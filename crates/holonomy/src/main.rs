@@ -35,7 +35,47 @@ fn main() {
     // point did not link a display server.
     println!("compositor: none");
 
-    // Phase 0 only. Every phase below this line is not implemented yet, and saying so
-    // is more useful than pretending otherwise.
+    // The derivation parameters are printed rather than hard-coded silently: if these
+    // ever differ from PROJECT.md §2.4 the unlock budget is wrong, and the place that
+    // finds out should not be a user's failed unlock.
+    println!(
+        "kdf:      argon2id m={} KiB t={} p={}",
+        KDF_M_COST_KIB, KDF_T_COST, KDF_P_COST
+    );
+    println!(
+        "modulus:  RSA-2048 ({} bits), composite, factors unknown",
+        MODULUS_BITS
+    );
+    println!("vdf:      T is derived from a measured per-squaring cost, not fixed");
+
+    // Phase 0 gate is the skeleton; the container, display and jail land in Phases 3-8.
     println!("phase: 0 -- build skeleton; no container, display or jail yet");
+}
+
+/// Argon2id memory cost in KiB, from PROJECT.md §2.4.
+const KDF_M_COST_KIB: u32 = holonomy_crypto::envelope::ARGON2_M_COST_KIB;
+/// Argon2id time cost, from PROJECT.md §2.4.
+const KDF_T_COST: u32 = holonomy_crypto::envelope::ARGON2_T_COST;
+/// Argon2id parallelism, from PROJECT.md §2.4.
+const KDF_P_COST: u32 = holonomy_crypto::envelope::ARGON2_P_COST;
+
+/// Bit length of the VDF modulus, read from the constant itself rather than written as a
+/// literal. If `N_PUB` were ever replaced with a differently-sized modulus, this line would
+/// report the new size instead of continuing to claim 2048.
+const MODULUS_BITS: usize = bit_length(&holonomy_crypto::modulus::N_PUB);
+
+/// Bit length of a fixed-width little-endian-limb integer.
+///
+/// `const fn` so `MODULUS_BITS` is computed during compilation. A plain `fn` cannot be
+/// called in a `const` initialiser.
+const fn bit_length(v: &[u64]) -> usize {
+    let mut i = v.len();
+    while i > 0 {
+        i -= 1;
+        let limb = v[i];
+        if limb != 0 {
+            return i * 64 + (64 - limb.leading_zeros() as usize);
+        }
+    }
+    0
 }
