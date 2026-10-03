@@ -15,5 +15,6 @@
 //! budget. See PROJECT.md §5 Phase 2.
 
 pub mod bignum;
+pub mod modulus;
 
 pub use holonomy_jail::PHASE_0_PLACEHOLDER;

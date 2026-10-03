@@ -162,13 +162,70 @@ This is a deliberate deviation from FR-4.3/FR-4.4 and is recorded as such. The s
 argument is preserved (memory fence + non-parallelizable serial chain); only the constant is
 corrected. Phase 9 re-measures on the Core 2 Duo and the numbers go into STATUS.md.
 
-### 2.5 The VDF modulus `N_pub` must be a real, checked safe prime
+### 2.5 The VDF modulus `N_pub` is the RSA-2048 semiprime, hardcoded
 
-The PRD says "RSA-2048 safe prime" and never says where it comes from. Phase 1 generates it:
-2048-bit p with p ≡ 3 (mod 4), q = 2p+1 prime, `N = 2pq+1` prime. Prime proof is
-Pocklington with a witness set, not Miller–Rabin alone. The modulus is a committed constant
-plus a `tools/verify-modulus` bin that re-proves it from the committed factors. `ST` is the
-Montgomery chain in §1.1, started from `K_int mod N` and squared `T` times.
+**Amended 2026-10-03.** Superseded: the "generate a safe prime and Pocklington-prove it"
+instruction. Two reasons, one engineering and one cryptographic.
+
+**Engineering.** Generating a 2048-bit prime plus a recursive Pratt/Pocklington certificate
+takes minutes to hours. That is not acceptable inside `cargo test` or `cargo build`, and a
+gate that occasionally stalls the box for an hour is a gate that gets skipped. `N_pub` is a
+public cryptographic parameter with no secret input: it is a compile-time constant in
+`.rodata`, and the gate checks it in O(1).
+
+**Cryptographic.** The VDF is the chain `S_i = S_{i-1}² (mod N)`. Its soundness rests on
+`N` being a composite whose factorisation is *unknown*, so that `φ(N)` and `λ(N)` are
+unknown and the exponent `2^T` cannot be reduced at all. That is the setting of the
+Rivest–Shamir time-lock puzzle and of Boneh–Bonneau–Bünz–Fischlin.
+
+**On the "a prime modulus is broken by Fermat" argument — it is not, and the reasoning is
+worth recording because it is an easy mistake.** If `N` is prime then `φ(N) = N − 1` is
+public, so `S_T = S_0^(2^T mod (N−1)) (mod N)`, and the reduction looks free. It is not:
+obtaining `2^T mod (N−1)` is *itself* a sequential squaring chain of `T` steps modulo
+`N−1`. Square-and-multiply on the 20-bit integer `T` yields `2^T` as an integer with `T`
+bits — not `2^T mod (N−1)` — and reducing a `T`-bit integer is the same hard problem. The
+residue cannot be obtained in ~21 squarings. Primality alone does not collapse the chain.
+
+What *does* matter is different, and it is why the original `N = 2pq+1` shape is rejected:
+**publishing a complete factorisation of `N − 1` is strictly worse than leaving the group
+order unknown.** With `N − 1 = 2pq` fully factored, an attacker computes `2^T mod (N−1)`
+by CRT into `2^T mod p` and `2^T mod q`, then recurses against `p − 1` and `q −1`. The
+recursion terminates in a shortcut as soon as any modulus in the chain has smooth order,
+and publishing `p` and `q` hands the attacker the complete map of that recursion. With
+`N = ab` composite and `a`, `b` unknown, `φ(N)` is unavailable and no such recursion
+exists at all. The rule is the opposite shape to the one first written here: publish
+nothing about the order of the group.
+
+**The constant.** `N_pub` is the RSA Laboratories RSA-2048 challenge number: a 2048-bit
+semiprime whose factors RSA Laboratories generated and destroyed in 1991. Chosen because
+it is the most widely replicated "random 2048-bit semiprime with unknown factorisation" in
+existence, so its soundness does not rest on our own key generation.
+
+```
+c7970cedcc3b0754490201a7aa613cd73911081c790f5f1a8726f463550bb5b
+7ff0db8e1ea1189ec72f93d1650011bd721aeeacc2acde32a04107f0648c28
+13a31f5b0b7765ff8b44b4b6ffc93384b646eb09c7cf5e8592d40ea33c80039f
+35b4f14a04b51f7bfd781be4d1673164ba8eb991c2c4d730bbbe35f592bdef5
+24af7e8daefd26c66fc02c479af89d64d373f442709439de66ceb955f3ea37d5
+159f6135809f85334b5cb1813addc80cd05609f10ac6a95ad65872c909525bdad
+32bc729592642920f24c61dc5b3c3b7923e56b16a4d9d373d8721f24a3fc0f1b
+3131f55615172866bccc30f95054c824e733a5eb6817f7bc16399d48c6361cc7e5
+```
+
+Cross-checked by extracting the 617 decimal digits from two independent renderings of the
+Wikipedia `RSA numbers` article and confirming the 512-nibble hex reproduces them exactly.
+
+**Consequence for the gate.** Pocklington is gone: a composite has no primality certificate,
+and by construction its factorisation must not be published. The gate is now (a) the
+constant matches, is 2048 bits and odd, (b) Montgomery multiplication round-trips against
+it, (c) a short chain matches an independent implementation.
+
+**Consequence for the chain.** `S_0 = K_int mod N` must satisfy `gcd(S_0, N) = 1`. If it
+does not, `S_0` is a zero divisor, the chain degenerates into one CRT component collapsing
+to zero, and both the delay and the derived key are meaningless. This is a hard error, not
+a warning: the probability is ~2^-1024 by accident, but a duress or wrong-passcode path must
+not be able to reach it silently. `ST` is the Montgomery chain in §1.1, started from
+`K_int mod N` and squared `T` times.
 
 ### 2.6 Sandboxing: allowlist from measurement, not from the PRD
 
@@ -274,12 +331,12 @@ is established from commit one.
 `as_ptr`, `as_mut_slice`, `zeroize_and_release`. `Drop` scrubs with `core::sync::atomic::compiler_fence`
 before `munmap`.
 
-Then `tools/verify-modulus`: generate the 2048-bit safe prime, Pocklington-prove it, and
-commit `N_pub` with its factors. The verifier re-proves from the committed factors on every
-build.
+Then `holonomy-crypto::modulus`: the 2048-bit RSA-2048 semiprime from §2.5, hardcoded as a
+`const N_PUB: [u64; 32]`. The Montgomery chain `S_i = S_{i-1}² (mod N_pub)` lives next to
+it, plus the `gcd(S_0, N_pub) == 1` precondition from §2.5.
 
 **Gate.** A test allocates 4096 bytes and confirms the pages below and above fault.
-`cargo test -p holonomy-secure` passes. `verify-modulus` re-proves `N_pub` from scratch.
+`cargo test -p holonomy-secure` passes. `cargo test -p holonomy-crypto modulus` passes: `N_pub` is 2048 bits, odd, matches the committed literal, Montgomery round-trips against it, and a short chain agrees with an independent implementation. All O(1) — no search happens in the gate.
 
 ### Phase 2 — Cryptographic envelope
 

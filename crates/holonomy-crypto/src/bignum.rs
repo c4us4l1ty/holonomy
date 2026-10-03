@@ -581,6 +581,56 @@ pub fn to_le_bytes(a: &U2048) -> [u8; 256] {
     out
 }
 
+/// Compile-time hex parse, so a large constant can live in `.rodata` as a readable
+/// literal rather than 32 opaque limb values.
+///
+/// Accepts whitespace and an optional `0x` prefix and left-pads to the full width exactly
+/// as [`from_hex`] does. Panics on a non-hex character, which for a `const` argument means
+/// a malformed literal is a compile error rather than a runtime surprise.
+///
+/// The two are checked against each other in the tests, so this does not have to be
+/// trusted to agree with [`from_hex`].
+pub const fn from_hex_const(s: &str) -> U2048 {
+    let bytes = s.as_bytes();
+    let mut nibbles = [0u8; LIMBS * 16];
+    let mut n = 0usize;
+    let mut i = bytes.len();
+    // Walk backwards so nibbles land least-significant first, skipping whitespace and a
+    // leading "0x".
+    while i > 0 {
+        i -= 1;
+        let c = bytes[i];
+        if c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' || c == b'_' {
+            continue;
+        }
+        if (c == b'x' || c == b'X') && n == 0 && i > 0 && bytes[i - 1] == b'0' {
+            continue;
+        }
+        let v = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => panic!("from_hex_const: not a hex digit"),
+        };
+        assert!(n < LIMBS * 16, "from_hex_const: more than 2048 bits");
+        nibbles[n] = v;
+        n += 1;
+    }
+    let mut out = ZERO;
+    let mut idx = 0usize;
+    while idx < LIMBS {
+        let mut limb = 0u64;
+        let mut k = 0usize;
+        while k < 16 {
+            limb |= (nibbles[idx * 16 + k] as u64) << (k * 4);
+            k += 1;
+        }
+        out[idx] = limb;
+        idx += 1;
+    }
+    out
+}
+
 /// Parse a hex string, most significant nibble first, into a [`U2048`].
 ///
 /// Accepts an optional `0x` prefix and any amount of whitespace.
