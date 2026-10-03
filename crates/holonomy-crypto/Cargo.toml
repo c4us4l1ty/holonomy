@@ -1,7 +1,3 @@
-# Argon2id, VDF time-lock, HKDF and the derived-key root.
-#
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
 [package]
 name = "holonomy-crypto"
 description = "Argon2id, VDF time-lock, HKDF and the derived-key root"
@@ -13,3 +9,4 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+libc = "0.2"
