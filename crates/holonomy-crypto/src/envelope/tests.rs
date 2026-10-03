@@ -120,23 +120,27 @@ fn hkdf_output_is_96_bytes_and_splits_as_specified() {
     let m = RootMaterial::from_okm(&okm);
     assert_eq!(m.k_enc, okm[0..32]);
     assert_eq!(m.k_chaff, okm[32..64]);
-    // Omega is big-endian: distinct OKMs must give distinct omegas.
-    assert_eq!(m.omega, u64::from_be_bytes(okm[64..72].try_into().unwrap()));
+    // Omega is little-endian per PRD FR-2.3.3's Read_U64_LE.
+    assert_eq!(m.omega, u64::from_le_bytes(okm[64..72].try_into().unwrap()));
     assert_eq!(m.n_root, okm[72..96]);
     assert_eq!(m.to_okm(), okm, "round-trip must be lossless");
 }
 
-/// Omega endianness is the kind of thing that silently halves every payload offset, so it
-/// is pinned directly rather than only through the round trip.
+/// Omega byte order is pinned directly rather than only through the round trip, because
+/// PRD FR-2.3.3 fixes it as `Read_U64_LE` and nothing else in the pipeline would notice a
+/// flip: it would just select a different, equally valid offset.
 #[test]
-fn omega_is_big_endian() {
+fn omega_is_little_endian() {
+    // Least significant byte first, so 0x01 in byte 0 is the value 1 ...
     let mut okm = [0u8; OKM_LEN];
     okm[64..72].copy_from_slice(&[0x01, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(RootMaterial::from_okm(&okm).omega, 1 << 56);
+    assert_eq!(RootMaterial::from_okm(&okm).omega, 1);
 
+    // ... and 0x01 in byte 7 is the value 2^56. A big-endian read would give the
+    // opposite of both.
     let mut okm = [0u8; OKM_LEN];
     okm[64..72].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x01]);
-    assert_eq!(RootMaterial::from_okm(&okm).omega, 1);
+    assert_eq!(RootMaterial::from_okm(&okm).omega, 1 << 56);
 }
 
 /// Distinct `K_root` values must give distinct output keys. A gate that only checks

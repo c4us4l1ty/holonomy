@@ -112,7 +112,7 @@ pub struct RootMaterial {
     pub k_enc: [u8; 32],
     /// Stream key for chaff generation.
     pub k_chaff: [u8; 32],
-    /// Dynamic payload offset pointer, big-endian. FR-4.6.
+    /// Dynamic payload offset pointer, little-endian. FR-4.6 / FR-2.3.3.
     pub omega: u64,
     /// Extended AEAD base nonce.
     pub n_root: [u8; 24],
@@ -121,8 +121,14 @@ pub struct RootMaterial {
 impl RootMaterial {
     /// Build from the 96-byte HKDF output, `K_enc || K_chaff || Omega || N_root`.
     ///
-    /// `Omega` is read big-endian so the byte order in the container matches the integer
-    /// written by the seeder; a little-endian read here would silently halve every offset.
+    /// `Omega` is read little-endian, because PRD FR-2.3.3 specifies
+    /// `Read_U64_LE(OffsetBytes)`. PROJECT.md is silent on the byte order, so the PRD
+    /// governs. An earlier revision read big-endian on the stated grounds that "a
+    /// little-endian read would silently halve every payload offset", which is not a real
+    /// effect: byte order is a bijection on the eight HKDF bytes, so either convention
+    /// selects an equally arbitrary and equally valid offset. There is no correctness
+    /// argument for preferring one -- only a conformance argument, and the PRD's
+    /// convention is the one to conform to.
     pub fn from_okm(okm: &[u8; OKM_LEN]) -> Self {
         let mut k_enc = [0u8; 32];
         let mut k_chaff = [0u8; 32];
@@ -135,7 +141,7 @@ impl RootMaterial {
         Self {
             k_enc,
             k_chaff,
-            omega: u64::from_be_bytes(omega),
+            omega: u64::from_le_bytes(omega),
             n_root,
         }
     }
@@ -145,7 +151,7 @@ impl RootMaterial {
         let mut okm = [0u8; OKM_LEN];
         okm[0..32].copy_from_slice(&self.k_enc);
         okm[32..64].copy_from_slice(&self.k_chaff);
-        okm[64..72].copy_from_slice(&self.omega.to_be_bytes());
+        okm[64..72].copy_from_slice(&self.omega.to_le_bytes());
         okm[72..96].copy_from_slice(&self.n_root);
         okm
     }
