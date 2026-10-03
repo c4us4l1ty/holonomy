@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "brotli_quality": 11,
+  "raw_len": 97204,
+  "packed_len": 45327,
+  "packed_sha256": "26393943c298ac88af8ae6fb812afa26272d725f8ec0c7084226655c3ceed89f",
+  "raw_sha256": "9040f39475bedca5d436c8b68f8cba733b91962f77564fe002ed6a1bdcecb75f",
+  "text_ranges": [
+    [
+      32,
+      126
+    ],
+    [
+      160,
+      255
+    ]
+  ],
+  "box_range": [
+    9472,
+    9599
+  ],
+  "box_is_procedural": true,
+  "faces": [
+    {
+      "name": "Inter-Regular",
+      "style": "Regular",
+      "monospace": false,
+      "offset": 0,
+      "length": 24188,
+      "sha256": "114ddffafa0aa9fd38972e261ee7a89aeb6d1e881c51f9ae8ed41b30c0c62122",
+      "source_sha256": "64f8be6e55c37e32ef03da99714bf3aa58b8f2099bfe4f759a7578e3b8291123"
+    },
+    {
+      "name": "Inter-Bold",
+      "style": "Bold",
+      "monospace": false,
+      "offset": 24188,
+      "length": 24384,
+      "sha256": "040f300f9f82628d975f0a5db97cfdb951c3b9906f4f7fe2136da73feceaa8f6",
+      "source_sha256": "0cb1bc1335372d9e3a0cf6f5311c7cce87af90d2a777fdeec18be605a2a70bc1"
+    },
+    {
+      "name": "Inter-Italic",
+      "style": "Italic",
+      "monospace": false,
+      "offset": 48572,
+      "length": 24952,
+      "sha256": "a5ba421d6bf63bfa09387dd1f36fc1a4f73dbcaa4f9b2c9e0c1bd1722c76d471",
+      "source_sha256": "d054d998ae12be33820b100e0ed3923d513fa5c79c6d4e7ca1953afeb262ea9b"
+    },
+    {
+      "name": "JetBrainsMono-Regular",
+      "style": "Monospace",
+      "monospace": true,
+      "offset": 73524,
+      "length": 23680,
+      "sha256": "88fa8f41107c5f2bcbaa54429c51691abedd5b95f51824b5653a351d6824db3d",
+      "source_sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+    }
+  ]
+}

@@ -1,10 +1,10 @@
-# Brotli-compressed fonts, the A8 glyph atlas and icon masks.
+# Brotli-compressed fonts, the A8 glyph atlas, and procedural Box Drawing.
 #
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+# Phase 4. The dependency on holonomy-jail is the single allocation chokepoint -- see
+# crates/holonomy-jail/src/lib.rs for why every crate has it.
 [package]
 name = "holonomy-assets"
-description = "Brotli-compressed fonts, the A8 glyph atlas and icon masks"
+description = "Brotli-compressed fonts, the A8 glyph atlas and procedural Box Drawing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,9 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+holonomy-secure = { path = "../holonomy-secure" }
+ttf-parser = "0.25"
+brotli-decompressor = "6"
+
+[dev-dependencies]
+getrandom = "0.4"
