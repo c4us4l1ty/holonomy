@@ -1,0 +1,46 @@
+# The Holonomy binary: boot sequence, session loop and CLI.
+#
+# This is the only crate with a bin target. It owns the boot *order*, which is
+# load-bearing and not negotiable (PROJECT.md §5 Phase 7):
+#
+#   mlockall -> open container -> allocate -> open DRM -> open evdev
+#     -> unshare -> no_new_privs -> seccomp
+#
+# Nothing after seccomp may allocate.
+#
+# Phase 0 skeleton only: no boot sequence yet, just enough to prove the release
+# profile, the musl target and the `hardware` feature flag line up.
+[package]
+name = "holonomy"
+description = "Holonomy bare-silicon word processor, encrypted container and sealed OS jail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Gates every path that needs real hardware. Phase 0 establishes the flag so the
+# dual-backend shape is in place from the first commit; nothing reads it yet.
+# PROJECT.md §2.7: CI must never depend on hardware-only paths.
+hardware = []
+
+[[bin]]
+name = "holonomy"
+path = "src/main.rs"
+
+[dependencies]
+# holonomy-assets re-exports from here because `include_bytes!` data is only visible
+# to the crate that declares it (PROJECT.md §4).
+holonomy-assets = { path = "../holonomy-assets" }
+holonomy-container = { path = "../holonomy-container" }
+holonomy-crypto = { path = "../holonomy-crypto" }
+holonomy-display = { path = "../holonomy-display" }
+holonomy-export = { path = "../holonomy-export" }
+holonomy-geometry = { path = "../holonomy-geometry" }
+holonomy-input = { path = "../holonomy-input" }
+holonomy-jail = { path = "../holonomy-jail" }
+holonomy-render = { path = "../holonomy-render" }
+holonomy-secure = { path = "../holonomy-secure" }
+holonomy-text = { path = "../holonomy-text" }

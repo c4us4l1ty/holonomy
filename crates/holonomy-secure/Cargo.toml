@@ -1,0 +1,15 @@
+# Page-locked, guard-bounded memory with provable scrubbing.
+#
+# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
+# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+[package]
+name = "holonomy-secure"
+description = "Page-locked, guard-bounded memory with provable scrubbing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+holonomy-jail = { path = "../holonomy-jail" }

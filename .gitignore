@@ -1,0 +1,15 @@
+# H1 build artefacts. PROJECT.md/Plan.md treat target/ as expensive: never `cargo clean`
+# casually, reclaim incremental first.
+/target
+
+# .wavefunction containers are documents. They must never enter the index, on this host
+# or any other.
+*.wavefunction
+
+# Phase 9 captures a fresh INDEX every run.
+INDEX
+
+# Editor and OS noise
+*.swp
+*~
+.DS_Store

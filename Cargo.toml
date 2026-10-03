@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/holonomy",
+    "crates/holonomy-assets",
+    "crates/holonomy-container",
+    "crates/holonomy-crypto",
+    "crates/holonomy-display",
+    "crates/holonomy-export",
+    "crates/holonomy-geometry",
+    "crates/holonomy-input",
+    "crates/holonomy-jail",
+    "crates/holonomy-render",
+    "crates/holonomy-secure",
+    "crates/holonomy-text",
+]
+# H2/ is the superseded Tauri + TypeScript + SQLite stack. It is a reference for
+# what to salvage and what to refuse (PROJECT.md §3), never a dependency. Excluded
+# so it keeps resolving against its own workspace and its own lockfile.
+exclude = ["H2"]
+
+[workspace.package]
+# Release baseline is v3.0.0-SINGULARITY (Plan.md Part 4). Cargo wants a lowercase
+# semver pre-release, so the codename is normalised here.
+version = "3.0.0-singularity"
+edition = "2021"
+rust-version = "1.98.1"
+license = "UNLICENSED"
+publish = false
+
+# Bare silicon. `panic = "abort"` removes landing pads and unwinding tables, which is
+# both size and attack surface; the jail calls _exit() directly and never unwinds.
+# `opt-level = "z"` trades throughput for the 2.5 MiB NFR-2.3 ceiling. NFR-2.3 also
+# demands stripped symbols, so debug info is never emitted in release.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true
+
+# Tests need unwinding: the guard-page tripwire assertions in Phase 7 run inside
+# `#[should_panic]`-style harnesses, and dev is what `cargo test` selects.
+[profile.dev]
+opt-level = 0
+overflow-checks = true

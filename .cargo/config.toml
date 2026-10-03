@@ -1,0 +1,21 @@
+# Holonomy H1 builds bare silicon. There is no gnu target in the intended workflow:
+# linking against glibc would drag in NSS, dlopen and the dynamic loader, all of which
+# are prohibited by the Zero-Compositor Invariant (Plan.md Part 4 §1).
+#
+# Scope warning: this file is discovered by walking up from the working directory, so a
+# `cargo` invocation started inside H2/ will *also* pick it up and switch that build to
+# musl. H2 needs glibc and webkit2gtk and cannot be built this way. H2 builds must be
+# run with `--target x86_64-unknown-linux-gnu` to override, or with
+# CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu in the environment.
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+# rustc ships self-contained crt objects and libc.a for this target, so no external
+# musl-gcc is required. rust-lld is selected explicitly because it is what the
+# self-contained linking expects and it produces the `statically linked` ELF header
+# the Phase 0 gate asserts.
+linker = "rust-lld"
+
+[net]
+offline = false
