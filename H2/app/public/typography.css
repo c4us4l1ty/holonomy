@@ -1,0 +1,73 @@
+/* The editor's typography, declared once.
+ *
+ * Two pages render Holonomy's body text and both must render it identically: the product
+ * (`index.html`) and the height-calibration harness (`calibrate.html`). The harness used to
+ * carry a copy of the `body` rule "verbatim from index.html", and it had already drifted — it
+ * still asked for `system-ui` after the product moved to an embedded face, so `npm run
+ * test:calibrate` reported *exactly* the old constants (24.83 / 34.89) for a font that was no
+ * longer in use. Nothing failed. The height model was simply fitted to a world the product no
+ * longer inhabited, which is a silent wrong answer rather than a crash.
+ *
+ * So the font, the size and the line height live here and nowhere else. Adding a weight means
+ * adding it here; the harness cannot be a page that renders differently.
+ *
+ * ## Why the face is embedded rather than `system-ui`
+ *
+ * `system-ui` is the OS's idea of a UI font: Segoe UI on Windows, San Francisco on macOS,
+ * Cantarell or DejaVu on Linux. Different advance widths mean different line breaking, and line
+ * breaking decides section height, and section height is what positions every section on screen.
+ * One calibration cannot be right on three platforms when the glyphs are three different sets.
+ *
+ * Two subsetted WOFF2 files fix the variable: latin only, which is what a document in this
+ * application is, ~24KB each rather than the ~300KB a Latin+Greek+Cyrillic cut would be. WOFF2
+ * is Brotli-compressed TTF, the format all three engines already decode.
+ *
+ * These are the **webview's** fonts. The PDF export path does not use them: Typst needs raw TTF
+ * and gets it from `typst-assets`, whose bytes are `include_bytes!`-ed into the binary and which
+ * is unaffected by anything here.
+ *
+ * `font-display: block` rather than `swap`. A section measured at the fallback's height and then
+ * re-laid-out at the real font's height is exactly the drift the geometry exists to prevent, so
+ * the text waits rather than reflowing under a scrollbar the user is looking at. `calibrate.ts`
+ * awaits `document.fonts.ready` before it measures anything, so the harness waits too.
+ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/inter-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url('/fonts/inter-latin-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+}
+
+/* The one declaration both pages render with, and the three numbers `calibrate.ts` fits:
+ * 15px, 1.6, and therefore a 24px line box. Changing any of them means re-running
+ * `npm run test:calibrate` and `cargo run --release --bin emit-calibration`. */
+html {
+  --holonomy-body-font: Inter, system-ui, sans-serif;
+  --holonomy-body-size: 15px;
+  --holonomy-body-leading: 1.6;
+  --holonomy-mono-font: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+body {
+  font-family: var(--holonomy-body-font);
+  font-size: var(--holonomy-body-size);
+  line-height: var(--holonomy-body-leading);
+}

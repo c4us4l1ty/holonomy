@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Holonomy — M3 core harness</title>
+    <!--
+      The M3 harness page. `index.html` is the product surface (the scroll-driven
+      scroller); this one exists to exercise the earlier focus-driven windowing
+      path in isolation.
+
+      It keeps its own copy of the stylesheet rather than importing one. Sharing a
+      stylesheet between two surfaces would couple their layout, and these tests
+      measure heights and screen columns — a change made for the scroller would
+      silently move numbers here, or vice versa. DOCTRINE.md §3 is about
+      measuring the thing that ships; the corollary is that a test harness
+      measuring its own thing must say so.
+    -->
+    <style>
+      body { margin: 0; font: 15px/1.6 system-ui, sans-serif; background: #f6f7f9; color: #1f2328; }
+      #bar { padding: 8px 12px; background: #fff; border-bottom: 1px solid #d8dce1;
+             display: flex; gap: 12px; align-items: center; font-size: 13px; }
+      #bar b { font-weight: 600; }
+      .dim { color: #6b7280; }
+      #stack { padding: 12px; }
+      .section-slice {
+        background: #fff; max-width: 46rem; margin: 0 auto 10px;
+        padding: 1.5rem 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.12);
+        position: relative;
+      }
+      .section-slice::before {
+        content: attr(data-section-id);
+        position: absolute; top: 4px; left: 8px;
+        font-size: 10px; color: #8b949e; letter-spacing: .04em;
+      }
+      .section-slice[data-focused="false"] { opacity: .72; }
+      .ProseMirror { outline: none; }
+      .ProseMirror p { margin: 0 0 .6rem; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <b>Holonomy M3</b>
+      <span class="dim">focused</span><span id="focused">—</span>
+      <span class="dim">mounted</span><span id="mounted">—</span>
+      <span class="dim">undo</span><span id="undo">—</span>
+      <span class="dim">redo</span><span id="redo">—</span>
+      <span class="dim">words</span><span id="words">—</span>
+    </div>
+    <div id="stack"></div>
+    <script type="module" src="/src/m3-harness.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,296 @@
+[
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\sum_{i=1}^{n} i",
+    "label": "large operator, both limits",
+    "typst": "sum_(i=1)^n i"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\sum_{i} x_i",
+    "label": "large operator, subscript only",
+    "typst": "sum_i x_i"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\prod^{n} k",
+    "label": "large operator, superscript only",
+    "typst": "product^n k"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\int_{0}^{\\infty} e^{-x} \\,dx",
+    "label": "integral with limits",
+    "typst": "integral_0^∞ e^(-x) thin_space() dif"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\int_0^1 e^{-x} \\,dx",
+    "label": "integral with a differential",
+    "typst": "integral_0^1 e^(-x) thin_space() dif"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\oint_C \\nabla \\times F",
+    "label": "contour integral",
+    "typst": "integral.cont_C ∇ × F"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\iint_S f \\,dA",
+    "label": "double integral",
+    "typst": "integral.double_S f thin_space() dif"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\iiint_V f \\,dV",
+    "label": "triple integral",
+    "typst": "integral.triple_V f thin_space() dif"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "i\\pi",
+    "label": "greek after an identifier",
+    "typst": "i pi"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\alpha\\beta",
+    "label": "two greeks adjacent",
+    "typst": "alpha beta"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "e^{i\\pi}",
+    "label": "greek inside a superscript",
+    "typst": "e^(i pi)"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\Gamma \\Delta \\Omega",
+    "label": "uppercase greek",
+    "typst": "Gamma Delta Omega"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\frac{a}{b}",
+    "label": "simple fraction",
+    "typst": "frac(a, b)"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\frac{1}{n} \\sum_{i=1}^{n} i",
+    "label": "fraction with a sum",
+    "typst": "frac(1, n) sum_(i=1)^n i"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\frac{a}{\\frac{b}{c}}",
+    "label": "nested fraction",
+    "typst": "frac(a, frac(b, c))"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\sqrt{2}",
+    "label": "plain square root",
+    "typst": "sqrt(2)"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\sqrt{\\frac{a}{b}}",
+    "label": "square root of a sum",
+    "typst": "sqrt(frac(a, b))"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\sqrt[3]{x}",
+    "label": "nth root",
+    "typst": "root(3, x)"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\cdot b + c \\times d \\pm e",
+    "label": "binary operators",
+    "typst": "a ⋅ b + c × d ± e"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\leq b \\geq c \\neq d \\approx e",
+    "label": "relations",
+    "typst": "a ≤ b ≥ c ≠ d ≈ e"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\in B, a \\notin C, A \\cup B, A \\cap B",
+    "label": "sets",
+    "typst": "a ∈ B, a ∉ C, A ∪ B, A ∩ B"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "A \\rightarrow B \\Rightarrow C",
+    "label": "arrows",
+    "typst": "A → B ⇒ C"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\infty \\partial \\nabla",
+    "label": "other symbols",
+    "typst": "∞ ∂ ∇"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\left( \\frac{a}{b} \\right)",
+    "label": "growing delimiters",
+    "typst": "lr(( frac(a, b) ))"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\left[ x + y \\right]",
+    "label": "growing brackets",
+    "typst": "lr([ x + y ])"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\left\\{ x \\} \\right\\}",
+    "label": "growing braces",
+    "typst": "lr({ x brace.r })"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\left| x \\right|",
+    "label": "growing bars",
+    "typst": "lr(| x |)"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\, b",
+    "label": "thin space",
+    "typst": "a thin_space() b"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\quad b",
+    "label": "quad",
+    "typst": "a quad b"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "x \\text{ if } y > 0",
+    "label": "upright text",
+    "typst": "x upright(\" if \") y > 0"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "x^2 + y^2 = z^2",
+    "label": "no commands at all",
+    "typst": "x^2 + y^2 = z^2"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "x^{10}",
+    "label": "superscript with a group",
+    "typst": "x^(10)"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: missing argument: denom",
+    "input": "\\frac{1}{",
+    "label": "unbalanced fraction",
+    "typst": "frac(1, )"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: missing argument: radicand",
+    "input": "\\sqrt{",
+    "label": "unbalanced sqrt",
+    "typst": "sqrt()"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: unclosed delimiter",
+    "input": "trailing \\",
+    "label": "lone backslash at the end",
+    "typst": "trailing \\"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: unknown variable: literal\n       hint: if you meant to display multiple letters as is, try adding spaces between each letter: `l i t e r a l`\n       hint: or if you meant to display this as text, try placing it in quotes: `\"literal\"`",
+    "input": "literal \\{ brace",
+    "label": "lone escaped brace",
+    "typst": "literal brace.l brace"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "brace \\{ and \\}",
+    "label": "escaped brace pair",
+    "typst": "brace brace.l and brace.r"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "\\{ 1, 2 \\}",
+    "label": "brace pair in a set",
+    "typst": "brace.l 1, 2 brace.r"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\, b",
+    "label": "thin space",
+    "typst": "a thin_space() b"
+  },
+  {
+    "compiles": true,
+    "error": null,
+    "input": "a \\! b",
+    "label": "negative thin space",
+    "typst": "a thin_space() b"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: unknown variable: cme\n       hint: if you meant to display multiple letters as is, try adding spaces between each letter: `c m e`\n       hint: or if you meant to display this as text, try placing it in quotes: `\"cme\"`",
+    "input": "\\acme{x}",
+    "label": "unknown command",
+    "typst": "\\acme{x}"
+  },
+  {
+    "compiles": false,
+    "error": "could not typeset \"Math\":\n  0: unknown variable: otacommand\n       hint: if you meant to display multiple letters as is, try adding spaces between each letter: `o t a c o m m a n d`\n       hint: or if you meant to display this as text, try placing it in quotes: `\"otacommand\"`",
+    "input": "\\notacommand",
+    "label": "unknown operator name",
+    "typst": "\\notacommand"
+  }
+]

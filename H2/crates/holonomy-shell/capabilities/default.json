@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main window. Tauri 2 requires every command to be granted explicitly; nothing is implicitly allowed, and an ungranted command fails at runtime rather than at build time, so this file is the actual permission surface rather than a formality. App-registered commands (the bridge) are not subject to this ACL -- see CONFIG-NOTES.md.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
+}

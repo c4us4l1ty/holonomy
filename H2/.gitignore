@@ -1,0 +1,42 @@
+# Rust build artifacts. 2.4GB and fully regenerable with `cargo build`.
+/target/
+
+# Node dependencies. 150MB, regenerable with `npm install`.
+node_modules/
+
+# Vendored reference repos.
+#
+# These were read to answer specific architecture questions and the answers are
+# written up in spikes/*/FINDINGS.md and STATUS.md. They are ~376MB of upstream
+# source, of which joplin-dev alone is 272MB, and nothing in the build imports
+# them. They are deliberately NOT tracked: if you need to consult one again,
+# re-fetch that single repo rather than carrying all six in the tree.
+#
+#   joplin-dev, cryptpad-main   — read for sync/storage patterns only
+#   tiptap-main                  — read for the pagination/virtualisation audit
+#   loro-main                    — read for the CRDT API and perf tests
+#   taino-edit-main              — read for the Rust-editor capability audit
+#   crdt-richtext-main           — read for the Peritext/Fugue prototype audit
+Github_projects_worth_forking/
+
+# Vite / build output
+dist/
+.vite/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local databases and WAL sidecars. A user's documents must never be committed.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Tauri shell build output
+crates/holonomy-shell/gen/schemas/
+# The engine verification writes here; it is a per-run artifact, not source.
+target/verification-report.json

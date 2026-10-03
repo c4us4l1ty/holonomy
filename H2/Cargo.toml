@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/holonomy-core",
+    "crates/loro-bench",
+    "crates/holonomy-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+
+[profile.release]
+debug = 1
+
+# Tauri links against webkit2gtk, which is not something to optimise away from the
+# developer's usual debug profile: a release build of the whole app is slow to
+# iterate on, and the M4 scroll measurements are only meaningful in an optimised
+# renderer anyway, so those are taken from the browser harness rather than here.
+[profile.dev]
+opt-level = 0

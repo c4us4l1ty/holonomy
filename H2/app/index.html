@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Holonomy</title>
+    <link rel="stylesheet" href="/typography.css" />
+    <style>
+      /* The font, its size and its line height are declared once, in
+         `public/typography.css`, because the height-calibration harness renders the same text
+         and used to keep its own copy of this rule — which drifted, silently, into fitting the
+         model to a font the product no longer used. */
+      body { margin: 0; background: #f6f7f9; color: #1f2328; }
+      #bar { padding: 8px 12px; background: #fff; border-bottom: 1px solid #d8dce1;
+             display: flex; gap: 12px; align-items: center; font-size: 13px; }
+      #bar b { font-weight: 600; }
+      .dim { color: #6b7280; }
+
+      /* The scroll container.
+         `overflow-y: auto` with a bounded height is what gives the canvas height a
+         meaning: an absolutely positioned slot contributes nothing to its
+         parent's height, so `#canvas` is set to the document's total height
+         explicitly by the scroller. Without that the scrollbar would be a few
+         pixels tall for a 2000-page document. */
+      #scroller { height: calc(100vh - 37px); overflow-y: auto; position: relative; }
+      #canvas { position: relative; padding: 12px 0; }
+      .slot { position: absolute; left: 0; right: 0; }
+
+      .section-slice {
+        background: #fff; max-width: 46rem; margin: 0 auto 10px;
+        padding: 1.5rem 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.12);
+        position: relative;
+      }
+      .section-slice::before {
+        content: attr(data-section-id);
+        position: absolute; top: 4px; left: 8px;
+        font-size: 10px; color: #8b949e; letter-spacing: .04em;
+      }
+      .section-slice[data-focused="false"] { opacity: .72; }
+      .ProseMirror { outline: none; }
+      .ProseMirror p { margin: 0 0 .6rem; }
+
+      /* Equations. KaTeX renders into its own spans and needs its stylesheet, which
+         `main.ts` imports; these rules are only the two things the document decides:
+         how an equation sits in a line of prose, and that an inline one is
+         baseline-aligned rather than stretched. */
+      .holo-math--inline { display: inline; line-height: normal; }
+      .holo-math--block { display: block; text-align: center; margin: 1rem 0; }
+      .holo-math .katex { font-size: 1.05em; }
+      /* A broken equation must be visible, not just red-on-red inside KaTeX's own
+         markup. KaTeX already colours it; this makes it not-blank too. */
+      .holo-math .katex-error { color: #b91c1c; }
+
+      #verify-panel { padding: 10px 12px; background: #fff; border-bottom: 1px solid #d8dce1;
+                      font-size: 13px; max-height: 42vh; overflow: auto; }
+      #verify-panel[hidden] { display: none; }
+      #verify-detail { white-space: pre-wrap; font: 11px/1.45 var(--holonomy-mono-font);
+                       margin: 8px 0 0; color: #444c56; }
+      /* -- the export modal -------------------------------------------------------- */
+      /* A 54-second export needs something on screen the whole time. Without it the window
+         looks hung, and a user who cannot tell "working" from "stopped" will cancel the
+         application rather than the export. Four steps rather than a smooth bar, because
+         a bar that sits at 0% for 45 seconds and then jumps is accurate and reads as
+         broken; a step labelled "Typesetting pages" is both. */
+      /* The toolbar host. Fixed height, so a disabled item or a wrapped group cannot change it:
+         a toolbar that grows by 4px moves the top of the scroller by 4px, and the geometry has
+         no idea that happened. */
+      #toolbar-host { flex: 0 0 auto; min-height: 2.1rem; }
+      #toolbar-host:empty { min-height: 0; }
+
+      #export-modal[hidden] { display: none; }
+      #export-modal {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        /* Not a full-screen scrim: the document stays visible and stays scrollable behind
+           the panel, because an export does not take the document away and a modal that
+           hides it implies it did. */
+        background: rgb(0 0 0 / 0.28);
+        z-index: 40;
+      }
+      #export-panel {
+        min-width: 22rem; max-width: 32rem; padding: 1.1rem 1.25rem;
+        background: Canvas; color: CanvasText;
+        border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+        border-radius: 8px;
+        box-shadow: 0 12px 40px rgb(0 0 0 / 0.28);
+        font: 13px/1.45 system-ui, sans-serif;
+      }
+      /* A real dialog role, so a screen reader announces it and so Escape has something
+         to mean. `aria-modal` is what tells assistive technology the rest is inert. */
+      #export-panel[role="dialog"] { display: block; }
+      #export-title { font-weight: 600; margin-bottom: 0.15rem; }
+      #export-detail { color: color-mix(in srgb, CanvasText 68%, transparent); min-height: 1.2em; }
+      #export-steps { list-style: none; margin: 0.85rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+      #export-steps li { display: flex; gap: 0.5rem; align-items: baseline; }
+      #export-steps li::before { content: '○'; width: 1em; color: color-mix(in srgb, CanvasText 45%, transparent); }
+      #export-steps li[data-state="done"]::before { content: '●'; color: color-mix(in srgb, CanvasText 45%, transparent); }
+      #export-steps li[data-state="active"]::before { content: '◉'; }
+      /* A four-segment bar rather than a continuous one, for the same reason as the steps. */
+      #export-bar { display: flex; gap: 3px; margin: 0.85rem 0 0; height: 4px; }
+      #export-bar span { flex: 1; background: color-mix(in srgb, CanvasText 16%, transparent); border-radius: 2px; }
+      #export-bar span[data-state="done"] { background: color-mix(in srgb, CanvasText 55%, transparent); }
+      #export-bar span[data-state="active"] { background: CanvasText; }
+      #export-actions { margin-top: 0.95rem; display: flex; gap: 0.5rem; justify-content: flex-end; }
+      #export-actions button {
+        font: inherit; padding: 0.3rem 0.8rem; cursor: pointer;
+        background: transparent; color: CanvasText;
+        border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: 5px;
+      }
+      #export-actions button:hover:not(:disabled) { background: color-mix(in srgb, CanvasText 10%, transparent); }
+      #export-actions button:disabled { opacity: 0.45; cursor: default; }
+      #export-actions button:focus-visible { outline: 2px solid CanvasText; outline-offset: 2px; }
+      /* The status bar grew a button and a notice, so it needs the button rule the export
+         actions already have. Copied rather than shared because the two are never on screen
+         at the same time and the bar's row is not the modal's. */
+      #backup-now { margin-left: auto; font: inherit; font-size: 13px; padding: 0.2rem 0.6rem;
+                    cursor: pointer; background: transparent; color: CanvasText;
+                    border: 1px solid color-mix(in srgb, CanvasText 30%, transparent);
+                    border-radius: 5px; }
+      #backup-now:hover:not(:disabled) { background: color-mix(in srgb, CanvasText 10%, transparent); }
+      #backup-now:disabled { opacity: 0.45; cursor: default; }
+      #notice { font-size: 12px; color: color-mix(in srgb, CanvasText 72%, transparent); }
+      #ingest-report { padding: 0.4rem 1rem; font-size: 12px;
+                       color: color-mix(in srgb, CanvasText 72%, transparent); }
+      #ingest-report[hidden] { display: none; }
+      /* The search panel. No scrim and not `aria-modal`: search is a place you go to and
+         come back from, and making the document unclickable behind it would be wrong for
+         the operation whose entire purpose is moving you through the document. Anchored
+         top-right rather than centred for the same reason — the text you are searching is
+         meant to stay visible while you search it. */
+      #search-modal[hidden] { display: none; }
+      #search-modal { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
+      #search-panel {
+        pointer-events: auto;
+        position: absolute; top: 0; right: 0; width: min(30rem, 92vw);
+        max-height: 80vh; display: flex; flex-direction: column;
+        padding: 0.75rem; gap: 0.45rem;
+        background: Canvas; color: CanvasText;
+        border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+        border-radius: 0 0 0 8px;
+        box-shadow: 0 12px 40px rgb(0 0 0 / 0.24);
+        font: 13px/1.45 system-ui, sans-serif;
+      }
+      #search-input {
+        font: inherit; padding: 0.4rem 0.55rem; width: 100%; box-sizing: border-box;
+        background: transparent; color: CanvasText;
+        border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: 5px;
+      }
+      #search-input:focus-visible { outline: 2px solid CanvasText; outline-offset: 1px; }
+      #search-summary { font-size: 12px; color: color-mix(in srgb, CanvasText 72%, transparent); }
+      #search-results { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+      #search-results:empty { display: none; }
+      #search-results li { border-radius: 5px; }
+      #search-results li[aria-selected="true"] { background: color-mix(in srgb, CanvasText 12%, transparent); }
+      #search-results button {
+        display: block; width: 100%; text-align: left; font: inherit; cursor: pointer;
+        padding: 0.35rem 0.5rem; background: transparent; color: inherit; border: 0;
+      }
+      #search-results button:hover { background: color-mix(in srgb, CanvasText 8%, transparent); }
+      /* `white-space: pre-wrap` so the snippet's own line breaks survive; the backend
+         elides with `…` and does not add newlines, but a long section can wrap and a
+         result that reflows into one line loses the context that makes it recognisable. */
+      #search-results .search-snippet { display: block; white-space: pre-wrap; }
+      #search-results b { font-weight: 600; }
+      #ingest-report.failed { color: color-mix(in srgb, #b3261e 80%, CanvasText); }
+      #export-warn { margin-top: 0.7rem; color: color-mix(in srgb, CanvasText 72%, transparent); }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <b>Holonomy</b>
+      <span class="dim">scrollHeight</span><span id="scrollHeight">—</span>
+      <span class="dim">geometry</span><span id="geoHeight">—</span>
+      <span class="dim">mounted</span><span id="mounted">—</span>
+      <span class="dim">focused</span><span id="focused">—</span>
+      <span class="dim">drift</span><span id="drift">—</span>
+      <span class="dim">engine</span><span id="engine">—</span>
+      <!-- A native save dialog is reachable from the chrome rather than only from a test
+           surface, and a failure has to land somewhere the user is already looking. -->
+      <button id="backup-now" type="button">Back up…</button>
+      <span id="notice" role="status" aria-live="polite"></span>
+    </div>
+    <!-- Ingest outcomes: a pasted figure that was refused is a figure the user expected to be
+         there, so it is reported rather than swallowed. One line, replaced rather than
+         appended, so pasting ten images does not push the document down the page. -->
+    <div id="ingest-report" hidden></div>
+    <!-- Verification panel. Present but hidden unless ?verify=1, so a normal run
+         shows no extra chrome. Lives on the product page rather than a dedicated
+         one so the assertions measure the real DOM and the real stylesheet;
+         see src/core/run-verification.ts. -->
+    <div id="verify-panel" hidden>
+      <div id="verify-status">running…</div>
+      <pre id="verify-detail"></pre>
+    </div>
+    <!-- The formatting toolbar. Present but empty; `core/toolbar.ts` builds its contents, so
+         the markup here is only the host element the app mounts into. It sits above the
+         scroller rather than inside it, so a toolbar that changes height does not move the
+         scroll position of a document being scrolled -- which is the one thing the geometry
+         cannot absorb. -->
+    <div id="toolbar-host"></div>
+    <div id="scroller">
+      <div id="canvas"></div>
+    </div>
+    <!-- The export modal. Present but hidden, so a normal run shows no extra chrome and
+         the markup is the same one the tests assert against. `aria-modal` with the panel
+         focused on open; Escape and the Cancel button both stop the export rather than
+         dismissing the panel, because an export that keeps running behind a closed
+         panel is the worse surprise. See src/core/export-panel.ts. -->
+    <div id="export-modal" hidden>
+      <div id="export-panel" role="dialog" aria-modal="true" aria-labelledby="export-title">
+        <div id="export-title">Exporting PDF</div>
+        <div id="export-detail">starting</div>
+        <ol id="export-steps"></ol>
+        <div id="export-bar" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div id="export-warn" hidden></div>
+        <div id="export-actions">
+          <button id="export-cancel" type="button">Cancel</button>
+          <button id="export-close" type="button" hidden>Close</button>
+        </div>
+      </div>
+    </div>
+    <!-- The search panel. No scrim and not `aria-modal`: search is a place you go to and
+         come back from, and making the document unclickable behind it would be wrong for
+         the operation whose entire purpose is moving you through the document. See
+         src/core/search-panel.ts. -->
+    <div id="search-modal" hidden>
+      <div id="search-panel" role="dialog" aria-labelledby="search-summary">
+        <input id="search-input" type="search" autocomplete="off" spellcheck="false"
+               placeholder="Find in document" aria-label="Find in document" />
+        <div id="search-summary" aria-live="polite"></div>
+        <ol id="search-results"></ol>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

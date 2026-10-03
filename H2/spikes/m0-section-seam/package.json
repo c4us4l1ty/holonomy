@@ -1,0 +1,38 @@
+{
+  "name": "m0-section-seam",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "sanity": "node --experimental-strip-types sanity.ts",
+    "sweep": "node --experimental-strip-types sweep.ts",
+    "sustained": "node --experimental-strip-types sustained.ts",
+    "drive": "node --experimental-strip-types drive.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": "true",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "@tiptap/core": "^3.30.3",
+    "@tiptap/extension-highlight": "^3.30.3",
+    "@tiptap/extension-link": "^3.30.3",
+    "@tiptap/extension-table": "^3.30.3",
+    "@tiptap/extension-text-style": "^3.30.3",
+    "@tiptap/extension-underline": "^3.30.3",
+    "@tiptap/pm": "^3.30.3",
+    "@tiptap/starter-kit": "^3.30.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

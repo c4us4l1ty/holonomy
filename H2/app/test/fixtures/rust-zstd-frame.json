@@ -1,0 +1,75 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "level": 2
+      },
+      "content": [
+        {
+          "text": "Chapter — a heading with an em dash",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "content": [
+        {
+          "text": "Plain. ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "Bold. ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            },
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": "Two marks.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Unicode: αβγ 中文 🎉 emoji, and a soft break.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "A list item, because a section is not only paragraphs.",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "listItem"
+        }
+      ],
+      "type": "bulletList"
+    }
+  ],
+  "type": "doc"
+}

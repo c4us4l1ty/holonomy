@@ -1,0 +1,62 @@
+{
+  "name": "holonomy-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Holonomy editor surface: multi-instance sections, global undo, boundary traversal, scroll-driven mounting",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/run.ts",
+    "test:scroll": "node --experimental-strip-types test/scroll.ts",
+    "test:calibrate": "node --experimental-strip-types test/calibrate.ts",
+    "test:oscillation": "node --experimental-strip-types test/oscillation.ts",
+    "test:all": "npm run typecheck && npm run test:node && npm run test:browser",
+    "test:node": "npm run test:blocks && npm run test:boot && npm run test:heights && npm run test:lifecycle && npm run test:rekey && npm run test:persist && npm run test:wire && npm run test:assets && npm run test:math && npm run test:export-math && npm run test:export && npm run test:shortcuts && npm run test:toolbar",
+    "test:browser": "npm run test && npm run test:scroll && npm run test:oscillation && npm run test:ingest && npm run test:chrome && npm run test:calibrate",
+    "dev:tauri": "vite --port 5184 --strictPort",
+    "tauri": "cargo tauri",
+    "tauri:dev": "cd .. && cargo tauri dev --config crates/holonomy-shell/tauri.conf.json",
+    "tauri:build": "cd .. && cargo tauri build --config crates/holonomy-shell/tauri.conf.json",
+    "test:blocks": "node --experimental-strip-types test/blocks-required.ts",
+    "test:boot": "node --experimental-strip-types test/boot.ts",
+    "test:heights": "node --experimental-strip-types test/height-sync.ts",
+    "test:lifecycle": "node --experimental-strip-types test/lifecycle.ts",
+    "test:rekey": "node --experimental-strip-types test/rekey.ts",
+    "test:persist": "node --experimental-strip-types test/persistence.ts",
+    "test:wire": "node --experimental-strip-types test/wire.ts",
+    "test:assets": "node --experimental-strip-types test/assets.ts",
+    "test:math": "node --experimental-strip-types test/math.ts",
+    "test:export": "node --experimental-strip-types test/export.ts",
+    "test:ingest": "node --experimental-strip-types test/ingest-browser.ts",
+    "test:export-math": "node --experimental-strip-types test/export-math.ts",
+    "test:shortcuts": "node --experimental-strip-types test/shortcuts.ts",
+    "test:toolbar": "node --experimental-strip-types test/toolbar.ts",
+    "test:chrome": "node --experimental-strip-types test/chrome.ts"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "@tiptap/core": "3.30.3",
+    "@tiptap/extension-highlight": "3.30.3",
+    "@tiptap/extension-link": "3.30.3",
+    "@tiptap/extension-table": "3.30.3",
+    "@tiptap/extension-text-style": "3.30.3",
+    "@tiptap/extension-underline": "3.30.3",
+    "@tiptap/pm": "3.30.3",
+    "@tiptap/starter-kit": "3.30.3",
+    "fzstd": "^0.1.1",
+    "katex": "^0.18.10"
+  },
+  "devDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.63.6",
+    "@types/node": "^26.6.3",
+    "playwright": "^1",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vite": "^7"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

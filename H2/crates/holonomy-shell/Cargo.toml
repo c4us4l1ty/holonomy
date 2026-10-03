@@ -1,0 +1,61 @@
+[package]
+name = "holonomy-shell"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "Holonomy desktop shell: a Tauri window hosting the editor surface"
+publish = false
+
+[lib]
+# A library crate rather than a plain binary so the Tauri mobile targets, which
+# require `lib` to be callable from JavaScript, do not need a second entry point.
+name = "holonomy_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# MessagePack for the boot payload only. One command uses it; see `get_document_boot`
+# for why that one message is MessagePack and every other one is JSON.
+rmp-serde = "1"
+# So `Vec<u8>` crosses as a MessagePack `bin` rather than an array of numbers. See
+# `bridge::SectionContent::content_zstd` for why that distinction was a real bug rather
+# than a style preference.
+serde_bytes = "0.11"
+# `Error::Other` takes an `anyhow::Error`; the shell needs it to report its own
+# failures through holonomy-core's error type rather than a second error enum.
+anyhow = "1"
+holonomy-core = { path = "../holonomy-core" }
+ts-rs = { version = "12.0.1", features = ["serde-compat"] }
+# PDF export. Pinned: Typst's markup language and its `World` trait both change between minor
+# versions, and the generated preamble below is written against one of them.
+typst = "0.15"
+typst-pdf = "0.15"
+typst-layout = "0.15"
+typst-assets = { version = "0.15", features = ["fonts"] }
+# SHA-256 for the pagination fingerprint. Also in holonomy-core for asset hashes; the same
+# version is used in both so the two digests are comparable, which is worth a shared dep if
+# a third appears.
+sha2 = "0.10"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+# Not yet wired: decision 6 fixes the wire format for the boot payload as
+# MessagePack, and `specta`/`ts-rs` for generated types. Neither is used until the
+# bridge exists, and adding them now would mean carrying dependencies that nothing
+# reads. Tracked in STATUS.md.
+
+# specta = { version = "2", features = ["derive"] }
+# tauri-specta = { version = "2", features = ["derive", "typescript"] }
+[dev-dependencies]
+# `ts-rs` in the lib already; listed here so the integration test depends on it
+# explicitly rather than relying on transitive re-export.
+ts-rs = { version = "12", features = ["serde-compat"] }
+# The shutdown tests assert against a database file on disk, which is the only way to
+# check the journal was truncated.
+tempfile = "3"

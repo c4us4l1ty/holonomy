@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Holonomy — height calibration</title>
+    <!-- The product's typography, loaded rather than copied. This file used to carry a
+         "verbatim from index.html" copy of the body rule, and it drifted: when the product
+         moved to an embedded face this page kept asking for `system-ui`, so `test:calibrate`
+         reported exactly the old constants for a font that was no longer in use. Nothing
+         failed. The harness now measures the page the product actually renders. -->
+    <link rel="stylesheet" href="/typography.css" />
+    <style>
+      body { margin: 0; background: #f6f7f9; color: #1f2328; }
+      .section-slice {
+        background: #fff; max-width: 46rem; margin: 0 auto 10px;
+        padding: 1.5rem 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.12);
+        position: relative;
+      }
+      .ProseMirror p { margin: 0 0 .6rem; }
+    </style>
+  </head>
+  <body>
+    <div class="section-slice" id="probe"></div>
+    <script type="module" src="/test/calibrate-harness.ts"></script>
+  </body>
+</html>

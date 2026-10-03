@@ -1,0 +1,35 @@
+[package]
+name = "loro-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "M1 benchmark: Loro CRDT cost for Holonomy section-sized documents"
+
+[dependencies]
+loro = "1.16"
+# Reuse the split thresholds and mark-cost model rather than duplicating the
+# constants, so the benchmark and the storage layer cannot drift apart.
+holonomy-core = { path = "../holonomy-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+rand = "0.8"
+rand_chacha = "0.3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bin]]
+name = "loro-bench"
+path = "src/main.rs"
+
+# The binary name follows the src/bin/ file stem, not the package name, so
+# this is invoked as `markcurve` rather than `loro-markcurve`.
+[[bin]]
+name = "markcurve"
+path = "src/bin/markcurve.rs"
+
+[[bench]]
+name = "section"
+harness = false

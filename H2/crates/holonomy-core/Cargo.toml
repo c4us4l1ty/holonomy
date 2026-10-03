@@ -1,0 +1,32 @@
+[package]
+name = "holonomy-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Holonomy storage core: section manifest, WAL, assets, search"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only so `GeometryCalibration` can derive its TypeScript type. The calibration is
+# part of the bridge contract and lives here, so the derive belongs here too —
+# defining a second, TS-only twin in the shell would be the duplication this
+# dependency exists to prevent (DOCTRINE.md §8). Compile-time only; no runtime
+# cost.
+ts-rs = { version = "12", features = ["serde-compat"] }
+zstd = "0.13"
+rusqlite = { version = "0.32", features = ["bundled"] }
+loro = "1.16"
+thiserror = "2"
+anyhow = "1"
+ulid = "1"
+# SHA-256 for asset content addressing, because the hash is not internal: it appears in
+# the `holo-asset://<hash>` URL the webview fetches, and a third party verifying an asset
+# has to compute it. WebCrypto has `digest('SHA-256')` and nothing else; a blake3 key in a
+# URL is a hash nothing in the web platform can check. See `Store::put_asset`.
+sha2 = "0.10"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

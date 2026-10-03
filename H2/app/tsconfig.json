@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    // The Node test suites import app modules with an explicit `.ts` extension,
+    // because `node --experimental-strip-types` resolves exactly what is written and
+    // cannot map the `.js` extensions the bundler wants back to TypeScript sources.
+    //
+    // Only tests do this. `src/` keeps `.js`, which is what Vite and the packaged
+    // build resolve, so this does not put a second resolution convention in the
+    // product.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ]
+}
