@@ -214,14 +214,30 @@ fn byte_encodings_roundtrip() {
 /// squaring for a different implementation; if this one is wildly different, the derived
 /// iteration count `T` and therefore the whole unlock budget is wrong.
 ///
-/// Measured on this host, release profile: **3,072 ns per squaring**. Same order as
-/// §1.1's 2,077 ns, which is the sanity check that matters -- the CIOS arithmetic is not
-/// quietly wrong. The gap is the release profile: §1.1 measured with `opt-level=3` and
-/// `target-cpu=native`, this workspace builds `opt-level="z"` for the 2.5 MiB NFR-2.3
-/// ceiling. Size optimisation costs roughly 50% of the throughput here, and the binary is
-/// 377 KB against a 2.5 MiB budget, so there are ~2.1 MiB of headroom to trade back if
-/// the unlock budget turns out to be the binding constraint on real hardware. That
-/// decision belongs to Phase 2, which is where `T` is derived. See PROJECT.md §2.4.
+/// Measured on this host under the current release profile (`opt-level=3`, `lto="fat"`),
+/// 5 samples of a 20,000-squaring chain: **~2,657 ns median**, spread 2,580-2,806.
+///
+/// Two corrections to what was recorded here earlier, both found by actually re-measuring
+/// the thing that had been asserted rather than measured:
+///
+/// 1. An earlier version of this comment said 3,072 ns and attributed the gap to §1.1's
+///    2,077 ns to the release profile being `opt-level="z"`. Both were wrong. 3,072 was a
+///    single sample at the top of the noise band, and the profile was not the cause:
+///    `opt-level="z"` measures ~2,808 ns median against ~2,657 for `opt-level=3`, so the
+///    switch is worth ~5%, not ~50%. The two distributions overlap almost entirely.
+/// 2. `target-cpu=native`, which §1.1 did use, adds only ~7% more (~2,711 ns median).
+///
+/// So the real gap is that §1.1's 2,077 ns came from a different *implementation*, and
+/// this one is ~28% slower. That is worth knowing and is not yet claimed anywhere: `T` is
+/// derived from this figure, so closing the gap is 28% more squarings inside an unchanged
+/// latency budget. The likely cause is that `Ext`, the 2049-bit accumulator, keeps the
+/// carry chain in memory rather than in registers -- the CIOS inner loop wants
+/// `mulx`/`adcx`/`adox` with the accumulator in a register pair. Worth attempting before
+/// Phase 9 freezes `T`; deliberately not attempted now, since Phase 3 is the priority.
+///
+/// The noise floor here is roughly +/-8%, so treat any single reading as indicative only.
+/// The calibration is honest precisely because it reports the spread rather than a number
+/// that flatters the implementation.
 #[test]
 #[ignore = "timing, not correctness; run explicitly"]
 fn calibrate_ns_per_squaring() {

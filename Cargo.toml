@@ -30,11 +30,40 @@ publish = false
 
 # Bare silicon. `panic = "abort"` removes landing pads and unwinding tables, which is
 # both size and attack surface; the jail calls _exit() directly and never unwinds.
-# `opt-level = "z"` trades throughput for the 2.5 MiB NFR-2.3 ceiling. NFR-2.3 also
-# demands stripped symbols, so debug info is never emitted in release.
+#
+# opt-level = 3, not "z" (Amended 2026-10-03).
+#
+# What the switch is worth, measured on this host over 5 samples of a 20,000-squaring
+# chain:
+#
+#   opt-level = "z", lto = fat : 2,824 / 2,696 / 2,681 / 2,808 / 3,016 ns  (median 2,808)
+#   opt-level = 3,  lto = fat : 2,688 / 2,806 / 2,581 / 2,580 / 2,623 ns  (median ~2,657)
+#
+# So ~5%, which is barely above the noise floor -- the distributions overlap. An earlier
+# note here claimed "z" cost ~50% of VDF throughput; that came from a single 3,072 ns
+# sample that happened to sit at the top of the band, and it was wrong. `target-cpu=native`
+# adds only ~7% more (median ~2,711 ns), so it is not the missing factor either.
+#
+# The switch is still correct, but for the reasons that actually hold:
+#
+#   * The size cost is +11,904 B (377,144 -> 389,048), against a 2.5 MiB NFR-2.3 ceiling.
+#     That is 0.45% of the budget for ~5% of the latency, which is a good trade and is
+#     why it is not worth reverting.
+#   * T is derived from a measured per-squaring cost (PROJECT.md §2.4), and §1.1 measured
+#     that cost under opt-level=3. Deriving T under a different profile from the one used
+#     to calibrate it is a silent inconsistency, and this removes it.
+#   * The Core 2 Duo target is narrower than this host, so fat LTO across a small codebase
+#     and a chain loop that does nothing but one multiply per iteration has more to gain
+#     there than the 5% seen here. Phase 9 re-measures on the real machine either way.
+#
+# The ~30% gap between ~2,657 ns here and §1.1's 2,077 ns is therefore in the CIOS
+# implementation, not in the build profile. That is a real and unclaimed 30% of VDF
+# throughput, and because T is derived from this number it translates directly into 30%
+# more squarings inside the same latency budget. Worth attempting before Phase 9 fixes T;
+# not attempted now, since Phase 3 is the priority.
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
