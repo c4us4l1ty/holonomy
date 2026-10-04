@@ -85,10 +85,18 @@ pub enum Action {
         /// Length in bytes.
         len: usize,
     },
-    /// `DRM_IOCTL_MODE_DESTROY_DUMB` on `fd`.
+    /// `DRM_IOCTL_MODE_DESTROY_DUMB` on `fd`, for `handle`.
     DestroyDumbBuffer {
         /// The DRM card fd opened during boot.
         fd: i32,
+        /// The dumb buffer's handle, from `CreateDumb`.
+        ///
+        /// Phase 8: this field did not exist. The ioctl was called with a **null** argument, and
+        /// `DRM_IOCTL_MODE_DESTROY_DUMB` takes `struct drm_mode_destroy_dumb { __u32 handle; }` -- the
+        /// kernel copies four bytes out of the pointer and a null one faults. So even with the right
+        /// request number the call could not have worked. The handle is the one thing the caller has and
+        /// the call site did not have, which is exactly why it belongs in the action.
+        handle: u32,
     },
     /// `fsync(2)` on `fd`.
     Sync {
@@ -135,9 +143,9 @@ impl TeardownPlan {
         })
     }
 
-    /// Append `DRM_IOCTL_MODE_DESTROY_DUMB` for `fd`.
-    pub fn destroy_dumb_buffer(&mut self, fd: i32) -> Result<(), TeardownError> {
-        self.push(Action::DestroyDumbBuffer { fd })
+    /// Append `DRM_IOCTL_MODE_DESTROY_DUMB` for `fd`, on the buffer `handle`.
+    pub fn destroy_dumb_buffer(&mut self, fd: i32, handle: u32) -> Result<(), TeardownError> {
+        self.push(Action::DestroyDumbBuffer { fd, handle })
     }
 
     /// Append `fsync` for `fd`.
@@ -228,16 +236,30 @@ impl TeardownPlan {
                         offset += 8;
                     }
                 }
-                Action::DestroyDumbBuffer { fd } => {
-                    // SAFETY: a plain ioctl with no argument. The cast to `c_int` is because
-                    // musl declares `ioctl(int, int, ...)`; the kernel truncates the request
-                    // to 32 bits, so the direction/size/type encoding in the high half reaches
-                    // it as the low 32 bits it has to be.
+                Action::DestroyDumbBuffer { fd, handle } => {
+                    // The kernel copies a `struct drm_mode_destroy_dumb` out of this pointer, so it is
+                    // a real local rather than a null argument. Phase 8: this was `ioctl(fd, req, 0)`,
+                    // which faults in the kernel for an ioctl whose only argument is a handle.
+                    let arg = DrmModeDestroyDumb { handle };
+                    // SAFETY: `arg` is a live, correctly aligned, `repr(C)` copy of the struct the
+                    // request declares, and it outlives the call. The cast to `c_int` is because musl
+                    // declares `ioctl(int, int, ...)`; the request is 32 bits wide and the kernel
+                    // truncates the encoding's high half, which is how `_IOR`'d numbers work at all.
                     //
-                    // A failure here is ignored on purpose. This step touches no plaintext,
-                    // and the steps after it are the ones that do.
+                    // A failure here is ignored on purpose. This step touches no plaintext, and the
+                    // steps after it are the ones that do.
+                    //
+                    // Which is exactly why the two bugs this line had -- a wrong request number and a
+                    // null argument -- were invisible. A step whose failure is unobservable needs its
+                    // inputs checked rather than its failures reported, so
+                    // `the_dumb_buffer_ioctl_matches_the_kernel_header` pins the request number and
+                    // `the_dumb_buffer_action_carries_its_handle` pins this one.
                     unsafe {
-                        libc::ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB as libc::c_int, 0);
+                        libc::ioctl(
+                            fd,
+                            DRM_IOCTL_MODE_DESTROY_DUMB as libc::c_int,
+                            &arg as *const DrmModeDestroyDumb as *mut libc::c_void,
+                        );
                     }
                 }
                 Action::Sync { fd } => {
@@ -267,26 +289,134 @@ impl TeardownPlan {
     }
 }
 
-/// `DRM_IOCTL_MODE_DESTROY_DUMB`, derived rather than pasted.
+/// `DRM_IOCTL_MODE_DESTROY_DUMB`, derived rather than pasted -- and now *checked against the header*
+/// rather than against itself.
 ///
-/// The kernel defines it `_IOWR('d', 0x44, struct drm_mode_destroy_dumb)` and the struct is a
-/// bare `__u32 handle`, so it is 4 bytes. `_IOC(dir, type, nr, size)` is
-/// `(dir << 30) | (size << 16) | (type << 8) | nr` with `dir = 3` for read+write.
+/// # This constant was wrong, and the test did not catch it
 ///
-/// [`drm_ioctl_mode_destroy_dumb`] recomputes this and the unit test asserts the two agree, so
-/// the constant cannot silently drift from its definition.
-pub const DRM_IOCTL_MODE_DESTROY_DUMB: libc::c_ulong = 0xC004_6444;
+/// Phase 7 wrote `0xC004_6444`, which decodes as `dir = 3`, `size = 4`, `type = 'd'`, **`nr = 0x44`**
+/// -- and paired it with a derivation that used the same `0x44`. So
+/// `the_dumb_buffer_ioctl_matches_its_kernel_definition` compared the constant against its own
+/// derivation and passed. Both were wrong together.
+///
+/// The kernel says otherwise. `/usr/include/drm/drm.h`:
+///
+/// ```c
+/// #define DRM_IOCTL_MODE_CREATE_DUMB   DRM_IOWR(0xB2, struct drm_mode_create_dumb)
+/// #define DRM_IOCTL_MODE_MAP_DUMB      DRM_IOWR(0xB3, struct drm_mode_map_dumb)
+/// #define DRM_IOCTL_MODE_DESTROY_DUMB  DRM_IOWR(0xB4, struct drm_mode_destroy_dumb)
+/// ```
+///
+/// with `DRM_IOWR(nr, type) = _IOWR('d', nr, type)` and `struct drm_mode_destroy_dumb` a bare
+/// `__u32 handle`. So `nr` is **`0xB4`**, not `0x44`, and the correct request is `0xC004_64B4`.
+/// `0x44` looks plausible because `DRM_COMMAND_BASE` is `0x40` and the legacy `DRM_IOCTL_MODE_*`
+/// numbers did live in `0x40..=0xA0`; those are different ioctls.
+///
+/// A wrong request number is `ENOTTY`, and this call's failure is *ignored on purpose* -- see
+/// [`Action::DestroyDumbBuffer`]. So the bug was invisible: a green gate over a step that never
+/// happened. The lesson is the one the original comment got wrong: deriving from the header's
+/// *definition* is only worth something if the definition is right, and the only way to know that is
+/// to read the header.
+///
+/// What the gate can check without a device: `nr` and the struct size. Both are asserted below against
+/// the values the header states, which is a different check from the one Phase 7 made.
+///
+/// [`DRM_IOCTL_MODE_CREATE_DUMB`]: DRM_IOCTL_MODE_CREATE_DUMB
+/// [`DRM_IOCTL_MODE_MAP_DUMB`]: DRM_IOCTL_MODE_MAP_DUMB
+pub const DRM_IOCTL_MODE_DESTROY_DUMB: libc::c_ulong = 0xC004_64B4;
+
+/// `DRM_IOCTL_MODE_CREATE_DUMB`: `_IOWR('d', 0xB2, struct drm_mode_create_dumb)`.
+///
+/// Published because the display backend needs the whole dumb-buffer sequence and there should be one
+/// copy of these numbers in the tree.
+pub const DRM_IOCTL_MODE_CREATE_DUMB: libc::c_ulong = 0xC020_64B2;
+
+/// `DRM_IOCTL_MODE_MAP_DUMB`: `_IOWR('d', 0xB3, struct drm_mode_map_dumb)`.
+pub const DRM_IOCTL_MODE_MAP_DUMB: libc::c_ulong = 0xC010_64B3;
+
+/// `struct drm_mode_destroy_dumb`, verbatim from `drm_mode.h`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DrmModeDestroyDumb {
+    /// The dumb buffer's handle.
+    pub handle: u32,
+}
+
+/// `struct drm_mode_create_dumb`, verbatim from `drm_mode.h`.
+///
+/// The field order is `height` before `width`, there is no `pixel_format`, and `handle` sits between
+/// `flags` and `pitch`. Guessing any of those produces a 32-byte struct that the kernel reads as
+/// garbage, which is why it is transcribed rather than remembered.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DrmModeCreateDumb {
+    /// Framebuffer height.
+    pub height: u32,
+    /// Framebuffer width.
+    pub width: u32,
+    /// Bits per pixel.
+    pub bpp: u32,
+    /// Driver flags.
+    pub flags: u32,
+    /// Out: the new buffer's handle.
+    pub handle: u32,
+    /// Out: the buffer's pitch in bytes.
+    pub pitch: u32,
+    /// Out: the buffer's size in bytes.
+    pub size: u64,
+}
+
+/// `struct drm_mode_map_dumb`, verbatim from `drm_mode.h`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DrmModeMapDumb {
+    /// The buffer's handle.
+    pub handle: u32,
+    /// Padding, for 32/64 compatibility.
+    pub pad: u32,
+    /// Out: the fake offset to `mmap` at.
+    pub offset: u64,
+}
+
+/// `DRM_FORMAT_XRGB8888`: `fourcc_code('X', 'R', '2', '4')`.
+///
+/// Bits `[31:0]` are `x:R:G:B` 8:8:8:8 little-endian, so red sits in `0x00RR_0000` of a `u32` -- which is
+/// the order [`crate::registry`] and the display backend already use, and the reason a dumb buffer can
+/// be handed a frame's bytes with no per-pixel conversion.
+pub const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
 /// Recompute [`DRM_IOCTL_MODE_DESTROY_DUMB`] from the `_IOC` layout.
 pub const fn drm_ioctl_mode_destroy_dumb() -> libc::c_ulong {
     const DIRECTION_READ_WRITE: u32 = 3;
     const TYPE_DISPLAY: u32 = b'd' as u32;
-    const NR_DESTROY_DUMB: u32 = 0x44;
+    const NR_DESTROY_DUMB: u32 = 0xB4;
     const SIZE_DRM_MODE_DESTROY_DUMB: u32 = core::mem::size_of::<u32>() as u32;
     ((DIRECTION_READ_WRITE << 30)
         | (SIZE_DRM_MODE_DESTROY_DUMB << 16)
         | (TYPE_DISPLAY << 8)
         | NR_DESTROY_DUMB) as libc::c_ulong
+}
+
+/// Recompute [`DRM_IOCTL_MODE_CREATE_DUMB`] from the `_IOC` layout.
+pub const fn drm_ioctl_mode_create_dumb() -> libc::c_ulong {
+    const DIRECTION_READ_WRITE: u32 = 3;
+    const TYPE_DISPLAY: u32 = b'd' as u32;
+    const NR_CREATE_DUMB: u32 = 0xB2;
+    ((DIRECTION_READ_WRITE << 30)
+        | (core::mem::size_of::<DrmModeCreateDumb>() as u32) << 16
+        | (TYPE_DISPLAY << 8)
+        | NR_CREATE_DUMB) as libc::c_ulong
+}
+
+/// Recompute [`DRM_IOCTL_MODE_MAP_DUMB`] from the `_IOC` layout.
+pub const fn drm_ioctl_mode_map_dumb() -> libc::c_ulong {
+    const DIRECTION_READ_WRITE: u32 = 3;
+    const TYPE_DISPLAY: u32 = b'd' as u32;
+    const NR_MAP_DUMB: u32 = 0xB3;
+    ((DIRECTION_READ_WRITE << 30)
+        | (core::mem::size_of::<DrmModeMapDumb>() as u32) << 16
+        | (TYPE_DISPLAY << 8)
+        | NR_MAP_DUMB) as libc::c_ulong
 }
 
 /// A `SplitMix64`, for buffer noise.
@@ -368,14 +498,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dumb_buffer_ioctl_matches_its_kernel_definition() {
+    fn the_dumb_buffer_ioctl_matches_the_kernel_header() {
+        // Constant against its own derivation.
         assert_eq!(
             DRM_IOCTL_MODE_DESTROY_DUMB,
             drm_ioctl_mode_destroy_dumb(),
-            "the constant and its derivation disagree; one of them is wrong and a wrong \
-             teardown ioctl fails silently"
+            "the constant and its derivation disagree"
         );
-        assert_eq!(DRM_IOCTL_MODE_DESTROY_DUMB, 0xC004_6444);
+
+        // And -- the check Phase 7 lacked -- the *inputs*, against `/usr/include/drm/drm.h`:
+        //
+        //     #define DRM_IOCTL_MODE_CREATE_DUMB   DRM_IOWR(0xB2, struct drm_mode_create_dumb)
+        //     #define DRM_IOCTL_MODE_MAP_DUMB      DRM_IOWR(0xB3, struct drm_mode_map_dumb)
+        //     #define DRM_IOCTL_MODE_DESTROY_DUMB  DRM_IOWR(0xB4, struct drm_mode_destroy_dumb)
+        //
+        // Phase 7 used `nr = 0x44` and so computed 0xC004_6444. Comparing the constant to its own
+        // derivation could never have caught that, because both used the same wrong input. These
+        // assertions are the independent half.
+        assert_eq!(
+            DRM_IOCTL_MODE_DESTROY_DUMB, 0xC004_64B4,
+            "nr must be 0xB4 (drm.h), not 0x44"
+        );
+        assert_eq!(DRM_IOCTL_MODE_CREATE_DUMB, 0xC020_64B2, "nr 0xB2");
+        assert_eq!(DRM_IOCTL_MODE_MAP_DUMB, 0xC010_64B3, "nr 0xB3");
+
+        // The size half of the encoding, which is `sizeof(struct)` -- so these also pin the layouts.
+        assert_eq!(core::mem::size_of::<DrmModeDestroyDumb>(), 4);
+        assert_eq!(core::mem::size_of::<DrmModeCreateDumb>(), 32);
+        assert_eq!(core::mem::size_of::<DrmModeMapDumb>(), 16);
+        assert_eq!(
+            ((DRM_IOCTL_MODE_CREATE_DUMB >> 16) & 0x3FFF) as usize,
+            core::mem::size_of::<DrmModeCreateDumb>()
+        );
+
+        // And the field offsets, which is the part a wrong guess would get wrong silently.
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, height), 0);
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, width), 4);
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, bpp), 8);
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, flags), 12);
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, handle), 16);
+        assert_eq!(core::mem::offset_of!(DrmModeCreateDumb, pitch), 20);
+        assert_eq!(
+            core::mem::offset_of!(DrmModeCreateDumb, size),
+            24,
+            "the u64 is 8-aligned, which is why the struct is 32 bytes and not 28"
+        );
+        assert_eq!(core::mem::offset_of!(DrmModeMapDumb, handle), 0);
+        assert_eq!(core::mem::offset_of!(DrmModeMapDumb, offset), 8);
+
+        // XRGB8888 is `fourcc_code('X','R','2','4')`, with red at `0x00RR_0000`.
+        assert_eq!(DRM_FORMAT_XRGB8888, 0x3432_5258);
+    }
+
+    #[test]
+    fn the_dumb_buffer_action_carries_its_handle() {
+        // Phase 8: the action had only an `fd` and the call passed a null argument. A `struct
+        // drm_mode_destroy_dumb` is a bare handle, so without this the ioctl could not work at all.
+        let mut plan = TeardownPlan::new();
+        plan.destroy_dumb_buffer(9, 0xDEAD_BEEF)
+            .expect("within budget");
+        assert_eq!(
+            plan.action(0),
+            Some(Action::DestroyDumbBuffer {
+                fd: 9,
+                handle: 0xDEAD_BEEF
+            })
+        );
     }
 
     #[test]
@@ -403,10 +591,13 @@ mod tests {
     #[test]
     fn actions_are_recorded_in_order() {
         let mut plan = TeardownPlan::new();
-        plan.destroy_dumb_buffer(7).unwrap();
+        plan.destroy_dumb_buffer(7, 3).unwrap();
         plan.sync(8).unwrap();
         plan.close(8).unwrap();
-        assert_eq!(plan.action(0), Some(Action::DestroyDumbBuffer { fd: 7 }));
+        assert_eq!(
+            plan.action(0),
+            Some(Action::DestroyDumbBuffer { fd: 7, handle: 3 })
+        );
         assert_eq!(plan.action(1), Some(Action::Sync { fd: 8 }));
         assert_eq!(plan.action(2), Some(Action::Close { fd: 8 }));
         assert_eq!(plan.action(3), None);

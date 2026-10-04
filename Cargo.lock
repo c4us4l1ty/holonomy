@@ -266,6 +266,8 @@ name = "holonomy-display"
 version = "3.0.0-singularity"
 dependencies = [
  "holonomy-jail",
+ "holonomy-render",
+ "libc",
 ]
 
 [[package]]

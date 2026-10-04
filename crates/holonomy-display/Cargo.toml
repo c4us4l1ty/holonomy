@@ -1,7 +1,7 @@
 # The Scanout trait: DrmScanout and HeadlessScanout.
 #
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+# `libc` for the `errno` values in `drm::errno_name`. The dependency on holonomy-jail is the single
+# allocation chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
 [package]
 name = "holonomy-display"
 description = "The Scanout trait: DrmScanout and HeadlessScanout"
@@ -13,3 +13,10 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+holonomy-render = { path = "../holonomy-render" }
+libc = "0.2"
+
+[features]
+# Everything that needs a DRM device. PROJECT.md 2.7: CI must never depend on hardware-only paths, and
+# the gate's visual baseline is a PPM rather than a readback from an i915 driver.
+hardware = []
