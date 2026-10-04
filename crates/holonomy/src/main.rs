@@ -91,6 +91,10 @@ fn main() -> ExitCode {
             eprintln!("holonomy: {e}");
             ExitCode::from(4)
         }
+        Err(Fail::Window { source }) => {
+            eprintln!("holonomy: the window failed: {source}");
+            ExitCode::from(5)
+        }
     }
 }
 
@@ -100,6 +104,7 @@ impl std::fmt::Display for Fail {
             Self::Usage(e) => write!(f, "{e}"),
             Self::Boot(e) => write!(f, "{e}"),
             Self::Session(e) => write!(f, "{e}"),
+            Self::Window { source } => write!(f, "{source}"),
         }
     }
 }
@@ -125,6 +130,15 @@ enum Fail {
     Boot(holonomy_jail::JailError),
     /// The session failed.
     Session(holonomy::session::SessionError),
+    /// The developer window failed. Boxed and feature-independent, because `WindowedError` exists only
+    /// when the `desktop` feature does, and this variant has to exist either way so the `match` in
+    /// `main` is the same code in both builds.
+    // Nothing constructs it without the feature, which is the one thing the linter is right about.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Window {
+        /// The window's own error, whatever its type.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// The passphrase, from the environment.
@@ -166,13 +180,34 @@ fn run() -> Result<(), Fail> {
         ..ChromeMetrics::DESKTOP
     };
 
+    // The developer window. Ahead of `headless` because `--window` is a request for a window, and a
+    // request that silently produced a PPM dump would be worse than useless.
+    #[cfg(feature = "desktop")]
+    if args.window {
+        let exit = holonomy::windowed::run(atlas, &args, metrics).map_err(|e| Fail::Window {
+            source: Box::new(e),
+        })?;
+        eprintln!("holonomy: {exit:?}");
+        return Ok(());
+    }
+    #[cfg(not(feature = "desktop"))]
+    if args.window {
+        eprintln!(
+            "holonomy: --window needs the desktop feature, which this binary was not built with.\n\
+             Build it with: cargo run --release --features desktop"
+        );
+        return Err(Fail::Usage(holonomy::args::ParseError::Unknown {
+            flag: "window".into(),
+        }));
+    }
+
     if headless {
         let mut sinks = open_sinks(&args).map_err(io)?;
         let mut screenshot = open_screenshot(&args).map_err(io)?;
         let mut s = Session::new(
             Editor::new(),
             Painter::new(atlas, 0),
-            HeadlessScanout::new(metrics.width, metrics.height),
+            Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
             metrics,
         );
         s.state.zoom_percent = args.zoom;
@@ -206,7 +241,7 @@ fn run() -> Result<(), Fail> {
                 session: Session::new(
                     Editor::new(),
                     Painter::new(atlas, 0),
-                    HeadlessScanout::new(metrics.width, metrics.height),
+                    Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
                     metrics,
                 ),
                 container: DirectFile::create_or_open(
@@ -299,10 +334,7 @@ fn drive(
     }
 
     if let Some(f) = screenshot {
-        let n = s
-            .scanout()
-            .dump_to_file(f)
-            .map_err(|e| Fail::Session(e.into()))?;
+        let n = s.dump_ppm_to_file(f).map_err(Fail::Session)?;
         f.flush().map_err(io)?;
         eprintln!("holonomy: wrote a {n}-byte PPM");
     }

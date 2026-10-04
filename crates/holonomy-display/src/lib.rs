@@ -27,13 +27,20 @@
 //!
 //! [`Frame`]: crate::Frame
 
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod drm;
 pub mod frame;
 pub mod headless;
 pub mod paint;
 
+#[cfg(feature = "desktop")]
+pub use desktop::{Desktop, DesktopError};
 pub use frame::{Frame, FrameError, PixelFormat, PIXEL_BYTES};
+// The `Scanout` trait's `present_damage` takes a `DamageRect`, so the crate that defines the trait
+// re-exports the type. `holonomy_render::DamageRect` is the one; there is no second.
 pub use headless::HeadlessScanout;
+pub use holonomy_render::DamageRect;
 pub use paint::{PaintStats, Painter};
 
 /// Somewhere a finished frame goes.
@@ -41,7 +48,15 @@ pub use paint::{PaintStats, Painter};
 /// One method, because that is the whole contract: by the time a frame is presented, rendering is
 /// over. Anything a backend needs to *prepare* -- allocating a buffer, mapping dumb memory, picking a
 /// mode -- happens in its constructor, where it can fail loudly instead of during presentation.
-pub trait Scanout {
+///
+/// # Why `Any`
+///
+/// A backend that needs to be *driven* as well as presented -- a window, whose connection is also where
+/// its key events come from -- is owned by the session, because the session presents through it. So the
+/// driver needs it back, and `Any` is what makes `Box<dyn Scanout>` downcastable to the concrete
+/// backend. It costs one vtable slot and no behaviour, and it is the only alternative to sharing the
+/// backend between the session and the loop, which is two mutable owners of one object.
+pub trait Scanout: std::any::Any {
     /// Present a frame, copying or presenting it as the backend sees fit.
     ///
     /// Returns how many pixels were written, which for a headless backend is the whole frame and for
@@ -49,6 +64,27 @@ pub trait Scanout {
     /// because a partially presented frame is a bug in the renderer's bounds and the backend should not
     /// paper over it.
     fn present(&mut self, frame: &Frame) -> Result<u64, FrameError>;
+
+    /// Present only `damage` of a frame, where the backend can.
+    ///
+    /// The session rasterises a damaged rectangle and then hands the backend the whole frame, because
+    /// the frame is where the pixels that did not change still live. A backend that pushes all of it
+    /// therefore spends 4 MiB of socket per keystroke to move 18 rows. This is the hook that lets a
+    /// bandwidth-bound backend -- a window on a desktop, eventually a display controller -- push only
+    /// the rectangle.
+    ///
+    /// **The default is the whole frame**, so a backend that says nothing gets exactly the behaviour it
+    /// had before this method existed, and `HeadlessScanout`'s numbers are unchanged. `None` also means
+    /// the whole frame: "no damage recorded" is not "nothing changed", it is "we do not know", and the
+    /// safe reading of that is everything.
+    fn present_damage(
+        &mut self,
+        frame: &Frame,
+        damage: Option<DamageRect>,
+    ) -> Result<u64, FrameError> {
+        let _ = damage;
+        self.present(frame)
+    }
 
     /// The frame's width in pixels.
     fn width(&self) -> u32;

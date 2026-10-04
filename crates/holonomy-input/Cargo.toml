@@ -12,6 +12,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The developer window. Off by default: it pulls in an X11 client, and the sealed boot chain has no use
+# for one -- the production input path is `evdev`.
+desktop = ["dep:holonomy-x11"]
+
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+# Only for the developer window, and only the event type: this crate interprets key events, it does not
+# speak any protocol.
+holonomy-x11 = { path = "../holonomy-x11", optional = true }
 libc = "0.2"

@@ -217,6 +217,7 @@ dependencies = [
  "holonomy-render",
  "holonomy-secure",
  "holonomy-text",
+ "holonomy-x11",
 ]
 
 [[package]]
@@ -268,6 +269,7 @@ dependencies = [
  "holonomy-assets",
  "holonomy-jail",
  "holonomy-render",
+ "holonomy-x11",
  "libc",
 ]
 
@@ -292,6 +294,7 @@ name = "holonomy-input"
 version = "3.0.0-singularity"
 dependencies = [
  "holonomy-jail",
+ "holonomy-x11",
  "libc",
 ]
 
@@ -335,6 +338,13 @@ dependencies = [
  "holonomy-secure",
  "libc",
  "zeroize",
+]
+
+[[package]]
+name = "holonomy-x11"
+version = "3.0.0-singularity"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

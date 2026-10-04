@@ -46,6 +46,8 @@ pub mod event;
 pub mod keymap;
 pub mod modifiers;
 pub mod source;
+#[cfg(feature = "desktop")]
+pub mod x11key;
 
 pub use evdev::EvdevSource;
 pub use event::{decode, encode, syn_report, InputEvent, EV_KEY, EV_MSC, EV_SYN, RECORD_BYTES};

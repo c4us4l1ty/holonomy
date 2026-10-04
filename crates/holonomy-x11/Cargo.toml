@@ -1,0 +1,19 @@
+# The X11 client behind the developer window.
+#
+# `libc` only, and deliberately so: the alternative (`minifb`, `softbuffer`) reaches X11 through
+# `x11-dl`, which is a `dlopen` at run time, which a static musl binary cannot do and which the
+# Zero-Compositor Invariant (Plan.md Part 4 §1) prohibits anyway. See src/lib.rs.
+#
+# Nothing in the sealed boot chain depends on this crate. It is a development convenience: on the
+# ThinkPad there is no X server, and `holonomy-display`'s `desktop` feature is off by default.
+[package]
+name = "holonomy-x11"
+description = "A minimal X11 core-protocol client, for the developer window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"

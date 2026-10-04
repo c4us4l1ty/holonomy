@@ -60,7 +60,7 @@ fn session(
     ));
     let scanout = HeadlessScanout::new(m.width, m.height);
     let painter = Painter::new(atlas, 0);
-    let s = Session::new(ed, painter, scanout, m);
+    let s = Session::new(ed, painter, Box::new(scanout), m);
     (s, atlas)
 }
 
@@ -263,7 +263,7 @@ fn a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact() {
     // --- The frame, dumped as a PPM.
     sess.repaint_all().expect("final paint");
     let mut ppm = std::fs::File::create(&ppm_path).expect("open the ppm");
-    let n = sess.scanout().dump_to_file(&mut ppm).expect("dump");
+    let n = sess.dump_ppm_to_file(&mut ppm).expect("dump");
     ppm.flush().expect("flush");
     drop(ppm);
     assert!(
@@ -367,7 +367,7 @@ fn a_scripted_session_produces_a_byte_identical_frame_every_time() {
         s.run(&mut src).expect("run");
         s.repaint_all().expect("paint");
         let mut out = Vec::new();
-        s.scanout().dump(&mut out).expect("dump");
+        s.dump_ppm(&mut out).expect("dump");
         out
     };
     assert_eq!(
@@ -444,7 +444,7 @@ fn a_session_with_no_atlas_still_reports_what_it_could_not_draw() {
     let mut ed = Editor::new();
     ed.insert_at(0, b"text", SpanPolicy::Strict).expect("seed");
     let scanout = HeadlessScanout::new(m.width, m.height);
-    let mut s = Session::new(ed, Painter::without_atlas(0), scanout, m);
+    let mut s = Session::new(ed, Painter::without_atlas(0), Box::new(scanout), m);
     s.repaint_all().expect("paint");
     assert!(s.stats.pixels > 0, "the bands still draw");
 }

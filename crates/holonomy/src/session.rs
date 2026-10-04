@@ -42,7 +42,7 @@ use std::fs::File;
 use std::io::Write;
 
 use holonomy_display::paint::Painter;
-use holonomy_display::{Frame, HeadlessScanout, Scanout};
+use holonomy_display::{Frame, Scanout};
 use holonomy_export::{Format, Report};
 use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
@@ -158,7 +158,15 @@ pub struct Session<'a> {
     /// The framebuffer.
     frame: Frame,
     /// The presentation target.
-    scanout: HeadlessScanout,
+    ///
+    /// A trait object rather than a `HeadlessScanout`, so the same loop can present to the PPM backend,
+    /// to a DRM panel, or to the developer window. The cost is one pointer indirection per frame, which
+    /// is nothing next to rasterising one, and the gain is that `main.rs` chooses a backend in one place
+    /// instead of the session knowing what a panel is.
+    ///
+    /// `Box<dyn Scanout>` rather than `Box<dyn Scanout + 'a>`, because `Scanout: Any` and `Any` is
+    /// `'static`. Every backend here owns its resources and outlives the session, so nothing is lost.
+    scanout: Box<dyn Scanout>,
     /// The painter, borrowing the atlas.
     painter: Painter<'a>,
     /// The keymap. Zero-sized and stateless.
@@ -180,7 +188,7 @@ impl<'a> Session<'a> {
     pub fn new(
         editor: Editor,
         painter: Painter<'a>,
-        scanout: HeadlessScanout,
+        scanout: Box<dyn Scanout>,
         metrics: ChromeMetrics,
     ) -> Self {
         let chrome = Chrome::new(metrics);
@@ -211,9 +219,36 @@ impl<'a> Session<'a> {
         &self.frame
     }
 
-    /// The headless scanout, for a PPM dump.
-    pub fn scanout(&self) -> &HeadlessScanout {
-        &self.scanout
+    /// The presentation target, for a caller that wants to describe it.
+    pub fn scanout(&self) -> &dyn Scanout {
+        self.scanout.as_ref()
+    }
+
+    /// The presentation target, mutably.
+    ///
+    /// For a driver that both presents *through* the backend and *reads from* it: the developer window's
+    /// events arrive on the same socket its frames go out on, and the session owns the socket. The
+    /// driver downcasts this to its own backend type and reads the events between frames.
+    pub fn scanout_mut(&mut self) -> &mut dyn Scanout {
+        self.scanout.as_mut()
+    }
+
+    /// Write the current frame to `sink` as a binary PPM. Returns the bytes written.
+    ///
+    /// **On the session, not on the scanout**, because the frame is the session's. `HeadlessScanout`
+    /// keeps its own copy so a caller can inspect what was presented, and its `dump` reads that copy --
+    /// which for a window or a panel does not exist. Writing `self.frame` is the same bytes for every
+    /// backend, and it means the gate's visual baseline does not depend on which backend the test chose.
+    pub fn dump_ppm<W: Write>(&self, sink: &mut W) -> Result<u64, SessionError> {
+        Ok(self.frame.to_ppm(sink)?)
+    }
+
+    /// Write the current frame to a pre-opened file, for a sealed session that cannot open anything.
+    pub fn dump_ppm_to_file(&self, file: &mut File) -> Result<u64, SessionError> {
+        let mut w = std::io::BufWriter::new(file);
+        let n = self.dump_ppm(&mut w)?;
+        w.flush()?;
+        Ok(n)
     }
 
     /// Paint everything and present. The first frame has no damage yet, so it is forced.
@@ -229,7 +264,7 @@ impl<'a> Session<'a> {
     /// as `stats.commands == 0` rather than as silence.
     pub fn run(&mut self, source: &mut dyn InputSource) -> Result<Exit, SessionError> {
         while let Some(event) = source.next_event().map_err(session_io)? {
-            if let Some(exit) = self.event(event)? {
+            if let Some(exit) = self.handle_event(event)? {
                 return Ok(exit);
             }
             // The blink may want a repaint even with no input.
@@ -246,7 +281,11 @@ impl<'a> Session<'a> {
     /// the editor accepted the text and the screen stayed blank until a blink happened to fire. The
     /// loop has to drain the accumulated damage first, because the blink's damage is a strict subset
     /// of the region that is already stale.
-    fn tick(&mut self) -> Result<(), SessionError> {
+    ///
+    /// Public because the window's driver does not have an [`InputSource`]: it reads X11 events and
+    /// therefore calls [`Session::handle_event`] and this in turn. The Phase 8 loop is unchanged --
+    /// `run` is exactly these two calls.
+    pub fn tick(&mut self) -> Result<(), SessionError> {
         if !self.damage.is_empty() {
             // `paint` clears `damage` itself, so this does not need to.
             self.paint(Some(self.damage))?;
@@ -267,7 +306,13 @@ impl<'a> Session<'a> {
     }
 
     /// Fold one event into the modifier state and dispatch it. Returns `Some` on a global hotkey.
-    fn event(&mut self, event: holonomy_input::InputEvent) -> Result<Option<Exit>, SessionError> {
+    ///
+    /// Public for the same reason as [`Session::tick`]: a driver with its own event source calls this
+    /// directly, one event at a time.
+    pub fn handle_event(
+        &mut self,
+        event: holonomy_input::InputEvent,
+    ) -> Result<Option<Exit>, SessionError> {
         // The modifier state is folded *before* dispatch, because `Ctrl+Q` is "ctrl goes down" then
         // "Q goes down", and the second is only `Ctrl+Q` once the first has landed.
         let command = self.keymap.dispatch_into(event, &mut self.mods);
@@ -485,7 +530,10 @@ impl<'a> Session<'a> {
         let stats = self.painter.paint(&mut self.frame, &tree, damage)?;
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
-        self.scanout.present(&self.frame)?;
+        // The damage goes to the backend as well as to the rasteriser. For the PPM backend that changes
+        // nothing -- `present_damage` defaults to the whole frame -- and for a backend on a socket it is
+        // the difference between 4 MiB per keystroke and 92 KiB.
+        self.scanout.present_damage(&self.frame, damage)?;
         self.damage = DamageRect::EMPTY;
         Ok(())
     }

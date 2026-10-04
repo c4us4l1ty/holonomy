@@ -684,6 +684,27 @@ scrubbed to zero. Binary ≤ 2.0 MiB.
 
 ---
 
+### Phase 9X — The developer window (not a product path)
+
+Added 2026-10-04, between the Phase 9 gate and Phase 10. It exists so a person can type a document on an
+ordinary desktop without `sudo`, and it is behind the `desktop` feature, which is off by default.
+
+The reasoning is in §8's amendment, but the shape is: a hand-written X11 core-protocol client in
+`crates/holonomy-x11` (only `libc`; no `minifb`, no `softbuffer`, because both reach X11 through
+`x11-dl`'s `dlopen`, which a static musl binary cannot do and the Zero-Compositor Invariant forbids), a
+`Desktop` backend implementing the existing `Scanout` trait including the new `present_damage`, and a
+`holonomy-input::x11key` that turns an X key event into an `InputEvent` by subtracting 8 — the same
+offset `holonomy_input::Keymap` already assumes, checked against 23 keys on a live server.
+
+**Gate.** `cargo test -p holonomy-x11`, plus `HOLONOMY_X11_LIVE=1 cargo test -p holonomy-x11 --test live`
+against a real server: a byte-identical 1,024,000-pixel round trip, a 4 MiB frame in 16 chunked requests,
+23 keycodes equal to `KEY_* + 8`, an `Expose` after `MapWindow`, and both events of two synthesised
+taps arriving in order. `crates/holonomy/tests/release_artifact.rs` asserts the default binary holds
+none of it: measured 1,032,472 bytes with zero of five X11 marker strings, against a desktop build of
+1,116,536 — a difference of exactly 84,064 bytes.
+
+---
+
 ### Phase 10 — Target-hardware run (ThinkPad X200, Core 2 Duo, GM45)
 
 Deferred from Phase 9 on 2026-10-04. Unchanged in substance.
@@ -746,7 +767,11 @@ the 50-entry allowlist.
 
 - **Sync, CRDT, ML-KEM, relay server** — §2.3. Deferred, not rejected.
 - **A second compositor path (softbuffer / tiny-skia)** — the superseded PRD revision. The
-  H1 stack is DRM/KMS only.
+  H1 stack is DRM/KMS only. **Amended 2026-10-04:** the `desktop` feature adds a window for development,
+  which is not a second *product* compositor path: it is off by default, it is not reachable from the
+  sealed boot chain, and `release_artifact.rs` fails if any of it reaches a default-features binary. What
+  it does share with the product is the `Scanout` trait, which is why `present_damage` was added to the
+  trait rather than to one implementation.
 - **H2's Typst export pipeline** — replaced by `pdf-writer`, §2.3.
 - **A TeX engine** — replaced by the micro-parser of §2.9 9B, on binary-size grounds.
 - **CFF outlines / STIX Two Math** — the math face is Noto Sans Math precisely so no CFF

@@ -68,7 +68,7 @@ const WHOAMI: &str = "phase8-session-loop";
 /// Printed when the workload itself failed, as opposed to the filter catching a syscall.
 const FAIL_MARKER: &str = "CENSUS-FAIL ";
 /// Printed before the boot, so a wrong binary is caught before the seal rather than after.
-
+///
 /// Everything stage 4 opened. Carried as the boot context so nothing after the filter can open.
 struct SessionContext {
     session: Session<'static>,
@@ -102,7 +102,7 @@ impl SessionContext {
         let session = Session::new(
             Editor::new(),
             Painter::new(atlas, 0),
-            HeadlessScanout::new(m.width, m.height),
+            Box::new(HeadlessScanout::new(m.width, m.height)),
             m,
         );
         Ok(Self {
@@ -256,8 +256,7 @@ fn workload(ctx: &mut SessionContext) -> Result<(), String> {
     }
 
     let n = s
-        .scanout()
-        .dump_to_file(&mut ctx.ppm)
+        .dump_ppm_to_file(&mut ctx.ppm)
         .map_err(|e| format!("dump the frame: {e}"))?;
     if n < 1000 {
         return Err(format!("the PPM is {n} bytes, which is only a header"));

@@ -28,6 +28,13 @@ default = []
 # dual-backend shape is in place from the first commit; nothing reads it yet.
 # PROJECT.md §2.7: CI must never depend on hardware-only paths.
 hardware = []
+# The developer window: a real window on a real desktop, so a human can type a document without `sudo`.
+#
+# Off by default, and NOT part of the product. The bare-silicon path is `hardware` plus the jail; this is
+# the other end of the `Scanout`/`InputSource` pair, for a machine that has a compositor. Enabling it
+# changes the binary: `tests/release_artifact.rs` asserts that a default-features release build contains
+# no X11 in it, and the seccomp census (`tests/census_session.rs`) covers the sealed path, not this one.
+desktop = ["holonomy-display/desktop", "holonomy-input/desktop", "dep:holonomy-x11"]
 
 [lib]
 name = "holonomy"
@@ -51,3 +58,5 @@ holonomy-jail = { path = "../holonomy-jail" }
 holonomy-render = { path = "../holonomy-render" }
 holonomy-secure = { path = "../holonomy-secure" }
 holonomy-text = { path = "../holonomy-text" }
+# Only for the developer window: the driver's own key events and the window manager's messages.
+holonomy-x11 = { path = "../holonomy-x11", optional = true }

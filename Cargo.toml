@@ -13,6 +13,7 @@ members = [
     "crates/holonomy-render",
     "crates/holonomy-secure",
     "crates/holonomy-text",
+    "crates/holonomy-x11",
 ]
 # H2/ is the superseded Tauri + TypeScript + SQLite stack. It is a reference for
 # what to salvage and what to refuse (PROJECT.md §3), never a dependency. Excluded

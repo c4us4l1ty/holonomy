@@ -47,6 +47,10 @@ pub struct Args {
     pub zoom: u32,
     /// Run headless: no DRM, no evdev, no jail. The integration gate's mode.
     pub headless: bool,
+    /// Open a window on a desktop display, instead of the jail's panel. Requires the `desktop` feature.
+    pub window: bool,
+    /// Which display, for `--window`. `$DISPLAY` when absent.
+    pub display: Option<String>,
     /// Print what would happen without doing it.
     pub dry_run: bool,
     /// Type a scripted event stream from this file instead of reading a keyboard.
@@ -66,6 +70,8 @@ impl Default for Args {
             height: 800,
             zoom: 100,
             headless: false,
+            window: false,
+            display: None,
             dry_run: false,
             script: None,
             passphrase_env: "HOLONOMY_PASSPHRASE",
@@ -201,6 +207,8 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 "--height" => out.height = parse_u32(&flag, &value()?)?,
                 "--zoom" => out.zoom = parse_u32(&flag, &value()?)?,
                 "--headless" => out.headless = true,
+                "--window" => out.window = true,
+                "--display" => out.display = Some(value()?),
                 "--dry-run" => out.dry_run = true,
                 "--help" | "-h" => {
                     return Err(ParseError::Unknown {

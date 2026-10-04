@@ -15,9 +15,14 @@ publish.workspace = true
 holonomy-assets = { path = "../holonomy-assets" }
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-render = { path = "../holonomy-render" }
+# Only for the developer window. Optional, so a default build never links a socket client.
+holonomy-x11 = { path = "../holonomy-x11", optional = true }
 libc = "0.2"
 
 [features]
 # Everything that needs a DRM device. PROJECT.md 2.7: CI must never depend on hardware-only paths, and
 # the gate's visual baseline is a PPM rather than a readback from an i915 driver.
 hardware = []
+# The developer window. Off by default, not part of the sealed boot chain, and the release artifact
+# test in `crates/holonomy/tests/release_artifact.rs` asserts a default-features binary holds none of it.
+desktop = ["dep:holonomy-x11"]

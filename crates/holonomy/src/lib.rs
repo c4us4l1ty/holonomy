@@ -15,6 +15,8 @@
 
 pub mod args;
 pub mod session;
+#[cfg(feature = "desktop")]
+pub mod windowed;
 
 pub use args::{Args, ExportTarget, ParseError};
 pub use session::{Exit, ExportSink, Session, SessionError, SessionStats};
