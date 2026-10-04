@@ -288,6 +288,15 @@ impl AltStack {
         self.len
     }
 
+    /// One past the last byte of the registered region.
+    ///
+    /// The bound the tripwire's final step wipes up to, immediately before `exit_group`. Public
+    /// because the tripwire is another module and the alternative is `base() + len()` arithmetic at
+    /// the call site -- where the wrapping add is a real thing to get wrong.
+    pub const fn top(&self) -> usize {
+        self.base.wrapping_add(self.len)
+    }
+
     /// A registered alternate stack is never zero-length.
     pub const fn is_empty(&self) -> bool {
         false

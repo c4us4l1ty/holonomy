@@ -233,6 +233,44 @@ pub fn deregister(handle: RegistryHandle) {
 ///
 /// Returns the number of bytes scrubbed, for the tripwire report.
 pub fn scrub_all() -> usize {
+    scrub_registry(None)
+}
+
+/// Every registered block **except** the one whose payload starts at `skip_base`.
+///
+/// # Why this exists
+///
+/// [`scrub_all`] cannot be called from a signal handler that is running on a registered block.
+/// The alternate signal stack *is* one: `AltStack::install` is documented as taking a region that
+/// has "already been registered with [`crate::registry`], so that a fault scrubs the frame the
+/// kernel just wrote". So a tripwire handler calling `scrub_all` zeroes the memory holding its
+/// own frames, and then returns into zeroes.
+///
+/// Not a subtle degradation. `SIGSEGV` on the altstack; `scrub_all` reaches the altstack slot and
+/// wipes it; the return from `scrub_all` into the handler pops `0x0000_0000_0000_0000` as an
+/// instruction pointer; the process dies of `SIGILL` instead of `_exit(137)`. Four of
+/// `tests/guard_page.rs`'s cases did precisely that, and the tripwire's report said nothing about
+/// it because the report is emitted *before* the walk reaches the stack.
+///
+/// # The skipped block's length is still counted
+///
+/// It *is* wiped -- by the tripwire's final step, in the same assembly block that issues
+/// `exit_group`, immediately before the process ends. It cannot be wiped earlier than that, and
+/// it is wiped before the process ends. So the total includes it, which keeps
+/// `expected_scrubbed` in `tests/guard_page.rs` an honest statement of **how much was scrubbed**
+/// rather than of **how much could be scrubbed without returning through itself**.
+///
+/// `skip_base == 0` skips nothing, since no block has a null payload.
+pub fn scrub_all_except(skip_base: usize) -> usize {
+    scrub_registry(if skip_base == 0 {
+        None
+    } else {
+        Some(skip_base)
+    })
+}
+
+/// The shared walk. `skip` is a payload address to leave untouched.
+fn scrub_registry(skip: Option<usize>) -> usize {
     let mut bytes = 0usize;
     for slot in REGISTRY.iter() {
         // Read `len` first and everything else second. Combined with `register` publishing
@@ -243,8 +281,12 @@ pub fn scrub_all() -> usize {
             continue;
         }
         let data = slot.data.load(Ordering::Relaxed);
-        scrub(data, len);
+        // Counted before the skip test, so a skipped block still contributes its length.
         bytes += len;
+        if skip == Some(data) {
+            continue;
+        }
+        scrub(data, len);
     }
     bytes
 }

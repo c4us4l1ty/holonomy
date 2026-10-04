@@ -221,20 +221,43 @@ unsafe extern "C" fn tripwire(
     unsafe { zero_signal_frame(ctx) };
 
     let blocks = registry::active_count();
-    // Step 5. This is the step that matters; see the module comment.
-    let scrubbed = registry::scrub_all();
 
-    // Whether the handler really is running on the alternate stack.
-    //
-    // Reported rather than assumed, because `SA_ONSTACK` is a *request* to the kernel and the
-    // kernel's compliance is exactly what fails when the alternate stack is missing or exhausted
-    // -- the failure mode this module exists to prevent.
+    // Which stack is the handler on? Read **before** the scrub, because the scrub is what used to
+    // destroy it.
     //
     // Answered from the record `install` left behind, not from a fresh `sigaltstack`: with
     // `SS_AUTODISARM` set, the kernel reports `SS_DISABLE` to `sigaltstack` from inside a handler
     // running on that stack, which is the whole point of the flag. See
     // [`AltStack::contains_address`].
     let altstack = installed_altstack();
+
+    // Step 5. This is the step that matters; see the module comment.
+    //
+    // **But not the stack this handler is standing on.**
+    //
+    // The alternate signal stack is a registered `SecureBlock` -- `AltStack::install` is documented
+    // as taking a region that has already been registered, precisely so that a fault scrubs the frame
+    // the kernel just wrote. Which means the walk below would reach it and zero it, and the handler's
+    // own frames *are* on it. Returning from this call then pops zeroes as an instruction pointer and
+    // the process dies of `SIGILL` instead of `_exit(137)`, after the report has already said
+    // everything looked fine.
+    //
+    // So the altstack is left for [`scrub_own_stack_and_exit`], which wipes it in the same assembly
+    // block that issues `exit_group`. Nothing runs between the wipe and the process ending, so nothing
+    // can return through the frames the wipe destroyed. See `registry::scrub_all_except`, which counts
+    // the skipped block's length so `expected_scrubbed` stays a statement about what was scrubbed.
+    let scrubbed = match altstack {
+        Some(alt) => registry::scrub_all_except(alt.base()),
+        // No recorded stack means we are on whatever the interrupted code was using, which is not a
+        // registered block, so there is nothing to exclude.
+        None => registry::scrub_all(),
+    };
+
+    // Whether the handler really is running on the alternate stack.
+    //
+    // Reported rather than assumed, because `SA_ONSTACK` is a *request* to the kernel and the
+    // kernel's compliance is exactly what fails when the alternate stack is missing or exhausted
+    // -- the failure mode this module exists to prevent.
     // A stack address, so a wrong answer is diagnosable rather than merely wrong.
     let handler_sp = &altstack as *const Option<AltStack> as usize;
     let on_altstack = altstack.is_some_and(|alt| alt.contains_address(handler_sp));
@@ -277,11 +300,111 @@ unsafe extern "C" fn tripwire(
     // argument is read again, so no argument can be destroyed by the routine that destroys
     // registers. It also cannot be placed *after* `_exit`, so this is as late as is correct.
     //
-    // Step 7.
+    // Step 7. One assembly block, and nothing between the two halves of it.
+    //
+    // `scrub_own_stack_and_exit` is `-> !` and ends in `exit_group`, so the wipe of the alternate
+    // stack cannot be followed by a return: there is no path out of it but the syscall.
     unsafe {
         zero_caller_saved_state();
-        libc::_exit(TRIPWIRE_EXIT);
+        scrub_own_stack_and_exit(altstack.map_or(0, |alt| alt.top()), TRIPWIRE_EXIT);
     }
+}
+
+/// Zero the alternate stack from here to its top, then `exit_group(code)`.
+///
+/// # The only correct ordering, and why the naive one is a crash
+///
+/// The alternate signal stack holds, between the current frame and its top: this handler's frames,
+/// its callers' return addresses, and the signal frame the kernel wrote. Wiping it is required --
+/// `MADV_DONTDUMP` means the kernel will not write it to a core file, but the pages are still mapped
+/// and readable until the process ends.
+///
+/// Wiping it and *then returning* is not possible: the return address is in the region being wiped.
+/// That is not theoretical. `scrub_all` did exactly that for four of `tests/guard_page.rs`'s cases,
+/// and the process died of `SIGILL` at `0x0` inside `registry::deregister` -- which is a return into
+/// the zeroed stack, not a fault in `deregister`.
+///
+/// So the wipe and the exit are the same `noreturn` assembly block. There is no instruction after
+/// the wipe except the syscall, no return address to pop (a `call` would push one onto the stack this
+/// block is destroying), and no Rust frame to unwind.
+///
+/// # `exit_group`, not `_exit`
+///
+/// [`libc::_exit`] is not a naked syscall in this build: musl compiles it to `sub $8, %rsp; call
+/// _Exit`. Calling it after the wipe would push a return address into the zeroed region. Inlining the
+/// syscall is what makes the sequence a single indivisible step.
+///
+/// `ud2` after the syscall is unreachable in practice and is there so the block is provably
+/// non-returning rather than hopefully so.
+///
+/// # `top == 0`
+///
+/// No recorded alternate stack, so there is nothing to wipe and the block is a bare `exit_group`.
+///
+/// # Safety
+///
+/// Must be called from a handler running on the alternate signal stack, or with `top == 0`. The caller
+/// must not need to return.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+unsafe fn scrub_own_stack_and_exit(top: usize, code: i32) -> ! {
+    /// `SYS_exit_group` on x86-64 Linux.
+    const NR_EXIT_GROUP: i32 = 231;
+
+    core::arch::asm!(
+        // --- the wipe: from the current frame upward.
+        //
+        // Upward, because the stack grows down: `rsp` is the low edge of the live frame, and
+        // everything from there to `top` is this handler's frames and the signal frame. `r10` is the
+        // cursor; `r11` holds the bound. Neither is live in the caller's frame -- the caller's locals
+        // are below `rsp`.
+        //
+        // Registers are **bare** and there are no `q`/`l` size suffixes: Rust's `asm!` defaults to
+        // Intel syntax on x86, where `%rsp` parses as a reference to an operand named `rsp` ("unknown
+        // token in expression") and where LLVM's assembler rejects AT&T spellings like `movq` and
+        // `addq` outright ("invalid instruction mnemonic"). Same trap as the `xorps` block above; the
+        // operand-size suffix goes in the instruction instead, as in `QWORD PTR [r10]`.
+        "mov  rsp, r10",
+        "2:",
+        "cmp  r11, r10",
+        "jae  3f",
+        "mov  QWORD PTR [r10], 0",
+        "add  r10, 8",
+        "jmp  2b",
+        "3:",
+        // --- the exit. Same block, so the wipe cannot be followed by a return.
+        //
+        // `rdi` is `code` from the operand list and is not touched by the loop. `eax` is set last,
+        // because the loop uses no scratch register it would disturb.
+        "mov  eax, {nr}",
+        "syscall",
+        "ud2",
+        // Positional, because an explicit register operand cannot also be named -- and nothing in the
+        // template refers to them by name, since the block uses `%r11` and `%rdi` directly.
+        in("r11") top,
+        in("rdi") code,
+        nr = const NR_EXIT_GROUP,
+        options(noreturn),
+    );
+}
+
+/// Non-x86-64: the alternate stack is still wiped, then the process leaves.
+///
+/// A separate function so the x86-64 version can be one assembly block. Here the two steps are
+/// ordinary calls, which is safe because nothing is wiped before the last one.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(never)]
+unsafe fn scrub_own_stack_and_exit(top: usize, code: i32) -> ! {
+    if top != 0 {
+        let mut frame = top as *mut usize;
+        while frame as usize >= &frame as *mut usize as usize {
+            core::ptr::write_volatile(frame, 0);
+            frame = frame.wrapping_sub(1);
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    // SAFETY: `_exit` does not return.
+    unsafe { libc::_exit(code) }
 }
 
 /// Overwrite the saved register context with zeroes.
@@ -382,9 +505,21 @@ unsafe fn zero_caller_saved_state() {
         out("r8")    _, out("r9")    _, out("r10")   _, out("r11")   _,
         options(nostack),
     );
-    // `cld` is invisible to the compiler, and a caller-saved flag is exactly the kind of
-    // state a compiler is entitled to assume it set up. Say so explicitly.
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // **No `compiler_fence` here, and that is deliberate.**
+    //
+    // `cld` changes a flag the compiler cannot see, so the textbook response is a barrier. But in a
+    // debug build `compiler_fence` is *not* a barrier to the machine: it is `#[inline]` without
+    // `#[inline(always)]`, so at `-C opt-level=0` LLVM outlines it into a real function and this
+    // block ends with `mov $4, %edi; call ...; pop %rax; ret`.
+    //
+    // That is a function call *after* the register wipe, which is the one thing the wipe is supposed
+    // to make impossible: the callee has a prologue, it adjusts `%rsp`, and it dispatches on a jump
+    // table indexed by a register this block just zeroed. It happens to work, because `edi` is set
+    // explicitly -- but "happens to work" is not a property to build a signal handler's exit on.
+    //
+    // Instead the next thing after this block is [`scrub_own_stack_and_exit`], which is `noreturn`
+    // and whose first instructions read `%rsp` and two operand registers. None of them read a flag,
+    // so there is nothing for a barrier to order and nothing for it to protect.
 }
 
 /// Non-x86-64 fallback: nothing to do.
