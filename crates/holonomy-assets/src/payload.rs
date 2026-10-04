@@ -116,59 +116,13 @@ pub fn codepoints_all() -> impl Iterator<Item = u32> {
     codepoints_in_text_ranges().chain(BOX_RANGE.0..=BOX_RANGE.1)
 }
 
-/// Decompress [`PACKED_FONTS`] into the TTF bytes.
-///
-/// The one place the packed blob is expanded, so a caller that wants a [`crate::atlas::Atlas`] does
-/// not have to know that the fonts are brotli-compressed, nor that `brotli_decompressor` is a
-/// dependency for exactly this. Returns the buffer rather than a guard so the `Face<'_>` borrows it
-/// can be held for as long as the caller needs.
-pub fn unpack_fonts() -> Result<Vec<u8>, crate::Error> {
-    use std::io::Read as _;
-    let mut input = std::io::Cursor::new(PACKED_FONTS);
-    let mut raw = Vec::with_capacity(RAW_LEN);
-    brotli_decompressor::Decompressor::new(&mut input, 4096).read_to_end(&mut raw)?;
-    Ok(raw)
-}
-
-/// The whole atlas: every face, every codepoint, every size.
-///
-/// Phase 8. Before this, every caller that wanted to draw anything had to open a `crate::atlas::AtlasBuilder`,
-/// loop over [`FACES`], parse each face with `ttf_parser`, call [`crate::raster::rasterize_face`],
-/// and call `finish` -- which is fifteen lines of ceremony repeated in every test that wanted a pixel.
-/// The dependencies needed for it (`ttf-parser`, `brotli-decompressor`) are *this crate's*, so the
-/// ceremony belongs here too.
-///
-/// # What lands in the atlas
-///
-/// [`codepoints_all`](codepoints_all): both text ranges plus the whole box-drawing block, for every
-/// face, at every size. That is [`crate::metric::CODEPOINTS`] codepoints times [`FACES`]::len()
-/// times `sizes.len()` glyphs, and the builder enforces
-/// [`PACKED_BUDGET`](crate::payload::PACKED_BUDGET) worth of *packed* size -- so asking for too many
-/// sizes fails here rather than producing an atlas that silently overflows the 2.5 MiB binary budget.
-///
-/// # Errors
-///
-/// [`crate::Error`], which covers a decompression failure, an unparseable face, a glyph the builder
-/// refuses, and a budget overflow. None of them are recoverable at the call site, and all of them are
-/// better as one error than as four.
-pub fn build_atlas(sizes: &[u16]) -> Result<crate::atlas::Atlas, crate::Error> {
-    use ttf_parser::Face as TtfFace;
-
-    let raw = unpack_fonts()?;
-    let mut builder = crate::atlas::AtlasBuilder::new(sizes)?;
-    for entry in FACES {
-        let slice = &raw[entry.offset as usize..(entry.offset + entry.length) as usize];
-        let index = FACES.iter().position(|f| f.name == entry.name).unwrap_or(0) as u32;
-        let face = TtfFace::parse(slice, 0).map_err(|e| crate::Error::Parse {
-            index,
-            detail: format!("{e}"),
-        })?;
-        crate::raster::rasterize_face(&face, &entry, sizes, &mut builder)?;
-    }
-    // Box drawing is *procedural*, not from a font: `draw_glyph` emits each rune's arms from the
-    // verified table. Rasterising them from the font instead would work but would make the chrome's
-    // rules depend on a font's box-drawing glyphs being present and correctly weighted -- and the
-    // whole point of the table is that they are not the font's to decide.
-    crate::box_drawing::add_box_drawing(sizes, &mut builder)?;
-    Ok(builder.finish()?.0)
-}
+// NOTE: an earlier version of Phase 8 added a `build_atlas` *here*, duplicating
+// [`crate::build_atlas`]. That was wrong twice over. It returned `Atlas` where the real one returns
+// `(Atlas, BootReport)`, so every caller silently dropped the phase timings -- including the one that
+// measures boot. And it decompressed into a plain `Vec<u8>` where the real one decompresses into a
+// page-locked, `mlock`ed, zeroizing `SecureBlock`, which is the entire point of Phase 4's
+// one-time pass: the expanded fonts are *supposed* to be scrubbed, and the duplicate made them
+// ordinary heap that a later `Drop` would leave behind.
+//
+// There is one `build_atlas`. It lives at the crate root because it is the whole pass, not a
+// payload detail, and it is the only place that knows the phases have to happen in order.

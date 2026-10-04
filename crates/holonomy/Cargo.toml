@@ -8,8 +8,11 @@
 #
 # Nothing after seccomp may allocate.
 #
-# Phase 0 skeleton only: no boot sequence yet, just enough to prove the release
-# profile, the musl target and the `hardware` feature flag line up.
+# Phase 8: a lib target as well as the bin. The session loop lives in the library so the
+# integration gate can drive it in-process -- the jail itself cannot be booted from a `#[test]`,
+# because `unshare(CLONE_NEWUSER)` returns EINVAL in any multi-threaded process and libtest always
+# spawns one. So the *loop* is tested here and the *jail* is entered from `main`, and the two meet
+# only in the binary.
 [package]
 name = "holonomy"
 description = "Holonomy bare-silicon word processor, encrypted container and sealed OS jail"
@@ -25,6 +28,10 @@ default = []
 # dual-backend shape is in place from the first commit; nothing reads it yet.
 # PROJECT.md §2.7: CI must never depend on hardware-only paths.
 hardware = []
+
+[lib]
+name = "holonomy"
+path = "src/lib.rs"
 
 [[bin]]
 name = "holonomy"

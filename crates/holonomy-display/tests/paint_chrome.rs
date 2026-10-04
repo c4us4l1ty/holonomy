@@ -15,7 +15,6 @@
 //! `painting_a_small_damage_rect_writes_fewer_pixels` and its siblings compare pixel counts and
 //! skipped-node counts, not just the picture.
 
-use holonomy_assets::payload;
 use holonomy_display::paint::Painter;
 use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
@@ -23,7 +22,9 @@ use holonomy_render::DamageRect;
 
 /// The whole atlas at one size, which is what a session uses.
 fn atlas() -> holonomy_assets::atlas::Atlas {
-    payload::build_atlas(&[16]).expect("build the atlas")
+    holonomy_assets::build_atlas(&[16])
+        .expect("build the atlas")
+        .0
 }
 
 /// A frame the size of the chrome.
