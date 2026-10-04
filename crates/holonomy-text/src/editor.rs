@@ -40,7 +40,8 @@
 
 use crate::rope::{Rope, RopeError};
 use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
-use crate::undo::{ActionKind, UndoError, UndoStack, UNDO_DEPTH};
+use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, UNDO_DEPTH};
+use zeroize::Zeroize;
 
 /// Removed-span slices retained for undoing a styled deletion.
 pub const STYLE_UNDO_DEPTH: usize = UNDO_DEPTH;
@@ -56,6 +57,13 @@ pub enum EditorError {
     Undo(UndoError),
     /// Nothing to undo.
     NothingToUndo,
+    /// Nothing to redo.
+    ///
+    /// A distinct variant rather than reusing [`EditorError::NothingToUndo`] because the two have
+    /// different causes with opposite fixes: an empty undo stack means the user pressed undo too
+    /// often, an empty redo stack means they started a new edit, and a keymap that shows the same
+    /// message for both tells the user nothing.
+    NothingToRedo,
     /// The offset is not on a UTF-8 character boundary.
     ///
     /// Checked here rather than deferred to the rope, because a mid-character offset would be accepted
@@ -74,6 +82,7 @@ impl std::fmt::Display for EditorError {
             Self::Span(e) => write!(f, "{e}"),
             Self::Undo(e) => write!(f, "{e}"),
             Self::NothingToUndo => write!(f, "there is nothing to undo"),
+            Self::NothingToRedo => write!(f, "there is nothing to redo"),
             Self::NotCharBoundary { offset } => {
                 write!(f, "byte {offset} is inside a UTF-8 character")
             }
@@ -129,12 +138,24 @@ pub struct Editor {
     rope: Rope,
     spans: SpanMap,
     undo: UndoStack,
-    /// Removed spans for undoing a styled deletion, newest last. Bounded to
-    /// [`STYLE_UNDO_DEPTH`].
+    /// Removed spans for undoing a deletion, newest last. Bounded to [`STYLE_UNDO_DEPTH`].
     ///
-    /// A plain `Vec<Vec<TextIntervalSpan>>`, deliberately *not* in the arena: entries are pushed only
-    /// when a delete removed styled content, so a plain-text document never allocates here at all, and
-    /// pushing to a plain `Vec` is far simpler than a second ring in [`UndoStack`].
+    /// Phase 6 made this a *lossy* side-channel -- pushed only when a delete removed styled content,
+    /// so that a plain-text document never allocated here at all -- and paired it with `undo`'s
+    /// **unconditional** pop. The two halves disagreed: undoing a plain delete popped an earlier
+    /// styled delete's record and restored it over the wrong bytes, and the following undo then found
+    /// nothing and silently lost the styling that was there all along. Silent, and unreachable by
+    /// testing one delete at a time, which is how it survived Phase 6's gate.
+    /// `tests/style_undo.rs` is the reproduction.
+    ///
+    /// So it is now **total**: one entry per Delete-kind action, with an empty `Vec` meaning "this
+    /// delete removed nothing styled". `Vec::new()` does not allocate, so the plain-delete case still
+    /// costs zero, and in exchange push and pop pair one-to-one -- the property that was missing.
+    ///
+    /// Still deliberately *not* in the arena. Being total changes its size bound from
+    /// "however many deletes touched styled text" to "however many deletes happened", but 500 empty
+    /// `Vec`s is 12 KB of pointer triples, not 500 arena slices, and a second ring in [`UndoStack`]
+    /// would have to keep the same eviction order as the first.
     style_undo: Vec<Vec<TextIntervalSpan>>,
     /// Scratch space for [`delete_at`](Self::delete_at)'s captured bytes, sized [`DELETE_SCRATCH`].
     ///
@@ -147,6 +168,19 @@ pub struct Editor {
     /// Hoisting it here makes it one allocation in [`Editor::new`], outside every measured window, and the
     /// per-delete count is then exactly zero with no caveat.
     delete_scratch: Vec<u8>,
+    /// Actions undone and awaiting redo, newest last. Bounded to [`UNDO_DEPTH`].
+    ///
+    /// Phase 8. A `Vec<UndoAction>` rather than a second arena, and the reason is that
+    /// [`UndoStack::pop_for_undo`] already *hands the bytes out*: it zeroizes its arena and returns an
+    /// owning `UndoAction`, because "the caller may re-push it for redo or drop it" is written into the
+    /// method's own doc comment. A redo built inside the arena would have to fight that zeroize.
+    /// Holding the actions here is what makes redo possible at all, and it costs one allocation per
+    /// **undo** -- never per keystroke, which is the path FR-1.2 measures.
+    ///
+    /// A plain heap `Vec`, not a `SecureBlock`, because an undone action's payload is plaintext that
+    /// must itself be scrubbed on drop. It is: [`clear_history`](Self::clear_history) zeroizes every
+    /// payload on the way out, the same guarantee the undo arena gives on eviction.
+    redo: Vec<UndoAction>,
 }
 
 /// Bytes of scratch [`Editor::delete_at`] keeps, covering every single-keystroke delete.
@@ -165,24 +199,30 @@ impl Default for Editor {
 impl Editor {
     /// An empty document.
     pub fn new() -> Self {
-        Self {
-            rope: Rope::new(),
-            spans: SpanMap::plain(0),
-            undo: UndoStack::new(),
-            style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
-            delete_scratch: vec![0u8; DELETE_SCRATCH],
-        }
+        Self::empty(Rope::new(), 0)
     }
 
     /// A document holding `text`, with no styling and no history.
     pub fn from_text(text: &[u8]) -> Result<Self, EditorError> {
-        Ok(Self {
-            rope: Rope::from_text(text)?,
-            spans: SpanMap::plain(text.len() as u32),
+        let rope = Rope::from_text(text)?;
+        let len = rope.text_len();
+        Ok(Self::empty(rope, len))
+    }
+
+    /// The shared constructor.
+    ///
+    /// Every allocation an [`Editor`] ever makes happens here, which is what lets the keystroke path
+    /// claim a flat zero. It exists as one function because the field list used to be spelled out in
+    /// both constructors, and Phase 6 found a field that had been added to one and not the other.
+    fn empty(rope: Rope, text_len: usize) -> Self {
+        Self {
+            rope,
+            spans: SpanMap::plain(text_len as u32),
             undo: UndoStack::new(),
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
-        })
+            redo: Vec::with_capacity(UNDO_DEPTH),
+        }
     }
 
     /// The document's bytes, for export and for tests.
@@ -244,6 +284,9 @@ impl Editor {
         self.spans
             .apply_insert_with(offset as u32, bytes.len() as u32, policy)?;
         self.undo.push_insert(offset as u32, bytes)?;
+        // Last, because a refused edit must leave the history exactly as it found it -- including the
+        // redo branch, which is history.
+        self.drop_redo();
 
         Ok(EditOutcome {
             offset: offset as u32,
@@ -340,13 +383,18 @@ impl Editor {
         self.rope.set_cursor(offset_u + len as usize)?;
         self.delete_range_in_rope(offset_u, len as usize)?;
 
-        // Record styling only when there was any.
+        // Record the styling the delete removed, **always**, so that `undo`'s pop pairs one-to-one
+        // with this push.
         //
-        // `removed_spans` already carries only the regions the delete touched, so this filter normally
-        // yields nothing and `Vec::new()` does not allocate. The `is_empty` check is what makes that
-        // true: an unconditional `collect()` over a `filter_map` allocates its capacity from the
-        // iterator's upper size hint even when it produces nothing, which is the second allocation per
-        // delete.
+        // Phase 6 gated this on `!styled.is_empty()`, which was a real optimisation (a plain-text
+        // document allocated nothing here at all) and a real bug: `undo` popped unconditionally, so
+        // a plain delete's undo stole the previous styled delete's record. `Vec::new()` does not
+        // allocate, so making the entry total costs a `Vec` header and nothing else.
+        //
+        // The `is_empty` branch is still worth spelling out rather than left implicit: an
+        // unconditional `collect()` over a `filter_map` takes its capacity from the iterator's upper
+        // size hint *even when it yields nothing*, which is the second allocation per delete that
+        // `no_alloc.rs` measures. The filter, then the `is_empty` check, is what makes that zero.
         let styled: Vec<TextIntervalSpan> = if removed_spans
             .iter()
             .all(|s| s.style_flags == 0 && s.color_rgb == 0)
@@ -359,12 +407,12 @@ impl Editor {
                 .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
                 .collect()
         };
-        if !styled.is_empty() {
-            if self.style_undo.len() == STYLE_UNDO_DEPTH {
-                self.style_undo.remove(0);
-            }
-            self.style_undo.push(styled);
+        if self.style_undo.len() == STYLE_UNDO_DEPTH {
+            self.style_undo.remove(0);
         }
+        self.style_undo.push(styled);
+        // A fresh delete invalidates the redo branch too, for the reason in `drop_redo`.
+        self.drop_redo();
 
         Ok(EditOutcome {
             offset,
@@ -464,25 +512,41 @@ impl Editor {
             }
             ActionKind::Delete => {
                 // The action deleted these bytes, so undoing re-inserts them, and the styling comes
-                // back from the style ring.
+                // back from the style record.
                 let removed = self.style_undo.pop();
+                let start = action.offset;
+                let end = action.offset + action.bytes.len() as u32;
                 self.rope.set_cursor(action.offset as usize)?;
                 self.rope.insert_at(action.offset as usize, &action.bytes)?;
                 // `GrowIntoInsert` so the restored bytes take the preceding run's style as a starting
                 // point, then the recorded spans overwrite it exactly.
                 self.spans.apply_insert_with(
-                    action.offset,
+                    start,
                     action.bytes.len() as u32,
                     SpanPolicy::GrowIntoInsert,
                 )?;
-                if let Some(spans) = removed {
-                    for s in spans {
-                        self.spans.style_range(
-                            s.start_byte,
-                            s.end_byte,
-                            s.style_flags,
-                            s.color_rgb,
-                        )?;
+                match removed {
+                    Some(spans) if !spans.is_empty() => {
+                        for s in spans {
+                            self.spans.style_range(
+                                s.start_byte,
+                                s.end_byte,
+                                s.style_flags,
+                                s.color_rgb,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        // An empty record -- and *only* an empty record, now that `style_undo` is total
+                        // -- means these bytes carried no styling of their own. So they must come back
+                        // plain, not with the `GrowIntoInsert` guess above.
+                        //
+                        // Before Phase 8 this arm could not tell "was plain" from "the record went
+                        // missing", so it took the guess, and undoing a plain delete that sat next to a
+                        // bold run restored the text bold. Restoring a delete should restore what was
+                        // deleted; `GrowIntoInsert` is the right default for the *caret* and the wrong
+                        // one for *history*, and this is where the two come apart.
+                        self.spans.style_range(start, end, 0, 0)?;
                     }
                 }
                 EditOutcome {
@@ -494,6 +558,18 @@ impl Editor {
                 }
             }
         };
+        // Park it for redo, *after* the inverse has been applied -- the action describes the original
+        // edit, so its bytes are still needed to replay it forward.
+        //
+        // Bounded exactly as `style_undo` is. The eviction matters more here than there: dropping an
+        // evicted redo action discards its payload, so it is zeroized rather than freed with plaintext
+        // still in it. An evicted redo is a redo that can no longer happen, which is the same guarantee
+        // `UndoStack`'s own arena gives on overflow.
+        if self.redo.len() == UNDO_DEPTH {
+            let mut evicted = self.redo.remove(0);
+            evicted.bytes.zeroize();
+        }
+        self.redo.push(action);
         Ok(outcome)
     }
 
@@ -513,6 +589,225 @@ impl Editor {
     pub fn clear_history(&mut self) {
         self.undo.clear();
         self.style_undo.clear();
+        // The redo payloads are plaintext that outlived their undo, so they get scrubbed rather than
+        // dropped. `UndoAction` holds a `Vec<u8>`, and this is the only path that discards one.
+        for action in &mut self.redo {
+            action.bytes.zeroize();
+        }
+        self.redo.clear();
+    }
+
+    // ---------------------------------------------------------------- caret, Phase 8
+
+    /// Where the caret is, in document bytes. Always on a UTF-8 character boundary.
+    #[inline]
+    pub fn caret(&self) -> u32 {
+        self.rope.cursor() as u32
+    }
+
+    /// Move the caret to `offset`, snapped into the document and onto a character boundary.
+    ///
+    /// Returns where it landed, which is not necessarily `offset`: an offset past the end clamps to
+    /// the end, and one that falls inside a multi-byte character snaps *backwards* to that
+    /// character's start.
+    ///
+    /// Snapping backwards rather than forwards is the choice worth stating. Forward would put the
+    /// caret after a character the caller meant to address; backwards puts it before, which is the
+    /// only reading where the character at `offset` is still reachable with a Right. Both are
+    /// defensible and only one is reversible.
+    pub fn caret_to(&mut self, offset: usize) -> Result<u32, EditorError> {
+        let target = offset.min(self.text_len());
+        let mut snapped = target;
+        while snapped > 0 && !self.is_char_boundary(snapped) {
+            snapped -= 1;
+        }
+        self.rope.set_cursor(snapped)?;
+        Ok(snapped as u32)
+    }
+
+    /// Move the caret left one character.
+    ///
+    /// Errors at offset 0 rather than clamping, because "left at the start" is a command the keymap
+    /// should swallow rather than a document operation that failed.
+    pub fn caret_left(&mut self) -> Result<u32, EditorError> {
+        let cursor = self.rope.cursor();
+        if cursor == 0 {
+            return Err(EditorError::NothingToUndo);
+        }
+        let mut target = cursor - 1;
+        while target > 0 && !self.is_char_boundary(target) {
+            target -= 1;
+        }
+        self.rope.set_cursor(target)?;
+        Ok(target as u32)
+    }
+
+    /// Move the caret right one character.
+    pub fn caret_right(&mut self) -> Result<u32, EditorError> {
+        let cursor = self.rope.cursor();
+        let end = self.text_len();
+        if cursor >= end {
+            return Err(EditorError::NothingToUndo);
+        }
+        let mut target = cursor + 1;
+        while target < end && !self.is_char_boundary(target) {
+            target += 1;
+        }
+        self.rope.set_cursor(target)?;
+        Ok(target as u32)
+    }
+
+    /// Delete the character *after* the caret. The Delete key, as opposed to
+    /// [`backspace`](Self::backspace).
+    ///
+    /// Deletes a whole codepoint, not a byte. Deleting a byte of a multi-byte character would leave
+    /// the document invalid UTF-8, and the rope's own `is_char_boundary` would then refuse every
+    /// subsequent edit at that point -- one Delete key turning into a document that cannot be edited
+    /// at all.
+    pub fn delete_forward(&mut self) -> Result<EditOutcome, EditorError> {
+        let cursor = self.rope.cursor() as u32;
+        if !self.is_char_boundary(cursor as usize) {
+            return Err(EditorError::NotCharBoundary { offset: cursor });
+        }
+        let mut len = 1usize;
+        while cursor as usize + len < self.text_len()
+            && !self.is_char_boundary(cursor as usize + len)
+        {
+            len += 1;
+        }
+        if cursor as usize + len > self.text_len() {
+            return Err(EditorError::Rope(RopeError::OutOfBounds {
+                offset: cursor as usize + len,
+                text_len: self.text_len(),
+            }));
+        }
+        self.delete_at(cursor, len as u32)
+    }
+
+    // ---------------------------------------------------------------- redo, Phase 8
+
+    /// Number of actions that can be redone.
+    #[inline]
+    pub fn redo_depth(&self) -> usize {
+        self.redo.len()
+    }
+
+    #[inline]
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Re-apply the most recently undone action.
+    ///
+    /// # Why this cannot reuse `insert_at` / `delete_at`
+    ///
+    /// Those push to the undo stack, because for a fresh edit that is what they must do. A redo is
+    /// not a fresh edit: it is the *same* edit being replayed, so recording it again would make the
+    /// two histories disagree -- undo would then be able to undo a redo, and the depths reported by
+    /// [`undo_depth`](Self::undo_depth) and [`redo_depth`](Self::redo_depth) would not sum to the
+    /// number of edits made. So a redo applies the bytes and the span shift directly, and puts the
+    /// action back on the undo stack exactly once, itself.
+    ///
+    /// The `Delete` arm additionally captures the styling of the region it removes, mirroring what
+    /// [`delete_at`](Self::delete_at) does for a fresh delete, so that an undo of this redo can put
+    /// the styling back.
+    pub fn redo(&mut self) -> Result<EditOutcome, EditorError> {
+        let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
+        let offset = action.offset as usize;
+        let len = action.bytes.len();
+        let lines_changed = action.bytes.contains(&b'\n');
+
+        let outcome = match action.kind {
+            ActionKind::Insert => {
+                self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: len as u32,
+                    kind: ActionKind::Insert,
+                    line: None,
+                    lines_changed,
+                }
+            }
+            ActionKind::Delete => {
+                // Capture the styling this redo is about to destroy, so an undo of the redo can put
+                // it back. Pushed to the same `style_undo` as a fresh delete, for the same reason
+                // that vector is total: both are Delete actions on one undo stack, and `undo` cannot
+                // tell them apart.
+                let removed = self.capture_spans(action.offset, len as u32)?;
+                if self.style_undo.len() == STYLE_UNDO_DEPTH {
+                    self.style_undo.remove(0);
+                }
+                self.style_undo.push(removed);
+                self.delete_range_in_rope(offset, len)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: len as u32,
+                    kind: ActionKind::Delete,
+                    line: None,
+                    lines_changed,
+                }
+            }
+        };
+
+        // Back on the undo stack, so undo and redo can alternate indefinitely. `push` may evict the
+        // oldest entries to make room, which is the same trade a fresh edit makes and the reason redo
+        // is not guaranteed forever: it is bounded exactly as deeply as undo is.
+        self.undo
+            .push(action.offset, action.kind, &action.bytes)
+            .map_err(EditorError::Undo)?;
+        // The arena owns a copy now, so scrub ours rather than dropping plaintext to the heap. Order
+        // matters: this is after the push for exactly that reason.
+        action.bytes.zeroize();
+        Ok(outcome)
+    }
+
+    /// Apply a byte insertion to the rope and the span map, with no history record.
+    ///
+    /// The shared half of [`insert_at`](Self::insert_at) and [`redo`](Self::redo): the two differ
+    /// only in whether the action is recorded.
+    fn apply_insert_raw(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+        policy: SpanPolicy,
+    ) -> Result<(), EditorError> {
+        self.rope.insert_at(offset, bytes)?;
+        Ok(self
+            .spans
+            .apply_insert_with(offset as u32, bytes.len() as u32, policy)?)
+    }
+
+    /// Discard the redo history, scrubbing the payloads on the way out.
+    ///
+    /// Called by every *fresh* edit. The branch that keeps the undone bytes replayable would otherwise
+    /// be one that every word processor takes: undo, type something, redo would splice the replayed
+    /// text at a caret that has since moved, which is not an edit anyone asked for.
+    ///
+    /// Not called by [`redo`](Self::redo), which is the whole point -- redo pushes *onto* the undo
+    /// stack and must leave this vector alone. The two are kept distinct precisely so `redo` can
+    /// bypass it; a single `record()` helper that both used would have been the bug.
+    fn drop_redo(&mut self) {
+        for action in &mut self.redo {
+            action.bytes.zeroize();
+        }
+        self.redo.clear();
+    }
+
+    /// The span records covering `[offset, offset+len)`, for restoring them on undo.
+    ///
+    /// Returns an empty vector when the region is plain, which is the case for almost every
+    /// keystroke in an unstyled document.
+    fn capture_spans(&self, offset: u32, len: u32) -> Result<Vec<TextIntervalSpan>, EditorError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .spans
+            .spans()
+            .iter()
+            .filter(|s| s.start_byte < offset + len && s.end_byte > offset)
+            .copied()
+            .collect())
     }
 
     /// Assert the editor's cross-structure invariants. Test-only.
