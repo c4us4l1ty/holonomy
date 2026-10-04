@@ -1,7 +1,7 @@
 # CAGR gap-rope leaves, style spans, undo and search.
 #
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+# The dependency on holonomy-jail is the single allocation chokepoint -- see
+# crates/holonomy-jail/src/lib.rs for why every crate has it.
 [package]
 name = "holonomy-text"
 description = "CAGR gap-rope leaves, style spans, undo and search"
@@ -13,3 +13,9 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+holonomy-secure = { path = "../holonomy-secure" }
+
+# Dev-dependency only: the latency test measures the Fenwick lookup's cost, so it needs the
+# geometry crate. The library itself does not depend on it -- the rope knows nothing about layout.
+[dev-dependencies]
+holonomy-geometry = { path = "../holonomy-geometry" }

@@ -1,11 +1,14 @@
-//! Fenwick-indexed geometry: line heights from font metrics, never from measurement.
+//! Fenwick line geometry and font-metric line heights.
 //!
-//! Two trees (PRD FR-1.3): one over vertical line heights, one over byte prefix sums.
-//! Both answer "which line is at pixel Y" in O(log n) with zero DOM and zero glyph
-//! measurement. `Fenwick` is ported from H2 with `f64` weights replaced by `u32`, which
-//! removes the ulp-disagreement that forced H2 into an O(log² n) `lower_bound`.
+//! FR-1.3. Two Fenwick trees over a document's lines -- one over pixel heights, one over byte
+//! lengths -- so that "which line is at pixel Y" and "which line contains byte B" are both O(log N)
+//! and neither needs a rendered glyph measured.
 //!
-//! Lands in Phase 6. Gate: H2's 36 `geometry.rs` tests plus the 4 `Fenwick` tests,
-//! re-targeted at the new tree. See PROJECT.md §3 and §5 Phase 6.
+//! Lands in Phase 6 with the rest of the text engine. See PROJECT.md §5 Phase 6, Plan.md §2.1
+//! FR-1.3, and `H2/crates/holonomy-core/src/geometry.rs` for the tree this is ported from.
 
-pub use holonomy_jail::PHASE_0_PLACEHOLDER;
+mod fenwick;
+mod lines;
+
+pub use fenwick::Fenwick;
+pub use lines::{DamageRect, GeometryError, LineGeometry, LineMetrics};

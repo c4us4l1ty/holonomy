@@ -1,15 +1,21 @@
-//! The SSE2 blitter, damage tracking, and the surface tree (text runs + icons + rects).
+//! SSE2 blitter, damage tracking and the surface tree.
 //!
-//! One correction to the PRD's kernel, recorded here so it is not reintroduced: the
-//! blend `(fg*a + bg*(255-a)) >> 8` is wrong by up to 1/255, because `255 * 255 = 65025`
-//! overflows the 16-bit intermediate SSE2 gives you. Use a `u32` intermediate, or
-//! `((fg*a) + (bg*(255-a)) + 127) / 255`. The PRD's scalar fallback has the same bug.
+//! Lands in Phase 5. The SSE2 text blitter is Phase 4's [`holonomy_assets::blit`]; this crate owns
+//! the parts that need to know the *panel's* geometry: the damage tracker and, next, the surface
+//! tree.
 //!
-//! Icons are hand-authored 1-bit masks in `.rodata`. No SVG runtime, no font parsing for
-//! UI chrome.
+//! # What is here, and why damage comes first
 //!
-//! Lands in Phase 5. Gate: blend accuracy against an exact reference, damage-rect union
-//! correctness, and a `HeadlessScanout` PPM fixture. See PROJECT.md §5 Phase 5 and
-//! PRD §7.4.
+//! [`damage`] implements FR-3.4, the dirty-row model, because it is the requirement that the rest of
+//! the renderer has to be built around: the blitter's inner loop has no bounds checks per row *because*
+//! damage arrives pre-clipped, and a full-screen redraw during typing is prohibited precisely so that
+//! the damage union stays small. Getting the tracker right first is what makes the surface tree's job
+//! -- turning a list of draw commands into a bounded rect -- possible.
+//!
+//! See PROJECT.md §5 Phase 5 and Plan.md §2.3 FR-3.4.
 
-pub use holonomy_jail::PHASE_0_PLACEHOLDER;
+mod damage;
+mod tree;
+
+pub use damage::{DamageRect, DamageTracker};
+pub use tree::{Icon, Node, NodeKind, Rect, Style, SurfaceTree, TextRun};

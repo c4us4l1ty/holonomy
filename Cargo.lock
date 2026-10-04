@@ -307,7 +307,9 @@ dependencies = [
 name = "holonomy-text"
 version = "3.0.0-singularity"
 dependencies = [
+ "holonomy-geometry",
  "holonomy-jail",
+ "holonomy-secure",
 ]
 
 [[package]]
