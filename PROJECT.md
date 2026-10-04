@@ -138,7 +138,9 @@ Per your decision. Deferred and why:
 - **Typst PDF export** — H2's `translate.rs` is reusable but pulls a multi-megabyte
   dependency tree into a 2.5 MiB binary. Replaced by `pdf-writer`, which is 80 KB, needs no
   `fork`/`exec` (so it runs inside the jail), and emits vectors directly.
-- **Tables, LaTeX math, inline images** — Phase 2 of the PRD's own roadmap. Deferred.
+- **Tables, LaTeX math, inline images** — Phase 2 of the PRD's own roadmap. **Promoted: this is
+  Phase 9.** See §2.9 for the arithmetic that constrains all three, and for the two measured facts
+  that changed the specification.
 
 ### 2.4 Key derivation: replace the PRD's parameters with a measured budget
 
@@ -160,7 +162,7 @@ squaring so the target's T can be re-derived without a rebuild.
 
 This is a deliberate deviation from FR-4.3/FR-4.4 and is recorded as such. The security
 argument is preserved (memory fence + non-parallelizable serial chain); only the constant is
-corrected. Phase 9 re-measures on the Core 2 Duo and the numbers go into STATUS.md.
+corrected. Phase 10 re-measures on the Core 2 Duo and the numbers go into STATUS.md.
 
 ### 2.5 The VDF modulus `N_pub` is the RSA-2048 semiprime, hardcoded
 
@@ -252,6 +254,127 @@ destroy all work unprivileged. Only `SETCRTC` presentation is out of reach. So:
 
 ---
 
+## 2.9 Phase 9 media and layout: the arithmetic, and two facts that changed the specification
+
+Tables, math and inline images look like three independent features. They are one budget problem, and
+two measurements taken on 2026-10-04 changed what Phase 9 can actually be.
+
+### 2.9.1 Binary headroom: 1.018 MiB to the new 2.0 MiB gate
+
+| quantity | bytes | MiB |
+|---|---|---|
+| release binary at `f1bb594` | 1,029,688 | 0.982 |
+| Phase 9 gate | 2,097,152 | 2.000 |
+| absolute ceiling | 2,621,440 | 2.500 |
+| **headroom to the gate** | **1,067,464** | **1.018** |
+| headroom to the ceiling | 1,591,752 | 1.518 |
+
+The gate moves from 2.5 MiB to 2.0 MiB. That costs 0.5 MiB of slack and buys the property that a
+regression in any dependency shows up before it breaches the hard ceiling rather than after.
+
+Tables and math cost **nothing measurable**: tables are integer geometry plus the Phase 4 box-drawing
+table, and math is an AST plus procedural rules plus atlas glyphs. The entire binary cost of Phase 9 is
+the image decoder. A PNG decoder needs inflate; `miniz_oxide` with a hand-written PNG chunk reader is
+**30–60 KiB**, about 6% of the headroom. `png` proper is 80–120 KiB with `flate2` and `crc32fast`
+pulled in, still affordable but harder to defend. Budget: **60 KiB, hard.**
+
+### 2.9.2 Measured fact: the packed fonts contain no math and no Greek
+
+Probed every face's `cmap` on 2026-10-04. Results, per face:
+
+| codepoint | glyph | in all four faces? |
+|---|---|---|
+| α β γ π σ (U+03B1…03C3) | Greek letters | **no — 0/5** |
+| Σ (U+03A3), ∑ (U+2211) | sum | **no — 0/2** |
+| ∫ (U+222B) | integral | **no — 0/1** |
+| √ (U+221A) | radical | **no — 0/1** |
+| − (U+2212) | minus | **no — 0/1** |
+| ⋅ (U+22C5) | dot operator | **no — 0/1** |
+| ≠ ≤ ≥ (U+2260, 2264, 2265) | relations | **no — 0/3** |
+| ± × ÷ | Latin-1 supplement | **yes — via U+00B1, U+00D7, U+00F7** |
+
+Each face carries 190–191 codepoints. The atlas windows are `0x20..0x100` (224) and `0x2500..0x2580`
+(128), so U+03B1 and U+221A are outside both *and* absent from the fonts.
+
+**The specification's "map math symbols directly to the atlas codepoints" is not implementable as
+written.** So the decision, made on measurement rather than optimism:
+
+1. **Add a fifth face: Noto Sans Math**, present on this machine at
+   `/usr/share/fonts/google-noto/NotoSansMath-Regular.ttf`, **2,919 codepoints, 15/15 of the required
+   set.** It is TrueType `glyf`, so `holonomy-assets`' existing rasteriser handles it with **no CFF
+   path** — which is the reason it was chosen over the other candidate.
+2. **STIX Two Math is rejected**, despite better coverage (4,605 codepoints). It ships as
+   `.otf`/CFF, so adopting it means writing a CFF outline interpreter, and the Zero-Bézier Invariant
+   (§2.2) exists precisely to keep outline evaluation out of this codebase.
+3. **Add a third atlas window** `0x0370..0x03FF` (Greek, 144) plus a hand-enumerated math-operator set
+   (32). Table cost: `(144 + 32) × 4 styles × 2 sizes × 10 B = 14,080` bytes, against §2.2's 512 KiB
+   budget — **2.7%**, and the existing `slot_of` already handles a window table rather than two
+   hardcoded comparisons.
+4. `√` is drawn **procedurally**, not from the font. The radical's shape is part of the layout — it
+   must stretch to the height of its radicand — so a fixed glyph is wrong at every size. This is the
+   same reason the box-drawing arms are procedural, and it is the Zero-Bézier Invariant applied to a
+   glyph rather than to a curve.
+
+### 2.9.3 Measured fact: the ±1 page policy only works if images are downscaled at decode time
+
+The specification says a 1080p RGBA image is 8.3 MiB and that "two images would trigger an OOM". The
+arithmetic is exact and it is tighter than it looks:
+
+| raster | bytes | MiB | fits an 8.0 MiB decoded budget |
+|---|---|---|---|
+| 1920×1080 RGBA (native) | 8,294,400 | **7.910** | exactly **one** |
+| 1280×720 RGBA | 3,686,400 | 3.516 | two |
+| 640×360 RGBA (page column width) | 921,600 | **0.879** | **nine** |
+
+So a ±1-page policy with native-resolution decoding can hold **one** 1080p image. A document with two
+photos on facing pages breaches the budget at the moment the second decodes, which is the OOM the
+specification is trying to prevent — the policy as written does not prevent it, it only makes the
+breach happen at a viewport boundary instead of at open time.
+
+**Decision: the Iceberg cache stores page-column-width rasters, not native rasters.** The container
+holds the original bytes, encrypted and on disk; the cache holds only what the viewport can show. For
+the 80-column page of §5's chrome that is 640 px wide. Consequences, all intended:
+
+* the ±1-page policy now holds ~9 images inside 8.0 MiB, so it is a policy rather than a formality;
+* the SSE2 scaler is exercised on *every* image, because a 1080p source is always downscaled — which
+  is the only honest way to test a scaler;
+* `PaintStats::missing` gains a sibling, `resampled`, so a frame records how much work the scaler did
+  rather than hiding it.
+
+The cache still keeps **only** ±1 page, still allocates inside `SecureBlock` (which is `mmap`+`mlock`
++`MADV_DONTDUMP`, and `munmap`/`madvise`/`mlock`/`munlock` are all already in the 50-entry allowlist),
+and still zeroizes on eviction — `SecureBlock::zeroize_and_release()` is the single call that does
+both, and the cache must use it rather than `Drop`, so that eviction is synchronous and observable.
+
+### 2.9.4 The RSS budget, accounted
+
+16.0 MiB steady state, and Phase 9 is the first phase that puts *media* in it:
+
+| consumer | MiB | note |
+|---|---|---|
+| decoded images (Iceberg) | ≤ 8.0 | §2.9.3, gate-enforced |
+| glyph atlas | 0.5 | §2.2, measured in Phase 4 |
+| CAGR text + span map | ~2.0 | 2000-page document |
+| container ring (3 stages) | ~3.0 | fixed by the container design |
+| chrome, damage, surface tree | ~1.0 | Phase 8 measured |
+| **unallocated headroom** | **~1.5** | |
+
+The headroom is thin and the atlas window from §2.9.2 spends 14 KiB of it. If the 8.0 MiB image
+ceiling is ever raised, this table is the thing to re-derive first.
+
+### 2.9.5 What Phase 9 explicitly does not do
+
+* **No `png` crate.** Hand-written chunk reader plus `miniz_oxide`. §2.9.1.
+* **No runtime curve evaluation anywhere.** Zero-Bézier Invariant, §2.2, extended to the radical sign.
+* **No image in the export path's way.** HTML and PDF get `<img>`/XObject references resolved at
+  export time from the container; if an image is not in the viewport the exporter reads it from the
+  container fd with `pread64` (allowlisted), never from a decoded cache entry, because a PDF must not
+  depend on scroll position.
+* **No SVG, no JPEG, no WebP.** One decoder, and PNG is the lossless one that suits documents.
+
+
+---
+
 ## 3. What is salvaged from H2
 
 Read by a scout against every file. Verdicts:
@@ -298,8 +421,23 @@ crates/holonomy-input       evdev, keymap, script injection
 crates/holonomy-display     Scanout trait: Drm | Headless
 crates/holonomy-export      streaming HTML, pdf-writer PDF
 crates/holonomy-jail        unshare, no_new_privs, seccomp, tripwire handler, teardown
+crates/holonomy-media       Phase 9: PNG chunk reader, Iceberg cache, AssetId, SSE2 scaler
 crates/holonomy             the binary: boot sequence, session loop, CLI
 ```
+
+Phase 9 adds one crate and extends three, and the placement is not arbitrary:
+
+* **`holonomy-media`** is new and separate because it is the only part of Phase 9 that touches the
+  filesystem at all. Everything else in the system is pure computation over the container fd; media
+  is where a `pread64` on an encrypted chunk becomes pixels, and it deserves its own dependency edge so
+  that `miniz_oxide` is reachable from exactly one place and its binary cost is one `cargo bloat` line.
+* **Tables** go in `holonomy-text` (the span is data, next to `TextIntervalSpan`, so undo covers them
+  for free) and `holonomy-render` (the grid is geometry, next to the chrome's integer layout).
+* **Math** splits: the parser produces `MathNode` in `holonomy-text`, and the procedural layout and
+  drawing live in `holonomy-render` beside the box-drawing table they share machinery with.
+* `holonomy-media` depends on `holonomy-secure` for `SecureBlock` and on `holonomy-render` for the
+  scaler's scanout traits. It does **not** depend on `holonomy-jail`, so it is testable in-process
+  like everything except the boot chain.
 
 `holonomy-assets` builds with `build.rs` and cannot be a dependency of anything else —
 `include_bytes!` data is only visible to the crate that declares it. `holonomy` re-exports.
@@ -308,8 +446,15 @@ crates/holonomy             the binary: boot sequence, session loop, CLI
 
 ## 5. Phase plan
 
-Phases 1–8 are strictly ordered. Phase 9 is the target-hardware run. Every phase lists the
-gate that must pass before the next starts.
+Phases 1–9 are strictly ordered. Phase 9 is complex media and structured layout; Phase 10 is the
+target-hardware run, deferred until then. Every phase lists the gate that must pass before the next
+starts.
+
+**Phase 9 replaced the target-hardware run, by decision, on 2026-10-04.** Hardware testing is
+deferred to Phase 10; the scope freed by that deferral was spent on the three features §2.3 had been
+holding. The substitution is not equivalent and should not be read as if it were: a hardware run
+validates the *timing and memory* claims on the actual target, and nothing in Phase 9 does that. What
+Phase 9 does is close a *scope* gap, and §2.9 records which measured numbers move as a result.
 
 ### Phase 0 — Repository and build skeleton
 
@@ -442,16 +587,117 @@ and its text extracts to the source. Full-session integration: load a container,
 sentence, scroll, undo, export, save, reopen — verified against a scripted event stream, with
 a PPM dump of the final frame.
 
-### Phase 9 — Target-hardware run (ThinkPad X200, Core 2 Duo, GM45)
+### Phase 9 — Complex media and structured layout
 
-Run `verify-target.sh` on the bare-silicon machine. It measures: boot to passcode prompt,
-`t_kdf` split by stage, the RSS ceiling during a 2000-page editing workload, the VDF per-
-squaring cost feeding T, keystroke-to-pixel percentiles over 500,000 events, and idle CPU
-over 30 minutes. KMS `SETCRTC` presentation is exercised here for the first time.
+Tables, inline math, and viewport-bounded images. §2.9 is the budget and the two measured facts that
+constrain this phase; read it first, because two parts of the original specification turned out not to
+be implementable and were changed rather than attempted.
+
+Worked in three parts, each with its own gate, because they share the budget and nothing else.
+
+#### 9A — Tables
+
+An integer cell matrix, not a web-style reflowing table model.
+
+```rust
+pub struct TableSpan {
+    pub rows: u16,
+    pub cols: u16,
+    pub col_widths: [u16; 8],   // in character cells
+}
+```
+
+**Eight columns maximum**, a compile-time constant with a test, because `col_widths` is a fixed-size
+array and a variable column count would mean a second representation with a conversion between them.
+
+* **Representation.** `TableSpan` lives in `holonomy-text`'s span map alongside `TextIntervalSpan`, so
+  the existing undo machinery covers table edits with no new code. Cell contents are byte ranges in the
+  CAGR buffer separated by **U+001F UNIT SEPARATOR** — chosen because it is a C0 control character,
+  which is exactly what §5's Phase 4 text window (`0x20..0x100`) excludes from the atlas, so it can
+  never be mistaken for a glyph and never widens a font subset.
+* **Borders.** `┌ ┬ ┐ ├ ┼ ┤ └ ┴ ┘ ─ │`, all ten verified in Phase 4's table
+  (`0x2500..=0x257F`, re-asserted for exactly these ten). Drawn through the existing procedural arm
+  table, never as `+`, `-` and `|`, which are monospaced *text* and leave a one-pixel gap at every cell
+  boundary. Widths and padding are integer-only; a table's total width is
+  `sum(col_widths) + (cols + 1) * pad`, asserted equal to the page measure.
+* **Navigation.** Tab advances to the next cell, Shift+Tab to the previous, both wrapping at the ends.
+  Enter inserts a newline *within* a cell without disturbing geometry. Arrows cross cell boundaries via
+  `holonomy-geometry`'s Fenwick mapper, which already maps offsets to rows and columns.
+
+**Gate.** A 4×3 table with populated cells, navigated with Tab and Shift+Tab across every boundary,
+edited in place; borders asserted to land on exact integer pixel coordinates — not "within a pixel".
+
+#### 9B — LaTeX math
+
+A micro-parser and a procedural layout. **No TeX engine** — one would be several megabytes against a
+2.0 MiB gate, and §2.3 already rejected Typst for the same reason.
+
+```rust
+pub enum MathNode {
+    Text(String),
+    Symbol(u16),
+    SuperSub { base: Box<MathNode>, sup: Option<Box<MathNode>>, sub: Option<Box<MathNode>> },
+    Fraction { num: Box<MathNode>, den: Box<MathNode> },
+    Sqrt(Box<MathNode>),
+    Row(Vec<MathNode>),
+}
+```
+
+Syntax scope: `^`, `_`, `\frac{}{}`, `\sqrt{}`, Greek letters, `\sum`, `\int`, and bracket sizing.
+
+* **Drawing is procedural.** Fraction bars are 1- and 2-pixel horizontal fills via direct scanout blit.
+  The radical is a procedural tick plus a stretched overbar — §2.9.2 point 4. Symbols come from the new
+  Noto Sans Math atlas window.
+* **Editing is a mode switch, not a separate buffer.** With the caret outside the formula the box
+  renders as compiled math. With the caret inside, it expands in place to show the raw LaTeX with
+  syntax styling and recompiles on blur. Expansion is one line of height per `\frac` level, computed
+  in integers.
+* **No allocation after the AST is built.** Layout writes into a caller-supplied scratch buffer.
+  `MathLayout::measure()` is `const`-callable and the gate asserts the allocation count is zero from
+  `layout()` onward, which is the same counting-allocator discipline Phase 6 established.
+
+**Gate.** Parse and render `\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}`. Assert the bounding box against
+hand-computed dimensions, and assert zero allocations between `MathNode` and the finished frame.
+
+#### 9C — Iceberg media cache
+
+Inline images, without breaching 16.0 MiB on a 2000-page document. §2.9.3 has the arithmetic that
+dictates the design; this is the mechanism.
+
+* **Decoder.** Hand-written PNG chunk reader plus `miniz_oxide` for inflate. Budget 60 KiB of binary,
+  asserted by the size gate.
+* **Storage.** Images are encrypted chunks in the `.wavefunction` payload section, addressed by a
+  32-byte BLAKE2b `AssetId`. They are read with `pread64` on the container fd, which is allowlisted —
+  **no `openat` after sealing**, so an image path must never exist at runtime.
+* **Cache.** `IcebergCache` holds decoded, **page-column-width** RGBA rasters (§2.9.3). Policy: only
+  rasters intersecting the viewport ± 1 page exist in decoded form. Eviction calls
+  `SecureBlock::zeroize_and_release()` — synchronously, so RSS falls before the next frame, and
+  observably, so the gate can assert it.
+* **Scaler.** SSE2, fixed-point bilinear, integer-only. It runs on *every* image because every image
+  is a downscale, which is the only way a scaler gets honestly tested.
+
+**Gate.** A document with 10 distinct images, scrolled from page 1 to page 50, with the counting
+allocator asserting **decoded image memory never exceeds 8.0 MiB** and that every evicted raster was
+scrubbed to zero. Binary ≤ 2.0 MiB.
+
+**Phase 9 gate.** `cargo test -p holonomy-render` plus the integration harness, plus all of §6.
+
+---
+
+### Phase 10 — Target-hardware run (ThinkPad X200, Core 2 Duo, GM45)
+
+Deferred from Phase 9 on 2026-10-04. Unchanged in substance.
+
+Run `verify-target.sh` on the bare-silicon machine. It measures: boot to passcode prompt, `t_kdf` split
+by stage, the RSS ceiling during a 2000-page editing workload, the VDF per-squaring cost feeding T,
+keystroke-to-pixel percentiles over 500,000 events, and idle CPU over 30 minutes. KMS `SETCRTC`
+presentation is exercised here for the first time. It also re-measures the Phase 9 media claims on the
+target's memory, which is the one thing §2.9 cannot establish.
 
 Results go into `STATUS.md` with the measurements that produced them, per H2's convention.
 
 **Gate.** Every NFR in §6.
+
 
 ---
 
@@ -459,13 +705,18 @@ Results go into `STATUS.md` with the measurements that produced them, per H2's c
 
 | requirement | source | gate |
 |---|---|---|
-| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; ≤ 2.5 MiB |
+| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; **≤ 2.0 MiB** (was 2.5; §2.9.1) |
+| image decoder cost | §2.9.1 | ≤ 60 KiB of the binary, measured by section delta |
+| atlas footprint incl. math window | §2.2, §2.9.2 | ≤ 512 KiB |
+| decoded image memory | §2.9.3 | **≤ 8.0 MiB at every point** of a page-1→50 scroll, 10 images |
+| evicted rasters scrubbed | §2.9.3 | zero after every eviction, asserted by the allocator |
+| math layout allocations | §2.9 9B | **0** between `MathNode` and frame |
+| table border alignment | §2.9 9A | exact integer pixel coordinates, not ±1 |
 | steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
 | `t_kdf` | §2.4 | measured, budget restated — the PRD's 400–550 ms is replaced |
 | keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on target |
 | idle CPU | NFR-1.2 | ≤ 0.001%, process blocked in `epoll_wait` |
-| atlas footprint | §2.2 | ≤ 512 KiB |
 | container entropy | FR-4.1 | NIST SP 800-22 subset passes, Shannon ≥ 7.99999 |
 | container size | FR-4.1 | exactly 134,217,728 bytes |
 | no heap allocation while editing | invariant | counting allocator asserts 0 |
@@ -476,22 +727,29 @@ Results go into `STATUS.md` with the measurements that produced them, per H2's c
 ## 7. Open items needing you
 
 1. **`SETCRTC` needs DRM master.** Verified everything else on the DRM path unprivileged;
-   presentation needs either the VT or root. Confirm whether Phase 9 runs on hardware you
-   control, or whether I should add a `mode-setting` fallback that renders into the dumb
-   buffer and presents via `drmModePageFlip` when master is unavailable.
+   presentation needs either the VT or root. This is now a **Phase 10** question rather than a
+   Phase 9 one. Confirm whether Phase 10 runs on hardware you control, or whether I should add a
+   `mode-setting` fallback that renders into the dumb buffer and presents via `drmModePageFlip`
+   when master is unavailable.
 2. **Arrows in the UI.** Inter has no Arrows block. Either pick a different glyph for the
    sidebar back button or add a second small face. Cosmetic; I will default to a drawn
    triangle mask and note it.
 
-Nothing else is blocked. Phases 0–8 are fully executable on this machine, unprivileged,
-as they stand.
+Nothing else is blocked. Phases 0–9 are fully executable on this machine, unprivileged, as
+they stand — Phase 9's two measured dependencies are both satisfied here: `/usr/share/fonts/google-noto/
+NotoSansMath-Regular.ttf` is present for the math face, and `munmap`/`madvise`/`mlock` are already in
+the 50-entry allowlist.
 
 ---
 
 ## 8. What is deliberately not being done
 
 - **Sync, CRDT, ML-KEM, relay server** — §2.3. Deferred, not rejected.
-- **Tables, LaTeX math, inline images** — PRD Phase 2.
 - **A second compositor path (softbuffer / tiny-skia)** — the superseded PRD revision. The
   H1 stack is DRM/KMS only.
 - **H2's Typst export pipeline** — replaced by `pdf-writer`, §2.3.
+- **A TeX engine** — replaced by the micro-parser of §2.9 9B, on binary-size grounds.
+- **CFF outlines / STIX Two Math** — the math face is Noto Sans Math precisely so no CFF
+  interpreter is needed, §2.9.2.
+- **SVG, JPEG, WebP** — one decoder, §2.9.5.
+- **Variable-length tables** — eight columns, a compile-time constant, §2.9 9A.
