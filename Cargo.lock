@@ -286,6 +286,15 @@ dependencies = [
 [[package]]
 name = "holonomy-jail"
 version = "3.0.0-singularity"
+dependencies = [
+ "holonomy-container",
+ "holonomy-crypto",
+ "holonomy-geometry",
+ "holonomy-render",
+ "holonomy-secure",
+ "holonomy-text",
+ "libc",
+]
 
 [[package]]
 name = "holonomy-render"

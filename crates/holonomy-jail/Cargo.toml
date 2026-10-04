@@ -11,3 +11,21 @@ publish.workspace = true
 # transitively beyond, so that every other crate can depend on it without risking a
 # cycle. See src/lib.rs for why every crate in the workspace depends on it.
 [dependencies]
+# `libc` and nothing else, deliberately. This is the crate that seals the process, so every
+# dependency here is code that runs before the filter is installed and can never be added to
+# it afterwards. See src/lib.rs, "Why hand-assembled BPF rather than a crate".
+libc = "0.2"
+
+[dev-dependencies]
+# The census workload runs the real subsystems, so the tests need them.
+#
+# Every one of these already depends on `holonomy-jail`, so each is a dependency cycle. Cargo
+# permits that for dev-dependencies specifically, and only there: the library still builds with
+# `libc` alone, which is the property that matters for a crate that seals the process.
+holonomy-container = { path = "../holonomy-container" }
+holonomy-crypto = { path = "../holonomy-crypto" }
+holonomy-geometry = { path = "../holonomy-geometry" }
+holonomy-render = { path = "../holonomy-render" }
+holonomy-secure = { path = "../holonomy-secure" }
+holonomy-text = { path = "../holonomy-text" }
+libc = "0.2"

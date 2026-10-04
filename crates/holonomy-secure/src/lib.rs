@@ -53,6 +53,15 @@ pub enum SecureBlockError {
     MprotectFailed,
     /// A zero-length block has no data page and therefore no meaningful guards.
     ZeroLength,
+    /// The block could not be added to the jail's registry of scrubbable mappings.
+    ///
+    /// Phase 7. Not a bookkeeping failure: a block that is not registered is a block the
+    /// guard-page tripwire cannot scrub, so its plaintext would survive a fault. Carried as its
+    /// own variant rather than folded into `MmapFailed` so the boot report can say *which*
+    /// ceiling was hit -- and on a document that sizes the block count it is
+    /// [`RegisterError::Full`](holonomy_jail::RegisterError::Full), which is the page-lock
+    /// ceiling again rather than anything new.
+    RegistryFull(holonomy_jail::RegisterError),
 }
 
 impl core::fmt::Display for SecureBlockError {
@@ -64,6 +73,7 @@ impl core::fmt::Display for SecureBlockError {
             Self::MadviseFailed => "madvise failed",
             Self::MprotectFailed => "mprotect failed on guard page",
             Self::ZeroLength => "zero-length block",
+            Self::RegistryFull(e) => return write!(f, "{e}"),
         };
         f.write_str(msg)
     }
@@ -82,6 +92,13 @@ pub struct SecureBlock {
     len: usize,
     /// Total mapped length including both guard pages. Passed to `munmap`.
     total: usize,
+    /// This block's slot in the jail's registry of scrubbable mappings.
+    ///
+    /// Phase 7. Not an `Option`: `allocate` registers before it returns, and a failure to
+    /// register fails the allocation. So there is no state in which a live block holding
+    /// plaintext is absent from the registry -- which is the invariant the whole tripwire rests
+    /// on, and therefore not an `Option` but a compiler-checked field.
+    registry: holonomy_jail::registry::RegistryHandle,
 }
 
 /// The host page size, in bytes.
@@ -165,7 +182,36 @@ impl SecureBlock {
             unsafe { libc::munmap(base.cast(), total) };
             return Err(e);
         }
-        Ok(Self { base, len, total })
+
+        // Phase 7: make this block reachable by the tripwire's scrub.
+        //
+        // Registered *before* the block is returned, so there is no instant at which a caller
+        // holds a block holding plaintext that the registry does not know about. A failure here
+        // unmaps and reports rather than returning an unregistered block: the entire reason
+        // `SecureBlock` exists is that its plaintext can be *guaranteed* gone, and an
+        // unregistered block has no such guarantee.
+        let registry = match holonomy_jail::registry::register(
+            base as usize,
+            total,
+            (base as usize) + page,
+            len,
+        ) {
+            Ok(handle) => handle,
+            Err(e) => {
+                // SAFETY: `base`/`total` is the live mapping, and nothing else references it
+                // because the block has not been constructed -- so there is no second unmapping
+                // path to collide with, which is the whole of the bug described above.
+                unsafe { libc::munmap(base.cast(), total) };
+                return Err(SecureBlockError::RegistryFull(e));
+            }
+        };
+
+        Ok(Self {
+            base,
+            len,
+            total,
+            registry,
+        })
     }
 
     /// Pointer to the first data byte. Never null for a live block.
@@ -287,7 +333,14 @@ fn initialise(base: *mut u8, page: usize, data_len: usize) -> Result<(), SecureB
 
 impl Drop for SecureBlock {
     fn drop(&mut self) {
-        // Scrub first. `zeroize`'s volatile writes mean the stores cannot be elided.
+        // The order of these three steps is the whole design, and it is the reverse of the
+        // obvious one. See `holonomy_jail::registry`, "The ordering that makes it work".
+        //
+        // 1. **Scrub**, while the block is still registered. `zeroize`'s volatile writes mean the
+        //    stores cannot be elided. Scrubbing first is what makes a guard fault *inside this
+        //    drop* safe: the handler finds the block, finishes the job, and exits. Deregistering
+        //    first would leave a window in which a live, full-of-plaintext mapping is registered
+        //    nowhere, and a fault in that window would exit with the plaintext intact.
         self.zeroize_and_release();
 
         // Stop the compiler from reordering the scrub *after* the unmap, which would
@@ -295,6 +348,16 @@ impl Drop for SecureBlock {
         // be visible before the mapping goes away.
         compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
+        // 2. **Deregister.** Now the payload is clean, so a handler that no longer sees this block
+        //    has nothing to miss. The store is Release-ordered inside `deregister`, which is what
+        //    lets the handler's `Acquire` load guarantee it cannot read a stale pointer for a
+        //    mapping that has already gone away.
+        holonomy_jail::registry::deregister(self.registry);
+
+        // 3. **Unmap last.** Unmapping before the scrub would make the scrub a write to
+        //    `PROT_NONE` memory: the segfault-in-`memset` shape this file's `allocate`
+        //    comment is mostly about.
+        //
         // SAFETY: `base`/`total` are the live mapping created in `allocate`, and
         // `Drop` runs exactly once per value. No slice into the data region may still be
         // alive, because the only ways to obtain one borrow `self`.

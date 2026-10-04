@@ -331,6 +331,20 @@ impl Ring {
             )?;
             file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot])?;
             self.dirty[slot] = false;
+            // **The slot is no longer resident.** Sealing happened in place, so the slot now
+            // holds ciphertext while `resident` still claims it holds chunk `index` as plaintext.
+            //
+            // That was a real bug, found by the Phase 7 census workload rather than by the
+            // container's own tests: `ensure_center_loaded` returns early when
+            // `resident[slot] == Some(center)`, so a `read_content()` after a `commit()` handed
+            // back the sealed bytes verbatim. The Phase 3 tests never hit it because they read
+            // through a freshly opened handle, whose ring is empty; the Phase 8 session hits it on
+            // every autosave-then-export, which is the single most common sequence there is.
+            //
+            // Forgotten rather than decrypted-back: there is no cheaper way to know whether the
+            // slot was the one just sealed, and re-reading costs one `pread64` for a chunk the
+            // caller is about to read anyway.
+            self.resident[slot] = None;
             written += 1;
         }
         if written > 0 {
