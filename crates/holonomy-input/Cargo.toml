@@ -1,7 +1,8 @@
 # Evdev input, code-based keymap and script injection.
 #
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+# `libc` for the three errno values and the O_NONBLOCK flag on a device node. The dependency on
+# holonomy-jail is the single allocation chokepoint -- see crates/holonomy-jail/src/lib.rs for why
+# every crate has it.
 [package]
 name = "holonomy-input"
 description = "Evdev input, code-based keymap and script injection"
@@ -13,3 +14,4 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+libc = "0.2"

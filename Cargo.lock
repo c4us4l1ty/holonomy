@@ -281,6 +281,7 @@ name = "holonomy-input"
 version = "3.0.0-singularity"
 dependencies = [
  "holonomy-jail",
+ "libc",
 ]
 
 [[package]]
