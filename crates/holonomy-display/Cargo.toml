@@ -12,6 +12,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+holonomy-assets = { path = "../holonomy-assets" }
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-render = { path = "../holonomy-render" }
 libc = "0.2"

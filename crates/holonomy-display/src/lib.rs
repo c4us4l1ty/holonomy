@@ -30,9 +30,11 @@
 pub mod drm;
 pub mod frame;
 pub mod headless;
+pub mod paint;
 
 pub use frame::{Frame, FrameError, PixelFormat, PIXEL_BYTES};
 pub use headless::HeadlessScanout;
+pub use paint::{PaintStats, Painter};
 
 /// Somewhere a finished frame goes.
 ///
