@@ -599,6 +599,27 @@ impl Editor {
 
     // ---------------------------------------------------------------- caret, Phase 8
 
+    /// Copy a range of the document into `out`, returning how many bytes were copied.
+    ///
+    /// Phase 8, for the exporters. [`text`](Self::text) is the honest whole-document API and allocates
+    /// a `Vec` the size of the document; a writer that streams wants a bounded buffer instead, and
+    /// inside the jail memory is the scarce resource.
+    ///
+    /// Short reads at the end are normal and reported as a short count rather than an error, so a
+    /// caller loops on `offset += n` until `n == 0`. A range that starts past the end copies nothing
+    /// and returns 0.
+    ///
+    /// `out` is the caller's, so this allocates nothing. The caret is not moved.
+    pub fn read_into(&self, offset: usize, out: &mut [u8]) -> Result<usize, EditorError> {
+        let len = self.text_len();
+        if offset >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(len - offset);
+        self.rope.read_at(offset, want, &mut out[..want])?;
+        Ok(want)
+    }
+
     /// Where the caret is, in document bytes. Always on a UTF-8 character boundary.
     #[inline]
     pub fn caret(&self) -> u32 {

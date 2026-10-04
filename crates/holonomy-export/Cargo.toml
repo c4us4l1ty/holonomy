@@ -1,7 +1,9 @@
 # Streaming HTML and pdf-writer PDF export.
 #
-# Phase 0 skeleton only. The dependency on holonomy-jail is the single allocation
-# chokepoint -- see crates/holonomy-jail/src/lib.rs for why every crate has it.
+# `pdf-writer` is 80 KB of dependency and writes into a `Vec<u8>` the caller hands to a pre-opened
+# descriptor. H2's Typst pipeline is recorded as a deliberate deviation: it would need `fork`/`exec`,
+# which the jail forbids. The dependency on holonomy-jail is the single allocation chokepoint -- see
+# crates/holonomy-jail/src/lib.rs for why every crate has it.
 [package]
 name = "holonomy-export"
 description = "Streaming HTML and pdf-writer PDF export"
@@ -13,3 +15,5 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+holonomy-text = { path = "../holonomy-text" }
+pdf-writer = "0.15"
