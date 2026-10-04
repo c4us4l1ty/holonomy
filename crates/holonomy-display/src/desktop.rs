@@ -17,6 +17,17 @@
 //! one cell of 144. The frame is still the source of truth -- the rect says which part of it to send,
 //! not what the window should contain.
 //!
+//! # Resizing
+//!
+//! [`Desktop::resize`] and the session's resize are two halves of one operation and the order matters:
+//! the backend first, because the frame it presents into is checked against its size. The driver does
+//! exactly that on every `ConfigureNotify`, which a window drag delivers for each intermediate size --
+//! so this is exercised continuously while a window is being dragged, not once.
+//!
+//! The measure is fixed (80 columns) and the page is centred, so a resize moves the gutters and nothing
+//! else: the text does not re-wrap, the caret does not move, and no edit is undone. That is what
+//! [`ChromeMetrics::for_size`](holonomy_render::chrome::ChromeMetrics::for_size) is for.
+//!
 //! # Events are drained here, because the connection lives here
 //!
 //! [`Desktop`] owns the socket, so it also owns reading from it. A backend that exposed the connection
@@ -128,6 +139,17 @@ impl Desktop {
         let mut conn = Conn::connect(display).map_err(DesktopError::Connect)?;
         let window =
             Window::create(&mut conn, width, height, title).map_err(DesktopError::Window)?;
+        // Tell the window manager what this client can draw into *before* mapping, so the first frame
+        // is never asked for at a size the chrome cannot use. `ChromeMetrics::for_size` clamps anyway,
+        // so this is the floor for the user's drag and the clamp is the floor for the code's arithmetic.
+        let _ = window.set_size_hints(
+            &mut conn,
+            (
+                holonomy_render::chrome::ChromeMetrics::MIN_WIDTH as u16,
+                holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT as u16,
+            ),
+            None,
+        );
         window.map(&mut conn).map_err(DesktopError::Window)?;
         // Best effort: a window manager that will not activate us is not a reason to refuse to open.
         let _ = window.activate(&mut conn);
@@ -152,6 +174,45 @@ impl Desktop {
     /// The window's id, for logs and for a caller that wants to raise it itself.
     pub fn window_id(&self) -> u32 {
         self.window.id()
+    }
+
+    /// The window's size as the server currently has it.
+    ///
+    /// This is [`GetGeometry`](holonomy_x11::Window::geometry) on every call, which is a round trip.
+    /// The driver's event loop already knows the size -- `ConfigureNotify` carries it -- and passes it
+    /// to [`Desktop::resize`]; this is for a caller that has no such event, and for a caller checking
+    /// that the two agree.
+    pub fn server_size(&mut self) -> Result<(u16, u16), DesktopError> {
+        self.window
+            .geometry(&mut self.conn)
+            .map(|(w, h, _)| (w, h))
+            .map_err(DesktopError::Window)
+    }
+
+    /// Adopt a new window size. Returns `true` if it changed.
+    ///
+    /// # The backend and the session have to agree, and this is the half that cannot fail
+    ///
+    /// [`Scanout::present`] checks the frame's size against the backend's and refuses a mismatch, which
+    /// is the right check: it catches a session that resized without telling anyone. So when the window
+    /// changes size the backend must be told *before* the session paints, and [`Desktop::resize`] is
+    /// what the driver calls first. A window drag delivers `ConfigureNotify` for every intermediate
+    /// size, and painting at the old size would push the whole old frame into a smaller window --
+    /// clipped, and with a band of stale pixels along the right and bottom edges.
+    ///
+    /// The window is resized as well as recorded, so that a caller which sized the frame first gets
+    /// the same answer here.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, DesktopError> {
+        let (w, h) = (width.min(u16::MAX as u32), height.min(u16::MAX as u32));
+        if (self.width, self.height) == (w, h) {
+            return Ok(false);
+        }
+        self.window
+            .configure_size(&mut self.conn, w as u16, h as u16)
+            .map_err(DesktopError::Window)?;
+        self.width = w as u32;
+        self.height = h as u32;
+        Ok(true)
     }
 
     /// How many frames have been pushed.

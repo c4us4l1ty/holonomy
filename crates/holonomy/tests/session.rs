@@ -448,3 +448,86 @@ fn a_session_with_no_atlas_still_reports_what_it_could_not_draw() {
     s.repaint_all().expect("paint");
     assert!(s.stats.pixels > 0, "the bands still draw");
 }
+
+/// A resize rebuilds the frame, keeps the document, and marks all of it stale.
+///
+/// Three claims, and all three are load-bearing. The frame's size follows the request, or the next
+/// `present` is refused as a `SizeMismatch`. The *document* is untouched, or a resize is an edit. And the
+/// whole new frame is marked stale, or the window keeps a ghost of its old self along the bottom and
+/// right edges -- the damage accumulated before the resize describes the *old* geometry, so none of it
+/// covers the new pixels.
+#[test]
+fn a_resize_changes_the_frame_and_not_the_text() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.repaint_all().expect("the first paint");
+
+    // Type something, so there is text that must survive.
+    for ev in type_str("resizing") {
+        s.handle_event(ev).expect("a character");
+    }
+    let text_before = s.editor.text().expect("the document text");
+    assert!(!text_before.is_empty(), "the harness typed nothing");
+    // The chrome state holds the caret as line/column rather than a byte offset, which is what
+    // the renderer needs; the editor holds the offset. Both must be unchanged, since a resize that
+    // moved either would put the caret in a different place in a document it did not change.
+    let caret_before = (s.state.caret_line, s.state.caret_column, s.editor.caret());
+
+    // Grow, then shrink below the starting size, then back.
+    for (w, h) in [(1600u32, 1000u32), (900, 500), (1280, 800)] {
+        s.resize(w, h).expect("resize");
+        assert_eq!(
+            (s.frame().width(), s.frame().height()),
+            (w, h),
+            "the frame is {w}x{h} after being asked for it"
+        );
+        s.repaint_all().expect("painting at the new size");
+    }
+
+    assert_eq!(
+        s.editor.text().expect("the document text"),
+        text_before,
+        "the document is unchanged"
+    );
+    assert_eq!(
+        (s.state.caret_line, s.state.caret_column, s.editor.caret()),
+        caret_before,
+        "and the caret has not moved: a resize is not an edit"
+    );
+}
+
+/// A panel below the chrome's minimum is clamped rather than refused.
+///
+/// A window can be dragged to nothing, and the answer has to be the smallest thing the chrome can draw.
+/// The alternative is a subtraction that wraps, which is what `Layout::new`'s saturating arithmetic
+/// exists to prevent -- this is the test that the clamp is what actually stops it.
+#[test]
+fn a_resize_below_the_minimum_is_clamped() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.repaint_all().expect("the first paint");
+    s.resize(1, 1).expect("a resize to nothing is not an error");
+    assert_eq!(
+        (s.frame().width(), s.frame().height()),
+        (ChromeMetrics::MIN_WIDTH, ChromeMetrics::MIN_HEIGHT),
+        "clamped up to the minimum the chrome can draw"
+    );
+    s.repaint_all().expect("painting at the minimum");
+}
+
+/// Resizing to the size a window already is does nothing at all.
+///
+/// This is the case a drag produces most: `ConfigureNotify` arrives for every intermediate size,
+/// including sizes it has already been, and rebuilding the frame each time reallocates 4 MiB per event
+/// for no visible change.
+#[test]
+fn a_resize_to_the_same_size_does_nothing() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.repaint_all().expect("the first paint");
+    let frames_before = s.stats.frames;
+    let damage_before = s.damage();
+    s.resize(m.width, m.height).expect("resize to the same size");
+    assert_eq!(s.stats.frames, frames_before, "no paint was asked for");
+    assert_eq!(s.damage(), damage_before, "and nothing was marked stale");
+}

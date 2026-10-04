@@ -30,7 +30,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::conn::{Conn, ConnError, Setup};
-use crate::proto::{self, cw, gc, image, mask, op, Rdr, Req};
+use crate::proto::{self, cw, gc, image, mask, op, value, Rdr, Req};
 
 /// Why a window operation failed.
 #[derive(Debug)]
@@ -62,6 +62,14 @@ pub enum WindowError {
         /// How many the rectangle needs.
         need: usize,
     },
+    /// A resize to zero. The server would answer `BadValue`, and the caller's own arithmetic is what
+    /// asked for it, so it is reported as the mistake it is rather than as the server's answer.
+    ZeroSize {
+        /// The width asked for.
+        width: u16,
+        /// The height asked for.
+        height: u16,
+    },
 }
 
 impl fmt::Display for WindowError {
@@ -83,6 +91,9 @@ impl fmt::Display for WindowError {
             Self::ShortReply(what) => write!(f, "the reply to {what} was shorter than its header"),
             Self::ShortBuffer { have, need } => {
                 write!(f, "the caller gave {have} bytes for a rectangle that needs {need}")
+            }
+            Self::ZeroSize { width, height } => {
+                write!(f, "cannot resize to {width}x{height}: a window has no zero dimension")
             }
         }
     }
@@ -123,6 +134,36 @@ impl Window {
         height: u32,
         title: &str,
     ) -> Result<Self, WindowError> {
+        Self::create_inner(conn, width, height, title, false)
+    }
+
+    /// A window no window manager will take ownership of.
+    ///
+    /// `override-redirect` is the difference between a window whose geometry this client decides and
+    /// one whose geometry a window manager decides. It is not a cosmetic setting: with it the server
+    /// hands every `ConfigureWindow` straight through, so a resize takes effect; without it, a window
+    /// manager that manages the window may ignore the resize and send a `ConfigureNotify` with whatever
+    /// size it prefers instead. Measured under GNOME's mutter on this machine: an ordinary window
+    /// created at 1024x700 stays 1024x700 after a `ConfigureWindow` to 1600x1000, with no error of any
+    /// kind -- the request is accepted and the size is simply not the client's to change. So this is
+    /// what a gate uses to test a resize, and it is why [`Window::configure_size`] on a managed window
+    /// is best read as a request that may be declined.
+    pub fn create_override_redirect(
+        conn: &mut Conn,
+        width: u32,
+        height: u32,
+        title: &str,
+    ) -> Result<Self, WindowError> {
+        Self::create_inner(conn, width, height, title, true)
+    }
+
+    fn create_inner(
+        conn: &mut Conn,
+        width: u32,
+        height: u32,
+        title: &str,
+        override_redirect: bool,
+    ) -> Result<Self, WindowError> {
         let setup = conn.setup().clone();
         let format = setup
             .format(setup.root_depth, 32)
@@ -161,12 +202,17 @@ impl Window {
                 .u16(0)
                 .u16(1) // InputOutput
                 .u32(0) // CopyFromParent visual
-                .u32(cw::BACK_PIXEL | cw::BORDER_PIXEL | cw::EVENT_MASK)
+                // `CWOverrideRedirect` is in the mask unconditionally, with a zero value for an
+                // ordinary window, because the value list's *length* is derived from the mask: a
+                // fourth value with no fourth bit is a `BadLength`, not an ignored extra. The values
+                // are in increasing bit order, as the specification requires, and those bits are
+                // BACK_PIXEL (1), BORDER_PIXEL (3), OVERRIDE_REDIRECT (9), EVENT_MASK (11).
+                .u32(cw::BACK_PIXEL | cw::BORDER_PIXEL | cw::OVERRIDE_REDIRECT | cw::EVENT_MASK)
                 .u32(setup.black_pixel)
                 .u32(setup.black_pixel)
+                .u32(override_redirect.into())
                 .u32(Self::event_mask()),
         )?;
-
         Self::set_title(conn, id, title)?;
         Self::set_delete_protocol(conn, id)?;
 
@@ -377,6 +423,142 @@ impl Window {
             return Err(WindowError::Protocol(e));
         }
         Ok(net_active)
+    }
+
+    /// Ask the server to make the window `width` x `height`.
+    ///
+    /// `ConfigureWindow` with only `width` and `height` in the value mask, which is the minimum a
+    /// client needs in order to be resizable at all: a window with no size in its `WM_NORMAL_HINTS`
+    /// and none set by a `ConfigureWindow` is a fixed-size island in a resizable desktop.
+    ///
+    /// The request has no reply, so it is followed by a sync and this claims *its* error: a rejected
+    /// `ConfigureWindow` -- `BadValue` for a width of zero, which is what a window manager sends while
+    /// a drag is in progress -- would otherwise be found by whatever asked for a queued error next.
+    pub fn configure_size(
+        &self,
+        conn: &mut Conn,
+        width: u16,
+        height: u16,
+    ) -> Result<(), WindowError> {
+        if width == 0 || height == 0 {
+            return Err(WindowError::ZeroSize { width, height });
+        }
+        // # The length is 3 words plus one per value the mask names
+        //
+        // `sz_xConfigureWindowReq` is 12 -- a `CARD16 mask` and a `CARD16 pad2` after the window -- so a
+        // mask naming `width` and `height` is 12 + 8 = 20 bytes, five words. That is what the
+        // specification says and what this sends.
+        //
+        // # The dead end this spent a day in
+        //
+        // **Writing the two `CARD16`s in the wrong order.** This sent `.u16(0)` for what it called the
+        // mask's high half and `.u16(mask)` second, on the theory that a 16-bit mask wanted its halves
+        // in that order -- so the mask landed at offset 10, in `pad2`, and the server read a mask of
+        // zero at offset 8. A mask of zero means *no values*, so the length it wanted was three words
+        // and the five sent were two too many: `BadLength`, on every length, at every mask position,
+        // with a `value: 25165825` that is `0x01800001` -- the window id with a bit set in it, which is
+        // a window error's `value` field being read out of a length error's context. The specification
+        // lists the fields in order; the only reason to reorder them is a mistake.
+        //
+        // # On a managed window this may change nothing, and that is not an error
+        //
+        // A window manager owns a managed window's geometry. It receives the `ConfigureWindow` as a
+        // `ConfigureRequest` and may send a `ConfigureNotify` with a size of its own choosing
+        // afterwards, so this returns `Ok` and the window is still the size it was. Measured under
+        // mutter on this machine: created at 1024x700, asked for 1600x1000, no error, still 1024x700.
+        // The product does not depend on this path -- a window resizes when a person drags it, and the
+        // window manager says so with `ConfigureNotify`, which is what `Session::resize` is driven by
+        // -- but a caller that wants the size it asked for must not use a managed window. See
+        // [`Window::create_override_redirect`].
+        //
+        // Two smaller dead ends, written down because both look like findings and neither is.
+        //
+        // **Adding four pad bytes** makes it 24 bytes and the server answers `BadLength`. The rule has
+        // no slack in it: `sizeof(xConfigureWindowReq)` is 12, not 16, even though `LISTofVALUE
+        // value-list` reads like an array and there is a `pad2` in the middle. (Searching the headers
+        // on this machine for `sizeof` finds nothing -- `Xproto.h` defines `sz_xConfigureWindowReq 12`
+        // and that is the number.)
+        //
+        // **Sweeping the length to find the rule** does not work, because a `BadLength` leaves the
+        // server reading four bytes into the middle of the next request: everything after the first
+        // refusal on a connection is answered about the wrong thing. The second version of the sweep
+        // opened a connection per shape and still produced nonsense, because its own
+        // `probe_request` wrote the bytes straight into the output buffer without taking a sequence
+        // number -- so from the second request on, every sequence was off by one and `sync` waited
+        // for a reply that had already been labelled for the request after it. The apparent
+        // "accepted, then timed out" pattern was entirely that. `Conn::probe_request` and the sweep
+        // that used it are gone rather than fixed, because a method that silently corrupts the
+        // sequence counter has no use that a correct one does not have.
+        conn.request(
+            Req::new(op::CONFIGURE_WINDOW)
+                .second_byte(0) // unused
+                .u32(self.id)
+                .u16(value::WIDTH | value::HEIGHT) // offset 8
+                .u16(0) // offset 10, the `pad2`
+                .u32(u32::from(width))
+                .u32(u32::from(height)),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
+        Ok(())
+    }
+
+    /// Tell the window manager the smallest and largest sizes this client can draw into.
+    ///
+    /// `WM_NORMAL_HINTS`, with a `WM_NORMAL_HINTS` structure of flags, the old and new sizes, the
+    /// increments and the counts. Only `min-size` and `max-size` are set: this is a window with no
+    /// fixed aspect ratio and no step, so the increments are one pixel and the counts are the whole
+    /// field. Sending *no* hints would work too -- most window managers resize an unhinted window
+    /// freely -- but "works on the window manager in front of me" is not a property to build a
+    /// resizable window on, and the minimum is the part that matters: without one, a drag to zero
+    /// produces a window this client cannot present into.
+    pub fn set_size_hints(
+        &self,
+        conn: &mut Conn,
+        min: (u16, u16),
+        max: Option<(u16, u16)>,
+    ) -> Result<(), WindowError> {
+        // WM_NORMAL_HINTS: flags, then the obsolete fields, then min, max, width-inc, height-inc.
+        let mut data = vec![0u8; 18 * 4];
+        // Flags: PSize(1) | PMinSize(1<<4) | PMaxSize(1<<5).
+        data[0..4].copy_from_slice(&((1u32 | (1 << 4) | (1 << 5)).to_le_bytes()));
+        // 4..12 are min-width, min-height, max-width, max-height. The first eight bytes are where the
+        // obsolete four CARD16s live and are zero here.
+        data[8..12].copy_from_slice(&u32::from(min.0).to_le_bytes());
+        data[12..16].copy_from_slice(&u32::from(min.1).to_le_bytes());
+        match max {
+            Some((w, h)) => {
+                data[16..20].copy_from_slice(&u32::from(w).to_le_bytes());
+                data[20..24].copy_from_slice(&u32::from(h).to_le_bytes());
+            }
+            None => {
+                // 0 means "no maximum", which is how the protocol spells unlimited.
+                data[16..24].copy_from_slice(&[0u8; 8]);
+            }
+        }
+        // width-inc, height-inc = 1 pixel; the counts are the whole field.
+        data[24..28].copy_from_slice(&1u32.to_le_bytes());
+        data[28..32].copy_from_slice(&1u32.to_le_bytes());
+        data[32..36].copy_from_slice(&0u32.to_le_bytes());
+        data[36..40].copy_from_slice(&0u32.to_le_bytes());
+        conn.request(
+            Req::new(op::CHANGE_PROPERTY)
+                .second_byte(0) // Replace
+                .u32(self.id)
+                .u32(proto::atom::WM_NORMAL_HINTS)
+                .u32(proto::atom::WM_SIZE_HINTS)
+                .u32(32) // format
+                .u16(0)
+                .u32(18) // 18 CARD32s
+                .bytes(&data),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
+        Ok(())
     }
 
     /// [`Window::focus`], with a bound on how long to wait for the map.

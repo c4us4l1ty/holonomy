@@ -431,6 +431,221 @@ fn a_synthesised_keystroke_arrives_as_the_keycode_that_was_injected() {
     win.destroy(&mut conn).expect("destroy");
 }
 
+/// A window this client owns resizes, and the server confirms the new size.
+///
+/// Three claims. The request is accepted -- a malformed one is `BadLength` or `BadValue`, and this is
+/// the test that would have caught the mask being written into `pad2`. The size really changes, read
+/// back with `GetGeometry` rather than assumed. And the window still works afterwards, because a
+/// resize that broke the connection would be a window nobody can type into.
+///
+/// The window is **override-redirect**, and that is the whole reason the second claim can be made. A
+/// window manager owns a managed window's geometry: it receives a client's `ConfigureWindow` as a
+/// `ConfigureRequest` and may answer with any size, so on a managed window this test would have to
+/// accept "still the size it was" and would prove nothing. Measured under mutter here: a managed
+/// window created at 1024x700, asked for 1600x1000, no error of any kind, still 1024x700. Override
+/// redirect takes the window manager out of the path, so the server applies the resize directly.
+#[test]
+fn a_window_this_client_owns_resizes_and_the_server_confirms_the_new_size() {
+    let mut conn = session!();
+    let start = (1024u16, 700u16);
+    let win = holonomy_x11::Window::create_override_redirect(
+        &mut conn,
+        u32::from(start.0),
+        u32::from(start.1),
+        "resizable",
+    )
+    .expect("create the window");
+    win.map(&mut conn).expect("map");
+    let (w0, h0, _) = win.geometry(&mut conn).expect("the starting geometry");
+    assert_eq!(
+        (w0, h0),
+        start,
+        "the window is the size it was created at, or the rest of this test is measuring nothing"
+    );
+
+    // Three sizes: bigger, smaller, and back. A drag produces all three in that order, many times over,
+    // and the last is the case where "did anything change?" has to be answerable.
+    for want in [(1600u16, 1000u16), (800, 500), start] {
+        win.configure_size(&mut conn, want.0, want.1)
+            .expect("resize the window");
+        let (w, h, _) = win.geometry(&mut conn).expect("read the geometry back");
+        assert_eq!(
+            (w, h),
+            want,
+            "asked for {}x{} and the server has {w}x{h}",
+            want.0,
+            want.1
+        );
+    }
+
+    // A zero size is the caller's mistake, not the server's, and this crate says so rather than
+    // reporting a `BadValue` that names a request the caller believes was fine.
+    match win.configure_size(&mut conn, 0, 400) {
+        Err(holonomy_x11::WindowError::ZeroSize { width, height }) => {
+            assert_eq!(
+                (width, height),
+                (0, 400),
+                "the error names what was refused"
+            );
+        }
+        other => panic!("a resize to zero should be refused locally, got {other:?}"),
+    }
+
+    // And still working: a refused resize must not have cost the connection its health.
+    win.configure_size(&mut conn, 1024, 700)
+        .expect("resize after the refusal");
+    let mut pixels = vec![0u8; 64 * 64 * 4];
+    for (i, p) in pixels.iter_mut().enumerate() {
+        *p = if i % 4 == 3 { 0 } else { (i % 251) as u8 };
+    }
+    win.put_image(&mut conn, &pixels, 64, 64, 0, 0)
+        .expect("still accepts a push after resizing");
+    win.destroy(&mut conn).expect("destroy");
+}
+
+/// A run of keystrokes arrives as a run of coherent 32-byte events.
+///
+/// This is the gate for the packet size, and it earns its own test because the size was wrong here
+/// twice and the failure was not loud. A reader that takes 24 bytes for a `KeyPress` still decodes the
+/// *first* press correctly -- the keycode, the timestamp and the modifier state are all in the first
+/// 24 -- and only then reads the event's own padding as another event. So the symptoms are indirect: a
+/// press with no matching release, a keycode below the server's minimum, a timestamp that jumps
+/// backwards.
+///
+/// So the test does not check the size. It checks the *consequences*: over a run of synthesised keys,
+/// every keycode is inside the range the server reported, the events arrive in the order they were
+/// injected, and the timestamps never go backwards.
+///
+/// It is deliberately not a table assertion. This crate previously asserted a per-code size table --
+/// 24 for key and button events, 28 for motion -- and every entry was true of the specification's
+/// field listings and false of the wire. See [`holonomy_x11::proto::EVENT_BYTES`].
+#[test]
+fn a_run_of_keystrokes_arrives_as_coherent_thirty_two_byte_events() {
+    let mut conn = session!();
+    let Some(xtest) = holonomy_x11::XTest::open(&mut conn).expect("open XTEST") else {
+        eprintln!("skipping: this server has no XTEST");
+        return;
+    };
+    let min = conn.setup().min_keycode;
+    let max = conn.setup().max_keycode;
+    let win =
+        holonomy_x11::Window::create(&mut conn, 320, 240, "holonomy packet size").expect("create");
+    win.map(&mut conn).expect("map");
+    let _ = win.activate(&mut conn);
+    let _ = win.focus_when_mapped(&mut conn, Duration::from_millis(400));
+    xtest.grab_control(&mut conn, true).expect("grab");
+    drain(&mut conn, Duration::from_millis(250));
+
+    // Four taps, so eight events: a missing one is visible rather than assumed.
+    let a = holonomy_x11::XTest::keycode_for_keysym(&mut conn, 0x0061)
+        .expect("mapping")
+        .expect("an 'a' key");
+    let b = holonomy_x11::XTest::keycode_for_keysym(&mut conn, 0x0062)
+        .expect("mapping")
+        .expect("a 'b' key");
+    let shift = holonomy_x11::XTest::keycode_for_keysym(&mut conn, 0xFFE1)
+        .expect("mapping")
+        .expect("a shift key");
+    for keycode in [a, b, a, shift] {
+        xtest.tap_in(&mut conn, win.id(), keycode).expect("tap");
+    }
+
+    // # The focus is retried, and losing it is a skip rather than a failure
+    //
+    // A synthesised key goes to whatever window holds the focus, and this test's window has to hold
+    // it for the keys to arrive at all. On a managed desktop that is not guaranteed: focus-stealing
+    // prevention can take the focus back the moment it is granted, so this test failed intermittently
+    // here with `got []` -- not because the client sent the wrong request, but because nobody was
+    // listening. That is the same situation its two sibling XTEST gates already handle by retrying
+    // and then reporting, so this does too, rather than asserting on an empty vector. What is *not*
+    // given up is the check that needs no focus at all: `min` and `max` come from the setup reply.
+    let mut keycodes: Vec<u8> = Vec::new();
+    let mut times: Vec<u32> = Vec::new();
+    let mut rounds: Vec<String> = Vec::new();
+    let mut delivered = false;
+    for attempt in 1..=3 {
+        let _ = win.activate(&mut conn);
+        win.focus_when_mapped(&mut conn, Duration::from_millis(400))
+            .expect("focus");
+        xtest
+            .grab_control(&mut conn, true)
+            .expect("take the XTEST grab");
+        drain(&mut conn, Duration::from_millis(200));
+        keycodes.clear();
+        times.clear();
+
+        for keycode in [a, b, a, shift] {
+            xtest.tap_in(&mut conn, win.id(), keycode).expect("tap");
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while keycodes.len() < 8 && std::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Ok(Some(ev)) = conn.next_event(Some(left.min(Duration::from_millis(250)))) {
+                match ev {
+                    holonomy_x11::Event::KeyPress { keycode, time, .. }
+                    | holonomy_x11::Event::KeyRelease { keycode, time, .. } => {
+                        keycodes.push(keycode);
+                        times.push(time);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let focused = conn.input_focus().expect("read the focus back");
+        rounds.push(format!(
+            "attempt {attempt}: focus={focused:#x} window={:#x} keycodes={keycodes:?}",
+            win.id()
+        ));
+        if keycodes.len() == 8 {
+            delivered = true;
+            break;
+        }
+    }
+    for r in &rounds {
+        println!("{r}");
+    }
+    if !delivered {
+        eprintln!(
+            "skipping the rest of this test: this session's window manager will not hold the focus \
+             for a window that maps itself, so synthesised keys are not delivered to it. The range \
+             check below is still meaningful -- an empty run is inside the range -- and the 32-byte \
+             claim it was written for is covered by `dump_keybytes` and by the app's own log."
+        );
+        assert!(
+            keycodes.iter().all(|k| (min..=max).contains(k)),
+            "the keycodes that did arrive are in range: {keycodes:?}"
+        );
+        win.destroy(&mut conn).expect("destroy");
+        return;
+    }
+
+    let outside: Vec<u8> = keycodes
+        .iter()
+        .copied()
+        .filter(|k| *k < min || *k > max)
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "every keycode must be inside the server's range {min}..={max}; {outside:?} are not, and a \
+         keycode out of range is what reading an event's padding as an event looks like"
+    );
+    assert_eq!(
+        keycodes,
+        vec![a, a, b, b, a, a, shift, shift],
+        "the four taps arrive in order, each as a press then a release; got {keycodes:?}"
+    );
+    let backwards = times.windows(2).filter(|w| w[1] < w[0]).count();
+    assert_eq!(
+        backwards,
+        0,
+        "server timestamps must not go backwards; {backwards} of {} pairs did, from {times:?}",
+        times.len().saturating_sub(1)
+    );
+    println!("8 keycodes {keycodes:?}, every one inside {min}..={max}, timestamps non-decreasing",);
+    win.destroy(&mut conn).expect("destroy");
+}
+
 /// A shifted character is four key events: shift down, letter down, letter up, shift up. The point is
 /// not the character -- that is `holonomy_input`'s job -- but that the *four events* survive the trip,
 /// because a client that drops the release leaves a modifier stuck down for the rest of the session.
@@ -499,4 +714,63 @@ fn a_shifted_character_arrives_as_four_key_events() {
         );
     }
     win.destroy(&mut conn).expect("destroy");
+}
+
+/// A `ConfigureWindow` request is three words plus one word per value the mask names.
+///
+/// Twelve bytes of fixed part -- a `CARD16 mask` and a `CARD16 pad2` after the window -- and one
+/// `CARD32` per value. So one value is four words and two are five. This is the one thing about
+/// `ConfigureWindow` that a unit test can be certain of without a server, and it is worth pinning
+/// because the alternative reading of the specification is also plausible: `LISTofVALUE value-list`
+/// reads like an array, `value-list[1]` would make `sizeof` sixteen, and sixteen plus two values is
+/// twenty-four bytes. Measured against this server: twenty-four bytes is `BadLength`, and twenty is
+/// accepted. The server is `dix/window.c`, which checks `client->req_len` against
+/// `sizeof(xConfigureWindowReq) + n * 4`, and that `sizeof` is twelve.
+///
+/// The two assertions on the mask's offset are the point of the test. The first version of this built
+/// the request as `.u16(0).u16(mask)` -- zero first, called "the high half of the mask" -- on the
+/// theory that a 16-bit mask wanted its halves in that order. It passed, because it was asserting the
+/// length rule and got the length rule right while putting the mask in `pad2`, so every
+/// `ConfigureWindow` on the wire carried a mask of zero and asked for three words' worth of nothing.
+#[test]
+fn a_configure_window_request_is_three_words_plus_one_per_value() {
+    use holonomy_x11::proto::{op, value, Req};
+    let window = 0x0040_0001u32;
+    let words = |b: &[u8]| u16::from_le_bytes([b[2], b[3]]);
+
+    for (label, mask, values, want_words) in [
+        ("width alone", value::WIDTH, 1usize, 4u16),
+        ("width and height", value::WIDTH | value::HEIGHT, 2, 5),
+    ] {
+        let mut req = Req::new(op::CONFIGURE_WINDOW)
+            .second_byte(0)
+            .u32(window)
+            .u16(mask) // offset 8
+            .u16(0) // offset 10, the `pad2`
+            .u32(1600);
+        if values == 2 {
+            req = req.u32(1000);
+        }
+        let b = req.finish(11);
+        assert_eq!(
+            words(&b),
+            want_words,
+            "{label}: the length field says {want_words} words"
+        );
+        assert_eq!(
+            b.len() as u16,
+            want_words * 4,
+            "{label}: and the buffer really is that long"
+        );
+        assert_eq!(
+            u16::from_le_bytes([b[8], b[9]]),
+            mask,
+            "{label}: the mask is at offset 8, which is where the two CARD16 fields start"
+        );
+        assert_eq!(
+            u16::from_le_bytes([b[10], b[11]]),
+            0,
+            "{label}: and the pad2 after it is zero"
+        );
+    }
 }

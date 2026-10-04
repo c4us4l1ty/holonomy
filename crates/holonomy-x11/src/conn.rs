@@ -52,25 +52,6 @@ const GREETING_KEEP: usize = 8;
 const GREETING_BYTE: u8 = 0xFF;
 const GREETING_LEN: usize = 8;
 
-/// `KeyPress`, the first of the four event codes whose size is measured rather than assumed.
-const FIRST_KEY_OR_BUTTON: u8 = proto::event::KEY_PRESS;
-/// `ButtonRelease`, the last of them.
-const LAST_KEY_OR_BUTTON: u8 = proto::event::BUTTON_RELEASE;
-
-/// How many waits a partly-delivered packet gets before the reader concludes it is out of step.
-///
-/// Three, because a socket that has delivered one byte of a packet will deliver the rest within
-/// microseconds; three waits of a caller's deadline is already generous. Past this the reader drops a
-/// byte and carries on, which loses at most one event per occurrence and never wedges the loop.
-const STALL_LIMIT: u32 = 3;
-
-/// How many bytes key and button events occupy unless [`Conn::set_key_event_bytes`] says otherwise.
-///
-/// 32, measured on this host: a synthesised tap arrives as 64 bytes, two 24-byte events with eight bytes
-/// of padding after each. The protocol says 24, and reading 24 on this server desynchronises the stream
-/// on the first keystroke -- see [`Conn::key_event_size`].
-pub const KEY_EVENT_BYTES_DEFAULT: usize = 32;
-
 /// Where a reply's own fields start: 1 for the reply marker, 1 for the second byte, 2 for the sequence
 /// number, 4 for the extra-data length.
 ///
@@ -91,6 +72,25 @@ const REPLY_FIELDS: usize = 8;
 fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("HOLONOMY_X11_TRACE").as_deref() == Ok("1"))
+}
+
+/// A request as hex, for the trace.
+///
+/// Not an API. A hand-written protocol client's errors are almost always a field in the wrong byte,
+/// and "the server said `BadValue`" does not say which field -- the hex does. This is the third bug in
+/// this crate that only the hex made visible: a value mask written into the `pad2` after it, a value
+/// list with a fourth value and no fourth mask bit, and a request whose length was one word short.
+#[cfg_attr(not(test), allow(dead_code))]
+fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i % 16 == 0 && i != 0 {
+            out.push('\n');
+            out.push_str("       ");
+        }
+        out.push_str(&format!("{b:02x} "));
+    }
+    out.trim_end().to_string()
 }
 
 /// A pixmap format the server supports, from the handshake.
@@ -271,8 +271,6 @@ pub struct Conn {
     /// Bytes the server sent after the setup reply that no request asked for. See
     /// [`Conn::drain_greeting`].
     greeting: Option<(usize, [u8; GREETING_KEEP])>,
-    /// How many bytes this server's key events occupy. See [`Conn::key_event_size`].
-    key_event_bytes: usize,
     /// How many post-setup greetings have been discarded, including the one at connect.
     greetings: u32,
     /// Bytes still owed for the packet at the front of the read buffer.
@@ -282,10 +280,6 @@ pub struct Conn {
     /// `next_event` return immediately, and the developer window looped as fast as it could, painting a
     /// caret blink on every pass: 420,000 requests in twenty seconds.
     pending: usize,
-    /// How many times the pending packet has gone unanswered, for the resynchronisation.
-    stalls: u32,
-    /// How many times the reader has had to drop a byte to get back in step.
-    resyncs: u32,
 }
 
 impl Conn {
@@ -394,11 +388,8 @@ impl Conn {
             errors: VecDeque::with_capacity(8),
             display: number,
             greeting: None,
-            key_event_bytes: KEY_EVENT_BYTES_DEFAULT,
             greetings: 0,
             pending: 0,
-            stalls: 0,
-            resyncs: 0,
         };
         conn.next_id = conn.setup.resource_id_base.wrapping_add(1);
         // X.Org increments a client's sequence number *before* using it, so the first request a
@@ -614,34 +605,12 @@ impl Conn {
         Ok((seen, first))
     }
 
-    /// How many times this connection had to drop a byte to get back in step with the server.
-    ///
-    /// Zero on a well-behaved connection. A non-zero count means some event was read at the wrong size,
-    /// which on this host means an extension event this crate does not decode; the cost is one lost
-    /// event, and it is counted rather than hidden.
-    pub fn resyncs(&self) -> u32 {
-        self.resyncs
-    }
-
     /// How many post-setup greetings this connection has discarded.
     ///
     /// One at connect is normal. Two means the server sent the eight bytes later than the connect-time
     /// window allowed, which it does; the count is here so that is visible rather than inferred.
     pub fn greetings(&self) -> u32 {
         self.greetings
-    }
-
-    /// How many bytes this server's key events occupy.
-    pub fn key_event_bytes(&self) -> usize {
-        self.key_event_bytes
-    }
-
-    /// Say how many bytes this server's key and button events occupy.
-    ///
-    /// The default is [`KEY_EVENT_BYTES_DEFAULT`], which is what this host was measured at. A server that
-    /// follows the protocol's 24 wants this called before the first key event arrives.
-    pub fn set_key_event_bytes(&mut self, bytes: usize) {
-        self.key_event_bytes = bytes;
     }
 
     /// How many bytes the server sent before any request was answered, and the first few of them.
@@ -690,12 +659,14 @@ impl Conn {
             });
         }
         if tracing() {
+            let hex = hex_of(&bytes);
             eprintln!(
                 "x11 -> opcode {} sequence {} ({} bytes)",
                 bytes[0],
                 self.seq,
                 bytes.len()
             );
+            eprintln!("       {hex}");
         }
         self.out.extend_from_slice(&bytes);
         let used = self.seq;
@@ -880,32 +851,20 @@ impl Conn {
         if !first {
             return Ok(None);
         }
-        if self.pending > 0 {
-            // A packet was started and not finished. Wait for the rest of it rather than reading the
-            // next one, which is the difference between waiting and spinning.
-            if !self.ensure(self.pending, deadline)? {
-                self.stalls += 1;
-                if self.stalls >= STALL_LIMIT {
-                    // The bytes are never coming, so the stream is out of step with the server: some
-                    // event was read at the wrong size. Resynchronising by dropping one byte is crude and
-                    // it is also the only thing that works without knowing the size of an event this
-                    // crate does not decode -- and it is bounded, so a client that gets it wrong loses
-                    // events rather than wedging.
-                    self.rstart += 1;
-                    self.pending = 0;
-                    self.stalls = 0;
-                    self.resyncs += 1;
-                    if tracing() {
-                        eprintln!(
-                            "x11    out of step; dropped a byte (resync number {})",
-                            self.resyncs
-                        );
-                    }
-                }
-                return Ok(None);
-            }
-            self.stalls = 0;
+        if self.pending > 0 && !self.ensure(self.pending, deadline)? {
+            // A packet was started and not finished: some of it is buffered and the rest has not
+            // arrived. Wait for the rest on the *next* call rather than treating this as "nothing to
+            // read", which is the difference between waiting and spinning. Measured: with `pending`
+            // ignored, every `next_event` returned immediately on a half-delivered event and the window
+            // looped as fast as it could -- 420,000 requests in twenty seconds, painting a caret blink on
+            // every pass.
+            //
+            // There is no stall counter and no resynchronisation, and there does not need to be: the
+            // packet size is constant, so a reader that got it right cannot fall out of step. The
+            // recovery machinery existed only to paper over a wrong size, and is gone with it.
+            return Ok(None);
         }
+
         // The greeting, wherever it turns up.
         //
         // [`Conn::drain_greeting`] catches the one that follows the handshake, but it is a *window*, not
@@ -931,28 +890,10 @@ impl Conn {
         }
 
         let code = self.rbuf[self.rstart] & !proto::event::SEND_EVENT_FLAG;
-        // 0 is an error and 1 is a reply, both 32 bytes; every other event has the size its core code
-        // says.
-        //
-        // # Extension events are 32 bytes here, and that is a decision
-        //
-        // An event with a code of 64 or above belongs to an extension, and the protocol has two
-        // conventions for those and no way to tell them apart from the code. A `GenericEvent` and
-        // everything `XInput2` sends carries its length in byte 1, counted in 4-byte units; `MIT-SHM`'s
-        // `ShmCompletionNotify` -- code 65 on this host -- carries a *drawable* there, and is 32 bytes.
-        //
-        // This crate tried the byte-1 rule and desynchronised on a real `ShmCompletionNotify` that this
-        // client never asked for: the readback reported "the server sent 32 of a packet's bytes and then
-        // stopped", and every event after it was garbage. So: unknown events are 32 bytes, and this is
-        // recorded as a limitation rather than a bug -- a client that wants an extension's events
-        // selects them, knows their convention, and sizes them itself. A word processor wants key,
-        // button, exposure and structure events, all of which are core and all of which are fixed size.
-        let want = match code {
-            0 | 1 => 32,
-            // Keys and buttons: 24 bytes by the protocol, and this host says otherwise.
-            2..=5 => self.key_event_size(code),
-            other => proto::event_size(other),
-        };
+        // One size for an error, a reply and every event alike. See [`proto::EVENT_BYTES`]: the
+        // per-code table this replaced was true of the specification's field lists and false of the
+        // wire, and it desynchronised the stream on the first keystroke.
+        let want = proto::EVENT_BYTES;
         self.pending = want;
         if !self.ensure(want, deadline)? {
             // A short read, not a protocol failure: some bytes of a packet arrived and the rest did
@@ -968,7 +909,6 @@ impl Conn {
         let packet = self.rbuf[self.rstart..self.rstart + want].to_vec();
         self.rstart += want;
         self.pending = 0;
-        self.stalls = 0;
         if tracing() {
             let first = packet[0];
             let what = match first {
@@ -1032,42 +972,6 @@ impl Conn {
                 Event::decode(&self.rbuf[self.rstart - want..self.rstart]).expect("an event code"),
             ),
         }))
-    }
-
-    /// How many bytes this server's key and button events occupy.
-    ///
-    /// # 32 on this host, 24 by the protocol, and the difference is fatal
-    ///
-    /// The specification says a key or button event is 24 bytes, and every core client reads 24. This
-    /// host does not: with nothing between the socket and the bytes
-    /// (`cargo run -p holonomy-x11 --example dump_keybytes`), one synthesised tap arrives as 64 bytes --
-    /// a `KeyPress`, then `cf fe 53 01 00 00 01 00`, then a `KeyRelease` -- so both events are 24 bytes
-    /// of real event followed by eight bytes that are in no specification and in no extension this client
-    /// asked for, and the next event starts 32 bytes in.
-    ///
-    /// Read as 24, the client consumes the first event correctly, then reads the padding as an event: its
-    /// first byte is `0xcf` or `0x02` depending on the key, which is not a keycode, and from there every
-    /// event is garbage. Measured in the developer window: two key events, no releases, a protocol error
-    /// the client had invented, and the window closing on its first keystroke.
-    ///
-    /// # Why a constant and not a guess
-    ///
-    /// This looked like a thing to *learn* from the stream -- read 24, look at what follows, decide -- and
-    /// both attempts at that failed on real packets, because the padding's first byte sometimes looks
-    /// like a valid event code: it was `0xcf` in a clean capture and `0x02` in the window, and a test that
-    /// accepts extension codes says 24 when the answer is 32. So the size is a property of the server,
-    /// measured, and a constructor-level override rather than a per-packet guess:
-    /// [`Conn::set_key_event_bytes`].
-    ///
-    /// A server that sends 24-byte key events is one call away, and `tests/live.rs` covers the 32-byte
-    /// case on this host.
-    fn key_event_size(&self, code: u8) -> usize {
-        let spec = proto::event_size(code);
-        if (FIRST_KEY_OR_BUTTON..=LAST_KEY_OR_BUTTON).contains(&code) {
-            self.key_event_bytes
-        } else {
-            spec
-        }
     }
 
     fn compact(&mut self) {

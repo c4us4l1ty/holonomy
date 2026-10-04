@@ -43,6 +43,22 @@ impl HeadlessScanout {
         }
     }
 
+    /// Change the frame's size, dropping what was presented. Returns whether it changed.
+    ///
+    /// The PPM target has no size of its own, so this is only about what `width` and `height` report --
+    /// which is what lets the gate render a document at a size no panel here has. The presented copy is
+    /// dropped rather than kept: it is the *old* size, and a gate that read it after a resize would be
+    /// comparing pixels from two different geometries.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        if self.width == width && self.height == height {
+            return false;
+        }
+        self.width = width;
+        self.height = height;
+        self.last = Frame::black(width, height);
+        true
+    }
+
     /// The most recently presented frame.
     ///
     /// A copy rather than a reference, because the caller usually wants to keep it past the next
@@ -81,6 +97,12 @@ impl HeadlessScanout {
 }
 
 impl Scanout for HeadlessScanout {
+    /// See [`HeadlessScanout::resize`]. This target follows any size asked of it, which is exactly why
+    /// it is the backend the visual gate uses: it can render at a size the panel does not have.
+    fn resize(&mut self, width: u32, height: u32) -> Result<bool, FrameError> {
+        Ok(HeadlessScanout::resize(self, width, height))
+    }
+
     fn present(&mut self, frame: &Frame) -> Result<u64, FrameError> {
         if frame.size() != (self.width, self.height) {
             return Err(FrameError::SizeMismatch {

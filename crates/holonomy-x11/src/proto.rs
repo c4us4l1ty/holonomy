@@ -53,6 +53,9 @@ pub mod op {
     pub const PUT_IMAGE: u8 = 72;
     /// GetImage.
     pub const GET_IMAGE: u8 = 73;
+    /// ConfigureWindow. Byte 1 is `unused`, then the window, a 2-byte value mask and the values in
+    /// ascending bit order.
+    pub const CONFIGURE_WINDOW: u8 = 12;
     /// SendEvent. The only way a client can hand an event to another client -- a window manager --
     /// without the server knowing it came from a client rather than from a device.
     pub const SEND_EVENT: u8 = 25;
@@ -117,9 +120,33 @@ pub mod cw {
     pub const BORDER_PIXEL: u32 = 0x0000_0008;
     /// CWEventMask.
     pub const EVENT_MASK: u32 = 0x0000_0800;
+    /// CWOverrideRedirect.
+    pub const OVERRIDE_REDIRECT: u32 = 0x0000_0200;
 }
 
 /// `CreateGC`'s value-mask bits.
+/// `ConfigureWindow`'s value mask: which of the values follow, and in what order.
+///
+/// The order is ascending bit order, and it is *not* the order the bits are declared here: a window's x
+/// and y come before its width and height. A client that sends width before y gets its window moved
+/// instead of resized, which is a real failure mode and not a subtle one.
+pub mod value {
+    /// The window's x position.
+    pub const X: u16 = 1 << 0;
+    /// The window's y position.
+    pub const Y: u16 = 1 << 1;
+    /// The window's width.
+    pub const WIDTH: u16 = 1 << 2;
+    /// The window's height.
+    pub const HEIGHT: u16 = 1 << 3;
+    /// The window's border width.
+    pub const BORDER_WIDTH: u16 = 1 << 4;
+    /// The window's sibling, for a restack request.
+    pub const SIBLING: u16 = 1 << 5;
+    /// The window's stack mode.
+    pub const STACK_MODE: u16 = 1 << 6;
+}
+
 pub mod gc {
     /// GCFunction.
     pub const FUNCTION: u32 = 0x0000_0001;
@@ -144,6 +171,10 @@ pub mod image {
 
 /// Predefined atoms used as `ChangeProperty` types and values.
 pub mod atom {
+    /// `WM_NORMAL_HINTS`, the predefined atom 40.
+    pub const WM_NORMAL_HINTS: u32 = 40;
+    /// `WM_SIZE_HINTS`, the predefined atom 41, which is the *type* of `WM_NORMAL_HINTS`.
+    pub const WM_SIZE_HINTS: u32 = 41;
     /// STRING.
     pub const STRING: u32 = 31;
     /// ATOM.
@@ -451,26 +482,46 @@ fn value_note(code: u8) -> &'static str {
     }
 }
 
-/// How many bytes an event of this code occupies on the wire.
+/// How many bytes an event occupies on the wire: **32, always**.
 ///
-/// **X11 events are not all 32 bytes, and this is the single most likely thing to get wrong.** Key
-/// and button events are 24, motion is 28, everything else is 32. A client that assumes 32 reads 8
-/// bytes of the *next* event as part of this one, and from then on every event it decodes is shifted
-/// by a multiple of four bytes: the keycodes come out as nonsense and the stream never resynchronises.
-/// So the size comes from the code, and `tests/live.rs` drives a real keystroke through
-/// `XTestFakeInput` to prove the resynchronisation.
+/// # Every event packet is 32 bytes, including the ones whose field list is shorter
 ///
-/// Codes 64 and above are **extension** events and are not a fixed size: their length is in the second
-/// byte, counted in 4-byte units. See [`crate::conn::Conn`], where that is handled, and note what
-/// happens when it is not: measured on this host, an extension event with code 54 arrived right after a
-/// synthesised keystroke, was read as 32 bytes, and every packet after it was garbage.
-pub fn event_size(code: u8) -> usize {
-    match code & !event::SEND_EVENT_FLAG {
-        event::KEY_PRESS | event::KEY_RELEASE | event::BUTTON_PRESS | event::BUTTON_RELEASE => 24,
-        6 /* MotionNotify */ => 28,
-        _ => 32,
-    }
-}
+/// A `KeyPress` is documented with 24 bytes of fields and a `MotionNotify` with 28, and it is tempting
+/// to read a per-code size table -- this crate did, and its `event_size` said exactly that. The wire
+/// format is 32 bytes for every event without exception: the shorter listings are the *defined fields*,
+/// and the packet is padded out to the 32-byte unit the rest of the protocol is built on.
+///
+/// This is a property of the protocol, not of a server or a version. The evidence that it is universal
+/// is that libX11, which every client on earth links, reads exactly 32 bytes per event into its
+/// `xEvent` and never varies it -- `xAnyEvent` is 32 bytes on a 64-bit build, and the decoders for the
+/// shorter formats simply ignore the tail. A server that sent 24-byte key events would break libX11
+/// itself, so there is no such server to break us.
+///
+/// # What the mistake looked like, because it cost three attempts to unlearn
+///
+/// Reading 24 bytes for a key event consumes the first 24 correctly and then treats the event's own
+/// padding as the next packet. Measured here (`cargo run -p holonomy-x11 --example dump_keybytes`), one
+/// synthesised tap arrived as 64 bytes -- a `KeyPress`, then eight bytes, then a `KeyRelease`:
+/// ```text
+/// 0000  02 32 19 00 f2 c9 95 13 ed 04 00 00 01 00 c0 00
+/// 0010  00 00 00 00 2f 04 e1 04 | cf fe 53 01 00 00 01 00   24 bytes of event, 8 of pad
+/// 0020  03 32 19 00 ...                                     the KeyRelease, 32 bytes in
+/// ```
+/// The symptom was not garbage, which is what made it expensive: the developer window received two key
+/// presses and no releases, invented a protocol error out of the padding, and closed on the first
+/// keystroke. Those eight bytes hold whatever Xwayland leaves there -- `cf fe 53 01 00 00 01 00` here --
+/// and reading them as an event header produced a plausible-looking keycode of 1.
+///
+/// Two further turns were built on the false premise that the size was a property of the server: a
+/// runtime *heuristic* that peeked at byte 24 to decide (wrong whenever the padding happened to begin
+/// with a valid event code, which was about half the time), and then a *stall detector* that dropped a
+/// byte to resynchronise the stream after guessing wrong. With the size constant none of that is needed:
+/// a reader with the right size cannot fall out of step, so there is nothing to detect and nothing to
+/// recover from. Both are deleted rather than left as dead configuration.
+///
+/// One thing does still vary, and is not the event size: an *extension* event with a code of 64 or above
+/// may carry its length in byte 1. This client selects no extension events, so it never receives one.
+pub const EVENT_BYTES: usize = 32;
 
 /// The lowest event code that belongs to an extension, whose length is in its second byte.
 pub const FIRST_EXTENSION_EVENT: u8 = 64;
@@ -558,7 +609,7 @@ pub enum Event {
 }
 
 impl Event {
-    /// Decode a packet of exactly [`event_size`] bytes.
+    /// Decode a packet of exactly [`EVENT_BYTES`] bytes.
     ///
     /// Returns `None` if the packet is an error or a reply, which are not events: the connection
     /// layer dispatches those first and only calls this for a genuine event code.
@@ -843,21 +894,33 @@ mod tests {
         assert_eq!(MAX_REQUEST_BYTES % 4, 0);
     }
 
-    /// The event sizes are the ones that break a stream if they are wrong. 24 for key and button
-    /// events, 28 for motion, 32 for everything else -- and `SendEvent` copies have the high bit set
-    /// on the code, so the size must not depend on it.
+    /// Every event is 32 bytes on the wire, whatever its field list says.
+    ///
+    /// This is the test that the correction is written down as a constant rather than a table. The
+    /// previous version of this crate asserted the table -- 24 for key and button, 28 for motion -- and
+    /// every one of those assertions was true of the *documentation* and false of the wire, which is why
+    /// the table had to go rather than be corrected.
     #[test]
-    fn events_are_twenty_four_twenty_eight_or_thirty_two_bytes() {
-        assert_eq!(event_size(event::KEY_PRESS), 24);
-        assert_eq!(event_size(event::KEY_RELEASE), 24);
-        assert_eq!(event_size(event::BUTTON_PRESS), 24);
-        assert_eq!(event_size(event::BUTTON_RELEASE), 24);
-        assert_eq!(event_size(6), 28, "MotionNotify");
-        assert_eq!(event_size(event::EXPOSE), 32);
-        assert_eq!(event_size(event::CLIENT_MESSAGE), 32);
-        assert_eq!(event_size(event::CONFIGURE_NOTIFY), 32);
-        // A `SendEvent` copy of a key press is still 24 bytes.
-        assert_eq!(event_size(event::KEY_PRESS | event::SEND_EVENT_FLAG), 24);
+    fn every_event_is_thirty_two_bytes() {
+        for code in [
+            event::KEY_PRESS,
+            event::KEY_RELEASE,
+            event::BUTTON_PRESS,
+            event::BUTTON_RELEASE,
+            6, // MotionNotify
+            event::EXPOSE,
+            event::CLIENT_MESSAGE,
+            event::CONFIGURE_NOTIFY,
+            event::MAP_NOTIFY,
+            event::PROPERTY_NOTIFY,
+            35, // GenericEvent
+            64, // the first extension code
+        ] {
+            // The size does not depend on the code at all, so it cannot depend on the `SendEvent` bit
+            // either. Asserted by calling it: there is nothing to call.
+            let _ = code;
+        }
+        assert_eq!(EVENT_BYTES, 32);
     }
 
     /// A `KeyPress` decodes to the keycode and modifier state the session's own state machine needs.

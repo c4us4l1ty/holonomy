@@ -42,7 +42,7 @@ use std::fs::File;
 use std::io::Write;
 
 use holonomy_display::paint::Painter;
-use holonomy_display::{Frame, Scanout};
+use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_export::{Format, Report};
 use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
@@ -214,6 +214,15 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// The damage accumulated since the last paint: what the next `paint` will touch.
+    ///
+    /// Read-only. A caller that wants a repaint asks for one with [`Session::repaint_all`]; a caller
+    /// that wants to *narrow* the next paint has no business doing it, because the accumulated damage
+    /// is the union of every edit's damage and dropping part of it drops a repaint with it.
+    pub fn damage(&self) -> DamageRect {
+        self.damage
+    }
+
     /// The current frame.
     pub fn frame(&self) -> &Frame {
         &self.frame
@@ -249,6 +258,59 @@ impl<'a> Session<'a> {
         let n = self.dump_ppm(&mut w)?;
         w.flush()?;
         Ok(n)
+    }
+
+    /// Change the size of everything, and mark all of it stale.
+    ///
+    /// # One method, because there are two halves and the order is load-bearing
+    ///
+    /// The frame is the session's; the target is the backend's; and [`Scanout::present`] refuses a frame
+    /// whose size differs from the backend's. So a resize has to change both, and it has to change the
+    /// backend *first* -- and this is the only place that knows so. A caller that resized the session
+    /// alone would get every subsequent paint refused as a `SizeMismatch`, which is the exact failure
+    /// this had before the order lived here.
+    ///
+    /// Afterwards the two are checked against each other. A backend with a genuinely fixed size -- a DRM
+    /// panel -- declines to resize, and then the session must *not* resize either, so the frame and the
+    /// panel stay the size they were and the caller gets `false`. That is the answer for a target whose
+    /// size is its mode, and it is better than rebuilding a 4 MiB frame that can never be presented.
+    ///
+    /// What is rebuilt, when it happens: a frame of the new size, `ChromeMetrics` at the new size, and
+    /// the `SurfaceTree` the painter walks. The text does not move, the caret does not move, and no edit
+    /// is undone -- only the picture of the document changes, and the measure is fixed, so even the line
+    /// breaks do not move. See [`ChromeMetrics::for_size`].
+    ///
+    /// The whole new frame is marked stale, because a resize is one of the two events (the other is an
+    /// `Expose`) where diffing damage rectangles is not cheaper than redrawing: the damage from before
+    /// the resize describes the *old* geometry, so none of it covers the new pixels.
+    ///
+    /// A size smaller than the chrome needs is clamped by [`ChromeMetrics::for_size`] rather than
+    /// refused: a window dragged to nothing should show the smallest thing it can, not an error.
+    ///
+    /// Returns whether the size actually changed.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, SessionError> {
+        let metrics = self.chrome.metrics.clamp_to(width, height);
+        let (w, h) = (metrics.width, metrics.height);
+        if (w, h) == (self.frame.width(), self.frame.height()) {
+            return Ok(false);
+        }
+        // The backend first, so that a backend which declines leaves the session untouched.
+        if !self.scanout.resize(w, h)? {
+            return Ok(false);
+        }
+        if (self.scanout.width(), self.scanout.height()) != (w, h) {
+            // A backend that claims to have resized and then disagrees is worse than one that
+            // declined, because every paint from here on fails with a `SizeMismatch` and the reason is
+            // not visible anywhere. So it is reported, and the session stays at the old size.
+            return Err(SessionError::Display(FrameError::SizeMismatch {
+                want: (w, h),
+                got: (self.scanout.width(), self.scanout.height()),
+            }));
+        }
+        self.chrome = Chrome::new(metrics);
+        self.frame = Frame::black(w, h);
+        self.damage = DamageRect::new(0, 0, w, h);
+        Ok(true)
     }
 
     /// Paint everything and present. The first frame has no damage yet, so it is forced.

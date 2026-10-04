@@ -15,12 +15,26 @@
 //!   loop {
 //!       wait up to one blink period for an event
 //!       key press/release  -> handle_event  (which ticks, so it paints)
+//!       ConfigureNotify    -> resize the backend, then the session, then repaint
 //!       Expose             -> repaint all of it
 //!       ButtonPress        -> take the focus, repaint
 //!       ClientMessage      -> the window manager asked us to close: quit
 //!       nothing            -> tick, which blinks if it is due
 //!   }
 //! ```
+//!
+//! # Resizing
+//!
+//! The window is resizable, and a `ConfigureNotify` is handled with one call: `Session::resize`. That
+//! method owns the order -- backend first, then the frame -- because `Scanout::present` checks the
+//! frame's size against the backend's and refuses a mismatch, so a session that resized its frame first
+//! would leave every paint failing until the backend caught up. The driver does not know that, and
+//! should not have to.
+//!
+//! The measure is fixed at 80 columns and the page is centred, so a resize moves the gutters and
+//! nothing else: the text does not re-wrap, the caret does not move, no edit is undone. That is what
+//! makes a drag cheap, and it is
+//! [`ChromeMetrics::for_size`](holonomy_render::chrome::ChromeMetrics::for_size) that decides it.
 //!
 //! The timeout is what paces this, and it is a quarter of the blink period: the caret has to blink on
 //! time, and nothing else in the loop blocks. Between keystrokes the loop wakes 4 times a second and
@@ -138,12 +152,37 @@ pub fn run(
                     ev @ (holonomy_x11::Event::KeyPress { .. }
                     | holonomy_x11::Event::KeyRelease { .. }) => {
                         if let Some(key) = x11key::key_event(&ev) {
+                            if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
+                                eprintln!("dispatch {key:?}");
+                            }
+                            // Nothing else: the key goes to the session, which folds the modifier
+                            // state and dispatches. Keeping the trace here rather than inside the
+                            // session means it cannot change what the session does.
                             if let Some(exit) =
                                 session.handle_event(key).map_err(WindowedError::Session)?
                             {
                                 report(&session, events, start);
                                 return Ok(exit);
                             }
+                        }
+                    }
+                    // The window changed size.
+                    //
+                    // Two halves, in this order: the backend first, because the frame it presents into
+                    // is checked against its size and a paint at the old size would be refused. A drag
+                    // delivers one of these per intermediate size, so this runs continuously while a
+                    // window is being dragged rather than once at the end.
+                    holonomy_x11::Event::ConfigureNotify { width, height } => {
+                        // One call, because the order -- backend first, then the frame -- is the
+                        // session's business and not the driver's. A drag delivers one of these per
+                        // intermediate size, so this is a per-frame cost while a window is moving.
+                        if session
+                            .resize(width as u32, height as u32)
+                            .map_err(WindowedError::Session)?
+                        {
+                            session
+                                .repaint_all()
+                                .map_err(WindowedError::Session)?;
                         }
                     }
                     // The window is on screen and the server does not know what is where. Repaint all of

@@ -192,6 +192,60 @@ impl ChromeMetrics {
     pub const fn page_w(&self) -> u32 {
         self.columns * self.cell_w + self.page_pad * 2
     }
+
+    /// The narrowest and shortest panel this chrome is drawn into without clipping.
+    ///
+    /// The width is the page, plus its shadow and the scrollbar rail, plus one text cell of gutter on
+    /// each side -- 736 + 3 + 12 + 16 = 767, rounded up to 768 because every rect in this crate is
+    /// easier to reason about at a multiple of the cell. The height is the four bands (96) plus the
+    /// page's padding (96), its shadow, and four rows of text: 288, which shows four whole lines.
+    ///
+    /// Both exist because a window can be dragged to nothing and the chrome still has to answer with
+    /// *something*. Below these the answer is still well-defined -- [`Layout::new`] clips the page and
+    /// clamps every band into the panel, all `saturating`, and that is a safety net rather than a
+    /// supported size.
+    pub const MIN_WIDTH: u32 = 768;
+    pub const MIN_HEIGHT: u32 = 288;
+
+    /// Metrics for a panel of `width` x `height`.
+    ///
+    /// **The measure does not change with the window.** This holds 80 columns and centres the page, so a
+    /// wider window grows the margins rather than the line length -- which is what a word processor
+    /// does, and what the reference screenshots in `Plan/` show. The alternative, fitting the measure to
+    /// the window, means dragging an edge re-wraps every paragraph under the caret, and a word processor
+    /// that did that would be unusable.
+    ///
+    /// So a resize is arithmetic on the gutters: the bands are the same, the page is the same, and
+    /// [`Layout::new`] recomputes where everything sits. Nothing about the *document* depends on the panel
+    /// size, which is also why [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize)
+    /// touches neither the text nor the caret.
+    ///
+    /// The size is clamped to [`MIN_WIDTH`](Self::MIN_WIDTH) and
+    /// [`MIN_HEIGHT`](Self::MIN_HEIGHT), so this is also the clamp and there is one code path.
+    pub const fn for_size(width: u32, height: u32) -> Self {
+        Self {
+            width: if width < Self::MIN_WIDTH {
+                Self::MIN_WIDTH
+            } else {
+                width
+            },
+            height: if height < Self::MIN_HEIGHT {
+                Self::MIN_HEIGHT
+            } else {
+                height
+            },
+            ..Self::DESKTOP
+        }
+    }
+
+    /// These metrics' bands, at a panel size of `width` x `height`.
+    ///
+    /// The cell size, the padding, the measure and the four band heights are all the same as `self`'s;
+    /// only the panel changes. This exists so that "what a resize does and does not change" is written
+    /// down once, and so a resize is one call at the call site rather than a struct literal.
+    pub const fn clamp_to(&self, width: u32, height: u32) -> Self {
+        Self::for_size(width, height)
+    }
 }
 
 /// The bands, computed once per size.

@@ -65,6 +65,21 @@ pub trait Scanout: std::any::Any {
     /// paper over it.
     fn present(&mut self, frame: &Frame) -> Result<u64, FrameError>;
 
+    /// Change the size of what this presents into. Returns whether it changed.
+    ///
+    /// **The default is "I have a fixed size", which is true of a DRM panel** and is the honest answer
+    /// for one: a panel's size is its mode, and changing it is a mode set, not a resize. A backend
+    /// whose size can change -- a window -- overrides this.
+    ///
+    /// This exists so that a resize has one owner. [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize)
+    /// calls this *before* it rebuilds its own frame, because `present` checks the frame's size against
+    /// the backend's and refuses a mismatch; and it checks the two agree afterwards, so a caller cannot
+    /// leave a session and a backend at different sizes even by accident. Two halves, one method, one
+    /// order.
+    fn resize(&mut self, _width: u32, _height: u32) -> Result<bool, FrameError> {
+        Ok(false)
+    }
+
     /// Present only `damage` of a frame, where the backend can.
     ///
     /// The session rasterises a damaged rectangle and then hands the backend the whole frame, because

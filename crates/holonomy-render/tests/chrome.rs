@@ -643,3 +643,111 @@ fn the_scroll_thumb_moves_down_as_the_view_scrolls() {
         last = thumb.y;
     }
 }
+
+/// A resize moves the gutters and nothing else.
+///
+/// The claim is that a wider window shows the same 80-column measure with more margin, the way a word
+/// processor does -- *not* a longer line. If this fails, dragging a window edge re-wraps every
+/// paragraph under the caret, which is the one thing a resizable window must not do.
+#[test]
+fn a_resize_moves_the_gutters_and_nothing_else() {
+    let small = ChromeMetrics::for_size(1024, 600);
+    let large = ChromeMetrics::for_size(1600, 1000);
+    assert_eq!(small.columns, large.columns, "the measure does not move with the window");
+    assert_eq!(small.cell_w, large.cell_w, "nor does the cell size");
+    assert_eq!(small.page_w(), large.page_w(), "nor the page's width");
+
+    let a = Layout::new(&small);
+    let b = Layout::new(&large);
+    assert_eq!(a.text.width, b.text.width, "the text column is the same width in both");
+    // Its *height* does not survive: a taller panel fits more rows, and rows are what a page grows
+    // by. Its width does, because the measure is fixed.
+    assert!(
+        b.text.height > a.text.height,
+        "a taller panel fits more rows: {} then {}",
+        a.rows,
+        b.rows
+    );
+    // Its *x* does move, by exactly the left gutter's growth, because the page is centred rather than
+    // left-aligned. What must not change is where the caret is inside it -- that is the `(0, 0)` origin
+    // the session's caret maths uses, and it is the same in both.
+    // Its `x` does move, because the page is centred rather than left-aligned. What must not change
+    // is the text column's distance from the *page's* left edge -- that is the origin the caret is
+    // located against, and it is the same in both.
+    assert_eq!(
+        a.text.x - a.gutter_left,
+        b.text.x - b.gutter_left,
+        "the text column sits the same distance inside the page in both"
+    );
+    assert_eq!(a.page.width, b.page.width, "the page is the same width in both");
+    assert!(
+        b.gutter_left > a.gutter_left,
+        "a wider panel has a bigger left gutter: {} then {}",
+        a.gutter_left,
+        b.gutter_left
+    );
+    assert!(
+        b.gutter_right > a.gutter_right,
+        "and a bigger right one: {} then {}",
+        a.gutter_right,
+        b.gutter_right
+    );
+    // Centred to within the pixel `Layout::new` deliberately gives away to the right gutter.
+    assert!(
+        b.gutter_left.abs_diff(b.gutter_right) <= 1,
+        "the page is centred: gutters {} and {}",
+        b.gutter_left,
+        b.gutter_right
+    );
+}
+
+/// The bands always partition the whole panel, at every size the chrome accepts.
+///
+/// This is the property that makes a resize safe: if the bands summed to less than the height, the
+/// strip below them would be whatever the frame was initialised to, and on a *resize* that is the
+/// previous frame's pixels at the old size -- so a window would keep a ghost of itself along the
+/// bottom edge.
+#[test]
+fn the_bands_partition_the_panel_at_any_size() {
+    for (w, h) in [
+        (ChromeMetrics::MIN_WIDTH, ChromeMetrics::MIN_HEIGHT),
+        (1280, 800),
+        (2560, 1440),
+        (800, 300),
+        (769, 289),
+    ] {
+        let m = ChromeMetrics::for_size(w, h);
+        let l = Layout::new(&m);
+        assert_eq!((l.width, l.height), (m.width, m.height), "{w}x{h}: the panel size is kept");
+        let mut at = 0u32;
+        for b in [l.tabs, l.toolbar, l.ruler, l.canvas, l.status] {
+            assert_eq!(b.y, at, "{w}x{h}: a band does not start where the last one ended");
+            assert!(b.width <= m.width, "{w}x{h}: a band is no wider than the panel");
+            at += b.height;
+        }
+        assert_eq!(at, m.height, "{w}x{h}: the five bands cover the panel exactly");
+        assert_eq!(
+            l.canvas.height,
+            m.canvas_h(),
+            "{w}x{h}: the canvas is what the four bands leave"
+        );
+    }
+}
+
+/// A panel too small for the chrome is clamped, not refused, and not left to wrap.
+///
+/// A window can be dragged to nothing. The answer has to be the minimum this chrome can draw, because
+/// the alternative is a subtraction that wraps: `Layout::new` is `saturating` throughout precisely so
+/// that cannot happen, and this is the test that the clamp is what actually stops it.
+#[test]
+fn a_panel_too_small_is_clamped_to_the_minimum() {
+    let m = ChromeMetrics::for_size(1, 1);
+    assert_eq!(m.width, ChromeMetrics::MIN_WIDTH, "the width is clamped up");
+    assert_eq!(m.height, ChromeMetrics::MIN_HEIGHT, "and the height");
+    let l = Layout::new(&m);
+    assert!(l.page.width <= m.width, "the page fits the panel it was clamped to");
+    assert!(l.rows >= 4, "and shows the four rows MIN_HEIGHT promises: {}", l.rows);
+    // `clamp_to` is the same thing under a different name, and it must stay so -- the session calls it
+    // on every resize.
+    assert_eq!(m.clamp_to(1, 1), m, "clamp_to agrees with for_size");
+}
