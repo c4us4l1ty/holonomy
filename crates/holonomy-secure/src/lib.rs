@@ -138,57 +138,34 @@ impl SecureBlock {
         if base == libc::MAP_FAILED {
             return Err(SecureBlockError::MmapFailed);
         }
-        // From here on every early return must `munmap`, or we leak the mapping.
         let base = base as *mut u8;
-        let block = Self { base, len, total };
-        block.initialise(page, data_len)?;
-        Ok(block)
-    }
 
-    /// Unmap the mapping and scrub the data region. Called by `allocate` and must run
-    /// on every failure path.
-    fn initialise(&self, page: usize, data_len: usize) -> Result<(), SecureBlockError> {
-        let data = unsafe { self.base.add(page) };
-
-        // Make the data region accessible. The guards stay PROT_NONE.
-        // SAFETY: `data` is inside the mapping (`page < total`) and spans `data_len`
-        // bytes, which is exactly the region reserved for it.
-        if unsafe { libc::mprotect(data.cast(), data_len, libc::PROT_READ | libc::PROT_WRITE) } != 0
-        {
-            // SAFETY: `base`/`total` are the live mapping.
-            unsafe { libc::munmap(self.base.cast(), self.total) };
-            return Err(SecureBlockError::MprotectFailed);
-        }
-
-        // NFR-3: this block must never reach swap. This is the call that fails on a
-        // host with a low RLIMIT_MEMLOCK, which is why the error is surfaced rather than
-        // logged and ignored.
-        // SAFETY: region is mapped and writable.
-        if unsafe { libc::mlock(data.cast(), data_len) } != 0 {
-            // SAFETY: `base`/`total` are the live mapping.
-            unsafe { libc::munmap(self.base.cast(), self.total) };
-            return Err(SecureBlockError::MlockFailed);
-        }
-
-        // Exclude from core dumps and from any future child. Advisory, so a failure is
-        // reported but does not make the block unusable -- the guards are what actually
-        // guarantee containment.
+        // # Do not construct the block until initialisation succeeds
         //
-        // Two separate calls, never one OR'd value. `madvise` takes a single advice
-        // argument, not a bitmask: the kernel switches on the exact value and returns
-        // EINVAL for a combination like MADV_DONTDUMP|MADV_DONTFORK. Plan.md Part 4
-        // writes them OR'd together, which is a notational trap rather than a fact
-        // about the syscall.
-        // SAFETY: region is mapped; MADV_* takes a length, not a validity contract.
-        for advice in [libc::MADV_DONTDUMP, libc::MADV_DONTFORK] {
-            if unsafe { libc::madvise(data.cast(), data_len, advice) } != 0 {
-                // SAFETY: `base`/`total` are the live mapping.
-                unsafe { libc::munmap(self.base.cast(), self.total) };
-                return Err(SecureBlockError::MadviseFailed);
-            }
+        // The original code built `Self { base, len, total }` and then called
+        // `block.initialise(page, data_len)?`, with a comment saying "from here on every early return
+        // must `munmap`, or we leak the mapping" -- and `initialise` did `munmap` on each of its four
+        // error paths.
+        //
+        // That is a double free of the mapping, because on `?` the `?` drops `block` as it propagates
+        // and `Drop::drop` runs `zeroize_and_release()` -- which **writes zeros into the data region**,
+        // now unmapped -- followed by a second `munmap`.
+        //
+        // It is not a theoretical path. `initialise` fails on `mlock`, and `mlock` fails as soon as the
+        // process exceeds `RLIMIT_MEMLOCK`. Loading a 4 MiB document needs ~2,184 page-locked leaves at
+        // 4 KiB each = 8.5 MB, against this host's 8,192 KB limit, so `Rope::from_text` took the `mlock`
+        // failure path and the process died with **SIGSEGV and no Rust backtrace**, in both release and
+        // debug -- a segfault inside `memset` on an unmapped page, which is exactly the shape of this bug.
+        //
+        // The fix is structural rather than a flag: `initialise` returns the error and `allocate` owns
+        // the single unmapping path, so there is only ever one `Drop` per mapping and it only ever runs on
+        // a mapping that was never released. Leaking is no longer possible because the `?` is gone.
+        if let Err(e) = initialise(base, page, data_len) {
+            // SAFETY: `base`/`total` are the live mapping and nothing else holds a reference to it.
+            unsafe { libc::munmap(base.cast(), total) };
+            return Err(e);
         }
-
-        Ok(())
+        Ok(Self { base, len, total })
     }
 
     /// Pointer to the first data byte. Never null for a live block.
@@ -262,6 +239,51 @@ impl SecureBlock {
 unsafe impl Send for SecureBlock {}
 // SAFETY: as above. Shared access yields only `&[u8]`, which is itself `Sync`.
 unsafe impl Sync for SecureBlock {}
+
+/// Make a freshly `mmap`'d region's data pages accessible, lock them, and mark them undumpable.
+///
+/// A **free function**, not a method, and that is the point. As a method on `&self` it could only be
+/// called on an already-constructed `SecureBlock`, so every failure path had to `munmap` a mapping that
+/// the caller's `Drop` would then unmap *again* -- and scrub into the gap on the way. See
+/// [`SecureBlock::allocate`] for how that segfaulted on every `mlock` failure.
+fn initialise(base: *mut u8, page: usize, data_len: usize) -> Result<(), SecureBlockError> {
+    let data = unsafe { base.add(page) };
+
+    // Make the data region accessible. The guards stay PROT_NONE.
+    //
+    // SAFETY: `data` is inside the mapping (`page < total`) and spans `data_len`
+    // bytes, which is exactly the region reserved for it.
+    if unsafe { libc::mprotect(data.cast(), data_len, libc::PROT_READ | libc::PROT_WRITE) } != 0 {
+        return Err(SecureBlockError::MprotectFailed);
+    }
+
+    // NFR-3: this block must never reach swap. This is the call that fails on a host with a low
+    // RLIMIT_MEMLOCK, which is why the error is surfaced rather than logged and ignored.
+    //
+    // SAFETY: region is mapped and writable.
+    if unsafe { libc::mlock(data.cast(), data_len) } != 0 {
+        return Err(SecureBlockError::MlockFailed);
+    }
+
+    // Exclude from core dumps and from any future child. Advisory, so a failure is
+    // reported but does not make the block unusable -- the guards are what actually
+    // guarantee containment.
+    //
+    // Two separate calls, never one OR'd value. `madvise` takes a single advice
+    // argument, not a bitmask: the kernel switches on the exact value and returns
+    // EINVAL for a combination like MADV_DONTDUMP|MADV_DONTFORK. Plan.md Part 4
+    // writes them OR'd together, which is a notational trap rather than a fact
+    // about the syscall.
+    //
+    // SAFETY: region is mapped; MADV_* takes a length, not a validity contract.
+    for advice in [libc::MADV_DONTDUMP, libc::MADV_DONTFORK] {
+        if unsafe { libc::madvise(data.cast(), data_len, advice) } != 0 {
+            return Err(SecureBlockError::MadviseFailed);
+        }
+    }
+
+    Ok(())
+}
 
 impl Drop for SecureBlock {
     fn drop(&mut self) {

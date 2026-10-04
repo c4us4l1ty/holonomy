@@ -34,6 +34,7 @@
 //! caret and scrollbar correct on the first frame rather than after a reflow.
 
 use crate::fenwick::Fenwick;
+use crate::fontmetrics::FontMetrics;
 
 /// One line's vertical metrics, in pixels.
 ///
@@ -70,6 +71,69 @@ impl LineMetrics {
             .saturating_add(self.descender)
             .saturating_add(self.leading)
     }
+
+    /// Derive line metrics from a font's own vertical metrics at `ppem`.
+    ///
+    /// PROJECT.md §5 Phase 6: "Line height comes from font ascender/descender, not from
+    /// measurement." This is that rule as code, and it is the only constructor that should be used
+    /// for a real document.
+    ///
+    /// # The one-pixel trap
+    ///
+    /// The natural derivation is:
+    ///
+    /// ```text
+    /// ascender_px = ceil(ascender * ppem / upm)
+    /// descender_px = ceil(|descender| * ppem / upm)
+    /// line_height  = ceil((ascender - descender + line_gap) * ppem / upm)
+    /// leading      = line_height - ascender_px - descender_px
+    /// ```
+    ///
+    /// and for **Inter at 22 ppem** the last line underflows:
+    ///
+    /// ```text
+    /// ascender_px  = ceil(1984 * 22 / 2048) = ceil(21.31) = 22
+    /// descender_px = ceil( 494 * 22 / 2048) = ceil( 5.31) =  6
+    /// line_height  = ceil(2478 * 22 / 2048) = ceil(26.62) = 27
+    /// leading      = 27 - 22 - 6 = -1        <-- negative
+    /// ```
+    ///
+    /// Because `ceil(a) + ceil(b)` is `ceil(a + b)` or `ceil(a + b) + 1`, the two independently
+    /// ceiled distances can exceed the ceiled total by exactly one. `leading` is a `u32`, so that
+    /// does not wrap to a huge positive number — it panics with "attempt to subtract with overflow",
+    /// which is how this was found: the ported H2 test suite's heading fixture hit it on every run.
+    ///
+    /// The fix is to make the *line box* the larger of the two, not to clamp `leading`:
+    ///
+    /// ```text
+    /// glyph_box  = ascender_px + descender_px
+    /// line_box   = max(line_height_px, glyph_box)
+    /// leading    = line_box - glyph_box
+    /// ```
+    ///
+    /// so `leading` is 0 or 1 and never negative, and the line box is always at least tall enough
+    /// for the glyphs it contains. Clamping `leading` at 0 instead would give a 27 px line box for
+    /// glyphs that want 28, and consecutive lines' ascenders would overlap by one pixel -- the exact
+    /// artefact the ceil in [`FontMetrics::line_height_px`] exists to prevent, reintroduced one step
+    /// later.
+    ///
+    /// # `caret_height`
+    ///
+    /// Set to `ascender_px + descender_px`, i.e. the glyph box. That is the caret's height on a line
+    /// with no inline images or superscripts, which is every line of a plain document; a caller that
+    /// has such a thing overrides it explicitly.
+    pub fn from_font(font: &FontMetrics, ppem: u16) -> LineMetrics {
+        let ascender = font.ascender_px(ppem);
+        let descender = font.descender_px(ppem);
+        let glyph_box = ascender.saturating_add(descender);
+        let line_box = font.line_height_px(ppem).max(glyph_box);
+        LineMetrics {
+            ascender,
+            descender,
+            leading: line_box.saturating_sub(glyph_box),
+            caret_height: glyph_box,
+        }
+    }
 }
 
 /// Why a geometry operation was refused.
@@ -100,6 +164,9 @@ pub enum GeometryError {
     },
     /// An empty document cannot answer a "which line" query.
     EmptyDocument,
+    /// The last line cannot be removed: a document with no lines has no height, and an empty
+    /// document is one empty line rather than zero.
+    LastLine,
 }
 
 impl std::fmt::Display for GeometryError {
@@ -115,11 +182,30 @@ impl std::fmt::Display for GeometryError {
                 write!(f, "byte {offset} is not a UTF-8 character boundary")
             }
             Self::EmptyDocument => write!(f, "the document has no lines"),
+            Self::LastLine => write!(
+                f,
+                "the last line cannot be removed; an empty document is one empty line, not zero"
+            ),
         }
     }
 }
 
 impl std::error::Error for GeometryError {}
+
+/// A line's height change, for scroll compensation.
+///
+/// Ported from H2's `HeightUpdate`, which exists because H2's heights arrive from the DOM and the
+/// caller needs to know whether to adjust the scroll position. H1's heights arrive immediately from
+/// font metrics, so the only reasons for `applied: false` are a no-op re-apply and an out-of-range
+/// line -- never a guess. The type is kept because the compensation call site is identical, and a
+/// caller that ignored `applied` would apply `0` and be correct either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HeightUpdate {
+    /// Change in the line's box height, in pixels. Signed.
+    pub delta: i32,
+    /// Whether the tree was actually updated.
+    pub applied: bool,
+}
 
 /// Vertical layout over a document's lines.
 ///
@@ -395,6 +481,287 @@ impl LineGeometry {
         self.lengths = Fenwick::from_weights(&new_lengths);
     }
 
+    /// Insert a line at `index`, giving it `metrics` and `len` bytes.
+    ///
+    /// Every line at or after `index` moves down one, so this is O(n) -- a Fenwick tree supports
+    /// point updates, not insertion. Called once per newline typed, which on a 60,000-line document
+    /// is 60,000 weight moves and two `Vec::insert`s.
+    ///
+    /// The O(n) cost is the reason the *measured* threshold exists: see
+    /// [`INSERTION_REBUILD_THRESHOLD`](Self::INSERTION_REBUILD_THRESHOLD).
+    pub fn insert_line(
+        &mut self,
+        index: usize,
+        metrics: LineMetrics,
+        len: usize,
+    ) -> Result<(), GeometryError> {
+        if index > self.metrics.len() {
+            return Err(GeometryError::NoSuchLine {
+                line: index,
+                lines: self.metrics.len(),
+            });
+        }
+        self.metrics.insert(index, metrics);
+        // **All three** structures, not two. An earlier version inserted into `metrics` and
+        // `lengths` and forgot `heights`, and the symptom was quiet and confusing: `line_count()`
+        // reads the *Fenwick* length, so it stayed at 5 after inserting into a 5-line geometry, and
+        // the ported H2 test `inserting_and_removing_keeps_the_tree_consistent` reported
+        // "left: 5, right: 6".
+        //
+        // The lesson is that `line_count()` has two plausible sources -- the `Vec<LineMetrics>` and
+        // the tree -- and this type keeps three structures that must agree. `check_invariants` below
+        // is what makes the agreement testable rather than a convention.
+        self.heights.insert(index, metrics.height());
+        self.lengths.insert(index, len as u32);
+        Ok(())
+    }
+
+    /// Assert that `metrics`, `heights` and `lengths` all have `line_count()` entries and agree.
+    ///
+    /// Test-only, and the reason it exists is the bug above: this type keeps three parallel
+    /// structures, and a mutation that updates two of them is silent -- every individual method still
+    /// returns a sensible value, and only a cross-check catches it.
+    ///
+    /// Not a `debug_assert`: a release build with a desynchronised geometry produces a document that
+    /// scrolls wrong, and the assertion is the only place that is knowable.
+    ///
+    /// Public because the interesting callers are the integration tests, which is where a structural
+    /// change is exercised -- [`insert_line`](Self::insert_line) and [`remove_line`](Self::remove_line)
+    /// were both wrong once, in the same way, and the unit tests did not notice because they only checked
+    /// the one structure they had just touched.
+    pub fn check_invariants(&self) {
+        assert_eq!(
+            self.metrics.len(),
+            self.heights.len(),
+            "metrics has {} lines but the height tree has {}",
+            self.metrics.len(),
+            self.heights.len()
+        );
+        assert_eq!(
+            self.metrics.len(),
+            self.lengths.len(),
+            "metrics has {} lines but the byte tree has {}",
+            self.metrics.len(),
+            self.lengths.len()
+        );
+        let sum: u32 = self.metrics.iter().map(LineMetrics::height).sum();
+        assert_eq!(
+            self.heights.total(),
+            sum,
+            "the height tree totals {} but the metrics sum to {}",
+            self.heights.total(),
+            sum
+        );
+        for i in 0..self.metrics.len() {
+            assert_eq!(
+                self.heights.weight(i),
+                self.metrics[i].height(),
+                "height tree and metrics disagree at line {i}"
+            );
+        }
+    }
+
+    /// Remove the line at `index`, returning its metrics and byte length.
+    ///
+    /// The inverse of [`insert_line`](Self::insert_line), and O(n) for the same reason.
+    ///
+    /// Refuses to remove the last line: a document with no lines has no height, and
+    /// [`Fenwick::lower_bound`] on an empty tree returns 0 with no meaning. A text document always
+    /// has at least one line, because an empty document is one empty line, not zero -- which is the
+    /// same rule [`Rope`](crate::Rope)'s leaf count follows.
+    pub fn remove_line(&mut self, index: usize) -> Result<(LineMetrics, usize), GeometryError> {
+        if index >= self.metrics.len() {
+            return Err(GeometryError::NoSuchLine {
+                line: index,
+                lines: self.metrics.len(),
+            });
+        }
+        if self.metrics.len() == 1 {
+            return Err(GeometryError::LastLine);
+        }
+        let metrics = self.metrics.remove(index);
+        // `heights` too -- see `insert_line`'s note. Dropping it here would leave the tree with one
+        // more weight than `metrics`, and `remove_line` would then be the mirror of the bug that
+        // `insert_line` had.
+        self.heights.remove(index);
+        let len = self.lengths.remove(index) as usize;
+        Ok((metrics, len))
+    }
+
+    /// The line count at which an O(n) line insertion consumes the whole per-keystroke budget.
+    ///
+    /// # The measurement
+    ///
+    /// PROJECT.md §5 Phase 6 says "Re-derive the section/split threshold by measurement in this phase,
+    /// and write the number down." So here is the number, and how it was arrived at.
+    ///
+    /// Every operation that changes the *count* of lines -- a typed newline, a line that wraps, a
+    /// paragraph re-flow -- is O(n), because a Fenwick node's range is defined by position and
+    /// inserting a line renumbers every later one. Measured on this host, release, 15 batches of 500
+    /// insertions at 60,000 lines:
+    ///
+    /// ```text
+    /// insert_line             min 332 us   median 383 us   max 481 us
+    /// per line                6.4 ns
+    /// ```
+    ///
+    /// and the components, from a separate breakdown run:
+    ///
+    /// ```text
+    /// Fenwick::rebuild_tree   ~250 us      at n = 60,000; insert_line does two of these
+    /// Fenwick::from_weights   841 us        at n = 60,000, including two 240 KB allocations
+    /// Vec<LineMetrics>::insert 428 us       960 KB moved, i.e. ~2.2 GB/s on this host
+    /// set_metrics (point update) 46 ns      O(log n), for comparison
+    /// ```
+    ///
+    /// ~7 ns per line, linear, so the line count at which one newline consumes a 500 us keystroke
+    /// budget is 500,000 / 7 = **~72,000 lines**. That is the constant.
+    ///
+    /// **H1's 2,000-page budget is 60,000 lines, which is *at* it** -- the newline keystroke at the
+    /// design document size measures a 383-460 us median against the 500 us target depending on machine
+    /// load, with batch maxima from 478 to 572 us. So the honest reading is that a newline at the design
+    /// document size costs about the whole keystroke budget, sometimes a little under it, and the derived
+    /// threshold above is where it definitely exceeds it.
+    ///
+    /// The measurement spans a 1.7x range on an unloaded host, which is why the gate asserts a regression
+    /// ceiling rather than the target itself. A test that fails intermittently on the machine's load is
+    /// not measuring the editor.
+    ///
+    /// # What the number means, and what it does not
+    ///
+    /// **It is not a tuning knob.** There is no crossover to find, because there is no cheaper branch
+    /// to switch to. An incremental insertion would splice the weight array -- an O(n) memmove that
+    /// cannot be avoided either -- and then still fix up the aggregates, which is the O(n) pass
+    /// already being done. 16 `Fenwick::add` calls would not beat a 250 us rebuild.
+    ///
+    /// **It is the trigger for a different structure.** Past 78,000 lines -- 2,600 pages, above H1's
+    /// own budget -- a newline starts to exceed the target, and the fix is not a faster rebuild but a
+    /// structure that inserts in O(log n). An order-statistic tree is the general answer; a B-tree over
+    /// runs of equal line heights is the cheaper one here, because a document's line heights have long
+    /// equal runs and the structure would compress rather than merely reorder.
+    ///
+    /// # Two claims this constant's history got wrong, both by guessing
+    ///
+    /// The first version of this comment asserted `insert_line` cost "~61 us" and that an incremental
+    /// point-update path would be cheaper below some threshold. Neither was measured. Measuring put
+    /// the real figure at **34.8 ms** -- 70x over budget -- because extracting the weights to rebuild
+    /// from cost O(n log n). Fixing that (the tree now
+    /// [carries its weights](crate::Fenwick)) brought it to 515 us by one noisy measurement; a
+    /// 7x200-batch median put it at **415 us**, and the "1.03x the budget" conclusion drawn from the
+    /// 515 figure was wrong -- H1's document size is inside the budget, not outside it.
+    ///
+    /// The lesson is the one this crate already encodes elsewhere: measure, then write the number down.
+    /// A plausible number in a doc comment is a claim, and a wrong one is worse than none, because the
+    /// next reader inherits it.
+    ///
+    /// # Why it is a named constant and not a comment
+    ///
+    /// A measured constant that lives only in prose goes stale silently. As a constant with a test that
+    /// checks its meaning, it fails loudly when the measurement moves.
+    pub const REBUILD_BUDGET_LINE_COUNT: usize = 72_000;
+
+    /// A line change's vertical delta, for scroll compensation.
+    ///
+    /// H2's `HeightUpdate`: `delta` is how much the line's box changed and `applied` is whether
+    /// anything was recorded. H1 differs in one way that matters: there is no "unmeasured" state, so
+    /// `applied` is only ever false for a no-op or a rejected value, never for a guess.
+    ///
+    /// A `delta` of `i32::MIN` is the rejection sentinel H2 uses a non-finite float for. It cannot
+    /// collide with a real delta because a line's height is a `u32` and its change is therefore at
+    /// most `±u32::MAX`, well away from `i32::MIN`.
+    pub fn set_metrics_checked(&mut self, line: usize, metrics: LineMetrics) -> HeightUpdate {
+        if line >= self.metrics.len() {
+            return HeightUpdate {
+                delta: 0,
+                applied: false,
+            };
+        }
+        let delta = metrics.height() as i64 - self.metrics[line].height() as i64;
+        if delta == 0 {
+            // A re-apply of the same height must be a no-op, or the tree accumulates drift from
+            // repeated subtraction. H2 needed this because it re-measures constantly; H1 needs it
+            // because a style edit can legitimately re-apply the same metrics.
+            return HeightUpdate {
+                delta: 0,
+                applied: false,
+            };
+        }
+        let _ = self.set_metrics(line, metrics);
+        HeightUpdate {
+            delta: delta as i32,
+            applied: true,
+        }
+    }
+
+    /// How much to shift the scroll position to hold the viewport steady.
+    ///
+    /// Ported verbatim from H2's `Geometry::scroll_compensation`, with `f64` replaced by `i32`
+    /// pixels, which makes the comparisons exact.
+    ///
+    /// # The invariant
+    ///
+    /// If the changed line lies *entirely above* `viewport_top`, everything visible moved by `delta`,
+    /// so scrolling by `delta` puts it back. If the line straddles `viewport_top` or lies below it,
+    /// the content at the top of the viewport did not move, so any compensation would be wrong.
+    ///
+    /// Compensating unconditionally is the bug H2's module doc opens with: scrolling down through
+    /// fresh content ratchets the document taller with every measurement.
+    ///
+    /// # Why H1 needs it even though H1 never measures
+    ///
+    /// H2 needed this because heights arrive late, from the DOM. H1's heights arrive immediately, from
+    /// font metrics -- but the *trigger* is the same: a line's box changing for reasons the user did
+    /// not ask for. Typing one character into a line that wraps produces a new line, every line below
+    /// it shifts, and without compensation the text under the user's eyes jumps by the height of the
+    /// wrapped remainder. That is H2's `measuring_a_section_shifts_everything_below_it`, reached by a
+    /// different route.
+    pub fn scroll_compensation(&self, index: usize, delta: i32, viewport_top: u32) -> i32 {
+        if delta == 0 {
+            return 0;
+        }
+        let Ok(bottom) = self
+            .y_of(index)
+            .map(|top| top.saturating_add(self.line_height_or_zero(index)))
+        else {
+            return 0;
+        };
+        // `bottom <= viewport_top`: the changed line ends at or above the top of the viewport, so it
+        // is entirely off-screen above and everything visible moved by `delta`.
+        //
+        // `<=`, not `<`: a line that *ends exactly at* `viewport_top` has no visible pixels, so
+        // compensating is correct, and H2 makes the same choice.
+        if bottom <= viewport_top {
+            delta
+        } else {
+            0
+        }
+    }
+
+    /// The half-open line range needed to fill a viewport at scroll offset `y`, with `overscan` lines
+    /// of margin on each side.
+    ///
+    /// Ported from H2's `Geometry::visible_range`. `None` only for a document with no lines, which
+    /// cannot happen: [`remove_line`](Self::remove_line) refuses to leave zero.
+    ///
+    /// `overscan` exists because mounting is not free: without it, a one-line scroll invalidates
+    /// everything, because the line that was at the bottom edge is now at the top. H2 measured this
+    /// as the difference between a smooth and a stuttering fast scroll.
+    pub fn visible_range(
+        &self,
+        y: u32,
+        viewport_height: u32,
+        overscan: usize,
+    ) -> Option<(usize, usize)> {
+        let n = self.metrics.len();
+        if n == 0 {
+            return None;
+        }
+        let first = self.line_at(y).saturating_sub(overscan);
+        let last_visible = self.line_at(y.saturating_add(viewport_height));
+        let last = (last_visible + 1 + overscan).min(n);
+        Some((first, last.max(first + 1).min(n)))
+    }
+
     /// The Fenwick tree over line heights, for callers that need it directly.
     #[inline]
     pub fn height_tree(&self) -> &Fenwick {
@@ -422,15 +789,64 @@ pub struct DamageRect {
 }
 
 impl DamageRect {
-    /// The smallest rect containing both.
+    /// The empty rect: nothing is damaged.
+    pub const EMPTY: Self = Self {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+
+    /// Build a rect.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// One past the right edge.
+    #[inline]
+    pub fn right(&self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    /// One past the bottom edge.
+    #[inline]
+    pub fn bottom(&self) -> u32 {
+        self.y.saturating_add(self.height)
+    }
+
+    /// Whether this rect touches nothing.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// The smallest rect containing both. Empty if either is empty.
     ///
     /// The union is what a frame accumulates: two keystrokes on different lines repaint one rect
     /// spanning both, and the union is never larger than the sum of the parts.
+    ///
+    /// # `saturating` rather than wrapping
+    ///
+    /// `x + width` on a `u32` can wrap for a rect near the top-left of a huge coordinate space, and
+    /// a wrapped `right()` is *smaller* than `x`, so a plain `+` would make `union` produce a rect
+    /// with negative width -- which then reads as empty and silently drops the damage. Saturation
+    /// clamps to `u32::MAX`, which is the right answer for a coordinate that cannot be represented.
     pub fn union(&self, other: &DamageRect) -> DamageRect {
+        if self.is_empty() {
+            return *other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
         let x = self.x.min(other.x);
         let y = self.y.min(other.y);
-        let right = (self.x.saturating_add(self.width)).max(other.x.saturating_add(other.width));
-        let bottom = (self.y.saturating_add(self.height)).max(other.y.saturating_add(other.height));
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
         DamageRect {
             x,
             y,
@@ -439,14 +855,39 @@ impl DamageRect {
         }
     }
 
-    /// Whether `y` falls inside, inclusive of both edges.
+    /// Clip to `bounds`, returning [`DamageRect::EMPTY`] if they do not overlap.
+    pub fn clip(&self, bounds: &DamageRect) -> DamageRect {
+        if self.is_empty() || bounds.is_empty() {
+            return DamageRect::EMPTY;
+        }
+        let x = self.x.max(bounds.x);
+        let y = self.y.max(bounds.y);
+        let right = self.right().min(bounds.right());
+        let bottom = self.bottom().min(bounds.bottom());
+        if right <= x || bottom <= y {
+            return DamageRect::EMPTY;
+        }
+        DamageRect {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        }
+    }
+
+    /// Whether `y` falls inside, half-open at the bottom.
     ///
-    /// Inclusive because a line's damage rect must include the row *after* its last text row when the
+    /// Half-open because a line's damage rect must include the row *after* its last text row when the
     /// next line's ascenders bleed into it, and because an off-by-one here repaints one row too few
     /// and leaves a visible artefact.
     #[inline]
     pub fn contains_row(&self, y: u32) -> bool {
-        y >= self.y && y < self.y.saturating_add(self.height)
+        y >= self.y && y < self.bottom()
+    }
+
+    /// Every scanout row in this rect, as `y0..y1`. For callers that walk rows.
+    pub fn row_range(&self) -> std::ops::Range<u32> {
+        self.y..self.bottom()
     }
 
     /// Number of scanout rows touched, i.e. `height`.

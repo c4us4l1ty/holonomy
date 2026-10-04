@@ -310,6 +310,8 @@ dependencies = [
  "holonomy-geometry",
  "holonomy-jail",
  "holonomy-secure",
+ "libc",
+ "zeroize",
 ]
 
 [[package]]

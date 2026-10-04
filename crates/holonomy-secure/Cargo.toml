@@ -19,3 +19,7 @@ holonomy-jail = { path = "../holonomy-jail" }
 libc = "0.2"
 # Volatile writes, so the scrub on drop cannot be optimised into nothing.
 zeroize = "1.9"
+[dev-dependencies]
+# The allocation-failure regression test calls `getrlimit` and `mlock` directly, to exhaust
+# `RLIMIT_MEMLOCK` and reach the code path that used to double-unmap.
+libc = "0.2"

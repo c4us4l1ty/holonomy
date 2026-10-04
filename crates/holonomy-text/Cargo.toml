@@ -15,7 +15,15 @@ publish.workspace = true
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-secure = { path = "../holonomy-secure" }
 
+# The undo stack zeroizes through this crate rather than a hand-rolled volatile write, so the
+# scrub is the audited implementation and not a local one that could be optimised away.
+zeroize = "1.9"
+
 # Dev-dependency only: the latency test measures the Fenwick lookup's cost, so it needs the
 # geometry crate. The library itself does not depend on it -- the rope knows nothing about layout.
 [dev-dependencies]
 holonomy-geometry = { path = "../holonomy-geometry" }
+
+# The gate reads `RLIMIT_MEMLOCK` with `getrlimit`, to report the page-lock ceiling rather than a
+# remembered one. The library itself uses libc only through holonomy-secure.
+libc = "0.2"

@@ -13,8 +13,18 @@
 //! Lands in Phase 6. Gate: insert/delete O(1) with zero allocations, asserted by a counting
 //! global allocator. See PROJECT.md §5 Phase 6 and PRD §7.1.
 
+mod editor;
 mod leaf;
 mod rope;
+mod span;
+pub mod undo;
+
+pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH};
+pub use span::{
+    SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER,
+    STYLE_ITALIC,
+};
+pub use undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 
 pub use leaf::{CagrLeaf, LeafError, CACHELINE_BYTES, GAP_MINIMUM, GAP_TARGET, LEAF_CAPACITY};
 pub use rope::{Rope, RopeError};

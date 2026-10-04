@@ -825,6 +825,24 @@ impl CagrLeaf {
     }
 }
 
+impl std::fmt::Debug for CagrLeaf {
+    /// Prints the leaf's *state*, never its text.
+    ///
+    /// A derived `Debug` on a struct holding a raw `*mut u8` would print the pointer, which is fine,
+    /// but the obvious temptation is to print the buffer -- and this leaf holds the document's
+    /// plaintext. A debug format that puts secrets in a log file is a defect in a container whose
+    /// entire purpose is not leaking them, so this one is written by hand and shows lengths only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CagrLeaf")
+            .field("text_len", &self.text_len)
+            .field("gap_start", &self.gap_start)
+            .field("gap_end", &self.gap_end)
+            .field("gap_len", &(self.gap_end - self.gap_start))
+            .field("is_dirty", &self.is_dirty.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for CagrLeaf {
     fn drop(&mut self) {
         // Scrub before `SecureBlock` unmaps. Doing it here rather than relying on the block's own

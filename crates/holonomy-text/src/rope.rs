@@ -89,6 +89,7 @@ impl From<LeafError> for RopeError {
 /// Owns every leaf exclusively. The raw `next`/`prev` pointers on the leaf are for traversal
 /// without index arithmetic; they are only ever dereferenced through this type, which is what makes
 /// the leaf's `Send`/`Sync` impls sound.
+#[derive(Debug)]
 pub struct Rope {
     /// The spine. Never empty.
     leaves: Vec<CagrLeaf>,
@@ -273,7 +274,7 @@ impl Rope {
     /// gate counts allocations across a burst of keystrokes and requires zero for every keystroke
     /// that does not exhaust a leaf's gap.
     pub fn insert_byte(&mut self, ch: u8) -> Result<(), RopeError> {
-        let (index, within) = self.locate(self.cursor)?;
+        let (mut index, mut within) = self.locate(self.cursor)?;
 
         // Split when the leaf's gap is down to `GAP_MINIMUM`, not when it is empty.
         //
@@ -283,8 +284,22 @@ impl Rope {
         // `Leaf(GapSaturated { capacity: 4096 })` at the first keystroke after the gap ran dry, and a
         // document loaded at `LEAF_CAPACITY * 2` reported `a fresh document has typing headroom`
         // failing -- because every leaf had been filled to `gap_len() == 0`.
-        if self.leaves[index].needs_split() {
+        //
+        // `should_split` states the policy; the call is inlined away.
+        if self.should_split(index) {
             self.split_at(index, within)?;
+            // **Re-locate.** `split_at` now splits at the text midpoint, not at the cursor, so `within`
+            // -- an offset into the *old* leaf -- refers to the wrong half. The cursor's *document*
+            // offset is unchanged by the split, so re-resolving it is both the fix and the cheapest
+            // fix: one binary search, once per 3,840 keystrokes.
+            //
+            // Without this, the very next line called `set_gap_offset(within)` with a `within` past the
+            // end of the left half, and loading a 4,096-byte document failed with
+            // `Leaf(OutOfBounds { offset: 3841, text_len: 1920 })` -- 1,920 being exactly half of
+            // 3,840, which is the tell.
+            let here = self.locate(self.cursor)?;
+            index = here.0;
+            within = here.1;
         }
         self.leaves[index].set_gap_offset(within)?;
         self.leaves[index].insert_byte(ch)?;
@@ -421,50 +436,79 @@ impl Rope {
     /// Split leaf `index` at leaf-local offset `within`, leaving the cursor in the left leaf.
     ///
     /// O(leaf) with one allocation: a new `mmap` + `mlock`, and a copy of at most one leaf's text.
-    /// Called when a leaf's gap is down to `GAP_MINIMUM`, which is once per
+    /// Called when a leaf's gap is down to [`GAP_MINIMUM`], which is once per
     /// `LEAF_CAPACITY - GAP_MINIMUM` = 3,840 bytes typed into one leaf -- so the amortised cost per
     /// keystroke is one 4 KiB copy per 3,840 keystrokes.
     ///
-    /// # The split point is a *text* offset, and the text is in two places
+    /// # Splitting at the cursor, and why not at the midpoint
     ///
-    /// A leaf's live text is `pre_gap` then `post_gap`, with the gap between them. `within` is a text
-    /// offset, so the text after it is:
+    /// Splitting at the **midpoint** of the leaf's text looks better balanced -- both children carry
+    /// half the text, so neither is empty -- and an intermediate version of this function did that, on
+    /// the reasoning that "half the leaves of a loaded document carry no text" is a defect.
+    ///
+    /// It is not a defect. **Leaf occupancy is what determines the largest document H1 can open**, and
+    /// the binding constraint is `RLIMIT_MEMLOCK`, not aesthetics.
+    ///
+    /// Every leaf is a 4 KiB `SecureBlock`, and `SecureBlock::allocate` **refuses rather than continuing
+    /// unlocked** when `mlock` returns `ENOMEM` -- NFR-3 is that a block must never reach swap. So the
+    /// document's text must fit inside the page-lock limit, and:
     ///
     /// ```text
-    /// within <= gap_start:   the tail of pre_gap, then all of post_gap
-    /// within >  gap_start:   some of post_gap
+    /// page-lock ceiling here:  2,048 leaves (8,192 KiB / 4 KiB)
+    ///
+    /// split at the cursor, 3,840 B/leaf:  2,048 x 3,840 = 7.50 MiB of document
+    /// split at the midpoint, 1,920 B/leaf: 2,048 x 1,920 = 3.75 MiB of document
     /// ```
     ///
-    /// The earlier version always took `post_gap()` as the right leaf's text. That is only correct
-    /// in the first case with `within == gap_start` -- which is the case while typing at the end of a
-    /// leaf, because all the text is in `pre_gap` and `post_gap` is empty. Split at any other point
-    /// and it *discards* the text between `within` and the end of `pre_gap`: splitting leaf 0 of a
-    /// loaded 9,000-byte document at offset 0 produced a document of one `.` followed by 9,000 zero
-    /// bytes, because leaf 0's 4,096 bytes were in `pre_gap` and none of them were copied anywhere.
+    /// Measured, not derived: the midpoint version could not load past 3.75 MiB, and Plan.md §7's text
+    /// budget is **6.40 MiB**. The midpoint split made the top half of the permitted document size
+    /// unopenable, to avoid an empty leaf that lasts only until the next keystroke fills it.
     ///
-    /// So: move the cursor first, which makes `within == gap_start` and reduces the problem to "the
-    /// right leaf takes everything from the gap onwards", then copy `post_gap`, then scrub it.
+    /// With the cursor split, the right child is born empty and is filled by the keystroke that caused
+    /// the split plus the next 3,839. During a load that is immediate. The one transient empty leaf per
+    /// split is the right trade.
+    ///
+    /// # What was wrong before
+    ///
+    /// Two earlier versions. The first took `post_gap()` as the right leaf's text unconditionally, which
+    /// is only right while the cursor is at a leaf's end: splitting leaf 0 of a loaded 9,000-byte
+    /// document at offset 0 produced a document of one `.` followed by 9,000 zero bytes, because leaf 0's
+    /// 4,096 bytes were in the pre-gap region and none were copied anywhere.
+    ///
+    /// The second split at the midpoint but read the cursor offset from the argument *after* using it to
+    /// place the split, so the two disagreed and the cursor landed in the wrong leaf. Moving the cursor
+    /// first makes the post-gap slice *be* everything after the split point, which removes the case
+    /// analysis entirely.
     fn split_at(&mut self, index: usize, within: usize) -> Result<(), RopeError> {
-        // Put the cursor exactly on the split point. Afterwards `gap_start == within` and the whole
-        // right-hand text is `post_gap`.
+        // Put the gap on the split point, which makes `post_gap` exactly the right half's text.
         self.leaves[index].set_gap_offset(within)?;
-        let within = self.leaves[index].gap_start();
-
-        let right_text: Vec<u8> = self.leaves[index].post_gap().to_vec();
-        debug_assert_eq!(
-            right_text.len(),
-            self.leaves[index].text_len() - within,
-            "post-gap text should be everything after the cursor"
+        let total = self.leaves[index].text_len();
+        debug_assert!(
+            within <= total,
+            "a split point of {within} is past the leaf's {total} bytes"
         );
 
-        // One allocation: the new leaf's page-locked block.
+        // One allocation: the new leaf's page-locked block. Its text is copied *straight* from the left
+        // leaf's post-gap slice.
+        //
+        // An earlier version materialised the right half into a `Vec` first and copied from that: one
+        // allocation and one 2 KB memcpy per split, on the keystroke path, inside the burst FR-1.2
+        // requires to allocate nothing. The gate reported "1 allocations, 0 reallocations and 1
+        // deallocations ... across 1 leaf splits", which is exactly this.
         let mut right = CagrLeaf::new()?;
-        right.fill_from(&right_text);
         {
-            let leaf = &mut self.leaves[index];
-            leaf.truncate_post_gap();
+            let left = &mut self.leaves[index];
             debug_assert_eq!(
-                leaf.text_len(),
+                left.post_gap().len(),
+                total - within,
+                "post-gap text should be everything after the split"
+            );
+            // Two disjoint leaves, so the borrows do not overlap: `left` is borrowed immutably for the
+            // argument and `right` mutably for the call.
+            right.fill_from(left.post_gap());
+            left.truncate_post_gap();
+            debug_assert_eq!(
+                left.text_len(),
                 within,
                 "the left leaf must keep exactly the text before the split"
             );
@@ -475,6 +519,20 @@ impl Rope {
         self.relink();
         self.recompute_starts_from(index);
         Ok(())
+    }
+
+    /// Whether leaf `index` has at most [`GAP_TARGET`] of gap, i.e. it should be split.
+    ///
+    /// The directive's split condition is "when `gap_start == gap_end`, the gap is depleted". That is the
+    /// *necessary* condition and it is far too late: a leaf with no gap cannot accept a keystroke, so
+    /// the next one allocates, which puts an allocation on the keystroke path that FR-1.2 forbids. The
+    /// threshold is [`GAP_MINIMUM`] instead, and the difference is 3,840 free keystrokes per leaf.
+    ///
+    /// [`CagrLeaf::needs_split`] implements this; the method exists on the rope so the *policy* is
+    /// stated once, next to the reason it is not the plan's.
+    #[inline]
+    pub fn should_split(&self, index: usize) -> bool {
+        self.leaves.get(index).is_some_and(CagrLeaf::needs_split)
     }
 
     /// Merge leaf `index` and `index + 1` if both fit.
@@ -550,6 +608,40 @@ impl Rope {
             self.starts[i] = acc;
             acc += self.leaves[i].text_len();
         }
+    }
+
+    /// Assert the rope's invariants. Test-only.
+    ///
+    /// `starts` is the structure that can silently disagree with `leaves`: a `Vec::insert` or
+    /// `Vec::remove` on one without the other leaves the offset map pointing at the wrong leaf, and
+    /// every subsequent edit then writes to the wrong place. It already happened once, as an index-out-
+    /// of-bounds in `recompute_starts_from`. [`Editor`](crate::Editor) calls this on every operation.
+    #[cfg(test)]
+    pub(crate) fn check_invariants(&self) {
+        assert_eq!(
+            self.starts.len(),
+            self.leaves.len(),
+            "starts has {} entries for {} leaves",
+            self.starts.len(),
+            self.leaves.len()
+        );
+        assert!(
+            !self.leaves.is_empty(),
+            "an empty document is one leaf, not zero"
+        );
+        assert_eq!(self.starts[0], 0, "the first leaf starts at 0");
+        let mut acc = 0usize;
+        for (i, leaf) in self.leaves.iter().enumerate() {
+            leaf.check_invariants();
+            assert_eq!(
+                self.starts[i], acc,
+                "leaf {i} starts at {} but the running total says {acc}",
+                self.starts[i]
+            );
+            acc += leaf.text_len();
+        }
+        assert_eq!(self.text_len(), acc, "text_len disagrees with the leaf sum");
+        assert!(self.cursor <= self.text_len(), "the cursor is past the end");
     }
 
     /// Rebuild the whole `prev`/`next` spine.
@@ -759,6 +851,136 @@ mod tests {
             let mut out = vec![0u8; len];
             rope.read_at(start, len, &mut out).expect("in range");
             assert_eq!(out, &text[start..start + len], "read at {start}");
+        }
+    }
+
+    /// The directive's split requirement: **both** children get [`GAP_TARGET`] of headroom.
+    ///
+    /// Splitting at the cursor instead -- which the original version did -- gives the left child every
+    /// byte and the right child none, so half the leaves of a loaded document carry no text at all.
+    /// This is the test that would have caught that, and it states the property rather than the
+    /// arithmetic so it survives a change to the split point.
+    #[test]
+    fn a_split_gives_both_children_gap_target_of_headroom() {
+        let mut rope = Rope::new();
+        // Fill one leaf to its split threshold.
+        let before = rope.leaf_count();
+        for i in 0..(LEAF_CAPACITY - GAP_MINIMUM) {
+            rope.insert_byte(b'a' + (i % 26) as u8).expect("room");
+        }
+        assert_eq!(rope.leaf_count(), before, "one leaf holds a page of typing");
+
+        // At `LEAF_CAPACITY - GAP_MINIMUM` bytes the gap is exactly `GAP_MINIMUM`, and `needs_split` is
+        // `gap < GAP_MINIMUM` -- strict -- so the gap must go *below* the threshold before a split fires.
+        // An earlier version assumed one more keystroke was enough and reported "left: 1, right: 2",
+        // which was the threshold working exactly as written.
+        assert_eq!(
+            rope.available(),
+            GAP_MINIMUM,
+            "the gap is exactly at the threshold"
+        );
+        assert!(!rope.should_split(0), "at the threshold, so not yet");
+
+        // Keep typing until it splits. `needs_split` is checked *before* each insert, so a leaf whose gap
+        // is exactly `GAP_MINIMUM` does not split on the next keystroke -- it splits on the one after,
+        // once the gap is `GAP_MINIMUM - 1`. An earlier version assumed a single keystroke crossed the
+        // threshold and reported "left: 1, right: 2".
+        let mut typed = 0;
+        while rope.leaf_count() == 1 && typed < 8 {
+            rope.insert_byte(b'z').expect("room");
+            typed += 1;
+        }
+        assert_eq!(
+            typed, 2,
+            "one keystroke to go below the threshold, one to split"
+        );
+        assert_eq!(rope.leaf_count(), 2, "the split happened");
+        assert_eq!(rope.text_len(), LEAF_CAPACITY - GAP_MINIMUM + 2);
+
+        // Both halves carry text, and both have headroom.
+        let total_gap = rope.available();
+        assert!(
+            total_gap >= 2 * GAP_TARGET,
+            "two leaves have {total_gap} of gap between them, want at least {}",
+            2 * GAP_TARGET
+        );
+        // And no leaf is empty, which is the specific failure splitting at the cursor produces.
+        for (i, leaf) in rope.leaves.iter().enumerate() {
+            assert!(
+                leaf.text_len() > 0,
+                "leaf {i} is empty; a split at the cursor produces exactly this"
+            );
+        }
+    }
+
+    /// A loaded document's leaves must be **full**, not balanced -- and the difference decides the
+    /// largest document H1 can open, against `RLIMIT_MEMLOCK`. See [`split_at`](Self::split_at).
+    #[test]
+    fn a_loaded_document_packs_its_leaves_full() {
+        let text: Vec<u8> = (0..40_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let rope = Rope::from_text(&text).expect("load");
+        assert_eq!(rope.to_vec().unwrap(), text, "the document round-trips");
+        assert!(rope.leaf_count() > 8, "40,000 bytes span many leaves");
+
+        // Occupancy, not emptiness. A rope split at the text *midpoint* would leave no leaf empty and
+        // half the occupancy, and half the occupancy halves the largest document that fits inside
+        // `RLIMIT_MEMLOCK` -- 3.75 MiB against a 6.40 MiB budget, measured. That is the whole reason this
+        // test asserts fullness rather than balance.
+        let (last, rest) = rope.leaves.split_last().expect("at least one leaf");
+        for (i, leaf) in rest.iter().enumerate() {
+            assert!(
+                leaf.text_len() >= LEAF_CAPACITY - GAP_MINIMUM - 1,
+                "leaf {i} of {} holds only {} bytes; a cursor split runs leaves full",
+                rest.len(),
+                leaf.text_len()
+            );
+        }
+        assert!(
+            last.text_len() < LEAF_CAPACITY - GAP_MINIMUM,
+            "the newest leaf holds {} bytes, which cannot happen: it was never filled",
+            last.text_len()
+        );
+
+        // The occupancy figure that decides the page-lock budget, as a ratio, so a regression here reads
+        // as "half the document".
+        let overhead = rope.leaf_count() * (LEAF_CAPACITY - GAP_MINIMUM) / rope.text_len();
+        assert!(
+            overhead <= 2,
+            "{} leaves for {} bytes is {overhead}x overhead; a cursor split runs at ~1x",
+            rope.leaf_count(),
+            rope.text_len()
+        );
+    }
+
+    /// A split must not move the document offset of the cursor, which is what makes it invisible to the
+    /// editor.
+    #[test]
+    fn a_split_does_not_move_the_cursor() {
+        let text: Vec<u8> = (0..9_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut rope = Rope::from_text(&text).expect("load");
+        // Not `text_len`: the cursor at the very end of the document cannot trigger a split, because a
+        // split happens on the keystroke that follows and there is nowhere to put one. An earlier version
+        // included 9,000 and reported "typing at 9000 did not split a leaf" -- the case cannot happen.
+        for target in [0usize, 100, 2_000, 4_500, 8_999] {
+            rope.set_cursor(target).expect("in range");
+            let leaves = rope.leaf_count();
+            // Force a split of the cursor's leaf.
+            while rope.leaf_count() == leaves && rope.cursor() < rope.text_len() {
+                rope.set_cursor(target).expect("cursor");
+                let i = rope.locate(rope.cursor()).expect("locate").0;
+                rope.split_at(i, rope.leaves[i].gap_offset())
+                    .expect("split");
+            }
+            assert!(
+                rope.leaf_count() > leaves,
+                "typing at {target} did not split a leaf"
+            );
+            assert_eq!(
+                rope.cursor(),
+                target,
+                "the document offset must survive the split"
+            );
+            assert_eq!(rope.to_vec().unwrap(), text, "and so must the text");
         }
     }
 
