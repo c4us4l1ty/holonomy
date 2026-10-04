@@ -13,3 +13,7 @@ publish.workspace = true
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
+holonomy-text = { path = "../holonomy-text" }
+
+[dev-dependencies]
+holonomy-assets = { path = "../holonomy-assets" }

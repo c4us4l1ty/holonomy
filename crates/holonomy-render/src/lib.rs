@@ -18,10 +18,12 @@ mod damage;
 mod tree;
 
 pub mod chrome;
+pub mod table;
 
 pub use chrome::{
     AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, StyleFlags,
     StyleFlagsSlot,
 };
 pub use damage::{DamageRect, DamageTracker};
+pub use table::{BorderIter, BorderRun, GridError, TableGrid};
 pub use tree::{Icon, Node, NodeKind, Rect, Style, SurfaceTree, TextRun};
