@@ -36,11 +36,13 @@
 //! blink cost one cell rather than a frame, and `painting_a_small_damage_rect_writes_fewer_pixels`
 //! asserts it rather than leaving it claimed.
 
+use core::fmt;
 use holonomy_assets::atlas::Atlas;
 use holonomy_assets::box_drawing;
 use holonomy_assets::metric;
 use holonomy_assets::payload::Style as AtlasStyle;
-use holonomy_render::{DamageRect, Node, SurfaceTree, TextRun};
+
+use holonomy_render::{AssetId, DamageRect, Node, RasterSource, Rect, SurfaceTree, TextRun};
 
 use crate::frame::{Frame, FrameError};
 
@@ -59,6 +61,22 @@ pub struct PaintStats {
     pub box_glyphs: u32,
     /// Codepoints with no glyph anywhere. See the module docs: not silently skipped.
     pub missing: u32,
+    /// Images blitted from decoded rasters.
+    ///
+    /// §2.9.3 requires `missing` to gain "a sibling, `resampled`, so a frame records how much work the
+    /// scaler did rather than hiding it", and the honest accounting is that **the scaler runs at decode
+    /// time, not at paint time**: §2.9.3's decision is that the cache holds page-column-width rasters,
+    /// so a 1920x1080 source is downscaled before it is ever resident and every image in the product is
+    /// a resample. A frame's share of that work is exactly the images it blitted, so this counts them
+    /// rather than inferring anything from a timer.
+    pub resampled: u32,
+    /// `Node::Image` whose raster was not resident, or whose rect did not match the raster's size.
+    ///
+    /// Counted for the same reason [`PaintStats::missing`] is counted: a missing image is a blank
+    /// rectangle, and a blank rectangle in a document is indistinguishable from a page break.
+    pub images_missing: u32,
+    /// Destination pixels written from decoded rasters.
+    pub image_pixels: u64,
     /// Pixels written.
     pub pixels: u64,
 }
@@ -80,12 +98,24 @@ struct Scratch {
 }
 
 /// Draws a [`SurfaceTree`] into a [`Frame`].
-#[derive(Debug)]
 pub struct Painter<'a> {
     atlas: Option<&'a Atlas>,
     /// Size index for [`TextRun`]s that ask for one.
     size_index: u8,
     scratch: Scratch,
+}
+
+/// Hand-written rather than derived, because `RasterSource` is a trait object and has no `Debug`.
+/// The source is reported as *present or absent*, which is the only thing about it that is this
+/// struct's business -- what it resolves to belongs to whoever implemented it.
+impl fmt::Debug for Painter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Painter")
+            .field("atlas", &self.atlas.is_some())
+            .field("size_index", &self.size_index)
+            .field("stats", &self.scratch.stats)
+            .finish()
+    }
 }
 
 impl<'a> Painter<'a> {
@@ -138,30 +168,69 @@ impl<'a> Painter<'a> {
     }
 
     /// Paint `tree` into `frame`, restricted to `damage` if given.
+    ///
+    /// No [`RasterSource`], so every [`Node::Image`] counts in
+    /// [`PaintStats::images_missing`]. The convenience form, for a document with no images and for the
+    /// tests that predate them.
     pub fn paint(
         &mut self,
         frame: &mut Frame,
         tree: &SurfaceTree,
         damage: Option<DamageRect>,
     ) -> Result<PaintStats, FrameError> {
+        self.paint_with_rasters(frame, tree, damage, None)
+    }
+
+    /// Paint `tree`, resolving [`Node::Image`]'s pixels through `rasters`.
+    ///
+    /// # Why the source is an argument and not a field
+    ///
+    /// The source in practice is the session's own `IcebergCache`, and the session *also* owns the
+    /// painter. A field would mean the painter held a borrow of a struct it lives inside, for as long
+    /// as the painter lives -- a self-referential `Session` that safe Rust cannot express, and that
+    /// `Box`-ing the cache would only disguise. An argument has the lifetime of the call, which is
+    /// exactly as long as the borrow needs to be.
+    ///
+    /// The cost is one extra parameter threaded through `walk` and `node`, and `walk` is recursive, so
+    /// it is one `&dyn` pointer copied per node. That is measurable only in a benchmark of an empty
+    /// tree, which is not a frame anyone paints.
+    pub fn paint_with_rasters(
+        &mut self,
+        frame: &mut Frame,
+        tree: &SurfaceTree,
+        damage: Option<DamageRect>,
+        rasters: Option<&dyn RasterSource>,
+    ) -> Result<PaintStats, FrameError> {
         self.scratch.stats = PaintStats::default();
-        self.walk(frame, tree, damage);
+        self.walk(frame, tree, damage, rasters);
         Ok(self.scratch.stats)
     }
 
-    fn walk(&mut self, frame: &mut Frame, tree: &SurfaceTree, damage: Option<DamageRect>) {
+    fn walk(
+        &mut self,
+        frame: &mut Frame,
+        tree: &SurfaceTree,
+        damage: Option<DamageRect>,
+        rasters: Option<&dyn RasterSource>,
+    ) {
         for child in &tree.before {
-            self.walk(frame, child, damage);
+            self.walk(frame, child, damage, rasters);
         }
         if let Some(node) = &tree.node {
-            self.node(frame, *node, damage);
+            self.node(frame, *node, damage, rasters);
         }
         for child in &tree.after {
-            self.walk(frame, child, damage);
+            self.walk(frame, child, damage, rasters);
         }
     }
 
-    fn node(&mut self, frame: &mut Frame, node: Node, damage: Option<DamageRect>) {
+    fn node(
+        &mut self,
+        frame: &mut Frame,
+        node: Node,
+        damage: Option<DamageRect>,
+        rasters: Option<&dyn RasterSource>,
+    ) {
         match node {
             Node::Rect(r) => {
                 let rect = DamageRect::new(r.x.max(0) as u32, r.y.max(0) as u32, r.width, r.height);
@@ -193,6 +262,7 @@ impl<'a> Painter<'a> {
                 self.scratch.stats.rects += 1;
             }
             Node::Text(run) => self.text(frame, run, damage),
+            Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
             Node::Icon(_) => {
                 // Icons are hand-authored 1-bit masks from `.rodata`, and nothing in the chrome uses
                 // one. Refusing to draw them beats drawing a wrong one: a silently blank icon is a bug
@@ -389,6 +459,164 @@ impl<'a> Painter<'a> {
     fn cell_height(&self) -> u32 {
         self.atlas.map_or(18, |a| u32::from(a.line_pitch()))
     }
+
+    /// Blit a decoded raster into `rect`.
+    ///
+    /// # Why the blit is 1:1 and no scaler lives here
+    ///
+    /// §2.9.3's decision is that the Iceberg cache holds **page-column-width** rasters rather than
+    /// native ones, because a ±1-page policy with native decoding holds exactly one 1080p image and
+    /// the second photo on facing pages breaches the budget. So the downscale has already happened by
+    /// the time a pixel is here -- it happened when the raster was admitted -- and `rect` is sized by
+    /// the session from the catalog's own `IHDR`, which is where the cache's dimensions came from too.
+    ///
+    /// A second resampler in this crate would then be a second implementation of §2.9.3's arithmetic
+    /// and a second thing to disagree with it. So there is none: if `rect` and the raster agree, the
+    /// blit is a copy; if they do not, the two callers have drifted and the painter says so.
+    ///
+    /// # Why a size mismatch is refused rather than stretched
+    ///
+    /// Nearest-neighbour stretching a photograph is not a degraded version of the image, it is a
+    /// different image, and there is no reading of it that is correct. `PaintStats::images_missing`
+    /// counts it, which makes the drift a number in a frame rather than a picture that is quietly
+    /// wrong.
+    fn image(
+        &mut self,
+        frame: &mut Frame,
+        rect: &Rect,
+        asset_id: AssetId,
+        damage: Option<DamageRect>,
+        rasters: Option<&dyn RasterSource>,
+    ) {
+        let area = rect.bounds();
+        let Some(area) = area else {
+            self.scratch.stats.images_missing += 1;
+            return;
+        };
+        if !intersects(area, damage) {
+            // Skipped for damage, not missing: the distinction is the same one `rects_skipped` makes
+            // for a rect, and conflating them would make a scrolled-past image look like a lost one.
+            self.scratch.stats.rects_skipped += 1;
+            return;
+        }
+        let Some(source) = rasters else {
+            // A painter with no raster source is the normal state for a document with no images, so
+            // this is counted rather than treated as a failure -- but it is counted separately from a
+            // cache miss so the two are distinguishable in a frame's stats.
+            self.scratch.stats.images_missing += 1;
+            return;
+        };
+        let Some(raster) = source.raster(asset_id) else {
+            self.scratch.stats.images_missing += 1;
+            return;
+        };
+        if raster.width != rect.width || raster.height != rect.height {
+            self.scratch.stats.images_missing += 1;
+            return;
+        }
+
+        // Alpha is honoured rather than ignored: a PNG with a transparent background must not paint
+        // the frame's colour over the text it sits on. The blend is integer, per the Zero-Bézier
+        // Invariant's spirit -- no float anywhere in this crate's blitters.
+        let fill = match damage {
+            Some(d) => area.clip(&d),
+            None => area,
+        };
+        let written = blit_rgba(
+            frame,
+            &fill,
+            rect.x,
+            rect.y,
+            raster.width,
+            raster.height,
+            raster.pixels,
+        );
+        self.scratch.stats.pixels += written;
+        self.scratch.stats.image_pixels += written;
+        self.scratch.stats.resampled += 1;
+    }
+}
+
+/// Blit an RGBA raster at `(x, y)`, 1:1, into `dst`.
+///
+/// `dst` is a **clipped** rect: `paint` clips the node's bounds to the damage before calling, so the
+/// raster's own coordinates have to be recovered by subtracting the node's origin. That is why `x` and
+/// `y` are passed alongside `dst` rather than being read out of it.
+///
+/// Returns the pixels written. The row loop skips rows the frame does not have, and the inner loop
+/// clips each row to the frame, so a raster hanging off the right or bottom edge is normal rather
+/// than something to guard against.
+fn blit_rgba(
+    frame: &mut Frame,
+    dst: &DamageRect,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    pixels: &[u8],
+) -> u64 {
+    let mut written = 0u64;
+    for r in 0..h {
+        let sy = y + r as i32;
+        if sy < 0 {
+            continue;
+        }
+        let dst_row = frame.row_mut(u32::try_from(sy).unwrap_or(u32::MAX));
+        if dst_row.is_empty() {
+            continue;
+        }
+        let src_row = r as usize * w as usize;
+        for cx in 0..w {
+            let sx = x + cx as i32;
+            if sx < 0 {
+                continue;
+            }
+            let Ok(px) = u32::try_from(sx) else { continue };
+            if px >= dst_row.len() as u32 {
+                break;
+            }
+            // The pixel's position inside the *clipped* rect, which is what decides whether it is
+            // inside the damage at all.
+            if px < dst.x || px >= dst.x.saturating_add(dst.width) {
+                continue;
+            }
+            let at = (src_row + cx as usize).saturating_mul(4);
+            let Some(px4) = pixels.get(at..at + 4) else {
+                // A short raster means the cache admitted something that is not `w * h * 4`, which
+                // `IcebergCache::insert` already refuses. Stopping here rather than reading past the
+                // end is belt to that braces, and the count below makes it visible.
+                break;
+            };
+            let (r8, g8, b8, a8) = (px4[0], px4[1], px4[2], px4[3]);
+            if a8 == 0 {
+                continue;
+            }
+            let under = dst_row[px as usize];
+            // Integer source-over: `src * a + dst * (255 - a)`, divided by 255.
+            //
+            // **All three channels use `/ 255`, and that is not interchangeable with `>> 8`.** The first
+            // version divided red by 255 and shifted the other two right by 8 -- the standard
+            // "good enough" fast blend -- and it loses the low bit of green and blue, so an *opaque*
+            // pixel came out as `(10, 19, 29)` where the source said `(10, 20, 30)`. An opaque blit has
+            // to be the identity: at `a == 255` there is no blending to do, and a blit that alters the
+            // colours of an opaque image reads as "the images look slightly wrong" rather than as a bug.
+            // `>> 8` is off by up to 1 in 255 on *every* pixel -- invisible on a photograph, a visible
+            // band on a flat one, and exactly wrong in a test that asserts a solid colour came through.
+            //
+            // `u32` intermediates because 255 * 255 * 2 is 130,050, which overflows a `u16` and would be
+            // one wrap away from overflowing an `i32`.
+            let a = u32::from(a8);
+            let inv = 255 - a;
+            let mix = |src: u8, dst: u32| (u32::from(src) * a + dst * inv) / 255;
+            let out = 0xFF00_0000
+                | (mix(b8, (under >> 16) & 0xFF) << 16)
+                | (mix(g8, (under >> 8) & 0xFF) << 8)
+                | mix(r8, under & 0xFF);
+            dst_row[px as usize] = out;
+            written += 1;
+        }
+    }
+    written
 }
 
 /// Draw one procedural box-drawing glyph. Returns whether the rune exists in the table.

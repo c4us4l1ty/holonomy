@@ -67,6 +67,16 @@ pub struct Entry {
     pub page: u32,
     /// Which image on that page, so a page with several images addresses them separately.
     pub index: u32,
+    /// The asset's content address: `BLAKE2b-256` over the asset's PNG bytes.
+    ///
+    /// **A raw `[u8; 32]`, not `holonomy_text::AssetId`, and that is deliberate.** A render tree says
+    /// "draw this asset" by content address; the cache says "I have a raster". The two are joined by
+    /// [`get_by_id`](IcebergCache::get_by_id), which is a linear scan over ≤ ~9 entries and is free
+    /// next to the blit it precedes. If this field were an `AssetId`, `holonomy-image` would depend on
+    /// `holonomy-text` and pull the whole gap-rope in behind it, so that §2.9.1's 60 KiB decoder budget
+    /// would be measured against a crate that also carries a text engine. The digest is a
+    /// `[u8; 32]` and that is all either side needs of it.
+    pub id: [u8; 32],
     /// Bytes of *source* (native) image that produced this raster, for `PaintStats`.
     ///
     /// The scaler's work is proportional to this, not to the raster, so it is what a "resampled"
@@ -217,6 +227,28 @@ impl IcebergCache {
             .find(|e| e.page == page && e.index == index)
     }
 
+    /// The entry for the asset `id`, if resident.
+    ///
+    /// The lookup a painter makes for [`Node::Image`](holonomy_render::Node::Image)'s content address.
+    /// A `Vec` scan rather than a `HashMap` because the key space is the number of rasters that fit in
+    /// the budget -- nine at §2.9.3's numbers -- and a hash table would cost more in code and in
+    /// binary than nine `u32` comparisons cost per image per frame.
+    ///
+    /// # Why the key is the address and not `(page, index)`
+    ///
+    /// Both address the same raster. The address is what the render tree carries, because a node must
+    /// be able to say *which picture* without knowing where it landed -- and the same asset pasted
+    /// twice is two anchors and one address, so an address-keyed lookup is what makes both anchors
+    /// find the same pixels instead of the second showing a blank.
+    pub fn get_by_id(&self, id: &[u8; 32]) -> Option<&Entry> {
+        self.entries.iter().find(|e| &e.id == id)
+    }
+
+    /// Whether a raster for `id` is resident, without borrowing it.
+    pub fn holds(&self, id: &[u8; 32]) -> bool {
+        self.get_by_id(id).is_some()
+    }
+
     /// Admit a raster for `(page, index)`, evicting whatever the ±1 rule allows first.
     ///
     /// Returns the entry's byte length on success. Eviction is *not* implicit here: the caller runs
@@ -230,8 +262,10 @@ impl IcebergCache {
     /// `RLIMIT_MEMLOCK` is spent by the document's text and a locked raster would fit only one
     /// beside a full document, defeating the policy this cache exists to implement. The raster is
     /// derived from the encrypted container, so the loss is re-decodable.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
+        id: [u8; 32],
         page: u32,
         index: u32,
         width: u32,
@@ -241,6 +275,14 @@ impl IcebergCache {
     ) -> Result<usize, CacheError> {
         if width == 0 || height == 0 {
             return Err(CacheError::ZeroSized);
+        }
+        // A raster already admitted for this address is *the same pixels*: the address is over the
+        // encoded PNG, so there is nothing to recompute and nothing to add. Re-admitting would evict a
+        // neighbour to make room for a byte-identical copy, and `set_window` on the next scroll would
+        // then scrub it. Scrolling back over an image inside the ±1 window is the common case, so this
+        // is the difference between a scroll that decodes and one that does not.
+        if let Some(existing) = self.get_by_id(&id) {
+            return Ok(existing.bytes());
         }
         let want = decoded.len();
         // A raster whose pixel buffer is not `width * height * 4` would make the painter's
@@ -288,6 +330,7 @@ impl IcebergCache {
             height,
             page,
             index,
+            id,
             source_pixels,
         });
         Ok(want)

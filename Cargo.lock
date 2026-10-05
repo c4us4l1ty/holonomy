@@ -218,6 +218,7 @@ dependencies = [
  "holonomy-display",
  "holonomy-export",
  "holonomy-geometry",
+ "holonomy-image",
  "holonomy-input",
  "holonomy-jail",
  "holonomy-render",
@@ -300,6 +301,7 @@ name = "holonomy-image"
 version = "3.0.0-singularity"
 dependencies = [
  "holonomy-jail",
+ "holonomy-render",
  "holonomy-secure",
  "libc",
  "miniz_oxide",

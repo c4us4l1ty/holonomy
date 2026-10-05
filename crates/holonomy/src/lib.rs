@@ -19,4 +19,4 @@ pub mod session;
 pub mod windowed;
 
 pub use args::{Args, ExportTarget, ParseError};
-pub use session::{Exit, ExportSink, Session, SessionError, SessionStats};
+pub use session::{Exit, ExportSink, Session, SessionError, SessionStats, TEST_CHART_PNG};

@@ -72,3 +72,27 @@ pub fn read_header(input: &[u8]) -> Result<Header> {
 pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<Header> {
     inflate::decode(input, dst)
 }
+
+/// An [`IcebergCache`] *is* a [`RasterSource`].
+///
+/// The impl is here rather than in the session because it is the one line that joins the two, and
+/// putting it anywhere else would need the cache to be reachable from a crate that only has a
+/// `&dyn RasterSource`. It is what lets `Painter::paint_with_rasters` take `Some(&self.images)`
+/// directly.
+///
+/// # Why `holonomy-image` depends on `holonomy-render` for this
+///
+/// One dependency edge, in this direction, for one trait. The alternative -- the session writing a
+/// 10-line wrapper struct that implements `RasterSource` over the cache -- costs the same binary and
+/// adds a type. `holonomy-render` does not depend on `holonomy-image`, so §2.9.1's decoder budget is
+/// still reachable from exactly this crate and `miniz_oxide` is still linked from exactly one place.
+impl holonomy_render::RasterSource for IcebergCache {
+    fn raster(&self, asset_id: holonomy_render::AssetId) -> Option<holonomy_render::Raster<'_>> {
+        let entry = self.get_by_id(asset_id.as_bytes())?;
+        Some(holonomy_render::Raster {
+            width: entry.width,
+            height: entry.height,
+            pixels: entry.pixels(),
+        })
+    }
+}

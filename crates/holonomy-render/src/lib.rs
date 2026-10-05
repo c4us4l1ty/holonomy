@@ -42,4 +42,8 @@ pub use math_layout::{
     MathMetrics, MathRun,
 };
 pub use table::{BorderIter, BorderRun, GridError, TableGrid};
-pub use tree::{Icon, Node, NodeKind, Rect, Style, SurfaceTree, TextRun};
+pub use tree::{Icon, Node, NodeKind, Raster, RasterSource, Rect, Style, SurfaceTree, TextRun};
+// `Node::Image` carries an `AssetId` and `RasterSource::raster` is keyed by one, so a consumer of
+// either needs the type in scope. Re-exported here because `tree` is private and the alternative is
+// for every caller to add a dependency on a module it cannot name.
+pub use holonomy_text::AssetId;

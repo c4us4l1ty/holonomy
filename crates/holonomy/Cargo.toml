@@ -53,6 +53,9 @@ holonomy-crypto = { path = "../holonomy-crypto" }
 holonomy-display = { path = "../holonomy-display" }
 holonomy-export = { path = "../holonomy-export" }
 holonomy-geometry = { path = "../holonomy-geometry" }
+# Phase 9C: the PNG decoder, the integer scaler and the Iceberg cache. The binary crate is where
+# `miniz_oxide` is reachable from, so §2.9.1's 60 KiB decoder budget is one crate's edge.
+holonomy-image = { path = "../holonomy-image" }
 holonomy-input = { path = "../holonomy-input" }
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-render = { path = "../holonomy-render" }

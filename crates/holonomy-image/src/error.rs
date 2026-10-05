@@ -152,6 +152,18 @@ pub enum PngError {
         /// Bytes the destination has.
         have: usize,
     },
+    /// The *source* buffer is shorter than the dimensions say it should be.
+    ///
+    /// A caller error rather than a file error: `resample_pixels` takes the dimensions and the bytes
+    /// separately, so a half-filled buffer would otherwise be read past its end in the horizontal pass.
+    /// An [`crate::scale::Rgba`] can never trip this -- its constructor allocates `bytes_for` -- so this
+    /// only fires for a hand-built call, and it is cheap to be sure.
+    SourceTooSmall {
+        /// Bytes `width * height * 4`.
+        want: usize,
+        /// Bytes actually present.
+        have: usize,
+    },
 }
 
 impl fmt::Display for PngError {
@@ -220,6 +232,9 @@ impl fmt::Display for PngError {
                 write!(f, "IDAT inflated to {got} bytes, the header implies {want}")
             }
             Self::Inflate => f.write_str("the zlib stream is malformed"),
+            Self::SourceTooSmall { want, have } => {
+                write!(f, "source holds {have} bytes, its dimensions need {want}")
+            }
             Self::DestinationTooSmall { want, have } => {
                 write!(f, "destination holds {have} bytes, the image needs {want}")
             }

@@ -44,14 +44,15 @@ use std::io::Write;
 use holonomy_display::paint::Painter;
 use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_export::{Format, Report};
+use holonomy_image::IcebergCache;
 use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
 use holonomy_render::math::{self, MathNode};
 use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRun};
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
-use holonomy_render::{Node, SurfaceTree, TextRun};
-use holonomy_text::{Editor, EditorError, SpanPolicy, STYLE_BOLD};
+use holonomy_render::{Node, Rect, SurfaceTree, TextRun};
+use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
@@ -194,6 +195,18 @@ pub struct SessionStats {
     pub table_cells_drawn: u32,
     /// Border runs drawn in the last paint.
     pub table_borders_drawn: u32,
+    /// Images inserted by `Ctrl+I` or [`Session::insert_image`].
+    pub image_inserts: u32,
+    /// Image nodes emitted in the last paint.
+    pub images_drawn: u32,
+    /// Rasters decoded into the Iceberg cache, across the session's life.
+    ///
+    /// The scaler ran on every one of them: §2.9.3's cache holds page-column-width rasters, so a
+    /// 1920x1080 source is a downscale before it is ever resident. Counted rather than inferred from
+    /// a timer, which is what §2.9.3 asks for.
+    pub images_decoded: u32,
+    /// Rasters the Iceberg cache scrubbed and released, across the session's life.
+    pub images_evicted: u32,
     /// Formulas inserted by `Ctrl+M` or [`Session::insert_math`].
     pub math_inserts: u32,
     /// Formulas drawn as a *compiled* layout in the last paint.
@@ -294,6 +307,38 @@ pub struct Session<'a> {
     /// rate, visible in a count. `tests/session_math.rs` asserts this field's capacity is unchanged
     /// across a compile.
     math_scratch: MathLayout,
+    /// Page-column-width rasters for the pages near the viewport. Phase 9C.
+    ///
+    /// Owns every decoded pixel in the process, which is why it is here and not in the painter: the
+    /// budget §2.9.4 charges 8.0 MiB to is this field's, and a gate asserts it through
+    /// [`Session::image_cache_bytes`].
+    ///
+    /// A direct field rather than behind the `RasterSource` trait object the painter holds, because the
+    /// painter borrows it *per frame* -- the cache is mutated between frames and the painter must not
+    /// hold a borrow across a mutation. `Painter::paint_with_rasters` takes it per call for exactly
+    /// that reason.
+    images: IcebergCache,
+    /// The native-size buffer a PNG decodes into, reused across decodes.
+    ///
+    /// **Transient, and deliberately outside the cache's accounting** -- the same bargain
+    /// `holonomy_image::scale` makes for its horizontal-pass intermediate, and for the same reason: a
+    /// 1920x1080 source needs 8.3 MB to decode into, it is freed before the frame is presented, and
+    /// counting it against the 8.0 MiB image budget would double-count a buffer that never coexists
+    /// with the resident rasters it feeds.
+    ///
+    /// A field rather than a local because a local `Vec` passed to `decode` **escapes** and is promoted
+    /// to the heap, which is the same trap [`Session::table_scratch`] documents: the allocation would
+    /// then happen once per decode rather than once per session -- invisible in a rate, visible in a
+    /// count.
+    image_decode_scratch: Vec<u8>,
+    /// The page-column-width buffer a resample produces, reused across decodes.
+    ///
+    /// A field for the same reason as `image_decode_scratch`, and this one *is* resident: its contents
+    /// are handed to `IcebergCache::insert`, which copies them into a `SecureBlock`. So it is a
+    /// transient copy of a resident buffer, and it is sized to one raster.
+    image_resample_scratch: Vec<u8>,
+    /// The page column's width in pixels: the width every raster is downscaled to. Phase 9C, §2.9.3.
+    image_column_width: u32,
     /// The compiled source a formula is compiled from, reused across paints.
     ///
     /// Separate from `math_scratch` because it is a different lifetime: this is the *input* to
@@ -356,6 +401,14 @@ impl<'a> Session<'a> {
             caret_drawn_at: None,
             math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
             math_source: Vec::new(),
+            images: IcebergCache::new(),
+            image_decode_scratch: Vec::new(),
+            image_resample_scratch: Vec::new(),
+            // The page column is `metrics.width` minus the chrome's side bands, and `Layout::text`
+            // has already worked it out. 640 is §2.9.3's figure for an 80-column page at a 1280 px
+            // window, and `max(1)` keeps a degenerate layout from producing a zero-width resample --
+            // which would be a division by zero inside `holonomy_image::scale::axis_map`.
+            image_column_width: u32::max(chrome.layout.text.width, 1),
         }
     }
 
@@ -413,6 +466,50 @@ impl<'a> Session<'a> {
         self.stats.math_inserts += 1;
         self.editor.caret_to(at as usize + 2)?;
         self.after_edit(4)
+    }
+
+    /// Insert an image at the caret, from the built-in chart.
+    ///
+    /// # Where the bytes come from, and why that is stated rather than hidden
+    ///
+    /// From a PNG committed to this repository and `include_bytes!`-ed. **Not** from a file the user
+    /// chose, and not from the network, because FR-5.1's `unshare(CLONE_NEWNET)` forbids the second and
+    /// the sealed 50-syscall allowlist forbids the first: there is no `openat` on a user-chosen path in
+    /// the jail. A real "insert image from disk" is therefore a Phase 13 question, where §4's windowed
+    /// document model brings a read path with it.
+    ///
+    /// Everything *else* is real end to end, and it is the part worth testing: a keystroke becomes a
+    /// U+FFFC anchor, a BLAKE2b content address, a catalog entry in the payload's tail, a PNG decode, a
+    /// fixed-point downscale to page-column width, a `SecureBlock` in the Iceberg cache, a
+    /// `Node::Image`, an integer blit, a displacement of every line below it, and -- in
+    /// `holonomy-export` -- a `<img>` and an `/XObject`. The only thing stubbed is the file dialog.
+    ///
+    /// The chart is 1920x1080 on purpose. §2.9.3's scaler runs on *every* image precisely because the
+    /// cache holds page-column-width rasters, so a fixture at or below the column width would never
+    /// exercise it at all.
+    pub fn insert_image(&mut self) -> Result<(), SessionError> {
+        self.insert_image_bytes(TEST_CHART_PNG)
+    }
+
+    /// Insert `png` as an image at the caret.
+    ///
+    /// The same path as [`insert_image`](Self::insert_image) with the bytes supplied, so a test can use
+    /// a fixture of its own and a future file picker can use the same code without either being a
+    /// special case.
+    pub fn insert_image_bytes(&mut self, png: &[u8]) -> Result<(), SessionError> {
+        let at = self.editor.caret();
+        // `Editor::insert_image` writes the catalog entry *before* the anchor, so a malformed PNG
+        // leaves nothing behind rather than an anchor that nothing serves.
+        self.editor.insert_image(at, png)?;
+        self.stats.image_inserts += 1;
+        // The caret moves past the anchor, so the next keystroke types after the image rather than
+        // inside it. `insert_at` already moved it; this makes the intent explicit and survives a
+        // change to how `insert_at` places the cursor.
+        self.editor.caret_to(at as usize + ANCHOR_BYTES.len())?;
+        // The *whole page* is invalidated, not one line: an image is hundreds of pixels tall and
+        // `after_edit` damages `cell_h` by construction, which would leave the image's own rows stale.
+        self.damage = self.chrome.full_damage();
+        self.after_edit(ANCHOR_BYTES.len() as u32)
     }
 
     /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
@@ -719,6 +816,9 @@ impl<'a> Session<'a> {
             }
             Command::Hotkey(Hotkey::InsertMath) => {
                 self.insert_math()?;
+            }
+            Command::Hotkey(Hotkey::InsertImage) => {
+                self.insert_image()?;
             }
             Command::Hotkey(Hotkey::InsertTable) => {
                 // 3 by 3: the directive's default, and the shape that divides an 80-column measure
@@ -1117,7 +1217,13 @@ impl<'a> Session<'a> {
         let mut damage = damage;
         self.emit_tables(&mut tree, &mut damage);
         self.emit_math(&mut tree, &mut damage);
-        let stats = self.painter.paint(&mut self.frame, &tree, damage)?;
+        self.emit_images(&mut tree, &mut damage);
+        // The raster source is borrowed *for this call* and not held: the cache is mutated by the next
+        // frame's decode and eviction, so a borrow that outlived the paint would be a self-referential
+        // `Session` -- the painter is a field and so is the cache it would have to point at.
+        let stats =
+            self.painter
+                .paint_with_rasters(&mut self.frame, &tree, damage, Some(&self.images))?;
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
         // The damage goes to the backend as well as to the rasteriser. For the PPM backend that changes
@@ -1165,7 +1271,63 @@ impl<'a> Session<'a> {
         if let Ok(text) = self.editor.text() {
             blocks.extend(self.math_blocks(&text));
         }
+        // Images join the tables and the formulas in the *same* model, for the same reason: an image
+        // is taller than any line, so the lines below it have to move or it draws over them. The block
+        // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
+        // using the source height would displace by a factor of three at 1920x1080.
+        blocks.extend(self.image_blocks());
         self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
+    }
+
+    /// Every visible image's `(anchor_line, raster_height_px)`, for [`Session::publish_line_heights`].
+    ///
+    /// Shares `emit_images`' scan rather than repeating it, because the displacement and the draw have
+    /// to be derived from the same numbers: a line moved by one height and an image drawn at another is
+    /// a bug that looks like a layout choice.
+    ///
+    /// Returns nothing when the document has no images, which is the common case and costs one `is_empty`
+    /// rather than a scan.
+    fn image_blocks(&mut self) -> Vec<(u32, u32)> {
+        if self.editor.assets().is_empty() {
+            return Vec::new();
+        }
+        let Ok(text) = self.editor.text() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (ordinal, at) in holonomy_text::scan_anchors(&text).into_iter().enumerate() {
+            let Ok(asset) = self.editor.assets().get(ordinal) else {
+                continue;
+            };
+            let (w, h) = self.raster_size(asset.width as u32, asset.height as u32);
+            let _ = w;
+            out.push((self.line_index(at as usize), h));
+        }
+        out
+    }
+
+    /// The page-column-width raster size for a source of `src_w` by `src_h`.
+    ///
+    /// §2.9.3: the cache holds **page-column-width** rasters, not native ones, because a ±1-page policy
+    /// with native decoding holds exactly one 1080p image and the second photo on facing pages breaches
+    /// the budget. So a source is downscaled to `image_column_width` wide and its height follows the
+    /// aspect ratio, rounded up so a raster is never one pixel short of the row it has to cover.
+    ///
+    /// A source already narrower than the column is **not** enlarged. Upscaling a 200 px GIF to 640 px
+    /// spends 921,600 bytes of an 8.0 MiB budget on 16x more pixels of the same information, and the
+    /// painter's 1:1 blit draws it at whatever size it is.
+    fn raster_size(&self, src_w: u32, src_h: u32) -> (u32, u32) {
+        let column = self.image_column_width.max(1);
+        if src_w <= column {
+            return (src_w.max(1), src_h.max(1));
+        }
+        // `u64` because `src_h * column` overflows `u32` for a 40000 px panorama, which a PNG's `u32`
+        // IHDR permits and this must not panic on.
+        let h = u64::from(src_h)
+            .saturating_mul(u64::from(column))
+            .saturating_add(u64::from(src_w) / 2)
+            / u64::from(src_w);
+        (column, h.max(1).min(u32::MAX as u64) as u32)
     }
 
     /// Draw every table whose first line is on screen, and widen `damage` to cover them.
@@ -1310,6 +1472,272 @@ impl<'a> Session<'a> {
         self.stats.table_borders_drawn = borders_drawn;
         self.tables_shape_dirty = false;
         widen(damage, extra);
+    }
+
+    /// Draw every image whose line is on screen, and widen `damage` to cover them.
+    ///
+    /// # The order of the four things this does
+    ///
+    /// 1. **Evict**, by the ±1-page window, *before* deciding what is on screen. Evicting first means
+    ///    the budget is already correct when a decode is attempted, so an image cannot be admitted by a
+    ///    cache that was over its limit.
+    /// 2. **Decode** what is visible and not resident. This is the expensive step and the one §2.9.3's
+    ///    arithmetic is about: 9 rasters at 640x360 inside 8.0 MiB, or *one* at native 1080p.
+    /// 3. **Emit** a `Node::Image` per visible anchor, whether or not its raster is resident. A node
+    ///    with no pixels is a counted miss in the painter rather than an absent node, so "the image did
+    ///    not draw" is a number in `PaintStats` and not an absence nobody can explain.
+    /// 4. **Widen `damage`**, through the same `widen` the tables and formulas use.
+    ///
+    /// # Why the node carries the address and not the pixels
+    ///
+    /// `Node` is `Copy` and `SurfaceTree`'s before/self/after ordering depends on that. A node holding
+    /// 921,600 bytes cannot be `Copy` and cannot be in a `Vec<Node>`, so it carries the 32-byte
+    /// `AssetId` and the painter resolves it through `&IcebergCache`. The cost is one `Option<&Entry>`
+    /// and a pointer chase per image per frame, which is nothing next to rasterising one.
+    ///
+    /// # Why the rect is the *raster's* size and not the source's
+    ///
+    /// The painter's blit is 1:1 by design -- there is no second scaler in `holonomy-display`, and a
+    /// nearest-neighbour stretch is a different picture rather than a worse one. So the rect has to be
+    /// the raster the cache holds, which is the page-column-width one. §2.9.3's downscaling is therefore
+    /// not an optimisation that paint can skip: it is what makes the blit a copy.
+    fn emit_images(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+        self.stats.images_drawn = 0;
+        if self.editor.assets().is_empty() {
+            return;
+        }
+        let Ok(text) = self.editor.text() else {
+            return;
+        };
+        let l = self.chrome.layout;
+        let first = self.state.scroll_line;
+        let last = first + l.rows;
+
+        // --- 1. eviction. The window is the visible page plus one either side.
+        let rows_per_page = l.rows.max(1);
+        let first_page = first / rows_per_page;
+        let last_page = last.saturating_sub(1) / rows_per_page;
+        let evicted = self.images.set_window(
+            &(first_page.saturating_sub(1)..=last_page.saturating_add(1)).collect::<Vec<_>>(),
+        );
+        self.stats.images_evicted += evicted.count;
+        // `evicted.rasters` is dropped here, which releases the scrubbed memory. The *count* is kept
+        // because the scrub itself is asserted in `holonomy-image`'s gate, where the victims can still
+        // be read through a pointer captured before the eviction.
+
+        let mut drawn = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let line_heights = self.state.line_heights.clone();
+        let anchors = holonomy_text::scan_anchors(&text);
+
+        for (ordinal, at) in anchors.into_iter().enumerate() {
+            let line = self.line_index(at as usize);
+            if line < first || line >= last {
+                continue;
+            }
+            let Ok(asset) = self.editor.assets().get(ordinal) else {
+                // An anchor with no asset: the text says there is an image here and the catalog does
+                // not agree. Counting it is the only honest response -- drawing a placeholder would be
+                // inventing content.
+                continue;
+            };
+            let id = asset.id;
+            let (rw, rh) = self.raster_size(asset.width as u32, asset.height as u32);
+
+            // --- 2. decode if absent. Only for what is on screen, which is the whole of the ±1 rule's
+            // point: a document may hold a thousand images and only the visible ones cost anything.
+            if !self.images.holds(id.as_bytes()) && self.decode_into_cache(ordinal, line) {
+                // Decoded. `rw`/`rh` are recomputed by the decoder's own header, and a header that
+                // disagreed with the catalog would already have been refused when the catalog was
+                // loaded.
+            }
+
+            let top = l.text.y + line_heights.y(line - first);
+            // The colour is never read: `Painter::image` blits the raster's own RGBA and ignores
+            // `Rect::colour`. The page background is passed because `Rect` requires one, and because
+            // it is the right answer for the `DamageRect` a caller derives from the rect.
+            let rect = Rect::new(
+                l.text.x as i32,
+                top as i32,
+                rw,
+                rh,
+                holonomy_render::chrome::colour::PAGE,
+            );
+            tree.before
+                .push(SurfaceTree::leaf(Node::Image { rect, asset_id: id }));
+            drawn += 1;
+            extra = union_opt(extra, Some(rect.bounds().unwrap_or(DamageRect::EMPTY)));
+        }
+        self.stats.images_drawn = drawn;
+        widen(damage, extra);
+    }
+
+    /// Decode asset `ordinal` and admit the page-column-width raster, reporting whether it worked.
+    ///
+    /// Three buffers, in this order, and each is the reason for the next:
+    ///
+    /// * `image_decode_scratch` at **native** size, because [`holonomy_image::decode`] produces the
+    ///   source's own pixels. `read_header` sizes it first, so a header claiming 32 megapixels is
+    ///   refused *before* anything is allocated from it.
+    /// * `image_resample_scratch` at the **raster** size, because [`holonomy_image::resample`] cannot
+    ///   write in place and the two sizes are different by construction at 1920x1080.
+    /// * the cache's `SecureBlock`, which is where the result lives and what the budget counts.
+    ///
+    /// A failure at any step returns `false` and leaves the cache untouched. It is not an error the
+    /// paint should propagate: one undecodable asset is a blank rectangle, and failing the whole frame
+    /// over it would turn a bad picture into an unusable editor.
+    fn decode_into_cache(&mut self, ordinal: usize, page: u32) -> bool {
+        let Ok(asset) = self.editor.assets().get(ordinal) else {
+            return false;
+        };
+        let png = asset.png.as_slice();
+        let Ok(header) = holonomy_image::read_header(png) else {
+            return false;
+        };
+        // `decoded_len` saturates through `u64`, so a header claiming 32 megapixels produces a length
+        // rather than a wrap. The `resize` below then either succeeds or the allocation fails, and a
+        // failed allocation is an abort rather than a silent 100 MB buffer -- which is the right
+        // response to a hostile header in a process with a 16 MiB RSS budget.
+        let native = holonomy_image::decoded_len(&header);
+        if self.image_decode_scratch.len() < native {
+            self.image_decode_scratch.resize(native, 0);
+        }
+        if holonomy_image::decode(png, &mut self.image_decode_scratch).is_err() {
+            return false;
+        }
+        let (rw, rh) = self.raster_size(header.width, header.height);
+        // `bytes_for` already saturates to `usize::MAX`, so there is no conversion left to make.
+        let want = holonomy_image::scale::bytes_for(rw, rh);
+        if self.image_resample_scratch.len() < want {
+            self.image_resample_scratch.resize(want, 0);
+        }
+        if holonomy_image::scale::resample_pixels(
+            header.width,
+            header.height,
+            &self.image_decode_scratch,
+            rw,
+            rh,
+            &mut self.image_resample_scratch,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let decoded = &self.image_resample_scratch[..want];
+        if self
+            .images
+            .insert(
+                *asset.id.as_bytes(),
+                page,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                rw,
+                rh,
+                u64::from(header.width) * u64::from(header.height),
+                decoded,
+            )
+            .is_ok()
+        {
+            self.stats.images_decoded += 1;
+            true
+        } else {
+            // A raster larger than the whole budget. §2.9.3's arithmetic says 9 fit; a 20th does not,
+            // and the refusal is the cache's `Budget` error rather than an overflow.
+            false
+        }
+    }
+
+    /// Bytes of decoded image resident right now. The number §2.9.4's budget row is about.
+    pub fn image_cache_bytes(&self) -> usize {
+        self.images.resident_bytes()
+    }
+
+    /// Scroll the page by `delta` lines, without moving the caret.
+    ///
+    /// Separate from [`Session::move_line`] because moving the caret is not the same as scrolling the
+    /// page, and a gate for the Iceberg window needs to do the second without the first: scrolling
+    /// *with* the caret keeps the caret on screen, so it can never actually leave the image.
+    ///
+    /// Saturating at zero rather than refusing, because scrolling up past the first line is a thing a
+    /// reader does, not an error.
+    pub fn scroll_by(&mut self, delta: i64) -> u32 {
+        let next = (self.state.scroll_line as i64 + delta).max(0) as u32;
+        if next == self.state.scroll_line {
+            return self.state.scroll_line;
+        }
+        self.state.scroll_line = next;
+        // The whole page: a scroll moves every line, so there is no smaller honest rect.
+        self.damage = self.chrome.full_damage();
+        self.state.scroll_line
+    }
+
+    /// The first line on screen.
+    pub fn scroll_line(&self) -> u32 {
+        self.state.scroll_line
+    }
+
+    /// The document line image `ordinal` is anchored on.
+    ///
+    /// `ordinal` is the anchor's index among the document's anchors, which is also its index into the
+    /// catalog -- the pairing `AssetCatalog`'s ordering contract is about.
+    pub fn line_of_anchor(&self, ordinal: usize) -> u32 {
+        let Ok(text) = self.editor.text() else {
+            return 0;
+        };
+        holonomy_text::scan_anchors(&text)
+            .get(ordinal)
+            .map_or(0, |at| self.line_index(*at as usize))
+    }
+
+    /// The raster size `(width, height)` image `ordinal` is drawn at, in pixels.
+    ///
+    /// This is the **page-column-width** size, not the source image's, and the difference is §2.9.3's
+    /// whole decision. Exposed because a gate asserting "the resident raster is the column-width one"
+    /// needs the number the *layout* used, not the one the catalog recorded -- the two being equal is
+    /// the property, and a test that recomputed the expectation from the catalog would agree with a
+    /// broken layout.
+    pub fn chrome_rect_for_image(&self, ordinal: usize) -> (u32, u32) {
+        let Ok(asset) = self.editor.assets().get(ordinal) else {
+            return (0, 0);
+        };
+        self.raster_size(asset.width as u32, asset.height as u32)
+    }
+
+    /// The resident raster's pixels for image `ordinal`, if it is resident.
+    ///
+    /// Read-only, and for the same reason every other accessor here is: the budget and the scrub are
+    /// properties a gate must be able to observe, and a cache whose contents can be written from
+    /// outside could not be asserted about.
+    pub fn image_cache_pixels(&self, ordinal: usize) -> Option<&[u8]> {
+        let asset = self.editor.assets().get(ordinal).ok()?;
+        self.images
+            .get_by_id(asset.id.as_bytes())
+            .map(|e| e.pixels())
+    }
+
+    /// The resident raster's `(width, height)` for image `ordinal`.
+    pub fn image_cache_size(&self, ordinal: usize) -> Option<(u32, u32)> {
+        let asset = self.editor.assets().get(ordinal).ok()?;
+        self.images
+            .get_by_id(asset.id.as_bytes())
+            .map(|e| (e.width, e.height))
+    }
+
+    /// One pixel of the current frame, as `0x00RRGGBB`.
+    ///
+    /// `Frame::pixel` returns the frame's own `0xAARRGGBB`; this normalises it so a test compares
+    /// against the `chrome::colour` constants rather than re-deriving the alpha byte.
+    pub fn frame_pixel(&self, x: u32, y: u32) -> u32 {
+        self.frame.pixel(x, y) & 0x00FF_FFFF
+    }
+
+    /// The Iceberg cache's budget.
+    pub fn image_cache_budget(&self) -> usize {
+        self.images.budget()
+    }
+
+    /// Rasters resident right now.
+    pub fn image_cache_len(&self) -> usize {
+        self.images.len()
     }
 
     /// Draw every formula whose line is on screen, and widen `damage` to cover them.
@@ -1678,6 +2106,15 @@ fn advance_from_published(cp: u32) -> u32 {
     };
     atlas.metric(cp, style, size).advance_x.into()
 }
+
+/// The image `Ctrl+I` inserts: a 1920x1080 colour chart with a 64 px grid.
+///
+/// Deliberately **larger than the page column**, which is §2.9.3's claim made testable: because the
+/// Iceberg cache holds page-column-width rasters, every image in this product is a downscale, and a
+/// fixture at or below the column width would never run the scaler. Committed rather than generated
+/// because `include_bytes!` needs bytes at compile time, and a build script that emitted one would put a
+/// PNG *encoder* into the build -- more code than the fixture.
+pub const TEST_CHART_PNG: &[u8] = include_bytes!("../assets/test-chart.png");
 
 /// How many run slots [`Session::math_scratch`] is sized for.
 ///

@@ -360,16 +360,35 @@ pub const fn catalog_fixed_bytes(count: u32) -> usize {
     4 + count as usize * (ID_LEN + 2 + 2 + 4)
 }
 
-/// The document's images, in document order.
+/// The document's images, one per anchor, in document order.
 ///
-/// # Ordering is the contract
+/// # Ordering is the contract, and it needs maintaining
 ///
-/// Entry `i` serves the *i*-th [`ANCHOR`] character in document order. [`insert`](Self::insert)
-/// appends, which is what makes that pairing hold after an insert in the middle of the document:
-/// inserting a new anchor before an existing one shifts every later anchor up by one, and appending
-/// the asset at the end keeps it at the end. **Inserting an anchor anywhere other than the end
-/// without appending an asset would break the pairing**, which is why [`Self::insert`] is the only
-/// way in and [`Self::remove`] refuses to shrink past the anchors.
+/// Entry `i` serves the *i*-th [`ANCHOR`] in document order. **That pairing is positional, so it has
+/// to be repaired after every edit, and the first version of this file did not repair it.** It claimed
+/// -- in a doc comment, at length, and wrongly -- that a catalog needed none of the five
+/// `apply_insert`/`apply_delete` sites `TableMap` needs, on the grounds that a content address is not
+/// an interval. A content address is not; the *ordinal* is.
+///
+/// Undoing an insertion of an image deletes its anchor and nothing else, so the document was left with
+/// one anchor and two assets: anchor 0 still pointed at the first entry, and the second entry was
+/// unreachable. That is invisible whenever the two images are the same bytes -- which is what the
+/// test fixture is -- and a **wrong picture** the moment they are not. `tests/asset_payload.rs` cannot
+/// catch it either: both the text and the catalog are individually valid and mutually inconsistent, so
+/// the AEAD tag is valid and the payload decodes.
+///
+/// So the catalog is maintained the way [`TableMap`](crate::TableMap) is: [`insert_at`](Self::insert_at)
+/// puts an asset at a chosen ordinal, [`remove_range`](Self::remove_range) drops a run of them and
+/// hands the removed assets back so undo can restore them, and [`Editor`](crate::Editor) calls both at
+/// the same five sites its tables are called from.
+///
+/// # Why the alternative was rejected
+///
+/// The obvious fix is to put the address *in the text* next to the anchor -- U+FFFC followed by 64 hex
+/// digits -- which makes the pairing content-addressed and needs no maintenance at all. It costs 64
+/// bytes of document per image, which for a document with a thousand images is 64 KB of pure overhead
+/// inside an 8 MiB payload, and it makes the document's text carry a serialised pointer to a structure
+/// that lives in the same document. Ordinals cost nothing and are what the frozen layout implies.
 #[derive(Default)]
 pub struct AssetCatalog {
     entries: Vec<Asset>,
@@ -400,17 +419,135 @@ impl AssetCatalog {
         self.entries.is_empty()
     }
 
-    /// Append `png` and return its [`AssetId`].
+    /// Put `png` at ordinal `at`, making it the asset for the *`at`-th anchor.
     ///
-    /// The returned id is the catalog's index *and* its content address, and those agree only when
-    /// the anchor is appended too -- see the ordering contract above. A duplicate is **not**
-    /// deduplicated: the id would be the same but the index would not, and the index is what pairs
-    /// the asset with its anchor.
-    pub fn insert(&mut self, png: &[u8]) -> Result<AssetId, AssetError> {
+    /// **Not** `push`. A caller inserting an image in the middle of a document has an anchor at some
+    /// ordinal `k`, and appending the asset would serve it the *last* picture in the document -- see
+    /// this type's ordering contract for how that went wrong once.
+    ///
+    /// `at` beyond the end is the same as the end, which is what makes "insert at the caret, which is
+    /// past every anchor" work without the caller having to measure. Out-of-order inserts are
+    /// impossible: `at > len` is clamped to `len`, so a caller's arithmetic mistake shortens the
+    /// document's image list rather than leaving a hole nothing serves.
+    ///
+    /// A duplicate is **not** deduplicated, and the reason is the ordering: entry `i` serves anchor
+    /// `i`, so collapsing two entries into one would leave the second anchor pointing at the first
+    /// anchor's slot. The *addresses* still collide, which is what lets a caller ask "do I already have
+    /// this picture" without a side table.
+    pub fn insert_at(&mut self, at: usize, png: &[u8]) -> Result<AssetId, AssetError> {
         let asset = Asset::new(png)?;
         let id = asset.id;
-        self.entries.push(asset);
+        let at = at.min(self.entries.len());
+        self.entries.insert(at, asset);
         Ok(id)
+    }
+
+    /// Drop `count` assets starting at ordinal `first`, and hand them back.
+    ///
+    /// Returning the removed assets is what makes undo of a deletion possible. [`TableMap`] solves the
+    /// same problem with a whole-map shadow (`Editor::undo_tables`), which works for tables because a
+    /// table is 28 bytes; an asset is a PNG, so shadowing the map would mean holding every image twice.
+    /// Handing back exactly what was removed costs one `Vec` per delete that removed an anchor, and
+    /// `Vec::new()` does not allocate for the overwhelmingly common delete that removed none.
+    pub fn remove_range(&mut self, first: usize, count: usize) -> Vec<Asset> {
+        if count == 0 || first >= self.entries.len() {
+            return Vec::new();
+        }
+        let last = first.saturating_add(count).min(self.entries.len());
+        self.entries.drain(first..last).collect()
+    }
+
+    /// Put the first `take` of `assets` back at ordinal `at`, and return whatever did not fit.
+    ///
+    /// The inverse of [`remove_range`](Self::remove_range), used by undo and by redo.
+    ///
+    /// Three things about the signature, each forced by something:
+    ///
+    /// * **`Vec<Asset>` by value, and `Asset` is not `Clone`.** An `Asset` owns a PNG in a
+    ///   `Zeroizing<Vec<u8>>`, so a `Clone` derive would be a way to duplicate plaintext image bytes
+    ///   without the copy being scrubbed -- and it would be used, because "just clone the assets back"
+    ///   is the obvious thing to write at a restore site. Restoring by moving is both cheaper and the
+    ///   only version whose scrub story is checkable.
+    /// * **`take`,** because the stash is a `Vec` and the range may hold fewer anchors than the stash has
+    ///   assets. Taking all of it would install assets no anchor serves.
+    /// * **Returns the remainder**, so a caller that cannot explain the difference can keep it rather
+    ///   than drop it. Dropping a PNG is legal; dropping one *because a count was wrong* is how the
+    ///   wrong-picture bug starts.
+    ///
+    /// The installed assets are **inserted** at `at`, shifting everything from `at` on up by `take` --
+    /// and that shift is the point, not an accident.
+    ///
+    /// An earlier version of this replaced the range instead, on the reasoning that "assets at or after
+    /// the restored range belong to later anchors and must stay where they are". That reasoning is
+    /// wrong, and the arithmetic shows it. Deleting anchor 0 of `[a0, a1]` leaves `[a1]` at ordinal 0,
+    /// correctly serving the anchor that is now first. Undoing must get back to `[a0, a1]`, so `A0`
+    /// goes **in front of** `A1` and `A1` moves back up to ordinal 1. Replacing would have destroyed
+    /// `A1`:
+    ///
+    /// ```text
+    /// delete anchor 0:  catalog [A0, A1] -> [A1]      (remove_range(0, 1))
+    /// undo:             catalog [A1]     -> [A0, A1]   (insert_at(0, A0))
+    /// ```
+    pub fn restore_at(&mut self, at: usize, assets: Vec<Asset>, take: usize) -> Vec<Asset> {
+        if take == 0 || assets.is_empty() {
+            return assets;
+        }
+        let at = at.min(self.entries.len());
+        let take = take.min(assets.len());
+        let mut rest = assets;
+        // `drain(..take)` hands back the taken prefix and leaves the remainder in place; nothing is
+        // copied and nothing is cloned.
+        let taken: Vec<Asset> = rest.drain(..take).collect();
+        for (i, a) in taken.into_iter().enumerate() {
+            self.entries.insert(at + i, a);
+        }
+        rest
+    }
+
+    /// How many anchors there are at or before byte `offset` of `text`.
+    ///
+    /// The ordinal an [`Editor::insert_image`](crate::Editor::insert_image) at `offset` will create,
+    /// and the ordinal [`remove_anchors_in`](Self::remove_anchors_in) needs to know about. Counting
+    /// bytes rather than characters is right because the catalog pairs with *byte* offsets, which is
+    /// what every other offset in the editor is.
+    #[must_use]
+    pub fn ordinal_at(text: &[u8], offset: usize) -> usize {
+        let at = offset.min(text.len());
+        scan_anchors(&text[..at]).len()
+    }
+
+    /// How many anchors are in `bytes`.
+    ///
+    /// The half of a delete's work that needs no document at all: the bytes being deleted are already
+    /// in the editor's `delete_scratch`, so counting the anchors among them is arithmetic over a buffer
+    /// that exists.
+    #[must_use]
+    pub fn count_in(bytes: &[u8]) -> usize {
+        scan_anchors(bytes).len()
+    }
+
+    /// Remove `count` assets starting at ordinal `first`.
+    ///
+    /// The two halves a delete needs, separated so neither forces the other to materialise the
+    /// document: `first` comes from the caller's own anchor list, `count` from the deleted bytes. The
+    /// first version took a `text: &[u8]` and the range and did both from the whole document, which
+    /// meant a full-document `Vec` **per delete** -- 1,000 allocations over a 1,000-keystroke burst,
+    /// which `no_alloc.rs` reported immediately. The keystroke path has to stay allocation-free whatever
+    /// the document contains.
+    pub fn remove_n(&mut self, first: usize, count: usize) -> Vec<Asset> {
+        self.remove_range(first, count)
+    }
+
+    /// The anchors inside byte range `offset..offset + len` of `text`, as their ordinals.
+    ///
+    /// What a *re-insert* needs: the assets go back at these ordinals. Kept separate from
+    /// [`remove_anchors_in`](Self::remove_anchors_in) because undo needs the count and redo needs the
+    /// positions, and a function returning both would have every caller destructure away half of it.
+    #[must_use]
+    pub fn anchors_in(text: &[u8], offset: u32, len: u32) -> (usize, usize) {
+        let lo = (offset as usize).min(text.len());
+        let hi = lo.saturating_add(len as usize).min(text.len());
+        (Self::ordinal_at(text, lo), Self::ordinal_at(text, hi))
     }
 
     /// Asset `index`, by position.

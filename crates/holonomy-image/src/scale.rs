@@ -155,6 +155,28 @@ pub fn axis_map(src: u32, dst: u32) -> Vec<Sample> {
 ///
 /// See the module docs for why this is two passes and why only the second is vectorised.
 pub fn resample(src: &Rgba, dst_w: u32, dst_h: u32, dst: &mut [u8]) -> Result<()> {
+    resample_pixels(src.width, src.height, &src.pixels, dst_w, dst_h, dst)
+}
+
+/// Resample `src_w x src_h` RGBA from `src` into `dst`, borrowing the source.
+///
+/// # Why this exists beside [`resample`]
+///
+/// [`Rgba`] owns its pixels, so a caller that decodes into a reused buffer has to wrap the borrow in
+/// an `Rgba` -- and cannot, because the constructor allocates. The session is exactly that caller: it
+/// decodes a 1920x1080 source into an 8.3 MB scratch it reuses, and wrapping that borrow in an owned
+/// `Rgba` would either copy all 8.3 MB per image or mean keeping two buffers alive for no reason.
+///
+/// So the dimensions are parameters and the pixels are a slice, and [`resample`] is the owned-pixels
+/// convenience over it. One implementation, two entry points, no duplicated arithmetic.
+pub fn resample_pixels(
+    src_w: u32,
+    src_h: u32,
+    src: &[u8],
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut [u8],
+) -> Result<()> {
     let want = bytes_for(dst_w, dst_h);
     if dst.len() < want {
         return Err(PngError::DestinationTooSmall {
@@ -162,10 +184,20 @@ pub fn resample(src: &Rgba, dst_w: u32, dst_h: u32, dst: &mut [u8]) -> Result<()
             have: dst.len(),
         });
     }
-    if src.width == 0 || src.height == 0 {
+    if src_w == 0 || src_h == 0 {
         // The decoder refuses a zero-sized image at `IHDR`, so this is only reachable by
-        // constructing an `Rgba` by hand.
+        // constructing an `Rgba` by hand or by calling this function with zero dimensions.
         return Err(PngError::ZeroDimension);
+    }
+    // A source shorter than its own dimensions is a *caller* error -- a half-filled buffer would
+    // otherwise read past the end in the horizontal pass. `bytes_for` is the same arithmetic
+    // `Rgba::new` uses, so an `Rgba` can never trip this and only a hand-built call can.
+    let have = bytes_for(src_w, src_h);
+    if src.len() < have {
+        return Err(PngError::SourceTooSmall {
+            want: have,
+            have: src.len(),
+        });
     }
     // A zero destination is not an error: it is the degenerate "show nothing", and returning an empty
     // image for it is more useful than refusing.
@@ -174,17 +206,18 @@ pub fn resample(src: &Rgba, dst_w: u32, dst_h: u32, dst: &mut [u8]) -> Result<()
     }
 
     // Pass 1: horizontally, every source row down to `dst_w`.
-    let xmap = axis_map(src.width, dst_w);
+    let src_stride = src_w as usize * 4;
+    let xmap = axis_map(src_w, dst_w);
     let mid_stride = dst_w as usize * 4;
-    let mut mid = vec![0u8; mid_stride * src.height as usize];
-    for y in 0..src.height as usize {
-        let row = &src.pixels[y * src.stride()..(y + 1) * src.stride()];
+    let mut mid = vec![0u8; mid_stride * src_h as usize];
+    for y in 0..src_h as usize {
+        let row = &src[y * src_stride..(y + 1) * src_stride];
         let out = &mut mid[y * mid_stride..(y + 1) * mid_stride];
-        scale_x(row, src.width, out, &xmap);
+        scale_x(row, src_w, out, &xmap);
     }
 
     // Pass 2: vertically, `src.height` rows down to `dst_h`.
-    let ymap = axis_map(src.height, dst_h);
+    let ymap = axis_map(src_h, dst_h);
     for dy in 0..dst_h as usize {
         let s = ymap[dy];
         let r0 = &mid[s.lo as usize * mid_stride..];

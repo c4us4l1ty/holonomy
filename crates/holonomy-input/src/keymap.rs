@@ -134,6 +134,17 @@ pub enum Hotkey {
     DocumentStart,
     /// Ctrl+End.
     DocumentEnd,
+    /// Ctrl+I. Insert an image at the caret.
+    ///
+    /// A hotkey rather than a [`Command`] because it carries no payload: the *bytes* come from
+    /// whatever the product can offer, which is a session fact, and a keymap that carried image bytes
+    /// would be a keymap holding a file.
+    ///
+    /// Ctrl+I rather than a bare `i` because the bare letter is a character. Every other block-level
+    /// insertion is bound this way for the same reason -- Ctrl+T for a table, Ctrl+M for a formula --
+    /// and the pattern is that inserting a block is an *action*, while inserting a character is
+    /// *typing*.
+    InsertImage,
     /// Ctrl+T. Insert a table at the caret.
     ///
     /// A hotkey rather than a [`Command`] because it carries no payload: the dimensions come from the
@@ -308,6 +319,7 @@ impl Keymap {
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
                 KEY_M if !mods.shift() && !mods.alt() => Some(Hotkey::InsertMath),
+                KEY_I if !mods.shift() && !mods.alt() => Some(Hotkey::InsertImage),
                 _ => None,
             };
             if let Some(hotkey) = binding {

@@ -40,6 +40,7 @@
 //! scrolled halfway off the panel costs the same as one fully visible.
 
 use crate::damage::DamageRect;
+use holonomy_text::AssetId;
 
 /// A style index into the Phase 4 atlas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -268,6 +269,28 @@ pub enum Node {
     Text(TextRun),
     /// A 1-bit icon mask.
     Icon(Icon),
+    /// A decoded raster, at `rect`, from the asset `asset_id`.
+    ///
+    /// A **struct** variant where the other three are tuple variants, because both field names carry
+    /// weight here and neither is self-evident: `rect` says where it goes, `asset_id` says *which*
+    /// picture, and the two come from different places -- the rect from the line layout, the id from
+    /// the payload's catalog. Calling them `r` and `i` would make the variant look like `Icon`.
+    ///
+    /// # Why the asset is named and not carried
+    ///
+    /// The node carries a 32-byte content address, not pixels. That keeps `Node` `Copy` -- which
+    /// [`SurfaceTree`]'s `before`/`after` ordering depends on -- and it means the pixels arrive
+    /// through a [`RasterSource`] the painter holds, so an image that is scrolled out of the Iceberg
+    /// window is a *cache miss at paint time* rather than a node that could not be built at all.
+    /// `PaintStats::images_missing` counts that, so it is visible instead of a blank page.
+    ///
+    /// # Why the rect is not scaled here
+    ///
+    /// The Iceberg cache holds **page-column-width** rasters (§2.9.3), and the session sizes `rect`
+    /// from the catalog's own `IHDR` dimensions, so the blit is 1:1 and this crate needs no resampler.
+    /// A size mismatch means the layout and the cache disagree, which is a bug; the painter refuses
+    /// it and counts it rather than stretching the picture.
+    Image { rect: Rect, asset_id: AssetId },
 }
 
 impl Node {
@@ -285,6 +308,7 @@ impl Node {
             Node::Rect(r) => r.bounds(),
             Node::Text(t) => t.bounds(line_height, advance),
             Node::Icon(i) => i.bounds(),
+            Node::Image { rect, .. } => rect.bounds(),
         }?;
         Some(match clip {
             Some(c) => raw.clip(&c),
@@ -298,6 +322,7 @@ impl Node {
             Node::Rect(_) => NodeKind::Rect,
             Node::Text(_) => NodeKind::Text,
             Node::Icon(_) => NodeKind::Icon,
+            Node::Image { .. } => NodeKind::Image,
         }
     }
 }
@@ -311,6 +336,41 @@ pub enum NodeKind {
     Text,
     /// A 1-bit icon mask.
     Icon,
+    /// A decoded raster.
+    Image,
+}
+
+/// One decoded raster, as a painter needs it: RGBA, tightly packed, 4 bytes per pixel.
+#[derive(Debug, Clone, Copy)]
+pub struct Raster<'a> {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes, row-major, no padding.
+    pub pixels: &'a [u8],
+}
+
+/// Where a [`Node::Image`]'s pixels come from.
+///
+/// # Why a trait and not a concrete cache
+///
+/// `holonomy-render` produces geometry and knows nothing about pixels, which is the whole division of
+/// labour this crate documents. If [`Node::Image`] named `IcebergCache` directly, `holonomy-render`
+/// would depend on `holonomy-image` and the miniz decoder would be reachable from the geometry crate
+/// -- and the binary cost §2.9.1 budgets would no longer be one crate's edge.
+///
+/// So the seam is one trait, in the crate that owns geometry, and the cache lives behind it. That
+/// also makes the painter testable without a decoder: `crates/holonomy-display/tests/` supplies a
+/// one-entry [`RasterSource`] and gets a frame back.
+pub trait RasterSource {
+    /// The raster for `asset_id`, or `None` when it is not resident.
+    ///
+    /// `None` is the normal, expected answer for an image scrolled outside the Iceberg window -- not
+    /// an error, and not something to paper over. The painter counts it in
+    /// `PaintStats::images_missing` so a page of missing pictures is visible in a frame's stats
+    /// rather than being a blank region nobody can explain.
+    fn raster(&self, asset_id: AssetId) -> Option<Raster<'_>>;
 }
 
 /// One node and its children.

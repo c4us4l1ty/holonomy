@@ -168,7 +168,7 @@ fn the_catalog_is_the_last_section_and_reads_to_end_of_input() {
     let fx = fixtures();
     let mut cat = AssetCatalog::new();
     for f in &fx {
-        cat.insert(f).expect("fixture PNGs");
+        cat.insert_at(usize::MAX, f).expect("fixture PNGs");
     }
     // The text holds one anchor per asset, which is what makes this document real rather than a byte
     // pattern, and no formula, so the math count is zero.
@@ -213,9 +213,10 @@ fn catalog_entry_size_is_forty_bytes_plus_its_png() {
     assert_eq!(catalog_fixed_bytes(3) - 4, 120);
     let small = png(2, 2, [4, 5, 6]);
     let mut cat = AssetCatalog::new();
-    cat.insert(&small).expect("fixture");
+    cat.insert_at(usize::MAX, &small).expect("fixture");
     let one = cat.encoded_len();
-    cat.insert(&png(2, 2, [7, 8, 9])).expect("fixture");
+    cat.insert_at(usize::MAX, &png(2, 2, [7, 8, 9]))
+        .expect("fixture");
     let two = cat.encoded_len();
     // The delta is one 40-byte entry header plus the second PNG in full, so the assertion has to
     // know the PNG's length -- an estimate here would pass for the wrong reason.
@@ -299,8 +300,8 @@ fn the_same_png_twice_is_two_entries_sharing_one_address() {
     // which is what makes "have I already got this image" answerable without a table.
     let f = png(8, 8, [9, 9, 9]);
     let mut cat = AssetCatalog::new();
-    let a = cat.insert(&f).expect("first");
-    let b = cat.insert(&f).expect("second");
+    let a = cat.insert_at(usize::MAX, &f).expect("first");
+    let b = cat.insert_at(usize::MAX, &f).expect("second");
     assert_eq!(a, b);
     assert_eq!(cat.len(), 2);
 }
@@ -312,7 +313,8 @@ fn the_same_png_twice_is_two_entries_sharing_one_address() {
 #[test]
 fn a_spliced_id_is_refused_rather_than_honoured() {
     let mut cat = AssetCatalog::new();
-    cat.insert(&png(16, 16, [7, 7, 7])).expect("fixture");
+    cat.insert_at(usize::MAX, &png(16, 16, [7, 7, 7]))
+        .expect("fixture");
     let mut bytes = Vec::new();
     cat.encode_into(&mut bytes);
     // Flip a bit in the stored id. The PNG beside it is untouched, so the recomputation disagrees.
@@ -375,7 +377,8 @@ fn png_ranges(
 #[test]
 fn stored_dimensions_must_match_the_pngs_ihdr() {
     let mut cat = AssetCatalog::new();
-    cat.insert(&png(20, 10, [1, 1, 1])).expect("fixture");
+    cat.insert_at(usize::MAX, &png(20, 10, [1, 1, 1]))
+        .expect("fixture");
     let mut bytes = Vec::new();
     cat.encode_into(&mut bytes);
     // The entry is [4..36] the id, then [36..38] width, [38..40] height, [40..44] length. The id
@@ -399,11 +402,11 @@ fn stored_dimensions_must_match_the_pngs_ihdr() {
 #[test]
 fn a_png_that_is_not_a_png_is_refused() {
     assert_eq!(
-        AssetCatalog::new().insert(b"not a png at all, but long enough"),
+        AssetCatalog::new().insert_at(usize::MAX, b"not a png at all, but long enough"),
         Err(AssetError::NotPng)
     );
     assert!(matches!(
-        AssetCatalog::new().insert(b"short"),
+        AssetCatalog::new().insert_at(usize::MAX, b"short"),
         Err(AssetError::Truncated { .. })
     ));
 }
@@ -615,7 +618,7 @@ fn an_anchor_slides_when_text_is_inserted_in_front_of_it() {
 }
 
 #[test]
-fn an_anchor_survives_undo_because_it_went_through_insert_at() {
+fn undoing_an_image_insert_takes_the_anchor_and_the_asset_together() {
     let mut e = holonomy_text::Editor::from_text(b"Z").expect("text");
     e.insert_image(1, &png(4, 4, [1, 1, 1])).expect("image");
     assert_eq!(e.assets().len(), 1);
@@ -625,14 +628,176 @@ fn an_anchor_survives_undo_because_it_went_through_insert_at() {
         0,
         "the anchor is gone"
     );
-    // The catalog keeps the bytes. It is not an interval map, so there is nothing to slide or drop --
-    // and that is the tradeoff `AssetCatalog`'s docs name: an asset outlives its anchor until the
-    // document is reopened.
+    // **The catalog must lose the bytes too.** This test used to assert the opposite -- that an asset
+    // outlives its anchor -- and that was the bug. The anchor-to-asset pairing is positional, so an
+    // anchor removed without its asset renumbers every later anchor and each of them then shows the
+    // picture that used to be one higher: invisible when the images are identical, which they are in
+    // this fixture, and a *wrong picture* when they are not. See `AssetCatalog`'s header.
     assert_eq!(
         e.assets().len(),
-        1,
-        "the picture outlives the anchor; unreachable, not corrupt"
+        0,
+        "and so is the asset, or the pairing has shifted"
     );
+}
+
+/// The invariant, as a function: entry `i` serves anchor `i`.
+///
+/// Asserted after every step of a sequence that includes the operations which can break it. The failure
+/// this catches is a *wrong picture*, not a missing one, so the check compares each anchor's served
+/// asset against the rule rather than against whatever the editor reported.
+fn assert_pairs_up(e: &holonomy_text::Editor, what: &str) {
+    let text = e.text().expect("text");
+    let anchors = holonomy_text::scan_anchors(&text);
+    let catalog = e.assets().entries();
+    assert_eq!(
+        catalog.len(),
+        anchors.len(),
+        "{what}: {} anchors and {} assets -- every anchor must have exactly one asset",
+        anchors.len(),
+        catalog.len()
+    );
+    for (i, at) in anchors.iter().enumerate() {
+        let served = &catalog[i];
+        assert_eq!(
+            served.id,
+            holonomy_text::AssetId::of(served.png.as_slice()),
+            "{what}: anchor {i} at byte {at} is served an asset whose id is not its own"
+        );
+    }
+}
+
+#[test]
+fn every_anchor_stays_paired_through_deletes_in_the_middle() {
+    // Three distinguishable images, anchors at the end. Deleting the *first* anchor renumbers the other
+    // two down by one, so each must end up served the image that was already next -- this is the case
+    // that shows the *wrong* picture rather than a missing one.
+    let fx = [
+        png(8, 8, [10, 0, 0]),
+        png(8, 8, [0, 20, 0]),
+        png(8, 8, [0, 0, 30]),
+    ];
+    let mut e = holonomy_text::Editor::from_text(b"").expect("text");
+    for f in &fx {
+        e.insert_image(e.text_len() as u32, f).expect("image");
+    }
+    assert_pairs_up(&e, "after three inserts");
+
+    let at = e.image_anchors().expect("anchors")[0] as usize;
+    e.delete_at(at as u32, 3).expect("delete the first anchor");
+    assert_eq!(e.image_anchors().expect("anchors").len(), 2);
+    assert_pairs_up(&e, "after deleting the first anchor");
+    assert_eq!(e.assets().entries()[0].png.as_slice(), fx[1].as_slice());
+    assert_eq!(e.assets().entries()[1].png.as_slice(), fx[2].as_slice());
+}
+
+#[test]
+fn an_image_inserted_in_the_middle_is_served_its_own_picture() {
+    // The bug in its purest form: appending the asset while the anchor lands at the front serves it the
+    // *last* picture in the document.
+    let a = png(8, 8, [1, 1, 1]);
+    let b = png(8, 8, [2, 2, 2]);
+    let mut e = holonomy_text::Editor::from_text(b"").expect("text");
+    e.insert_image(0, &a).expect("first at 0");
+    e.insert_image(0, &b)
+        .expect("second, also at 0 -- it lands before the first");
+    assert_pairs_up(&e, "two images both anchored at the front");
+    let anchors = e.image_anchors().expect("anchors");
+    assert_eq!(anchors, vec![0, 3]);
+    assert_eq!(
+        e.assets().entries()[0].png.as_slice(),
+        b.as_slice(),
+        "anchor 0 is the second insert"
+    );
+    assert_eq!(e.assets().entries()[1].png.as_slice(), a.as_slice());
+}
+
+#[test]
+fn undoing_a_deletion_of_an_anchor_puts_the_picture_back() {
+    let fx = [png(8, 8, [7, 7, 7]), png(8, 8, [8, 8, 8])];
+    let mut e = holonomy_text::Editor::from_text(b"").expect("text");
+    e.insert_image(0, &fx[0]).expect("first");
+    e.insert_image(3, &fx[1]).expect("second");
+    let at = e.image_anchors().expect("anchors")[0] as usize;
+    e.delete_at(at as u32, 3).expect("delete the first anchor");
+    assert_eq!(e.assets().len(), 1);
+    e.undo().expect("undo the deletion");
+    assert_eq!(
+        e.image_anchors().expect("anchors").len(),
+        2,
+        "the anchor is back"
+    );
+    assert_pairs_up(&e, "after undoing a deletion");
+    assert_eq!(e.assets().entries()[0].png.as_slice(), fx[0].as_slice());
+    assert_eq!(e.assets().entries()[1].png.as_slice(), fx[1].as_slice());
+}
+
+#[test]
+fn undo_then_redo_keeps_every_anchor_paired() {
+    let fx = [
+        png(8, 8, [1, 0, 0]),
+        png(8, 8, [0, 1, 0]),
+        png(8, 8, [0, 0, 1]),
+    ];
+    let mut e = holonomy_text::Editor::from_text(b"start\n").expect("text");
+    for f in &fx {
+        e.insert_image(e.text_len() as u32, f).expect("image");
+    }
+    assert_pairs_up(&e, "built");
+    for step in 0..3 {
+        e.undo().expect("undo");
+        assert_pairs_up(&e, &format!("after undo {step}"));
+        e.redo().expect("redo");
+        assert_pairs_up(&e, &format!("after redo {step}"));
+    }
+    for (i, f) in fx.iter().enumerate() {
+        assert_eq!(
+            e.assets().entries()[i].png.as_slice(),
+            f.as_slice(),
+            "image {i} is not the one anchor {i} should serve"
+        );
+    }
+}
+
+#[test]
+fn a_payload_after_any_of_those_sequences_still_round_trips() {
+    // The pairing is in-memory state; the payload is the on-disk form. If the two disagreed, the
+    // document would change pictures when saved -- the same bug in a different hat.
+    let fx = [png(8, 8, [3, 1, 4]), png(8, 8, [1, 5, 9])];
+    let mut e = holonomy_text::Editor::from_text(b"body\n").expect("text");
+    e.insert_image(5, &fx[0]).expect("first");
+    e.insert_image(e.text_len() as u32, &fx[1]).expect("second");
+    e.delete_at(5, 3).expect("delete the first anchor");
+    e.undo().expect("undo");
+
+    let payload = e.payload().expect("payload");
+    let back = holonomy_text::Editor::from_payload(&payload).expect("reopen");
+    assert_eq!(back.assets().len(), 2);
+    for (i, f) in fx.iter().enumerate() {
+        assert_eq!(
+            back.assets().entries()[i].png.as_slice(),
+            f.as_slice(),
+            "entry {i}"
+        );
+    }
+    assert_eq!(back.payload().expect("re-payload"), payload);
+}
+
+#[test]
+fn typing_past_an_anchor_does_not_disturb_the_pairing() {
+    // The case the "a content address is not an interval" claim was resting on: an insert in front of
+    // every anchor moves every anchor up, and nothing about the catalog should change.
+    let f = png(8, 8, [5, 5, 5]);
+    let mut e = holonomy_text::Editor::from_text(b"").expect("text");
+    e.insert_image(0, &f).expect("image");
+    for n in 0..10u8 {
+        e.insert_at(0, &[b'a' + n], SpanPolicy::Strict)
+            .expect("prefix");
+    }
+    assert_pairs_up(&e, "after ten inserts in front");
+    assert_eq!(e.image_anchors().expect("anchors"), vec![10]);
+    e.delete_at(0, 10).expect("delete the prefix");
+    assert_pairs_up(&e, "after deleting the prefix");
+    assert_eq!(e.image_anchors().expect("anchors"), vec![0]);
 }
 
 #[test]

@@ -38,7 +38,7 @@
 //! only when a delete actually removed styled content. Unstyled deletes -- the overwhelming majority,
 //! and every keystroke in a plain document -- push nothing and allocate nothing.
 
-use crate::asset::{AssetCatalog, AssetError, AssetId};
+use crate::asset::{Asset, AssetCatalog, AssetError, AssetId};
 use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
 use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
@@ -176,6 +176,21 @@ pub struct Editor {
     /// `Vec`s is 12 KB of pointer triples, not 500 arena slices, and a second ring in [`UndoStack`]
     /// would have to keep the same eviction order as the first.
     style_undo: Vec<Vec<TextIntervalSpan>>,
+    /// Scratch for counting anchors in the bytes before or inside an edited range, sized
+    /// [`DELETE_SCRATCH`].
+    ///
+    /// Exists because of the same measurement as [`Editor::delete_scratch`] and for the same reason: the
+    /// obvious way to find an anchor's ordinal is to read the whole prefix with `text()`, which is a
+    /// `Vec` the size of the document on **every delete**. `no_alloc.rs` measured 1,000 allocations over
+    /// a 1,000-keystroke delete burst and said so immediately.
+    ///
+    /// So the prefix and the range are counted in chunks through [`Rope::read_at`], which allocates
+    /// nothing, into this buffer. What remains is `O(document)` *time* per delete -- which is what every
+    /// offset in this crate already costs, and what Phase 11 exists to replace with Fenwick queries. An
+    /// allocation claim and a time claim are different claims, and the allocation one is this crate's
+    /// gate. It is kept green for documents with a thousand images as well as documents with none,
+    /// because the keystroke path cannot afford to depend on what the document happens to contain.
+    anchor_scan_scratch: Vec<u8>,
     /// Scratch space for [`delete_at`](Self::delete_at)'s captured bytes, sized [`DELETE_SCRATCH`].
     ///
     /// A field rather than a local array, and the reason is measured: a `let mut buf = [u8; 256]`
@@ -227,17 +242,33 @@ pub struct Editor {
     /// must itself be scrubbed on drop. It is: [`clear_history`](Self::clear_history) zeroizes every
     /// payload on the way out, the same guarantee the undo arena gives on eviction.
     redo: Vec<UndoAction>,
-    /// The document's images, in document order. Phase 9C.
+    /// The document's images, one per anchor, in document order. Phase 9C.
     ///
-    /// **Unlike `tables`, this is not an interval map, and that is the whole design.** An image's
-    /// position is a U+FFFC character in the document's own bytes ([`crate::ANCHOR`]), so every edit
-    /// that moves bytes moves the anchor for free -- no `apply_insert` here, nothing to forget at the
-    /// five sites the `tables` doc comment enumerates, and nothing to keep an `undo_tables` twin of.
-    /// What is *not* derivable from the text is the picture, so this holds the pictures.
+    /// **An image's *position* is a character, not an offset.** A U+FFFC OBJECT REPLACEMENT CHARACTER
+    /// in the document's own bytes ([`crate::ANCHOR`]) is what says where a picture goes, so an edit
+    /// moves the anchor for free -- no anchor list to slide.
     ///
-    /// Entry `i` serves the `i`-th anchor in document order, which is what lets the payload's frozen
-    /// per-entry shape (`Blake2b | w u16 | h u16 | len | PNG`) carry no anchor at all.
+    /// **But the *pairing* is positional and has to be maintained.** Entry `i` serves the `i`-th
+    /// anchor, because the payload's frozen per-entry shape (`Blake2b | w u16 | h u16 | len | PNG`) has
+    /// nowhere to record which anchor an asset belongs to. So deleting an anchor removes an asset, and
+    /// undoing an insertion of an image puts it back -- at the same five sites `tables` is updated from,
+    /// for the same reason: the site that is forgotten is a picture nobody can account for.
+    ///
+    /// The first version of this field's doc comment claimed none of that was necessary, on the grounds
+    /// that a content address is not an interval. It was wrong, and `AssetCatalog`'s own header now
+    /// records the mistake and the symptom -- see [`AssetCatalog`].
     assets: AssetCatalog,
+    /// Assets removed by the most recent delete, for undo. Phase 9C.
+    ///
+    /// The asset counterpart of [`Editor::undo_tables`], and shaped by the same reason: undoing a
+    /// deletion re-inserts the bytes, and bytes alone do not bring an image back. Unlike the table
+    /// shadow this is *only* the assets the last delete removed, not a whole map -- a `TableSpan` is 28
+    /// bytes and shadowing the map is cheap, whereas an asset is a PNG and shadowing the catalog would
+    /// mean holding every image in the document a second time.
+    ///
+    /// A `Vec`, and empty in the common case: a delete that touched no anchor removes no assets, and
+    /// `Vec::new()` does not allocate, so the per-keystroke allocation count is unaffected.
+    undo_assets: Vec<Asset>,
 }
 
 /// Bytes of scratch [`Editor::delete_at`] keeps, covering every single-keystroke delete.
@@ -277,9 +308,11 @@ impl Editor {
             spans: SpanMap::plain(text_len as u32),
             tables: TableMap::new(),
             undo_tables: None,
+            undo_assets: Vec::new(),
             undo: UndoStack::new(),
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
+            anchor_scan_scratch: vec![0u8; DELETE_SCRATCH],
             redo: Vec::with_capacity(UNDO_DEPTH),
             assets: AssetCatalog::new(),
         }
@@ -319,7 +352,12 @@ impl Editor {
     /// correctly when text is typed in front of it, and it moves the caret past itself -- exactly as
     /// any other insertion does.
     pub fn insert_image(&mut self, offset: u32, png: &[u8]) -> Result<AssetId, EditorError> {
-        let id = self.assets.insert(png)?;
+        // The ordinal this anchor will have is the number of anchors before `offset`, counted on the
+        // text as it is *now* -- the anchor does not exist yet. Putting the asset there rather than at
+        // the end is the whole of `AssetCatalog`'s ordering contract, and getting it wrong serves this
+        // image the last picture in the document.
+        let at = self.anchor_ordinal_at(offset as usize);
+        let id = self.assets.insert_at(at, png)?;
         self.insert_at(offset, &crate::asset::ANCHOR_BYTES, SpanPolicy::Strict)?;
         Ok(id)
     }
@@ -593,6 +631,13 @@ impl Editor {
         // That is the honest cost for that operation and it is documented rather than hidden.
         let removed_spans = self.spans.apply_delete(offset, len)?;
         self.tables.apply_delete(offset, len);
+        // Read before the bytes go, because both halves of this are byte positions and the delete
+        // renumbers them: `first` is how many anchors precede the range, and `count` is how many are
+        // inside it. Neither needs the document -- the first is a chunked prefix scan into
+        // `anchor_scan_scratch`, the second a count over the bytes already in `delete_scratch`.
+        let first = self.anchor_ordinal_at(offset_u);
+        let anchor_count = self.anchors_in_range(offset_u, len);
+        self.undo_assets = self.assets.remove_n(first, anchor_count);
         // A table whose separators have all been deleted has no cells, and `cell_count()` subtracts
         // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a later
         // keystroke walking into a zero-cell table; see `TableMap::retain_intact`.
@@ -758,6 +803,7 @@ impl Editor {
         // Stashed before the undo, not after: after it, the spans that this undo is about to delete
         // are already gone, and stashing then would preserve the loss rather than undo it.
         self.undo_tables = Some(self.tables.spans().to_vec());
+        let stash_assets = core::mem::take(&mut self.undo_assets);
         let action = self
             .undo
             .pop_for_undo()
@@ -770,6 +816,14 @@ impl Editor {
                 self.tables
                     .apply_delete(action.offset, action.bytes.len() as u32);
                 self.tables.retain_intact();
+                // The asset that was inserted with those bytes goes too, or the anchor-to-asset pairing
+                // shifts by one and every image below this point shows the wrong picture. **Kept** rather
+                // than dropped, because `redo` replays these same bytes and has to put the asset back
+                // -- and the stash is the only record of it that exists.
+                let first = self.anchor_ordinal_at(action.offset as usize);
+                self.undo_assets = self
+                    .assets
+                    .remove_n(first, AssetCatalog::count_in(&action.bytes));
                 self.rope
                     .set_cursor(action.offset as usize + action.bytes.len())?;
                 self.delete_range_in_rope(action.offset as usize, action.bytes.len())?;
@@ -800,6 +854,14 @@ impl Editor {
                     SpanPolicy::GrowIntoInsert,
                 )?;
                 self.tables.apply_insert(start, action.bytes.len() as u32);
+                // The bytes are back, so the assets for the anchors among them go back too. `restore_at`
+                // replaces rather than appends, so the assets of *later* anchors stay where they are.
+                if !stash_assets.is_empty() {
+                    let (first, after) =
+                        AssetCatalog::anchors_in(&self.text()?, start, action.bytes.len() as u32);
+                    let want = after.saturating_sub(first);
+                    self.undo_assets = self.assets.restore_at(first, stash_assets, want);
+                }
                 match removed {
                     Some(spans) if !spans.is_empty() => {
                         for s in spans {
@@ -905,6 +967,71 @@ impl Editor {
     ///
     /// Returns where it landed, which is not necessarily `offset`: an offset past the end clamps to
     /// the end, and one that falls inside a multi-byte character snaps *backwards* to that
+    /// How many anchors are inside the byte range `offset..offset + len`, without allocating.
+    ///
+    /// Reads through [`Editor::anchor_scan_scratch`], the same buffer [`anchor_ordinal_at`](Self)
+    /// uses -- so a delete does one pass over the prefix and one over the range, both into memory
+    /// allocated once in `Editor::empty`. That is the whole point of `no_alloc.rs` staying green: a
+    /// document with a thousand images must delete a character as cheaply as one with none, because
+    /// the keystroke path cannot afford to depend on how much the document happens to contain.
+    ///
+    /// A range longer than the scratch is not a keystroke -- it is a multi-kilobyte selection -- so it
+    /// takes one heap buffer, which is the honest cost and is documented rather than pretended away.
+    fn anchors_in_range(&mut self, offset: usize, len: u32) -> usize {
+        let len = len as usize;
+        if len == 0 {
+            return 0;
+        }
+        if len > self.anchor_scan_scratch.len() {
+            let mut heap = vec![0u8; len];
+            let Ok(()) = self.rope.read_at(offset, len, &mut heap) else {
+                return 0;
+            };
+            return AssetCatalog::count_in(&heap);
+        }
+        let Ok(()) = self
+            .rope
+            .read_at(offset, len, &mut self.anchor_scan_scratch[..len])
+        else {
+            return 0;
+        };
+        AssetCatalog::count_in(&self.anchor_scan_scratch[..len])
+    }
+
+    /// How many anchors there are before byte `offset`, without copying the prefix.
+    ///
+    /// The ordinal an image inserted at `offset` will take, and the ordinal a delete starting at
+    /// `offset` begins removing from. Reads the prefix in [`DELETE_SCRATCH`]-sized chunks through
+    /// [`Rope::read_at`] -- see [`Editor::anchor_scan_scratch`] for why this is not `text()`.
+    ///
+    /// `&mut self` rather than `&self` because it writes the scratch, and a scratch that had to be
+    /// taken with `mem::take` to satisfy the borrow checker would be a heap allocation -- the very thing
+    /// the scratch exists to avoid.
+    fn anchor_ordinal_at(&mut self, offset: usize) -> usize {
+        let mut n = 0usize;
+        let mut at = 0usize;
+        let end = offset.min(self.text_len());
+        let chunk = self.anchor_scan_scratch.len();
+        while at < end {
+            let take = chunk.min(end - at);
+            if self
+                .rope
+                .read_at(at, take, &mut self.anchor_scan_scratch[..take])
+                .is_err()
+            {
+                // A failed read means the rope disagrees with `text_len`, which is an invariant
+                // violation rather than an edit case. Counting what was read and stopping is the
+                // conservative direction: it can under-count an ordinal, and an under-count surfaces as a
+                // refused insert or an over-eager removal -- both recoverable -- where an over-count
+                // would silently show the wrong picture.
+                return n;
+            }
+            n += AssetCatalog::count_in(&self.anchor_scan_scratch[..take]);
+            at += take;
+        }
+        n
+    }
+
     /// character's start.
     ///
     /// Snapping backwards rather than forwards is the choice worth stating. Forward would put the
@@ -1011,6 +1138,7 @@ impl Editor {
         // Restored after the bytes go back in, so the spans are the ones the re-inserted bytes belong
         // to rather than a guess about where they should be.
         let restore = self.undo_tables.take();
+        let restore_assets = core::mem::take(&mut self.undo_assets);
         let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
         let offset = action.offset as usize;
         let len = action.bytes.len();
@@ -1022,6 +1150,15 @@ impl Editor {
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
                 if let Some(spans) = restore {
                     self.tables.replace(spans);
+                }
+                if !restore_assets.is_empty() {
+                    let (first, after) = AssetCatalog::anchors_in(
+                        &self.text()?,
+                        action.offset,
+                        action.bytes.len() as u32,
+                    );
+                    let want = after.saturating_sub(first);
+                    self.undo_assets = self.assets.restore_at(first, restore_assets, want);
                 }
                 EditOutcome {
                     offset: action.offset,

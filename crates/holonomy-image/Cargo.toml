@@ -16,6 +16,10 @@ miniz_oxide = "0.9"
 # gone rather than merely drop them. Phase 9C uses `LockPolicy::Unlocked` for these.
 holonomy-secure = { path = "../holonomy-secure" }
 holonomy-jail = { path = "../holonomy-jail" }
+# For `impl RasterSource for IcebergCache` only -- the one edge that lets the painter ask the cache for
+# a raster without knowing what a cache is. The direction is this crate -> render, so `miniz_oxide`
+# stays reachable from exactly one crate and 2.9.1's decoder budget stays one crate's edge.
+holonomy-render = { path = "../holonomy-render" }
 
 [dev-dependencies]
 libc = "0.2"

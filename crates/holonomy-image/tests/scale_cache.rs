@@ -56,6 +56,20 @@ fn gradient(w: u32, h: u32) -> Rgba {
     img
 }
 
+/// A deterministic content address for a test raster.
+///
+/// `IcebergCache` is keyed by `(page, index)` for residency and carries the asset's content address
+/// alongside, so a test that admits two *different* rasters must not claim they are the same one --
+/// which a constant `[0; 32]` would do, and the new `insert` would then answer "already resident" for
+/// the second and the test would silently stop testing eviction at all. Derived from the arguments
+/// instead, so every distinct raster has a distinct address and the same raster always has the same.
+fn id_for(page: u32, index: u32) -> [u8; 32] {
+    let mut id = [0u8; 32];
+    id[..4].copy_from_slice(&page.to_le_bytes());
+    id[4..8].copy_from_slice(&index.to_le_bytes());
+    id
+}
+
 /// §2.9.3's arithmetic, restated as a test so the doc and the code cannot drift apart.
 ///
 /// The table in PROJECT.md: a 1920x1080 RGBA image is 8.29 MiB and fits the 8.0 MiB budget
@@ -310,7 +324,15 @@ fn decoded_raster_memory_never_exceeds_the_budget() {
     let pixels = vec![0x40u8; RASTER_BYTES];
     for page in 0..40u32 {
         // Nine fit; the tenth must be refused rather than admitted.
-        let r = cache.insert(page, 0, PAGE_COL_W, PAGE_COL_H, 1920 * 1080, &pixels);
+        let r = cache.insert(
+            id_for(page, 0),
+            page,
+            0,
+            PAGE_COL_W,
+            PAGE_COL_H,
+            1920 * 1080,
+            &pixels,
+        );
         if let Ok(bytes) = r {
             assert!(
                 cache.resident_bytes() <= DEFAULT_BUDGET,
@@ -340,7 +362,7 @@ fn eviction_is_a_plus_or_minus_one_page_window() {
     // One image on each of pages 10..=20.
     for page in 10..=20u32 {
         cache
-            .insert(page, 0, PAGE_COL_W, PAGE_COL_H, 1, &pixels)
+            .insert(id_for(page, 0), page, 0, PAGE_COL_W, PAGE_COL_H, 1, &pixels)
             .expect("eleven rasters fit inside 9 MiB? no -- the tenth evicts the first");
     }
     // Viewport on page 15, so 14..=16 stay.
@@ -380,7 +402,7 @@ fn every_evicted_raster_is_scrubbed_to_zero_before_it_is_released() {
     let mut cache = IcebergCache::new();
     let pixels = vec![0xEEu8; RASTER_BYTES];
     cache
-        .insert(1, 0, PAGE_COL_W, PAGE_COL_H, 1, &pixels)
+        .insert(id_for(1, 0), 1, 0, PAGE_COL_W, PAGE_COL_H, 1, &pixels)
         .expect("insert");
     let entry = cache.get(1, 0).expect("entry is resident");
     assert!(
@@ -502,7 +524,15 @@ fn a_scroll_from_page_one_to_fifty_never_exceeds_eight_mib() {
                 continue;
             }
             cache
-                .insert(on_page, index, PAGE_COL_W, PAGE_COL_H, 1920 * 1080, &pixels)
+                .insert(
+                    id_for(on_page, index),
+                    on_page,
+                    index,
+                    PAGE_COL_W,
+                    PAGE_COL_H,
+                    1920 * 1080,
+                    &pixels,
+                )
                 .unwrap_or_else(|e| {
                     panic!("image {i} on page {on_page}: a page-column raster must fit: {e}")
                 });
@@ -556,4 +586,136 @@ fn a_scroll_from_page_one_to_fifty_never_exceeds_eight_mib() {
         cache.len() * RASTER_BYTES,
         "resident bytes must be exactly the sum of live entries"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The exact-integer-ratio finding
+// ---------------------------------------------------------------------------------------------
+
+/// # What this file's header table calls "the scaler runs on every image" turns out to mean
+///
+/// §2.9.3 makes the product downscale every image to page-column width, and its headline arithmetic is
+/// 1920 -> 640: **exactly 3:1**. `axis_map` places destination pixel `i` at source coordinate
+/// `(i + 0.5) * src/dst - 0.5`, which at `src/dst == 3` is `3i + 1` -- an exact integer. Every
+/// interpolation weight is therefore zero and the bilinear filter reduces to nearest-neighbour.
+///
+/// That is the correct behaviour for a bilinear filter at an exact integer ratio, and `axis_map` is
+/// right to do it: the pixel-centre convention it implements is the correct one and the
+/// `the_sample_map_uses_pixel_centres_not_left_edges` test above pins it. What is *not* correct is the
+/// product's arithmetic being built on the assumption that a 3:1 reduction averages. It does not, and a
+/// nearest-neighbour reduction of a photograph at 3:1 aliases visibly where an area average would not.
+///
+/// So the two tests below pin the two halves of that statement, and this comment is the record:
+/// `an_exact_integer_ratio_has_zero_weights_and_is_a_decimation` says what happens at 3:1, and
+/// `a_non_integer_ratio_actually_averages` says what happens at 7:3, so neither can change silently.
+/// The fix, if one is wanted, is an area filter on the downscale path -- a separate change with its own
+/// gate, recorded in PROJECT.md §8 rather than slipped in here.
+///
+/// `crates/holonomy/tests/session_image.rs` asserts the 3:1 half end to end, through a session, an
+/// `IcebergCache` and a `Node::Image`.
+
+#[test]
+fn an_exact_integer_ratio_has_zero_weights_and_is_a_decimation() {
+    let map = axis_map(1920, 640);
+    assert_eq!(map.len(), 640);
+    assert!(
+        map.iter().all(|s| s.weight == 0),
+        "at src/dst == 3 every destination pixel lands on a source pixel centre"
+    );
+    assert!(
+        map.iter()
+            .enumerate()
+            .all(|(i, s)| s.lo as usize == 3 * i + 1),
+        "and it lands at source 3i + 1, which is what makes the weights zero"
+    );
+    // The weights being zero is the whole mechanism; `hi` is still recorded so the second pass can
+    // address two rows, and `hi == lo + 1` means "the next one, at weight zero".
+    assert!(map.iter().all(|s| s.hi == (s.lo + 1).min(1919)));
+
+    // And the consequence, on pixels rather than on the map: a 1-px checkerboard at 3:1 comes back as
+    // itself.
+    let src = checker(96, 8);
+    let mut dst = vec![0u8; holonomy_image::scale::bytes_for(32, 8)];
+    resample(&src, 32, 8, &mut dst).expect("resample");
+    // Destination `x` therefore carries source `3x + 1`, not `3x` -- which is the map's own claim
+    // showing up in pixels, and would be the whole of a left-edge-vs-centre bug if it were off by one.
+    for y in 0..8u32 {
+        for x in 0..32u32 {
+            let p = dst[(y as usize * 32 + x as usize) * 4];
+            assert_eq!(
+                p,
+                src.pixel(x * 3 + 1, y).expect("in range")[0],
+                "column {x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_non_integer_ratio_has_fractional_weights_and_still_reads_only_two_pixels() {
+    // 96 -> 14 is 48/7, so no destination pixel lands on a source centre and every weight is genuinely
+    // fractional. This is the case §2.9.3's arithmetic assumed it was getting.
+    let map = axis_map(96, 14);
+    assert!(
+        map.iter().any(|s| s.weight != 0),
+        "a non-integer ratio must produce fractional weights"
+    );
+    assert!(
+        map.iter().any(|s| s.weight != 0 && s.weight != ONE),
+        "and interior samples must be genuinely fractional, not clamped to an endpoint"
+    );
+
+    // **But a fractional weight is not an average.** A hard edge down the middle of a 96 px source,
+    // then 96 -> 14: every destination pixel reads *two adjacent* source pixels, and at 6.86:1 that is
+    // two of every seven. So the edge is either straddled by one of those pairs or missed entirely, and
+    // no column comes out intermediate:
+    let mut img = Rgba::new(96, 4);
+    for y in 0..4 {
+        for x in 0..96 {
+            let at = (y as usize * 96 + x) * 4;
+            img.pixels[at] = if x < 48 { 0 } else { 255 };
+            img.pixels[at + 1] = 128;
+            img.pixels[at + 2] = 64;
+            img.pixels[at + 3] = 255;
+        }
+    }
+    let mut dst = vec![0u8; holonomy_image::scale::bytes_for(14, 4)];
+    resample(&img, 14, 4, &mut dst).expect("resample");
+    let intermediate = (0..14u32)
+        .filter(|&x| {
+            let r = dst[(x as usize) * 4];
+            r > 20 && r < 235
+        })
+        .count();
+    assert_eq!(
+        intermediate, 0,
+        "bilinear reads two adjacent source pixels, so a 6.86:1 reduction of a hard edge produces no \
+         intermediate values at all -- 2 of every 7 source pixels are looked at and the edge is skipped"
+    );
+
+    // This is why `a_downscale_averages_the_pixels_it_covers` above is a 2x1 -> 1x1 case and nothing
+    // larger: 2:1 is the *only* integer ratio at which the two samples a destination pixel reads are
+    // guaranteed to straddle everything in between. Every larger reduction needs an **area** filter, and
+    // that is the open item recorded in PROJECT.md §8 -- not a defect in `axis_map`, which implements the
+    // pixel-centre convention correctly and is pinned for doing so.
+    assert!(
+        (0..14u32).all(|x| dst[(x as usize) * 4] == 0 || dst[(x as usize) * 4] == 255),
+        "the edge is either straddled or missed -- there is no third outcome for a two-tap filter"
+    );
+}
+
+/// A 1-px checkerboard, `w x h`.
+fn checker(w: u32, h: u32) -> Rgba {
+    let mut img = Rgba::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (y as usize * w as usize + x as usize) * 4;
+            let on = (x + y) % 2 == 0;
+            img.pixels[at] = if on { 235 } else { 20 };
+            img.pixels[at + 1] = if on { 235 } else { 20 };
+            img.pixels[at + 2] = if on { 235 } else { 20 };
+            img.pixels[at + 3] = 255;
+        }
+    }
+    img
 }
