@@ -438,6 +438,30 @@ fn rasterize(
     }
 }
 
+/// A glyph's top side bearing: the distance from the baseline up to the top of its ink.
+///
+/// # The formula, and what it was before
+///
+/// The flattener works in a y-down space whose origin is the **ascender line**, so a glyph's ink
+/// starts at `y0` below that line while the baseline sits at `ascent_px` below it. The ink top's
+/// distance *above the baseline* is therefore `ascent_px - y0`.
+///
+/// This used to be `-(y0 + bh)`, which is the distance from the ascender line down to the ink
+/// **bottom**. That is a different quantity, and the two disagree by a lot: for a 16 ppem `x` with
+/// `y0 = 2`, `bh = 10` and `ascent_px = 15`, the correct bearing is `+13` (ink 13 px above the
+/// baseline) and the old value was `-12` (12 px above the *line box*'s top edge).
+///
+/// Nothing noticed for a long time because the arithmetic is symmetric enough to stay in range:
+/// `PaintStats::missing` stayed at zero, every glyph still appeared, and the ink simply landed
+/// 17-21 px above the line box it was supposed to be inside. `GlyphMetric::bearing_y`'s doc comment
+/// said "top side bearing, above the baseline, positive is up" the whole time -- the contract was
+/// documented correctly and the producer was violating it, which is why the fix belongs here and
+/// not in the painter. See `holonomy-assets/examples/probe_linebox.rs`.
+#[inline]
+fn top_side_bearing(ascent_px: i32, y0: i32) -> i32 {
+    ascent_px - y0
+}
+
 /// Rasterise every glyph of one face at every requested size.
 pub fn rasterize_face(
     face: &Face,
@@ -455,6 +479,17 @@ pub fn rasterize_face(
     for &ppem in sizes {
         let scale = ppem as f32 / upm;
         let ascender = face.ascender() as f32 * scale;
+        // The two vertical metrics the painter needs, in whole pixels, recorded *here* so the atlas
+        // and the rasters cannot disagree about where a baseline is.
+        //
+        // Rounded, not ceiled, and that is deliberate: `ascender` is the exact float the `Flattener`
+        // below subtracts glyph coordinates from, so the baseline really does sit at that fractional
+        // y. `FontMetrics::ascent_px` ceils because a *line box* must be tall enough for the worst
+        // case; a *baseline* must be where the outlines were actually placed. The 1px pad below
+        // absorbs the half-pixel the two conventions disagree by.
+        let ascent_px = ascender.round() as i32;
+        let descent_px = (-(face.descender() as f32) * scale).round().max(0.0) as i32;
+        builder.set_vertical(entry.style, ppem, ascent_px, descent_px);
         // One reusable tile buffer, since only one glyph's ink box is live at a time.
         let max_dim = (ppem as f32 * 3.0).ceil() as usize;
         let mut tile_scratch = vec![0u8; max_dim * max_dim];
@@ -516,7 +551,7 @@ pub fn rasterize_face(
                     0,
                     0,
                     x0,
-                    -(y0 + bh as i32),
+                    top_side_bearing(ascent_px, y0),
                     advance,
                 )?)?;
                 continue;
@@ -543,7 +578,7 @@ pub fn rasterize_face(
                 bw,
                 bh,
                 x0,
-                -(y0 + bh as i32),
+                top_side_bearing(ascent_px, y0),
                 advance,
             )?)?;
         }

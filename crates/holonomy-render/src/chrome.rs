@@ -179,6 +179,39 @@ impl ChromeMetrics {
         columns: 80,
     };
 
+    /// Adapt these metrics to a line pitch read from the fonts.
+    ///
+    /// # Why this exists
+    ///
+    /// `cell_h` is a *derived* number: [`Session::new`](../../holonomy/index.html) overwrites it with
+    /// the atlas's [`line_pitch`](https://docs.rs/holonomy-assets/latest/holonomy_assets/atlas/struct.Atlas.html#method.line_pitch),
+    /// because the packed faces need 25 px of ascent-plus-descent at 16 ppem while this file shipped
+    /// `cell_h: 18`. Four bands vertically centre a cell with a **bare subtraction**:
+    ///
+    /// ```text
+    /// l.status.y + (l.status.height - m.cell_h) / 2
+    /// ```
+    ///
+    /// and a bare `u32` subtraction underflows. That is not a hypothetical -- it panicked at
+    /// `chrome.rs:992` in 20 of 22 tests the moment the pitch went from 18 to 25, because
+    /// `status_h` was 22. A `saturating_sub` at each site would have hidden it and left the status
+    /// text drawn off the top of its band, which is a *worse* bug than a panic.
+    ///
+    /// So the invariant is made structural instead: **every band that centres a cell is raised to at
+    /// least `cell_h`.** A future face with a taller em box then costs one row of chrome height
+    /// instead of a panic, and it cannot silently mis-draw.
+    ///
+    /// `cell_w`, `width`, `height`, `columns` and the padding are untouched -- only the vertical
+    /// bands that contain text, and only upward.
+    pub fn with_line_pitch(mut self, cell_h: u32) -> Self {
+        self.cell_h = cell_h;
+        self.tab_h = self.tab_h.max(cell_h);
+        self.toolbar_h = self.toolbar_h.max(cell_h);
+        self.ruler_h = self.ruler_h.max(cell_h);
+        self.status_h = self.status_h.max(cell_h);
+        self
+    }
+
     /// Height the page canvas gets: everything the four bands do not.
     pub const fn canvas_h(&self) -> u32 {
         self.height

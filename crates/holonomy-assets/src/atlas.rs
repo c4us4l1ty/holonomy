@@ -137,6 +137,14 @@ pub struct Atlas {
     metrics: MetricTable,
     sizes: Vec<u16>,
     used: usize,
+    /// `(ascent_px, descent_px)` per `(style, size_index)`, recorded by the rasteriser.
+    ///
+    /// Why the atlas carries this rather than the painter holding a second copy: the baseline a glyph
+    /// is drawn on is a property of the *face it was rasterised from*, and the atlas is the only
+    /// thing that knows which face that was. A `Style` is not a file, so the painter cannot derive
+    /// an ascent from it without reopening the fonts -- which is exactly the kind of second source
+    /// of truth that drifts.
+    vertical: Vec<(u16, u16)>,
 }
 
 impl core::fmt::Debug for Atlas {
@@ -162,6 +170,43 @@ impl Atlas {
     /// The metric table.
     pub fn metrics(&self) -> &MetricTable {
         &self.metrics
+    }
+
+    /// `(ascent_px, descent_px)` for `style` at pixel `size`, both positive.
+    ///
+    /// The baseline of a run at `line_box_top` is `line_box_top + ascent`, and a glyph's ink then
+    /// starts at `baseline - bearing_y`. Those are the two numbers the vertical fix turns on, and
+    /// they are per-face because the packed faces disagree: at 16 ppem Inter needs 20 px, JetBrains
+    /// Mono 22, and Noto Sans Math 24.
+    ///
+    /// Returns `(0, 0)` for an undeclared pair, which makes every glyph land on the box's own top
+    /// edge -- degraded but not wrong in any way that reads as a crash.
+    pub fn vertical(&self, style: Style, size: u16) -> (u16, u16) {
+        let Some(hi) = self.sizes.iter().position(|&s| s == size) else {
+            return (0, 0);
+        };
+        self.vertical
+            .get(style as usize * crate::metric::MAX_SIZES + hi)
+            .copied()
+            .unwrap_or((0, 0))
+    }
+
+    /// The tallest `(ascent + descent)` over every face and size in this atlas, plus one pixel.
+    ///
+    /// **This is the line pitch a renderer needs**, and it is why `ChromeMetrics::cell_h` was 18 for
+    /// so long: `18 == 16 ppem + 2`, an arithmetic identity with nothing to do with the fonts. The
+    /// tallest packed face needs 24 px of ink at 16 ppem, so an 18 px line box could not contain it
+    /// no matter how the baselines were placed.
+    ///
+    /// One extra pixel, not two: the rasteriser already pads each glyph's ink box by one pixel on
+    /// every side for antialiasing, so `ascent + descent + 1` contains the padded ink exactly.
+    pub fn line_pitch(&self) -> u16 {
+        self.vertical
+            .iter()
+            .map(|&(a, d)| a.saturating_add(d))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     /// Sizes rasterised, ascending.
@@ -323,6 +368,8 @@ pub struct AtlasBuilder {
     aliases: Vec<Alias>,
     metrics: MetricTable,
     sizes: Vec<u16>,
+    /// `(ascent_px, descent_px)` per `(style, size_index)`; see [`Atlas::vertical`].
+    vertical: Vec<(u16, u16)>,
 }
 
 impl AtlasBuilder {
@@ -349,7 +396,27 @@ impl AtlasBuilder {
             aliases: Vec::new(),
             metrics: MetricTable::new(sizes),
             sizes: sorted,
+            vertical: vec![(0u16, 0u16); crate::metric::STYLE_COUNT * crate::metric::MAX_SIZES],
         })
+    }
+
+    /// Record a face's `(ascent_px, descent_px)` at `ppem`, from the rasteriser that read them.
+    ///
+    /// Called by `rasterize_face` for every (style, size) it handles, which is what makes the atlas's
+    /// vertical metrics and its glyphs' `bearing_y` values provably consistent: both come from the
+    /// same pass over the same face. Undeclared ppem is refused, as it is in [`add`](Self::add) --
+    /// a vertical metric at a size the metric table has no axis for could never be read back.
+    pub fn set_vertical(&mut self, style: Style, ppem: u16, ascent_px: i32, descent_px: i32) {
+        let Some(hi) = self.sizes.iter().position(|&s| s == ppem) else {
+            return;
+        };
+        let slot = style as usize * crate::metric::MAX_SIZES + hi;
+        if let Some(cell) = self.vertical.get_mut(slot) {
+            *cell = (
+                ascent_px.clamp(0, u16::MAX as i32) as u16,
+                descent_px.clamp(0, u16::MAX as i32) as u16,
+            );
+        }
     }
 
     /// Offer one glyph's coverage.
@@ -541,6 +608,7 @@ impl AtlasBuilder {
                 metrics,
                 sizes: self.sizes,
                 used,
+                vertical: self.vertical,
             },
             used,
             ATLAS_BYTES,

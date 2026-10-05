@@ -222,7 +222,14 @@ fn an_unparseable_formula_falls_back_to_raw_latex_and_says_so() {
     );
 }
 
-/// A fraction is 41 px tall where a line is 18, so the model has to know.
+/// A fraction is taller than a line, so the model has to know.
+///
+/// **Derived, not literal.** This asserted `formula_h == 41`, which encodes `18` -- and `18` was
+/// `ppem + 2`, a number that had nothing to do with the faces. The line pitch is now
+/// `Atlas::line_pitch()` (25 px: the tallest packed face's ascent plus descent at 16 ppem), so the
+/// same fraction is 55. Pinning either literal would leave the test asserting whatever the pitch
+/// happened to be when it was written; pinning `2 * cell_h + 5` is the property, and it survives
+/// the pitch changing again.
 #[test]
 fn a_formula_taller_than_a_line_pushes_the_lines_below_it_down() {
     let mut s = with_text("");
@@ -234,8 +241,10 @@ fn a_formula_taller_than_a_line_pushes_the_lines_below_it_down() {
     )
     .height;
     assert_eq!(
-        formula_h, 41,
-        "18 + 2 pad + 1 bar + 2 pad + 18, which is the number `tests/math.rs` also derives"
+        formula_h,
+        m.cell_h * 2 + 5,
+        "{cell_h} px line + 2 pad + 1 bar + 2 pad + {cell_h} px line, with cell_h={cell_h}          coming from the atlas's line pitch rather than from `ppem + 2`",
+        cell_h = m.cell_h
     );
     assert!(
         formula_h > m.cell_h,
@@ -370,25 +379,46 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
     // rather than a luminance threshold: a threshold of `< 0x808080` matches the canvas, which is
     // black, and reports ink 119 px into the column. The frame's only other colour here is black, so
     // this is exact rather than approximate.
+    //
+    // The chrome's caret is a third thing in the same rectangle -- `Caret::locate` reads the same
+    // `LineHeights`, so a caret just past a compiled formula sits in the formula's own rows -- and it
+    // is ink by that two-colour test. It is dropped by exact value, and no glyph pixel can be
+    // mistaken for it: glyph ink is a coverage blend of `INK` (0x18181C) into `PAGE` (0xFAFAF8), and
+    // matching the caret's red 0x30 pins coverage at (0xFA - 0x30) / (0xFA - 0x18) = 202/226, which
+    // puts blue at 0xF8 - 220 * 202/226 = 0x33 rather than the caret's 0x38. A flat fill and a blend
+    // of those two colours meet nowhere.
     const CANVAS: u32 = 0x0000_0000;
     const PAGE: u32 = 0x00FA_FAF8;
+    let caret_fill = holonomy_render::chrome::colour::CARET & 0x00FF_FFFF;
     let m = real.chrome().metrics;
     let text_x = real.chrome().layout.text.x;
     let top = real.chrome().layout.text.y;
     let frame = real.frame();
-    // A full cell either side of the line box, because `bearing_y` currently places ink *above* the
-    // box -- see `probe_linebox.rs` and the `Painter::text` docs. A window tight to `top` would find
-    // nothing and the test would pass vacuously.
+
+    // # The window is the formula's line box, and the caret is dropped by exact value
+    //
+    // `LineHeights::from` adds a block's height to `y(line)` for every `l <= line`, so a line
+    // holding a formula-tall block starts *after* its own block: the caret and the formula both live
+    // in `[text.y + cell_h, text.y + 2 * cell_h)`. `Caret::locate` and `emit_math` read that same
+    // model, which is what makes this the box rather than a guess, and it is the box
+    // `Painter::text`'s vertical placement promises to fill.
+    //
+    // The previous window was `text.y - cell_h .. text.y + cell_h`, written when `bearing_y` put ink
+    // 17-21 px *above* its box. The fix put the ink inside the box, so that window now misses it
+    // entirely -- the fix working, not a test that cannot fail: ink escaping the box in either
+    // direction still leaves this scan empty and fails at the `.expect` below.
+    let box_top = top + m.cell_h;
+    let rows = box_top..box_top + m.cell_h;
     let inked = |x: u32, y: u32| {
         let p = frame.pixel(x, y);
-        p != CANVAS && p != PAGE
+        p != CANVAS && p != PAGE && p != caret_fill
     };
     // Scanned from the text column's left edge, not from 0: the ruler draws vertical rules at
     // `text.x` and `text.right()`, and a search that started off-column would find the rule rather
     // than the formula.
     let ink_right = (text_x..text_x + 60)
         .rev()
-        .find(|&x| (top - m.cell_h..top + m.cell_h).any(|y| inked(x, y)))
+        .find(|&x| rows.clone().any(|y| inked(x, y)))
         .expect("the formula drew something");
 
     // Exactly 29 px of inked extent, and the number is derived rather than observed twice.
@@ -465,18 +495,22 @@ fn a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width() {
 
     const CANVAS: u32 = 0x0000_0000;
     const PAGE: u32 = 0x00FA_FAF8;
+    let caret_fill = holonomy_render::chrome::colour::CARET & 0x00FF_FFFF;
+    let cell_h = s.chrome().metrics.cell_h;
     let text_x = s.chrome().layout.text.x;
     let top = s.chrome().layout.text.y;
     let frame = s.frame();
+    // The formula's line box and the caret's exclusion: see the same construction in
+    // `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`, which spells out why
+    // the window is `[text.y + cell_h, text.y + 2 * cell_h)` and not `text.y +/- cell_h`.
+    let rows = (top + cell_h)..(top + cell_h + cell_h);
     let inked = |x: u32, y: u32| {
         let p = frame.pixel(x, y);
-        p != CANVAS && p != PAGE
+        p != CANVAS && p != PAGE && p != caret_fill
     };
     let rightmost = (text_x..text_x + 40)
         .rev()
-        .find(|&x| {
-            (top - s.chrome().metrics.cell_h..top + s.chrome().metrics.cell_h).any(|y| inked(x, y))
-        })
+        .find(|&x| rows.clone().any(|y| inked(x, y)))
         .expect("`\\sum` drew something");
     assert_eq!(
         rightmost,

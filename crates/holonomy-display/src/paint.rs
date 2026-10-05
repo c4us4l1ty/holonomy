@@ -296,29 +296,44 @@ impl<'a> Painter<'a> {
             // blit truncated every one of them to 8 columns, so `\sum` lost 6 of its 14 and no glyph
             // in the product was drawn at its own width.
             //
-            // # Why the damage test is still the *cell*, not the ink
+            // # Why the damage test is still the *cell*
             //
-            // Culling on the ink rect is the correct end state and it is not here, because
-            // `bearing_y` does not mean what the painter assumes. `raster.rs` stores
-            // `bearing_y = -(y0 + bh)` -- the ink's bottom, measured up from the font's *ascender
-            // line* -- while every caller passes `run.y` as a **line box top**, so the painter's
-            // `run.y + bearing_y` lands ink 17-21 px *above* the box and outside the damage rect the
-            // session computed for it. `holonomy-assets/examples/probe_linebox.rs` measures this:
-            // 19 of 19 sampled glyphs place their ink outside an 18 px box.
+            // Culling on the ink rect is the correct end state, and the precondition for it -- ink
+            // inside the line box -- now holds, because `bearing_y` is a real top side bearing and
+            // `cell_height()` is derived from the faces' own ascent and descent (see
+            // `Atlas::line_pitch`).
             //
-            // Culling on the ink rect under that bug rejects the glyphs entirely -- the formula's ink
-            // sits at y 126..138 while `emit_math` damages y 143..160, they do not intersect, and a
-            // formula stops rendering. Which is why the cell is still the cull: it is where the
-            // damage model actually agrees with the draw, so the two are consistent today even
-            // though both are wrong. Fixing `bearing_y` and the line box together is what lets the
-            // cull move to the ink rect, and it needs a line-height decision (18 px cannot contain
-            // these faces' ascenders and descenders), so it is a separate change.
+            // It is still the cell because the cell is what the *rest* of the system agrees on. Every
+            // caller damages `cell_h`-tall rects (`emit_math`, the table grid, the chrome bands) and
+            // positions lines by `LineHeights`, whose pitch is `cell_h`. Moving the cull to the ink
+            // rect is a saving of a few bytes of damage area per glyph, and it would have to be
+            // proven against every one of those callers. A cell that contains the ink culls
+            // *conservatively* -- it can only ever paint more than strictly necessary, never less --
+            // so it is the safe side to be on while the pitch is still changing.
+            //
+            // What the old version of this comment recorded is worth keeping: the previous
+            // arrangement had ink *outside* the cell, so culling on the cell and culling on the ink
+            // disagreed about which glyphs exist at all, and a formula stopped rendering because its
+            // ink at y 126..138 did not intersect the damage at y 143..160. `probe_linebox.rs` is the
+            // gate that says ink is now inside the box.
+            // # The vertical placement, which used to be wrong by 17-21 px
+            //
+            // `run.y` is a **line box top**, not a baseline. A glyph's ink starts at
+            // `baseline - bearing_y`, and the baseline is `run.y + ascent` for the run's own face --
+            // so the blit belongs at `run.y + ascent - bearing_y`, not at `run.y + bearing_y`.
+            //
+            // It used to be the latter, and `raster.rs` stored `bearing_y` as the distance from the
+            // *ascender line* down to the ink bottom rather than the distance from the baseline up to
+            // the ink top, so the two errors compounded into ink landing 17-21 px above the box that
+            // was supposed to contain it. `bearing_y` is now a true top side bearing; see
+            // `holonomy-assets/src/raster.rs::top_side_bearing`.
+            let ascent = i32::from(self.vertical(run.style, size).0);
             let coverage = atlas.coverage();
             blit_coverage(
                 &mut self.scratch,
                 frame,
                 x + i32::from(m.bearing_x),
-                run.y + i32::from(m.bearing_y),
+                run.y + ascent - i32::from(m.bearing_y),
                 u32::from(m.width),
                 u32::from(m.height),
                 run.colour,
@@ -354,10 +369,25 @@ impl<'a> Painter<'a> {
             .map_or(8, |ppem| u32::from(ppem) / 2)
     }
 
-    fn cell_height(&self) -> u32 {
+    /// `(ascent_px, descent_px)` for a run's style and size, or `(0, 0)` with no atlas.
+    fn vertical(&self, style: holonomy_render::Style, size: u16) -> (u16, u16) {
         self.atlas
-            .and_then(|a| a.sizes().first().copied())
-            .map_or(18, |ppem| u32::from(ppem) + 2)
+            .map_or((0, 0), |a| a.vertical(atlas_style(style), size))
+    }
+
+    /// The text cell height: the line box a run occupies.
+    ///
+    /// **This was `ppem + 2`, which is 18 and was an arithmetic identity with nothing to do with the
+    /// fonts.** The packed faces need 20 px (Inter), 22 (JetBrains Mono) and 24 (Noto Sans Math) of
+    /// ascent-plus-descent at 16 ppem, so no placement of the baselines can make an 18 px box contain
+    /// their ink. The value is now [`Atlas::line_pitch`] -- the tallest ascent plus descent in the
+    /// atlas, plus the one pixel the rasteriser's antialiasing pad needs.
+    ///
+    /// With no atlas there are no faces and therefore no metrics, so this falls back to 18. A
+    /// chrome-only frame draws box-drawing glyphs, which are procedural and sized to the cell, so the
+    /// fallback only has to be self-consistent rather than typographically correct.
+    fn cell_height(&self) -> u32 {
+        self.atlas.map_or(18, |a| u32::from(a.line_pitch()))
     }
 }
 

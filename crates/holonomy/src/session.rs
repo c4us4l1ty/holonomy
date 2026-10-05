@@ -312,6 +312,24 @@ impl<'a> Session<'a> {
         scanout: Box<dyn Scanout>,
         metrics: ChromeMetrics,
     ) -> Self {
+        // # The line pitch comes from the faces, not from the constant
+        //
+        // `ChromeMetrics::DESKTOP.cell_h` is 18, which is `16 ppem + 2` -- an arithmetic identity with
+        // nothing to do with the fonts. The packed faces need 20 px (Inter), 22 (JetBrains Mono) and
+        // 24 (Noto Sans Math) of ascent-plus-descent at 16 ppem, so an 18 px line box cannot contain
+        // their ink at *any* baseline placement. Every caller here -- `publish_line_heights`,
+        // `emit_math`, the table grid, the damage rects -- positions and damages by `cell_h`, so the
+        // one place that can set it correctly from real metrics is where the session first meets the
+        // atlas it will paint from.
+        //
+        // The constant stays 18 as the **no-atlas** fallback, which is the same value
+        // `Painter::cell_height` falls back to. A chrome-only frame draws procedural box-drawing
+        // glyphs sized to the cell, so it needs the fallback to be self-consistent, not
+        // typographically correct -- and the two agreeing is the point.
+        let metrics = match painter.atlas().map(|a| a.line_pitch()).filter(|&p| p > 0) {
+            Some(pitch) => metrics.with_line_pitch(u32::from(pitch)),
+            None => metrics,
+        };
         let chrome = Chrome::new(metrics);
         publish_atlas(painter.atlas(), painter.size_index());
         let frame = Frame::black(metrics.width, metrics.height);
@@ -1291,12 +1309,7 @@ impl<'a> Session<'a> {
         self.stats.table_cells_drawn = cells_drawn;
         self.stats.table_borders_drawn = borders_drawn;
         self.tables_shape_dirty = false;
-        if let Some(rect) = extra {
-            *damage = Some(match *damage {
-                Some(d) => d.union(&rect),
-                None => rect,
-            });
-        }
+        widen(damage, extra);
     }
 
     /// Draw every formula whose line is on screen, and widen `damage` to cover them.
@@ -1515,12 +1528,7 @@ impl<'a> Session<'a> {
         self.stats.math_raw = raw_count;
         self.stats.math_rules = rules;
         self.stats.math_parse_errors = parse_errors;
-        if let Some(rect) = extra {
-            *damage = Some(match *damage {
-                Some(d) => d.union(&rect),
-                None => rect,
-            });
-        }
+        widen(damage, extra);
     }
 
     /// Add every formula's height to the line-height model, so the lines below it move down.
@@ -1695,6 +1703,37 @@ const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
 #[inline]
 fn measure_only(node: &MathNode, m: &MathMetrics) -> holonomy_render::math_layout::MathBox {
     holonomy_render::math_layout::measure(node, m)
+}
+
+/// Widen `damage` by the rectangle an emitter had to draw, **without ever narrowing a full
+/// repaint**.
+///
+/// # The bug this replaces
+///
+/// Both emitters used to inline
+///
+/// ```text
+/// *damage = Some(match *damage { Some(d) => d.union(&rect), None => rect });
+/// ```
+///
+/// which reads as "union" and is not one. `None` in this position does not mean *nothing to
+/// repaint*: [`Painter::paint`] treats `None` as the whole frame, and `Session::paint(None)` is how
+/// a test asks for a full repaint. Turning that `None` into `Some(rect)` silently converted a full
+/// repaint into a repaint of one formula's box, and everything outside the box kept whatever pixels
+/// it already had -- black, on a first paint.
+///
+/// It was found by tracing the vertical-placement fix in Phase 9C: after `Session::paint(None)`, a
+/// caret drawn at the *old* cell (x 320, y 130) was still on screen four repaints later, because the
+/// page fill that erases it was clipped away along with everything outside the formula's rect at
+/// (320, 155). The caret's own lookup said (376, 155) and the frame said (320, 130) -- two answers to
+/// the same question, which is exactly the class of disagreement this file exists to prevent.
+///
+/// So the union is now only performed when there is a rect to union into. A full frame cannot be
+/// widened by a smaller rectangle, and that is the whole rule.
+fn widen(damage: &mut Option<DamageRect>, extra: Option<DamageRect>) {
+    if let (Some(d), Some(e)) = (*damage, extra) {
+        *damage = Some(d.union(&e));
+    }
 }
 
 fn union_opt(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
