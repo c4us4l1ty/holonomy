@@ -351,6 +351,7 @@ dependencies = [
 name = "holonomy-text"
 version = "3.0.0-singularity"
 dependencies = [
+ "blake2",
  "holonomy-geometry",
  "holonomy-input",
  "holonomy-jail",

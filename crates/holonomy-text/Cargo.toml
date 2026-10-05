@@ -15,6 +15,11 @@ publish.workspace = true
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-secure = { path = "../holonomy-secure" }
 
+# `AssetId` is BLAKE2b-256 over a PNG's encoded bytes. Already in the lock file via holonomy-crypto
+# (`Blake2b512`, the same construction at a different output length), so this adds no new transitive
+# dependency and no new binary cost -- only the 256-bit variant gets linked.
+blake2 = "0.11"
+
 # The undo stack zeroizes through this crate rather than a hand-rolled volatile write, so the
 # scrub is the audited implementation and not a local one that could be optimised away.
 zeroize = "1.9"

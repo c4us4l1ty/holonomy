@@ -13,17 +13,25 @@
 //! Lands in Phase 6. Gate: insert/delete O(1) with zero allocations, asserted by a counting
 //! global allocator. See PROJECT.md §5 Phase 6 and PRD §7.1.
 
+pub mod asset;
 mod editor;
 mod leaf;
 mod math_span;
+pub mod payload;
 mod rope;
 mod span;
 pub mod table;
 pub mod tables;
 pub mod undo;
 
+pub use asset::{
+    scan_anchors, Asset, AssetCatalog, AssetError, AssetId, ANCHOR, ANCHOR_BYTES, ID_LEN,
+};
 pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH};
 pub use math_span::{for_each_math_span, math_span_at, math_span_count, MathSpan, DELIM, MIN_SPAN};
+pub use payload::{
+    decode, encode, image_offsets, Decoded, PayloadError, FORMAT, HEADER_LEN, MAGIC,
+};
 pub use span::{
     SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER,
     STYLE_ITALIC,

@@ -38,6 +38,8 @@
 //! only when a delete actually removed styled content. Unstyled deletes -- the overwhelming majority,
 //! and every keystroke in a plain document -- push nothing and allocate nothing.
 
+use crate::asset::{AssetCatalog, AssetError, AssetId};
+use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
 use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
@@ -74,6 +76,10 @@ pub enum EditorError {
         /// Requested offset.
         offset: u32,
     },
+    /// An image could not be catalogued, or a payload could not be read or written.
+    Asset(AssetError),
+    /// A document payload was refused.
+    Payload(PayloadError),
 }
 
 impl std::fmt::Display for EditorError {
@@ -87,6 +93,8 @@ impl std::fmt::Display for EditorError {
             Self::NotCharBoundary { offset } => {
                 write!(f, "byte {offset} is inside a UTF-8 character")
             }
+            Self::Asset(e) => write!(f, "{e}"),
+            Self::Payload(e) => write!(f, "{e}"),
         }
     }
 }
@@ -106,6 +114,16 @@ impl From<SpanError> for EditorError {
 impl From<UndoError> for EditorError {
     fn from(e: UndoError) -> Self {
         Self::Undo(e)
+    }
+}
+impl From<AssetError> for EditorError {
+    fn from(e: AssetError) -> Self {
+        Self::Asset(e)
+    }
+}
+impl From<PayloadError> for EditorError {
+    fn from(e: PayloadError) -> Self {
+        Self::Payload(e)
     }
 }
 
@@ -209,6 +227,17 @@ pub struct Editor {
     /// must itself be scrubbed on drop. It is: [`clear_history`](Self::clear_history) zeroizes every
     /// payload on the way out, the same guarantee the undo arena gives on eviction.
     redo: Vec<UndoAction>,
+    /// The document's images, in document order. Phase 9C.
+    ///
+    /// **Unlike `tables`, this is not an interval map, and that is the whole design.** An image's
+    /// position is a U+FFFC character in the document's own bytes ([`crate::ANCHOR`]), so every edit
+    /// that moves bytes moves the anchor for free -- no `apply_insert` here, nothing to forget at the
+    /// five sites the `tables` doc comment enumerates, and nothing to keep an `undo_tables` twin of.
+    /// What is *not* derivable from the text is the picture, so this holds the pictures.
+    ///
+    /// Entry `i` serves the `i`-th anchor in document order, which is what lets the payload's frozen
+    /// per-entry shape (`Blake2b | w u16 | h u16 | len | PNG`) carry no anchor at all.
+    assets: AssetCatalog,
 }
 
 /// Bytes of scratch [`Editor::delete_at`] keeps, covering every single-keystroke delete.
@@ -252,12 +281,80 @@ impl Editor {
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
             redo: Vec::with_capacity(UNDO_DEPTH),
+            assets: AssetCatalog::new(),
         }
     }
 
     /// The document's bytes, for export and for tests.
     pub fn text(&self) -> Result<Vec<u8>, EditorError> {
         Ok(self.rope.to_vec()?)
+    }
+
+    /// The document's images, in document order.
+    #[must_use]
+    pub fn assets(&self) -> &AssetCatalog {
+        &self.assets
+    }
+
+    /// The byte offset of every image anchor, in document order.
+    ///
+    /// A full copy of the document to find three bytes per image, which is exactly the cost Phase 11's
+    /// audit complains about elsewhere. It is here rather than being a streaming walk because the
+    /// session needs the offsets and the session already holds the text; the `read_into` version
+    /// belongs with that phase, not with this one.
+    pub fn image_anchors(&self) -> Result<Vec<u32>, EditorError> {
+        Ok(crate::asset::scan_anchors(&self.text()?))
+    }
+
+    /// Insert `png` as an image at `offset`, and return its [`AssetId`].
+    ///
+    /// **Two writes, and the order is the contract.** The catalog's *nth* entry serves the *n*-th
+    /// anchor in the text, so the two must stay in step. A text write that failed *after* the catalog
+    /// write would leave every image below the new one showing the wrong picture -- a corruption that
+    /// no error message would ever name. So the catalog is written first and the text second: a
+    /// refused PNG leaves nothing at all, and a failed text write leaves a catalog entry that is never
+    /// reached. Both are harmless. The reverse order is not.
+    ///
+    /// The anchor goes in through [`insert_at`](Self::insert_at), so it is undoable, it slides
+    /// correctly when text is typed in front of it, and it moves the caret past itself -- exactly as
+    /// any other insertion does.
+    pub fn insert_image(&mut self, offset: u32, png: &[u8]) -> Result<AssetId, EditorError> {
+        let id = self.assets.insert(png)?;
+        self.insert_at(offset, &crate::asset::ANCHOR_BYTES, SpanPolicy::Strict)?;
+        Ok(id)
+    }
+
+    /// The whole document as a container payload.
+    ///
+    /// This is the byte string `Wavefunction::create` and `write_content` are handed. The container
+    /// neither parses it nor knows its shape; see [`crate::payload`] for why the container format did
+    /// not have to change to accommodate it.
+    pub fn payload(&self) -> Result<Vec<u8>, EditorError> {
+        let text = self.text()?;
+        let text =
+            String::from_utf8(text).map_err(|_| EditorError::Payload(PayloadError::NotUtf8))?;
+        let tables: Vec<crate::TableSpan> = self.tables.spans().to_vec();
+        Ok(payload::encode(&text, &self.spans, &tables, &self.assets))
+    }
+
+    /// Rebuild a document from a payload produced by [`payload`](Self::payload).
+    ///
+    /// The history is empty: an opened document has no undo stack. That is Phase 6's "undo is never
+    /// persisted" taken to its conclusion rather than a gap.
+    ///
+    /// No invariant check is called afterwards, and that is not an oversight: `Rope::from_text`
+    /// validates the rope, `SpanMap::from_spans` validated the span list on the way out of `decode`
+    /// (including that it is sorted, gap-free and ends exactly at the text length), and `decode`
+    /// bounds-checked every table against the text. A second validator here would be a second thing
+    /// to keep in step with the first, which is the cost `from_spans` exists to avoid.
+    pub fn from_payload(bytes: &[u8]) -> Result<Self, EditorError> {
+        let decoded = payload::decode(bytes)?;
+        let rope = Rope::from_text(decoded.text.as_bytes())?;
+        let mut e = Self::empty(rope, decoded.text.len());
+        e.spans = decoded.spans;
+        e.tables.replace(decoded.tables);
+        e.assets = decoded.assets;
+        Ok(e)
     }
 
     /// Document length in bytes.
@@ -592,9 +689,26 @@ impl Editor {
     /// Separate from [`delete_at`](Self::delete_at) because deleting at an arbitrary offset and
     /// deleting before the caret take different paths through the rope: the latter is the keystroke
     /// path, and it is the one that merges leaves.
+    ///
+    /// # Why the cursor is set once, at the far end
+    ///
+    /// `Rope::delete_byte` deletes the byte *before* the cursor and leaves the cursor on it, so one
+    /// `set_cursor(offset + 1)` per byte is the obvious way to walk forward. **It cannot delete a
+    /// multi-byte character.** After a 3-byte U+FFFC lands at `offset`, the second iteration sets the
+    /// cursor to `offset + 1`, which is the middle of that character, and `set_cursor` refuses:
+    ///
+    /// ```text
+    /// thread 'undo' panicked: undo: Rope(NotCharBoundary { offset: 2, text_len: 4 })
+    /// ```
+    ///
+    /// Every byte offset this crate's own tests touched was ASCII, so nothing noticed. Setting the
+    /// cursor once to `offset + len` and then deleting walks *backwards* through the run, and every
+    /// intermediate position is set by `delete_byte` itself rather than by us -- so there is no moment
+    /// at which a cursor can land mid-character. `offset + len` is a boundary because the run was
+    /// inserted as whole characters at a boundary, which is the only thing that puts it in a payload.
     fn delete_range_in_rope(&mut self, offset: usize, len: usize) -> Result<(), EditorError> {
+        self.rope.set_cursor(offset + len)?;
         for _ in 0..len {
-            self.rope.set_cursor(offset + 1)?;
             self.rope.delete_byte()?;
         }
         Ok(())

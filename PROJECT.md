@@ -446,8 +446,16 @@ Phase 9 adds one crate and extends three, and the placement is not arbitrary:
 
 ## 5. Phase plan
 
-Phases 1–9 are strictly ordered, and there is no Phase 10. Every phase lists the gate that must pass
-before the next starts.
+Phases 1–9 are strictly ordered, and there is no Phase 10. Phases 11–14 were added on 2026-10-05, after
+the Phase 9C gate, and are ordered among themselves. Every phase lists the gate that must pass before the
+next starts.
+
+Phases 11–14 exist because Phases 0–9 built the parts and never assembled the product: no document is
+loaded from the container, no document body text is drawn, and the per-keystroke path copies the whole
+document. Their ordering is **speed before UI** — Phase 11 makes the edit path `O(edited line)`, and
+Phase 14 makes a rich chrome demonstrable around a path that is not. Read the audit at the head of
+Phase 11 before starting any of them; most of it is derived arithmetic rather than measurement, which is
+why Phase 11's first gate replaces the arithmetic with measured numbers.
 
 **The target-hardware run is removed, by decision, on 2026-10-05.** The laptop this is being built on,
 running an ordinary X11 desktop through the `desktop` feature, is the **designated daily-driver
@@ -862,6 +870,227 @@ none of it: measured 1,032,472 bytes with zero of five X11 marker strings, again
 
 Removed on 2026-10-05, with the reasoning at the head of §5. There is no target-hardware run.
 
+### Phases 11–14 — Added 2026-10-05, after the Phase 9C gate
+
+Four phases, added rather than folded backward, because each one answers a question that the Phase 0–9
+gates were never asking. Phases 0–9 built the *parts*: a text engine, a renderer, a container, a jail, a
+window. What was never assembled is the *product* — a document is never loaded from the container, no
+document body text is ever drawn, and the per-keystroke path is superlinear in document length. The
+audit that motivated these phases is below, and it is worth reading because most of it is arithmetic
+rather than measurement, which is exactly why Phase 11's first act is to replace the arithmetic with
+numbers.
+
+The ordering is **speed before UI**, and it is load-bearing rather than stylistic. A menu bar is a dozen
+clickable rectangles; it is also a way to make the application's cost model visible to a person, and
+there is no value in making a fast-looking shell demonstrable around a 300×-over-budget edit path. Phase 14
+therefore comes last, and Phase 11 comes first.
+
+#### The audit that produced these phases
+
+**Nothing in the product loads a document.** `main.rs:208` and `main.rs:242` construct `Editor::new()`
+— an empty editor. The container is opened as a raw fd (`main.rs:247`), the passphrase is read at
+`main.rs:276` and discarded at `main.rs:295` (`let _ = &phrase;`). The only code path that goes
+container → editor is `crates/holonomy-jail/examples/census_session.rs:308-311`. And
+`Wavefunction::read_content` (`crates/holonomy-container/src/lib.rs:344`) is not a paged read — it
+streams every chunk through the 192 KiB ring and then concatenates the whole document into one `Vec`,
+so loading is fully resident with a transient 2× peak at open.
+
+**Nothing draws document body text.** `Chrome::tree` documents it: *"draws no document body text at all
+— the page behind the chrome is blank"* (`crates/holonomy-render/src/chrome.rs:445-448`). `Painter::text`
+is private and rasterises a contiguous codepoint run rather than bytes read from a document. There is no
+function anywhere that takes a document line and paints it.
+
+**Every keystroke copies the entire document, eleven times over.** `Session` calls
+`self.editor.text()` at eleven sites (`crates/holonomy/src/session.rs:379, 391, 450, 821, 926, 1044,
+1054, 1093, 1165, 1200, 1350`), and `Editor::text` → `Rope::to_vec` allocates a `Vec` the size of the
+document (`crates/holonomy-text/src/rope.rs:428`). `Rope::read_at` fills it byte-at-a-time
+(`rope.rs:418-420`), so each copy is a per-byte call rather than a memcpy. Three of those sites are on
+the caret path itself — `line_start` (`session.rs:1043`) and `line_index` (`session.rs:1053`) are called
+from every `caret_to`, and `refresh_counts` (`session.rs:1092`) then makes three more full passes for
+bytes, words and lines.
+
+The consequence, derived rather than measured: at a 6.4 MiB document, one keystroke moves on the order
+of 40 MiB and touches 6.7 M per-byte accessor calls, repeated eleven times. The `no_alloc.rs` gate is
+green through all of this because it drives `Editor` directly and never constructs a `Session` — so
+"no heap allocation while editing" is currently asserted about a code path the product does not use.
+
+**The geometry engine is built, proven, and disconnected.** `LineGeometry` — the two Fenwick trees,
+`O(log n)` `y_of`/`line_at`/`byte_of`/`line_of_byte`, with exact-inverse tests at 60,000 lines — appears
+only in `holonomy-text/tests/latency.rs`, `holonomy-geometry/tests/h2_port.rs`, and one jail example. It
+is in no production path. `Session` uses `ChromeState::scroll_line` plus a newline count.
+
+**The 16.0 MiB gate has never been measured.** There is no `statm`, no `/proc/self/status` and no
+`getrusage` anywhere under `crates/`. §6's row "steady-state RSS ≤ 16.0 MiB with a 2000-page document
+open" is arithmetic, not a test. The arithmetic, corrected against the source: §2.9.4's table
+understates CAGR text by ~3.7× (it says ~2.0 MiB for "CAGR text + span map"; measured leaf data alone is
+6.82 MiB at the full budget, `crates/holonomy-text/tests/latency.rs:368`) and overstates the container
+ring by ~16× (it says ~3.0 MiB; `crates/holonomy-container/src/io.rs:39-48` allocates 3 × 65,536 =
+0.188 MiB), and it omits the 3.906 MiB framebuffer (`crates/holonomy-display/src/frame.rs:132`). §2.9.4
+is left as written because it is the record of what was believed at the time; **the corrected
+derivation is in Phase 11 and it is the number that governs.**
+
+**Two ceilings bind before RSS does, and they were not accounted for.** `S_MAX_PAYLOAD` is 8 MiB
+(`crates/holonomy-container/src/layout.rs:85`), so the format caps plaintext at 8 MiB; 8 MiB of text needs
+`8 MiB × 4096/3840 = 8.53 MiB` of `mlock`, and this host's `RLIMIT_MEMLOCK` is 8.00 MiB. **The
+format's maximum document is therefore unopenable**, and the real ceiling is set by `mlock` occupancy,
+not by RSS. `RLIMIT_MEMLOCK` is raised soft→hard by the boot chain
+(`crates/holonomy-jail/src/rlimits.rs:138-155`, invoked at `main.rs:385`), which is why
+`latency.rs:396` passes on this host and why it will fail on a host whose *hard* limit is 8 MiB.
+
+#### Phase 11 — The keystroke path: one document, no copies
+
+Make the product's edit path `O(edited line)` instead of `O(document)`, and replace §6's derived memory
+numbers with measured ones. **Nothing about security, the container format, or the jail changes here** —
+this phase makes an existing claim true rather than making a new one.
+
+1. **A session-owned scratch buffer, and `read_into` everywhere.** `Editor::read_into`
+   (`crates/holonomy-text/src/editor.rs:774`) already reads a byte range into a caller-supplied buffer
+   without allocating. `Session` grows one scratch sized to the widest *visible region* rather than the
+   document, and every one of the eleven `editor.text()` sites goes through it or through the Fenwick
+   trees. The pattern is already in the tree: `with_table` (`session.rs:766-784`) holds a
+   `table_scratch` and its doc comment states the cost of not doing so.
+2. **`Rope::read_at` copies per leaf, not per byte.** The inner loop at `rope.rs:418-420` becomes one
+   `copy_from_slice` against the leaf's data pointer. This is a change to the hottest function in the
+   crate and it must be gated on byte-identical output, not on a benchmark.
+3. **`LineGeometry` goes into the session.** `line_start`, `line_index` and `refresh_counts` become
+   `O(log n)` Fenwick queries and incremental deltas instead of scans. `LineGeometry::damage_rect_for`
+   already returns the repaint region a keystroke needs, and `Editor` already has a seam for attaching
+   geometry (`crates/holonomy-text/src/editor.rs:123-125`) that currently returns `None` in the product.
+   **Cost, stated up front:** two trees at 60,000 lines plus per-line metrics is ~1.8 MiB resident, which
+   §2.9.4 budgeted at 1.20 MiB. That is charged against Phase 11's budget, not against 9's.
+4. **Incremental counts.** Word and line totals are maintained as deltas at the edit site, with a full
+   recount available as a repair path and a test that forces it.
+
+**Gate.** A `#[global_allocator]` counting test that drives a **`Session`**, not an `Editor`, through
+1,000 edits on a document of the largest prefix this host can lock, asserting **0 heap allocations** —
+today's `no_alloc.rs:126-148` drives `Editor` and passes while the product allocates per keystroke.
+Plus an RSS test that reads `/proc/self/statm`, loads the largest lockable document, and asserts
+≤ 16.0 MiB, printing the per-consumer breakdown. Plus a latency test at **full document size**, not the
+70 %-of-ceiling prefix `latency.rs:504` deliberately uses. Keystroke→pixel p99.9 ≤ 0.50 ms or the phase
+does not pass. `RLIMIT_MEMLOCK`'s hard limit is asserted to cover the design document, so a host that
+cannot open a 2000-page document fails here rather than at a user.
+
+#### Phase 12 — Draw the document
+
+The page stops being blank. Body text is rendered from document bytes, wrapped to the page measure, and
+scrolled through `LineGeometry`. This is the first phase that touches `Painter::text`, whose current
+contract takes a *codepoint run* rather than *document bytes*; that contract is replaced, and every
+caller is migrated.
+
+Also here, because it is the same seam: the 9C item left open — `Painter::text` blits `cell_width()`
+columns instead of `GlyphMetric::width`, clipping every glyph wider than the 8 px grid. `PROJECT.md:846`
+records this as "the largest known correctness gap in the renderer." With real document text on the page
+it stops being cosmetic, so it is fixed in this phase and not deferred again. The fixed-8-px-grid
+assumption is pinned by `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`
+(`crates/holonomy-render/tests/math.rs`), and that pin moves deliberately, in a phase that is about
+pixels.
+
+**Gate.** A `HeadlessScanout` PPM fixture of a known document frame, byte-compared. Scrolling to a
+known line index lands on the expected pixel row at 60,000 lines. A 2000-page document's page count
+derives from `LineGeometry`, not from a constant. The clipped-glyph regression test: a `W`, a `∑` and an
+italic `f` at 16 ppem each draw every column the font advances, asserted against `GlyphMetric`.
+
+#### Phase 13 — Sections: H2's iceberg for text
+
+Make document length a function of the *window*, not of the process. This is the port of H2's
+large-document strategy, and it is a port of the **idea**, not of H2's numbers.
+
+**What H2 actually did, and what of it was Rust.** H2 measured its own soak at 1,014,000 words over
+1,300 sections: peak 167 DOM nodes, 30 resident sections, 35 ms worst frame gap
+(`H2/STATUS.md:377-390`). The mechanism was a structure-without-content manifest plus a bounded content
+cache plus viewport-bounded mounting. The manifest and the Fenwick tree were Rust
+(`H2/crates/holonomy-core/src/manifest.rs`, `geometry.rs`); **the scroll, hydration and virtualisation
+hot path was TypeScript**, and H2 says so itself — there is no Fenwick tree anywhere under `H2/app/`,
+the runtime geometry is a TypeScript prefix-sum mirror, and `H2/STATUS.md:23-29` states plainly that the
+Fenwick tree "is not earning its keep on speed." So the portable insight is the *windowing discipline*,
+which is language-independent; the fast part of H2 was its renderer, and here the renderer is Rust.
+
+1. **A section manifest**, ported from `H2/crates/holonomy-core/src/manifest.rs` — a sorted vector of
+   per-section metrics with no I/O, so a 2000-page document's structure is tens of kilobytes and touches
+   no ciphertext. Adapt: serde derive off, `mark_count` becomes a count of interval-map spans
+   (`PROJECT.md:388` already says this).
+2. **Section size is re-derived by measurement here, and H2's 1500 words is not carried forward as a
+   decision.** H2's `MAX_WORDS_PER_SECTION = 1500` (`H2/crates/holonomy-core/src/split.rs:17`) came from
+   Chromium window-slide costs and Loro styled-read costs (`H2/spikes/m0-section-seam/FINDINGS.md:25-38`)
+   — neither exists in H1. H1's binding per-section cost is section-height granularity against the
+   8 px grid and the cost of a `pread64`, so the H1 optimum is expected to be *larger*. Phase 6's own
+   instruction (`PROJECT.md:570-571`) already requires re-derivation; this is where it happens, and the
+   number gets written down here the way every other measured constant in this file is.
+3. **On-demand load and evict**, with eviction calling `SecureBlock::zeroize_and_release()` rather than
+   `Drop`, for the same reason 9C requires it: eviction must be synchronous and observable.
+4. **`RLIMIT_MEMLOCK` stops being the document-size ceiling**, because a document's text is no longer
+   entirely page-locked at once. This is the phase that retires the Phase 11 §audit finding that "the
+   format's maximum document is unopenable" — the answer is that a document is never fully resident, so
+   `S_MAX_PAYLOAD`'s 8 MiB becomes reachable. **The container format does not change.**
+
+**Two things H2 could not do, which H1 must solve and which are called out now rather than discovered:**
+
+* **Cross-section selection.** H2 accepted this as a known limitation of its multi-instance strategy —
+  dragging across a seam stops at the section edge, and a virtual selection layer was "judged not worth
+  its maintenance and accessibility cost" (`H2/README.md:80-82`). H1 needs a selection model that spans
+  section boundaries, because the alternative is a user-visible defect inherited deliberately.
+* **Search.** H2 used SQLite FTS5 and, before it fixed the schema, rebuilt "the whole document — 1.33M
+  words per keystroke" (`H2/STATUS.md:704-716`) — a scaling landmine H1 never inherits, since H1 has no
+  database at all. H1's search must be built, and it must be built incrementally against an encrypted
+  container with no database to lean on. It is scoped, not deferred.
+
+**Gate.** Open a 2000-page document and assert a wall-clock open time, printed and gated. Scroll page 1
+→ page 50 with the counting allocator asserting resident text stays bounded by the section budget, and
+assert every evicted section was scrubbed to zero. Assert the manifest alone can size the scrollbar for
+a document that has never been rendered. RSS re-measured ≤ 16.0 MiB with the images from §2.9.3 resident
+too — **the 8.0 MiB image budget and a full document have never been asserted together**, and
+`crates/holonomy-image/tests/scale_cache.rs:307` passes because it runs with no document in the process.
+
+#### Phase 14 — The chrome: pointer input, menus, icons
+
+Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
+component library, not an SVG runtime — `crates/holonomy-render/src/tree.rs:1-34` already sets that
+rule and the zero-Bézier invariant already forbids the alternative.
+
+**Features explicitly removed from the reference screenshots, by decision on 2026-10-05:** Share,
+Upgrade, cloud sync, comments, Extensions, and AI. They are removed because the sandbox forbids the
+network that every one of them requires (`FR-5.1`'s `unshare(CLONE_NEWNET)`), not because they are
+hard to draw. A menu entry for a feature that cannot work is worse than no entry.
+
+1. **Pointer input.** The input layer is keyboard-only today: `decode()` keeps `EV_KEY` and drops
+   `EV_REL` as "never a keystroke" (`crates/holonomy-input/src/event.rs:144-160`), the X11 event mask
+   omits `PointerMotionMask` (`crates/holonomy-x11/src/window.rs:248-256`), `Event` has no
+   `MotionNotify` variant (`proto.rs:531-609`), and the one `ButtonPress` consumer throws the
+   coordinates away in order to take focus (`crates/holonomy/src/windowed.rs:195-199`). Motion, buttons,
+   and coordinates are carried end to end. `Chrome::toggle_rect` and `Chrome::scroll_thumb`
+   (`chrome.rs:804, 826`) are the hit-test primitives and are currently reachable only from drawing code.
+2. **Menus.** A dropdown needs layered input: a popup drawn above the page, a click outside it closing
+   it, and hover state on the row under the pointer. The z-order it needs already exists —
+   `SurfaceTree` has `before`/`after` child lists with before→self→after draw order
+   (`tree.rs:316-329, 395-413`, test `draw_order_is_before_then_self_then_after`), and `Chrome::tree`
+   already composes three root groups. What does not exist is popup *state*, a grab, or hit-testing.
+3. **Icons, hand-authored.** `Icon { bits, width, height, x, y, colour }` exists (`tree.rs:203-260`) and
+   **zero icons exist** — `PROJECT.md:418`'s "icon masks" is aspirational, and the painter currently
+   *refuses* to draw them, counting each as `rects_skipped` (`crates/holonomy-display/src/paint.rs:196-202`).
+   Cost is authorial labour, not bytes: a 20×20 1-bit mask is 50 bytes.
+4. **The glyphs a menu wants are outside the font.** `▶` U+25B6, `✓` U+2713 and `…` U+2026 are in
+   neither `TEXT_RANGES = [(0x20,0x7E), (0xA0,0xFF)]` (`crates/holonomy-assets/src/payload.rs:125`) nor
+   `MATH_RANGES` (`payload.rs:128-139`), and `BOX_RANGE` stops at 0x257F. Per §7 item 2 and the
+   box-drawing precedent (`chrome.rs:29-32`), they are **drawn as 1-bit masks**, not added to the subset.
+   Growing the font would spend atlas slots the 9B finding shows are already at 96.4 % of the 512 KiB
+   ceiling (`PROJECT.md:704`).
+5. **The sidebar.** A document-tabs sidebar is named in Phase 8's chrome list (`PROJECT.md:598`) and
+   exists in no crate — `Layout` (`chrome.rs:253-354`) has no sidebar field. It is a band in `Layout`
+   plus a click target, and it is the largest single piece of this phase.
+
+**Security, stated plainly rather than buried.** The `desktop` window path runs inside an ordinary X
+session, where any other client with access to the same display could in principle observe the screen or
+inject events. That is the accepted cost of the 2026-10-05 decision at the head of §5 — the desktop is
+the designated target, and the sealed path has no display at all. It does not change with a menu bar,
+and it is recorded here so that "add a rich UI" is never mistaken for a security-neutral change.
+
+**Gate.** `cargo test -p holonomy-x11 --test live` with a synthesised pointer motion and click landing
+on a toolbar button and a menu row, asserting the clicked action fired. A menu opens, closes on an
+outside click, and survives a window resize mid-open with its layout reflowed. A PPM fixture of the
+chrome. Icon count asserted non-zero and each icon's bounds asserted integral. `release_artifact.rs`
+still fails if any of it reaches a default-features binary. Binary ≤ 2.0 MiB — the room is 904,328 B on
+the desktop build, and none of this needs more than a few tens of KiB.
+
 ## 6. Gates, restated as numbers
 
 | requirement | source | gate |
@@ -873,7 +1102,9 @@ Removed on 2026-10-05, with the reasoning at the head of §5. There is no target
 | evicted rasters scrubbed | §2.9.3 | zero after every eviction, asserted by the allocator |
 | math layout allocations | §2.9 9B | **0** between `MathNode` and frame |
 | table border alignment | §2.9 9A | exact integer pixel coordinates, not ±1 |
-| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open |
+| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured, not derived, as of Phase 11** |
+| per-keystroke allocations | invariant | **0**, driven through a `Session`, as of Phase 11 — `no_alloc.rs` currently drives an `Editor` |
+| document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
 | `t_kdf` | §2.4 | measured, budget restated — the PRD's 400–550 ms is replaced |
 | keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms **on this host**, the designated target since 2026-10-05 |
@@ -894,7 +1125,13 @@ Removed on 2026-10-05, with the reasoning at the head of §5. There is no target
    nothing uses. The `Scanout` trait keeps the seam if that changes.
 2. **Arrows in the UI.** Inter has no Arrows block. Either pick a different glyph for the
    sidebar back button or add a second small face. Cosmetic; I will default to a drawn
-   triangle mask and note it.
+   triangle mask and note it. **Decided and folded into Phase 14:** drawn 1-bit mask, together
+   with `▶` `✓` `…`, all of which are outside every declared font range.
+
+3. **Which sizes are we allowed to claim?** Phase 11's gate runs at "the largest prefix this host can
+   lock" and therefore passes today at roughly 3.5 MiB, not at 2000 pages. Reaching the full design
+   document needs Phase 13's windowing. So until Phase 13 lands, the honest claim is **~950 leaves of
+   editing latency, not 2000 pages** — and §6's RSS row is not yet measured at any size.
 
 Nothing else is blocked. Phases 0–9 are fully executable on this machine, unprivileged, as
 they stand — Phase 9's two measured dependencies are both satisfied here: `/usr/share/fonts/google-noto/
@@ -906,6 +1143,14 @@ the 50-entry allowlist.
 ## 8. What is deliberately not being done
 
 - **Sync, CRDT, ML-KEM, relay server** — §2.3. Deferred, not rejected.
+- **Share, cloud sync, comments, Extensions, AI** — **removed 2026-10-05, by decision.** These are
+  features of the reference screenshots in `Plan/` that require the network `FR-5.1`'s
+  `unshare(CLONE_NEWNET)` forbids. Not deferred: they cannot work in this product, and a menu entry
+  for a feature that cannot function is worse than no entry. Phase 14 builds the rest of the chrome.
+- **A GUI framework** — `winit`, `egui`, `iced`, `slint`, `softbuffer`, `tiny-skia`: all rejected on
+  binary size, on the Zero-Bézier Invariant (each brings its own outline rasteriser), and on
+  `x11-dl`'s `dlopen`, which a static musl binary cannot perform. Chrome is the existing surface tree.
+  `crates/holonomy-x11/Cargo.toml:1-19` records this and depends on `libc` alone.
 - **A second compositor path (softbuffer / tiny-skia)** — the superseded PRD revision. The
   H1 stack is DRM/KMS only. **Amended 2026-10-04:** the `desktop` feature adds a window for development,
   which is not a second *product* compositor path: it is off by default, it is not reachable from the
@@ -913,6 +1158,13 @@ the 50-entry allowlist.
   it does share with the product is the `Scanout` trait, which is why `present_damage` was added to the
   trait rather than to one implementation.
 - **H2's Typst export pipeline** — replaced by `pdf-writer`, §2.3.
+- **H2's 1500-word section constant** — **not carried forward, 2026-10-05.** It was measured against
+  Chromium window-slide costs (`H2/spikes/m0-section-seam/FINDINGS.md:25-38`) and Loro styled-read costs,
+  neither of which exists in H1. Phase 13 re-derives it. What *is* carried forward is the discipline:
+  window-bounded residency, a structure-without-content manifest, and a bounded content cache.
+- **The Fenwick tree as H2's speed story** — H2 says otherwise itself, twice (`H2/STATUS.md:23-29`:
+  0.46 µs at 667 sections, 0.003 % of a frame). Phase 13 ports the windowing, and the trees come along
+  because they are correct and free, not because they earned their place in H2.
 - **A TeX engine** — replaced by the micro-parser of §2.9 9B, on binary-size grounds.
 - **CFF outlines / STIX Two Math** — the math face is Noto Sans Math precisely so no CFF
   interpreter is needed, §2.9.2.

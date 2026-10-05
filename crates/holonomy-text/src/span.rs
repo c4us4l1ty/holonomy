@@ -808,6 +808,74 @@ impl SpanMap {
         Ok(())
     }
 
+    /// Install `spans` verbatim as the map over `text_len` bytes.
+    ///
+    /// # Why this exists, and why it validates rather than trusts
+    ///
+    /// This is the **load** path: the payload carries the span list as bytes and hands it back here.
+    /// The obvious way to reconstruct a map from a list is to call [`style_range`](Self::style_range)
+    /// once per span, and that does not work: `style_range` ends in [`normalise`](Self::normalise),
+    /// which merges adjacent identically-styled spans and re-extends coverage. A document whose spans
+    /// came back merged is a document whose runs are *equivalent* -- and if the list came from a
+    /// payload, "equivalent" is not good enough, because the bytes on disk and the bytes in memory
+    /// must round-trip to the same thing. So the list is installed as it stands.
+    ///
+    /// What it *is* checked for is every invariant `normalise` would have established: sorted,
+    /// non-empty, non-overlapping, gap-free, and ending exactly at `text_len`. A payload that
+    /// violates any of them is refused rather than repaired, because a repaired span map is a span
+    /// map whose styles do not match what was saved, and the only symptom would be text that is the
+    /// wrong colour.
+    ///
+    /// One exception is made for the empty case: an empty `spans` over a non-empty `text_len` is
+    /// accepted and filled with one plain span, since that is the representation of "no styling" and
+    /// it is what `SpanMap::plain` produces. Every other gap is an error.
+    pub fn from_spans(spans: Vec<TextIntervalSpan>, text_len: u32) -> Result<Self, SpanError> {
+        let mut m = Self { spans, text_len };
+        if m.spans.is_empty() {
+            if text_len > 0 {
+                m.spans.push(TextIntervalSpan::plain(0, text_len));
+            }
+            return Ok(m);
+        }
+        if m.spans[0].start_byte != 0 {
+            return Err(SpanError::Invariant(format!(
+                "the first span starts at {} not 0",
+                m.spans[0].start_byte
+            )));
+        }
+        for (i, sp) in m.spans.iter().enumerate() {
+            if sp.is_empty() {
+                return Err(SpanError::Invariant(format!(
+                    "span {i} covers no bytes: {sp:?}"
+                )));
+            }
+            if sp.end_byte > text_len {
+                return Err(SpanError::RangeOutOfBounds {
+                    start: u64::from(sp.start_byte),
+                    end: u64::from(sp.end_byte),
+                    text_len,
+                });
+            }
+            if i > 0 && m.spans[i - 1].end_byte != sp.start_byte {
+                return Err(SpanError::Invariant(format!(
+                    "span {i} starts at {} but span {} ends at {}",
+                    sp.start_byte,
+                    i - 1,
+                    m.spans[i - 1].end_byte
+                )));
+            }
+        }
+        if let Some(last) = m.spans.last() {
+            if last.end_byte != text_len {
+                return Err(SpanError::Invariant(format!(
+                    "the last span ends at {} but the text is {text_len} bytes",
+                    last.end_byte
+                )));
+            }
+        }
+        Ok(m)
+    }
+
     /// Apply a styling to `[start, end)`, splitting whatever spans straddle it.
     ///
     /// The one *authoring* operation, as against the two *maintenance* ones. Splitting is inherent
