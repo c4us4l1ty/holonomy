@@ -73,9 +73,91 @@ mod window_typing {
             .expect("a control key");
 
         let mut typed = 0usize;
-        for c in text.chars() {
+        // Tokens first, then characters.
+        //
+        // A token is a key that is not a character, and the harness needs three of them for the table
+        // run: `ctrl-t` to insert a table, `tab` and `shift-tab` to move between cells. Typing the
+        // literal string "ctrl-t" would have sent `c`, `t`, `r`, `o`, `l`, `-`, `t` -- which is how the
+        // first attempt at this harness put a table of nonsense in a document.
+        //
+        // Scanned left to right and consumed greedily, so "Name" is text and "tab" is a token, but a
+        // literal word "tab" in the middle of some other text cannot be typed. That is a real
+        // limitation and it is a harness, not a product.
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            let (is_token, width, with_shift, with_ctrl) = if rest.starts_with("shift-tab") {
+                (true, 9usize, true, false)
+            } else if rest.starts_with("ctrl-t") {
+                (true, 6, false, true)
+            } else if rest.starts_with("tab") {
+                (true, 3, false, false)
+            } else {
+                (false, 0, false, false)
+            };
+            if is_token {
+                let tab = holonomy_x11::XTest::keycode_for_keysym(&mut conn, 0xFF09)
+                    .expect("mapping")
+                    .expect("a tab key");
+                // Lowercase `t`, not `T`: `keycode_for_keysym` matches the *first* keysym at a
+                // keycode, and that is the unshifted one. Asking for `T` finds nothing on a US layout,
+                // which is how this first failed with "a T key" as the panic message.
+                let t = holonomy_x11::XTest::keycode_for_keysym(&mut conn, b't' as u32)
+                    .expect("mapping")
+                    .expect("a t key");
+                // The modifier is **held across** the key: press, key down, key up, release.
+                //
+                // `tap_in` is press-then-release, and using it for the modifier sends
+                // `ctrl down, ctrl up, t down` -- the app sees a plain `t` and types one. The windowed
+                // trace is what showed it:
+                //
+                //   dispatch InputEvent { code: 29, value: 1 }   ctrl down
+                //   dispatch InputEvent { code: 29, value: 0 }   ctrl up
+                //   dispatch InputEvent { code: 20, value: 1 }   t down, with no modifier held
+                //
+                // which is why Ctrl+T silently did nothing for a whole run while every scripted gate
+                // passed. This is the same reason `ctrl-q` below uses `fake_key_in`.
+                if with_ctrl {
+                    xtest
+                        .fake_key_in(&mut conn, 0, ctrl, true)
+                        .expect("ctrl down");
+                }
+                if with_shift {
+                    xtest
+                        .fake_key_in(&mut conn, 0, shift, true)
+                        .expect("shift down");
+                }
+                if rest.starts_with("ctrl-t") {
+                    xtest.fake_key_in(&mut conn, 0, t, true).expect("T down");
+                    xtest.fake_key_in(&mut conn, 0, t, false).expect("T up");
+                } else {
+                    xtest
+                        .fake_key_in(&mut conn, 0, tab, true)
+                        .expect("tab down");
+                    xtest.fake_key_in(&mut conn, 0, tab, false).expect("tab up");
+                }
+                if with_shift {
+                    xtest
+                        .fake_key_in(&mut conn, 0, shift, false)
+                        .expect("shift up");
+                }
+                if with_ctrl {
+                    xtest
+                        .fake_key_in(&mut conn, 0, ctrl, false)
+                        .expect("ctrl up");
+                }
+                typed += 1;
+                rest = &rest[width..];
+                std::thread::sleep(std::time::Duration::from_millis(12));
+                continue;
+            }
+            let c = rest.chars().next().expect("a character");
             let Some((code, needs_shift)) = keycode_for(c) else {
                 eprintln!("skipping {c:?}: no keycode in this example's table");
+                rest = &rest[c.len_utf8()..];
                 continue;
             };
             if needs_shift {
@@ -86,6 +168,7 @@ mod window_typing {
                 xtest.tap_in(&mut conn, 0, shift).expect("shift");
             }
             typed += 1;
+            rest = &rest[c.len_utf8()..];
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
         println!("typed {typed} characters into the focused window");

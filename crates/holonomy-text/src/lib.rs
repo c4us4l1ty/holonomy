@@ -18,6 +18,7 @@ mod leaf;
 mod rope;
 mod span;
 pub mod table;
+pub mod tables;
 pub mod undo;
 
 pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH};
@@ -26,6 +27,10 @@ pub use span::{
     STYLE_ITALIC,
 };
 pub use table::{Cell, ResolvedTable, TableError, TableSpan, CELL_SEPARATOR};
+pub use tables::{
+    appended_row_bytes, col_widths_for, down, empty_table_bytes, left, right, shift_tab, tab, up,
+    Nav, TableCursor, TableMap, TableMapError,
+};
 pub use undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 
 pub use leaf::{CagrLeaf, LeafError, CACHELINE_BYTES, GAP_MINIMUM, GAP_TARGET, LEAF_CAPACITY};

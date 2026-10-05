@@ -40,6 +40,7 @@
 
 use crate::rope::{Rope, RopeError};
 use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
+use crate::tables::{col_widths_for, TableMap, TableMapError};
 use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, UNDO_DEPTH};
 use zeroize::Zeroize;
 
@@ -168,6 +169,33 @@ pub struct Editor {
     /// Hoisting it here makes it one allocation in [`Editor::new`], outside every measured window, and the
     /// per-delete count is then exactly zero with no caveat.
     delete_scratch: Vec<u8>,
+    /// Every table in the document, as spans. Phase 9A.
+    ///
+    /// A field rather than something the caller keeps, because a span is an interval and every edit
+    /// moves intervals: an insert inside a table has to extend it and an insert before one has to
+    /// slide it. A caller-side table map would have to be updated at every edit site, and the site it
+    /// forgets is a table whose cells silently shift under the caret. So the map is updated inside the
+    /// five places bytes move -- [`insert_at`](Self::insert_at), [`delete_at`](Self::delete_at),
+    /// [`undo`](Self::undo) and [`apply_insert_raw`](Self::apply_insert_raw) -- which is the same
+    /// argument `spans` makes for the interval map, and the reason both are fields rather than
+    /// collaborators is that neither can be correct without the edit.
+    tables: TableMap,
+    /// The table map as it was before the most recent undo, so redo can restore it.
+    ///
+    /// # Why the map cannot be derived from the bytes
+    ///
+    /// Undoing an insertion deletes the table's separators, and `TableMap::retain_intact` then drops
+    /// the span -- correctly, because there is no longer a table there. Redoing re-inserts the same
+    /// bytes at the same offset, and `apply_insert` can slide an *existing* span but cannot invent a
+    /// vanished one. Worse, it could not invent a correct one even in principle: `rows`, `cols` and
+    /// `col_widths` are not recoverable from a flat run of separators, so a 2x3 table and a 1x6 table
+    /// are the same six bytes.
+    ///
+    /// So the pre-undo map is kept, and redo puts it back. It is a single `Option`, not a stack,
+    /// because redo is only valid immediately after an undo -- any new edit calls
+    /// [`drop_redo`](Self::drop_redo) -- so there is at most one undo's worth of table state to
+    /// remember, and a stack would imply a depth the code cannot honour.
+    undo_tables: Option<Vec<crate::TableSpan>>,
     /// Actions undone and awaiting redo, newest last. Bounded to [`UNDO_DEPTH`].
     ///
     /// Phase 8. A `Vec<UndoAction>` rather than a second arena, and the reason is that
@@ -218,6 +246,8 @@ impl Editor {
         Self {
             rope,
             spans: SpanMap::plain(text_len as u32),
+            tables: TableMap::new(),
+            undo_tables: None,
             undo: UndoStack::new(),
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
@@ -234,6 +264,121 @@ impl Editor {
     #[inline]
     pub fn text_len(&self) -> usize {
         self.rope.text_len()
+    }
+
+    /// Every table in the document, as spans.
+    pub fn tables(&self) -> &TableMap {
+        &self.tables
+    }
+
+    /// The table containing `offset`, if any.
+    pub fn table_at(&self, offset: u32) -> Option<crate::TableSpan> {
+        self.tables.at(offset)
+    }
+
+    /// Insert an empty `rows` by `cols` table at the caret and return its span.
+    ///
+    /// # The bytes, and why there are newlines around them
+    ///
+    /// The table's own bytes are `rows * cols - 1` separators and nothing else -- every cell starts
+    /// empty. Around them, this inserts a newline **before** when the caret is not already at the
+    /// start of a line, and one **after** always.
+    ///
+    /// Both are load-bearing rather than cosmetic. Without the leading one, a table inserted into the
+    /// middle of a paragraph would begin on that paragraph's line, and the box's top border would be
+    /// drawn across the second half of a sentence. Without the trailing one, whatever text followed
+    /// the caret would end up inside the table's last cell, because a table's span ends at a byte
+    /// offset and the only thing that says "the table stopped here" is a newline the layout knows
+    /// about. Insert one means the next character typed is *outside* the table, which is what a
+    /// person expects after `Ctrl+T`.
+    ///
+    /// The span covers the separators only, never the newlines, so a caret on either newline is
+    /// outside the table -- see [`TableMap::at`], whose end is exclusive for the same reason.
+    ///
+    /// The caret is left where the insertion started, which is the first byte of cell `(0, 0)`: a
+    /// person who has just asked for a table wants to type into its first cell, and the session's
+    /// `Ctrl+T` handler moves there explicitly rather than relying on this.
+    pub fn insert_table(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        measure: u32,
+    ) -> Result<crate::TableSpan, TableMapError> {
+        let widths = col_widths_for(measure, cols).ok_or(crate::TableError::TooWide {
+            content: 0,
+            needed: u32::MAX,
+            measure,
+        })?;
+        let shape = crate::TableSpan::with_widths(rows, cols, widths, 0, 0)?;
+
+        let at = self.caret();
+        let text = self.text()?;
+        // A leading newline only when there is a line to end. At offset 0 there is nothing before,
+        // and a leading newline would leave the table one line down with a blank line above it.
+        let leading = if at > 0 && text.get(at as usize - 1) != Some(&b'\n') {
+            1u32
+        } else {
+            0
+        };
+
+        let mut bytes = Vec::with_capacity(shape.separator_count() as usize + 2);
+        if leading > 0 {
+            bytes.push(b'\n');
+        }
+        let table_start = at + leading;
+        bytes.extend(std::iter::repeat_n(
+            crate::table::CELL_SEPARATOR,
+            shape.separator_count() as usize,
+        ));
+        let table_end = table_start + shape.separator_count();
+        bytes.push(b'\n');
+
+        // The insert happens *first*, so that `insert_at`'s own `apply_insert` moves the tables that
+        // are already here, and this table's span is registered against bytes that exist.
+        self.insert_at(at, &bytes, SpanPolicy::GrowIntoInsert)?;
+
+        let span = crate::TableSpan {
+            start_byte: table_start,
+            end_byte: table_end,
+            ..shape
+        };
+        self.tables.insert(span)?;
+        Ok(span)
+    }
+
+    /// Append a row to `span`'s table, and return the new row's index.
+    ///
+    /// `cols - 1` new separators, at the end of the table, because the boundary between the old last
+    /// cell and the new first cell already has one. Called by Tab at the bottom-right cell, and only
+    /// there: it is an **edit**, with bytes and an undo action, which is why it is not inside the
+    /// navigation rule.
+    pub fn append_table_row(&mut self, span: crate::TableSpan) -> Result<u16, TableMapError> {
+        let add = crate::tables::appended_row_bytes(span.cols);
+        if add.is_empty() {
+            return Err(crate::TableError::ZeroExtent.into());
+        }
+        let rows = span.rows;
+        self.insert_at(span.end_byte, &add, SpanPolicy::GrowIntoInsert)?;
+        let grown = crate::TableSpan {
+            rows: rows + 1,
+            end_byte: span.end_byte + add.len() as u32,
+            ..span
+        };
+        // Replace rather than insert: `apply_insert` above already extended this span, and inserting a
+        // second copy of it would make the map think there are two tables where there is one.
+        if let Some(at) = self
+            .tables
+            .spans()
+            .iter()
+            .position(|s| s.start_byte == span.start_byte)
+        {
+            let mut spans = self.tables.take();
+            spans[at] = grown;
+            self.tables.replace(spans);
+        } else {
+            self.tables.insert(grown)?;
+        }
+        Ok(rows)
     }
 
     /// The span map.
@@ -283,6 +428,7 @@ impl Editor {
         self.rope.insert_at(offset, bytes)?;
         self.spans
             .apply_insert_with(offset as u32, bytes.len() as u32, policy)?;
+        self.tables.apply_insert(offset as u32, bytes.len() as u32);
         self.undo.push_insert(offset as u32, bytes)?;
         // Last, because a refused edit must leave the history exactly as it found it -- including the
         // redo branch, which is history.
@@ -349,6 +495,11 @@ impl Editor {
         // A delete longer than [`DELETE_SCRATCH`] -- a multi-kilobyte selection -- falls back to the heap.
         // That is the honest cost for that operation and it is documented rather than hidden.
         let removed_spans = self.spans.apply_delete(offset, len)?;
+        self.tables.apply_delete(offset, len);
+        // A table whose separators have all been deleted has no cells, and `cell_count()` subtracts
+        // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a later
+        // keystroke walking into a zero-cell table; see `TableMap::retain_intact`.
+        self.tables.retain_intact();
 
         // Read the bytes out of the scratch buffer and hand them to the undo stack, in one scope.
         //
@@ -490,6 +641,9 @@ impl Editor {
     /// Both directions restore bytes *and* styling, which is the whole point of routing edits through
     /// this type.
     pub fn undo(&mut self) -> Result<EditOutcome, EditorError> {
+        // Stashed before the undo, not after: after it, the spans that this undo is about to delete
+        // are already gone, and stashing then would preserve the loss rather than undo it.
+        self.undo_tables = Some(self.tables.spans().to_vec());
         let action = self
             .undo
             .pop_for_undo()
@@ -499,6 +653,9 @@ impl Editor {
                 // The action inserted these bytes, so undoing removes them.
                 self.spans
                     .apply_delete(action.offset, action.bytes.len() as u32)?;
+                self.tables
+                    .apply_delete(action.offset, action.bytes.len() as u32);
+                self.tables.retain_intact();
                 self.rope
                     .set_cursor(action.offset as usize + action.bytes.len())?;
                 self.delete_range_in_rope(action.offset as usize, action.bytes.len())?;
@@ -512,7 +669,10 @@ impl Editor {
             }
             ActionKind::Delete => {
                 // The action deleted these bytes, so undoing re-inserts them, and the styling comes
-                // back from the style record.
+                // back from the style record. The table map needs no restore on this arm: the
+                // `apply_insert` below extends whatever span these bytes landed in, and a table that
+                // survived the delete is still a span. Only redo's `Insert` arm needs the stash,
+                // because undoing an insertion deletes a table outright.
                 let removed = self.style_undo.pop();
                 let start = action.offset;
                 let end = action.offset + action.bytes.len() as u32;
@@ -525,6 +685,7 @@ impl Editor {
                     action.bytes.len() as u32,
                     SpanPolicy::GrowIntoInsert,
                 )?;
+                self.tables.apply_insert(start, action.bytes.len() as u32);
                 match removed {
                     Some(spans) if !spans.is_empty() => {
                         for s in spans {
@@ -733,6 +894,9 @@ impl Editor {
     /// [`delete_at`](Self::delete_at) does for a fresh delete, so that an undo of this redo can put
     /// the styling back.
     pub fn redo(&mut self) -> Result<EditOutcome, EditorError> {
+        // Restored after the bytes go back in, so the spans are the ones the re-inserted bytes belong
+        // to rather than a guess about where they should be.
+        let restore = self.undo_tables.take();
         let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
         let offset = action.offset as usize;
         let len = action.bytes.len();
@@ -741,6 +905,10 @@ impl Editor {
         let outcome = match action.kind {
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
+                // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
+                if let Some(spans) = restore {
+                    self.tables.replace(spans);
+                }
                 EditOutcome {
                     offset: action.offset,
                     len: len as u32,
@@ -755,6 +923,10 @@ impl Editor {
                 // that vector is total: both are Delete actions on one undo stack, and `undo` cannot
                 // tell them apart.
                 let removed = self.capture_spans(action.offset, len as u32)?;
+                // No table restore here. Redoing a delete removes bytes again, and `apply_delete`
+                // below shortens the same spans the original delete did, which is the same answer.
+                // The stash is for the `Insert` arm alone.
+                let _ = &restore;
                 if self.style_undo.len() == STYLE_UNDO_DEPTH {
                     self.style_undo.remove(0);
                 }
@@ -793,9 +965,10 @@ impl Editor {
         policy: SpanPolicy,
     ) -> Result<(), EditorError> {
         self.rope.insert_at(offset, bytes)?;
-        Ok(self
-            .spans
-            .apply_insert_with(offset as u32, bytes.len() as u32, policy)?)
+        self.spans
+            .apply_insert_with(offset as u32, bytes.len() as u32, policy)?;
+        self.tables.apply_insert(offset as u32, bytes.len() as u32);
+        Ok(())
     }
 
     /// Discard the redo history, scrubbing the payloads on the way out.

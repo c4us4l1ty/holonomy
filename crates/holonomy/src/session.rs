@@ -46,8 +46,11 @@ use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_export::{Format, Report};
 use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
+use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
+use holonomy_render::{Node, SurfaceTree, TextRun};
 use holonomy_text::{Editor, EditorError, SpanPolicy, STYLE_BOLD};
+use holonomy_text::{Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +68,16 @@ pub enum SessionError {
     Editor(EditorError),
     /// A frame or scanout operation failed.
     Display(holonomy_display::FrameError),
+    /// Something asked for the cell the caret is in, and the caret is not in a table.
+    ///
+    /// Its own variant rather than a `TableError`, because the answer is not "the table is malformed"
+    /// -- it is "there is no table here", which is a question about the caret and not about a span.
+    NotInTable {
+        /// Where the caret actually is.
+        offset: u32,
+    },
+    /// A table's structure did not match the bytes it claims.
+    Table(holonomy_text::TableError),
     /// An export failed.
     Export(holonomy_export::ExportError),
     /// A sink refused the write.
@@ -78,11 +91,39 @@ impl std::fmt::Display for SessionError {
             Self::Display(e) => write!(f, "{e}"),
             Self::Export(e) => write!(f, "{e}"),
             Self::Sink(e) => write!(f, "{e}"),
+            Self::NotInTable { offset } => write!(
+                f,
+                "the caret at byte {offset} is not inside a table, so there is no cell to act on"
+            ),
+            Self::Table(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for SessionError {}
+
+impl From<holonomy_text::TableError> for SessionError {
+    fn from(e: holonomy_text::TableError) -> Self {
+        Self::Table(e)
+    }
+}
+
+impl From<holonomy_text::TableMapError> for SessionError {
+    fn from(e: holonomy_text::TableMapError) -> Self {
+        match e {
+            holonomy_text::TableMapError::Table(t) => Self::Table(t),
+            holonomy_text::TableMapError::Editor(ed) => Self::Editor(ed),
+            // An overlap is a bug in the caller's span, and it is reported as one rather than as a
+            // `TableError` the caller did not produce.
+            holonomy_text::TableMapError::Overlap { start, after } => {
+                Self::Table(holonomy_text::TableError::StructureMismatch {
+                    expected: after,
+                    found: start,
+                })
+            }
+        }
+    }
+}
 
 impl From<EditorError> for SessionError {
     fn from(e: EditorError) -> Self {
@@ -135,6 +176,22 @@ pub struct SessionStats {
     /// Counted rather than ignored: a keymap that starts producing commands the session does not
     /// understand is a keymap/session mismatch, and it should be visible rather than a silent no-op.
     pub unhandled: u32,
+    /// Tables inserted by `Ctrl+T` or [`Session::insert_table`].
+    pub table_inserts: u32,
+    /// Cell navigations that actually moved.
+    pub table_navs: u32,
+    /// Navigations that asked for a cell that does not exist -- Up from the first row, and so on.
+    ///
+    /// Counted rather than ignored, because a number that is unexpectedly large means the navigation
+    /// rules and the table's shape disagree, which is otherwise invisible: the keystroke simply does
+    /// nothing.
+    pub table_nav_nowhere: u32,
+    /// Newlines inserted inside a cell.
+    pub table_newlines: u32,
+    /// Table cells drawn in the last paint.
+    pub table_cells_drawn: u32,
+    /// Border runs drawn in the last paint.
+    pub table_borders_drawn: u32,
 }
 
 /// A pre-opened export sink.
@@ -179,6 +236,25 @@ pub struct Session<'a> {
     pub stats: SessionStats,
     /// Damage accumulated since the last paint.
     damage: DamageRect,
+    /// Which table cell the caret is in, if it is in one. Phase 9A.
+    ///
+    /// `None` means the caret is in ordinary text, which is the only thing that was possible before
+    /// 9A and is the case every non-table keystroke takes. `Some` means Tab, Shift+Tab, Enter and the
+    /// four arrows are being interpreted by `holonomy_text`'s navigation rules instead of by the
+    /// document.
+    ///
+    /// It is a cursor rather than just the caret offset because the rules are about *cells*, and
+    /// "the cell above" cannot be answered from a byte offset without re-walking the separators on
+    /// every keystroke. Eight bytes, `Copy`, and the caret offset is recoverable from it.
+    active_cell: Option<TableCursor>,
+    /// Whether a table's *shape* changed since the last paint, as opposed to its content.
+    ///
+    /// This is what makes per-cell damage possible. Typing in a cell only changes that cell's pixels,
+    /// so the next paint only needs that cell's rectangle; but inserting a table or appending a row
+    /// moves every border line, so the whole grid is stale. One flag rather than a comparison of
+    /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
+    /// discover what one `set` already knows.
+    tables_shape_dirty: bool,
     /// Where the caret was last drawn, so it can be erased.
     caret_drawn_at: Option<DamageRect>,
 }
@@ -210,8 +286,68 @@ impl<'a> Session<'a> {
             blink: Blink::new(Blink::DEFAULT_PERIOD),
             stats: SessionStats::default(),
             damage: DamageRect::EMPTY,
+            active_cell: None,
+            tables_shape_dirty: false,
             caret_drawn_at: None,
         }
+    }
+
+    /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
+    /// to check where something was drawn.
+    pub fn chrome(&self) -> &holonomy_render::chrome::Chrome {
+        &self.chrome
+    }
+
+    /// Which table cell the caret is in, if it is.
+    ///
+    /// Read-only, for the same reason [`Session::damage`] is: a gate needs to ask where the caret is,
+    /// and a caller that could *set* it would be able to put the caret somewhere the document's bytes
+    /// disagree with.
+    pub fn active_cell(&self) -> Option<TableCursor> {
+        self.active_cell
+    }
+
+    /// The table containing the caret, if it is in one.
+    pub fn active_table(&self) -> Option<TableSpan> {
+        self.active_cell?;
+        self.editor.table_at(self.editor.caret())
+    }
+
+    /// The bytes of the cell the caret is in, for a gate to read what was typed into it.
+    pub fn active_cell_text(&self) -> Result<Vec<u8>, SessionError> {
+        let cur = self.active_cell.ok_or_else(|| SessionError::NotInTable {
+            offset: self.editor.caret(),
+        })?;
+        let span = self
+            .editor
+            .table_at(self.editor.caret())
+            .ok_or(SessionError::NotInTable {
+                offset: self.editor.caret(),
+            })?;
+        let text = self.editor.text()?;
+        let t = ResolvedTable::new(span, &text)?;
+        let cell = t.cell_at(span.cell_index(cur.row, cur.col))?;
+        let start = cell.start_byte + cur.offset_in_cell.min(cell.len());
+        Ok(text[start as usize..cell.end_byte as usize].to_vec())
+    }
+
+    /// Insert a table of `rows` by `cols` at the caret, and put the caret in cell `(0, 0)`.
+    ///
+    /// This is `Ctrl+T`, and the dimensions come from the caller rather than being written here: the
+    /// keymap says *how many* columns, and the measure -- which only this layer knows -- says how wide
+    /// they are. `col_widths_for` does that arithmetic.
+    ///
+    /// The caret goes to the first cell rather than staying where the insertion started, because a
+    /// person who has just asked for a table wants to type into it, and the insertion point is the
+    /// table's first *separator*, which is not inside any cell.
+    pub fn insert_table(&mut self, rows: u16, cols: u16) -> Result<(), SessionError> {
+        let span = self
+            .editor
+            .insert_table(rows, cols, self.chrome.metrics.columns)?;
+        self.stats.table_inserts += 1;
+        self.tables_shape_dirty = true;
+        self.enter_cell(span, 0, 0, 0)?;
+        self.after_edit(0)
     }
 
     /// The damage accumulated since the last paint: what the next `paint` will touch.
@@ -398,10 +534,47 @@ impl<'a> Session<'a> {
                 let bytes = c.encode_utf8(&mut buf).as_bytes().to_vec();
                 self.insert(&bytes)?;
             }
-            Command::Newline => self.insert(b"\n")?,
-            Command::Tab => self.insert(b"\t")?,
+            // Enter is a newline in ordinary text and a line break *inside* a cell in a table, and
+            // the difference is the whole of what makes a table usable: a newline that ended the row
+            // would add a document line, and a cell is not a line.
+            Command::Newline => {
+                if self.active_cell.is_some() {
+                    self.newline_in_cell()?;
+                } else {
+                    self.insert(b"\n")?;
+                }
+            }
+            // Tab is a literal tab outside a table and cell navigation inside one. Outside, it is four
+            // spaces rather than `\t`: a tab character in the document moves the *caret* to the next
+            // tab stop while contributing nothing to any column count, so a status bar reporting
+            // "Col 9" for four spaces would be describing a tab stop rather than a column.
+            Command::Tab => {
+                if self.active_cell.is_some() {
+                    self.nav(holonomy_text::tab)?;
+                } else {
+                    self.insert(b"    ")?;
+                }
+            }
+            // Shift+Tab outside a table removes one level of the indentation Tab added, which is what
+            // makes the two a pair rather than two unrelated keys.
+            Command::ShiftTab => {
+                if self.active_cell.is_some() {
+                    self.nav(holonomy_text::shift_tab)?;
+                } else {
+                    self.outdent()?;
+                }
+            }
+            Command::InsertTable { rows, cols } => self.insert_table(rows, cols)?,
             Command::Backspace => self.backspace()?,
             Command::DeleteForward => self.delete_forward()?,
+            // Inside a table the four arrows are cell navigation, not caret movement: "down" means
+            // the cell below, which for a one-line cell is a jump of a whole row rather than a line.
+            // The rules report `Nav::Nowhere` when there is no such cell, and that is swallowed -- a
+            // movement that cannot happen is not a document failure.
+            Command::Left if self.active_cell.is_some() => self.nav(holonomy_text::left)?,
+            Command::Right if self.active_cell.is_some() => self.nav(holonomy_text::right)?,
+            Command::Up if self.active_cell.is_some() => self.nav(holonomy_text::up)?,
+            Command::Down if self.active_cell.is_some() => self.nav(holonomy_text::down)?,
             Command::Left => self.move_caret(-1)?,
             Command::Right => self.move_caret(1)?,
             Command::Up => self.move_line(-1)?,
@@ -421,6 +594,11 @@ impl<'a> Session<'a> {
                 // no container. Counted so the caller can see it happened.
                 self.stats.saves += 1;
             }
+            Command::Hotkey(Hotkey::InsertTable) => {
+                // 3 by 3: the directive's default, and the shape that divides an 80-column measure
+                // into three readable columns of 23 with the borders and padding accounted for.
+                self.insert_table(3, 3)?;
+            }
             Command::Hotkey(Hotkey::DocumentStart) => self.caret_to(0)?,
             Command::Hotkey(Hotkey::DocumentEnd) => self.caret_to(self.editor.text_len())?,
             _ => {
@@ -439,6 +617,178 @@ impl<'a> Session<'a> {
         self.editor
             .insert_at(at, bytes, SpanPolicy::GrowIntoInsert)?;
         self.after_edit(bytes.len() as u32)
+    }
+
+    /// Run `f` with the table the caret is in, or report that there is none.
+    ///
+    /// A closure rather than a returned `ResolvedTable` because that borrows the document bytes, and
+    /// the bytes come from [`Editor::text`], which hands over an owned `Vec`. Returning the resolved
+    /// table would mean returning a borrow of a local -- so the text has to stay inside this frame,
+    /// and the only way to do that with the borrow checker is to scope it with a closure.
+    ///
+    /// Every table operation goes through here, and each re-derives the table from the editor rather
+    /// than caching one, because a byte typed into a previous cell moves every cell boundary after it.
+    /// A cached `ResolvedTable` would be stale after a single keystroke, which is the whole editing
+    /// session.
+    ///
+    /// **Cost, stated rather than hidden:** `Editor::text` copies the whole document, so this
+    /// allocates once per table keystroke. That is a real departure from the "no heap allocation while
+    /// editing" invariant and it is not yet fixed; `Editor::read_into` reads a byte range into a
+    /// caller-supplied buffer without allocating, and the fix is to hold the table's bytes in a
+    /// session-owned scratch buffer sized to the widest table. It is not done here because a wrong
+    /// buffer size is worse than a measurable allocation.
+    fn with_table<R>(
+        &self,
+        f: impl FnOnce(TableSpan, &ResolvedTable<'_>) -> Result<R, SessionError>,
+    ) -> Result<R, SessionError> {
+        // The span is handed to the closure as well as the resolved table because a caller that has
+        // just moved the caret needs the *old* span's `start_byte` to find the table again afterwards,
+        // and re-deriving it from the new caret is exactly what `table_at` would refuse to do.
+        let caret = self.editor.caret();
+        let span = self
+            .editor
+            .table_at(caret)
+            .ok_or(SessionError::NotInTable { offset: caret })?;
+        let text = self.editor.text()?;
+        let resolved = ResolvedTable::new(span, &text)?;
+        f(span, &resolved)
+    }
+
+    /// Put the caret into `(row, col)` at `offset_in_cell` of `span`, and start table-editing.
+    ///
+    /// # Why `span` is a parameter and not looked up from the caret
+    ///
+    /// The first version resolved the table with [`Session::with_table`], which finds it *from the
+    /// caret*. That is the right rule for every keystroke inside a table and the wrong one for the
+    /// keystroke that creates it: `Editor::insert_at` leaves the caret one past the inserted bytes,
+    /// which is the newline after the table's last row -- outside the table, so the lookup failed with
+    /// `NotInTable` for the very operation that had just made one. It is also the wrong rule after an
+    /// append, where the caret is about to be somewhere new.
+    ///
+    /// So the caller passes the span it already has. There is no window in which the table has to be
+    /// found by guessing where it is.
+    fn enter_cell(
+        &mut self,
+        span: TableSpan,
+        row: u16,
+        col: u16,
+        offset_in_cell: u32,
+    ) -> Result<(), SessionError> {
+        let text = self.editor.text()?;
+        let t = ResolvedTable::new(span, &text)?;
+        let cell = t.cell_at(span.cell_index(row, col))?;
+        let offset = offset_in_cell.min(cell.len());
+        self.active_cell = Some(TableCursor {
+            row,
+            col,
+            offset_in_cell: offset,
+        });
+        self.caret_to((cell.start_byte + offset) as usize)
+    }
+
+    /// The table containing `offset`, or an error saying there is none.
+    fn span_of(&self, offset: u32) -> Result<TableSpan, SessionError> {
+        self.editor
+            .table_at(offset)
+            .ok_or(SessionError::NotInTable { offset })
+    }
+
+    /// Run one navigation rule and act on its answer.
+    ///
+    /// The rule is a function rather than an enum so that "which rule" is a type error rather than a
+    /// match arm somebody forgets. Each returns `Result<Nav, TableError>` because the rules have to
+    /// read the neighbouring cell to know where "the previous cell's end" is.
+    fn nav(
+        &mut self,
+        rule: fn(&ResolvedTable<'_>, TableCursor) -> Result<Nav, holonomy_text::TableError>,
+    ) -> Result<(), SessionError> {
+        let Some(cur) = self.active_cell else {
+            return Ok(());
+        };
+        let start = self.editor.caret();
+        let (span, dest, append_row) = self.with_table(|span, t| match rule(t, cur)? {
+            Nav::Nowhere => Ok((span, None, false)),
+            Nav::NewlineInCell => Ok((span, None, false)),
+            Nav::Move {
+                row,
+                col,
+                offset_in_cell,
+                append_row,
+            } => Ok((span, Some((row, col, offset_in_cell)), append_row)),
+        })?;
+        let _ = start;
+        let Some((row, col, offset_in_cell)) = dest else {
+            self.stats.table_nav_nowhere += 1;
+            return Ok(());
+        };
+        let span = if append_row {
+            // An append is an **edit**: new bytes, an undo action, a new row of cells. The navigation
+            // rule only said it wanted one; this is where the separators go in. The rule asked to land
+            // in row `row`, which is `span.rows` -- the row the append creates -- so the two are
+            // asserted against each other rather than assumed to agree.
+            let new_row = self.editor.append_table_row(span)?;
+            self.tables_shape_dirty = true;
+            debug_assert_eq!(
+                new_row, row,
+                "the rule asked to land in the row the append created, and the append made row \
+                 {new_row}; if these disagree the navigation rule and the edit have drifted apart"
+            );
+            // The grown span, not the one the rule was handed: `row` is one past the old `rows`, so
+            // resolving it against the old span is `OutOfRange`. That was the second version's bug --
+            // the first passed the old span through and reported `OutOfRange { row: 3, rows: 3 }` for
+            // the keystroke that had just created row 3.
+            self.span_of(span.start_byte)?
+        } else {
+            span
+        };
+        self.stats.table_navs += 1;
+        self.enter_cell(span, row, col, offset_in_cell)
+    }
+
+    /// A newline inside the caret's cell, which makes that cell's row taller.
+    ///
+    /// The row height is derived from the cell's own line count rather than assumed to be one, so a
+    /// cell holding three lines is three lines tall and the borders below it move down. That is the
+    /// "recompute row height in the Fenwick geometry" of the directive: the Fenwick mapper maps byte
+    /// offsets to line indices, and a cell's height is the number of `\n` bytes in it.
+    fn newline_in_cell(&mut self) -> Result<(), SessionError> {
+        let Some(cur) = self.active_cell else {
+            return self.insert(b"\n");
+        };
+        let cell_start = self.with_table(|_span, t| {
+            Ok(t.cell_at(t.span.cell_index(cur.row, cur.col))?.start_byte)
+        })?;
+        self.insert(b"\n")?;
+        // The insertion is inside the table, so the span grew; re-read it and re-enter the cell one
+        // byte past the newline that was just inserted.
+        // The insertion is inside the table, so the table grew; the span is re-read at the cell's old
+        // start, which is the check that would catch a `TableMap` that stopped tracking the edit.
+        self.stats.table_newlines += 1;
+        self.enter_cell(
+            self.span_of(cell_start)?,
+            cur.row,
+            cur.col,
+            cur.offset_in_cell + 1,
+        )
+    }
+
+    /// Remove one level of indentation, for Shift+Tab outside a table.
+    fn outdent(&mut self) -> Result<(), SessionError> {
+        const INDENT: &[u8] = b"    ";
+        let at = self.editor.caret();
+        if at < INDENT.len() as u32 {
+            return Ok(());
+        }
+        let text = self.editor.text()?;
+        let start = at as usize - INDENT.len();
+        if text.get(start..at as usize) != Some(INDENT) {
+            // Nothing to remove. Not an error: Shift+Tab on a line that was never indented is a
+            // keystroke with no effect, exactly as it is in any editor.
+            self.stats.table_nav_nowhere += 1;
+            return Ok(());
+        }
+        self.editor.delete_at(start as u32, INDENT.len() as u32)?;
+        self.after_edit(INDENT.len() as u32)
     }
 
     fn backspace(&mut self) -> Result<(), SessionError> {
@@ -588,7 +938,12 @@ impl<'a> Session<'a> {
         // The caret goes *under* the page's text in paint order, so the caret's rect is erased by
         // repainting the page and then redrawn -- which is why the damage includes it whenever it
         // moves.
-        let tree = self.chrome.tree(&self.state);
+        let mut tree = self.chrome.tree(&self.state);
+        // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
+        // they have to be painted in the page's coordinate space and clipped by the same damage the
+        // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
+        let mut damage = damage;
+        self.emit_tables(&mut tree, &mut damage);
         let stats = self.painter.paint(&mut self.frame, &tree, damage)?;
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
@@ -598,6 +953,154 @@ impl<'a> Session<'a> {
         self.scanout.present_damage(&self.frame, damage)?;
         self.damage = DamageRect::EMPTY;
         Ok(())
+    }
+
+    /// Draw every table whose first line is on screen, and widen `damage` to cover them.
+    ///
+    /// # Why the damage is the active cell and not the whole grid
+    ///
+    /// The directive's requirement is that typing in a cell invalidates only that cell's rectangle.
+    /// That holds because of the split between *content* and *shape*: a keystroke inside a cell
+    /// changes only that cell's glyphs, and the borders around it are in different rectangles that
+    /// did not move. So when `tables_shape_dirty` is false, the added damage is the active cell's
+    /// content rect. When it is true -- a table was inserted or a row appended -- every border line
+    /// below moved, and the added damage is the whole grid.
+    ///
+    /// # Why the viewport bounds it
+    ///
+    /// A table's `TableGrid` is built from integer arithmetic over the span and costs nothing to skip,
+    /// so a document with a hundred tables pays for the ones on screen. That is the same policy the
+    /// image cache will need in 9C, and it is here first because a table's geometry is cheap: the
+    /// expensive thing in 9C is a decoded raster.
+    ///
+    /// Known limit, recorded rather than hidden: a table is anchored at its document line and the
+    /// lines *below* it are not offset by its height, so text after a tall table overlaps its last
+    /// row. A full block layout is a larger change than this, and pretending otherwise by drawing the
+    /// table somewhere else would be worse.
+    fn emit_tables(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+        let spans = self.editor.tables().spans();
+        if spans.is_empty() {
+            self.stats.table_cells_drawn = 0;
+            self.stats.table_borders_drawn = 0;
+            return;
+        }
+        let Ok(text) = self.editor.text() else {
+            // A table whose bytes will not read cannot be drawn, and reporting it here would turn a
+            // rendering problem into a paint failure. The session's own table operations already
+            // surface the same error through `with_table`.
+            return;
+        };
+        let m = self.chrome.metrics;
+        let l = self.chrome.layout;
+        let row_pitch = l.text.height / l.rows.max(1);
+        let first = self.state.scroll_line;
+        let last = first + l.rows;
+        let mut cells_drawn = 0u32;
+        let mut borders_drawn = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let active = self.active_cell;
+
+        for span in spans.iter().copied() {
+            let line = self.line_index(span.start_byte as usize) as u32;
+            if line < first || line >= last {
+                continue;
+            }
+            let Ok(resolved) = ResolvedTable::new(span, &text) else {
+                continue;
+            };
+            let top = l.text.y + (line - first) * row_pitch;
+            let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
+
+            // --- borders, as procedural box-drawing glyph runs on the cell grid.
+            for run in grid.borders() {
+                let node = Node::Text(TextRun::new(
+                    run.x as i32,
+                    run.y as i32,
+                    run.codepoint,
+                    run.len,
+                    holonomy_render::Style::MONOSPACE,
+                    0,
+                    holonomy_render::chrome::colour::INK,
+                ));
+                // A border run knows its own rectangle -- `x`, `y`, `width`, `height` are its fields,
+                // because a run is *only* a rectangle of one repeated glyph.
+                extra = union_opt(
+                    extra,
+                    Some(DamageRect::new(run.x, run.y, run.width, run.height)),
+                );
+                tree.before.push(SurfaceTree::leaf(node));
+                borders_drawn += 1;
+            }
+
+            // --- cell text, clipped to each cell's content rect.
+            for index in 0..span.cell_count() {
+                let Ok(cell) = resolved.cell_at(index) else {
+                    continue;
+                };
+                let Some((cx, cy, cw, ch)) = grid.cell_content_rect(cell.row, cell.col) else {
+                    continue;
+                };
+                let content = &text[cell.start_byte as usize..cell.end_byte as usize];
+                if !content.is_empty() {
+                    // Clipped to the column width: a cell holding more characters than its column can
+                    // show is truncated rather than allowed to run into its neighbour, because a
+                    // `TextRun` has no clip rect and would otherwise overwrite the border.
+                    let fits = (cw / m.cell_w.max(1)).min(u32::from(TextRun::MAX_LEN)) as usize;
+                    let shown: String = content.iter().take(fits).map(|&b| b as char).collect();
+                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+                        cx as i32,
+                        cy as i32,
+                        shown.chars().next().map_or(0, |c| c as u32),
+                        shown.chars().count() as u16,
+                        holonomy_render::Style::REGULAR,
+                        0,
+                        holonomy_render::chrome::colour::INK,
+                    ))));
+                }
+                cells_drawn += 1;
+                if active.is_some_and(|a| a.row == cell.row && a.col == cell.col) {
+                    extra = union_opt(extra, Some(DamageRect::new(cx, cy, cw, ch)));
+                }
+            }
+
+            // --- the caret, drawn inside the cell rather than by the chrome's line model, which has
+            // no idea a cell exists.
+            if let Some(a) = active.filter(|a| a.row < span.rows && a.col < span.cols) {
+                if let Some((cx, cy, cw, _)) = grid.cell_content_rect(a.row, a.col) {
+                    let cx = cx + a.offset_in_cell * m.cell_w;
+                    tree.before
+                        .push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                            cx as i32,
+                            cy as i32,
+                            m.cell_w.min(cw),
+                            m.cell_h,
+                            holonomy_render::chrome::colour::CARET,
+                        ))));
+                    extra = union_opt(extra, Some(DamageRect::new(cx, cy, m.cell_w, m.cell_h)));
+                }
+            }
+
+            if self.tables_shape_dirty {
+                extra = union_opt(
+                    extra,
+                    Some(DamageRect::new(
+                        grid.origin_x,
+                        grid.origin_y,
+                        grid.width_px(),
+                        grid.height_px(),
+                    )),
+                );
+            }
+        }
+        self.stats.table_cells_drawn = cells_drawn;
+        self.stats.table_borders_drawn = borders_drawn;
+        self.tables_shape_dirty = false;
+        if let Some(rect) = extra {
+            *damage = Some(match *damage {
+                Some(d) => d.union(&rect),
+                None => rect,
+            });
+        }
     }
 
     // ---------------------------------------------------------------- export
@@ -619,6 +1122,19 @@ impl<'a> Session<'a> {
     pub fn toggle_bold(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
         self.editor.style_range(from, to, STYLE_BOLD, 0)?;
         self.after_edit(0)
+    }
+}
+
+/// Union two optional rectangles.
+///
+/// `DamageRect::union` takes two rectangles, and "no damage yet" is `None` rather than an empty
+/// rectangle, so the optionality has to be lifted out of the way at every step. A `None` on either
+/// side yields the other; two `None`s yield `None`.
+fn union_opt(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.union(&b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
     }
 }
 

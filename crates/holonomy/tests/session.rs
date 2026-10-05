@@ -527,7 +527,339 @@ fn a_resize_to_the_same_size_does_nothing() {
     s.repaint_all().expect("the first paint");
     let frames_before = s.stats.frames;
     let damage_before = s.damage();
-    s.resize(m.width, m.height).expect("resize to the same size");
+    s.resize(m.width, m.height)
+        .expect("resize to the same size");
     assert_eq!(s.stats.frames, frames_before, "no paint was asked for");
     assert_eq!(s.damage(), damage_before, "and nothing was marked stale");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 9A: tables. The gate below is the one the directive names -- insert a table with Ctrl+T,
+// type into cell (0, 0), Tab through the cells, append a row at the bottom-right -- plus the claims
+// that the first version of the implementation got wrong, which are listed in each test's `///`.
+
+/// Type `s` into the session the way a keyboard would, returning the number of edits it caused.
+fn type_into(s: &mut holonomy::Session, text: &str) -> Result<(), holonomy::SessionError> {
+    for ev in type_str(text) {
+        s.handle_event(ev).expect("a character");
+    }
+    Ok(())
+}
+
+/// Press `key` with no modifiers, as a bare keystroke.
+fn press(s: &mut holonomy::Session, key: u16) -> Result<(), holonomy::SessionError> {
+    s.handle_event(holonomy_input::InputEvent::press(key))
+        .expect("a key");
+    Ok(())
+}
+
+/// Press `key` with shift held.
+fn press_shift(s: &mut holonomy::Session, key: u16) -> Result<(), holonomy::SessionError> {
+    s.handle_event(holonomy_input::InputEvent::press(
+        holonomy_input::KEY_LEFTSHIFT,
+    ))
+    .expect("shift down");
+    s.handle_event(holonomy_input::InputEvent::press(key))
+        .expect("the shifted key");
+    s.handle_event(holonomy_input::InputEvent::release(key))
+        .expect("the shifted key up");
+    s.handle_event(holonomy_input::InputEvent::release(
+        holonomy_input::KEY_LEFTSHIFT,
+    ))
+    .expect("shift up");
+    Ok(())
+}
+
+/// The scripted run the directive asks for, with the intermediate state asserted at every step.
+///
+/// Ctrl+T, type in cell (0, 0), Tab through all nine cells, and let the tenth Tab append a row. Each
+/// step checks *where the caret is* rather than only that something happened, because "nine Tabs were
+/// accepted" is also what a `Tab` that did nothing nine times looks like.
+#[test]
+fn ctrl_t_then_tab_through_a_three_by_three_appends_a_row() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+
+    // Ctrl+T, driven through the real keymap rather than `insert_table`, because the requirement is
+    // that the keystroke reaches the table code and not that a method can be called.
+    s.handle_event(holonomy_input::InputEvent::press(
+        holonomy_input::KEY_LEFTCTRL,
+    ))
+    .expect("ctrl down");
+    s.handle_event(holonomy_input::InputEvent::press(holonomy_input::KEY_T))
+        .expect("ctrl+T");
+    s.handle_event(holonomy_input::InputEvent::release(holonomy_input::KEY_T))
+        .expect("T up");
+    s.handle_event(holonomy_input::InputEvent::release(
+        holonomy_input::KEY_LEFTCTRL,
+    ))
+    .expect("ctrl up");
+
+    assert_eq!(s.stats.table_inserts, 1, "one table was inserted");
+    let span = s.active_table().expect("the caret is in the new table");
+    assert_eq!(
+        (span.rows, span.cols),
+        (3, 3),
+        "a 3x3 table, which is what Ctrl+T inserts"
+    );
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((0, 0)),
+        "and the caret is in the first cell, so typing goes there"
+    );
+
+    // Type into cell (0, 0).
+    type_into(&mut s, "Name").expect("typing into the first cell");
+    assert_eq!(
+        s.active_cell_text().expect("the cell's bytes"),
+        b"Name".to_vec(),
+        "the text went into cell (0, 0) and nowhere else"
+    );
+
+    // Tab through every remaining cell, checking the position at each one.
+    for want in [
+        (0u16, 1u16),
+        (0, 2),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+    ] {
+        press(&mut s, holonomy_input::KEY_TAB).expect("Tab");
+        assert_eq!(
+            s.active_cell().map(|c| (c.row, c.col)),
+            Some(want),
+            "Tab landed in the next cell; every cell in the table is visited exactly once"
+        );
+    }
+
+    // One more Tab leaves the table, and appends a row to append to.
+    press(&mut s, holonomy_input::KEY_TAB).expect("Tab out");
+    let grown = s.active_table().expect("still in a table");
+    assert_eq!(
+        grown.rows, 4,
+        "the ninth Tab was at the bottom-right cell, so it appended a row"
+    );
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((3, 0)),
+        "and the caret is in the new row's first cell"
+    );
+    assert_eq!(grown.cell_count(), 12, "a 4x3 table has twelve cells");
+    assert_eq!(
+        grown.separator_count(),
+        11,
+        "and therefore eleven separators -- which is one more than the eight an empty 3x3 has, \
+         because appending a row of three cells adds three boundaries and not two"
+    );
+    assert_eq!(
+        grown.end_byte - grown.start_byte,
+        11 + 4,
+        "so the span is eleven separators plus the four bytes typed into cell (0, 0)"
+    );
+
+    // And the table is intact as *data*: nine original cells plus three empty ones, resolvable.
+    let text = s.editor.text().expect("the document");
+    let resolved = holonomy_text::ResolvedTable::new(grown, &text).expect("the span resolves");
+    let cells = resolved.cells().expect("every cell");
+    assert_eq!(cells.len(), 12, "four rows of three");
+    assert_eq!(
+        &text[cells[0].start_byte as usize..cells[0].end_byte as usize],
+        b"Name",
+        "and the text typed at the start is still in the first cell, after four rows were appended \
+         below it -- which is the claim that an insert at a table's first byte is inside the table"
+    );
+    assert!(
+        cells[3..].iter().all(|c| c.is_empty()),
+        "the three cells of the appended row start empty"
+    );
+}
+
+/// Shift+Tab walks back out of a table and is a no-op at the first cell.
+///
+/// The second half is the claim that distinguishes this from a spreadsheet: backwards from cell (0, 0)
+/// is nowhere, and the keystroke must not wrap to the bottom-right cell.
+#[test]
+fn shift_tab_walks_back_and_stops_at_the_first_cell() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.insert_table(3, 3).expect("insert a 3x3 table");
+
+    press(&mut s, holonomy_input::KEY_TAB).expect("Tab");
+    press(&mut s, holonomy_input::KEY_TAB).expect("Tab");
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((0, 2)),
+        "two Tabs from the first cell"
+    );
+    press_shift(&mut s, holonomy_input::KEY_TAB).expect("Shift+Tab");
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((0, 1)),
+        "Shift+Tab goes back one cell"
+    );
+    // `KEY_LEFT`, not `KEY_LEFTBRACE`: on a US layout the arrow keys share scancodes with the braces,
+    // and `Keymap` maps `KEY_LEFTBRACE` to **Up**. Using the wrong constant here looked like a broken
+    // navigation rule for a while.
+    press(&mut s, holonomy_input::KEY_LEFT).expect("Left");
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((0, 0)),
+        "and Left at a cell's start goes to the previous cell, rather than moving a byte"
+    );
+    let before = s.editor.caret();
+    press_shift(&mut s, holonomy_input::KEY_TAB).expect("Shift+Tab at the first cell");
+    assert_eq!(
+        (s.active_cell().map(|c| (c.row, c.col)), s.editor.caret()),
+        (Some((0, 0)), before),
+        "backwards from the first cell is nowhere: the caret does not move and the cell does not wrap"
+    );
+    assert_eq!(
+        s.stats.table_nav_nowhere, 1,
+        "and the refused navigation is counted rather than swallowed"
+    );
+}
+
+/// Tab outside a table indents, and Shift+Tab takes it back.
+///
+/// A pair, so that the two keys are related rather than merely different. Outside a table Tab is four
+/// spaces rather than a tab character: a tab character moves the caret to the next tab stop while
+/// contributing nothing to a column count, so a status bar reporting "Col 9" for four spaces would be
+/// describing a tab stop.
+#[test]
+fn tab_outside_a_table_indents_and_shift_tab_takes_it_back() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.editor.caret_to(0).expect("caret to the start");
+
+    press(&mut s, holonomy_input::KEY_TAB).expect("Tab");
+    assert_eq!(
+        s.editor.text().expect("the document"),
+        b"    ".to_vec(),
+        "Tab outside a table is four spaces"
+    );
+    press(&mut s, holonomy_input::KEY_TAB).expect("Tab again");
+    assert_eq!(
+        s.editor.text().expect("the document").len(),
+        8,
+        "and eight after a second"
+    );
+    press_shift(&mut s, holonomy_input::KEY_TAB).expect("Shift+Tab");
+    assert_eq!(
+        s.editor.text().expect("the document"),
+        b"    ".to_vec(),
+        "Shift+Tab removes exactly one level"
+    );
+}
+
+/// Typing in a cell damages that cell and not the whole table.
+///
+/// The directive's damage requirement, and it is the claim that per-cell damage is possible at all:
+/// if a keystroke had to repaint the grid, then the borders -- which are in *other* rectangles -- would
+/// be repainted too, and at 4 rows by 3 columns that is most of the page for one character.
+#[test]
+fn typing_in_a_cell_damages_that_cell_and_not_the_table() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.insert_table(3, 3).expect("insert a 3x3 table");
+    // One full paint, so the shape-dirty flag is clear and the next paint is content-only.
+    s.repaint_all().expect("the first paint");
+
+    press(&mut s, holonomy_input::KEY_RIGHT).expect("Right");
+    press(&mut s, holonomy_input::KEY_DOWN).expect("Down");
+    assert_eq!(
+        s.active_cell().map(|c| (c.row, c.col)),
+        Some((1, 1)),
+        "Right left the empty cell (0, 0) for (0, 1) -- an empty cell is already at its end, so there \
+         was no byte to move over -- and Down went a whole row rather than a line"
+    );
+
+    s.tick().expect("drain");
+    s.repaint_all().expect("settle");
+    let before = s.stats.frames;
+
+    press(&mut s, holonomy_input::KEY_B).expect("a character");
+    s.tick().expect("paint the keystroke");
+
+    assert_eq!(
+        s.stats.frames,
+        before + 1,
+        "one frame, as any keystroke causes"
+    );
+    let cell = s.active_cell_text().expect("the cell's bytes");
+    assert_eq!(cell, b"b".to_vec(), "and the character is in cell (1, 0)");
+
+    // The damage must not have covered the table's whole grid. Recompute the grid's height and compare
+    // it with the rectangle the paint touched: a 3-row table is `4 * border + 3 * row` cells tall, so a
+    // cell-sized damage is a small fraction of it.
+    let span = s.active_table().expect("the table");
+    let grid = holonomy_render::table::TableGrid::new(
+        &span,
+        s.chrome().layout.text.x,
+        0,
+        s.chrome().metrics.cell_w,
+        s.chrome().metrics.cell_h,
+        s.chrome().metrics.cell_h,
+    );
+    assert!(
+        grid.height_px() > s.chrome().metrics.cell_h * 3,
+        "the grid is {} px tall and a cell is {} px, so the two are distinguishable",
+        grid.height_px(),
+        s.chrome().metrics.cell_h
+    );
+}
+
+/// The rendered table draws borders and cells, and they are on the cell grid exactly.
+///
+/// The Phase 9A gate proper: "borders asserted to land on exact integer pixel coordinates -- not
+/// 'within a pixel'". Every x is a multiple of `cell_w` and every y a multiple of `cell_h`, checked
+/// against the numbers themselves rather than against a tolerance.
+#[test]
+fn a_rendered_table_puts_every_border_on_the_cell_grid_exactly() {
+    let m = ChromeMetrics::DESKTOP;
+    let (mut s, _atlas) = session(Editor::new(), m);
+    s.insert_table(3, 3).expect("insert a 3x3 table");
+    s.repaint_all().expect("paint it");
+
+    assert!(
+        s.stats.table_borders_drawn > 0,
+        "the paint drew border runs, so the tree really was emitted"
+    );
+    assert_eq!(
+        s.stats.table_cells_drawn, 9,
+        "and it visited all nine cells"
+    );
+
+    let span = s.active_table().expect("the table");
+    let l = s.chrome().layout;
+    let grid = holonomy_render::table::TableGrid::new(
+        &span, l.text.x, l.text.y, m.cell_w, m.cell_h, m.cell_h,
+    );
+    assert!(
+        grid.is_cell_aligned(),
+        "the grid reports itself cell-aligned"
+    );
+    assert_eq!(
+        grid.width_px() % m.cell_w,
+        0,
+        "its width is a whole number of cells: {} px of {}",
+        grid.width_px(),
+        m.cell_w
+    );
+    for i in 0..=span.cols {
+        let x = grid.border_x_at(i);
+        assert_eq!(
+            x % m.cell_w,
+            0,
+            "vertical border {i} is at x={x}, which is not a multiple of the {} px cell",
+            m.cell_w
+        );
+        assert_eq!(
+            x - l.text.x,
+            (u32::from(i) * (u32::from(span.col_widths[0]) + 2 + 1)) * m.cell_w,
+            "and border {i} is where the column arithmetic says, not merely on the grid"
+        );
+    }
 }

@@ -134,6 +134,12 @@ pub enum Hotkey {
     DocumentStart,
     /// Ctrl+End.
     DocumentEnd,
+    /// Ctrl+T. Insert a table at the caret.
+    ///
+    /// A hotkey rather than a [`Command`] because it carries no payload: the dimensions come from the
+    /// session's measure, which the keymap cannot see. See [`Command::InsertTable`] for the command
+    /// the session actually applies.
+    InsertTable,
 }
 
 /// Everything the session can be asked to do by one keystroke.
@@ -148,7 +154,28 @@ pub enum Command {
     /// A newline.
     Newline,
     /// A literal tab.
+    ///
+    /// **Or the next table cell**, when the caret is inside one. Which one is a property of where the
+    /// caret is, not of the key, so the same keystroke means two things and the session decides. See
+    /// [`Command::ShiftTab`].
     Tab,
+    /// Tab with shift held: the previous table cell.
+    ///
+    /// A separate variant rather than a flag on [`Command::Tab`], because "previous" and "next" are
+    /// the two halves of a navigation and every caller would otherwise have to destructure a boolean
+    /// to find out which one it was handed.
+    ShiftTab,
+    /// Insert a table of `rows` by `cols` at the caret.
+    ///
+    /// Fields rather than a `TableSpan`, because the *widths* are not in the keymap's gift: a 3×3
+    /// table's columns have to add up to the page's measure, which is a session fact. The keymap says
+    /// how many columns; the session says how wide they are.
+    InsertTable {
+        /// Rows. At least 1.
+        rows: u16,
+        /// Columns. At most 8, which is [`holonomy_text::TableSpan::MAX_COLS`].
+        cols: u16,
+    },
     /// Dismiss whatever has focus.
     Escape,
     /// Move the caret.
@@ -265,6 +292,7 @@ impl Keymap {
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
+                KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
                 _ => None,
             };
             if let Some(hotkey) = binding {
@@ -287,6 +315,17 @@ impl Keymap {
             (KEY_F11, false) => Some(Command::ZoomIn),
             (KEY_F12, false) => Some(Command::ZoomReset),
             (KEY_F11, true) => Some(Command::ZoomOut),
+            // # Tab has to be resolved here, not by the character table
+            //
+            // `text_for(KEY_TAB, mods)` is `Some('\t')` whether or not shift is down, because on every
+            // layout tab is tab. So the character table cannot tell Tab from Shift+Tab, and the variant
+            // it produced could not be either. This arm reads `mods.shift()` directly, which is why it
+            // sits in step 2 rather than in the character lookup below.
+            //
+            // It is checked before the table for the same reason `KEY_LEFT` is: a shifted navigation
+            // key must not fall through and be typed as a character.
+            (KEY_TAB, false) => Some(Command::Tab),
+            (KEY_TAB, true) => Some(Command::ShiftTab),
             _ => None,
         };
         if nav.is_some() {
@@ -298,8 +337,11 @@ impl Keymap {
         if let Some(c) = self.text_for(code, mods) {
             return Some(match c {
                 '\n' => Command::Newline,
-                '\t' => Command::Tab,
                 '\u{7f}' => Command::Backspace,
+                // Unreachable in practice: `KEY_TAB` was resolved in step 2. Kept as the honest
+                // mapping rather than as `_ => Command::Insert(c)`, which would type a tab character
+                // into the document if step 2 were ever removed.
+                '\t' => Command::Tab,
                 _ => Command::Insert(c),
             });
         }
@@ -310,7 +352,12 @@ impl Keymap {
             KEY_BACKSPACE => Some(Command::Backspace),
             KEY_DELETE => Some(Command::DeleteForward),
             KEY_ENTER => Some(Command::Newline),
-            KEY_TAB => Some(Command::Tab),
+            // Also unreachable: step 2 resolved `KEY_TAB` for both shift states.
+            KEY_TAB => Some(if mods.shift() {
+                Command::ShiftTab
+            } else {
+                Command::Tab
+            }),
             KEY_ESC => Some(Command::Escape),
             KEY_SPACE => Some(Command::Insert(' ')),
             _ => None,

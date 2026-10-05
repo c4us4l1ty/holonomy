@@ -653,13 +653,19 @@ fn the_scroll_thumb_moves_down_as_the_view_scrolls() {
 fn a_resize_moves_the_gutters_and_nothing_else() {
     let small = ChromeMetrics::for_size(1024, 600);
     let large = ChromeMetrics::for_size(1600, 1000);
-    assert_eq!(small.columns, large.columns, "the measure does not move with the window");
+    assert_eq!(
+        small.columns, large.columns,
+        "the measure does not move with the window"
+    );
     assert_eq!(small.cell_w, large.cell_w, "nor does the cell size");
     assert_eq!(small.page_w(), large.page_w(), "nor the page's width");
 
     let a = Layout::new(&small);
     let b = Layout::new(&large);
-    assert_eq!(a.text.width, b.text.width, "the text column is the same width in both");
+    assert_eq!(
+        a.text.width, b.text.width,
+        "the text column is the same width in both"
+    );
     // Its *height* does not survive: a taller panel fits more rows, and rows are what a page grows
     // by. Its width does, because the measure is fixed.
     assert!(
@@ -679,7 +685,10 @@ fn a_resize_moves_the_gutters_and_nothing_else() {
         b.text.x - b.gutter_left,
         "the text column sits the same distance inside the page in both"
     );
-    assert_eq!(a.page.width, b.page.width, "the page is the same width in both");
+    assert_eq!(
+        a.page.width, b.page.width,
+        "the page is the same width in both"
+    );
     assert!(
         b.gutter_left > a.gutter_left,
         "a wider panel has a bigger left gutter: {} then {}",
@@ -718,14 +727,27 @@ fn the_bands_partition_the_panel_at_any_size() {
     ] {
         let m = ChromeMetrics::for_size(w, h);
         let l = Layout::new(&m);
-        assert_eq!((l.width, l.height), (m.width, m.height), "{w}x{h}: the panel size is kept");
+        assert_eq!(
+            (l.width, l.height),
+            (m.width, m.height),
+            "{w}x{h}: the panel size is kept"
+        );
         let mut at = 0u32;
         for b in [l.tabs, l.toolbar, l.ruler, l.canvas, l.status] {
-            assert_eq!(b.y, at, "{w}x{h}: a band does not start where the last one ended");
-            assert!(b.width <= m.width, "{w}x{h}: a band is no wider than the panel");
+            assert_eq!(
+                b.y, at,
+                "{w}x{h}: a band does not start where the last one ended"
+            );
+            assert!(
+                b.width <= m.width,
+                "{w}x{h}: a band is no wider than the panel"
+            );
             at += b.height;
         }
-        assert_eq!(at, m.height, "{w}x{h}: the five bands cover the panel exactly");
+        assert_eq!(
+            at, m.height,
+            "{w}x{h}: the five bands cover the panel exactly"
+        );
         assert_eq!(
             l.canvas.height,
             m.canvas_h(),
@@ -745,8 +767,15 @@ fn a_panel_too_small_is_clamped_to_the_minimum() {
     assert_eq!(m.width, ChromeMetrics::MIN_WIDTH, "the width is clamped up");
     assert_eq!(m.height, ChromeMetrics::MIN_HEIGHT, "and the height");
     let l = Layout::new(&m);
-    assert!(l.page.width <= m.width, "the page fits the panel it was clamped to");
-    assert!(l.rows >= 4, "and shows the four rows MIN_HEIGHT promises: {}", l.rows);
+    assert!(
+        l.page.width <= m.width,
+        "the page fits the panel it was clamped to"
+    );
+    assert!(
+        l.rows >= 4,
+        "and shows the four rows MIN_HEIGHT promises: {}",
+        l.rows
+    );
     // `clamp_to` is the same thing under a different name, and it must stay so -- the session calls it
     // on every resize.
     assert_eq!(m.clamp_to(1, 1), m, "clamp_to agrees with for_size");

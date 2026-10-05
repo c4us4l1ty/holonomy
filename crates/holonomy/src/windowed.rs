@@ -180,9 +180,7 @@ pub fn run(
                             .resize(width as u32, height as u32)
                             .map_err(WindowedError::Session)?
                         {
-                            session
-                                .repaint_all()
-                                .map_err(WindowedError::Session)?;
+                            session.repaint_all().map_err(WindowedError::Session)?;
                         }
                     }
                     // The window is on screen and the server does not know what is where. Repaint all of
@@ -228,15 +226,44 @@ fn window_of<'s>(session: &'s mut Session<'_>) -> Result<&'s mut Desktop, Window
 }
 
 /// What the session did, on the way out.
+///
+/// The table counters are in this line rather than behind a debug flag because a table's whole point
+/// is that it is *visible*, and "is there a table on screen" is not a question a log line should need a
+/// flag to answer. A windowed run that inserted a table and drew no cells would otherwise report
+/// success.
 fn report(session: &Session<'_>, events: u64, start: Instant) {
+    let t = &session.stats;
     eprintln!(
         "holonomy: {} commands, {} edits, {} frames, {} pixels, {} events in {:.1}s -- \
          press Ctrl+Q to quit",
-        session.stats.commands,
-        session.stats.edits,
-        session.stats.frames,
-        session.stats.pixels,
+        t.commands,
+        t.edits,
+        t.frames,
+        t.pixels,
         events,
         start.elapsed().as_secs_f64()
     );
+    if t.table_inserts > 0 {
+        eprintln!(
+            "holonomy: tables: {} inserted, {} cell navigations, {} refused, {} in-cell newlines, \
+             {} cells and {} border runs drawn in the last frame",
+            t.table_inserts,
+            t.table_navs,
+            t.table_nav_nowhere,
+            t.table_newlines,
+            t.table_cells_drawn,
+            t.table_borders_drawn,
+        );
+        match (session.active_cell(), session.active_table()) {
+            (Some(c), Some(s)) => eprintln!(
+                "holonomy: caret in cell ({}, {}) of a {}x{} table at bytes {}..={}",
+                c.row, c.col, s.rows, s.cols, s.start_byte, s.end_byte,
+            ),
+            (cell, span) => eprintln!(
+                "holonomy: no caret cell ({:?}) for span {:?}",
+                cell.map(|c| (c.row, c.col)),
+                span.map(|s| (s.rows, s.cols)),
+            ),
+        }
+    }
 }

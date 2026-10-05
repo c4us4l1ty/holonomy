@@ -53,7 +53,7 @@ of magnitude. Both are measured here.
 | 65,536 | 4 | 2 | 0.25 | 419 ms |
 
 Cost is linear in GiB-passes at ≈1.7 ms/GiB-pass. **The PRD's "m=384 MiB, t=16 → 180 ms"
-is 57× optimistic.** On the Core 2 Duo it would be far worse. NFR-1.3 (400–550 ms total
+is 57× optimistic.** NFR-1.3 (400–550 ms total
 `t_kdf`) is unreachable at PRD parameters and is replaced in §2.4.
 
 **Wesolowski VDF, 2048-bit Montgomery square, 32 u64 limbs, `opt-level=3` + lto +
@@ -65,7 +65,7 @@ is 57× optimistic.** On the Core 2 Duo it would be far worse. NFR-1.3 (400–55
 | PRD's claim | 300 ns |
 | T = 1,500,000 → measured here | **3,115 ms** |
 
-The PRD's 450 ms is 7× optimistic here and worse on the target. `T` is therefore derived
+The PRD's 450 ms is 7× optimistic here. `T` is therefore derived
 from a measured per-squaring cost at build time, not hard-coded. See §2.4.
 
 ### 1.2 Dependency resolution, verified by compiling and running
@@ -144,13 +144,13 @@ Per your decision. Deferred and why:
 
 ### 2.4 Key derivation: replace the PRD's parameters with a measured budget
 
-The PRD's 384 MiB / t=16 / p=2 costs 10.2 s here and would be ~30 s on a Core 2 Duo. That
+The PRD's 384 MiB / t=16 / p=2 costs 10.2 s here. That
 is not an unlock, that is a denial of service on the user's own device. NFR-1.3's
 400–550 ms total cannot be met at PRD parameters, so the budget is restated:
 
 | parameter | value | justification |
 |---|---|---|
-| Argon2id m | 131,072 KiB (128 MiB) | 128 MiB is a real memory fence; a GPU attacker must supply it per guess. Measured 524 ms here, ~1.5 s on target. |
+| Argon2id m | 131,072 KiB (128 MiB) | 128 MiB is a real memory fence; a GPU attacker must supply it per guess. Measured 524 ms here. |
 | Argon2id t | 2 | minimum that is not degenerate |
 | Argon2id p | 2 | dual-core, no thrash |
 | VDF T | `floor(target_vdf_ms / ns_per_squaring × 1e6)` | derived, not guessed |
@@ -158,11 +158,11 @@ is not an unlock, that is a denial of service on the user's own device. NFR-1.3'
 `build.rs` runs a `vdf-calibrate` bin once and bakes `NS_PER_SQUARING` into the binary; T is
 a compile-time constant computed from it. Changing the unlock budget is changing one number
 and rebuilding. The `vdf-calibrate` bin is the honest artifact — it prints measured ns per
-squaring so the target's T can be re-derived without a rebuild.
+squaring so `T` can be re-derived for a different host without a rebuild.
 
 This is a deliberate deviation from FR-4.3/FR-4.4 and is recorded as such. The security
 argument is preserved (memory fence + non-parallelizable serial chain); only the constant is
-corrected. Phase 10 re-measures on the Core 2 Duo and the numbers go into STATUS.md.
+corrected. §5 records where the numbers are measured now.
 
 ### 2.5 The VDF modulus `N_pub` is the RSA-2048 semiprime, hardcoded
 
@@ -446,15 +446,34 @@ Phase 9 adds one crate and extends three, and the placement is not arbitrary:
 
 ## 5. Phase plan
 
-Phases 1–9 are strictly ordered. Phase 9 is complex media and structured layout; Phase 10 is the
-target-hardware run, deferred until then. Every phase lists the gate that must pass before the next
-starts.
+Phases 1–9 are strictly ordered, and there is no Phase 10. Every phase lists the gate that must pass
+before the next starts.
 
-**Phase 9 replaced the target-hardware run, by decision, on 2026-10-04.** Hardware testing is
-deferred to Phase 10; the scope freed by that deferral was spent on the three features §2.3 had been
-holding. The substitution is not equivalent and should not be read as if it were: a hardware run
-validates the *timing and memory* claims on the actual target, and nothing in Phase 9 does that. What
-Phase 9 does is close a *scope* gap, and §2.9 records which measured numbers move as a result.
+**The target-hardware run is removed, by decision, on 2026-10-05.** The laptop this is being built on,
+running an ordinary X11 desktop through the `desktop` feature, is the **designated daily-driver
+target**, and every performance, latency and memory number is measured and asserted against it. The
+ThinkPad X200 / Core 2 Duo / GM45 run is not deferred any more; it is not going to happen.
+
+What that changes, stated plainly rather than softened:
+
+* **The 2 MiB binary ceiling, the 16.0 MiB steady-state RSS ceiling, the 8.0 MiB decoded-image ceiling
+  and the ≤ 0.50 ms keystroke→pixel p99.9 are all re-baselined to this machine.** They are asserted in
+  §6 against numbers measured here, and a number measured here is a real number — which is more than
+  the plan had. What it no longer is is a claim about the hardware the design was originally sized
+  for.
+* **The Core 2 Duo arithmetic in §1.1 and the VDF cost of ~2,077 ns per squaring are no longer the
+  inputs `T` is derived from.** `T = floor(target_vdf_ms / ns_per_squaring × 1e6)` used a per-squaring
+  cost measured on hardware this code has never run on, while the measured cost *here* is ~2,657 ns.
+  The gate now derives `T` from the host it runs on, so the derivation and the calibration are the same
+  machine. The ~30% CIOS throughput gap noted in §1.1 is therefore still unclaimed, and is now worth
+  claiming against a target that exists.
+* **DRM presentation on bare silicon is no longer a target.** The `desktop` window is the compositor
+  path, and §1.2's finding that DRM needs `SETCRTC` — and therefore DRM master — stops being an open
+  question about hardware nobody has. `SETCRTC` stays unimplemented and unimplemented-on-purpose; the
+  `Scanout` trait already has two real backends behind it.
+* **What is genuinely lost:** a bare-silicon boot was going to be validated on real hardware, and now
+  it is not. The jail, the container and the crypto are validated here; the *boot* on a VT with no
+  desktop environment is not, and cannot be from this machine.
 
 ### Phase 0 — Repository and build skeleton
 
@@ -686,7 +705,8 @@ scrubbed to zero. Binary ≤ 2.0 MiB.
 
 ### Phase 9X — The developer window (not a product path)
 
-Added 2026-10-04, between the Phase 9 gate and Phase 10. It exists so a person can type a document on an
+Added 2026-10-04, after the Phase 8 gate. As of 2026-10-05 it is also the **product's** presentation
+path, not only a development convenience — see §5. It exists so a person can type a document on an
 ordinary desktop without `sudo`, and it is behind the `desktop` feature, which is off by default.
 
 The reasoning is in §8's amendment, but the shape is: a hand-written X11 core-protocol client in
@@ -705,22 +725,9 @@ none of it: measured 1,032,472 bytes with zero of five X11 marker strings, again
 
 ---
 
-### Phase 10 — Target-hardware run (ThinkPad X200, Core 2 Duo, GM45)
+### Phase 10 — Removed
 
-Deferred from Phase 9 on 2026-10-04. Unchanged in substance.
-
-Run `verify-target.sh` on the bare-silicon machine. It measures: boot to passcode prompt, `t_kdf` split
-by stage, the RSS ceiling during a 2000-page editing workload, the VDF per-squaring cost feeding T,
-keystroke-to-pixel percentiles over 500,000 events, and idle CPU over 30 minutes. KMS `SETCRTC`
-presentation is exercised here for the first time. It also re-measures the Phase 9 media claims on the
-target's memory, which is the one thing §2.9 cannot establish.
-
-Results go into `STATUS.md` with the measurements that produced them, per H2's convention.
-
-**Gate.** Every NFR in §6.
-
-
----
+Removed on 2026-10-05, with the reasoning at the head of §5. There is no target-hardware run.
 
 ## 6. Gates, restated as numbers
 
@@ -736,7 +743,7 @@ Results go into `STATUS.md` with the measurements that produced them, per H2's c
 | steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
 | `t_kdf` | §2.4 | measured, budget restated — the PRD's 400–550 ms is replaced |
-| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on target |
+| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms **on this host**, the designated target since 2026-10-05 |
 | idle CPU | NFR-1.2 | ≤ 0.001%, process blocked in `epoll_wait` |
 | container entropy | FR-4.1 | NIST SP 800-22 subset passes, Shannon ≥ 7.99999 |
 | container size | FR-4.1 | exactly 134,217,728 bytes |
@@ -747,11 +754,11 @@ Results go into `STATUS.md` with the measurements that produced them, per H2's c
 
 ## 7. Open items needing you
 
-1. **`SETCRTC` needs DRM master.** Verified everything else on the DRM path unprivileged;
-   presentation needs either the VT or root. This is now a **Phase 10** question rather than a
-   Phase 9 one. Confirm whether Phase 10 runs on hardware you control, or whether I should add a
-   `mode-setting` fallback that renders into the dumb buffer and presents via `drmModePageFlip`
-   when master is unavailable.
+1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
+   Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
+   window as the designated target, bare-metal presentation is out of scope rather than deferred, and
+   a `mode-setting` fallback that renders into the dumb buffer is not worth building for a path
+   nothing uses. The `Scanout` trait keeps the seam if that changes.
 2. **Arrows in the UI.** Inter has no Arrows block. Either pick a different glyph for the
    sidebar back button or add a second small face. Cosmetic; I will default to a drawn
    triangle mask and note it.

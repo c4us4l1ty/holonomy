@@ -24,6 +24,12 @@ zeroize = "1.9"
 [dev-dependencies]
 holonomy-geometry = { path = "../holonomy-geometry" }
 
+# The Ctrl+T gate drives the real keymap rather than calling `insert_table` with the dimensions
+# written out, because "does Ctrl+T reach the table code" is the requirement and calling the table code
+# directly would not test it. A dev-dependency, not a normal one: `holonomy-text` must not depend on
+# the input layer, or the text engine grows a notion of a keystroke.
+holonomy-input = { path = "../holonomy-input" }
+
 # The gate reads `RLIMIT_MEMLOCK` with `getrlimit`, to report the page-lock ceiling rather than a
 # remembered one. The library itself uses libc only through holonomy-secure.
 libc = "0.2"
