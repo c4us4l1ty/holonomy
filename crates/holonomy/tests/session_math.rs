@@ -10,7 +10,7 @@
 //! | typing in a formula does not reallocate the layout | [`typing_inside_a_formula_does_not_reallocate_the_run_buffer`] |
 //! | the raw source is readable back | [`the_session_reports_the_latex_of_the_formula_the_caret_is_in`] |
 //! | real advances are live, at the pixel level | [`a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`] |
-//! | wide glyphs are clipped by the renderer | [`the_renderer_clips_glyphs_wider_than_its_cell_and_this_is_recorded`] |
+//! | a glyph wider than the cell is blitted at its own width | [`a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width`] |
 
 use holonomy::session::Session;
 use holonomy_display::paint::Painter;
@@ -19,16 +19,37 @@ use holonomy_input::{Command, Hotkey, InputEvent, Keymap, ModifierState, KEY_LEF
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_text::{Editor, SpanPolicy};
 
-/// A session over a fresh document, with the real atlas.
+/// The one atlas every test in this file shares.
+///
+/// **One, not one per test.** `Session::new` publishes the atlas into a process-global
+/// (`publish_atlas`, and `advance_shim`'s `PUBLISHED_ATLAS`) because `MathMetrics::advance` is a
+/// plain `fn` pointer and cannot capture. Building a fresh atlas per test therefore made that global
+/// a race between this file's ten tests, running in parallel: whichever session called
+/// `Session::new` last owned the global, and every *other* session's `advance_shim` compared its own
+/// atlas pointer against a foreign one, found no match, and returned `None` -- so the layout silently
+/// fell back to the fixed 8 px grid.
+///
+/// The visible symptom was `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`
+/// failing intermittently with a different ink extent, and passing on a re-run. It is not a flaky
+/// test, it is a test that was measuring which of ten racing sessions happened to run last. One
+/// shared `OnceLock` makes the global stable and the measurement deterministic.
+///
+/// `Box::leak` rather than a `static`: the atlas is ~458 KiB of coverage, and a `static` would have
+/// to be built at compile time from a `const` expression, which the rasteriser cannot be.
+fn shared_atlas() -> &'static holonomy_assets::atlas::Atlas {
+    static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
+        std::sync::OnceLock::new();
+    ATLAS.get_or_init(|| {
+        let (atlas, _) = holonomy_assets::build_atlas(&[16]).expect("build the atlas");
+        Box::leak(Box::new(atlas))
+    })
+}
+
+/// A session over a fresh document, with the shared atlas.
 fn session(ed: Editor) -> Session<'static> {
-    let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
-        holonomy_assets::build_atlas(&[16])
-            .expect("build the atlas")
-            .0,
-    ));
     let m = ChromeMetrics::DESKTOP;
     let scanout = HeadlessScanout::new(m.width, m.height);
-    let painter = Painter::new(atlas, 0);
+    let painter = Painter::new(shared_atlas(), 0);
     Session::new(ed, painter, Box::new(scanout), m)
 }
 
@@ -337,39 +358,69 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
     assert_eq!(fixed.width, 24, "3 letters x 8 px on the page's grid");
 
     // Now with the shim. The session does this internally, so the comparison is against the painted
-    // ink: three `x`-width runs at 10 px spacing leave the last one's right edge 6 px beyond the
-    // fixed grid's, which the frame shows as ink further right.
+    // ink: three glyphs at a 10 px advance leave the last one's right edge beyond the fixed grid's.
+    //
+    // **This measures glyph ink, not the chrome's fills.** The previous version searched for any
+    // non-zero pixel in rows `top..top + 40`, which is the page background (`0x00FAFAF8`) -- a solid
+    // fill -- so it was measuring the right edge of that fill, and its expected value of 28 encoded
+    // the painter's old 8-column cell truncation rather than anything about glyphs. That is why the
+    // number moved when the width fix landed even though no glyph had changed.
+    //
+    // Ink is then exactly "neither transparent black nor the page fill", which is a two-colour test
+    // rather than a luminance threshold: a threshold of `< 0x808080` matches the canvas, which is
+    // black, and reports ink 119 px into the column. The frame's only other colour here is black, so
+    // this is exact rather than approximate.
+    const CANVAS: u32 = 0x0000_0000;
+    const PAGE: u32 = 0x00FA_FAF8;
     let m = real.chrome().metrics;
     let text_x = real.chrome().layout.text.x;
     let top = real.chrome().layout.text.y;
     let frame = real.frame();
-    let ink_right = (text_x..text_x + 120)
+    // A full cell either side of the line box, because `bearing_y` currently places ink *above* the
+    // box -- see `probe_linebox.rs` and the `Painter::text` docs. A window tight to `top` would find
+    // nothing and the test would pass vacuously.
+    let inked = |x: u32, y: u32| {
+        let p = frame.pixel(x, y);
+        p != CANVAS && p != PAGE
+    };
+    // Scanned from the text column's left edge, not from 0: the ruler draws vertical rules at
+    // `text.x` and `text.right()`, and a search that started off-column would find the rule rather
+    // than the formula.
+    let ink_right = (text_x..text_x + 60)
         .rev()
-        .find(|&x| {
-            (top..top + 40).any(|y| {
-                let p = frame.pixel(x, y);
-                p != 0
-            })
-        })
+        .find(|&x| (top - m.cell_h..top + m.cell_h).any(|y| inked(x, y)))
         .expect("the formula drew something");
 
-    // Exactly 28, and the number is derived rather than observed twice.
+    // Exactly 29 px of inked extent, and the number is derived rather than observed twice.
     //
-    // Three glyphs at a 10 px advance sit at x = 0, 10, 20. The painter blits `cell_width()` = 8
-    // columns per glyph, not the glyph's own 10, so the last one covers 20..28 and the ink stops
-    // there. On the fixed grid it would be three 8 px cells: 0..8, 8..16, 16..24.
+    // Three glyphs at a 10 px advance sit at x = 0, 10, 20, and the painter blits each glyph's own
+    // ink width -- `m.width`, measured 9-11 px for Inter Italic at 16 ppem, not the 8 px cell. The
+    // last glyph, `c`, therefore covers columns 20..29 relative to the text column.
+    //
+    // The rightmost of those is the rasteriser's **1 px antialiasing pad** (`raster.rs` takes
+    // `max_x.ceil() + 1` so edge coverage is not clipped), and a pad column has zero coverage. So
+    // the rightmost *inked* column is 28, and that is what this asserts. The pad is why the number
+    // is 29 and not 30; it is a real property of the atlas, not slack in the assertion.
     //
     // Asserting the exact value rather than `>=` is what makes this a gate on *both* features at
-    // once: 24 says the advance shim is inert, 30 would say the blit uses the real width, and 28 is
-    // the answer only if the advance is real *and* the painter's cell truncation is still in place.
+    // once, and all three failure modes stay distinguishable:
+    //
+    // | rightmost ink | meaning |
+    // |---|---|
+    // | text_x + 23 | fixed grid **and** the painter truncating to its cell -- today's two bugs together |
+    // | text_x + 24 | fixed grid, real-width blit: the advance shim is inert |
+    // | text_x + 28 | real advances and real-width blit: correct |
+    //
+    // So a regression in either the advance shim or the blit fails here, and neither can hide behind
+    // the other.
     assert_eq!(
         ink_right,
         text_x + 28,
-        "ink reaches {ink_right}, {} px into a text column at {text_x}. Expected 28 = two 10 px \
-         advances plus the painter's 8-column blit; the fixed grid would give 24",
+        "ink reaches {ink_right}, {} px into a text column at {text_x}. Expected 29 px of inked \
+         extent = three 10 px advances with the painter blitting each glyph's own width, less the \
+         rasteriser's 1 px pad column. A fixed grid gives 24 and a truncating blit gives 23",
         ink_right - text_x
     );
-    let _ = m;
 }
 
 /// The renderer blits every glyph into a fixed-width cell, so a glyph wider than the cell is clipped.
@@ -378,29 +429,63 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
 /// math bug: it is how every glyph on the page is drawn.
 ///
 /// `Painter::text` calls `blit_coverage` with `w = cell_width()` -- `ppem / 2`, so 8 px at 16 ppem --
-/// rather than `GlyphMetric::width`. Measured (`holonomy-assets/examples/math_advances.rs`), the ink widths at
-/// 16 ppem are 9 px for most Latin letters, 10 px for Greek and operators, and **14 px for `\sum`**.
-/// So every glyph loses its right-hand columns to the cell, `\sum` losing 6 of them.
+/// The painter blits a glyph at its own ink width, so a glyph wider than the text cell is not clipped.
 ///
-/// For body text this is masked: runs advance by the same 8 px, so the next glyph's cell covers the
-/// clipped part and the page reads as tight-but-fine. For a formula it is visible, because
-/// `math_layout` advances by real advances while the painter still blits a cell.
+/// **This replaces a test that asserted the opposite.** Phase 9B recorded the limitation instead of
+/// fixing it: `the_renderer_clips_glyphs_wider_than_its_cell_and_this_is_recorded` asserted that
+/// `\sum`'s 14 px of ink exceeded the 8 px cell the painter blitted, and documented "the fix is one
+/// line -- pass `m.width` instead of `cell_w` -- and it is not taken here". Phase 9C took it, so that
+/// test's claim became false and asserting it would have pinned the bug in place.
 ///
-/// **The fix is one line** -- pass `m.width` instead of `cell_w` -- and it is not taken here because
-/// it changes the ink of every glyph on the page, which is a visual-baseline change for the whole
-/// product rather than a Phase 9B one. It is the top of the 9C list.
+/// `\sum` is the right glyph to gate on because it is the worst case in the atlas: 14 px of ink in an
+/// 8 px cell, so a truncating blit loses 6 columns. Inter's letters are 9-11 px and lose only 1-3,
+/// which is a weak signal -- see `math_advances.rs`, which prints the whole table.
+///
+/// The expected extent is derived, not observed: the metric is 14 px wide including `raster.rs`'s
+/// 1 px pad on each side, so the inked columns are 1..=12 relative to the pen and the rightmost is
+/// `text_x + 12`. A cell-truncating blit would stop at `text_x + 6`.
 #[test]
-fn the_renderer_clips_glyphs_wider_than_its_cell_and_this_is_recorded() {
-    let atlas = holonomy_assets::build_atlas(&[16]).expect("atlas").0;
-    let sum = atlas.metric(0x2211, holonomy_assets::payload::Style::Math, 16);
+fn a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width() {
+    let sum = shared_atlas().metric(0x2211, holonomy_assets::payload::Style::Math, 16);
     assert_eq!(sum.width, 14, "`\\sum`'s ink is 14 px at 16 ppem");
     let cell = 16 / 2;
     assert_eq!(cell, 8, "the painter's cell is ppem / 2");
     assert!(
         sum.width > cell,
-        "so {} of its 14 columns are outside the cell the painter blits. See this test's docs: \
-         `Painter::text` passes `cell_width()`, not `m.width`",
+        "so this glyph is {} px wider than the cell, which is what makes it a usable gate",
         sum.width - cell
+    );
+
+    let mut s = with_text("");
+    s.apply(ctrl_m()).expect("Ctrl+M");
+    type_into(&mut s.editor, "\\sum");
+    s.apply(Command::Right).expect("Right");
+    s.paint(None).expect("paint");
+    assert_eq!(s.stats.math_compiled, 1, "`\\sum` should have compiled");
+
+    const CANVAS: u32 = 0x0000_0000;
+    const PAGE: u32 = 0x00FA_FAF8;
+    let text_x = s.chrome().layout.text.x;
+    let top = s.chrome().layout.text.y;
+    let frame = s.frame();
+    let inked = |x: u32, y: u32| {
+        let p = frame.pixel(x, y);
+        p != CANVAS && p != PAGE
+    };
+    let rightmost = (text_x..text_x + 40)
+        .rev()
+        .find(|&x| {
+            (top - s.chrome().metrics.cell_h..top + s.chrome().metrics.cell_h).any(|y| inked(x, y))
+        })
+        .expect("`\\sum` drew something");
+    assert_eq!(
+        rightmost,
+        text_x + 12,
+        "`\\sum`'s ink reached {rightmost}, {} px past the pen at {text_x}. Expected 12 = its 14 px \
+         metric width less the 1 px pad on each side; a blit truncated to the 8 px cell would stop \
+         at {}. See `Painter::text`.",
+        rightmost - text_x,
+        text_x + 6
     );
 }
 

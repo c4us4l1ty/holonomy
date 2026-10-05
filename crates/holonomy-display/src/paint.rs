@@ -203,29 +203,33 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// # Why `cell_width()` and not `m.width`
+    /// # The grid is the grid; the ink is the ink
     ///
-    /// `blit_coverage` is handed `cell_width()` -- `ppem / 2`, so 8 px at 16 ppem -- rather than the
-    /// metric's own ink width, so **every glyph wider than 8 px has its right-hand columns clipped**.
-    /// Measured at 16 ppem (`holonomy-assets/examples/math_advances.rs` prints the table): Latin letters are
-    /// 9–10 px, Greek and the operators 10–11 px, and `\sum` is **14 px**, losing 6 of its columns.
+    /// **Changed in Phase 9C.** This used to hand `blit_coverage` `cell_width()` -- `ppem / 2`, so
+    /// 8 px at 16 ppem -- rather than the metric's own width, so **every glyph wider than 8 px had its
+    /// right-hand columns clipped**. Measured at 16 ppem (`holonomy-assets/examples/math_advances.rs`
+    /// prints the table): Latin letters are 9–10 px, Greek and the operators 10–11 px, and `\sum` is
+    /// **14 px**, losing 6 of its columns.
     ///
-    /// This is not new and it is not a math bug. The renderer is a **fixed-cell grid**: `cell_width`
-    /// is also the advance `TextRun` uses for every `k`, so a proportional face is drawn on an 8 px
-    /// lattice. For body text the two mistakes cancel -- the next glyph's cell starts exactly where
-    /// the clipped one ended -- so the page reads as tight rather than wrong.
+    /// The old behaviour was self-consistent for body text, which is why it survived to 9B: the
+    /// renderer is a **fixed-cell grid**, `cell_width` is the advance `TextRun` uses for every `k`, and
+    /// a clipped glyph's missing columns were exactly overwritten by the next cell's leading columns.
+    /// The page read as *tight*, not wrong. It stopped cancelling for a formula, because
+    /// `math_layout` advances by the fonts' *real* advances (`MathMetrics::advance`) while the painter
+    /// blitted one cell -- a gap of `advance - cell_width` px between glyphs, and a `\sum` missing its
+    /// right-hand third.
     ///
-    /// They stop cancelling for a formula, because `math_layout` advances by the fonts' *real*
-    /// advances (`MathMetrics::advance`) while the painter still blits one cell. The result is a
-    /// visible gap of `advance - cell_width` px between glyphs, and a `\sum` whose right-hand third
-    /// is missing. `crates/holonomy/tests/session_math.rs`'s
-    /// `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model` pins the exact
-    /// geometry (28 px for three letters) so this stays accounted for rather than drifting.
+    /// **What this still does *not* do: it does not make the advance proportional.** The advance stays
+    /// `cell_w` for every `k`, because that is the page's text grid and 9A/9B laid tables and formulas
+    /// out on it. So a proportional face is still *positioned* on an 8 px lattice; what changed is
+    /// that its ink is no longer truncated to the lattice. Overhang is now possible and expected, which
+    /// is why the damage test below is the ink rect rather than the cell: on an 8 px grid with 9–10 px
+    /// glyphs, consecutive letters overlap by 1–2 px, and culling on the cell would leave a stale
+    /// stripe wherever the overhang was the only thing damaged.
     ///
-    /// **The fix is one argument: pass `m.width`, not `cell_w`.** It is not made here because it
-    /// changes the ink of every glyph on the page, which is a visual-baseline change for the whole
-    /// product -- dozens of existing tests compare rendered frames -- rather than a Phase 9B one. It
-    /// is the first item on the 9C list.
+    /// The visual baseline moved with this. `crates/holonomy-display/tests/` and
+    /// `crates/holonomy/tests/` pin the affected geometry; `phase4_gate.rs`'s atlas figures are
+    /// unaffected because the atlas is unchanged -- this is purely how it is read.
     fn text(&mut self, frame: &mut Frame, run: TextRun, damage: Option<DamageRect>) {
         let cell_w = self.cell_width();
         let cell_h = self.cell_height();
@@ -238,13 +242,19 @@ impl<'a> Painter<'a> {
                 continue;
             };
             let x = run.x + (k as i32) * cell_w as i32;
+            // One damage test for the whole glyph, box drawing included, because the damage model
+            // and the cell are the same rectangle. See the note on the blit below for why this is
+            // the cell and not the ink.
             let cell = DamageRect::new(x.max(0) as u32, run.y.max(0) as u32, cell_w, cell_h);
             if !intersects(cell, damage) {
                 self.scratch.stats.glyphs_skipped += 1;
                 continue;
             }
 
-            // Box drawing first: procedural, so it cannot be missing.
+            // Box drawing first: procedural, so it cannot be missing. Its damage rect is the whole
+            // cell because `box_glyph` draws arms to the cell edges -- a `──` fills its cell's full
+            // width by construction, not by accident. See `box_drawing::cell_metric`, which reports
+            // `width == height == cell_size(ppem)`.
             if (box_drawing::FIRST..=box_drawing::LAST).contains(&cp) {
                 if box_glyph(
                     &mut self.scratch,
@@ -273,14 +283,44 @@ impl<'a> Painter<'a> {
                 self.scratch.stats.glyphs += 1;
                 continue;
             }
+
+            // # The advance is the cell; the ink is the metric's
+            //
+            // `cell_w` is the *advance* -- the page's fixed text grid, and what every caller and the
+            // whole line model position by -- so it stays. What changes is the blit: `m.width` and
+            // `m.height` from the metric, at `x + bearing_x`, instead of `cell_w` x `cell_h` at the
+            // cell origin.
+            //
+            // Why it matters, measured at 16 ppem by `holonomy-assets/examples/math_advances.rs`:
+            // Inter Italic letters are 9-11 px of ink and `\sum` is 14, all in an 8 px cell. The old
+            // blit truncated every one of them to 8 columns, so `\sum` lost 6 of its 14 and no glyph
+            // in the product was drawn at its own width.
+            //
+            // # Why the damage test is still the *cell*, not the ink
+            //
+            // Culling on the ink rect is the correct end state and it is not here, because
+            // `bearing_y` does not mean what the painter assumes. `raster.rs` stores
+            // `bearing_y = -(y0 + bh)` -- the ink's bottom, measured up from the font's *ascender
+            // line* -- while every caller passes `run.y` as a **line box top**, so the painter's
+            // `run.y + bearing_y` lands ink 17-21 px *above* the box and outside the damage rect the
+            // session computed for it. `holonomy-assets/examples/probe_linebox.rs` measures this:
+            // 19 of 19 sampled glyphs place their ink outside an 18 px box.
+            //
+            // Culling on the ink rect under that bug rejects the glyphs entirely -- the formula's ink
+            // sits at y 126..138 while `emit_math` damages y 143..160, they do not intersect, and a
+            // formula stops rendering. Which is why the cell is still the cull: it is where the
+            // damage model actually agrees with the draw, so the two are consistent today even
+            // though both are wrong. Fixing `bearing_y` and the line box together is what lets the
+            // cull move to the ink rect, and it needs a line-height decision (18 px cannot contain
+            // these faces' ascenders and descenders), so it is a separate change.
             let coverage = atlas.coverage();
             blit_coverage(
                 &mut self.scratch,
                 frame,
-                x,
+                x + i32::from(m.bearing_x),
                 run.y + i32::from(m.bearing_y),
-                cell_w,
-                cell_h,
+                u32::from(m.width),
+                u32::from(m.height),
                 run.colour,
                 |row, dst| {
                     // Within one glyph the rows are contiguous, though the *skyline* packer does not
