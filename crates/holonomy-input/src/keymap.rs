@@ -140,6 +140,20 @@ pub enum Hotkey {
     /// session's measure, which the keymap cannot see. See [`Command::InsertTable`] for the command
     /// the session actually applies.
     InsertTable,
+    /// Ctrl+M. Insert an inline math span at the caret.
+    ///
+    /// **M is a bad key for math and it is still the right one.** `Ctrl+M` is `Enter` in a terminal
+    /// and the same chord is what most editors use to move to the document's end, so a user with
+    /// terminal muscle memory will press it expecting a newline. The alternatives are worse: `Ctrl+$`
+    /// and `Ctrl+\` are unbound on most layouts but sit under digits and backslash respectively, so
+    /// the mnemonic survives at the cost of an unusual reach, and any letter that *is* a mnemonic
+    /// here (`Ctrl+E` exponent, `Ctrl+F` fraction, `Ctrl+S` root) collides with a binding that
+    /// already exists — `Ctrl+S` is save, and re-binding save would be a much worse surprise than a
+    /// mnemonic that is merely weak.
+    ///
+    /// The honest summary: the directive specifies `Ctrl+M`, the chords above are worse, so it is
+    /// `Ctrl+M`. [`Command::InsertMath`] is what the session applies.
+    InsertMath,
 }
 
 /// Everything the session can be asked to do by one keystroke.
@@ -293,6 +307,7 @@ impl Keymap {
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
+                KEY_M if !mods.shift() && !mods.alt() => Some(Hotkey::InsertMath),
                 _ => None,
             };
             if let Some(hotkey) = binding {

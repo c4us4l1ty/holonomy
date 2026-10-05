@@ -572,22 +572,68 @@ fn ink_bounds(contours: &[Vec<Pt>]) -> (f32, f32, f32, f32) {
 
 /// Codepoints to rasterise: the font-supplied ranges only. Box Drawing is added separately by
 /// [`crate::box_drawing`].
+///
+/// **Which ranges depends on the face**, which this function ignored until Phase 9B made ignoring it
+/// visible. It walked `codepoints_in_text_ranges()` for all five faces, so the math face was asked
+/// for Latin-1 and got whatever Noto Sans Math happens to carry there — 191 codepoints requested, a
+/// few dozen present, and no way to say so at the call site. The `let _ = entry;` at the bottom is
+/// the compiler recording that the parameter was accepted and then discarded.
+///
+/// The math face's set is `MATH_RANGES` **and nothing else** — no ASCII.
+///
+/// An intermediate version of this chained `a`..`z`, `A`..`Z` and `0`..`9` onto the math face, on
+/// the reasoning that `MathNode::Symbol` resolves a bare `x` to U+0078 and a face without it would
+/// draw an empty numerator. True, and it still draws one: those codepoints are in the **text**
+/// window, so `MetricTable::get` finds them under [`crate::payload::Style::Italic`] or `Regular`,
+/// which the face already rasterises.
+///
+/// **The chained ASCII cost nothing, and claiming otherwise would have been a fiction.** The comment
+/// on that version said it "cost 19,964 bytes of coverage". It cost **zero**: `MATH_RANGES` is also
+/// the list the *subsetter* is given, so the payload's copy of Noto Sans Math never contained a
+/// Latin letter, and `face.glyph_index('a')` returned `None` for all 62. The number was inferred from
+/// 62 glyphs × 2 sizes rather than measured, and the atlas's `used()` did not move by a single byte
+/// when the chain was removed. A saving that cannot be observed in the thing it claims to save is
+/// not a saving.
+///
+/// The chain is still gone, for the reason that does hold: Inter-Italic is the right face for a math
+/// variable, by the convention every textbook uses, while Noto Sans Math's ASCII is upright — so a
+/// formula drawn from the math face would set `x` upright beside a slanted `y`. The style for each
+/// glyph is chosen by the caller, in `session.rs`, from [`crate::payload::is_math_symbol`]; this
+/// function's only job is to put the *symbols* in the atlas.
+///
+/// **What the math face does cost, measured: 42,987 bytes of coverage** for 108 codepoints × 2
+/// sizes, which is 398 bytes per glyph — Greek letters are the widest things in the payload. That is
+/// 8.2% of the 512 KiB budget and it is why `metric::ATLAS_HEIGHT` had to drop from 480 to 448.
+/// `crates/holonomy-assets/examples/probe_budget.rs` prints it: the text faces plus the
+/// procedural Box Drawing come to 374,313, so the difference from `used()` is exactly the math face.
 fn glyphs_of(face: &Face, entry: &FaceEntry) -> Vec<(GlyphId, u32)> {
     let mut out = Vec::new();
-    for cp in crate::payload::codepoints_in_text_ranges() {
-        // `glyph_index` takes a `char` and returns `Option`, not `Result`. Latin-1 and ASCII
-        // are all scalar values so the `char` conversion is always sound here, but `as char`
-        // on a code point is only correct if nothing above the Unicode range ever arrives, so
-        // the conversion is checked rather than cast blindly.
-        if let Some(c) = char::from_u32(cp) {
-            if let Some(gid) = face.glyph_index(c) {
-                out.push((gid, cp));
+    match entry.style {
+        crate::payload::Style::Math => {
+            for cp in crate::payload::codepoints_in_math_ranges() {
+                if let Some(c) = char::from_u32(cp) {
+                    if let Some(gid) = face.glyph_index(c) {
+                        out.push((gid, cp));
+                    }
+                }
+            }
+        }
+        _ => {
+            for cp in crate::payload::codepoints_in_text_ranges() {
+                // `glyph_index` takes a `char` and returns `Option`, not `Result`. Latin-1 and ASCII
+                // are all scalar values so the `char` conversion is always sound here, but `as char`
+                // on a code point is only correct if nothing above the Unicode range ever arrives, so
+                // the conversion is checked rather than cast blindly.
+                if let Some(c) = char::from_u32(cp) {
+                    if let Some(gid) = face.glyph_index(c) {
+                        out.push((gid, cp));
+                    }
+                }
             }
         }
     }
     out.sort_by_key(|&(_, cp)| cp);
     out.dedup_by_key(|&mut (_, cp)| cp);
-    let _ = entry;
     out
 }
 

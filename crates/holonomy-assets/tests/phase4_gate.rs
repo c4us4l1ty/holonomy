@@ -319,6 +319,7 @@ fn atlas_and_table_fit_the_l2_ceiling() {
         payload::Style::Bold,
         payload::Style::Italic,
         payload::Style::Monospace,
+        payload::Style::Math,
     ] {
         for &ppem in &SIZES {
             let found = (0..CODEPOINTS)
@@ -338,6 +339,44 @@ fn atlas_and_table_fit_the_l2_ceiling() {
             );
         }
     }
+
+    // **The math face, specifically, and by count.**
+    //
+    // The loop above asks only "is this style non-empty", which the math face passes on a handful of
+    // glyphs. That is too weak for the face whose whole job is a specific list: a regeneration that
+    // dropped `MATH_RANGES` to one range would leave `\alpha` and `\sum` as .notdef while the atlas
+    // still built, still fit, and still passed the loop above.
+    //
+    // So every codepoint the payload declares as math coverage, and that the font actually carries,
+    // must have a non-blank metric in the math face. The count is asserted exactly, because a face that
+    // quietly picked up *more* than it should is the same class of bug as one that picked up less:
+    // `MATH_RANGES` is what the subsetter was told, and the table is paid for per codepoint.
+    let mut math_glyphs = 0usize;
+    for cp in payload::codepoints_in_math_ranges() {
+        let slot = metric::slot_of(cp).expect("every math codepoint is addressable");
+        let slot_cp = metric::codepoint_of(slot)
+            .unwrap_or_else(|| panic!("U+{cp:04X} slot {slot} does not name a codepoint back"));
+        assert_eq!(slot_cp, cp, "slot_of and codepoint_of must round-trip");
+        for &ppem in &SIZES {
+            let m = a
+                .metrics()
+                .get(cp, payload::Style::Math as usize, size_index(&a, ppem));
+            assert!(
+                !m.is_blank() || !face_carries(cp),
+                "U+{cp:04X} is declared in MATH_RANGES and the face carries it, so the atlas must \\
+                 hold it at {ppem} ppem; it is blank, which means it would draw as nothing"
+            );
+            if !m.is_blank() {
+                math_glyphs += 1;
+            }
+        }
+    }
+    assert!(
+        math_glyphs >= 200,
+        "only {math_glyphs} math metrics were populated across both sizes; the face carries 108 \\
+         codepoints, so roughly 216 slots are expected and anything under 200 means most symbols \\
+         rasterised to nothing"
+    );
 
     assert!(
         a.coverage().len() + table <= 512 * 1024,
@@ -359,12 +398,16 @@ fn atlas_and_table_fit_the_l2_ceiling() {
 fn atlas_geometry_leaves_room_for_the_metric_table() {
     let ceiling = 512 * 1024;
     let table_at_2_sizes = SIZES.len() * STYLE_COUNT * CODEPOINTS * size_of::<GlyphMetric>();
-    // A one-size atlas: half the table, so the pair gains 14,080 bytes of coverage budget.
+    // A one-size atlas: half the table, so the pair gains 23,200 bytes of coverage budget.
     let table_at_1_size = STYLE_COUNT * CODEPOINTS * size_of::<GlyphMetric>();
 
-    assert_eq!(CODEPOINTS, 352, "224 Latin-1 + 128 Box Drawing");
-    assert_eq!(table_at_2_sizes, 28_160);
-    assert_eq!(table_at_1_size, 14_080);
+    assert_eq!(
+        CODEPOINTS, 464,
+        "224 Latin-1 + 57 Greek + 3 arrows + 44 operators + 1 approx + 6 relations + 1 cdot + \
+         128 Box Drawing"
+    );
+    assert_eq!(table_at_2_sizes, 46_400);
+    assert_eq!(table_at_1_size, 23_200);
 
     // The geometry that does *not* fit, kept as the reason for the one that does.
     assert_eq!(
@@ -381,8 +424,9 @@ fn atlas_geometry_leaves_room_for_the_metric_table() {
     // one this configuration actually builds.
     assert_eq!(
         metric::ATLAS_HEIGHT,
-        480,
-        "the height is what leaves room for the table"
+        448,
+        "the height is what leaves room for the table -- it was 480 until the math face took a \
+         fifth style and four more windows, which put the pair at 537,720 against a 524,288 ceiling"
     );
     let max_table = metric::MAX_SIZES * STYLE_COUNT * CODEPOINTS * size_of::<GlyphMetric>();
     assert!(
@@ -409,12 +453,47 @@ fn atlas_geometry_leaves_room_for_the_metric_table() {
     );
 }
 
-fn first_codepoint_of(slot: usize) -> u32 {
-    if slot < metric::TEXT_CODEPOINTS {
-        metric::FIRST_CODEPOINT + slot as u32
-    } else {
-        metric::FIRST_BOX + (slot - metric::TEXT_CODEPOINTS) as u32
+/// Whether the math face's font actually has a glyph for `cp`.
+///
+/// The distinction the assertion above needs: a codepoint in `MATH_RANGES` that the font does *not*
+/// carry is correctly blank in the atlas, and requiring it to be non-blank would fail on the subsetter
+/// dropping something rather than on the atlas dropping something.
+fn face_carries(cp: u32) -> bool {
+    let face = math_face();
+    char::from_u32(cp).is_some_and(|c| face.glyph_index(c).is_some())
+}
+
+/// The decompressed math face, parsed once per call site.
+///
+/// Leaked rather than returned as a borrow of a local, for the same reason `math_coverage.rs` leaks
+/// it: `ttf_parser::Face` borrows its bytes and the buffer has to outlive the face.
+fn math_face() -> ttf_parser::Face<'static> {
+    let mut input = payload::PACKED_FONTS;
+    let mut out = Vec::new();
+    {
+        use std::io::Read;
+        brotli_decompressor::Decompressor::new(&mut input, 4096)
+            .read_to_end(&mut out)
+            .expect("the payload decompresses");
     }
+    let out: &'static [u8] = Box::leak(out.into_boxed_slice());
+    let entry = payload::FACES
+        .iter()
+        .find(|f| f.style == payload::Style::Math)
+        .expect("a math face");
+    ttf_parser::Face::parse(
+        &out[entry.offset as usize..(entry.offset + entry.length) as usize],
+        0,
+    )
+    .expect("the math face parses")
+}
+
+fn first_codepoint_of(slot: usize) -> u32 {
+    // `metric::codepoint_of`, not a local re-derivation. This helper assumed two windows and was
+    // silently wrong the moment the atlas gained six more: every slot past the Latin-1 window would
+    // have been reported as Box Drawing, so the coverage count would have credited Greek to the
+    // procedural face. See `metric::codepoint_of`'s own comment.
+    metric::codepoint_of(slot).expect("a slot inside CODEPOINTS names a codepoint")
 }
 
 fn size_index(a: &holonomy_assets::atlas::Atlas, ppem: u16) -> usize {
@@ -533,13 +612,14 @@ fn every_required_codepoint_resolves_in_every_face() {
     );
     assert_eq!(boxd, 128, "Box Drawing 0x2500..0x257F");
     assert_eq!(
-        math, 421,
-        "the math coverage is 421 slots over 7 ranges: one each for plus-minus, times and divide,
-         the Arrows block at 112, Greek uppercase 25, Greek lowercase 25, and Mathematical
-         Operators 256. The three single-codepoint ranges are the price of plus-minus being Latin-1:
-         U+00B1 is *not* in Mathematical Operators, and a range chosen by what looks like maths
-         rather than by the parser's own symbol table would have left six of the 58 symbols
-         rendering as .notdef"
+        math, 108,
+        "the math coverage is 108 slots over 10 ranges, and every one of them is a codepoint the \
+         parser can name: 1 each for plus-minus, times, divide, approx and cdot; Arrows 3; Greek \
+         uppercase 25; Greek lowercase 25; operators 44; relations 6. It was 421 over 7 ranges -- \
+         the Arrows block whole at 112 and Mathematical Operators whole at 256 -- which was fine \
+         while math glyphs were rasterised on demand and wrong the moment they rasterise at boot, \
+         because then every listed codepoint is coverage and a metric slot whether or not a formula \
+         draws it. The three Latin-1 entries cost no metric slots; they sit inside the text window"
     );
     assert_eq!(
         payload::codepoints_all().count(),
@@ -562,11 +642,24 @@ fn every_required_codepoint_resolves_in_every_face() {
     );
     assert_eq!(
         CODEPOINTS - (text + boxd),
-        33,
-        "the window also covers DEL and the 32 C1 controls, which coverage does not require"
+        145,
+        "the Latin-1 window covers DEL and the 32 C1 controls that coverage does not require (33), \
+         plus 112 slots of Greek, arrows and operators that are addressed but mostly unpopulated"
     );
     assert_eq!(metric::TEXT_CODEPOINTS, 224, "0x20..0x100 inclusive");
     assert_eq!(metric::BOX_CODEPOINTS, 128, "0x2500..0x257F inclusive");
+    // The math windows are deliberately wider than the 108 codepoints the payload carries: a window
+    // has to be contiguous for `slot_of` to be arithmetic. 33 of the 112 are genuinely unused.
+    assert_eq!(
+        metric::GREEK_CODEPOINTS
+            + metric::ARROW_CODEPOINTS
+            + metric::OP_CODEPOINTS
+            + metric::APPROX_CODEPOINTS
+            + metric::REL_CODEPOINTS
+            + metric::CDOT_CODEPOINTS,
+        112,
+        "57 Greek + 3 arrows + 44 operators + 1 approx + 6 relations + 1 cdot"
+    );
 
     // And the exception stays exactly one codepoint, in exactly the three Inter faces.
     for style in [
@@ -809,9 +902,10 @@ fn no_font_outline_survives_the_one_time_pass() {
     let (a, report) = build_atlas(&SIZES).expect("fit");
     assert_eq!(report.scrubbed, payload::RAW_LEN);
     assert_eq!(
-        report.scrubbed, 169_480,
-        "the whole decompressed payload is scrubbed -- 169,480 B as of Phase 9B, which added Noto \
-         Sans Math at 72,276 B raw"
+        report.scrubbed, 118_636,
+        "the whole decompressed payload is scrubbed. This number is the point of the whole \
+         arrangement: `build_atlas` returns an atlas and no curves, so nothing downstream can \
+         evaluate a Bézier. It was 169,480 B while the math face was still pruned-to-whole-blocks"
     );
     // The atlas holds coverage and metrics only: no reference to the font remains.
     let (a2, _) = build_atlas(&SIZES).expect("fit");
@@ -1266,9 +1360,15 @@ fn box_drawing_is_not_in_the_font_payload() {
     //    outside Greek and 0x2200..0x22FF. All six are Latin-1 or Arrows, all six would have rendered
     //    as .notdef, and the ranges are now chosen from the parser's symbol table rather than from
     //    what looks like "math".
-    assert_eq!(payload::RAW_LEN, 169_480);
+    assert_eq!(payload::RAW_LEN, 118_636);
     assert_eq!(payload::FACES.len(), 5);
-    assert_eq!(payload::PACKED_LEN, 78_354);
+    assert_eq!(
+        payload::PACKED_LEN,
+        55_886,
+        "down from 78,354 when the math face was 507 glyphs over four whole Unicode blocks. \
+         Pruning to the 108 codepoints the parser can name is what let the face rasterise at boot \
+         without pushing the atlas and its table past the 512 KiB ceiling"
+    );
     let per_face: usize = payload::FACES.iter().map(|f| f.length as usize).sum();
     assert_eq!(per_face, payload::RAW_LEN);
 }

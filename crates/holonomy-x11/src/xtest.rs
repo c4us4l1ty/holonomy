@@ -162,6 +162,44 @@ impl XTest {
         Ok(None)
     }
 
+    /// The keycode that produces `keysym`, and whether **shift** has to be held to get it.
+    ///
+    /// [`XTest::keycode_for_keysym`] only matches a keycode's *first* keysym, which is right for a
+    /// letter and wrong for anything you have to hold shift for: `}` (U+007D) sits in the second
+    /// column of the bracket key, so the first-only lookup returns `None` and a caller that types LaTeX
+    /// silently drops every closing brace. A 9B live run typed `\frac{1}{2}` and got `\frac12`
+    /// recorded, which parses as an error and made the session log "1 parse error" for a formula that
+    /// was typed correctly.
+    ///
+    /// So this walks every column of the mapping and reports which one matched:
+    ///
+    /// * column 0 -- the key produces it unshifted
+    /// * column 1 -- the key produces it with shift
+    ///
+    /// Anything past column 1 is mode-switched (`AltGraph`) rather than shifted, and is reported as
+    /// unshifted rather than guessed at, because XTEST cannot set a mode alone and typing the wrong
+    /// thing silently is worse than reporting that it could not be typed.
+    ///
+    /// A caller that wants a `char` should prefer this over two lookups: asking for `c` and then for
+    /// `c.to_lowercase()` gets the keycode but still has to work out the shift flag itself, which is
+    /// the part that goes wrong.
+    pub fn keycode_for_keysym_shifted(
+        conn: &mut Conn,
+        keysym: u32,
+    ) -> Result<Option<(u8, bool)>, ConnError> {
+        let mapping = conn.keyboard_mapping()?;
+        let first = conn.setup().min_keycode;
+        for (i, syms) in mapping.iter().enumerate() {
+            if syms.first().is_some_and(|s| *s == keysym) {
+                return Ok(Some((first + i as u8, false)));
+            }
+            if syms.get(1).is_some_and(|s| *s == keysym) {
+                return Ok(Some((first + i as u8, true)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Wait for the next key event, up to `timeout`.
     ///
     /// Skips everything else -- `Expose`, `ConfigureNotify`, the `ClientMessage` the server sends when

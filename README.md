@@ -33,7 +33,7 @@ number is why there is no TeX engine, no SVG, no JPEG, no WebP, no variable-leng
 sync protocol. It is not an optimisation target that was missed; it is the constraint the design is
 derived from, and `crates/holonomy/tests/release_artifact.rs` fails the build if it is crossed.
 
-Current: **1,032,920 bytes**, static-pie, against a 2,097,152-byte ceiling.
+Current: **1,101,944 bytes**, static-pie, against a 2,097,152-byte ceiling — 995,208 bytes of room.
 
 ## Build and run
 
@@ -88,10 +88,18 @@ Fifteen external crates, all vendored into a static musl binary: `argon2`, `blak
 ## Status
 
 Phases 0–8 are done and gated. Phase 9X — a window a person can type into, on an ordinary desktop,
-without `sudo` — is done. Phase 9 is in progress: tables (9A), a LaTeX micro-parser for inline math
-(9B), and a viewport-bounded image cache (9C).
+without `sudo` — is done. Phase 9 is in progress: **tables (9A) and LaTeX math (9B) are done and
+gated**; the viewport-bounded image cache (9C) is not started.
 
-856 tests pass in release. 108 files, ~53,000 lines.
+`Ctrl+T` inserts a 3×3 table and Tab moves between cells. `Ctrl+M` inserts an inline formula: with the
+caret outside it the box draws as compiled math — glyphs from Noto Sans Math for the symbols, Inter
+Italic for the variables, and 1 px integer fills for the fraction bars and radical overlines — and with
+the caret inside it expands in place to the raw LaTeX in monospace.
+
+907 tests pass in release. 109 files / 58,214 lines under `crates/*/src` and `crates/*/tests`
+(`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`) — the previous "108 files,
+~53,000 lines" was both off by a file and 3,000 lines light, and had no stated convention to check it
+against.
 
 ## Things that are true and non-obvious
 

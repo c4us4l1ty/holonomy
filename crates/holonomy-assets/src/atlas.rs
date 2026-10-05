@@ -615,13 +615,18 @@ mod tests {
     ///
     /// What is asserted now is the requirement: coverage plus table, at the maximum size count the
     /// builder accepts, must fit in 512 KiB.
+    ///
+    /// The height is 448 rather than 480 as of Phase 9B, because the fifth style and four new
+    /// codepoint windows raised the table from 28,160 to 46,400 and the pair had to come back under
+    /// the same ceiling. `metric::ATLAS_WIDTH` carries the arithmetic; `ink_occupancy_stays_below`
+    /// carries what it cost.
     #[test]
     fn atlas_and_table_fit_the_ceiling() {
         let ceiling = 512 * 1024;
         assert_eq!(ATLAS_WIDTH, 1024);
-        assert_eq!(ATLAS_HEIGHT, 480);
+        assert_eq!(ATLAS_HEIGHT, 448);
         assert_eq!(ATLAS_BYTES, ATLAS_WIDTH as usize * ATLAS_HEIGHT as usize);
-        assert_eq!(ATLAS_BYTES, 491_520);
+        assert_eq!(ATLAS_BYTES, 458_752);
 
         let table = crate::metric::MAX_SIZES
             * crate::metric::STYLE_COUNT
@@ -745,9 +750,17 @@ mod tests {
         let mut b = AtlasBuilder::new(&[16]).expect("builder");
         let tile = vec![0xFFu8; 200 * 200];
         let mut added = 0;
-        // A 1024x512 atlas holds 5 x 2 = 10 of these, so the 11th must fail at finish time.
-        // `add` accepts any number, so all 12 are queued and `finish` reports the overflow.
-        for i in 0..12u32 {
+        // A 1024x448 atlas holds 5 x 2 = 10 of these -- five across (5 x 200 = 1,000 <= 1,024),
+        // two down (2 x 200 = 400 <= 448) -- so the 11th must fail at finish time. `add` accepts any
+        // number, so all 11 are queued and `finish` reports the overflow.
+        //
+        // **11, not 12, and the height is why.** At the old 512 height, 12 tiles queued to 480,000
+        // bytes which was under a 491,520 capacity, so the case demonstrated *fragmentation*: area
+        // available, nowhere to put it. Dropping to 448 shrank capacity to 458,752, and 12 tiles now
+        // exceed it by area -- which would make the test pass for the trivial reason that the glyphs
+        // genuinely did not fit, proving nothing about the packer. 11 tiles queue to 440,000, under
+        // the new capacity, so the case still separates the two questions.
+        for i in 0..11u32 {
             if b.add(
                 PendingGlyph::new(
                     0x20 + i,
@@ -769,14 +782,14 @@ mod tests {
         }
         let r = b.finish();
         match r {
-            Ok(_) => panic!("{added} 200x200 tiles must not fit a 512x512 atlas"),
+            Ok(_) => panic!("{added} 200x200 tiles must not fit a 1024x448 atlas"),
             Err(AtlasError::AtlasFull { need, have }) => {
                 assert_eq!(have, ATLAS_BYTES);
-                // `need` is the *total* area of everything queued, which for 12 tiles is
-                // 480,000 — under the 524,288 capacity even though the packer had to refuse.
+                // `need` is the *total* area of everything queued, which for 11 tiles is
+                // 440,000 -- under the 458,752 capacity even though the packer had to refuse.
                 // Skyline packing fragments, so "the glyphs fit by area" and "the glyphs fit"
                 // are different questions, and this is the case that separates them.
-                assert_eq!(need, 12 * 200 * 200, "need must be the queued area");
+                assert_eq!(need, 11 * 200 * 200, "need must be the queued area");
                 assert!(
                     need < ATLAS_BYTES,
                     "the queued area is under capacity yet placement failed, which is exactly \

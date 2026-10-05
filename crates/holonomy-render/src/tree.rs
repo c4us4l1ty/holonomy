@@ -54,6 +54,18 @@ impl Style {
     pub const ITALIC: Style = Style(2);
     /// Regular weight, monospaced.
     pub const MONOSPACE: Style = Style(3);
+    /// Noto Sans Math: Greek and Mathematical Operators.
+    ///
+    /// The fifth style, and the only one a formula's *symbols* are drawn in. **A formula's variables
+    /// are not** -- `x` and `b` are ASCII and come from [`Style::ITALIC`], which is the correct face
+    /// for a math variable and costs no fifth-face glyph. The choice per glyph is
+    /// [`holonomy_assets::payload::is_math_symbol`], and it is the reason the math face does not
+    /// carry a Latin alphabet: carrying one would have meant either duplicating 62 glyphs for no
+    /// benefit or setting variables upright.
+    ///
+    /// Its numeric value must equal `holonomy_assets::payload::Style::Math as u8` (4), because
+    /// `MetricTable` is indexed by style and the painter forwards this value straight through.
+    pub const MATH: Style = Style(4);
 }
 
 /// A filled rectangle.

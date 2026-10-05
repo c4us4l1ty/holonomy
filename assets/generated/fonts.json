@@ -1,10 +1,10 @@
 {
   "version": 1,
   "brotli_quality": 11,
-  "raw_len": 169480,
-  "packed_len": 78354,
-  "packed_sha256": "f32aacc36f8e338f4eee969349359ea1d6dd20e1cb136f7ddb3a205db04273ef",
-  "raw_sha256": "a1910d25dc42390b53d5297a33522fced14f60ae57a35fd135eddec6fdf30d42",
+  "raw_len": 118636,
+  "packed_len": 55886,
+  "packed_sha256": "45eb01c37442e6c3b35766d4ee95dc7d02d14fa427b7e23c5f51bea16f69428d",
+  "raw_sha256": "c5e6f0f3ae2fb73bf2c98b24afe8a6cd9a2fa44673b6e4b49334bad883afcc56",
   "text_ranges": [
     [
       32,
@@ -30,7 +30,7 @@
     ],
     [
       8592,
-      8703
+      8594
     ],
     [
       913,
@@ -42,7 +42,19 @@
     ],
     [
       8704,
-      8959
+      8747
+    ],
+    [
+      8776,
+      8776
+    ],
+    [
+      8800,
+      8805
+    ],
+    [
+      8901,
+      8901
     ]
   ],
   "box_range": [
@@ -92,8 +104,8 @@
       "style": "Math",
       "monospace": false,
       "offset": 97204,
-      "length": 72276,
-      "sha256": "fb410aa41518b6fa7444d4da81a2797294383678ccdd1865309b6746dcccfb44",
+      "length": 21432,
+      "sha256": "98a3731a8fa8f1ef96589216c992adb880484822a4b84ee86742251b7271a24e",
       "source_sha256": "d51afd5739c7ba6c44fcab35a88160e25dfb69a2d4ad0bd99533f8d894af1f96"
     }
   ]

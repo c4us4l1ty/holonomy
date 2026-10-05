@@ -36,7 +36,16 @@ use crate::math::MathNode;
 /// Not constants, because the one thing that must be true of every value here is that it comes from
 /// the page's metrics. A fraction bar drawn at 1 px on a 2x display is a 50%-opacity bar, which looks
 /// like a rendering bug rather than a scaling one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **`PartialEq` and `Eq` are deliberately absent.** They were derived, and rustc is right that
+/// comparing `Option<fn(u32) -> u32>` fields does not mean anything: the same function can have
+/// different addresses in different codegen units, and two distinct functions can share one after
+/// merging. Two `MathMetrics` that differ only in which advance function they hold would compare
+/// **equal**, which is exactly the bug a value type's `Eq` is supposed to prevent. `Copy` and `Clone`
+/// are kept because the layout passes metrics down by value everywhere and needs to.
+///
+/// Nothing in the workspace compares `MathMetrics`, so removing the derives breaks no caller.
+#[derive(Debug, Clone, Copy)]
 pub struct MathMetrics {
     /// Width of one math glyph slot.
     pub cell_w: u32,
@@ -63,6 +72,44 @@ pub struct MathMetrics {
     pub script_scale_eighths: u32,
     /// Width of the radical's vertical stub.
     pub tick_w_px: u32,
+    /// Per-codepoint advance at body size, or `None` for a fixed `cell_w` grid.
+    ///
+    /// # Why this exists, and why the gate's numbers do not move
+    ///
+    /// The layout places every glyph on a fixed `cell_w` grid. That is what makes it integer-only and
+    /// hand-checkable, and it is right *when the grid matches the font*. It is not right for the fonts
+    /// that actually exist. Measured at 16 ppem on this host (`holonomy-assets/examples/math_advances.rs`
+    /// prints it):
+    ///
+    /// | glyph | face | advance | `cell_w` |
+    /// | --- | --- | --- | --- |
+    /// | `b`, `x`, `a` | Inter Italic | 9–10 | 8 |
+    /// | `0`–`9` | JetBrains Mono | 10 | 8 |
+    /// | `\pm`, `\leq`, `\times` | Noto Sans Math | 9 | 8 |
+    /// | `\sum` | Noto Sans Math | **14** | 8 |
+    ///
+    /// So a formula drawn on the page's 8 px grid overlaps by 1–2 px per glyph, and `\sum` overruns
+    /// its cell by 6 — which puts a superscript *inside* the summation sign's ink. Rendered, that is
+    /// `\sum_{i=0}^{n} i` coming out as `∑ i n i`.
+    ///
+    /// This field is the fix: a caller that has real metrics supplies them, and a caller that wants the
+    /// fixed-grid model — which is what `tests/math.rs` asserts, and what makes its numbers
+    /// hand-computable — leaves it `None`. **The gate's expected dimensions are unchanged by this
+    /// field**, because `None` is exactly the arithmetic that was there before. `MathMetrics::new`
+    /// sets `None`.
+    ///
+    /// A bare `fn` pointer rather than a trait object or a closure: the caller is `Session`, which
+    /// holds the atlas behind a `&'a` it must not outlive, and a `fn` is a code address the layout
+    /// can call with no borrow of the caller's data. The cost is that the function cannot see the
+    /// session, so it must be a shim over something `'static`; `holonomy-assets`' atlas is leaked once
+    /// per process for exactly this reason, which is a real constraint and is why this is a pointer
+    /// and not a generic parameter.
+    pub advance: Option<fn(cp: u32) -> u32>,
+    /// True for a script's copy of these metrics, so [`Self::adv`] applies the script scale.
+    ///
+    /// A flag rather than a scaled copy of the function, because a `fn` pointer cannot be wrapped in
+    /// another `fn` without a `'static` closure and this type is `Copy` and `const`-constructible.
+    pub scripted: bool,
     /// Height of the radical's diagonal.
     pub tick_h_px: u32,
 }
@@ -86,6 +133,41 @@ impl MathMetrics {
             script_scale_eighths: 5,
             tick_w_px: 3,
             tick_h_px: 5,
+            // The fixed-grid model. `tests/math.rs` asserts against exactly this, which is why the
+            // default is `None` and not a lookup: the hand-computed numbers in that gate are the
+            // fixed-grid arithmetic, and they were written before real metrics were available.
+            advance: None,
+            scripted: false,
+        }
+    }
+
+    /// The advance of `cp` in these metrics.
+    ///
+    /// Falls back to [`Self::cell_w`] when no advance function is supplied, so every caller that does
+    /// not opt in gets the original behaviour exactly.
+    ///
+    /// For a *scripted* copy -- what [`Self::scaled`] produces -- the supplied advance is scaled by
+    /// [`Self::script_scale_eighths`]. The atlas has no smaller rasterisation to ask about: it is built
+    /// at 16 and 22 ppem and a script is neither, so 5/8 of a proportional advance is the closest
+    /// honest answer, and it costs no atlas slot at a third size, which the ceiling could not afford
+    /// anyway (`metric::MAX_SIZES`'s comment has that arithmetic).
+    #[inline]
+    pub fn adv(&self, cp: u32) -> u32 {
+        match self.advance {
+            // A codepoint with no glyph in the face has a zero advance in the atlas, and a zero-width
+            // box would make `measure` return a box narrower than the ink that gets drawn. Falling back
+            // to the cell is the conservative direction: it over-reserves rather than clipping.
+            Some(f) => {
+                let a = f(cp);
+                if a == 0 {
+                    self.cell_w
+                } else if self.scripted {
+                    a * self.script_scale_eighths / 8
+                } else {
+                    a
+                }
+            }
+            None => self.cell_w,
         }
     }
 
@@ -104,6 +186,26 @@ impl MathMetrics {
         self.cell_h * self.sup_rise_eighths / 8
     }
 
+    /// The width of the decimal digits of `v` in these metrics.
+    ///
+    /// The sum of each digit's advance, computed without formatting the number -- [`measure`] is
+    /// documented as allocating nothing and `format!` allocates.
+    ///
+    /// `unsigned_abs` rather than `abs`, so `i64::MIN` does not overflow. `digits` has the same
+    /// reason to avoid the negation and says so.
+    pub fn int_width(&self, v: i64) -> u32 {
+        let mut n = v.unsigned_abs();
+        let mut width = 0u32;
+        loop {
+            let digit = u32::from(b'0') + (n % 10) as u32;
+            width = width.saturating_add(self.adv(digit));
+            n /= 10;
+            if n == 0 {
+                return width;
+            }
+        }
+    }
+
     /// How far a subscript drops.
     pub const fn sub_drop(&self) -> u32 {
         self.cell_h * self.sub_drop_eighths / 8
@@ -111,9 +213,17 @@ impl MathMetrics {
 
     /// The metrics a node's children are measured and laid out with, when they are scripts.
     fn scaled(&self) -> Self {
+        // `advance` is carried through and `scripted` is set, so `adv` applies the 5/8 factor to the
+        // real advance. `cell_w` is scaled beside it for the `None` case.
+        //
+        // The first version cleared `advance` here, on the reasoning that "a script's metrics are
+        // fixed-grid". That would have put scripts on a 5 px grid while their bases sat on real 10 px
+        // advances -- the same collision bug one level down, and invisible in the gate because the
+        // gate's metrics are fixed-grid at both levels.
         Self {
             cell_w: self.script_cell_w(),
             cell_h: self.script_cell_h(),
+            scripted: true,
             ..*self
         }
     }
@@ -270,14 +380,21 @@ pub fn measure(node: &MathNode, m: &MathMetrics) -> MathBox {
                 baseline: above,
             }
         }
-        MathNode::Symbol(_) => MathBox {
-            width: m.cell_w,
+        MathNode::Symbol(cp) => MathBox {
+            width: m.adv(*cp),
             height: m.cell_h,
             baseline: m.cell_h,
         },
         MathNode::Int(v) => MathBox {
-            // One cell per digit, so `b^2` is one cell and not the width of "2" as a string.
-            width: m.cell_w * digits(*v),
+            // The sum of the digits' own advances, so `b^2` is one digit wide and not the width of
+            // "2" as a string, *and* so a face whose digits are not uniform is measured correctly.
+            //
+            // Computed arithmetically rather than by formatting the number: `measure` is on the paint
+            // path and is documented as allocating nothing, so `format!` -- one allocation per integer
+            // literal in a formula -- is not available here. `emit` does format, and it must agree;
+            // `an_integer_lays_out_as_the_sum_of_its_digits` in `tests/math.rs` is what holds the two
+            // to the same arithmetic.
+            width: m.int_width(*v),
             height: m.cell_h,
             baseline: m.cell_h,
         },
@@ -398,19 +515,25 @@ fn emit(node: &MathNode, m: &MathMetrics, x: u32, y: u32, out: &mut MathLayout) 
             x,
             y,
             cp: *cp,
-            w: m.cell_w,
+            w: m.adv(*cp),
             h: m.cell_h,
         }),
         MathNode::Int(v) => {
+            // A running pen rather than `i * cell_w`, so a non-uniform face does not leave a gap or an
+            // overlap every second digit. `format!` allocates, which is why `measure` computes this same
+            // sum arithmetically -- see `MathNode::Int` in `measure`.
             let text = format!("{v}");
-            for (i, b) in text.bytes().enumerate() {
+            let mut pen = x;
+            for b in text.bytes() {
+                let cp = u32::from(b);
                 out.runs.push(MathRun::Glyph {
-                    x: x + i as u32 * m.cell_w,
+                    x: pen,
                     y,
-                    cp: u32::from(b),
-                    w: m.cell_w,
+                    cp,
+                    w: m.adv(cp),
                     h: m.cell_h,
                 });
+                pen = pen.saturating_add(m.adv(cp));
             }
         }
         MathNode::SuperSub { base, sup, sub } => {
@@ -418,13 +541,28 @@ fn emit(node: &MathNode, m: &MathMetrics, x: u32, y: u32, out: &mut MathLayout) 
             emit(base, m, x, y, out);
             let sm = m.scaled();
             let sx = x.saturating_add(base_box.width);
+            // The subscript goes *after* the superscript, not under it.
+            //
+            // `measure` above reserves `max(sup.width, sub.width)` -- one script's width, side by side,
+            // not two -- and this used to emit **both** at `sx`, so `x_i^2` drew its `n` and its `i=0` on
+            // top of each other while the box was correctly wide enough for them not to. That is a
+            // measure/emit disagreement, which is the one class of bug in this module that no box
+            // assertion can catch: every dimension was right and the pixels were wrong.
+            //
+            // It was invisible until real advances arrived. On the fixed 8 px grid a script is 5 px and
+            // a single-character script `n` is 5 px wide, so the two sat at the same x without
+            // overlapping. At real advances `i=0` is 19 px and `n` is 6, and `\sum_{i=0}^{n} i` came out
+            // as `∑ in0i`. The gate never caught it because the gate only ever lays out `b^2` -- one
+            // script, no sibling to collide with -- so `tests/math.rs` now has
+            // `a_subscript_sits_beside_the_superscript_not_under_it`.
+            let mut after_sup = sx;
             if let Some(s) = sup {
                 let b = measure(s, &sm);
                 emit(s, &sm, sx, y.saturating_sub(m.sup_rise()), out);
-                let _ = b;
+                after_sup = sx.saturating_add(b.width);
             }
             if let Some(s) = sub {
-                emit(s, &sm, sx, y.saturating_add(m.sub_drop()), out);
+                emit(s, &sm, after_sup, y.saturating_add(m.sub_drop()), out);
             }
         }
         MathNode::Fraction { num, den } => {

@@ -254,6 +254,48 @@ fn report(session: &Session<'_>, events: u64, start: Instant) {
             t.table_cells_drawn,
             t.table_borders_drawn,
         );
+    }
+    if t.math_inserts > 0 {
+        // Same argument as the table line above: a formula's whole point is that it is visible, and
+        // the split between "compiled" and "raw" is the part that can silently be wrong in both
+        // directions -- a formula stuck in raw looks like a formula being edited, which is a state the
+        // user chose deliberately, so it cannot be told apart by looking.
+        eprintln!(
+            "holonomy: math: {} inserted, {} compiled and {} raw in the last frame, {} procedural \
+             fills, {} parse errors",
+            t.math_inserts, t.math_compiled, t.math_raw, t.math_rules, t.math_parse_errors,
+        );
+        // The source of every formula in the document, so a live check can be compared against what
+        // was typed. Without it, "1 compiled, 0 procedural fills" for a `\frac` is an unexplained
+        // number: the counters say the formula compiled and drew no bar, which means the thing that
+        // compiled was not the thing that was typed. Reading the bytes settles it.
+        if let Ok(text) = session.editor.text() {
+            let mut shown = 0usize;
+            holonomy_text::for_each_math_span(&text, |sp| {
+                shown += 1;
+                if shown <= 4 {
+                    let src = String::from_utf8_lossy(&text[sp.inner()]);
+                    eprintln!(
+                        "holonomy: formula at {}..={} is {:?}",
+                        sp.start,
+                        sp.end,
+                        &src[..src.len().min(48)]
+                    );
+                }
+            });
+            eprintln!("holonomy: {shown} formulas in the document");
+        }
+        match session.active_math() {
+            Some(sp) => eprintln!(
+                "holonomy: caret inside a formula at bytes {}..={} ({})",
+                sp.start,
+                sp.end,
+                if sp.closed { "closed" } else { "unclosed" }
+            ),
+            None => eprintln!("holonomy: caret is not inside a formula"),
+        }
+    }
+    if t.table_inserts > 0 {
         match (session.active_cell(), session.active_table()) {
             (Some(c), Some(s)) => eprintln!(
                 "holonomy: caret in cell ({}, {}) of a {}x{} table at bytes {}..={}",

@@ -117,6 +117,21 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// The atlas this painter blits from, if it has one.
+    ///
+    /// For the session's math layout, which needs real per-glyph advances and gets them from here
+    /// rather than from a second copy of the atlas. `Painter` already owns the only `&'a Atlas` in the
+    /// session, and exposing it is cheaper than storing another reference that must be kept in step --
+    /// two `&Atlas` in one struct is two chances to point at different ones.
+    pub fn atlas(&self) -> Option<&'a Atlas> {
+        self.atlas
+    }
+
+    /// The size index runs are painted at.
+    pub fn size_index(&self) -> u8 {
+        self.size_index
+    }
+
     /// The last [`PaintStats`].
     pub fn stats(&self) -> PaintStats {
         self.scratch.stats
@@ -188,6 +203,29 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// # Why `cell_width()` and not `m.width`
+    ///
+    /// `blit_coverage` is handed `cell_width()` -- `ppem / 2`, so 8 px at 16 ppem -- rather than the
+    /// metric's own ink width, so **every glyph wider than 8 px has its right-hand columns clipped**.
+    /// Measured at 16 ppem (`holonomy-assets/examples/math_advances.rs` prints the table): Latin letters are
+    /// 9–10 px, Greek and the operators 10–11 px, and `\sum` is **14 px**, losing 6 of its columns.
+    ///
+    /// This is not new and it is not a math bug. The renderer is a **fixed-cell grid**: `cell_width`
+    /// is also the advance `TextRun` uses for every `k`, so a proportional face is drawn on an 8 px
+    /// lattice. For body text the two mistakes cancel -- the next glyph's cell starts exactly where
+    /// the clipped one ended -- so the page reads as tight rather than wrong.
+    ///
+    /// They stop cancelling for a formula, because `math_layout` advances by the fonts' *real*
+    /// advances (`MathMetrics::advance`) while the painter still blits one cell. The result is a
+    /// visible gap of `advance - cell_width` px between glyphs, and a `\sum` whose right-hand third
+    /// is missing. `crates/holonomy/tests/session_math.rs`'s
+    /// `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model` pins the exact
+    /// geometry (28 px for three letters) so this stays accounted for rather than drifting.
+    ///
+    /// **The fix is one argument: pass `m.width`, not `cell_w`.** It is not made here because it
+    /// changes the ink of every glyph on the page, which is a visual-baseline change for the whole
+    /// product -- dozens of existing tests compare rendered frames -- rather than a Phase 9B one. It
+    /// is the first item on the 9C list.
     fn text(&mut self, frame: &mut Frame, run: TextRun, damage: Option<DamageRect>) {
         let cell_w = self.cell_width();
         let cell_h = self.cell_height();
@@ -378,6 +416,14 @@ fn atlas_style(style: holonomy_render::Style) -> AtlasStyle {
         x if x == holonomy_render::Style::BOLD.0 => AtlasStyle::Bold,
         x if x == holonomy_render::Style::ITALIC.0 => AtlasStyle::Italic,
         x if x == holonomy_render::Style::MONOSPACE.0 => AtlasStyle::Monospace,
+        // The fifth face, and the one arm that must be written out rather than left to the `_`.
+        //
+        // `Style::Math` falls into `_ => Regular` correctly *today*, because `Regular` is 0 and the
+        // matcher compares equality rather than indexing. It is still worth its own arm: the failure
+        // mode of getting it wrong is that every `\alpha` and `\sum` is looked up in Inter, which has
+        // neither, so `MetricTable::get` returns `GlyphMetric::BLANK` and the symbol draws as nothing.
+        // A formula with a silent hole in it reads as a rendering bug rather than as a wrong style.
+        x if x == holonomy_render::Style::MATH.0 => AtlasStyle::Math,
         _ => AtlasStyle::Regular,
     }
 }

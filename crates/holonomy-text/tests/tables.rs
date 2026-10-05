@@ -341,7 +341,7 @@ fn table_spans_follow_the_bytes_around_them() {
 #[test]
 fn undoing_a_table_insertion_removes_the_table() {
     let mut ed = editor(b"");
-    let span = ed.insert_table(2, 2, MEASURE).expect("a 2x2 table");
+    ed.insert_table(2, 2, MEASURE).expect("a 2x2 table");
     assert_eq!(ed.tables().len(), 1, "one table");
     ed.undo().expect("undo");
     assert_eq!(

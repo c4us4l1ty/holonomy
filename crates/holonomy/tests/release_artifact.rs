@@ -80,8 +80,13 @@ fn assert_static_pie(path: &Path, what: &str) {
 
 /// A default-features release binary has none of the X11 client in it.
 ///
-/// Measured on this host: 1,032,472 bytes, static PIE, and zero of the five markers. The desktop build
-/// of the same source is 1,116,536 bytes -- 84,064 more, which is the whole crate.
+/// Measured on this host after Phase 9B: 1,101,944 bytes, static PIE, and zero of the five markers.
+/// The desktop build of the same source is 1,192,824 bytes -- 90,880 more, which is the whole crate.
+///
+/// Both are well inside the 2,097,152 ceiling: 995,208 bytes of room for the default and 904,328 for
+/// the desktop build. Phase 9B's whole cost was 69,472 bytes on the default build, and it came *down*
+/// on the asset side -- the pruned math face removed 22,468 bytes of compressed payload, which is more
+/// than the parser, the layout and the wiring added.
 #[test]
 fn the_default_release_binary_carries_no_x11_client() {
     let path = binary();
@@ -171,8 +176,8 @@ fn the_desktop_build_is_still_static_and_under_the_ceiling() {
     let size = bytes.len() as u64;
     println!(
         "the desktop build is {size} bytes, {} more than the {}-byte default",
-        size.saturating_sub(1_032_472),
-        1_032_472
+        size.saturating_sub(1_101_944),
+        1_101_944
     );
     assert!(
         size <= CEILING,

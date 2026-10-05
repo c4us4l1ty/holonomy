@@ -15,9 +15,16 @@
 //! See PROJECT.md §5 Phase 5 and Plan.md §2.3 FR-3.4.
 
 mod damage;
-mod math;
-mod math_layout;
 mod tree;
+
+/// Phase 9B: the LaTeX micro-parser and its procedural layout.
+///
+/// Public as modules, not only as the re-exports below, because a caller that needs to *name* the
+/// module -- `holonomy_render::math::parse` rather than the free `parse_math` -- is doing something
+/// the flat re-export list reads ambiguously. `parse` in particular collides with half a dozen other
+/// `parse` functions in the workspace.
+pub mod math;
+pub mod math_layout;
 
 pub mod chrome;
 pub mod table;

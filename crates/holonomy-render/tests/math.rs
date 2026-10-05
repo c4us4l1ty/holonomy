@@ -7,6 +7,7 @@
 //! | the fraction bar spans the wider child | [`the_fraction_bar_spans_the_wider_child_plus_padding`] |
 //! | the radical is tick plus overline | [`the_radical_is_a_tick_and_an_overline_and_no_glyphs`] |
 //! | scripts rise from the baseline | [`a_superscript_rises_from_the_baseline_not_from_the_top`] |
+//! | a subscript sits beside its superscript | [`a_subscript_sits_beside_the_superscript_not_under_it`] |
 //! | integers are one cell per digit | [`an_integer_literal_is_one_cell_per_digit`] |
 //! | `b^2` == `b^{2}` | [`a_braced_and_unbraced_script_are_the_same_tree`] |
 //! | symbols resolve | [`every_symbol_the_grammar_names_resolves_to_a_codepoint`] |
@@ -288,6 +289,54 @@ fn the_radical_is_a_tick_and_an_overline_and_no_glyphs() {
          the overline overhangs the right edge by 3 px. An overline that stops exactly at the last \\
          glyph reads as a box with its top edge missing"
     );
+}
+
+/// A subscript sits *beside* the superscript, not under it.
+///
+/// `measure` reserves `max(sup, sub)` for the two, and the first `emit` put both at the same x, so
+/// the two drew on top of each other. No box assertion can see that: the width was right, the height
+/// was right, and the pixels were wrong.
+///
+/// It stayed invisible for as long as the layout was a fixed 8 px grid, where a one-character script
+/// is exactly 5 px wide and two scripts at the same x do not overlap. With real advances -- see
+/// `MathMetrics::advance` -- `i=0` is 19 px against `n`'s 6, and `\sum_{i=0}^{n} i` rendered as
+/// `∑ in0i`. The fix is in `emit`; this is the gate that would have caught it, and it exists because
+/// every other test here lays out `b^2`, which has no sibling script to collide with.
+#[test]
+fn a_subscript_sits_beside_the_superscript_not_under_it() {
+    let mm = m();
+    let node = parse_math(br"x_i^2").expect("parses");
+    let box_ = measure_math(&node, &mm);
+
+    let mut out = MathLayout::with_capacity(16);
+    layout_boxed(&node, &mm, 0, 0, &mut out);
+
+    // The two script runs, by their codepoints.
+    let glyph_x = |want: char| -> Option<u32> {
+        out.runs.iter().find_map(|r| match *r {
+            MathRun::Glyph { x, cp, .. } if char::from_u32(cp) == Some(want) => Some(x),
+            _ => None,
+        })
+    };
+    let x = glyph_x('x').expect("the base is drawn");
+    let i = glyph_x('i').expect("the subscript is drawn");
+    let two = glyph_x('2').expect("the superscript is drawn");
+
+    assert_eq!(
+        two, 8,
+        "`x` is 8 px wide on the fixed grid, so the superscript starts there"
+    );
+    assert_eq!(
+        i, 13,
+        "the subscript starts 5 px after the superscript, which is one script cell -- the two are \
+         side by side. Both were at 8 before, which drew them on top of each other"
+    );
+    assert_eq!(
+        box_.width, 13,
+        "and the box reserves exactly that: base 8 + one script cell 5, because `measure` takes \
+         max(sup, sub) rather than their sum"
+    );
+    assert!(i > x && two > x, "both scripts clear the base's own 8 px");
 }
 
 /// A superscript rises from the baseline, not from the top of the box.

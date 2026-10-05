@@ -26,27 +26,6 @@ mod window_typing {
     //
     //   cargo run -p holonomy --features desktop --example xtype -- "Hello, Holonomy" ctrl-q
 
-    /// One character as the X keycode, and whether it needs shift held.
-    ///
-    /// The letter keycodes are `38 + (c - 'a')`, because X keycode 38 is `a` and they run from there --
-    /// which is the same offset the rest of this workspace uses, `KEY_A` is 30 and 30 + 8 is 38. The first
-    /// version of this table said `9 + (c - 'a')`, which is the *escape* keycode plus the offset, so it typed
-    /// `q` when asked for `a` and the window looked like it was typing the wrong letters.
-    fn keycode_for(c: char) -> Option<(u8, bool)> {
-        Some(match c {
-            'a'..='z' => (38 + (c as u8 - b'a'), false),
-            'A'..='Z' => (38 + (c.to_ascii_lowercase() as u8 - b'a'), true),
-            '0'..='9' => (10 + (c as u8 - b'0'), false),
-            ' ' => (65, false), // KEY_SPACE 57 + 8
-            ',' => (51, false), // KEY_COMMA 43 + 8
-            '.' => (59, false), // KEY_DOT 51 + 8
-            '\'' => (48, true), // KEY_APOSTROPHE 40 + 8
-            '!' => (10, true),
-            '-' => (20, false), // KEY_MINUS 12 + 8
-            _ => return None,
-        })
-    }
-
     pub fn run() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let (text, quit) = match args.split_last() {
@@ -93,8 +72,22 @@ mod window_typing {
                 (true, 9usize, true, false)
             } else if rest.starts_with("ctrl-t") {
                 (true, 6, false, true)
+            } else if rest.starts_with("ctrl-m") {
+                // `Ctrl+M`, Phase 9B's math chord. Same `with_ctrl` path as `ctrl-t`; the only reason
+                // it is a separate arm is that the *key* differs, and the key is looked up below by
+                // hard-coding `t`.
+                (true, 6, false, true)
             } else if rest.starts_with("tab") {
                 (true, 3, false, false)
+            } else if rest.starts_with("right") {
+                // Phase 9B: leaving a formula is an arrow key, and a newline will not do it. A newline
+                // inserted while the caret is inside leaves the closing `$$` at the start of the next
+                // line, where it opens a *second*, empty span -- so the run compiles two formulas and
+                // the counter reads 2 for one. Two Rights step over the two delimiter bytes, which is
+                // what a user does.
+                (true, 5, false, false)
+            } else if rest.starts_with("left") {
+                (true, 4, false, false)
             } else {
                 (false, 0, false, false)
             };
@@ -105,9 +98,15 @@ mod window_typing {
                 // Lowercase `t`, not `T`: `keycode_for_keysym` matches the *first* keysym at a
                 // keycode, and that is the unshifted one. Asking for `T` finds nothing on a US layout,
                 // which is how this first failed with "a T key" as the panic message.
-                let t = holonomy_x11::XTest::keycode_for_keysym(&mut conn, b't' as u32)
+                // The chord's letter, as a keysym: `t` for `ctrl-t`, `m` for `ctrl-m`.
+                let letter = if rest.starts_with("ctrl-m") {
+                    b'm'
+                } else {
+                    b't'
+                };
+                let t = holonomy_x11::XTest::keycode_for_keysym(&mut conn, u32::from(letter))
                     .expect("mapping")
-                    .expect("a t key");
+                    .expect("a t or m key");
                 // The modifier is **held across** the key: press, key down, key up, release.
                 //
                 // `tap_in` is press-then-release, and using it for the modifier sends
@@ -130,9 +129,33 @@ mod window_typing {
                         .fake_key_in(&mut conn, 0, shift, true)
                         .expect("shift down");
                 }
-                if rest.starts_with("ctrl-t") {
-                    xtest.fake_key_in(&mut conn, 0, t, true).expect("T down");
-                    xtest.fake_key_in(&mut conn, 0, t, false).expect("T up");
+                let arrow = if rest.starts_with("right") {
+                    Some(0xFF53)
+                } else if rest.starts_with("left") {
+                    Some(0xFF51)
+                } else {
+                    None
+                };
+                if let Some(keysym) = arrow {
+                    // Arrow keys are looked up by keysym rather than by a hard-coded code, because a
+                    // US layout puts them wherever it likes and the block above's codes are all
+                    // main-row keys.
+                    let key = holonomy_x11::XTest::keycode_for_keysym(&mut conn, keysym)
+                        .expect("mapping")
+                        .expect("an arrow key");
+                    xtest
+                        .fake_key_in(&mut conn, 0, key, true)
+                        .expect("arrow down");
+                    xtest
+                        .fake_key_in(&mut conn, 0, key, false)
+                        .expect("arrow up");
+                } else if rest.starts_with("ctrl-t") || rest.starts_with("ctrl-m") {
+                    xtest
+                        .fake_key_in(&mut conn, 0, t, true)
+                        .expect("chord letter down");
+                    xtest
+                        .fake_key_in(&mut conn, 0, t, false)
+                        .expect("chord letter up");
                 } else {
                     xtest
                         .fake_key_in(&mut conn, 0, tab, true)
@@ -155,13 +178,43 @@ mod window_typing {
                 continue;
             }
             let c = rest.chars().next().expect("a character");
-            let Some((code, needs_shift)) = keycode_for(c) else {
-                eprintln!("skipping {c:?}: no keycode in this example's table");
+            // **Ask the server which key produces this character, rather than trusting a table.**
+            //
+            // `keycode_for` hard-codes `38 + (c - 'a')` for the letters, which is only right if the
+            // letters are contiguous -- and they are not. On this host the X keycodes are evdev + 8, and
+            // evdev's letter codes are `a = 30, b = 48, c = 46, d = 32, e = 18, f = 33, ...`, so
+            // `38 + (c - 'a')` sends `f` as keycode 43, which the server reports as `h`. A live 9B run
+            // typed the quadratic formula's fraction and the document came out as `uhvad23` -- seven
+            // wrong bytes, and the log's "1 compiled, 0 procedural fills" was *that*.
+            //
+            // The server already has the answer in its keymap, and `keycode_for_keysym` is what the
+            // chord keys above already use. Every character goes through it now. The table survives for
+            // the *shift* decision, which a keysym lookup cannot answer.
+            // One lookup, and it answers both halves: which key, and whether shift must be held.
+            // Two lookups -- the character then its lowercase -- get the keycode but leave the shift
+            // flag to guesswork, and `}` was being dropped precisely because of that.
+            let found = match holonomy_x11::XTest::keycode_for_keysym_shifted(&mut conn, c as u32) {
+                Ok(found) => found,
+                Err(e) => {
+                    eprintln!("keysym lookup for {c:?} failed: {e:?}");
+                    None
+                }
+            };
+            let Some((code, needs_shift)) = found else {
+                eprintln!("skipping {c:?}: no keycode for it in this server's keymap");
                 rest = &rest[c.len_utf8()..];
                 continue;
             };
+            // **Shift is held across the key, not tapped.** `tap_in` is press-then-release, so tapping
+            // shift sends `shift down, shift up, key down` and the key arrives unshifted -- the same
+            // mistake this harness already documents for Ctrl, and it had the same effect: every `{`
+            // and `}` vanished, because the app saw an unshifted `[` and `]` on a key it does not map
+            // to a command and the harness's own counter cheerfully reported them as typed. A live run
+            // recorded `rac12` from `rac{1}{2}`.
             if needs_shift {
-                xtest.tap_in(&mut conn, 0, shift).expect("shift");
+                xtest
+                    .fake_key_in(&mut conn, 0, shift, true)
+                    .expect("shift down");
             }
             xtest.tap_in(&mut conn, 0, code).expect("the character");
             if needs_shift {

@@ -15,6 +15,7 @@
 
 mod editor;
 mod leaf;
+mod math_span;
 mod rope;
 mod span;
 pub mod table;
@@ -22,6 +23,7 @@ pub mod tables;
 pub mod undo;
 
 pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH};
+pub use math_span::{for_each_math_span, math_span_at, math_span_count, MathSpan, DELIM, MIN_SPAN};
 pub use span::{
     SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER,
     STYLE_ITALIC,

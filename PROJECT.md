@@ -678,10 +678,143 @@ Syntax scope: `^`, `_`, `\frac{}{}`, `\sqrt{}`, Greek letters, `\sum`, `\int`, a
 **Gate.** Parse and render `\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}`. Assert the bounding box against
 hand-computed dimensions, and assert zero allocations between `MathNode` and the finished frame.
 
+##### 9B, delivered — what was built and what the measurements said
+
+Delivered in two commits' worth of work: the parser and layout first (`3a93b68`), then the asset
+rework and the session wiring. Four things in this section turned out to be wrong as written, and each
+correction is recorded here with the number that corrected it rather than quietly in a commit message.
+
+**The math face rasterises at boot, and the budget paid for it by shrinking.** §2.9.2 point 1 planned a
+fifth face; the first implementation *skipped* it at boot and rasterised on demand, because a 5-style,
+773-codepoint, 2-size table is 77,300 B and 491,520 of coverage plus that is 568,820 against the
+524,288 ceiling. On-demand was the wrong answer for a reason that has nothing to do with bytes: it is
+**curve evaluation at runtime**, which §2.9.5 forbids outright, and a cache in front of it is the same
+violation with bookkeeping. No allocation-counting gate can see that, which is exactly why it is
+written down here. The face now rasterises at boot, and the cost was paid in the budget:
+
+| | before 9B | after 9B |
+|---|---|---|
+| `MATH_RANGES` codepoints | 421 (four whole Unicode blocks) | **108** (exactly what `SYMBOLS` names) |
+| math glyphs | 507 | **160** |
+| packed payload | 78,354 B | **55,886 B** |
+| `STYLE_COUNT` | 4 | **5** |
+| metric-table codepoint windows | 2 | **8** |
+| `CODEPOINTS` | 352 | **464** |
+| `ATLAS_HEIGHT` | 480 | **448** |
+| atlas + table | 519,680 (99.1%) | **505,152 (96.4%)**, 19,136 spare |
+| ink occupancy | 76.2% | **83.7%** |
+| boot to ready (release) | 41.6 ms | **34.0 ms** |
+
+The height had to drop because the table is linear in both the style count and the window count: at 480
+the pair is 537,720, which is 102.6% of the ceiling. **The math face was paid for out of the coverage's
+slack, not out of headroom that existed** — the pair got *less* full while every one of its parts grew.
+A sixth style fits at no height.
+
+The operators are **four** windows, not one. A single 0x2200..0x22C6 span cost 198 slots, 146 of them
+unreachable, for **14,600 B of table**. Three extra comparisons in the least-taken path in the renderer
+bought that back. `metric::slot_of`'s neighbours show the spans; `metric::codepoint_of` is the inverse,
+added because a test that inverted the layout itself was silently wrong the moment the layout grew.
+
+**Boot got faster, which was not expected.** Pruning removed 22,468 B of compressed payload and 67
+glyphs' worth of rasterisation, so the 34.0 ms is 7.6 ms *under* the 41.6 ms this phase started from.
+
+**The parser's symbol table is the payload's coverage definition.** `tools/build_font_payload.py`
+derives `MATH_RANGES` from what `holonomy_render::SYMBOLS` can name, and
+`crates/holonomy-render/tests/math_coverage.rs` asserts the two agree in both directions — no symbol
+outside the declared ranges, no symbol missing from the face. The first version listed Unicode *blocks*
+"because a partial range in a subsetter produces a `cmap` with holes", which was true and became the
+wrong answer once the face rasterised at boot: then every listed codepoint is coverage *and* a metric
+slot whether or not a formula draws it.
+
+**Two bugs the gates could not see, found by rendering the frame and looking at it.**
+
+1. `emit` put a superscript and a subscript at the *same x*. `measure` reserved `max(sup, sub)` — one
+   script's width, side by side — so every box dimension was correct and the pixels overlapped. It was
+   invisible on the fixed 8 px grid, where a one-character script is exactly 5 px wide and two scripts
+   at one x cannot overlap, and every existing test laid out `b^2`, which has no sibling script.
+   `a_subscript_sits_beside_the_superscript_not_under_it` in `tests/math.rs` is the gate.
+2. The layout sat on the page's 8 px text grid while the fonts are proportional. Measured at 16 ppem:
+   Inter Italic advances 9–10 px, JetBrains Mono 10, and `\sum` **14**. So glyphs overlapped by 1–2 px
+   and `\sum_{i=0}^{n} i` rendered as `∑ in0i`. `MathMetrics::advance` now takes an optional
+   per-codepoint advance; `None` keeps the fixed grid, which is what the hand-computed gate asserts and
+   **its expected numbers did not move**. `emit_math` supplies the real one.
+   `MathMetrics` lost its `PartialEq`/`Eq` for this: rustc is right that comparing
+   `Option<fn(u32) -> u32>` fields is meaningless, and two metrics differing only in advance function
+   would have compared *equal*.
+
+**The remaining fidelity limit, stated rather than left to be discovered.** The renderer is a **fixed
+8 px cell grid**: `Painter::text` calls `blit_coverage` with `cell_width()` = `ppem / 2` rather than
+`GlyphMetric::width`, so every glyph wider than 8 px has its right-hand columns clipped — 9–10 px for
+most letters, **14 px for `\sum`**, which loses 6 of them. For body text this is masked, because runs
+advance by the same 8 px so the next glyph covers the clipped part. For a formula it shows, because the
+layout now advances by real advances while the painter still blits a cell. The fix is one argument, and
+it is **not** taken here because it changes the ink of every glyph on the page — a visual-baseline
+change for the whole product, not a 9B one. It is first on the 9C list.
+`a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model` pins the exact geometry (28 px
+for three letters) so the two numbers cannot drift apart unnoticed.
+
+**Editing is a mode switch on the caret, and the delimiters are document bytes.** `Ctrl+M` inserts
+**four** bytes — `$$$$` — and leaves the caret at `start + 2`, so the formula exists the instant the key
+is pressed rather than depending on the user remembering to close it. Spans are derived by scanning for
+`$$` pairs (`holonomy_text::math_span`), which is the opposite of 9A's table and the reason is worth
+stating: a table's shape is **not** derivable from its bytes (2×3 and 1×6 are the same six separators),
+whereas a formula's span is, so undo, save, load and export need no special case.
+
+An unpaired `$$` runs to the end of its line rather than vanishing — dropping it would make a
+half-written formula blink out of existence mid-edit. That forced a `closed` flag on `MathSpan`: the
+first version computed `inner()` as `start + 2 .. end - 2` unconditionally and silently ate the last
+two bytes of every half-written formula.
+
+**A caret move is a repaint, and it was not one.** `caret_to` set no damage and `tick` only paints when
+damage is non-empty, so pressing an arrow moved the caret in the model and left the pixels alone — the
+old cell stayed drawn and the new one waited for the next blink toggle. Every scripted gate missed it,
+because they assert on `Caret::locate`'s arithmetic and never on a frame after a bare movement. The live
+window found it in the worst possible way: leaving a formula with Right changed every number in
+`SessionStats` *except the ones the frame was drawn from*, so the window kept showing raw source while
+the log said the caret was outside. `caret_to` now damages both the old and the new caret cell.
+
+**Live verification.** `crates/holonomy/examples/xtype.rs`, single invocation so the XTEST grab is taken
+once:
+
+```text
+$ xtype 'ctrl-m \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} right right' ctrl-q
+holonomy: math: 1 inserted, 1 compiled and 0 raw in the last frame, 3 procedural fills, 0 parse errors
+holonomy: formula at 0..=34 is "\frac{-b\pm\sqrt{b^2-4ac}}{2a}"
+holonomy: caret is not inside a formula
+
+$ xtype 'ctrl-m \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}' ctrl-q
+holonomy: math: 1 inserted, 0 compiled and 1 raw in the last frame, 0 procedural fills, 0 parse errors
+holonomy: caret inside a formula at bytes 0..=34 (closed)
+```
+
+Three procedural fills is the right answer and not a typo: the fraction bar, the radical's overline and
+its tick. The second run is the same document with the caret left inside, drawing source and no bars —
+drawing a fraction bar over the literal text `\frac{1}{2}` would be a lie about what the document says.
+
+Getting there took **three harness bugs**, all of which had produced a plausible-looking wrong answer:
+`38 + (c - 'a')` is not a letter keycode table (the letters are not contiguous; `\frac{1}{2}` arrived as
+`uhvad23`), `keycode_for_keysym` matches only a keycode's *first* keysym so every `}` was dropped, and
+shift was *tapped* rather than held across the key. The middle one is a real API gap, not a harness
+one: `XTest::keycode_for_keysym_shifted` now returns the keycode **and** whether shift is needed, since
+two lookups get the keycode but leave the shift flag to guesswork. The third is the same trap this
+harness already documents for Ctrl.
+
+**Cost.** Default release binary 1,101,944 B against the 2,097,152 ceiling — **995,208 B of room**, up
+69,472 B from before 9B. The `--features desktop` build is 1,192,824 B, 904,328 B of room. Payload
+55,886 B of an 81,920 B budget.
+
 #### 9C — Iceberg media cache
 
 Inline images, without breaching 16.0 MiB on a 2000-page document. §2.9.3 has the arithmetic that
 dictates the design; this is the mechanism.
+
+**Before the images: one line of the renderer.** `Painter::text` blits `cell_width()` columns rather
+than `GlyphMetric::width`, so the whole product draws on a fixed 8 px grid and clips every glyph wider
+than that. 9B measured it (9–10 px for most letters, 14 px for `\sum`) and left it, because fixing it
+changes the ink of every glyph on the page and therefore every visual baseline — a change that wants its
+own phase rather than riding along inside a media one. It is here because it is the largest known
+correctness gap in the renderer, and because 9C's decoder and scaler are also "measure the real width
+instead of the assumed one" and doing both together is cheaper than doing them apart.
 
 * **Decoder.** Hand-written PNG chunk reader plus `miniz_oxide` for inflate. Budget 60 KiB of binary,
   asserted by the size gate.

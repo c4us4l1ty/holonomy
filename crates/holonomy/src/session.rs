@@ -46,11 +46,13 @@ use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_export::{Format, Report};
 use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
 use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
+use holonomy_render::math::{self, MathNode};
+use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRun};
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
 use holonomy_render::{Node, SurfaceTree, TextRun};
 use holonomy_text::{Editor, EditorError, SpanPolicy, STYLE_BOLD};
-use holonomy_text::{Nav, ResolvedTable, TableCursor, TableSpan};
+use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +194,24 @@ pub struct SessionStats {
     pub table_cells_drawn: u32,
     /// Border runs drawn in the last paint.
     pub table_borders_drawn: u32,
+    /// Formulas inserted by `Ctrl+M` or [`Session::insert_math`].
+    pub math_inserts: u32,
+    /// Formulas drawn as a *compiled* layout in the last paint.
+    ///
+    /// The compiled/raw split is the whole of the focused-vs-unfocused rule, so it is a count rather
+    /// than a detail: a formula that should have compiled and did not is invisible on screen as
+    /// anything except "it looks like source", which is also what a formula being edited looks like.
+    pub math_compiled: u32,
+    /// Formulas drawn as raw LaTeX in the last paint, because the caret is inside them.
+    pub math_raw: u32,
+    /// Procedural fills drawn in the last paint: fraction bars and radical overlies.
+    pub math_rules: u32,
+    /// Formulas that failed to parse and fell back to raw LaTeX while the caret was elsewhere.
+    ///
+    /// Counted because a parse error is otherwise *invisible by design*: `math.rs` renders an
+    /// unparseable formula as its own source, which is exactly what an edited one looks like. Without
+    /// this counter, a formula that stopped compiling three edits ago would sit there looking fine.
+    pub math_parse_errors: u32,
 }
 
 /// A pre-opened export sink.
@@ -266,6 +286,22 @@ pub struct Session<'a> {
     table_scratch: Vec<u8>,
     /// Where the caret was last drawn, so it can be erased.
     caret_drawn_at: Option<DamageRect>,
+    /// Reusable buffer for the compiled formula's runs.
+    ///
+    /// Sized once and cleared per paint, for the reason [`Session::table_scratch`] exists and stated
+    /// at greater length there: a local `MathLayout` would be promoted to the heap by the compiler and
+    /// the allocation would then happen once per paint rather than once per session -- invisible in a
+    /// rate, visible in a count. `tests/session_math.rs` asserts this field's capacity is unchanged
+    /// across a compile.
+    math_scratch: MathLayout,
+    /// The compiled source a formula is compiled from, reused across paints.
+    ///
+    /// Separate from `math_scratch` because it is a different lifetime: this is the *input* to
+    /// `math::parse`, which allocates an AST, and the AST is dropped at the end of each paint. The
+    /// buffer avoids re-allocating the string; the AST itself is one allocation per formula per paint,
+    /// which `math.rs`'s header argues is acceptable and which the zero-allocation requirement is
+    /// explicitly about the *layout*, not the parse.
+    math_source: Vec<u8>,
 }
 
 impl<'a> Session<'a> {
@@ -277,6 +313,7 @@ impl<'a> Session<'a> {
         metrics: ChromeMetrics,
     ) -> Self {
         let chrome = Chrome::new(metrics);
+        publish_atlas(painter.atlas(), painter.size_index());
         let frame = Frame::black(metrics.width, metrics.height);
         let state = ChromeState {
             // The document's first line is on screen at the caret's line.
@@ -299,7 +336,65 @@ impl<'a> Session<'a> {
             tables_shape_dirty: false,
             table_scratch: Vec::new(),
             caret_drawn_at: None,
+            math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
+            math_source: Vec::new(),
         }
+    }
+
+    /// Capacity of the reusable run buffer, so a gate can assert it did not grow.
+    ///
+    /// Read-only, and for the same reason [`Session::damage`] is: the zero-allocation requirement is
+    /// about the *count* of allocations, and a count can only be asserted through an accessor. Reading
+    /// `runs.capacity()` from outside would mean exposing the buffer itself.
+    pub fn math_run_capacity(&self) -> usize {
+        self.math_scratch.runs.capacity()
+    }
+
+    /// The formula the caret is inside, if it is inside one.
+    ///
+    /// Read-only and derived, like [`Session::active_cell`]: the answer comes from scanning the
+    /// document's bytes for `$$` pairs, so there is no stored state that could disagree with the text.
+    /// A gate can ask "is the caret in a formula, and what is its LaTeX?" without the session being
+    /// able to be told the answer.
+    pub fn active_math(&self) -> Option<MathSpan> {
+        let caret = self.editor.caret();
+        let text = self.editor.text().ok()?;
+        holonomy_text::math_span_at(&text, caret)
+    }
+
+    /// The LaTeX of the formula the caret is in.
+    ///
+    /// For a gate that wants to assert what was typed. Returns `None` when the caret is not in a
+    /// formula, which is the ordinary case.
+    pub fn active_math_source(&self) -> Result<Option<Vec<u8>>, SessionError> {
+        let Some(span) = self.active_math() else {
+            return Ok(None);
+        };
+        let text = self.editor.text()?;
+        Ok(Some(text[span.inner()].to_vec()))
+    }
+
+    /// Insert an empty formula at the caret and put the caret inside it.
+    ///
+    /// This is `Ctrl+M`. It writes **four** bytes -- `$$$$` -- and leaves the caret at `start + 2`.
+    ///
+    /// **Four, not two.** Two would give the user an opening delimiter and no way to see where the
+    /// formula ends; four makes the span exist the instant the key is pressed, so `Ctrl+M` then `\sqrt
+    /// {x}` then Right shows a compiled radical rather than a `$$` that does nothing until someone
+    /// remembers to close it. The alternative -- two bytes and a "closed by typing the next `$$`"
+    /// rule -- makes the first keystroke's effect depend on a rule the user has not been told.
+    ///
+    /// The caret lands between the delimiters rather than after them, because a person who has just
+    /// asked for a formula wants to type one. That is the same argument as
+    /// [`Session::insert_table`]'s first-cell placement, and it is the reason this method moves the
+    /// caret at all rather than inserting and returning.
+    pub fn insert_math(&mut self) -> Result<(), SessionError> {
+        let at = self.editor.caret();
+        self.editor
+            .insert_at(at, b"$$$$", SpanPolicy::GrowIntoInsert)?;
+        self.stats.math_inserts += 1;
+        self.editor.caret_to(at as usize + 2)?;
+        self.after_edit(4)
     }
 
     /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
@@ -604,6 +699,9 @@ impl<'a> Session<'a> {
                 // no container. Counted so the caller can see it happened.
                 self.stats.saves += 1;
             }
+            Command::Hotkey(Hotkey::InsertMath) => {
+                self.insert_math()?;
+            }
             Command::Hotkey(Hotkey::InsertTable) => {
                 // 3 by 3: the directive's default, and the shape that divides an 80-column measure
                 // into three readable columns of 23 with the borders and padding accounted for.
@@ -885,12 +983,36 @@ impl<'a> Session<'a> {
 
     /// Put the caret at `at`, clamped back to a codepoint boundary.
     fn caret_to(&mut self, at: usize) -> Result<(), SessionError> {
+        // The caret's old cell, before anything moves. Read from the *state* rather than by locating
+        // it, because the state is what `Caret::locate` will use and re-deriving it after the move
+        // would give the new position, which is the one thing that is not yet stale.
+        let old_cell = self.caret_cell();
         self.editor.caret_to(at)?;
         // The caret's *column* within its line, for the status bar.
         let line_start = self.line_start(self.editor.caret() as usize);
         self.state.caret_column =
             ((self.editor.caret() as usize).saturating_sub(line_start)) as u32;
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        // **A caret move is a repaint, and this used not to be one.**
+        //
+        // `caret_to` set no damage, and `tick` only paints when damage is non-empty, so pressing an
+        // arrow key moved the caret in the model and left the pixels alone. The old cell stayed drawn
+        // and the new one did not appear until the *blink* happened to toggle, at
+        // `Blink::DEFAULT_PERIOD`. Every scripted gate missed it because the gates assert on
+        // `Caret::locate`'s arithmetic and never on a frame after a bare movement.
+        //
+        // Phase 9B found it in a live window, and in the worst possible way to find it: this is the
+        // repaint that switches a formula from compiled to raw. Leaving a formula with Right changed
+        // every number in `SessionStats` except the ones the frame was drawn from, so the window kept
+        // showing the raw source while the log said the caret was outside.
+        //
+        // Both cells are damaged, old and new: moving within a line leaves a trail otherwise, which is
+        // the same reasoning as `after_edit`'s comment about the old caret's line.
+        let new_cell = self.caret_cell();
+        let moved = union_opt(old_cell, new_cell);
+        if let Some(rect) = moved {
+            self.damage = self.damage.union(&rect);
+        }
         Ok(())
     }
 
@@ -976,6 +1098,7 @@ impl<'a> Session<'a> {
         // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
         let mut damage = damage;
         self.emit_tables(&mut tree, &mut damage);
+        self.emit_math(&mut tree, &mut damage);
         let stats = self.painter.paint(&mut self.frame, &tree, damage)?;
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
@@ -1016,6 +1139,13 @@ impl<'a> Session<'a> {
             );
             let line = self.line_index(span.start_byte as usize);
             blocks.push((line, grid.height_px()));
+        }
+        // Formulas join the tables in the *same* model, for the same reason: a fraction is 41 px tall
+        // where a line is 18, so the lines below it have to move or the formula draws over them.
+        // `LineHeights::from` merges two blocks that share a line by adding, so a table and a formula
+        // starting on one line displace by the sum rather than one overwriting the other.
+        if let Ok(text) = self.editor.text() {
+            blocks.extend(self.math_blocks(&text));
         }
         self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
     }
@@ -1065,7 +1195,7 @@ impl<'a> Session<'a> {
         let active = self.active_cell;
 
         for span in spans.iter().copied() {
-            let line = self.line_index(span.start_byte as usize) as u32;
+            let line = self.line_index(span.start_byte as usize);
             if line < first || line >= last {
                 continue;
             }
@@ -1169,6 +1299,258 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Draw every formula whose line is on screen, and widen `damage` to cover them.
+    ///
+    /// # The two modes, and why both are here
+    ///
+    /// A formula is drawn as one of two things:
+    ///
+    /// * **the caret is inside it** — the raw LaTeX, in the monospace face, exactly as typed. Editing
+    ///   a formula means editing its source, and a compiled layout cannot be edited: there is no
+    ///   position in `rac{-b}{2a}` that means "between the minus and the b", because the compiled
+    ///   form has no such character.
+    /// * **the caret is elsewhere** — the compiled layout: glyphs from the math face for the symbols,
+    ///   Inter Italic for the variables, and *procedural fills* for the fraction bars and radical
+    ///   overlies.
+    ///
+    /// The switch is on the caret alone, with no focus ring and no mode key, because the caret is
+    /// already the thing that says what the user is doing. A separate "edit formula" mode would need
+    /// its own state, its own exit, and its own way to be wrong.
+    ///
+    /// **A formula that does not parse draws as raw LaTeX even when the caret is elsewhere.** That is
+    /// `math.rs`'s rule and it is the right one: a half-typed `ra` is not an error to show the user
+    /// as a blank box, it is a formula being written. `math_parse_errors` counts it, because a
+    /// deliberate fallback and a formula that silently stopped compiling look identical on screen.
+    ///
+    /// # Why the bars are not glyphs
+    ///
+    /// `MathRun::Rule` becomes a [`holonomy_render::Rect`] and `MathRun::RadicalTick` becomes a small
+    /// stepped fill, both integer-aligned. A 1 px line drawn from a glyph outline is antialiased at
+    /// both ends and so does not meet the glyph beside it exactly; at 1x that seam is visible. This is
+    /// PROJECT.md §2.9.2 point 4 applied, and it is why the radical is a shape rather than U+221A.
+    fn emit_math(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+        self.stats.math_compiled = 0;
+        self.stats.math_raw = 0;
+        self.stats.math_rules = 0;
+        self.stats.math_parse_errors = 0;
+
+        let Ok(text) = self.editor.text() else {
+            return;
+        };
+        let m = self.chrome.metrics;
+        let l = self.chrome.layout;
+        let mut mm = MathMetrics::new(m.cell_w, m.cell_h);
+        // Real per-glyph advances, so the layout's boxes match the ink it is about to draw.
+        //
+        // Without this the layout sits on the page's 8 px text grid while the fonts are proportional:
+        // measured at 16 ppem, JetBrains Mono advances 10 px and `\sum` 14, so every glyph overlapped
+        // its neighbour by 1-2 px and a superscript landed *inside* the summation sign. See
+        // `MathMetrics::advance` for the table and `crates/holonomy-assets/examples/adv.rs`, which
+        // prints it.
+        mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
+        let first = self.state.scroll_line;
+        let last = first + l.rows;
+        let caret = self.editor.caret();
+        let ink = holonomy_render::chrome::colour::INK;
+        let line_heights = self.state.line_heights.clone();
+        // The closure below cannot touch `self`: it holds `&mut self.math_scratch`, and borrowing
+        // `self.line_index` as well is E0500. So every field it needs is copied out first and the
+        // counters come back out after. Copying a `ChromeMetrics` is four `u32`s and a `LineHeights`
+        // is a `Vec` that is *cloned* -- which is why this is worth a comment rather than a shrug: it
+        // is one allocation per paint, on the same path `publish_line_heights` already allocates on.
+        // The alternative -- an explicit `for` loop with the borrows scoped per iteration -- is what
+        // this should be, and `for_each_math_span`'s closure is the wrong tool for a body that mutates
+        // the session. Recorded rather than left for someone to rediscover at three more call sites.
+        let mut compiled = 0u32;
+        let mut raw_count = 0u32;
+        let mut rules = 0u32;
+        let mut parse_errors = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let scratch = &mut self.math_scratch;
+        let source = &mut self.math_source;
+        let text = text.as_slice();
+        let line_of = |at: usize| {
+            text[..at.min(text.len())]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count() as u32
+        };
+
+        holonomy_text::for_each_math_span(text, |span| {
+            let line = line_of(span.start as usize);
+            if line < first || line >= last {
+                return;
+            }
+            let inner = span.inner();
+            let top = l.text.y + line_heights.y(line - first);
+
+            // --- caret inside: the raw LaTeX, in the monospace face.
+            if span.contains(caret) {
+                let raw = &text[inner.clone()];
+                let shown: String = raw
+                    .iter()
+                    .take(MAX_MATH_SOURCE)
+                    .map(|&b| b as char)
+                    .collect();
+                if !shown.is_empty() {
+                    // The source is drawn at the text column's left edge, which is where the formula
+                    // *starts* -- not where the caret is. A formula that grew to 200 bytes would
+                    // otherwise reflow the rest of the line every keystroke.
+                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+                        l.text.x as i32,
+                        top as i32,
+                        shown.chars().next().map_or(0, |c| c as u32),
+                        shown.chars().count() as u16,
+                        holonomy_render::Style::MONOSPACE,
+                        0,
+                        ink,
+                    ))));
+                }
+                raw_count += 1;
+                let w = (shown.chars().count() as u32) * m.cell_w;
+                let h = mm.cell_h;
+                extra = union_opt(extra, Some(DamageRect::new(l.text.x, top, w, h)));
+                // The caret inside a formula is drawn by the chrome's own line model at the column,
+                // which for a formula that starts at the text column is the same place. Nothing extra
+                // to do: the chrome already draws it, and it lands on the source.
+                return;
+            }
+
+            // --- caret elsewhere: compile.
+            source.clear();
+            source.extend_from_slice(&text[inner]);
+            let Ok(node) = math::parse(source) else {
+                parse_errors += 1;
+                // Fall back to the raw source at the text column. Same geometry as the raw mode above,
+                // deliberately: a formula that stops compiling must not move.
+                let shown: String = source
+                    .iter()
+                    .take(MAX_MATH_SOURCE)
+                    .map(|&b| b as char)
+                    .collect();
+                if !shown.is_empty() {
+                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+                        l.text.x as i32,
+                        top as i32,
+                        shown.chars().next().map_or(0, |c| c as u32),
+                        shown.chars().count() as u16,
+                        holonomy_render::Style::MONOSPACE,
+                        0,
+                        ink,
+                    ))));
+                }
+                raw_count += 1;
+                let w = (shown.chars().count() as u32) * m.cell_w;
+                extra = union_opt(extra, Some(DamageRect::new(l.text.x, top, w, mm.cell_h)));
+                return;
+            };
+
+            // The box is `above` the text column's top by half its extra height, so a fraction is
+            // vertically centred on the line it sits in rather than hanging from its top edge. This is
+            // a *centre*, not a `LineHeights` offset: `publish_line_heights` handles the displacement
+            // of the lines below, and doing both here would double it.
+            let box_ = measure_only(&node, &mm);
+            let y = top + (m.cell_h.saturating_sub(box_.height)) / 2;
+            scratch.clear();
+            layout_boxed(&node, &mm, l.text.x, y, scratch);
+
+            for run in &scratch.runs {
+                match *run {
+                    MathRun::Glyph { x, y: gy, cp, .. } => {
+                        // The style is per glyph, not per formula: `\alpha` is in the math face, `x` is
+                        // Inter Italic. `is_math_symbol` is the whole decision.
+                        let style = if holonomy_assets::payload::is_math_symbol(cp) {
+                            holonomy_render::Style::MATH
+                        } else {
+                            holonomy_render::Style::ITALIC
+                        };
+                        tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+                            x as i32, gy as i32, cp, 1, style, 0, ink,
+                        ))));
+                    }
+                    MathRun::Rule { x: rx, y: ry, w, h } => {
+                        tree.before.push(SurfaceTree::leaf(Node::Rect(
+                            holonomy_render::Rect::new(rx as i32, ry as i32, w, h, ink),
+                        )));
+                        rules += 1;
+                    }
+                    MathRun::RadicalTick {
+                        x: rx,
+                        y: ry,
+                        w,
+                        tick_h,
+                    } => {
+                        // A vertical stub plus a diagonal, drawn as integer steps. See the module
+                        // header on `MathRun::RadicalTick`: a diagonal as 1 px squares aliases, and
+                        // this is the only place in the renderer that draws one.
+                        let stub_w = (m.cell_w / 3).max(1);
+                        tree.before.push(SurfaceTree::leaf(Node::Rect(
+                            holonomy_render::Rect::new(rx as i32, ry as i32, stub_w, tick_h, ink),
+                        )));
+                        // The diagonal: `tick_h` steps of one pixel each, marching right.
+                        let steps = tick_h.min(w);
+                        for step in 0..steps {
+                            tree.before.push(SurfaceTree::leaf(Node::Rect(
+                                holonomy_render::Rect::new(
+                                    (rx + stub_w + step) as i32,
+                                    (ry + tick_h - 1 - step) as i32,
+                                    1,
+                                    2,
+                                    ink,
+                                ),
+                            )));
+                        }
+                        rules += 1;
+                    }
+                }
+            }
+            compiled += 1;
+            extra = union_opt(
+                extra,
+                Some(DamageRect::new(l.text.x, y, box_.width, box_.height)),
+            );
+        });
+
+        self.stats.math_compiled = compiled;
+        self.stats.math_raw = raw_count;
+        self.stats.math_rules = rules;
+        self.stats.math_parse_errors = parse_errors;
+        if let Some(rect) = extra {
+            *damage = Some(match *damage {
+                Some(d) => d.union(&rect),
+                None => rect,
+            });
+        }
+    }
+
+    /// Add every formula's height to the line-height model, so the lines below it move down.
+    ///
+    /// Same model as tables and the same arithmetic: the extra **is** the block's full height, because
+    /// [`LineHeights::from`] is handed pixels and displaces every line from the anchor onward. A
+    /// formula one line tall therefore contributes its `cell_h` and pushes the line below it down by a
+    /// whole line -- which is wrong for an inline formula and right for a displayed one, and the
+    /// distinction is Phase 9B's known limit rather than a bug to be argued about here. Recorded in
+    /// `PROJECT.md` §9B rather than silently approximated.
+    fn math_blocks(&self, text: &[u8]) -> Vec<(u32, u32)> {
+        let mut mm = MathMetrics::new(self.chrome.metrics.cell_w, self.chrome.metrics.cell_h);
+        // Must match `emit_math` exactly. If these two disagree, the displacement the line model
+        // applies is for one formula and the pixels are another -- and a wrong displacement is
+        // invisible in the counters, because the formula still draws.
+        mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
+        let mut blocks = Vec::new();
+        holonomy_text::for_each_math_span(text, |span| {
+            let inner = span.inner();
+            // An unparseable formula has no box, so it contributes nothing and the raw text's own line
+            // height stands. That is the same answer the caret-inside mode gives.
+            let Ok(node) = math::parse(&text[inner]) else {
+                return;
+            };
+            let line = self.line_index(span.start as usize);
+            blocks.push((line, measure_only(&node, &mm).height));
+        });
+        blocks
+    }
+
     // ---------------------------------------------------------------- export
 
     /// Write the document to a pre-opened sink in `format`.
@@ -1196,6 +1578,125 @@ impl<'a> Session<'a> {
 /// `DamageRect::union` takes two rectangles, and "no damage yet" is `None` rather than an empty
 /// rectangle, so the optionality has to be lifted out of the way at every step. A `None` on either
 /// side yields the other; two `None`s yield `None`.
+/// A per-codepoint advance function over the atlas, or `None` for the fixed-grid model.
+///
+/// The signature is `fn(u32) -> u32` rather than a closure because `MathMetrics` is `Copy` and
+/// `const`-constructible, and a closure capturing the atlas would make it neither. The cost of that
+/// choice is the table below: the atlas and the size index have to be reachable from a `fn`, which
+/// means they are stashed in statics.
+///
+/// # Why statics rather than a leak
+///
+/// The session holds `&'a Atlas` through its `Painter`, so it does *not* outlive the atlas, and a
+/// leaked `&'static` would be a second reference that could outlive it -- and then point at a
+/// dropped atlas. So the pointers are written once, when the atlas is built, and the advance function
+/// asserts that what it finds is what was published. A formula laid out after the session's painter
+/// was dropped would panic rather than read freed memory, which is the failure order that is safe.
+///
+/// This is a limitation of the `fn`-pointer design and it is the cost of the alternative: a
+/// `dyn Fn` field on `MathMetrics` would make the layout allocate-capable and stop being `Copy`, which
+/// costs every existing caller and buys nothing here.
+fn advance_shim(
+    atlas: Option<&holonomy_assets::atlas::Atlas>,
+    size_index: u8,
+) -> Option<fn(u32) -> u32> {
+    let atlas = atlas?;
+    if std::ptr::from_ref(atlas) as usize
+        != PUBLISHED_ATLAS.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return None;
+    }
+    // Compared in *pixels*, because that is what `publish_atlas` stored. See its comment: the two
+    // sizes are different quantities and mixing them silently disables the whole feature.
+    let px = atlas.sizes().get(size_index as usize).copied().unwrap_or(0);
+    if px as usize != PUBLISHED_SIZE.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    Some(advance_from_published)
+}
+
+/// The published atlas pointer. Written by [`publish_atlas`].
+static PUBLISHED_ATLAS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The published size, in **pixels**. Written by [`publish_atlas`].
+static PUBLISHED_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Publish the atlas and the pixel size the advance shim will read.
+///
+/// Called from [`Session::new`]. A single global because the shim is a plain `fn`; a process that
+/// built two atlases of different sizes would have the second session fall back to the fixed grid,
+/// which [`advance_shim`] detects rather than reading the wrong metrics.
+///
+/// **The size is translated from an index to pixels here, and that is not cosmetic.**
+/// `Painter::size_index` is an index into `Atlas::sizes`, while `Atlas::metric` takes a *pixel* size
+/// and looks the index up itself. Passing the index straight through made every lookup ask for 0 ppem,
+/// find no such size, and return `GlyphMetric::BLANK` -- whose advance is 0 -- so `adv` fell back to
+/// `cell_w` and the whole feature was inert while still looking correct in the counters. The advance
+/// is the one number whose absence changes no counter, which is why this needed a pixel-level
+/// regression test rather than a smoke test: see
+/// `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`.
+fn publish_atlas(atlas: Option<&holonomy_assets::atlas::Atlas>, size_index: u8) {
+    PUBLISHED_ATLAS.store(
+        atlas.map_or(0, |a| std::ptr::from_ref(a) as usize),
+        std::sync::atomic::Ordering::Release,
+    );
+    let px = atlas
+        .and_then(|a| a.sizes().get(size_index as usize).copied())
+        .unwrap_or(0);
+    PUBLISHED_SIZE.store(px as usize, std::sync::atomic::Ordering::Release);
+}
+
+/// The advance function itself: read `GlyphMetric::advance_x` for `cp`, choosing the face per glyph.
+///
+/// The face choice is the same one `emit_math` makes for *drawing*, and it has to be the same one:
+/// measuring `lpha` in Inter, which has no Greek, would give a zero advance and reserve nothing.
+fn advance_from_published(cp: u32) -> u32 {
+    let ptr = PUBLISHED_ATLAS.load(std::sync::atomic::Ordering::Acquire)
+        as *const holonomy_assets::atlas::Atlas;
+    if ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: `ptr` was published from a `&'a Atlas` that some live `Session` owns. A `Session` that
+    // owned it has not been dropped while another `Session` is being painted in this process, because
+    // painting happens through a `&Session` borrow. The remaining hole is two sessions built over two
+    // different atlases, which `advance_shim` rejects by comparing the pointer before publishing a
+    // closure -- so only the *published* atlas is ever read here, and only while its owner lives.
+    let atlas = unsafe { &*ptr };
+    let size = PUBLISHED_SIZE.load(std::sync::atomic::Ordering::Acquire) as u16;
+    let style = if holonomy_assets::payload::is_math_symbol(cp) {
+        holonomy_assets::payload::Style::Math
+    } else {
+        holonomy_assets::payload::Style::Italic
+    };
+    atlas.metric(cp, style, size).advance_x.into()
+}
+
+/// How many run slots [`Session::math_scratch`] is sized for.
+///
+/// The quadratic formula -- the gate's worked example -- lays out to 14 runs. 64 is the next power of
+/// two above that and covers `rac{a}{b} + \sqrt{c}` with room for a superscript and a subscript, so
+/// the common case never reallocates. A pathological formula with more than 64 runs grows the `Vec`
+/// once and then stops, which is the same behaviour every other growable buffer here has.
+const MATH_RUN_CAPACITY: usize = 64;
+
+/// The most source bytes of a formula drawn as raw LaTeX.
+///
+/// A `TextRun` is capped at [`TextRun::MAX_LEN`] codepoints, and a `u32` advance times an unbounded
+/// byte count would put the run's right edge past the page. Truncating is wrong in principle and right
+/// in practice: the user is looking at the formula they are editing, which is at the front.
+const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
+
+/// `node`'s box, without emitting anything.
+///
+/// `math_layout::measure`, re-exported under a name that says what it is for at the call site. There is
+/// a `measure` and a `layout_boxed` in `holonomy_render`, and this function needs the box *twice* --
+/// once to centre the formula vertically before laying it out, and once for the damage rectangle --
+/// so it is the measure-only entry point rather than the one that returns a box as a by-product.
+#[inline]
+fn measure_only(node: &MathNode, m: &MathMetrics) -> holonomy_render::math_layout::MathBox {
+    holonomy_render::math_layout::measure(node, m)
+}
+
 fn union_opt(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.union(&b)),

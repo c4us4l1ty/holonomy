@@ -70,8 +70,8 @@ pub enum Style {
     Math = 4,
 }
 
-/// Total decompressed size, 169,480 bytes.
-pub const RAW_LEN: usize = 169480;
+/// Total decompressed size, 118,636 bytes.
+pub const RAW_LEN: usize = 118636;
 
 /// The 5 faces, in atlas order.
 pub const FACES: [FaceEntry; 5] = [
@@ -108,31 +108,34 @@ pub const FACES: [FaceEntry; 5] = [
         style: Style::Math,
         monospace: false,
         offset: 97204,
-        length: 72276,
+        length: 21432,
     },
 ];
 
 /// Compressed size, asserted by `build.rs`.
-pub const PACKED_LEN: usize = 78354;
+pub const PACKED_LEN: usize = 55886;
 
 /// Digest of the compressed stream, so a regenerated payload cannot differ silently.
-pub const PACKED_SHA256: &str = "f32aacc36f8e338f4eee969349359ea1d6dd20e1cb136f7ddb3a205db04273ef";
+pub const PACKED_SHA256: &str = "45eb01c37442e6c3b35766d4ee95dc7d02d14fa427b7e23c5f51bea16f69428d";
 
 /// Digest of the decompressed buffer.
-pub const RAW_SHA256: &str = "a1910d25dc42390b53d5297a33522fced14f60ae57a35fd135eddec6fdf30d42";
+pub const RAW_SHA256: &str = "c5e6f0f3ae2fb73bf2c98b24afe8a6cd9a2fa44673b6e4b49334bad883afcc56";
 
 /// Codepoint ranges taken from the text faces.
 pub const TEXT_RANGES: [(u32, u32); 2] = [(0x20, 0x7E), (0xA0, 0xFF)];
 
 /// Codepoint ranges taken from the math face. Phase 9B.
-pub const MATH_RANGES: [(u32, u32); 7] = [
+pub const MATH_RANGES: [(u32, u32); 10] = [
     (0x0B1, 0x0B1),
     (0x0D7, 0x0D7),
     (0x0F7, 0x0F7),
-    (0x2190, 0x21FF),
+    (0x2190, 0x2192),
     (0x391, 0x3A9),
     (0x3B1, 0x3C9),
-    (0x2200, 0x22FF),
+    (0x2200, 0x222B),
+    (0x2248, 0x2248),
+    (0x2260, 0x2265),
+    (0x22C5, 0x22C5),
 ];
 
 /// Box Drawing, which is procedural and deliberately absent from every face.
@@ -149,6 +152,26 @@ pub fn codepoints_in_text_ranges() -> impl Iterator<Item = u32> {
 /// Every codepoint the math face is expected to carry.
 pub fn codepoints_in_math_ranges() -> impl Iterator<Item = u32> {
     MATH_RANGES.iter().flat_map(|&(lo, hi)| lo..=hi)
+}
+
+/// True when `codepoint` is one the math face carries, and so must be drawn in [`Style::Math`].
+///
+/// The other half of [`MATH_RANGES`]'s job. `MATH_RANGES` says what to *subset*; this says
+/// what to *draw in the math style*, and a renderer needs the second without re-walking the
+/// ranges on every glyph.
+///
+/// It matters because the math face deliberately does **not** carry ASCII. A formula's variables
+/// -- `x`, `b`, the `2` in `2a` -- are ASCII codepoints, and they are drawn from the text faces
+/// (`Italic` for a letter, by the convention every textbook uses) while `\alpha` and `\sum` come
+/// from the math face. So the style for each glyph is a real decision with a real answer, and
+/// this function is that answer.
+///
+/// Linear over ten ranges, called once per glyph of a formula and never for a text glyph, which
+/// is why it is not worth a lookup table.
+pub fn is_math_symbol(codepoint: u32) -> bool {
+    MATH_RANGES
+        .iter()
+        .any(|&(lo, hi)| codepoint >= lo && codepoint <= hi)
 }
 
 /// Every codepoint from every face, **plus** the procedural Box Drawing range.

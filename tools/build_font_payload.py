@@ -60,37 +60,48 @@ BOX_RANGE = (0x2500, 0x257F)
 
 # Phase 9B's math coverage, and only ever for the math face.
 #
-# Greek is 0x391..0x3C9 with a gap: 0x3A0..0x3FF is unassigned in Unicode except for a handful, and
-# subsetting an unassigned codepoint makes fontTools emit a .notdef glyph, which is worse than
-# omitting it because it *looks* present. So the two real runs are given separately and the gap between
-# them is left out.
+# **These are the codepoints `holonomy_render::SYMBOLS` can name, and nothing else.** Every entry
+# here is a glyph the layout can ask for, so the list is the parser's symbol table read as ranges.
+# `crates/holonomy-render/tests/math_coverage.rs` asserts the two agree in both directions: no
+# symbol outside these ranges (`every_symbol_is_inside_a_declared_math_range`) and no symbol missing
+# from the face (`every_symbol_the_parser_can_name_is_in_the_math_face`).
 #
-# Mathematical Operators 0x2200..0x22FF is taken whole rather than as the nine symbols the directive
-# names, and the reason is measured rather than aesthetic: a partial range in a subsetter produces a
-# `cmap` with holes, and the first version of this asked for exactly the nine and got a face where
-# `\le` and `\int` were absent because they had not been thought of yet. The whole block is 256
-# codepoints of which Noto Sans Math carries 141, and brotli compresses the absent ones to nothing.
-# `tests/math_coverage.rs` asserts every symbol the parser can name, so the set cannot shrink by
-# accident -- and it also asserts the face does *not* carry Box Drawing, which would mean the two
-# procedural sources had started overlapping.
-# Three ranges above and four here, and the split is the interesting part: **the math face must carry
-# the symbols the parser can name, wherever Unicode puts them.** The first version of this listed only
-# Greek and Mathematical Operators, and `tests/math_coverage.rs` immediately reported six symbols
-# missing from the face -- `\pm` (U+00B1), `\times` (U+00D7), `\div` (U+00F7), and the three arrows
-# (U+2190/0x2192, all in the Arrows block). All six are real LaTeX commands that the directive names
-# explicitly, and none of them is in 0x2200..0x22FF, so all six would have rendered as .notdef -- a
-# hollow box, which reads as a missing glyph rather than as a missing subsetting range.
+# # Why this was 421 codepoints and is now 108
 #
-# So the ranges are chosen from the parser's symbol table rather than from what looks like "math".
-# `\pm` being Latin-1 is a fact about Unicode, not an argument.
+# The first version listed the *blocks* -- Arrows 0x2190..0x21FF, Greek, and Mathematical Operators
+# 0x2200..0x22FF -- which is 421 codepoints and a 507-glyph face. That was defensible while math
+# glyphs were rasterised on demand, where a glyph costs nothing unless a formula asks for it.
+#
+# It stopped being defensible when the atlas became boot-rasterised, because then every listed
+# codepoint is a glyph in the coverage *and* a slot in the metric table, whether or not a formula
+# ever draws it. `metric::ATLAS_WIDTH`'s comment is the arithmetic: the fifth style and four new
+# codepoint windows pushed the pair to 537,720 against a 524,288 ceiling -- over by 13,432 -- and the
+# coverage height had to come down from 480 to 448 to pay for it. Pruning to the symbol set is what
+# made that trade survivable, and it is the reason the height had to move as little as it did.
+#
+# So the ranges are now the smallest spans that cover the parser's symbols:
+#
+# * **Greek** 0x391..0x3C9 as two runs, because 0x3AA..0x3B0 is unassigned and subsetting an
+#   unassigned codepoint makes fontTools emit a .notdef glyph, which is worse than omitting it
+#   because it *looks* present. The 57-slot metric window does span the gap -- the table needs a
+#   contiguous span because `slot_of` is arithmetic, not a search -- but the *font* need not.
+# * **Arrows** 0x2190..0x2192, three slots for `\leftarrow` and `\rightarrow`. The block is 112.
+# * **Operators** as four short runs rather than the 256-slot block: the 15 operators the parser
+#   names cluster into 0x2200..0x222B, then 0x2248, 0x2260..0x2265, and 0x22C5.
+# * **Latin-1** `\pm` (U+00B1), `\times` (U+00D7), `\div` (U+00F7), which are already inside the
+#   text window. They still have to be in *this* face's range list, because the ranges say what this
+#   face carries and the other four do not carry Greek -- but they cost no new metric slots.
 MATH_RANGES = [
     (0x00B1, 0x00B1),   # plus-minus
     (0x00D7, 0x00D7),   # multiplication sign
     (0x00F7, 0x00F7),   # division sign
-    (0x2190, 0x21FF),   # Arrows: leftarrow, rightarrow, and 110 more
-    (0x391, 0x3A9),     # Greek, uppercase
-    (0x3B1, 0x3C9),     # Greek, lowercase
-    (0x2200, 0x22FF),   # Mathematical Operators
+    (0x2190, 0x2192),   # Arrows: leftarrow, rightarrow (and 1 unused slot between them)
+    (0x391, 0x3A9),     # Greek, uppercase: Gamma..Upsilon
+    (0x3B1, 0x3C9),     # Greek, lowercase: alpha..omega
+    (0x2200, 0x222B),   # Operators: forall partial exists nabla in prod mp infty int
+    (0x2248, 0x2248),   # approx
+    (0x2260, 0x2265),   # neq equiv leq geq
+    (0x22C5, 0x22C5),   # cdot
 ]
 
 FACES = [

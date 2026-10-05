@@ -144,29 +144,26 @@ pub fn build_atlas(ppem_sizes: &[u16]) -> Result<(atlas::Atlas, BootReport), Err
     let mut builder = atlas::AtlasBuilder::new(ppem_sizes)?;
     let bytes = scratch.as_slice();
     for (index, entry) in payload::FACES.iter().enumerate() {
-        // # The math face is **not** rasterised at boot, and that is arithmetic, not an omission
+        // The math face *is* rasterised at boot, and getting here took pruning the payload.
         //
-        // `Style::Math` exists, Noto Sans Math is in the payload, and it is deliberately skipped here.
-        // The 512 KiB ceiling in PROJECT.md §2.2 is a *combined* budget: a 1024x480
-        // one-byte-per-pixel coverage bitmap is already 491,520 bytes, leaving 32,768 for everything
-        // else including the metric table.
+        // The first version skipped it, on the arithmetic that a 5-style, 773-codepoint, 2-size
+        // table is 77,300 bytes and 491,520 of coverage plus that is 568,820 against a 524,288
+        // ceiling -- over by 8.7%. On-demand rasterisation was the answer then, and it was wrong
+        // for a reason that has nothing to do with bytes: rasterising a glyph at runtime is
+        // **curve evaluation at runtime**, which PROJECT.md §2.9.5 forbids outright ("No runtime
+        // curve evaluation anywhere"), and an on-demand cache is the same violation with a
+        // bookkeeping layer on top. A gate that counts allocations cannot see it.
         //
-        // Measured with the math face included: 507 glyphs across the full coverage window would need a
-        // 5-style table, and a 5-style, 773-codepoint, 2-size table is 77,300 bytes -- a combined
-        // 568,820 against a 524,288 limit. Over by 8.7%, and much further over at three sizes.
+        // So the face rasterises at boot and the *budget* moved instead. Two changes, both in
+        // `metric.rs`:
         //
-        // So math glyphs are rasterised **on demand**, into a cache, the first time a formula is
-        // drawn. Right for two reasons beyond the budget: most documents contain no mathematics and
-        // would otherwise pay for 507 glyphs at every boot, and the cost becomes proportional to what is
-        // on the page rather than to what the font could show.
+        // * `MATH_RANGES` is now the 108 codepoints `holonomy_render::SYMBOLS` can name, not the
+        //   421 that four whole Unicode blocks amount to. The face went from 507 glyphs and
+        //   78,354 B packed to 160 glyphs and 21,432 B raw.
+        // * `ATLAS_HEIGHT` is 448, not 480, because the fifth style and four new windows push the
+        //   table to 46,200 and the pair had to fit under the same ceiling.
         //
-        // The consequence, stated so it is not a surprise: `metric.set(cp, Style::Math as usize, ..)`
-        // panics with "style 4 out of range", because `STYLE_COUNT` is 4. That is deliberate. A path
-        // that tries to take math glyphs from the boot atlas fails loudly at the mistake rather than
-        // reading a blank metric and drawing nothing.
-        if entry.style == payload::Style::Math {
-            continue;
-        }
+        // The cost is stated in `metric::ATLAS_WIDTH`: ink occupancy went from 76.2% to 83.7%.
         let slice = &bytes[entry.offset as usize..(entry.offset + entry.length) as usize];
         // `Face::parse`'s second argument selects a face *within* a TrueType Collection (a
         // `ttcf` file). Each slice here is a standalone single-face TTF, so the index must be 0

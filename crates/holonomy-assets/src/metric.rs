@@ -27,24 +27,37 @@
 
 /// Width and height of the atlas, in pixels.
 ///
-/// **1024 × 480**, and the height is not arbitrary: the Phase 4 ceiling is on the atlas *and* its
+/// **1024 × 448**, and the height is not arbitrary: the Phase 4 ceiling is on the atlas *and* its
 /// metric table together, so the coverage cannot spend all of it.
 ///
-/// 1024 × 512 = 524,288 bytes of coverage, which is the whole ceiling by itself; adding the
-/// two-size table's 28,160 gives 552,448 — 105% of the limit. That is what
-/// `atlas_and_table_fit_the_l2_ceiling` caught when it compared `coverage().len() + table`
-/// against `512 * 1024`. At 1024 × 480 the pair is 491,520 + 28,160 = 519,680, which is 99.1% of
-/// the ceiling and leaves 4,608 bytes of headroom.
+/// The height is the *whole* of the arithmetic, and it moved twice. It was 512, which is 524,288
+/// bytes of coverage — the entire ceiling by itself — and adding the two-size table's 28,160 gave
+/// 552,448, or 105% of the limit; `atlas_and_table_fit_the_l2_ceiling` caught that. Dropping to 480
+/// gave 491,520 + 28,160 = 519,680, 99.1%, with 4,608 bytes spare.
 ///
-/// The width is a power of two so a blit crossing a row boundary needs no special case, and 480 is
+/// **Phase 9B then took that 4,608.** Not because the coverage grew — it shrank — but because the
+/// *table* did: the math face needs a fifth style (STYLE_COUNT 4 → 5) and four more codepoint
+/// windows for Greek and the operators, and the table is linear in both. At 480 the pair becomes
+/// 491,520 + 46,200 = 537,720, or **102.6%** — over, by 13,432 bytes. The height had to go down to
+/// buy table space, so it is 448: 458,752 + 46,200 = **504,952, 96.3%**, leaving 19,336 bytes.
+///
+/// What that cost is packing density. Ink occupancy goes from 76.2% of the arena to 83.7%, and the
+/// first build at 448 did overflow once during development (`AtlasFull { need: …, have: 458752 }`)
+/// before the symbol set was pruned to the 54 the parser can actually name. That is the honest
+/// statement of the trade: **the math face was paid for out of the coverage's slack, not out of
+/// headroom that existed.** A ninth style would not fit at any height.
+///
+/// The width is a power of two so a blit crossing a row boundary needs no special case, and 448 is
 /// a multiple of 32 so most glyph heights divide the arena without a ragged last row.
-///
-/// At four faces × two sizes the atlas holds 376,415 bytes of glyphs, i.e. 76.6% occupancy —
-/// the same packing efficiency the 512-tall arena achieved, so nothing is squeezed out.
 pub const ATLAS_WIDTH: u16 = 1024;
 
 /// Height of the atlas, in pixels.
-pub const ATLAS_HEIGHT: u16 = 480;
+///
+/// 448, and [`ATLAS_WIDTH`]'s comment is the derivation: 480 fit four styles with 4,608 bytes to
+/// spare and did not fit five. The gate that pins this is `tests/phase4_gate.rs`'s
+/// `atlas_geometry_leaves_room_for_the_metric_table`, which asserts the pair against the ceiling at
+/// the shipped geometry *and* the maximum table [`MAX_SIZES`] allows.
+pub const ATLAS_HEIGHT: u16 = 448;
 
 /// The atlas is A8: one byte of coverage per pixel, row-major, stride [`ATLAS_WIDTH`].
 pub const ATLAS_STRIDE: usize = ATLAS_WIDTH as usize;
@@ -61,6 +74,52 @@ pub const FIRST_CODEPOINT: u32 = 0x20;
 /// One past the last codepoint of the text window: U+0100, exclusive of Latin-1's end.
 pub const END_CODEPOINT: u32 = 0x100;
 
+/// First codepoint of the Greek window, U+0391.
+///
+/// Phase 9B. Greek is where the parser's named symbols live, and it was outside both original
+/// windows, so `\alpha` resolved to a codepoint with no metric slot and no way to give it one.
+pub const FIRST_GREEK: u32 = 0x0391;
+
+/// One past the last codepoint of the Greek window: U+03CA, past `omega`.
+pub const END_GREEK: u32 = 0x03CA;
+
+/// First codepoint of the Arrows window, U+2190 (`leftarrow`).
+pub const FIRST_ARROW: u32 = 0x2190;
+
+/// One past the last codepoint of the Arrows window, U+2193, past `rightarrow`.
+///
+/// Only three slots for two symbols. A window is a *contiguous* span because [`slot_of`] has to be
+/// arithmetic rather than a search, so the cost of an arrow is the three codepoints between
+/// `leftarrow` and `to`'s U+2192 — and the block is 0x2190..0x21FF, **112 slots**, which is why it
+/// is not taken whole.
+pub const END_ARROW: u32 = 0x2193;
+
+/// First codepoint of the operator window, U+2200 (`forall`).
+pub const FIRST_OP: u32 = 0x2200;
+
+/// One past the last codepoint of the operator window: U+222C, past `int`.
+///
+/// 44 slots. `\forall` through `\int`, which is where 12 of the 15 named operators live.
+pub const END_OP: u32 = 0x222C;
+
+/// First codepoint of the `\approx` window, U+2248.
+pub const FIRST_APPROX: u32 = 0x2248;
+
+/// One past the `\approx` window, U+2249.
+pub const END_APPROX: u32 = 0x2249;
+
+/// First codepoint of the relation window, U+2260 (`neq`).
+pub const FIRST_REL: u32 = 0x2260;
+
+/// One past the relation window, U+2266, past `geq`.
+pub const END_REL: u32 = 0x2266;
+
+/// First codepoint of the `\cdot` window, U+22C5.
+pub const FIRST_CDOT: u32 = 0x22C5;
+
+/// One past the `\cdot` window, U+22C6.
+pub const END_CDOT: u32 = 0x22C6;
+
 /// First codepoint of the Box Drawing window, U+2500.
 pub const FIRST_BOX: u32 = 0x2500;
 
@@ -70,57 +129,246 @@ pub const END_BOX: u32 = 0x2580;
 /// Codepoints in the text window, `0x100 - 0x20` = 224.
 pub const TEXT_CODEPOINTS: usize = (END_CODEPOINT - FIRST_CODEPOINT) as usize;
 
+/// Codepoints in the Greek window, `0x3CA - 0x391` = 57.
+pub const GREEK_CODEPOINTS: usize = (END_GREEK - FIRST_GREEK) as usize;
+
+/// Codepoints in the Arrows window, `0x2193 - 0x2190` = 3.
+pub const ARROW_CODEPOINTS: usize = (END_ARROW - FIRST_ARROW) as usize;
+
+/// Codepoints in the operator window, `0x222C - 0x2200` = 44.
+pub const OP_CODEPOINTS: usize = (END_OP - FIRST_OP) as usize;
+
+/// Codepoints in the `\approx` window, 1.
+pub const APPROX_CODEPOINTS: usize = (END_APPROX - FIRST_APPROX) as usize;
+
+/// Codepoints in the relation window, `0x2266 - 0x2260` = 6.
+pub const REL_CODEPOINTS: usize = (END_REL - FIRST_REL) as usize;
+
+/// Codepoints in the `\cdot` window, 1.
+pub const CDOT_CODEPOINTS: usize = (END_CDOT - FIRST_CDOT) as usize;
+
 /// Codepoints in the Box Drawing window, `0x2580 - 0x2500` = 128.
 pub const BOX_CODEPOINTS: usize = (END_BOX - FIRST_BOX) as usize;
 
-/// Codepoints the table covers in total, 224 + 128 = 352.
+/// Codepoints the table covers in total: 224 + 57 + 3 + 44 + 1 + 6 + 1 + 128 = 464.
 ///
-/// # Two windows, not one
+/// # Eight windows, not one
 ///
-/// The required coverage is ASCII, Latin-1 Supplement and Box Drawing — three ranges whose third
-/// member is at 0x2500 while the first two are contiguous. A single window 0x20..=0x2580 would
-/// need 9,472 entries per style, i.e. 75,776 entries at two sizes, 757,760 bytes of table for
-/// 352 useful ones: 96.3% of it would always read [`GlyphMetric::BLANK`].
+/// The required coverage is ASCII, Latin-1 Supplement, Box Drawing, Greek, two arrows and fifteen
+/// operators — eight ranges whose members sit at 0x20, 0x391, 0x2190, 0x2200, 0x2248, 0x2260, 0x22C5
+/// and 0x2500. A single window 0x20..=0x2580 would need 9,472 entries per style, i.e. 189,440 entries
+/// at five styles and two sizes, **1,894,400 bytes of table** for 464 useful ones: 99.98% of it would
+/// always read [`GlyphMetric::BLANK`].
 ///
-/// Keeping the two windows apart costs one comparison and one add in the index arithmetic and
-/// shrinks the table to 352 × 4 × 2 × 10 = 28,160 bytes, which is 5.4% of the 512 KiB ceiling
-/// rather than 145% of it. See [`slot_of`].
-pub const CODEPOINTS: usize = TEXT_CODEPOINTS + BOX_CODEPOINTS;
+/// Keeping the windows apart costs one comparison and one add each in the index arithmetic and
+/// shrinks the table to 464 × 5 × 2 × 10 = 46,400 bytes, which is 8.8% of the 512 KiB ceiling
+/// rather than 361% of it. See [`slot_of`].
+///
+/// **The operators are four windows, not one, and that is 14,600 bytes.** They were a single
+/// 0x2200..0x22C6 span first — 198 slots, one comparison — on the theory that operators are
+/// contiguous. They are not: `\approx` is at 0x2248, the relations at 0x2260, and `\cdot` at 0x22C5,
+/// so the span carried 146 slots nothing could reach for **14,600 bytes of table** at five styles and
+/// two sizes. Three extra comparisons in the least-taken path in the whole renderer is the cheap side
+/// of that trade. It also bought back the coverage height: see [`ATLAS_WIDTH`].
+///
+/// **Order matters and is asserted.** [`slot_of`] sums the *preceding* windows' sizes, so the
+/// constants' declaration order here is the layout order there. Reordering the windows without
+/// reordering `slot_of` would silently re-address every glyph after the moved one.
+pub const CODEPOINTS: usize = TEXT_CODEPOINTS
+    + GREEK_CODEPOINTS
+    + ARROW_CODEPOINTS
+    + OP_CODEPOINTS
+    + APPROX_CODEPOINTS
+    + REL_CODEPOINTS
+    + CDOT_CODEPOINTS
+    + BOX_CODEPOINTS;
 
-/// Styles in the atlas.
-pub const STYLE_COUNT: usize = 4;
+/// Styles in the atlas: four text faces plus [`payload::Style::Math`](crate::payload::Style::Math).
+///
+/// Five as of Phase 9B, and that is the other half of why [`ATLAS_HEIGHT`] moved from 480 to 448:
+/// the table is linear in this constant, so the fifth style cost 10,240 bytes of table before any
+/// new codepoint was considered. `assert_eq!(STYLE_COUNT, 5)` is in this module's tests, so adding a
+/// sixth face cannot pass without someone reading the ceiling arithmetic again.
+pub const STYLE_COUNT: usize = 5;
 
 /// The largest number of pixel sizes the atlas geometry is budgeted for.
 ///
 /// The ceiling in [`ATLAS_WIDTH`]/[`ATLAS_HEIGHT`] is only valid for a table of at most this many
-/// sizes: each extra size adds `STYLE_COUNT * CODEPOINTS * 10` = 14,080 bytes of table, and three
-/// sizes would push the pair to 533,760 — over the limit again. Enforced by
+/// sizes: each extra size adds `STYLE_COUNT * CODEPOINTS * 10` = **30,500** bytes of table, and
+/// three sizes would push the pair to 535,452 — over the limit again. Enforced by
 /// [`AtlasBuilder::new`](crate::atlas::AtlasBuilder::new) so the geometry cannot silently go over
 /// budget by asking for more sizes.
+///
+/// Was 14,080 at four styles and 352 codepoints; the arithmetic here is why the ceiling is now a
+/// real constraint on Phase 9C rather than a formality.
 pub const MAX_SIZES: usize = 2;
 
 /// The index of `codepoint` within [`CODEPOINTS`], or `None` if it is not covered.
 ///
-/// # Why two windows
+/// # Why eight windows
 ///
 /// A single contiguous window from space to the end of Box Drawing spans 9,472 codepoints of
-/// which 352 are ever drawn, and the table's size is linear in the window, so the naive choice
-/// wastes 96% of a budget that also has to hold the coverage itself. Splitting into the two
-/// ranges the coverage actually specifies costs one compare-and-add:
+/// which 464 are ever drawn, and the table's size is linear in the window, so the naive choice
+/// wastes 99.98% of a budget that also has to hold the coverage itself. Splitting into the ranges
+/// the coverage actually specifies costs one compare-and-add each:
 ///
 /// ```text
-/// slot = cp - 0x20                 if cp < 0x100
-///      = 0xE0 + (cp - 0x2500)       if 0x2500 <= cp < 0x2580
+/// slot = cp - 0x20                  if cp < 0x100
+///      = 0xE0 + (cp - 0x391)        if 0x391 <= cp < 0x3CA
+///      = 0x119 + (cp - 0x2190)      if 0x2190 <= cp < 0x2193
+///      = 0x11C + (cp - 0x2200)      if 0x2200 <= cp < 0x222C
+///      = 0x148 + (cp - 0x2248)      if 0x2248 <= cp < 0x2249
+///      = 0x149 + (cp - 0x2260)      if 0x2260 <= cp < 0x2266
+///      = 0x14F + (cp - 0x22C5)      if 0x22C5 <= cp < 0x22C6
+///      = 0x150 + (cp - 0x2500)      if 0x2500 <= cp < 0x2580
 /// ```
 ///
-/// which is branchless in the common case if the second window is placed after the first, and
-/// is the only arithmetic between the keystroke and the blit.
+/// Each offset is the sum of the preceding windows' sizes, which is why the window constants'
+/// *declaration order* is load-bearing — see [`CODEPOINTS`].
+///
+/// **The comparison order is the order codepoints arrive in, and it is deliberate.** Text is checked
+/// first because it is 99% of all lookups: a keystroke blits a text glyph, so the common path exits
+/// on the first comparison. A formula's symbol exits on the third through seventh. Branchless in the
+/// text case, and it is the only arithmetic between the keystroke and the blit.
+///
+/// **What this rejects.** A codepoint in none of the eight windows returns `None` and
+/// [`MetricTable::get`] turns that into [`GlyphMetric::BLANK`] — zero advance, nothing copied. That
+/// is how an unlisted codepoint renders as nothing rather than as a crash, and `metric.set` panics
+/// on the same input at build time, which is where the mistake should be caught. That panic is not
+/// hypothetical: it caught `\cdot` (U+22C5) sitting past the then-current operator window, which is
+/// why `END_CDOT` exists as a window of its own.
 #[inline]
 pub const fn slot_of(codepoint: u32) -> Option<usize> {
     if codepoint >= FIRST_CODEPOINT && codepoint < END_CODEPOINT {
         Some((codepoint - FIRST_CODEPOINT) as usize)
+    } else if codepoint >= FIRST_GREEK && codepoint < END_GREEK {
+        Some(TEXT_CODEPOINTS + (codepoint - FIRST_GREEK) as usize)
+    } else if codepoint >= FIRST_ARROW && codepoint < END_ARROW {
+        Some(TEXT_CODEPOINTS + GREEK_CODEPOINTS + (codepoint - FIRST_ARROW) as usize)
+    } else if codepoint >= FIRST_OP && codepoint < END_OP {
+        Some(
+            TEXT_CODEPOINTS + GREEK_CODEPOINTS + ARROW_CODEPOINTS + (codepoint - FIRST_OP) as usize,
+        )
+    } else if codepoint >= FIRST_APPROX && codepoint < END_APPROX {
+        Some(
+            TEXT_CODEPOINTS
+                + GREEK_CODEPOINTS
+                + ARROW_CODEPOINTS
+                + OP_CODEPOINTS
+                + (codepoint - FIRST_APPROX) as usize,
+        )
+    } else if codepoint >= FIRST_REL && codepoint < END_REL {
+        Some(
+            TEXT_CODEPOINTS
+                + GREEK_CODEPOINTS
+                + ARROW_CODEPOINTS
+                + OP_CODEPOINTS
+                + APPROX_CODEPOINTS
+                + (codepoint - FIRST_REL) as usize,
+        )
+    } else if codepoint >= FIRST_CDOT && codepoint < END_CDOT {
+        Some(
+            TEXT_CODEPOINTS
+                + GREEK_CODEPOINTS
+                + ARROW_CODEPOINTS
+                + OP_CODEPOINTS
+                + APPROX_CODEPOINTS
+                + REL_CODEPOINTS
+                + (codepoint - FIRST_CDOT) as usize,
+        )
     } else if codepoint >= FIRST_BOX && codepoint < END_BOX {
-        Some(TEXT_CODEPOINTS + (codepoint - FIRST_BOX) as usize)
+        Some(
+            TEXT_CODEPOINTS
+                + GREEK_CODEPOINTS
+                + ARROW_CODEPOINTS
+                + OP_CODEPOINTS
+                + APPROX_CODEPOINTS
+                + REL_CODEPOINTS
+                + CDOT_CODEPOINTS
+                + (codepoint - FIRST_BOX) as usize,
+        )
+    } else {
+        None
+    }
+}
+
+/// The codepoint [`slot_of`] maps `slot` to, or `None` if the slot is out of range.
+///
+/// The inverse of [`slot_of`], and it exists because a test needed it: `tests/phase4_gate.rs`
+/// walks the table counting non-blank entries per style, and its own helper for that -- `if slot <
+/// TEXT_CODEPOINTS { 0x20 + slot } else { 0x2500 + slot - TEXT_CODEPOINTS }` -- was correct for two
+/// windows and silently wrong for eight. Every slot from `TEXT_CODEPOINTS` onward would have been
+/// reported as a Box Drawing codepoint, so the ceiling test would have counted Greek glyphs as box
+/// drawing and reported "style Math has no glyphs at all" for a face that carries 108 of them.
+///
+/// A second implementation of an index layout is a second source of truth, and the one that disagrees
+/// is never the one under test. This is the layout, inverted, next to the layout.
+#[inline]
+pub const fn codepoint_of(slot: usize) -> Option<u32> {
+    if slot < TEXT_CODEPOINTS {
+        Some(FIRST_CODEPOINT + slot as u32)
+    } else if slot < TEXT_CODEPOINTS + GREEK_CODEPOINTS {
+        Some(FIRST_GREEK + (slot - TEXT_CODEPOINTS) as u32)
+    } else if slot < TEXT_CODEPOINTS + GREEK_CODEPOINTS + ARROW_CODEPOINTS {
+        Some(FIRST_ARROW + (slot - TEXT_CODEPOINTS - GREEK_CODEPOINTS) as u32)
+    } else if slot < TEXT_CODEPOINTS + GREEK_CODEPOINTS + ARROW_CODEPOINTS + OP_CODEPOINTS {
+        Some(FIRST_OP + (slot - TEXT_CODEPOINTS - GREEK_CODEPOINTS - ARROW_CODEPOINTS) as u32)
+    } else if slot
+        < TEXT_CODEPOINTS + GREEK_CODEPOINTS + ARROW_CODEPOINTS + OP_CODEPOINTS + APPROX_CODEPOINTS
+    {
+        Some(
+            FIRST_APPROX
+                + (slot - TEXT_CODEPOINTS - GREEK_CODEPOINTS - ARROW_CODEPOINTS - OP_CODEPOINTS)
+                    as u32,
+        )
+    } else if slot
+        < TEXT_CODEPOINTS
+            + GREEK_CODEPOINTS
+            + ARROW_CODEPOINTS
+            + OP_CODEPOINTS
+            + APPROX_CODEPOINTS
+            + REL_CODEPOINTS
+    {
+        Some(
+            FIRST_REL
+                + (slot
+                    - TEXT_CODEPOINTS
+                    - GREEK_CODEPOINTS
+                    - ARROW_CODEPOINTS
+                    - OP_CODEPOINTS
+                    - APPROX_CODEPOINTS) as u32,
+        )
+    } else if slot
+        < TEXT_CODEPOINTS
+            + GREEK_CODEPOINTS
+            + ARROW_CODEPOINTS
+            + OP_CODEPOINTS
+            + APPROX_CODEPOINTS
+            + REL_CODEPOINTS
+            + CDOT_CODEPOINTS
+    {
+        Some(
+            FIRST_CDOT
+                + (slot
+                    - TEXT_CODEPOINTS
+                    - GREEK_CODEPOINTS
+                    - ARROW_CODEPOINTS
+                    - OP_CODEPOINTS
+                    - APPROX_CODEPOINTS
+                    - REL_CODEPOINTS) as u32,
+        )
+    } else if slot < CODEPOINTS {
+        Some(
+            FIRST_BOX
+                + (slot
+                    - TEXT_CODEPOINTS
+                    - GREEK_CODEPOINTS
+                    - ARROW_CODEPOINTS
+                    - OP_CODEPOINTS
+                    - APPROX_CODEPOINTS
+                    - REL_CODEPOINTS
+                    - CDOT_CODEPOINTS) as u32,
+        )
     } else {
         None
     }
@@ -384,32 +632,44 @@ mod tests {
     /// This test used to assert `ATLAS_BYTES == 512 * 1024`. That was right while the geometry
     /// was 1024x512 and wrong afterwards, and it reported `left: 491520, right: 524288` -- a true
     /// observation about a stale expectation. The requirement is the pair, not the coverage alone.
+    ///
+    /// **Every number below moved in Phase 9B, and each is here so it cannot drift quietly:**
+    /// the height 480 → 448, the styles 4 → 5, the codepoints 352 → 464, and the table
+    /// 28,160 → 46,400. The pair went from 519,680 (99.1%, 4,608 spare) to **505,152 (96.4%,
+    /// 19,136 spare)**. It got *less* full while every one of its parts grew, because the coverage
+    /// gave up 32,768 bytes to pay for 18,240 bytes of table.
     #[test]
     fn atlas_and_table_share_the_512_kib_ceiling() {
         let ceiling = 512 * 1024;
         assert_eq!(ATLAS_WIDTH, 1024);
-        assert_eq!(ATLAS_HEIGHT, 480);
+        assert_eq!(ATLAS_HEIGHT, 448);
         assert_eq!(ATLAS_STRIDE, ATLAS_WIDTH as usize);
         assert_eq!(ATLAS_BYTES, ATLAS_STRIDE * ATLAS_HEIGHT as usize);
-        assert_eq!(ATLAS_BYTES, 491_520);
+        assert_eq!(ATLAS_BYTES, 458_752);
 
         let table = MAX_SIZES * STYLE_COUNT * CODEPOINTS * size_of::<GlyphMetric>();
         assert_eq!(
-            table, 28_160,
-            "2 sizes x 4 styles x 352 codepoints x 10 bytes"
+            table, 46_400,
+            "2 sizes x 5 styles x 464 codepoints x 10 bytes"
         );
         assert_eq!(
             ATLAS_BYTES + table,
-            519_680,
-            "the pair must fit, with 4,608 bytes of headroom"
+            505_152,
+            "the pair must fit, with 19,136 bytes of headroom"
         );
         assert!(ATLAS_BYTES + table <= ceiling);
 
         // Guard the mistake this geometry exists to avoid: a 512x512 A8 atlas is 256 KiB, half the
         // ceiling, and reading the requirement as "the atlas is 512 KiB" would have passed on it.
         assert_eq!(512 * 512, 262_144);
-        assert_eq!(CODEPOINTS, 352, "224 Latin-1 window + 128 Box Drawing");
-        assert_eq!(STYLE_COUNT, 4);
+        assert_eq!(
+            CODEPOINTS, 464,
+            "224 Latin-1 + 57 Greek + 3 arrows + 44 ops + 1 approx + 6 relations + 1 cdot + 128 Box Drawing"
+        );
+        assert_eq!(
+            STYLE_COUNT, 5,
+            "four text faces plus Style::Math; a sixth would not fit under this ceiling"
+        );
     }
 
     #[test]
