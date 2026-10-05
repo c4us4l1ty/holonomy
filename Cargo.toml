@@ -8,6 +8,7 @@ members = [
     "crates/holonomy-display",
     "crates/holonomy-export",
     "crates/holonomy-geometry",
+    "crates/holonomy-image",
     "crates/holonomy-input",
     "crates/holonomy-jail",
     "crates/holonomy-render",

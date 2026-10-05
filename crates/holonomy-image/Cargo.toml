@@ -1,0 +1,21 @@
+[package]
+name = "holonomy-image"
+description = "The Phase 9C PNG decoder, the integer scaler and the Iceberg decoded-image cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# PROJECT.md §2.9.5: "No `png` crate. Hand-written chunk reader plus `miniz_oxide`."
+# §2.9.1 budgets the whole decoder at 60 KiB of binary; `png` proper is 80-120 KiB with
+# `flate2` and `crc32fast` dragged in, which is both over budget and harder to defend.
+miniz_oxide = "0.9"
+# The cache holds rasters in `SecureBlock`s, which is what lets an eviction *prove* the pixels are
+# gone rather than merely drop them. Phase 9C uses `LockPolicy::Unlocked` for these.
+holonomy-secure = { path = "../holonomy-secure" }
+holonomy-jail = { path = "../holonomy-jail" }
+
+[dev-dependencies]
+libc = "0.2"
