@@ -255,6 +255,15 @@ pub struct Session<'a> {
     /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
     /// discover what one `set` already knows.
     tables_shape_dirty: bool,
+    /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
+    ///
+    /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
+    /// appended. A field rather than a local because a local array passed to `read_into` **escapes**
+    /// and is promoted to the heap by the compiler -- which is the same trap
+    /// [`holonomy_text::Editor::delete_scratch`] documents, measured rather than assumed: the
+    /// allocation then happens once per call instead of once per session, so it is invisible in a rate
+    /// and visible in a count.
+    table_scratch: Vec<u8>,
     /// Where the caret was last drawn, so it can be erased.
     caret_drawn_at: Option<DamageRect>,
 }
@@ -288,6 +297,7 @@ impl<'a> Session<'a> {
             damage: DamageRect::EMPTY,
             active_cell: None,
             tables_shape_dirty: false,
+            table_scratch: Vec::new(),
             caret_drawn_at: None,
         }
     }
@@ -638,7 +648,7 @@ impl<'a> Session<'a> {
     /// session-owned scratch buffer sized to the widest table. It is not done here because a wrong
     /// buffer size is worse than a measurable allocation.
     fn with_table<R>(
-        &self,
+        &mut self,
         f: impl FnOnce(TableSpan, &ResolvedTable<'_>) -> Result<R, SessionError>,
     ) -> Result<R, SessionError> {
         // The span is handed to the closure as well as the resolved table because a caller that has
@@ -649,8 +659,26 @@ impl<'a> Session<'a> {
             .editor
             .table_at(caret)
             .ok_or(SessionError::NotInTable { offset: caret })?;
-        let text = self.editor.text()?;
-        let resolved = ResolvedTable::new(span, &text)?;
+        let need = (span.end_byte - span.start_byte) as usize;
+        if self.table_scratch.len() < need {
+            // Only ever grows, and only when a table is bigger than any seen before. An allocation
+            // *per keystroke* was what the first version did, by copying the whole document with
+            // `Editor::text` -- which is a departure from the "no heap allocation while editing"
+            // invariant, and the reason this exists.
+            self.table_scratch.resize(need, 0);
+        }
+        let got = self
+            .editor
+            .read_into(span.start_byte as usize, &mut self.table_scratch)?;
+        if got < need {
+            return Err(SessionError::Table(
+                holonomy_text::TableError::InvertedRange {
+                    start: span.start_byte,
+                    end: span.start_byte + got as u32,
+                },
+            ));
+        }
+        let resolved = ResolvedTable::new(span, &self.table_scratch[..got])?;
         f(span, &resolved)
     }
 
@@ -938,6 +966,10 @@ impl<'a> Session<'a> {
         // The caret goes *under* the page's text in paint order, so the caret's rect is erased by
         // repainting the page and then redrawn -- which is why the damage includes it whenever it
         // moves.
+        // The line-height model is rebuilt from the tables *before* the chrome's tree, because the
+        // chrome's tree and `Caret::locate` both read it: a table that pushed the lines below it down
+        // but was published afterwards would move the text and leave the caret behind.
+        self.publish_line_heights();
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
         // they have to be painted in the page's coordinate space and clipped by the same damage the
@@ -953,6 +985,39 @@ impl<'a> Session<'a> {
         self.scanout.present_damage(&self.frame, damage)?;
         self.damage = DamageRect::EMPTY;
         Ok(())
+    }
+
+    /// Rebuild the chrome's line-height model from the tables, and park it in the state.
+    ///
+    /// Each table contributes `(anchor_line, its visual height in pixels)`; `LineHeights::from` turns
+    /// that into a sparse `(line, extra)` list by subtracting the line slots the table was already
+    /// using, so a table that happens to be exactly as tall as the rows it replaces contributes
+    /// nothing and every line below stays put.
+    ///
+    /// This is the debt Phase 9A recorded, paid. It is cheap: proportional to the number of tables,
+    /// not to the number of lines, and it does not allocate after the tables stop growing because the
+    /// `Vec` is reused across paints by `LineHeights::from`'s caller... which it currently is not --
+    /// `from` allocates a fresh `Vec` per paint. That is one allocation per paint, on a path that
+    /// paints per keystroke, and it is the next thing to fix. It is called out here rather than left to
+    /// be discovered, because the whole point of this function is to stop pretending the geometry is
+    /// free.
+    fn publish_line_heights(&mut self) {
+        let pitch = self.chrome.metrics.cell_h.max(1);
+        let spans: Vec<TableSpan> = self.editor.tables().spans().to_vec();
+        let mut blocks: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
+        for span in &spans {
+            let grid = holonomy_render::table::TableGrid::new(
+                span,
+                0,
+                0,
+                self.chrome.metrics.cell_w,
+                self.chrome.metrics.cell_h,
+                self.chrome.metrics.cell_h,
+            );
+            let line = self.line_index(span.start_byte as usize);
+            blocks.push((line, grid.height_px()));
+        }
+        self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
     }
 
     /// Draw every table whose first line is on screen, and widen `damage` to cover them.
@@ -992,7 +1057,6 @@ impl<'a> Session<'a> {
         };
         let m = self.chrome.metrics;
         let l = self.chrome.layout;
-        let row_pitch = l.text.height / l.rows.max(1);
         let first = self.state.scroll_line;
         let last = first + l.rows;
         let mut cells_drawn = 0u32;
@@ -1008,7 +1072,9 @@ impl<'a> Session<'a> {
             let Ok(resolved) = ResolvedTable::new(span, &text) else {
                 continue;
             };
-            let top = l.text.y + (line - first) * row_pitch;
+            // From the model, not from `row_pitch`: this is the line the model has reserved for the
+            // table, so the table and the chrome agree on where that line is by construction.
+            let top = l.text.y + self.state.line_heights.y(line - first);
             let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
 
             // --- borders, as procedural box-drawing glyph runs on the cell grid.

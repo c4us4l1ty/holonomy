@@ -13,7 +13,9 @@
 //!   answer, must all be the caret's rect and their union must equal it. This is the FR-3.4 property
 //!   and the reason `Blink::advance` returns a `DamageRect` rather than a `bool`.
 
-use holonomy_render::chrome::{self, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout};
+use holonomy_render::chrome::{
+    self, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, LineHeights,
+};
 use holonomy_render::{DamageRect, Node, NodeKind};
 
 // ---------------------------------------------------------------- geometry
@@ -418,6 +420,11 @@ fn the_caret_sits_on_its_column_and_row() {
         let state = ChromeState {
             caret_line: line,
             caret_column: column,
+            // The line model carries the pitch, and `ChromeState::default()` has a pitch of **zero**
+            // because it has no `ChromeMetrics` to take one from. This test caught that: with a zero
+            // pitch every line landed at y=0 and the caret sat on the first row of the page. So a
+            // state that is going to be used for a caret lookup has to say what a line is tall.
+            line_heights: LineHeights::uniform(m.cell_h),
             ..ChromeState::default()
         };
         let caret = Caret::locate(&c.layout, &m, &state).expect("on screen");

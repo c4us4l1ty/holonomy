@@ -21,8 +21,8 @@ pub mod chrome;
 pub mod table;
 
 pub use chrome::{
-    AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, StyleFlags,
-    StyleFlagsSlot,
+    AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, LineHeights,
+    StyleFlags, StyleFlagsSlot,
 };
 pub use damage::{DamageRect, DamageTracker};
 pub use table::{BorderIter, BorderRun, GridError, TableGrid};

@@ -403,6 +403,148 @@ pub enum StyleFlagsSlot {
     Heading,
 }
 
+/// Per-line vertical geometry, as a uniform pitch plus a sparse table of extra heights.
+///
+/// # Why this exists, and what it is not fixing
+///
+/// Phase 9A put a table on the page as a block anchored at its document line, and recorded a debt:
+/// "lines *below* it are not offset by its height, so text after a tall table overlaps its last row."
+/// **That claim was wrong about the present and right about the future.** `Chrome::tree` draws no
+/// document body text at all -- the page behind the chrome is blank -- so there is nothing to overlap
+/// yet. What is missing is not a fix but the shared model that a fix would need, built now so that
+/// when body text arrives it lands in the right row for free.
+///
+/// So: every line is `pitch` pixels tall, except the lines listed in `extras`, which are `pitch + n`
+/// tall. A table contributes its whole visual height at its anchor line, so everything below moves
+/// down by the difference between what the table needs and the lines it was using.
+///
+/// # Why a sparse table rather than a `Vec<u32>` per line
+///
+/// A 2000-page document has tens of thousands of lines and, in scope, a handful of tables. A dense
+/// vector is tens of thousands of `u32`s to answer a question that has one non-zero entry per table,
+/// and it has to be rebuilt on every keystroke because an insertion moves every line index after it.
+/// A sparse `(line, extra)` list is proportional to the number of *tables*, which is what actually
+/// changes shape.
+///
+/// # Exactness
+///
+/// `u32` throughout, and `y` is a prefix sum of whole pixels. There is no rounding and no
+/// interpolation, so "the line below a 4-row table starts at y" is a number rather than a tolerance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineHeights {
+    /// Every line's base height in pixels. Normally the text cell height.
+    pub pitch: u32,
+    /// Extra pixels at `(line, pixels)`, ascending by line. Not required to be sorted by the caller:
+    /// `from_tables` sorts, and `y` assumes sorted.
+    pub extras: Vec<(u32, u32)>,
+}
+
+impl LineHeights {
+    /// A uniform model: every line `pitch` tall.
+    pub const fn uniform(pitch: u32) -> Self {
+        Self {
+            pitch,
+            extras: Vec::new(),
+        }
+    }
+
+    /// The height of `line` itself.
+    pub fn height(&self, line: u32) -> u32 {
+        self.pitch + self.extra_at(line)
+    }
+
+    /// The extra at `line`, or zero. Binary search, because `extras` is sorted.
+    ///
+    /// A linear scan would be three or four comparisons in scope and `O(n)` in a document with many
+    /// tables, on a path that the caret lookup takes on **every** frame. The sort in [`Self::from`]
+    /// is what makes the search valid; `LineHeights` is public, so a caller that constructs one by
+    /// hand with unsorted `extras` gets wrong answers -- which is why `extras` is documented as
+    /// ascending rather than left implicit.
+    fn extra_at(&self, line: u32) -> u32 {
+        match self.extras.binary_search_by_key(&line, |&(l, _)| l) {
+            Ok(at) => self.extras[at].1,
+            Err(_) => 0,
+        }
+    }
+
+    /// The y of `line`'s top, relative to the text rectangle.
+    ///
+    /// `line * pitch` plus every extra at or before it. A table's extra is at its **anchor** line, so
+    /// the table itself occupies that line's slot and everything below it moves down -- which is the
+    /// whole point.
+    pub fn y(&self, line: u32) -> u32 {
+        let base = line.saturating_mul(self.pitch);
+        let mut extra = 0u32;
+        for &(l, px) in &self.extras {
+            if l <= line {
+                extra = extra.saturating_add(px);
+            } else {
+                break;
+            }
+        }
+        base.saturating_add(extra)
+    }
+
+    /// The total height of `lines` lines.
+    pub fn total(&self, lines: u32) -> u32 {
+        self.y(lines)
+    }
+
+    /// The model a set of blocks implies.
+    ///
+    /// `blocks` is `(anchor_line, visual_height_px)`, one per table, in document order.
+    ///
+    /// # The extra **is** the height, and the net-subtracting version was wrong
+    ///
+    /// The obvious reading is that a table of `rows` rows was already using `rows` line slots and so
+    /// only needs to report the difference. It cannot work, because `from` is handed **pixels**, not a
+    /// row count: it has no way to know how many slots the table was notionally occupying, so it
+    /// recomputes `ceil(height / pitch)` and subtracts that -- which is **zero** for every height that
+    /// is a whole number of slots. The gate caught it: a 9-slot, 162 px table reported an extra of 0,
+    /// and no line below it moved.
+    ///
+    /// The correct model is simpler and needs no row count. A table anchored at line `L` occupies
+    /// `[L * pitch, L * pitch + height)`, so **every line from `L` onward moves down by the full
+    /// height**, including `L` itself -- otherwise the table is drawn over the first line of text
+    /// after it. [`Self::slots_for`] remains the right way to ask how many lines a block *covers*,
+    /// which is a different question, used for scroll extents rather than displacement.
+    ///
+    /// Two blocks on one line add, rather than the second overwriting the first.
+    pub fn from(pitch: u32, blocks: &[(u32, u32)]) -> Self {
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(blocks.len());
+        for &(line, height) in blocks {
+            if height == 0 {
+                // A block with no height displaces nothing, and recording `(line, 0)` would put an
+                // entry into a list that `extra_at` binary-searches on every caret lookup.
+                continue;
+            }
+            match merged.iter_mut().find(|(l, _)| *l == line) {
+                Some((_, px)) => *px = px.saturating_add(height),
+                None => merged.push((line, height)),
+            }
+        }
+        merged.sort_by_key(|&(l, _)| l);
+        Self {
+            pitch,
+            extras: merged,
+        }
+    }
+
+    /// How many line slots a block of `height` pixels covers, rounded up.
+    ///
+    /// Ceiling rather than floor, because a block that is 2.5 pitches tall still displaces three
+    /// lines' worth of following text, not two. Rounding down would let the last line of text sit
+    /// inside the block's last quarter.
+    pub const fn slots_for(height: u32, pitch: u32) -> u32 {
+        if pitch == 0 {
+            return 0;
+        }
+        // `u32::from(bool)` is not a `const fn` on this toolchain (rust-lang/rust#143874), so the
+        // ceiling is spelled out. Both operands are already `u32` and `pitch` is non-zero here.
+        height / pitch + if height % pitch == 0 { 0 } else { 1 }
+    }
+}
+
 /// What the chrome displays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChromeState {
@@ -430,6 +572,22 @@ pub struct ChromeState {
     pub styles: StyleFlags,
     /// Whether the caret is currently drawn. Driven by [`Blink`].
     pub caret_visible: bool,
+    /// Per-line vertical geometry, so a table pushes the lines below it down.
+    ///
+    /// Owned by the chrome rather than passed alongside it because the *caret* needs it: `Caret::locate`
+    /// takes a `ChromeState` and nothing else, so a caret below a tall table would be placed at the
+    /// uniform-pitch row -- the same overlap the model exists to prevent, one line up and one caret to
+    /// the left of where it should be.
+    ///
+    /// # The default is a zero pitch, and that is a trap
+    ///
+    /// `Default` cannot know a pitch, so it uses `LineHeights::uniform(0)`, and a state left at the
+    /// default puts **every** line at `y = 0` -- so `Caret::locate` puts the caret on the page's first
+    /// row whatever `caret_line` says. That is not hypothetical: it broke
+    /// `the_caret_sits_on_its_column_and_row` the moment this field was added, which is the only
+    /// reason it is written down here. A state used for a caret lookup **must** carry a real pitch;
+    /// `Session` does, from `ChromeMetrics::cell_h`, on every paint.
+    pub line_heights: LineHeights,
 }
 
 impl Default for ChromeState {
@@ -447,6 +605,7 @@ impl Default for ChromeState {
             total_lines: 1,
             styles: StyleFlags::default(),
             caret_visible: true,
+            line_heights: LineHeights::uniform(0),
         }
     }
 }
@@ -477,7 +636,10 @@ impl Caret {
     /// draw a caret in the wrong place, which is worse than drawing none.
     pub fn locate(layout: &Layout, m: &ChromeMetrics, state: &ChromeState) -> Option<Self> {
         let row = state.caret_line.checked_sub(state.scroll_line)?;
-        let y = layout.text.y.checked_add(row.checked_mul(m.cell_h)?)?;
+        // `row * cell_h` plus whatever extras the model carries at or before this line, rather than
+        // the uniform product. With no tables the extras are empty and this is the old expression, so
+        // the caret is in the same place it always was.
+        let y = layout.text.y.checked_add(state.line_heights.y(row))?;
         if row >= layout.rows || state.caret_column >= m.columns {
             return None;
         }
