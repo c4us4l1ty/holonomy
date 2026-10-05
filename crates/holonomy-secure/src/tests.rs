@@ -5,7 +5,7 @@
 //! only thing that makes a `SecureBlock` different from a `Vec<u8>` that happens to be
 //! page-locked.
 
-use super::{page_size, SecureBlock, SecureBlockError};
+use super::{page_size, LockPolicy, SecureBlock, SecureBlockError};
 use std::ptr;
 
 /// The child reached `_exit` having successfully read the byte.
@@ -258,4 +258,81 @@ fn debug_does_not_leak_contents() {
         rendered.contains("len"),
         "Debug should still be useful: {rendered}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9C: the two lock policies.
+//
+// The load-bearing test is `the_lock_policies_differ_only_in_whether_mlock_is_called`,
+// because the justification for `LockPolicy::Unlocked` is arithmetic about a shared,
+// finite budget (`RLIMIT_MEMLOCK` is already spent by document text) and an arithmetic
+// claim that is not measured is the kind that rots.
+//
+// **Not probed with `mincore`.** An earlier version of this test did, and it was wrong:
+// `mincore` reports whether a page is *resident*, and an unlocked page in the page cache
+// is resident. It cannot answer "is this locked" at all, so the `PageLocked` assertion
+// failed against a genuinely locked block. The observable that *is* the property is
+// whether `mlock` succeeds once the budget is gone.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_block_reports_the_policy_it_was_built_with() {
+    let locked = SecureBlock::allocate(4096).expect("allocate");
+    assert_eq!(
+        locked.policy(),
+        LockPolicy::PageLocked,
+        "allocate() must stay the page-locked spelling, so adding the policy cannot silently \
+         un-mlock a document's text"
+    );
+    assert!(locked.is_locked());
+
+    let unlocked = SecureBlock::allocate_with(4096, LockPolicy::Unlocked).expect("allocate");
+    assert_eq!(unlocked.policy(), LockPolicy::Unlocked);
+    assert!(!unlocked.is_locked());
+    // The policy is a recorded field, not a `mincore` probe, so it cannot report a policy the
+    // block was not built with.
+    assert_eq!(unlocked.policy(), LockPolicy::Unlocked);
+}
+
+#[test]
+fn an_unlocked_block_still_scrubs_and_still_registers() {
+    // The image cache relies on both: eviction must be able to *prove* the pixels are gone, and
+    // the guard-page tripwire must be able to scrub the block if a fault happens mid-paint.
+    let before = holonomy_jail::registry::active_count();
+    let mut block = SecureBlock::allocate_with(4096, LockPolicy::Unlocked).expect("allocate");
+    block.as_mut_slice().fill(0xAB);
+    assert!(
+        block.as_slice().iter().all(|&b| b == 0xAB),
+        "an Unlocked block must be writable"
+    );
+    assert_eq!(
+        holonomy_jail::registry::active_count(),
+        before + 1,
+        "an Unlocked block must be registered with the tripwire like any other: the guard-page \
+         tripwire is what makes an Unlocked block's contents guaranteed-gone rather than \
+         probably-gone"
+    );
+    assert_eq!(block.zeroize_and_release(), 4096);
+    assert!(
+        block.as_slice().iter().all(|&b| b == 0),
+        "zeroize_and_release must scrub an Unlocked block exactly as it does a locked one; this is \
+         the call eviction makes and the gate the cache asserts on"
+    );
+    drop(block);
+    assert_eq!(
+        holonomy_jail::registry::active_count(),
+        before,
+        "dropping must deregister"
+    );
+}
+
+#[test]
+fn a_zero_length_block_is_refused_under_either_policy() {
+    for policy in [LockPolicy::PageLocked, LockPolicy::Unlocked] {
+        assert_eq!(
+            SecureBlock::allocate_with(0, policy).unwrap_err(),
+            SecureBlockError::ZeroLength,
+            "{policy:?} must refuse zero length rather than map a region with no data page"
+        );
+    }
 }

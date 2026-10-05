@@ -23,8 +23,37 @@
 //! window but neither is a guarantee. The guard pages *are* the guarantee, and they are
 //! the only part of this type that can be asserted.
 //!
-//! Lands in Phase 1. Gate: `cargo test -p holonomy-secure`, including a test that
-//! allocates 4096 bytes and proves both neighbouring pages fault.
+//! # Two lock policies, because `mlock` is a shared global budget
+//!
+//! [`LockPolicy::PageLocked`] is the default and everything except Phase 9C's image rasters uses
+//! it. `mlock` is the strongest of the four hardening calls -- it is what stops plaintext reaching
+//! swap -- so it is the right default and it stays the default.
+//!
+//! It is also *process-wide and finite*, and that is a budget that has to be spent rather than
+//! assumed. Measured on this host on 2026-10-05, with `RLIMIT_MEMLOCK` soft = hard = 8,388,608 B:
+//!
+//! | consumer | page lock |
+//! |---|---|
+//! | a full 2000-page text budget, 1,747 rope leaves at 4 KiB | 6.82 MiB |
+//! | headroom left for anything else | **1.18 MiB** |
+//! | one page-column-width RGBA raster, 640x360x4 | 0.88 MiB |
+//!
+//! So the text budget alone leaves room for **one** decoded raster, while PROJECT.md §2.9.3's
+//! design wants 9.1 of them (8.0 MiB / 0.88 MiB) to make the +/-1-page policy a policy rather than
+//! a formality. The two requirements cannot both hold: 6.82 + 8.0 = 14.8 MiB against an 8 MiB
+//! ceiling, and `raise_memlock_to_hard_limit` cannot help because soft already equals hard here.
+//!
+//! [`LockPolicy::Unlocked`] therefore drops *only* the `mlock` for rasters, keeping the guard pages,
+//! `MADV_DONTDUMP` and `MADV_DONTFORK`. **The traded property, stated plainly: a decoded raster can
+//! reach swap.** What is *not* traded: a stray pointer still faults instead of corrupting, the
+//! pixels are still absent from a core dump, and they are still not inherited by a child. And the
+//! loss is smaller than it looks, because a raster is *derived*: the container holds the original
+//! encrypted bytes, so a raster on swap is a decrypted downscale of data the process can re-fetch
+//! and re-decrypt. A document's *text* has no such property -- it is not in the container in
+//! plaintext -- which is why text keeps `mlock` and rasters do not.
+//!
+//! Lands in Phase 1, with the policy added in Phase 9C. Gate: `cargo test -p holonomy-secure`,
+//! including a test that allocates 4096 bytes and proves both neighbouring pages fault.
 //! See PROJECT.md §5 Phase 1 and PRD §8.1 TC-MEM-02.
 
 use core::ptr;
@@ -81,6 +110,24 @@ impl core::fmt::Display for SecureBlockError {
 
 impl std::error::Error for SecureBlockError {}
 
+/// Whether a [`SecureBlock`]'s pages are `mlock`ed.
+///
+/// Added in Phase 9C. See the module docs, "Two lock policies, because `mlock` is a shared
+/// global budget", for the measurement that forced the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LockPolicy {
+    /// `mlock` the data region: plaintext cannot reach swap. **The default**, and what document
+    /// text uses.
+    #[default]
+    PageLocked,
+    /// Skip `mlock`. The guard pages, `MADV_DONTDUMP` and `MADV_DONTFORK` all still apply; only
+    /// the swap guarantee is given up.
+    ///
+    /// For data that is *derived* and re-derivable from an encrypted store, so that swap
+    /// disclosure costs confidentiality of a cache entry rather than of the document.
+    Unlocked,
+}
+
 /// A page-locked, guard-bounded, scrub-on-drop byte buffer.
 ///
 /// Not `Clone` and not `Copy`: duplicating the contents of a `SecureBlock` would defeat
@@ -92,6 +139,11 @@ pub struct SecureBlock {
     len: usize,
     /// Total mapped length including both guard pages. Passed to `munmap`.
     total: usize,
+    /// Whether the data region is `mlock`ed.
+    ///
+    /// Recorded rather than re-derived so `is_locked` is a field read and not a second `getrlimit`
+    /// plus a `mincore` probe, and so a block cannot report a policy it was not built with.
+    policy: LockPolicy,
     /// This block's slot in the jail's registry of scrubbable mappings.
     ///
     /// Phase 7. Not an `Option`: `allocate` registers before it returns, and a failure to
@@ -130,6 +182,16 @@ impl SecureBlock {
     /// `len` need not be a multiple of the page size; the data region is rounded up and
     /// the returned slice is exactly `len` bytes, so the padding is never observable.
     pub fn allocate(len: usize) -> Result<Self, SecureBlockError> {
+        Self::allocate_with(len, LockPolicy::PageLocked)
+    }
+
+    /// Allocate a guard-bounded block of `len` bytes under `policy`.
+    ///
+    /// The only difference between the two policies is whether `mlock` is called; every other
+    /// property -- guard pages, `MADV_DONTDUMP`, `MADV_DONTFORK`, registry membership, scrub on
+    /// drop -- is identical. See [`LockPolicy`] for why the split exists, and for the measurement
+    /// that forced it.
+    pub fn allocate_with(len: usize, policy: LockPolicy) -> Result<Self, SecureBlockError> {
         if len == 0 {
             return Err(SecureBlockError::ZeroLength);
         }
@@ -177,7 +239,7 @@ impl SecureBlock {
         // The fix is structural rather than a flag: `initialise` returns the error and `allocate` owns
         // the single unmapping path, so there is only ever one `Drop` per mapping and it only ever runs on
         // a mapping that was never released. Leaking is no longer possible because the `?` is gone.
-        if let Err(e) = initialise(base, page, data_len) {
+        if let Err(e) = initialise(base, page, data_len, policy) {
             // SAFETY: `base`/`total` are the live mapping and nothing else holds a reference to it.
             unsafe { libc::munmap(base.cast(), total) };
             return Err(e);
@@ -210,8 +272,22 @@ impl SecureBlock {
             base,
             len,
             total,
+            policy,
             registry,
         })
+    }
+
+    /// The policy this block was allocated under.
+    ///
+    /// A field read, not a `mincore` probe: the block records what it was built with, so a
+    /// caller cannot be told `PageLocked` for a block that is not.
+    pub fn policy(&self) -> LockPolicy {
+        self.policy
+    }
+
+    /// Whether this block's pages are `mlock`ed against swap.
+    pub fn is_locked(&self) -> bool {
+        self.policy == LockPolicy::PageLocked
     }
 
     /// Pointer to the first data byte. Never null for a live block.
@@ -291,8 +367,13 @@ unsafe impl Sync for SecureBlock {}
 /// A **free function**, not a method, and that is the point. As a method on `&self` it could only be
 /// called on an already-constructed `SecureBlock`, so every failure path had to `munmap` a mapping that
 /// the caller's `Drop` would then unmap *again* -- and scrub into the gap on the way. See
-/// [`SecureBlock::allocate`] for how that segfaulted on every `mlock` failure.
-fn initialise(base: *mut u8, page: usize, data_len: usize) -> Result<(), SecureBlockError> {
+/// [`SecureBlock::allocate_with`] for how that segfaulted on every `mlock` failure.
+fn initialise(
+    base: *mut u8,
+    page: usize,
+    data_len: usize,
+    policy: LockPolicy,
+) -> Result<(), SecureBlockError> {
     let data = unsafe { base.add(page) };
 
     // Make the data region accessible. The guards stay PROT_NONE.
@@ -306,8 +387,12 @@ fn initialise(base: *mut u8, page: usize, data_len: usize) -> Result<(), SecureB
     // NFR-3: this block must never reach swap. This is the call that fails on a host with a low
     // RLIMIT_MEMLOCK, which is why the error is surfaced rather than logged and ignored.
     //
+    // Skipped entirely under `LockPolicy::Unlocked`, which is the whole point of that policy:
+    // `RLIMIT_MEMLOCK` is a process-wide budget that document text has already spent, and a
+    // derived raster is not worth the swap guarantee it would cost the document. See `LockPolicy`.
+    //
     // SAFETY: region is mapped and writable.
-    if unsafe { libc::mlock(data.cast(), data_len) } != 0 {
+    if policy == LockPolicy::PageLocked && unsafe { libc::mlock(data.cast(), data_len) } != 0 {
         return Err(SecureBlockError::MlockFailed);
     }
 
@@ -371,6 +456,7 @@ impl core::fmt::Debug for SecureBlock {
         f.debug_struct("SecureBlock")
             .field("len", &self.len)
             .field("mapped_len", &self.mapped_len())
+            .field("policy", &self.policy)
             .finish_non_exhaustive()
     }
 }
