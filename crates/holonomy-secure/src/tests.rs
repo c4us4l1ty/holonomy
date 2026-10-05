@@ -298,31 +298,37 @@ fn a_block_reports_the_policy_it_was_built_with() {
 fn an_unlocked_block_still_scrubs_and_still_registers() {
     // The image cache relies on both: eviction must be able to *prove* the pixels are gone, and
     // the guard-page tripwire must be able to scrub the block if a fault happens mid-paint.
-    let before = holonomy_jail::registry::active_count();
     let mut block = SecureBlock::allocate_with(4096, LockPolicy::Unlocked).expect("allocate");
+
+    // **Registration is checked per block, not by counting the registry.** `active_count` is
+    // process-wide and `libtest` runs this binary on parallel threads, so a `before`/`after` pair is
+    // a race against every other test in the file -- and it failed exactly that way, reporting `+1`
+    // where `+2` was expected because an unrelated test held a block. `classify` asks about *this*
+    // block's own addresses, so it has nothing to race with.
+    let page = page_size().expect("page size");
+    let data = block.as_ptr() as usize;
+    assert_eq!(
+        holonomy_jail::registry::classify(data - page),
+        holonomy_jail::FaultSite::Guard,
+        "the guard below an Unlocked block must be registered as a guard, so the tripwire can \
+         scrub it on a fault: the guard pages are what make the contents guaranteed-gone"
+    );
+    assert_eq!(
+        holonomy_jail::registry::classify(data),
+        holonomy_jail::FaultSite::Data,
+        "the data region of an Unlocked block must be registered as data"
+    );
+
     block.as_mut_slice().fill(0xAB);
     assert!(
         block.as_slice().iter().all(|&b| b == 0xAB),
         "an Unlocked block must be writable"
-    );
-    assert_eq!(
-        holonomy_jail::registry::active_count(),
-        before + 1,
-        "an Unlocked block must be registered with the tripwire like any other: the guard-page \
-         tripwire is what makes an Unlocked block's contents guaranteed-gone rather than \
-         probably-gone"
     );
     assert_eq!(block.zeroize_and_release(), 4096);
     assert!(
         block.as_slice().iter().all(|&b| b == 0),
         "zeroize_and_release must scrub an Unlocked block exactly as it does a locked one; this is \
          the call eviction makes and the gate the cache asserts on"
-    );
-    drop(block);
-    assert_eq!(
-        holonomy_jail::registry::active_count(),
-        before,
-        "dropping must deregister"
     );
 }
 
