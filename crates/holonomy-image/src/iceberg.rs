@@ -295,12 +295,27 @@ impl IcebergCache {
 
     /// Evict every entry not covered by `keep`, scrubbing each synchronously.
     ///
-    /// `keep` is the ±1-page set: the caller passes the pages near the viewport. Returns the number
-    /// of entries evicted and the bytes they held, so a frame can record the eviction the way it
-    /// records the paint.
-    pub fn set_window(&mut self, keep: &[u32]) -> (u32, usize) {
-        let mut evicted = 0u32;
-        let mut freed = 0usize;
+    /// `keep` is the ±1-page set: the caller passes the pages near the viewport.
+    ///
+    /// # Why the evicted rasters are *returned* rather than dropped
+    ///
+    /// §2.9.3 requires eviction to be "synchronous, and observably, so the gate can assert it". A
+    /// scrub followed by an immediate `drop` satisfies the first half and destroys the second: once the
+    /// `SecureBlock` is unmapped there is nothing left to read, so a gate can only measure the *absence*
+    /// of pixels and infer the scrub happened. Deleting the `zeroize_and_release()` call from
+    /// [`set_window`] left every test in this file passing.
+    ///
+    /// So the victims are handed back **already scrubbed**, and the caller releases them by dropping
+    /// them. `pixels()` on a returned entry is `read_at_eviction_time`, and it is all zeroes. That
+    /// makes the scrub a structural property of the return value rather than a promise in a comment:
+    /// `every_evicted_raster_is_scrubbed_to_zero_before_it_is_released` reads those bytes, and
+    /// `every_evicted_raster_is_scrubbed_to_zero_before_it_is_released`'s mutation -- removing the
+    /// scrub call -- makes it fail.
+    ///
+    /// The cost is that the caller now holds a `Vec<Entry>` for the frame. That is zero entries in the
+    /// common case, and dropping it is one `munmap` per raster either way.
+    pub fn set_window(&mut self, keep: &[u32]) -> Evicted {
+        let mut out = Evicted::default();
         let mut i = 0usize;
         while i < self.entries.len() {
             if keep.contains(&self.entries[i].page) {
@@ -312,14 +327,35 @@ impl IcebergCache {
             // Scrub *before* the memory is released and before the next frame is painted.
             victim.block.zeroize_and_release();
             self.resident -= bytes;
-            freed += bytes;
-            evicted += 1;
+            out.bytes += bytes;
+            out.count += 1;
+            out.rasters.push(victim);
         }
-        (evicted, freed)
+        out
     }
 
-    /// Evict everything, scrubbing synchronously. Returns `(entries, bytes)`.
-    pub fn clear(&mut self) -> (u32, usize) {
+    /// Evict everything, scrubbing synchronously.
+    pub fn clear(&mut self) -> Evicted {
         self.set_window(&[])
+    }
+}
+
+/// What one eviction removed, handed back so the scrub is observable.
+///
+/// See [`IcebergCache::set_window`] for why the rasters come back rather than being dropped.
+#[derive(Debug, Default)]
+pub struct Evicted {
+    /// How many rasters were evicted.
+    pub count: u32,
+    /// Total bytes they held, for a frame's record of the eviction.
+    pub bytes: usize,
+    /// The evicted rasters, **already scrubbed to zero**. Drop this to release the memory.
+    pub rasters: Vec<Entry>,
+}
+
+impl Evicted {
+    /// Whether nothing was evicted.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 }

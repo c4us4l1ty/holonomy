@@ -35,6 +35,7 @@ pub mod png;
 pub mod scale;
 
 pub use error::{PngError, Result};
+pub use iceberg::{CacheError, Entry, IcebergCache, DEFAULT_BUDGET};
 pub use inflate::decoded_len;
 pub use png::Header;
 pub use scale::{resample, Rgba};
