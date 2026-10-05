@@ -282,8 +282,11 @@ pub(crate) fn walk(png: &[u8]) -> Result<Chunks<'_>> {
                 if header.is_some() {
                     return Err(PngError::DuplicateChunk { chunk: "IHDR" });
                 }
-                // The signature is 8 bytes, so `IHDR` must be the chunk at offset 8.
-                if at != 8 {
+                // `walk` sees the file with the signature already stripped, so the first chunk is at
+                // body offset 0. (This check said `at != 8` once, on the reasoning that the 8-byte
+                // signature put `IHDR` at 8 -- but that offset is in the *whole file*, and by the time
+                // the walk runs the signature is gone. Every fixture failed on it.)
+                if at != 0 {
                     return Err(PngError::IhdrNotFirst { offset: at });
                 }
                 header = Some(Header::parse(data)?);
@@ -344,19 +347,28 @@ pub(crate) fn strip_signature(png: &[u8]) -> Result<&[u8]> {
 
 /// Undo one scanline's filter, in place.
 ///
-/// `row` is `1 + stride` bytes: the filter byte followed by the row's payload. The filter byte is
-/// left where it is; it is not part of the output. `prev` is the already-reconstructed row above, or
-/// `None` for the first row.
+/// `payload` is the row's `stride` bytes with the filter byte **already removed**; `filter` is that
+/// byte. `prev` is the already-reconstructed row above -- also without its filter byte -- or `None`
+/// for the first row.
+///
+/// **The filter byte is a separate argument, not a prefix of `payload`.** A signature that took the
+/// whole stored row and did `&mut row[1..]` internally could be called with a payload that had already
+/// been split, and would then filter from the wrong offset -- producing plausible bytes rather than an
+/// obvious failure. Making the one-way transformation explicit removes that failure mode.
 ///
 /// `bpp` is [`Header::bytes_per_pixel`] -- **bytes**, not samples, because PNG's filters are defined
 /// on bytes and a 16-bit image's `Up` adds two bytes at a time.
 pub(crate) fn unfilter_row(
     filter: u8,
-    row: &mut [u8],
+    payload: &mut [u8],
     prev: Option<&[u8]>,
     bpp: usize,
 ) -> Result<()> {
-    let data = &mut row[1..];
+    // `payload` arrives with the filter byte already removed, so it *is* the row. See the signature's
+    // docs: an earlier version took the whole stored row and stripped the filter byte here, so a
+    // caller that had already split it off filtered from the wrong offset and produced a plausible
+    // but wrong image rather than an obvious failure.
+    let data = payload;
     let stride = data.len();
     match filter {
         // None: the payload is the row.

@@ -52,11 +52,17 @@ pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<Header> {
         });
     }
 
-    // Source bytes per row excluding the filter byte, and the exact inflated stream length:
-    // one filter byte plus `stride` payload bytes, per row.
+    // `stride` is source *payload* bytes per row; `row_len` is what the stream stores per row, which
+    // is one more because `unfilter_row` leaves each row's filter byte in place.
+    //
+    // Both are needed, and conflating them is the bug this comment exists for. Indexing
+    // `raw[y * stride ..]` as if every row were `stride` long reads the row's *filter byte* as its
+    // first pixel -- which for a palette image silently yields palette index 1 instead of 0, and for
+    // truecolour shifts every channel by one.
     let channels = Header::channels(header.colour_type);
     let stride = header.width as usize * channels;
-    let raw_len = (stride + 1) * header.height as usize;
+    let row_len = stride + 1;
+    let raw_len = row_len * header.height as usize;
 
     let mut raw = inflate(&chunks, raw_len)?;
     if raw.len() != raw_len {
@@ -70,6 +76,7 @@ pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<Header> {
     expand(
         &header,
         stride,
+        row_len,
         &raw,
         chunks.palette,
         chunks.transparency,
@@ -129,9 +136,26 @@ fn unfilter(header: &Header, stride: usize, raw: &mut [u8]) -> Result<()> {
     let bpp = header.bytes_per_pixel().max(1);
     let row_len = stride + 1;
     for y in 0..header.height as usize {
-        let (this, rest) = raw.split_at_mut(y * row_len);
-        let (filter, payload) = this.split_at_mut(1);
-        png::unfilter_row(filter[0], payload, rest.get(..stride), bpp)?;
+        // Two splits, and both matter.
+        //
+        // `split_at_mut` yields the part *before* the index first, so `done` is rows 0..y -- already
+        // reconstructed, because this loop walks them in order -- and `tail` is row y onward. An
+        // earlier draft named the first result `this` and row 0's slice was therefore empty, which
+        // panicked on the next `split_at_mut(1)`.
+        let (done, tail) = raw.split_at_mut(y * row_len);
+        let (filter, after_filter) = tail.split_at_mut(1);
+        // **The row's own payload must be split out here.** Passing `after_filter` -- everything from
+        // this row's first pixel to the end of the buffer -- makes `unfilter_row` treat the remaining
+        // rows as one long row, so `stride` becomes the whole remainder and `Up` adds the row below
+        // into this one. The second split is what bounds the work to one row.
+        let (payload, _below) = after_filter.split_at_mut(stride);
+        // The row above is row y-1's *payload*, which is the **last `stride` bytes** of `done` --
+        // `done` ends with row y-1's reconstructed payload, because the filter byte sits *before* it.
+        // Starting at `done.len() - row_len` instead would include that filter byte as the first pixel
+        // and shift every `Up`, `Average` and `Paeth` reconstruction by one, which shows up as a
+        // plausible-looking wrong pixel rather than as an error.
+        let prev = done.len().checked_sub(stride).map(|at| &done[at..]);
+        png::unfilter_row(filter[0], payload, prev, bpp)?;
     }
     Ok(())
 }
@@ -154,6 +178,7 @@ fn unfilter(header: &Header, stride: usize, raw: &mut [u8]) -> Result<()> {
 fn expand(
     header: &Header,
     stride: usize,
+    row_len: usize,
     raw: &[u8],
     palette: Option<&[u8]>,
     transparency: Option<&[u8]>,
@@ -166,11 +191,16 @@ fn expand(
         w * h * 4,
         "decoded_len and expand must agree on the output size"
     );
+    debug_assert_eq!(
+        row_len,
+        stride + 1,
+        "the stream keeps one filter byte per row, so its stride is one more than the payload's"
+    );
     match header.colour_type {
         // Greyscale: the value goes into all three channels, alpha opaque.
         0 => {
             for y in 0..h {
-                let src = &raw[y * stride..y * stride + w];
+                let src = &raw[y * row_len + 1..y * row_len + 1 + w];
                 let out = &mut dst[y * w * 4..(y + 1) * w * 4];
                 for (i, &g) in src.iter().enumerate() {
                     out[i * 4] = g;
@@ -183,13 +213,16 @@ fn expand(
         // Truecolour: RGB in, alpha forced opaque.
         2 => {
             for y in 0..h {
-                let src = &raw[y * stride..y * stride + w * 3];
+                let src = &raw[y * row_len + 1..y * row_len + 1 + w * 3];
                 let out = &mut dst[y * w * 4..(y + 1) * w * 4];
                 // `as_chunks` rather than `chunks_exact`: the slice length is already `w * 3`, so
                 // the remainder it returns is provably empty and the compiler can drop the bounds
                 // work in the loop.
                 let (px, rest) = src.as_chunks::<3>();
-                debug_assert!(rest.is_empty(), "the row length is exactly w * 3 by construction");
+                debug_assert!(
+                    rest.is_empty(),
+                    "the row length is exactly w * 3 by construction"
+                );
                 for (i, px) in px.iter().enumerate() {
                     out[i * 4] = px[0];
                     out[i * 4 + 1] = px[1];
@@ -204,7 +237,7 @@ fn expand(
             let plte = palette.ok_or(PngError::MissingPalette)?;
             let entries = plte.len() / 3;
             for y in 0..h {
-                let src = &raw[y * stride..y * stride + w];
+                let src = &raw[y * row_len + 1..y * row_len + 1 + w];
                 let out = &mut dst[y * w * 4..(y + 1) * w * 4];
                 for (i, &idx) in src.iter().enumerate() {
                     let e = usize::from(idx);
@@ -228,10 +261,13 @@ fn expand(
         // Greyscale + alpha.
         4 => {
             for y in 0..h {
-                let src = &raw[y * stride..y * stride + w * 2];
+                let src = &raw[y * row_len + 1..y * row_len + 1 + w * 2];
                 let out = &mut dst[y * w * 4..(y + 1) * w * 4];
                 let (px, rest) = src.as_chunks::<2>();
-                debug_assert!(rest.is_empty(), "the row length is exactly w * 2 by construction");
+                debug_assert!(
+                    rest.is_empty(),
+                    "the row length is exactly w * 2 by construction"
+                );
                 for (i, px) in px.iter().enumerate() {
                     out[i * 4] = px[0];
                     out[i * 4 + 1] = px[0];
@@ -243,7 +279,7 @@ fn expand(
         // Truecolour + alpha: already RGBA, one copy per row.
         6 => {
             for y in 0..h {
-                let src = &raw[y * stride..y * stride + w * 4];
+                let src = &raw[y * row_len + 1..y * row_len + 1 + w * 4];
                 let out = &mut dst[y * w * 4..(y + 1) * w * 4];
                 out.copy_from_slice(src);
             }

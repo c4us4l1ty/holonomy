@@ -36,13 +36,38 @@ pub mod scale;
 
 pub use error::{PngError, Result};
 pub use inflate::decoded_len;
+pub use png::Header;
 pub use scale::{resample, Rgba};
+
+/// Read only the `IHDR` of a PNG file, without inflating anything.
+///
+/// # Why this is a separate step rather than an argument to `decode`
+///
+/// The Iceberg cache must size its `SecureBlock` *before* it decodes, because the block is the thing
+/// the budget is measured in and it is allocated once. It cannot decode into a `Vec` and copy the
+/// result into a block -- that is a second 921,600-byte allocation per raster, and it makes the
+/// cache's resident figure a peak rather than a resident total.
+///
+/// So the sequence is: read the header, size the block, decode into the block. Parsing the header
+/// twice (once here, once inside `decode`) is the price, and it is worth it: the header walk is
+/// integer arithmetic over a few dozen bytes.
+///
+/// Everything this rejects is the same set [`decode`] rejects, and it rejects it *first*: a header
+/// claiming 32 megapixels is refused before any buffer is sized from it.
+pub fn read_header(input: &[u8]) -> Result<Header> {
+    let body = png::strip_signature(input)?;
+    // `walk` needs to reach `IEND` to finish, so this is a full chunk walk. That is a little more work
+    // than reading 16 bytes, and it buys the IDAT and palette checks at no extra cost -- `walk` already
+    // does them, and duplicating that logic to save a few hundred byte comparisons would be a second
+    // place for the two to disagree.
+    Ok(png::walk(body)?.header)
+}
 
 /// Decode `input` (a whole PNG file) into RGBA in `dst`.
 ///
-/// `dst` must be at least [`decoded_len`] for the image's header, which the caller cannot know until
-/// the file is parsed -- so the two-step path is [`decode`] when the caller sizes the buffer itself
-/// (the Iceberg cache does, from a header it has already read) and this convenience form otherwise.
-pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<png::Header> {
+/// `dst` must be at least [`decoded_len`] long for the image's header; [`read_header`] gives it one
+/// without decoding. The length is *checked*, so a caller that mis-sizes gets
+/// [`PngError::DestinationTooSmall`] rather than a panic on a hostile file.
+pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<Header> {
     inflate::decode(input, dst)
 }
