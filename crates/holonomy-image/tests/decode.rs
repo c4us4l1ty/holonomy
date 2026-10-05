@@ -95,11 +95,11 @@ fn truecolour_decodes_to_the_pattern_it_encodes() {
     assert_eq!(out.len(), (W * H * 4) as usize);
     for y in 0..H {
         for x in 0..W {
-            let [r, g, b, a] = expected(x, y);
+            let [r, g, b, _] = expected(x, y);
             assert_eq!(
                 pixel(&out, x, y),
                 [r, g, b, 255],
-                "pixel ({x},{y}) of a colour-type-2 image"
+                "pixel ({x},{y}) of a colour-type-2 image: a type without an alpha channel must                  decode with alpha forced opaque"
             );
         }
     }
