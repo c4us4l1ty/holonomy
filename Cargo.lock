@@ -315,9 +315,11 @@ dependencies = [
 name = "holonomy-render"
 version = "3.0.0-singularity"
 dependencies = [
+ "brotli-decompressor",
  "holonomy-assets",
  "holonomy-jail",
  "holonomy-text",
+ "ttf-parser",
 ]
 
 [[package]]

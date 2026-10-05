@@ -15,6 +15,8 @@
 //! See PROJECT.md §5 Phase 5 and Plan.md §2.3 FR-3.4.
 
 mod damage;
+mod math;
+mod math_layout;
 mod tree;
 
 pub mod chrome;
@@ -25,5 +27,12 @@ pub use chrome::{
     StyleFlags, StyleFlagsSlot,
 };
 pub use damage::{DamageRect, DamageTracker};
+pub use math::{
+    parse as parse_math, symbol, MathError, MathNode, MAX_DEPTH, OUT_OF_SCOPE, SYMBOLS,
+};
+pub use math_layout::{
+    digits, layout as layout_math, layout_boxed, measure as measure_math, MathBox, MathLayout,
+    MathMetrics, MathRun,
+};
 pub use table::{BorderIter, BorderRun, GridError, TableGrid};
 pub use tree::{Icon, Node, NodeKind, Rect, Style, SurfaceTree, TextRun};

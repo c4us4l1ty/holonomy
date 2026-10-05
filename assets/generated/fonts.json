@@ -1,10 +1,10 @@
 {
   "version": 1,
   "brotli_quality": 11,
-  "raw_len": 97204,
-  "packed_len": 45327,
-  "packed_sha256": "26393943c298ac88af8ae6fb812afa26272d725f8ec0c7084226655c3ceed89f",
-  "raw_sha256": "9040f39475bedca5d436c8b68f8cba733b91962f77564fe002ed6a1bdcecb75f",
+  "raw_len": 169480,
+  "packed_len": 78354,
+  "packed_sha256": "f32aacc36f8e338f4eee969349359ea1d6dd20e1cb136f7ddb3a205db04273ef",
+  "raw_sha256": "a1910d25dc42390b53d5297a33522fced14f60ae57a35fd135eddec6fdf30d42",
   "text_ranges": [
     [
       32,
@@ -13,6 +13,36 @@
     [
       160,
       255
+    ]
+  ],
+  "math_ranges": [
+    [
+      177,
+      177
+    ],
+    [
+      215,
+      215
+    ],
+    [
+      247,
+      247
+    ],
+    [
+      8592,
+      8703
+    ],
+    [
+      913,
+      937
+    ],
+    [
+      945,
+      969
+    ],
+    [
+      8704,
+      8959
     ]
   ],
   "box_range": [
@@ -56,6 +86,15 @@
       "length": 23680,
       "sha256": "88fa8f41107c5f2bcbaa54429c51691abedd5b95f51824b5653a351d6824db3d",
       "source_sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+    },
+    {
+      "name": "NotoSansMath-Regular",
+      "style": "Math",
+      "monospace": false,
+      "offset": 97204,
+      "length": 72276,
+      "sha256": "fb410aa41518b6fa7444d4da81a2797294383678ccdd1865309b6746dcccfb44",
+      "source_sha256": "d51afd5739c7ba6c44fcab35a88160e25dfb69a2d4ad0bd99533f8d894af1f96"
     }
   ]
 }

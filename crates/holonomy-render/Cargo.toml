@@ -17,3 +17,9 @@ holonomy-text = { path = "../holonomy-text" }
 
 [dev-dependencies]
 holonomy-assets = { path = "../holonomy-assets" }
+
+# `math_coverage.rs` opens the math face directly to ask whether it carries a glyph, which is the one
+# question no amount of counting can answer. Both are already dependencies of `holonomy-assets`, so
+# this adds nothing to the binary -- they are dev-only and the face is read at test time.
+brotli-decompressor = "6.0"
+ttf-parser = "0.25"

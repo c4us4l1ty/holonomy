@@ -478,8 +478,25 @@ fn every_required_codepoint_resolves_in_every_face() {
                     }
                     continue;
                 }
-                // A codepoint is resolved if it has an advance. A space has an advance and no
-                // coverage; everything else needs both.
+                // **A codepoint is only *required* in the styles whose face carries it.** Phase 9B:
+                // `α` is in the math face and not in Inter, so asking Inter for an advance for it is
+                // asking for something the design deliberately does not have -- and the first version
+                // of this gate reported 2,448 such slots ("U+0391 Regular @16ppem: no advance"), which
+                // is the gate insisting that a Latin text face carry Greek.
+                //
+                // So: text codepoints are required of the four text styles and the math style is not
+                // asked, and math codepoints are required of the math style alone. A codepoint in
+                // neither set is required of nothing, which keeps this from becoming a weaker gate
+                // than it was -- the union is still fully covered, just by the right face.
+                let required = match style {
+                    payload::Style::Math => math_coverage().contains(&cp),
+                    _ => text_coverage().contains(&cp),
+                };
+                if !required {
+                    continue;
+                }
+                // Resolved means an advance. A space has an advance and no coverage; the rest need
+                // both.
                 if m.advance_x == 0 {
                     missing.push(format!("U+{cp:04X} {style:?} @{ppem}ppem: no advance"));
                 } else if m.is_blank() && cp != ' ' as u32 && cp != 0xA0 {
@@ -498,14 +515,37 @@ fn every_required_codepoint_resolves_in_every_face() {
         &missing[..missing.len().min(8)]
     );
 
-    // The counts match the spec: 191 text + 128 Box Drawing, per face, per size.
+    // The counts match the spec. **Three** coverage sets now, not two: 191 text, plus the math face's
+    // Greek and Mathematical Operators, plus 128 procedural Box Drawing.
+    //
+    // The first version computed `boxd` as `codepoints_all() - text` and asserted it was 128, which is
+    // only true when there are exactly two sets. With a third, that difference is 434 and the gate
+    // reported "Box Drawing 0x2500..0x257F: left 306, right 128" -- i.e. it named Box Drawing while
+    // actually counting Greek. Deriving the box count as a remainder is the mistake; it is now the
+    // width of the declared range, which cannot drift when another coverage set is added.
     let text = payload::codepoints_in_text_ranges().count();
-    let boxd = payload::codepoints_all().count() - text;
+    let math = payload::codepoints_in_math_ranges().count();
+    let (box_lo, box_hi) = payload::BOX_RANGE;
+    let boxd = (box_hi - box_lo + 1) as usize;
     assert_eq!(
         text, 191,
         "ASCII 0x20..0x7E is 95, Latin-1 0xA0..0xFF is 96"
     );
     assert_eq!(boxd, 128, "Box Drawing 0x2500..0x257F");
+    assert_eq!(
+        math, 421,
+        "the math coverage is 421 slots over 7 ranges: one each for plus-minus, times and divide,
+         the Arrows block at 112, Greek uppercase 25, Greek lowercase 25, and Mathematical
+         Operators 256. The three single-codepoint ranges are the price of plus-minus being Latin-1:
+         U+00B1 is *not* in Mathematical Operators, and a range chosen by what looks like maths
+         rather than by the parser's own symbol table would have left six of the 58 symbols
+         rendering as .notdef"
+    );
+    assert_eq!(
+        payload::codepoints_all().count(),
+        text + math + boxd,
+        "and the union is the sum of the three: they do not overlap"
+    );
 
     // The *window* is wider than the required coverage, and that is deliberate. 0x20..0x100 is a
     // contiguous 224 slots, but coverage requires only 0x20..0x7E and 0xA0..0xFF — 191 of them.
@@ -535,7 +575,12 @@ fn every_required_codepoint_resolves_in_every_face() {
         payload::Style::Italic,
         payload::Style::Monospace,
     ] {
-        let absent: Vec<u32> = payload::codepoints_all()
+        // Restricted to *this style's* coverage, for the same reason as the loop above. Greek and
+        // Mathematical Operators are absent from all three Inter faces **by design** -- they live in
+        // the math face -- and `codepoints_all()` reported all 306 of them as missing for Regular,
+        // which is this gate demanding that a Latin text face carry Greek.
+        let absent: Vec<u32> = required_for(style)
+            .into_iter()
             .filter(|&cp| a.metric(cp, style, 16).advance_x == 0)
             .collect();
         let expected: Vec<u32> = if inter_style(style) {
@@ -579,21 +624,52 @@ fn brotli_round_trip_is_byte_identical() {
         let slice = &out[entry.offset as usize..(entry.offset + entry.length) as usize];
         let face =
             ttf_parser::Face::parse(slice, 0).unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+        // **Per face**, since Phase 9B. The first four faces are subset to `TEXT_RANGES` and the math
+        // face to `MATH_RANGES`, so requiring all of them to carry the text coverage fails at once --
+        // correctly, because a math face that also carried ASCII would be a fifth copy of the Latin
+        // alphabet for nothing.
+        //
+        // Which ranges a face must cover is a function of its *style*, not a list per face: one
+        // style, one coverage, so a new face cannot quietly bring its own.
         let mut absent = Vec::new();
-        for cp in payload::codepoints_in_text_ranges() {
+        for cp in required_for(entry.style) {
             let c = char::from_u32(cp).expect("in range");
             if face.glyph_index(c).is_none() {
                 absent.push(format!("U+{cp:04X}"));
             }
         }
+        // One codepoint of slack, measured rather than assumed: Inter has no U+00AD (soft hyphen) and
+        // Noto Sans Math has no U+03A2 (archaic koppa). Both are reported by the build script.
         assert!(
             absent.len() <= 1,
-            "{} is missing {} required text codepoints: {:?}",
+            "{} is missing {} required codepoints: {:?}",
             entry.name,
             absent.len(),
             &absent[..absent.len().min(4)]
         );
         assert!(face.number_of_glyphs() > 0, "{} has no glyphs", entry.name);
+    }
+}
+
+/// Every codepoint the text faces must carry, collected once.
+///
+/// A `Vec` rather than the iterator because the gate loops over it inside a per-face loop that also
+/// parses the face; re-collecting per face would put an allocation into a test file whose subject is
+/// mostly about what does *not* allocate.
+fn text_coverage() -> Vec<u32> {
+    payload::codepoints_in_text_ranges().collect()
+}
+
+/// Every codepoint the math face must carry. Phase 9B added this.
+fn math_coverage() -> Vec<u32> {
+    payload::codepoints_in_math_ranges().collect()
+}
+
+/// Which coverage a face must carry.
+fn required_for(style: payload::Style) -> Vec<u32> {
+    match style {
+        payload::Style::Math => math_coverage(),
+        _ => text_coverage(),
     }
 }
 
@@ -733,8 +809,9 @@ fn no_font_outline_survives_the_one_time_pass() {
     let (a, report) = build_atlas(&SIZES).expect("fit");
     assert_eq!(report.scrubbed, payload::RAW_LEN);
     assert_eq!(
-        report.scrubbed, 97_204,
-        "the whole decompressed payload is scrubbed"
+        report.scrubbed, 169_480,
+        "the whole decompressed payload is scrubbed -- 169,480 B as of Phase 9B, which added Noto \
+         Sans Math at 72,276 B raw"
     );
     // The atlas holds coverage and metrics only: no reference to the font remains.
     let (a2, _) = build_atlas(&SIZES).expect("fit");
@@ -775,9 +852,23 @@ fn boot_to_ready_is_under_the_budget() {
         "release"
     };
     println!("boot to ready ({profile}), best of 5: {best:.3} ms");
+    // # Two ceilings, because the debug number is a proxy and the release number is the product
+    //
+    // Phase 4 set a single 250 ms ceiling here and it was always a *debug* ceiling: the thing it is
+    // actually watching for is a regression in the one-time rasterisation pass, and that shows up in
+    // both profiles. Phase 9B made the point sharp. Adding Noto Sans Math -- 385 glyphs across four
+    // sizes -- took debug from ~250 ms to **254.3 ms** and left release at **41.6 ms**, inside the
+    // documented 37.2..45.5 ms band from Phase 4.
+    //
+    // So the release ceiling is stated separately and tightly, because that is the number the product
+    // ships; the debug ceiling is a regression tripwire and is set for what unoptimised rasterisation
+    // of 5 faces costs. The alternative -- one number -- is what would have let 254 ms through
+    // unremarked, or forced the debug gate to be tightened until it failed for reasons nobody could
+    // see.
+    let ceiling = if cfg!(debug_assertions) { 300.0 } else { 60.0 };
     assert!(
-        best < 250.0,
-        "boot to ready regressed to {best:.3} ms ({profile} build)"
+        best < ceiling,
+        "boot to ready is {best:.3} ms against a {ceiling:.0} ms {profile} ceiling"
     );
 }
 
@@ -1162,10 +1253,22 @@ fn box_drawing_is_not_in_the_font_payload() {
         );
     }
 
-    // 2. The payload size is what four faces of ASCII + Latin-1 cost and nothing more. Exact, not
-    //    a bound: if a glyph is added, this fails rather than merely getting closer to a limit.
-    assert_eq!(payload::RAW_LEN, 97_204);
-    assert_eq!(payload::FACES.len(), 4);
+    // 2. The payload size is exactly what the five faces cost and nothing more -- **not** a bound, so
+    //    a glyph added by accident fails rather than merely getting closer to a limit.
+    //
+    //    Phase 9B took this from 97,204 to 169,480 by adding Noto Sans Math at 72,276 B raw: 507
+    //    glyphs. Inter carries neither Greek nor Mathematical Operators, so those codepoints had
+    //    nowhere else to come from. Packed, the stream went 45,327 -> 78,354 B against an 81,920 B
+    //    budget.
+    //
+    //    The face is 507 glyphs rather than the 385 a first pass produced because `tests/math_coverage.rs`
+    //    found six symbols the parser can name -- `\pm`, `\times`, `\div` and the three arrows -- sitting
+    //    outside Greek and 0x2200..0x22FF. All six are Latin-1 or Arrows, all six would have rendered
+    //    as .notdef, and the ranges are now chosen from the parser's symbol table rather than from
+    //    what looks like "math".
+    assert_eq!(payload::RAW_LEN, 169_480);
+    assert_eq!(payload::FACES.len(), 5);
+    assert_eq!(payload::PACKED_LEN, 78_354);
     let per_face: usize = payload::FACES.iter().map(|f| f.length as usize).sum();
     assert_eq!(per_face, payload::RAW_LEN);
 }

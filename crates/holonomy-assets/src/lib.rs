@@ -144,6 +144,29 @@ pub fn build_atlas(ppem_sizes: &[u16]) -> Result<(atlas::Atlas, BootReport), Err
     let mut builder = atlas::AtlasBuilder::new(ppem_sizes)?;
     let bytes = scratch.as_slice();
     for (index, entry) in payload::FACES.iter().enumerate() {
+        // # The math face is **not** rasterised at boot, and that is arithmetic, not an omission
+        //
+        // `Style::Math` exists, Noto Sans Math is in the payload, and it is deliberately skipped here.
+        // The 512 KiB ceiling in PROJECT.md §2.2 is a *combined* budget: a 1024x480
+        // one-byte-per-pixel coverage bitmap is already 491,520 bytes, leaving 32,768 for everything
+        // else including the metric table.
+        //
+        // Measured with the math face included: 507 glyphs across the full coverage window would need a
+        // 5-style table, and a 5-style, 773-codepoint, 2-size table is 77,300 bytes -- a combined
+        // 568,820 against a 524,288 limit. Over by 8.7%, and much further over at three sizes.
+        //
+        // So math glyphs are rasterised **on demand**, into a cache, the first time a formula is
+        // drawn. Right for two reasons beyond the budget: most documents contain no mathematics and
+        // would otherwise pay for 507 glyphs at every boot, and the cost becomes proportional to what is
+        // on the page rather than to what the font could show.
+        //
+        // The consequence, stated so it is not a surprise: `metric.set(cp, Style::Math as usize, ..)`
+        // panics with "style 4 out of range", because `STYLE_COUNT` is 4. That is deliberate. A path
+        // that tries to take math glyphs from the boot atlas fails loudly at the mistake rather than
+        // reading a blank metric and drawing nothing.
+        if entry.style == payload::Style::Math {
+            continue;
+        }
         let slice = &bytes[entry.offset as usize..(entry.offset + entry.length) as usize];
         // `Face::parse`'s second argument selects a face *within* a TrueType Collection (a
         // `ttcf` file). Each slice here is a standalone single-face TTF, so the index must be 0
