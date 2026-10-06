@@ -321,7 +321,10 @@ fn deleted_text_does_not_survive_in_any_leaf() {
     // Every byte of the secret must be absent from every leaf's buffer, including the gap.
     for needle in secret.iter() {
         assert!(
-            !rope.any_leaf_contains(*needle),
+            // `Result` because Phase 13's absent-leaf state makes this refuse rather than skip:
+            // an absent leaf cannot be scanned, and a `false` from a leaf that was never looked at is
+            // the wrong answer for a destructive-delete gate.
+            !rope.any_leaf_contains(*needle).expect("the rope is fully resident here"),
             "byte {needle:#04x} of the deleted passphrase survived in a leaf"
         );
     }

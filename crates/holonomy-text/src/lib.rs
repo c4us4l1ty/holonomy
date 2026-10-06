@@ -44,4 +44,5 @@ pub use tables::{
 pub use undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 
 pub use leaf::{CagrLeaf, LeafError, CACHELINE_BYTES, GAP_MINIMUM, GAP_TARGET, LEAF_CAPACITY};
-pub use rope::{Rope, RopeError};
+pub use rope::{LeafSource, Rope, RopeError};
+
