@@ -1249,6 +1249,23 @@ pages are shared, so under `cargo test --workspace` a parallel test binary takes
 bisection's "this loads" and its load. The first is fixed by letting the measurement back off and report
 what it measured; the second is not fixed and remains a flake worth watching.
 
+**A third intermittent gate, and this one turned out to be a real defect rather than contention.**
+`holonomy-container`'s `random_data_passes_every_test` failed roughly **1 run in 5**. It draws fresh OS
+randomness and runs six SP 800-22 tests at `ALPHA = 0.001`, so 6 x 0.001 = **0.6 % of runs should reject
+true randomness** — 1-in-5 is eight times that, and the gap was the clue. Cause:
+`sp800_22::cumulative_sums` took a `forward: bool` and **used it only to pick the p-value tail**, computing
+a single `z` from `cusum_max_abs(data)` for both directions. So the "reverse" test was the forward
+statistic with a different formula, the two were not independent, and the report printed the same `z` twice.
+`cusum_max_abs` now takes a direction and reverses **both** the byte order and the bit order within each
+byte, since the per-byte excursion tables are built from bit order.
+
+**After the fix: 0 failures in 40 consecutive runs.** The gate that would have caught it is
+`the_forward_and_reverse_cusums_are_different_statistics` — the two `z` values must be *able* to differ,
+checkable only on input that is not its own reverse. Which is the second lesson: **the first version of that
+gate failed against the fixed code**, because 40 bytes of `0xFF` then 40 of `0x00` is balanced and so is its
+own reverse in aggregate (both directions peak at 320). A test that measures nothing is worse than no test,
+because it is counted. Same shape as the `b'z'` needle in Phase 13 part 3.
+
 **Cost: 3,592 bytes** for part 2, 1,441,912 → **1,452,504** against the 2,097,152 ceiling. The geometry
 tables are `Vec`s of `u32` and 3.1 MiB of document is 71,500 lines, so ~0.6 MiB of resident weight is
 the honest cost of making the lookup `O(log n)`; PROJECT.md's §Phase 11 budgeted 1.83 MiB for it and

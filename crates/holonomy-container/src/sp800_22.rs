@@ -325,7 +325,24 @@ impl<'a> BitBlocks<'a> {
 /// Uses a 256-entry table of per-byte excursions so the walk costs one lookup per byte
 /// rather than one iteration per bit. Over 2^30 bits that is 134 M fewer iterations, which
 /// is the difference between this test running in the gate and not running in it.
-fn cusum_max_abs(data: &[u8]) -> (f64, i64) {
+///
+/// # `reverse` walks the sequence backwards, and it is not a cosmetic flag
+///
+/// SP 800-22 sec 2.4.4 asks for the test **in both directions**: the forward cumulative sum of the bit
+/// stream, and the forward cumulative sum of the *reversed* stream. Those are two different statistics
+/// with two different `z` values, and only the p-value formula differs downstream.
+///
+/// This function originally took no direction and the caller computed **one** `z` and used it for both
+/// directions — so the "reverse" test was the forward statistic with a different tail formula, the two
+/// were not independent, and the printed report showed the same `z` twice. **It failed silently**: every
+/// p-value was in range, nothing panicked, and the only symptom was a slightly elevated rejection rate
+/// against true randomness, which reads as a flaky gate rather than as a wrong statistic.
+///
+/// Reversing means two things, and both are needed: the **bytes** are visited last-to-first, and each
+/// byte's **bits** are visited most-significant-first-in-reverse, because the per-byte excursion table is
+/// built from the bit order. Getting only one right produces a statistic that is neither the forward nor
+/// the reverse one.
+fn cusum_max_abs_dir(data: &[u8], reverse: bool) -> (f64, i64) {
     // For each byte value: (upward excursion, downward excursion) of the running sum within
     // that byte, starting from 0, and the net change.
     let mut up = [0i32; 256];
@@ -333,7 +350,10 @@ fn cusum_max_abs(data: &[u8]) -> (f64, i64) {
     let mut net = [0i32; 256];
     for b in 0..256usize {
         let (mut s, mut u, mut d) = (0i32, 0i32, 0i32);
-        for k in 0..8 {
+        // `k` counts bits from the **end** of the byte's 8-bit string in reverse mode, so the excursion
+        // within a byte matches the order the walk visits its bits.
+        for j in 0..8 {
+            let k = if reverse { 7 - j } else { j };
             let bit = if (b >> k) & 1 == 1 { 1 } else { -1 };
             s += bit;
             u = u.max(s);
@@ -346,17 +366,35 @@ fn cusum_max_abs(data: &[u8]) -> (f64, i64) {
 
     let mut s: i64 = 0;
     let mut best: i64 = 0;
-    for &b in data {
-        s += net[b as usize] as i64;
+    // Two loops rather than one iterator chain: the branch is the clearest expression of "walk this way"
+    // and the body is identical in both, so the only difference between the directions is visible.
+    let mut step = |s: &mut i64, best: &mut i64, b: u8| {
+        let (u, d, n) = (up[b as usize] as i64, down[b as usize] as i64, net[b as usize] as i64);
+        *s += n;
         // The excursion within this byte is measured from the value at its start.
-        best = best
-            .max(s)
-            .max(s - net[b as usize] as i64 + up[b as usize] as i64);
-        best = best
-            .max(-s)
-            .max(net[b as usize] as i64 - s + down[b as usize] as i64);
+        *best = (*best).max(*s).max(*s - n + u);
+        *best = (*best).max(-*s).max(n - *s + d);
+    };
+    if reverse {
+        for &b in data.iter().rev() {
+            step(&mut s, &mut best, b);
+        }
+    } else {
+        for &b in data {
+            step(&mut s, &mut best, b);
+        }
     }
     (best as f64, s)
+}
+
+/// [`cusum_max_abs_dir`] walking forwards.
+fn cusum_max_abs(data: &[u8]) -> (f64, i64) {
+    cusum_max_abs_dir(data, false)
+}
+
+/// [`cusum_max_abs_dir`] walking backwards.
+fn cusum_max_abs_rev(data: &[u8]) -> (f64, i64) {
+    cusum_max_abs_dir(data, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +604,10 @@ pub fn runs(data: &[u8], n: f64) -> TestResult {
 /// 0.5)/√(n−1)`. Both are written via `erfc` rather than `1 − Φ` so that a genuinely tiny
 /// p-value is computed instead of cancelling to zero.
 pub fn cumulative_sums(data: &[u8], n: f64, forward: bool) -> TestResult {
-    let (z, _) = cusum_max_abs(data);
+    // **The statistic depends on the direction, not only the p-value formula.** Using one `z` for both
+    // made the reverse test a re-run of the forward test with a different tail: not an independent check,
+    // and not the statistic SP 800-22 sec 2.4.4 specifies for the reverse direction.
+    let (z, _) = if forward { cusum_max_abs(data) } else { cusum_max_abs_rev(data) };
     let s = (n - 1.0).sqrt();
 
     // SP 800-22 sec 2.4.4, both tails and the z < 0.5 continuation:
@@ -906,7 +947,74 @@ mod tests {
     /// a subtly wrong number. Checked on adversarial patterns, not just random data, because
     /// random data almost never reaches the excursion extremes the table encodes.
     #[test]
+    /// **The two directions are two different statistics, not one statistic reported twice.**
+    ///
+    /// `cumulative_sums` computed a single `z` and used it for both directions, varying only the p-value
+    /// tail formula. Everything downstream was in range, nothing panicked, and the symptom was an
+    /// elevated rejection rate against true randomness — which presents as a flaky gate, not as a wrong
+    /// statistic. The gate that would have caught it is exactly this one: **the two `z` values must be
+    /// able to differ**, which is only checkable on input that is not its own reverse.
+    ///
+    /// # The input has to be *unbalanced*, which the first version of this test got wrong
+    ///
+    /// It used 40 bytes of `0xFF` followed by 40 of `0x00`. That has as many ones as zeros, so the walk
+    /// ends where it started in **both** directions and both peak at the same 320 — the assertion failed
+    /// on a correct implementation. An equal run of each value is its own reverse in aggregate, so the
+    /// test measured nothing.
+    ///
+    /// So: 48 bytes of `0xFF` then 16 of `0x00`. Forward, the walk climbs to 384 and falls back to 256;
+    /// reversed, it drops to −128 and climbs to 256. 384 ≠ 256, and the difference is structural.
+    #[test]
+    fn the_forward_and_reverse_cusums_are_different_statistics() {
+        let data: Vec<u8> = vec![0xFF; 48].into_iter().chain(vec![0x00; 16]).collect();
+        let n = (data.len() * 8) as f64;
+        let fwd = cumulative_sums(&data, n, true);
+        let rev = cumulative_sums(&data, n, false);
+
+        assert_ne!(
+            fwd.statistic, rev.statistic,
+            "forward and reverse reported the same statistic, so the reverse test is the forward test \
+             with a different tail formula and SP 800-22's reverse direction is not being measured"
+        );
+        assert_eq!(fwd.statistic, 384.0, "forward walk peaks at 48 * 8");
+        assert_eq!(rev.statistic, 256.0, "reverse walk peaks at 16 * 8 + 16 * 8");
+
+        // The control: input that **is** its own reverse must give equal statistics, which shows the
+        // inequality above comes from the input rather than from arithmetic noise.
+        //
+        // **`[0x00, 0xFF, 0xFF, 0x00]`, and the 0/1-only bytes are what make it work.** Reversing the
+        // walk reverses both the byte order *and* the bit order within each byte, so self-reverse needs
+        // `b[i] == reverse_bits(b[n-1-i])` — true for any `0x00`/`0xFF` sequence, and *false* for a plain
+        // byte palindrome like `[0xAA, 0x55]`, whose reversal is `0x55, 0xAA` bit-reversed. A palindrome
+        // was the first thing tried here and it is not self-reverse at all.
+        let palindrome: Vec<u8> = vec![0x00, 0xFF, 0xFF, 0x00];
+        assert_eq!(
+            cumulative_sums(&palindrome, (palindrome.len() * 8) as f64, true).statistic,
+            cumulative_sums(&palindrome, (palindrome.len() * 8) as f64, false).statistic,
+            "a self-reverse input must give equal statistics in both directions"
+        );
+    }
+
+    #[test]
     fn cusum_matches_a_naive_walk() {
+        // **The reverse direction is the forward walk over reversed bytes *and* reversed bits.** Both
+        // halves matter: the per-byte excursion tables are built from bit order, so reversing only the
+        // byte order would give a statistic that is neither direction's.
+        //
+        // Asserted against a naive bit-at-a-time walk, the same shape as the forward case below, so a
+        // regression in either half is caught by arithmetic rather than by a p-value drifting out of
+        // range on some future run.
+        for data in [vec![0x00u8; 31].into_iter().chain(vec![0xFF; 33]).collect::<Vec<_>>(), random(997)] {
+            let (fast, _) = cusum_max_abs_rev(&data);
+            let (mut s, mut best) = (0i64, 0i64);
+            for &b in data.iter().rev() {
+                for k in (0..8).rev() {
+                    s += if (b >> k) & 1 == 1 { 1 } else { -1 };
+                    best = best.max(s.abs());
+                }
+            }
+            assert_eq!(fast, best as f64, "reverse cusum differs on {} bytes", data.len());
+        }
         let cases: Vec<Vec<u8>> = vec![
             vec![0u8; 64],
             vec![0xFFu8; 64],
