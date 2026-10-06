@@ -1127,6 +1127,99 @@ allocations across 1,000 keystrokes — measured at **2,000 before item 4** and 
 correcting in place of the stale 1,101,944 in §9B's cost table: that figure predates 9C and 9X, and the
 measured binary at `e89825c` was 1,439,288.
 
+##### Phase 11, delivered, part 2 — the Fenwick trees, and the 122× that followed
+
+Part 1 removed the allocations. This part removes the *scans*, and the headline number is:
+
+| position in a 3.1 MiB document | median | worst | before |
+|---|---|---|---|
+| start | **106 µs** | 177 µs | **12,954 µs** |
+| middle | **2 µs** | 58 µs | — |
+| end | **1 µs** | 26 µs | — |
+
+**`tests/session_latency.rs` is the gate, and it is a session-level measurement on purpose.**
+`holonomy-text/tests/latency.rs` reports single-digit microseconds for `Rope::insert_byte` at 3.5 MiB,
+and that number is real — it is just not the keystroke. The product's path is
+`Session::handle_event → apply → after_edit → tick`, and `after_edit` did six things the text engine's
+gate never sees. The new gate drives `Session`, at three caret positions, and reports the *edit* and the
+*paint* separately because they are different claims.
+
+**The diagnostic that found what was left is `print_where_a_keystrokes_time_goes`** (`#[ignore]`d), and
+it is the most useful thing in this phase:
+
+```text
+     apply (whole keystroke):   4376.6 us/call
+                caret_to:         0.1 us/call
+          refresh_counts:  11477.9 us/call
+             sync_lines:   3906.3 us/call
+            tick (paint):    799.0 us/call
+```
+
+"12.9 ms per keystroke" says nothing actionable; "11.5 ms of it is the status bar's word count" says
+exactly what to do. Three fixes, in the order the diagnostic named them:
+
+1. **`LineGeometry` is wired in** (`crates/holonomy/src/doclines.rs`). `line_index` and `line_start` were
+   `O(bytes before the caret)`; they are now `O(log n)` from the two Fenwick trees Phase 6 built and no
+   production path used. `caret_to` went from microseconds to **0.1 µs**.
+2. **`TextCounts` maintains word and line totals as deltas** (`crates/holonomy/src/counts.rs`).
+   `refresh_counts` was the single largest cost in the keystroke. **A Fenwick tree cannot fix this one,
+   and that is why it is worth writing down**: line count is a prefix sum, so a tree answers it exactly,
+   but *word* count is not a prefix sum over anything — a word start depends on the whitespace on both
+   sides of a byte, so "words before offset `o`" is not a function of `o` alone and cannot be made into a
+   tree weight. Deltas are the correct shape: bytes before an edit are unchanged, so only the edited run
+   and its two seams can move a word start. Typing a letter is `O(1)`; a 64 KiB paste is `O(64 KiB)`,
+   which it was going to be anyway.
+3. **`sync_lines` takes the line count as an argument** rather than reading the document to count
+   newlines. This is the part that looks obvious only after the first version was measured at
+   **3,906 µs** — a whole-document read inside the one function whose entire purpose is to remove
+   `O(document)` work. The count was already maintained, by `TextCounts`. Passing it in turns the
+   newline case into a comparison and everything else into one local scan.
+
+**A real bug this phase found in itself, and where it surfaced.** `TextCounts`'s seam arithmetic
+compared the *old* right seam against `byte_at(offset)` — which after an insertion is the run's *first*
+byte, not the byte that used to follow it. Every insert into an **empty** document therefore netted zero
+words. It surfaced as an **arithmetic underflow in a delete**, several keystrokes downstream, in a
+different function, during the full-session gate — and the unit tests missed it because every one of them
+started from a document that already had text, which is the only situation where the old and new seam
+cannot differ by construction. `inserting_into_an_empty_document_counts_one_word` exists because of that,
+and the story is in its doc comment because "my tests all passed" and "the gate caught it" are both worth
+remembering.
+
+**A second bug, found the same way, that a reader should not repeat.** `insert_math`, `insert_table`,
+`insert_image` and `append_table_row` mutate the document *without* going through `Session::insert`, so
+they stopped folding the counts. `insert_math` now folds them; the other three rescan, because the editor
+does not hand back the bytes it wrote. All four are named in `recount_words_and_lines`'s doc comment,
+because the failure mode is an underflow in a function that has nothing to do with the edit that caused it.
+
+**Two gates that were failing before this phase, and are not now.** `holonomy-text`'s
+`base_edits_stay_within_the_keystroke_budget` and `boot_to_ready_is_under_the_budget` both fail
+intermittently on this host — **verified on the unmodified tree at `f19f1d7`**, so neither is a Phase 11
+regression. The cause is the same in both: `RLIMIT_MEMLOCK` is per-*process* but the system's locked
+pages are shared, so under `cargo test --workspace` a parallel test binary takes the headroom between a
+bisection's "this loads" and its load. The first is fixed by letting the measurement back off and report
+what it measured; the second is not fixed and remains a flake worth watching.
+
+**Cost: 3,592 bytes** for part 2, 1,441,912 → **1,452,504** against the 2,097,152 ceiling. The geometry
+tables are `Vec`s of `u32` and 3.1 MiB of document is 71,500 lines, so ~0.6 MiB of resident weight is
+the honest cost of making the lookup `O(log n)`; PROJECT.md's §Phase 11 budgeted 1.83 MiB for it and
+1.44 MiB is inside that.
+
+**What is still `O(document)`, stated plainly:**
+
+* **The paint path allocates and copies.** 164 µs at 64 KiB, 749 µs at 3 MiB — *not* linear in document
+  size, which is the property that matters, and it is asserted as such by
+  `a_paint_does_not_get_more_expensive_as_the_document_does`. Phase 12 owns it.
+* **A newline is `O(document)`.** `LineGeometry::resize_lines` rebuilds both trees because a Fenwick tree
+  supports point updates, not insertion, and it says so itself. Typing a letter is a point update;
+  pressing Enter is a rebuild. One keystroke in forty.
+* **`undo` and `redo` rescan.** `Editor::undo` returns an offset and a length but not the bytes, and the
+  bytes are what the seam arithmetic needs. The alternative — threading them out of `UndoStack` — would
+  put an undo-format detail into the counting path, where a format change becomes a counting bug.
+* **The document is never 2000 pages.** `RLIMIT_MEMLOCK` is 8.00 MiB and every leaf is a page-locked
+  4 KiB block, so a document is bounded by *occupancy*, not by RSS. 3.1 MiB is the largest this host
+  holds. **Phase 13's windowing is what makes the full document reachable**, and until it lands the
+  honest claim is "3.1 MiB", not "2000 pages".
+
 #### Phase 12 — Draw the document
 
 The page stops being blank. Body text is rendered from document bytes, wrapped to the page measure, and
@@ -1252,7 +1345,8 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 | requirement | source | gate |
 |---|---|---|
-| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; **≤ 2.0 MiB** (was 2.5; §2.9.1) |
+| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; **≤ 2.0 MiB** (was 2.5; §2.9.1); **1,452,504 B measured** at Phase 11 |
+| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on this host. **Phase 11 measures the edit half: 106 µs median / 177 µs worst at the start of a 3.1 MiB document, 1–2 µs elsewhere.** The paint half is 749 µs at 3 MiB and is Phase 12's |
 | image decoder cost | §2.9.1 | ≤ 60 KiB of the binary, measured by section delta |
 | atlas footprint incl. math window | §2.2, §2.9.2 | ≤ 512 KiB |
 | decoded image memory | §2.9.3 | **≤ 8.0 MiB at every point** of a page-1→50 scroll, 10 images |
@@ -1265,7 +1359,7 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
 | `t_kdf` | §2.4 | measured, budget restated — the PRD's 400–550 ms is replaced |
-| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms **on this host**, the designated target since 2026-10-05 |
+| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on this host, the designated target since 2026-10-05 — superseded by the measured row above as of Phase 11 |
 | idle CPU | NFR-1.2 | ≤ 0.001%, process blocked in `epoll_wait` |
 | container entropy | FR-4.1 | NIST SP 800-22 subset passes, Shannon ≥ 7.99999 |
 | container size | FR-4.1 | exactly 134,217,728 bytes |

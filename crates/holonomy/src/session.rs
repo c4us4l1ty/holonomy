@@ -41,6 +41,8 @@
 use std::fs::File;
 use std::io::Write;
 
+use crate::counts::TextCounts;
+use crate::doclines::{DocLines, Sync};
 use holonomy_display::paint::Painter;
 use holonomy_display::{Frame, FrameError, Scanout};
 use holonomy_export::{Format, Report};
@@ -166,6 +168,18 @@ pub struct SessionStats {
     pub commands: u32,
     /// Edits that changed the document.
     pub edits: u32,
+    /// Edits that changed exactly one line's length, so the geometry was a `O(log n)` point update.
+    ///
+    /// Phase 11. Paired with [`SessionStats::line_rebuilds`] this is the honest answer to "how much of
+    /// the keystroke path is still `O(document)`": a rebuild is one per newline typed, and everything
+    /// else is one point update.
+    pub line_updates: u32,
+    /// Edits that added or removed a newline, so both Fenwick trees were rebuilt. `O(n)`.
+    ///
+    /// `LineGeometry::resize_lines` rebuilds rather than inserting because a Fenwick tree supports point
+    /// updates, not insertion, and it says so itself. Typing a letter is a point update; pressing Enter
+    /// is a rebuild. That asymmetry is the design.
+    pub line_rebuilds: u32,
     /// Frames painted.
     pub frames: u32,
     /// Pixels written across all frames.
@@ -288,6 +302,17 @@ pub struct Session<'a> {
     /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
     /// discover what one `set` already knows.
     tables_shape_dirty: bool,
+    /// Line geometry in document byte coordinates, for `O(log n)` line lookup. Phase 11.
+    ///
+    /// Replaces the newline-counting scans in [`Session::line_start`] and [`Session::line_index`], which
+    /// were `O(bytes before the caret)` and ran on every keystroke. See [`crate::doclines`] for why the
+    /// terminator convention is this module's problem and not `LineGeometry`'s.
+    lines: DocLines,
+    /// The status bar's word and line totals, maintained as deltas. Phase 11 item 4.
+    ///
+    /// Built by a full scan at construction and folded forward by every edit whose bytes the caller
+    /// knows. `undo` and `redo` rescan — see [`Session::undo`] for why that is deliberate.
+    counts: TextCounts,
     /// Scratch for the whole document, reused across paints. Phase 11.
     ///
     /// Every paint-path function that needs the document's bytes -- `emit_tables`, `emit_math`,
@@ -390,6 +415,17 @@ impl<'a> Session<'a> {
         let chrome = Chrome::new(metrics);
         publish_atlas(painter.atlas(), painter.size_index());
         let frame = Frame::black(metrics.width, metrics.height);
+        // Built before `editor` moves into the struct below, since it reads the document.
+        //
+        // From the *document*, not from an empty one. A rebuild is `O(document)` and `LineGeometry`'s
+        // docs call it the cost of typing a newline; it must not also be the cost of the *first*
+        // keystroke in a session, which is exactly what happens if the geometry starts as an empty
+        // document's -- the first `sync_lines` sees a line-count mismatch and rebuilds.
+        let lines = {
+            let text = editor.text().unwrap_or_default();
+            DocLines::build(&text, holonomy_geometry::LineMetrics::default())
+        };
+        let counts = TextCounts::scan(&editor);
         let state = ChromeState {
             // The document's first line is on screen at the caret's line.
             scroll_line: 0,
@@ -409,6 +445,9 @@ impl<'a> Session<'a> {
             damage: DamageRect::EMPTY,
             active_cell: None,
             tables_shape_dirty: false,
+            // Built from the document; see the comment at the `DocLines::build` call above.
+            lines,
+            counts,
             doc_scratch: Vec::new(),
             table_scratch: Vec::new(),
             caret_drawn_at: None,
@@ -473,11 +512,18 @@ impl<'a> Session<'a> {
     /// [`Session::insert_table`]'s first-cell placement, and it is the reason this method moves the
     /// caret at all rather than inserting and returning.
     pub fn insert_math(&mut self) -> Result<(), SessionError> {
-        let at = self.editor.caret();
+        let at = self.editor.caret() as usize;
         self.editor
-            .insert_at(at, b"$$$$", SpanPolicy::GrowIntoInsert)?;
+            .insert_at(at as u32, b"$$$$", SpanPolicy::GrowIntoInsert)?;
         self.stats.math_inserts += 1;
-        self.editor.caret_to(at as usize + 2)?;
+        // **Phase 11 item 4: `TextCounts` is folded here too, and that is a bug this caught.** This
+        // path called `editor.insert_at` directly rather than going through `Session::insert`, so the
+        // word and line totals silently stopped tracking the document -- and the failure surfaced
+        // later as an *underflow* in a delete, several keystrokes afterwards, in a different function
+        // entirely. Every path that mutates the document must fold the counts; a new one that forgets
+        // will fail the same way, which is why `tests/session_counts.rs` drives all of them.
+        self.counts.after_insert(&self.editor, at, b"$$$$");
+        self.editor.caret_to(at + 2)?;
         self.after_edit(4)
     }
 
@@ -515,6 +561,10 @@ impl<'a> Session<'a> {
         // leaves nothing behind rather than an anchor that nothing serves.
         self.editor.insert_image(at, png)?;
         self.stats.image_inserts += 1;
+        // Rescan rather than deltify: `Editor::insert_image` writes an anchor whose bytes are not
+        // returned to the caller, and `TextCounts` needs them. One rescan for one Ctrl+Image is the
+        // right trade -- see `Session::undo` for the same argument.
+        self.counts = TextCounts::scan(&self.editor);
         // The caret moves past the anchor, so the next keystroke types after the image rather than
         // inside it. `insert_at` already moved it; this makes the intent explicit and survives a
         // change to how `insert_at` places the cursor.
@@ -578,6 +628,9 @@ impl<'a> Session<'a> {
             .editor
             .insert_table(rows, cols, self.chrome.metrics.columns)?;
         self.stats.table_inserts += 1;
+        // Rescan rather than deltify, for the reason `insert_image_bytes` does: `Editor::insert_table`
+        // does not hand back the separator bytes it wrote, and `TextCounts` needs them.
+        self.counts = TextCounts::scan(&self.editor);
         self.tables_shape_dirty = true;
         self.enter_cell(span, 0, 0, 0)?;
         self.after_edit(0)
@@ -867,17 +920,16 @@ impl<'a> Session<'a> {
     // ---------------------------------------------------------------- edits
 
     fn insert(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
-        let at = self.editor.caret();
+        let at = self.editor.caret() as usize;
         // `GrowIntoInsert` so typing at the end of a bold word keeps it bold, which is what a word
         // processor does and what `SpanPolicy`'s own docs argue for.
         self.editor
-            .insert_at(at, bytes, SpanPolicy::GrowIntoInsert)?;
+            .insert_at(self.editor.caret(), bytes, SpanPolicy::GrowIntoInsert)?;
+        self.counts.after_insert(&self.editor, at, bytes);
         self.after_edit(bytes.len() as u32)
     }
 
-    
-
-/// Run `f` with the table the caret is in, or report that there is none.
+    /// Run `f` with the table the caret is in, or report that there is none.
 ///
     /// A closure rather than a returned `ResolvedTable` because that borrows the document bytes, and
     /// the bytes come from [`Editor::text`], which hands over an owned `Vec`. Returning the resolved
@@ -1004,6 +1056,9 @@ impl<'a> Session<'a> {
             // asserted against each other rather than assumed to agree.
             let new_row = self.editor.append_table_row(span)?;
             self.tables_shape_dirty = true;
+            // Rescan, for the reason `insert_table` does: the appended row's separators are not
+            // returned to the caller and `TextCounts` needs them.
+            self.counts = TextCounts::scan(&self.editor);
             debug_assert_eq!(
                 new_row, row,
                 "the rule asked to land in the row the append created, and the append made row \
@@ -1055,15 +1110,20 @@ impl<'a> Session<'a> {
         if at < INDENT.len() as u32 {
             return Ok(());
         }
-        let text = self.editor.text()?;
+        // Phase 11 item 4: four bytes into a stack array rather than a whole-document `editor.text()`, so
+        // this path allocates nothing and is O(4).
         let start = at as usize - INDENT.len();
-        if text.get(start..at as usize) != Some(INDENT) {
+        let mut indent = [0u8; 4];
+        let n = self.editor.read_into(start, &mut indent).unwrap_or(0);
+        if &indent[..n] != INDENT {
             // Nothing to remove. Not an error: Shift+Tab on a line that was never indented is a
             // keystroke with no effect, exactly as it is in any editor.
             self.stats.table_nav_nowhere += 1;
             return Ok(());
         }
         self.editor.delete_at(start as u32, INDENT.len() as u32)?;
+        self.counts
+            .after_delete(&self.editor, start, INDENT);
         self.after_edit(INDENT.len() as u32)
     }
 
@@ -1071,7 +1131,19 @@ impl<'a> Session<'a> {
         if self.editor.caret() == 0 {
             return Ok(());
         }
+        let at = self.editor.caret() as usize - 1;
+        // The byte about to be deleted, captured first: FR-1.2 zeroes it, so afterwards there is
+        // nothing for `TextCounts` to count. `Editor::backspace` deletes exactly one byte
+        // (`editor.rs:729`), so one byte is read -- no char-length lookup, because this editor's caret
+        // is byte-addressed.
+        //
+        // A **stack** array, copied out before the delete. Holding a borrow of `self.editor` across
+        // the delete is E0502, and the borrow has to end there because `TextCounts` must be told the
+        // bytes *after* the document has changed. `editor.rs:778` reads a byte the same way.
+        let mut one = [0u8; 1];
+        let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.backspace()?;
+        self.counts.after_delete(&self.editor, at, &one[..n]);
         self.after_edit(1)
     }
 
@@ -1079,15 +1151,32 @@ impl<'a> Session<'a> {
         if self.editor.caret() as usize >= self.editor.text_len() {
             return Ok(());
         }
+        let at = self.editor.caret() as usize;
+        let mut one = [0u8; 1];
+        let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.delete_forward()?;
+        self.counts.after_delete(&self.editor, at, &one[..n]);
         self.after_edit(1)
     }
 
     fn undo(&mut self) -> Result<(), SessionError> {
         // `NothingToUndo` is a *keymap* condition, not a document failure: pressing undo with
         // nothing to undo should be swallowed, not reported. Same for redo.
+        //
+        // **Phase 11 item 4: undo and redo rescan rather than deltifying.** `Editor::undo` returns an
+        // `EditOutcome` with an offset and a length but not the bytes, and the bytes are what the seam
+        // arithmetic needs -- the run is either being put back or taken away, and which one is a
+        // question only the undo stack can answer. So this is the one edit path that pays `O(document)`.
+        //
+        // That is a deliberate trade, not an oversight: undo is not the keystroke the 0.50 ms budget is
+        // about, it happens perhaps once per ten keystrokes, and a rescan cannot be wrong. The
+        // alternative -- threading the bytes out of `UndoStack` -- would put an undo-format detail into
+        // the counting path, where a format change becomes a counting bug.
         match self.editor.undo() {
-            Ok(_) => self.after_edit(0),
+            Ok(_) => {
+                self.recount_counts();
+                self.after_edit(0)
+            }
             Err(EditorError::NothingToUndo) => Ok(()),
             Err(e) => Err(e.into()),
         }
@@ -1095,7 +1184,10 @@ impl<'a> Session<'a> {
 
     fn redo(&mut self) -> Result<(), SessionError> {
         match self.editor.redo() {
-            Ok(_) => self.after_edit(0),
+            Ok(_) => {
+                self.recount_counts();
+                self.after_edit(0)
+            }
             Err(EditorError::NothingToRedo) => Ok(()),
             Err(e) => Err(e.into()),
         }
@@ -1132,7 +1224,13 @@ impl<'a> Session<'a> {
     }
 
     /// Put the caret at `at`, clamped back to a codepoint boundary.
-    fn caret_to(&mut self, at: usize) -> Result<(), SessionError> {
+    ///
+    /// **Public as of Phase 11**, for the same reason `tick` and `apply` are: a driver -- or a gate --
+    /// that positions the caret needs to move it without inventing an edit to move it with. The latency
+    /// gate in `tests/session_latency.rs` places the caret at three offsets and measures the keystroke
+    /// that follows, and doing that through `Command::Insert` would have measured an insertion at a
+    /// guessed offset rather than at the one being tested.
+    pub fn caret_to(&mut self, at: usize) -> Result<(), SessionError> {
         // The caret's old cell, before anything moves. Read from the *state* rather than by locating
         // it, because the state is what `Caret::locate` will use and re-deriving it after the move
         // would give the new position, which is the one thing that is not yet stale.
@@ -1166,37 +1264,51 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// The byte offset of the start of the line containing `at`.
+    /// The byte offset of the start of the line containing `at`. **O(log n).**
     ///
-    /// Scans backwards for the last newline, in fixed-size chunks read through
-    /// [`Editor::read_into`](holonomy_text::Editor::read_into). **Phase 11**: this used to call
-    /// `self.editor.text()`, which allocates a `Vec` the size of the whole document and copies it
-    /// byte-for-byte -- so a function whose comment claimed "O(line length)" was in fact O(document)
-    /// and allocating, twice per keystroke via [`Session::caret_to`].
+    /// **Phase 11.** Three implementations have stood here, and the history is the reason for the
+    /// comment. First `self.editor.text()` — which allocates a `Vec` the size of the whole document and
+    /// copies it byte-for-byte, so a function whose comment claimed "O(line length)" was in fact
+    /// `O(document)` and allocating, twice per keystroke via [`Session::caret_to`]. Then a chunked
+    /// backward scan through `read_into`, which removed the allocation and left the scan. Now two
+    /// Fenwick trees, which remove the scan.
     ///
-    /// `Editor` deliberately does not own line geometry, so the session computes this. See the layering
-    /// note in `holonomy-input`: a `Command::Up` means "move up" and nothing about how many bytes that
-    /// is.
+    /// `Editor` deliberately does not own line geometry, so the session holds it. See the layering note
+    /// in `holonomy-input`: a `Command::Up` means "move up" and nothing about how many bytes that is.
     fn line_start(&self, at: usize) -> usize {
-        line_start_in(&self.editor, at)
+        self.lines.line_start(at)
     }
 
-    /// The 0-based line index containing `at`.
+    /// The 0-based line index containing `at`. **O(log n).**
     ///
-    /// Counts newlines in `[0, at)` the same chunked way [`Session::line_start`] does, for the same
-    /// reason. **This is still O(bytes before the caret) and Phase 11 does not pretend otherwise:**
-    /// the honest fix is the Fenwick tree over line heights, which answers this in `O(log n)`, and
-    /// wiring it is Phase 11's third item. What is fixed here is the *allocation* -- the count is the
-    /// remaining cost, not the 6.4 MiB copy that used to accompany it.
+    /// Same three implementations as [`Session::line_start`], for the same reasons. The scan this
+    /// replaced cost `O(bytes before the caret)` — at 3.5 MiB, ~900 `read_into` calls, which is
+    /// microseconds and therefore most of the 0.50 ms keystroke budget spent on answering a question a
+    /// tree answers in sixteen comparisons.
     fn line_index(&self, at: usize) -> u32 {
-        line_index_in(&self.editor, at)
+        self.lines.line_of(at)
     }
 
     /// Record an edit's consequences: counts, status bar, and the damaged line.
+    ///
+    /// **The counts are *not* refreshed here.** They are folded forward by the caller --
+    /// `Session::insert`, `backspace`, `delete_forward` and `outdent` each call `TextCounts` with the
+    /// bytes they moved, and `undo`/`redo` rescan. This function therefore does the two things that are
+    /// position-independent: move the caret, and reconcile the line geometry.
     fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
         self.caret_to(self.editor.caret() as usize)?;
-        self.refresh_counts();
+        // The line geometry must agree with the document before anything reads it, and `caret_to` has
+        // already used it above — so the order here is not free. **This is the fix for a latent bug,
+        // not only an optimisation**: `line_index` used to count newlines, so it was correct whatever
+        // the geometry said; now it is a tree lookup, and a tree that a previous edit left stale
+        // answers with the *previous* document's line numbers. Every edit syncs, so the tree is never
+        // stale at the top of this function.
+        self.sync_lines();
+        // And the status bar's totals, from the deltas the caller folded. O(1): this is a three-field
+        // copy out of `TextCounts`, not a recount. See `publish_counts` for why the two maintained
+        // quantities are published at their own points rather than together.
+        self.publish_counts();
         // FR-3.4: an edit invalidates one line's box. The damaged region is the caret's line, and
         // the *old* caret's line if the edit moved it -- both, or a line that got longer would keep
         // a tail of stale pixels.
@@ -1224,54 +1336,75 @@ impl<'a> Session<'a> {
         ))
     }
 
+    /// Bring the line geometry back into agreement with the document. Phase 11.
+    ///
+    /// Delegates to [`DocLines::sync`], which decides between a one-point update and a rebuild by
+    /// comparing the document's newline count with the geometry's line count. **It is called from
+    /// `after_edit` only** — every mutation in the session goes through there, including undo, redo,
+    /// table rows and formulas, which is why the sync is driven by a comparison rather than by being
+    /// told what each caller did.
+    ///
+    /// One thing this deliberately does *not* do: recompute the heights tree. `LineGeometry`'s heights
+    /// are uniform per line today because a line's height is `cell_h` for ordinary text, and the
+    /// variable-height blocks (tables, formulas, images) are handled by `LineHeights::from` on the
+    /// paint path. Wiring real per-line heights is Phase 12's, with `Painter::text`.
+    ///
+    /// **Public as of Phase 11**, for the reason `tick` and `apply` are: the latency diagnostic in
+    /// `tests/session_latency.rs` times this step on its own, and a diagnostic that cannot name the
+    /// thing it is measuring has to be deleted rather than maintained.
+    pub fn sync_lines(&mut self) {
+        // **The line count comes from `TextCounts`, not from a scan.** This function used to read the
+        // whole document to count newlines, which put a 3.1 MiB read back on the keystroke path inside
+        // the one function whose purpose is to remove `O(document)` work -- measured at 3,906 µs.
+        // `TextCounts` already maintains the newline count as a delta, so it is asked instead.
+        let expected = self.counts.lines() as usize;
+        let caret = self.editor.caret() as usize;
+        let metrics = holonomy_geometry::LineMetrics::default();
+        match self.lines.sync(&self.editor, expected, caret, metrics) {
+            Sync::OneLine => self.stats.line_updates += 1,
+            Sync::Rebuilt => self.stats.line_rebuilds += 1,
+            Sync::Unchanged => {}
+        }
+    }
+
+    /// The current word and line totals, from a full rescan. Phase 11 item 4.
+    ///
+    /// The repair path, and the one place `after_edit` no longer calls. See
+    /// [`Session::recount_words_and_lines`] for why it stays.
+    pub fn recount_counts(&mut self) {
+        self.recount_words_and_lines();
+    }
+
+    /// Copy the maintained totals into the state the status bar draws from.
+    ///
+    /// **O(1)**, and the reason the status bar keeps working while the recount stopped running on the
+    /// keystroke path. `ChromeState::words` and `total_lines` are what `Chrome::tree` reads; the
+    /// maintained `TextCounts` is what is correct. Publishing is the one-way bridge between them, and it
+    /// is a three-field copy rather than a recount.
+    ///
+    /// Kept separate from `sync_lines` so the two *independent* maintained quantities are published at
+    /// their own points: if either is wrong the other does not mask it.
+    fn publish_counts(&mut self) {
+        self.state.bytes = self.editor.text_len() as u32;
+        self.state.words = self.counts.words;
+        self.state.total_lines = self.counts.lines();
+    }
+
     /// Recount the words and bytes the status bar shows.
     ///
-    /// **Phase 11.** This was the third whole-document copy per keystroke, and unlike `line_index` it
-    /// has no O(log n) replacement yet: word count is not a prefix sum. So it is still a full scan, but
-    /// it now streams through [`Editor::read_into`](holonomy_text::Editor::read_into) in
-    /// [`SCAN_CHUNK`] pieces and holds one chunk rather than the document.
+    /// **Phase 11 item 4, and this is the method item 4 exists to remove from the keystroke path.** It is
+    /// `O(document)`: a byte at a time over the whole text. Measured at 12.9 ms of a 3.1 MiB document's
+    /// keystroke, which is 26x the entire 0.50 ms budget spent on numbers that only appear in a status
+    /// bar.
     ///
-    /// The word count is carried across chunk boundaries explicitly. An earlier version counted words
-    /// per chunk and added the chunks, which undercounts every document whose words straddle a
-    /// 4,096-byte boundary -- and 4,096 is not a large boundary relative to a 3.5 MiB document, so that
-    /// is a wrong answer rather than a rounding one. `in_word` is the carry.
-    fn refresh_counts(&mut self) {
-        let len = self.editor.text_len();
-        self.state.bytes = len as u32;
-        let mut words = 0u32;
-        let mut newlines = 0u32;
-        // Whether the byte before the chunk boundary continued a word. `false` at the document start.
-        let mut in_word = false;
-        let mut chunk = [0u8; SCAN_CHUNK];
-        let mut offset = 0usize;
-        while offset < len {
-            let want = (len - offset).min(SCAN_CHUNK);
-            let got = match self.editor.read_into(offset, &mut chunk[..want]) {
-                Ok(got) => got,
-                Err(_) => break,
-            };
-            if got == 0 {
-                break;
-            }
-            let bytes = &chunk[..got];
-            newlines += bytes.iter().filter(|&&b| b == b'\n').count() as u32;
-            for &b in bytes {
-                let space = b.is_ascii_whitespace();
-                // A word is a maximal run of non-whitespace, so it is counted on its *last* byte --
-                // that way a run split across two chunks is counted once, in the chunk that holds its
-                // final byte, and `in_word` carries the rest.
-                if space {
-                    in_word = false;
-                } else if !in_word {
-                    in_word = true;
-                    words += 1;
-                }
-            }
-            offset += got;
-        }
-        self.state.words = words;
-        // An empty document is one line, and that is what `ChromeState` initialises to.
-        self.state.total_lines = newlines.max(1);
+    /// Kept as the **repair path**, not the update path: [`Session::counts`] maintains the totals as
+    /// deltas and calls this only to rebuild from scratch -- at construction, and from `undo`/`redo` and
+    /// the editor-level inserts (`insert_table`, `insert_image`, `append_table_row`) that do not hand back
+    /// the bytes they wrote. It is also what `counts.rs`'s own tests compare against, which is what makes
+    /// it worth keeping at all.
+    pub fn recount_words_and_lines(&mut self) {
+        self.counts = TextCounts::scan(&self.editor);
+        self.publish_counts();
     }
 
     // ---------------------------------------------------------------- paint
@@ -2208,7 +2341,7 @@ const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
 /// The cost of the choice: a document scan is `document_bytes / 4096` calls into `read_into`. At 3.5
 /// MiB that is ~900 calls for the line count, which is microseconds. Phase 11's third item -- the
 /// Fenwick tree -- removes the scan itself rather than making it cheaper.
-const SCAN_CHUNK: usize = 4096;
+pub const SCAN_CHUNK: usize = 4096;
 
 /// `node`'s box, without emitting anything.
 ///
@@ -2217,35 +2350,6 @@ const SCAN_CHUNK: usize = 4096;
 /// once to centre the formula vertically before laying it out, and once for the damage rectangle --
 /// so it is the measure-only entry point rather than the one that returns a box as a by-product.
 #[inline]
-/// The byte offset of the start of the line containing `at`. Phase 11.
-///
-/// A free function over `&Editor` rather than a `&self` method, for the same reason
-/// [`read_document`] is: the paint-path callers hold a borrow of `doc_scratch` across the call, so a
-/// `&self` method would borrow all of `Session` and conflict with it.
-///
-/// Backwards in chunks, and the *nearest* newline wins, so a chunk containing one returns immediately
-/// rather than continuing to the document start.
-fn line_start_in(editor: &Editor, at: usize) -> usize {
-    let len = editor.text_len();
-    let mut at = at.min(len);
-    while at > 0 {
-        let from = at.saturating_sub(SCAN_CHUNK);
-        let mut chunk = [0u8; SCAN_CHUNK];
-        let want = at - from;
-        let got = match editor.read_into(from, &mut chunk[..want]) {
-            Ok(got) => got,
-            // A read that fails leaves `at` unchanged and would loop forever, so an unreadable range
-            // counts as "no newline in it" and the scan continues from the previous chunk.
-            Err(_) => break,
-        };
-        if let Some(i) = chunk[..got].iter().rposition(|&b| b == b'\n') {
-            return from + i + 1;
-        }
-        at = from;
-    }
-    0
-}
-
 /// The 0-based line index containing `at`. Phase 11.
 ///
 /// **Still O(bytes before the caret), and Phase 11 does not pretend otherwise.** The allocation is

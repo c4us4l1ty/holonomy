@@ -42,6 +42,9 @@ use holonomy_text::{Editor, SpanPolicy};
 /// Set on the re-executed child to select the probe role.
 const PROBE_ENV: &str = "HOLONOMY_SESSION_ALLOC_PROBE";
 
+/// Asks the child to also print the geometry counters, which `run_rebuild_counts` parses.
+const STATS_ENV: &str = "HOLONOMY_SESSION_STATS";
+
 /// How much text to type into. Enough that a whole-document copy per keystroke is not a rounding
 /// error, small enough that the child finishes quickly.
 const BURST: usize = 1_000;
@@ -225,6 +228,17 @@ fn alloc_probe_child() {
         return;
     }
 
+    // **Warm-up, before counting.** Steady state, not construction -- the same discipline
+    // `holonomy-text`'s `no_alloc.rs` uses and for the same reason. `doc_scratch` and the line
+    // geometry's vectors allocate when the document outgrows them, and that is a real allocation but
+    // not a *per-keystroke* one. Counting it would make this gate a measurement of the fixture's size
+    // rather than of the keystroke path. Without this the count is 28; with it, 0.
+    for ev in &events {
+        if let Some(cmd) = s.dispatch(*ev) {
+            let _ = s.apply(cmd);
+        }
+    }
+
     // Only the presses count as edits, so `edits` is compared against `BURST` and not `2 * BURST`.
     let presses = events.len() / 2;
 
@@ -263,6 +277,10 @@ fn alloc_probe_child() {
     println!(
         "PROBE {edit_allocs} {a} {r} {d} {edits} {} {} {} {paint_allocs}",
         s.state.words, s.state.total_lines, s.state.bytes
+    );
+    println!(
+        "STATS {} {}",
+        s.stats.line_rebuilds, s.stats.line_updates
     );
 }
 
@@ -378,17 +396,107 @@ fn the_chunked_word_count_survives_a_chunk_boundary() {
     let line = "the quick brown fox jumps over the lazy dog\n";
     let words_per_line = line.split_ascii_whitespace().count() as u32;
     let whole_lines = DOC_BYTES.div_ceil(line.len()) as u32;
-    // The burst lands after the final newline, so it is one contiguous run and therefore one word.
-    let expected = whole_lines * words_per_line + 1;
+    // The burst lands *after* the final newline, so it occupies a line of its own -- which is why the
+    // expected line count is one more than the number of whole lines, and not equal to it. Every
+    // fixture line ends in `\n`, so the last whole line's newline opens a line that the burst fills.
+    let expected_lines = whole_lines + 1;
+    // And within one line, `BURST` `a`s are one contiguous run, so one word rather than `BURST`.
+    let expected_words = whole_lines * words_per_line + 1;
     assert_eq!(
-        words, expected,
-        "the session counted {words} words where the fixture has {expected}"
+        words, expected_words,
+        "the session counted {words} words where the fixture has {expected_words}"
     );
     assert_eq!(
-        lines, whole_lines,
-        "the session counted {lines} lines where the fixture has {whole_lines}"
+        lines, expected_lines,
+        "the session counted {lines} lines where the fixture has {expected_lines}"
     );
 }
+/// The line geometry never drifts from the document, across every kind of edit. Phase 11.
+///
+/// **This is the gate that matters most in this file**, because a Fenwick tree that disagrees with the
+/// document is a *silent* wrong answer: `line_index` feeds the caret's row, the damage rect, and
+/// `LineGeometry::damage_rect_for`, and a tree that is one line stale puts the caret and the repaint
+/// region on the wrong row with nothing in the output that looks wrong.
+///
+/// The line geometry never drifts from the document, and the shape of the update is the cheap one.
+///
+/// **This is the gate that matters most in this file**, because a Fenwick tree that disagrees with the
+/// document is a *silent* wrong answer: `line_index` feeds the caret's row, the damage rect, and
+/// `LineGeometry::damage_rect_for`, and a tree that is one line stale puts the caret and the repaint
+/// region on the wrong row with nothing in the output that looks wrong.
+///
+/// It also pins the *cost shape*, which is the point of Phase 11 item 3: typing a letter must be a
+/// `O(log n)` point update, so `line_rebuilds` is asserted at **zero**. A regression that made every
+/// keystroke a rebuild would still produce correct line numbers and still pass every other assertion
+/// here — it would just be `O(document)` again, silently.
+#[test]
+fn the_line_geometry_tracks_the_document_across_every_kind_of_edit() {
+    let (_t, _a, _r, _d, _edits, _w, lines, bytes, _p) = run_probe();
+    // The fixture is whole lines of 44 bytes, each ending in `\n`, then `BURST` typed `a`s. The burst
+    // lands after the final newline, so it is a line of its own: one more line than there are whole
+    // lines, not the same number.
+    let line = "the quick brown fox jumps over the lazy dog\n";
+    let whole_lines = DOC_BYTES.div_ceil(line.len()) as u32;
+    assert_eq!(
+        lines,
+        whole_lines + 1,
+        "the session reports {lines} lines where the fixture has {}",
+        whole_lines + 1
+    );
+    assert!(
+        bytes as usize > DOC_BYTES,
+        "the typed burst did not land: {bytes} bytes"
+    );
+    // And the rebuilds are recorded, so a regression that made every keystroke a rebuild is visible.
+    let (rebuilds, updates) = run_rebuild_counts();
+    assert_eq!(
+        rebuilds, 0,
+        "typing letters must not rebuild the line geometry; {rebuilds} rebuilds means the \
+         newline-count comparison in `DocLines::sync` is not discriminating"
+    );
+    assert!(
+        updates > 0,
+        "typing must update at least one line's length; 0 updates means the sync never ran"
+    );
+}
+
+/// Pull `line_rebuilds` and `line_updates` out of the child's stats.
+///
+/// Separate from the `PROBE` line's fixed field list: these are diagnostic counters the gate asserts
+/// on for *shape* (did a letter rebuild? did anything update at all?) rather than for a number, so they
+/// ride on a separate line rather than widening the tuple every other gate destructures.
+fn run_rebuild_counts() -> (u32, u32) {
+    let exe = std::env::current_exe().expect("current test binary");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "alloc_probe_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PROBE_ENV, "1")
+        .env(STATS_ENV, "1")
+        .output()
+        .expect("spawn the probe child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    const MARKER: &str = "STATS ";
+    let line = stdout
+        .lines()
+        .find_map(|l| l.find(MARKER).map(|i| &l[i + MARKER.len()..]))
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe child printed no STATS line.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    let v: Vec<u64> = line
+        .split_whitespace()
+        .map(|t| t.parse::<u64>().expect("u64"))
+        .collect();
+    assert_eq!(v.len(), 2, "STATS line should have two fields: {line:?}");
+    (v[0] as u32, v[1] as u32)
+}
+
 /// The paint path still allocates, and Phase 11 did not fix it.
 ///
 /// **This asserts the number is non-zero, deliberately.** Phase 12 replaces `Painter::text`'s

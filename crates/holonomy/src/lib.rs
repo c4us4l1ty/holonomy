@@ -14,6 +14,8 @@
 //! loop lives in a library rather than in `main`.
 
 pub mod args;
+pub mod counts;
+pub mod doclines;
 pub mod session;
 #[cfg(feature = "desktop")]
 pub mod windowed;
