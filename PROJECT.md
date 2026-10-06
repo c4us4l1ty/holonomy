@@ -1578,7 +1578,7 @@ including the error path**.
 65,520-byte buffer** — `maximum document: 8321040 bytes in 127 chunks` — which is the mechanism item 4
 needs. **It does not yet stop anything being resident.** `Editor` still holds the whole document in a rope of
 page-locked 4 KiB leaves, so `mlock` occupancy is unchanged and **the format's maximum document is still
-unopenable**: 8,321,040 bytes of text needs 8.88 MiB of `mlock` against this host's 8.00 MiB limit.
+unopenable**: 8,321,040 bytes of text needs 8.46 MiB of `mlock` against this host's 8.00 MiB limit.
 
 **The concrete blocker for the rest of item 3, which is a design decision and not a bug.** `Editor` assumes
 the document is contiguous and resident: `text_len()`, `read_into`, the caret, every edit path, the span
@@ -1660,9 +1660,9 @@ The charge is real while the pages are there and is gone when they are not.
 
 **So `SectionStore`'s budget *is* the page-lock budget**, `mlockall` costs nothing on top of it beyond
 whatever is genuinely resident, and **item 4 is reachable without touching `mlockall` and without raising
-`RLIMIT_MEMLOCK`.** The maximum document needs `8,321,040 × 4096/3840 = 8.88 MiB` of page-locked leaves *only
+`RLIMIT_MEMLOCK`.** The maximum document needs `8,321,040 × 4096/3840 = 8,875,776 B = 8.46 MiB` of page-locked leaves *only
 if all of it is resident*; at a 4-section budget it needs about 256 KiB. What matters is the **peak**, so the
-windowing has to be in place *before* the document is loaded — a fully-resident `Editor` peaks at 8.88 MiB
+windowing has to be in place *before* the document is loaded — a fully-resident `Editor` peaks at 8.46 MiB
 and fails, and there is no recovering from that after the fact.
 
 **The ceiling still cannot be raised, and that is now a side note rather than a blocker.** Measured, for the
@@ -1689,6 +1689,64 @@ unmapping returns them. Two `SecureBlock` facts were already in the tree and wou
 are `munmap`ped when dropped (`SecureBlock::zeroize_and_release`), and `munlock` is allowlisted
 (`seccomp/table.rs:99`) precisely because a freed slot must not leak against the ceiling. The design already
 knew the answer; the note did not ask it.
+
+#### Phase 13, part 3 — wiring `Editor` to `SectionStore`: the impedance mismatch
+
+This is the design for item 3's remaining half, recorded **before** it is built, because two measurements
+change the shape of it.
+
+**Correction, 2026-10-06: the page-lock figure was wrong by a unit.** Earlier text said the maximum document
+needs `8.88 MiB`. The byte count `8,321,040 × 4096/3840 = 8,875,776 B` was right; `8,875,776` bytes is
+**8.46 MiB**, and 8.88 was that number in decimal MB mislabelled as MiB. The conclusion is unchanged — it is
+over the 8.00 MiB ceiling — but by **0.46 MiB, i.e. 119 leaves**, not by whatever 8.88 implied. `main.rs`
+already computed it correctly.
+
+**Measurement 1 — the ceiling is exactly 2,048 leaves, and that is where 8.00 MiB comes from.** Each leaf is
+one 4 KiB page-locked `SecureBlock`, so `2,048 × 4,096 = 8,388,608 B = 8.000 MiB` precisely. The maximum
+document needs `ceil(8,321,040 / 3,840) = 2,167` leaves — **119 more than the ceiling holds.**
+
+**Measurement 2 — a section is not a whole number of leaves, and this is the real obstacle.**
+
+```text
+leaf fill   LEAF_CAPACITY - GAP_MINIMUM = 4,096 - 256 = 3,840 B
+section     CHUNK_PLAINTEXT                           = 65,520 B
+65,520 / 3,840 = 17.0625      -> not integral
+```
+
+`SectionStore` budgets and evicts **per section**; `Rope` addresses **per leaf**. So **the two units do not
+tile, and a leaf can straddle a section boundary** — faulting one absent leaf in can require reading **two**
+sections, and the pair has to be pinned for as long as the leaf is resident, or the second fault-in returns
+bytes from a different pair than the first. This is the thing that has to be designed, and it is why "just
+point `Editor` at the store" is not a small change.
+
+**Measurement 3 — `Rope::insert_at` is byte-at-a-time, so there is no streaming load today.**
+
+```rust
+pub fn insert_at(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError> {
+    for &b in bytes { self.insert_byte(b)?; }
+}
+```
+
+`Editor::from_text(&[u8])` is the only load, and it requires the **whole document as a contiguous
+`&[u8]`** before the first byte lands. So "load then window" is not merely bad for peak `mlock`, it is
+**structurally unavailable** — there is no API that consumes a document incrementally. A `&[u8]` of
+8,321,040 bytes is itself 7.94 MiB of ordinary (unlocked) heap, on top of the rope.
+
+**What the design has to satisfy, gathered:**
+
+| requirement | consequence |
+| --- | --- |
+| `locate` is a binary search over `starts` — **pure geometry, no leaf bytes** (rope.rs:212) | an absent leaf needs only its **length**; the spine stays fully resident and costs 24 B/leaf (≈ 52 KB for 2,167 leaves) |
+| leaf 3,840 B vs. section 65,520 B, 17.0625 sections/leaf | a fault-in may need **two** sections, pinned together |
+| edits shift every offset after them | a leaf's bytes stop aligning to any section boundary after the first edit; the manifest's `sync` is what re-establishes alignment, so the store and the rope **cannot disagree about what is resident** — that is the coupling the summary named |
+| caret, `insert_byte`, `delete_byte`, `set_gap_offset`, split/merge all mutate leaf bytes | "edit an absent leaf" must **fault it in first**; the alternative is a leaf that is silently wrong |
+| `any_leaf_contains` is linear in total size and is the destructive-delete gate | a full scrub cannot see through an absent leaf, so eviction must not be allowed to hide bytes from it |
+
+**Sequencing, and why B before A.** B (absent leaves + fault-in) is what removes the 8.46 MiB peak and is
+therefore the change that unblocks the maximum document. A (a streaming load, so no whole-document `&[u8]`
+exists) removes a 7.94 MiB heap spike but **does not reduce residency on its own** — the rope would still
+hold every byte. Doing A first would be a smaller, independently testable change that does not move the
+number anyone is waiting for. **B is being done first.**
 
 #### Phase 14 — The chrome: pointer input, menus, icons
 
@@ -1807,14 +1865,14 @@ the desktop build, and none of this needs more than a few tens of KiB.
    `chunks_for` reserves a whole slot for the master frame and refuses a partial trailing chunk, so 2,032
    bytes of the payload are unreachable as content. **The gap between 3.40 MiB and 8.32 MB is not memory.**
    A document's text is page-locked while it is resident, and 8,321,040 bytes of text fully resident needs
-   `8,321,040 × 4096/3840 = 8.88 MiB` of `mlock` against this host's 8.00 MiB ceiling — so **the format's
+   `8,321,040 × 4096/3840 = 8,875,776 B = 8.46 MiB` of `mlock` against this host's 8.00 MiB ceiling — so **the format's
    maximum document is still unopenable today**, exactly as Phase 11's audit found. Phase 13 part 2 step 1
    made it *readable in principle* (it comes back through one 65,520-byte buffer) and did not make it
    *openable*, because `Editor` still holds the whole document resident.
    **Until then the honest claim is a 3.4 MiB document, and the reason is `mlock` rather than RAM.**
 
    **What changes this: the bound is a *peak*, not a floor.** `munmap` releases the page-lock charge, so a
-   bounded resident set bounds the locked set (item 7). The 8.88 MiB above is what a **fully resident**
+   bounded resident set bounds the locked set (item 7). The 8.46 MiB above is what a **fully resident**
    document costs; a 4-section window needs about 256 KiB. **So the ceiling is reachable by windowing alone**
    — the 3.40 MiB number is a property of `Editor` being fully resident, not a property of the host, and
    wiring `Editor` to `SectionStore` is what removes it.
@@ -1828,7 +1886,7 @@ the desktop build, and none of this needs more than a few tens of KiB.
    mmap/touch/`munmap` of 2 MiB. **So the locked set tracks the resident set, `SectionStore`'s budget is the
    page-lock budget, and `mlockall` costs nothing beyond what is genuinely resident.** Item 4 needs no host
    change, no raised limit and no retirement — it needs `Editor` to be sparse *before* the document is loaded,
-   because what binds is the **peak**. A fully-resident `Editor` peaks at 8.88 MiB and fails; a 4-section
+   because what binds is the **peak**. A fully-resident `Editor` peaks at 8.46 MiB and fails; a 4-section
    budget needs ~256 KiB. See §Phase 13, part 2, step 2b.
 
 8. **`SectionStore` is gated and unused.** A session's residency is unchanged, because `Editor` does not read
