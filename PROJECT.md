@@ -1906,27 +1906,33 @@ the desktop build, and none of this needs more than a few tens of KiB.
    because what binds is the **peak**. A fully-resident `Editor` peaks at 8.46 MiB and fails; a 4-section
    budget needs ~256 KiB. See §Phase 13, part 2, step 2b.
 
-8. **Every Phase 13 mechanism is gated and unused, and §6's RSS row must not be read as if otherwise.**
-   The chain is complete *in libraries* and reached *by no product path*:
+8. **The product now opens a document; what remains is how much of the document it can reach.**
+   `main.rs` adopted the stage-4 descriptor with the passphrase and loaded via `from_skeleton` +
+   `read_into_faulting`, so the chain is no longer gate-only:
 
-   | piece | reachable from a session? |
+   | piece | reachable from a product path? |
    | --- | --- |
-   | `Manifest` (`5b9f1e2`) | no — `Session` builds and syncs it, but nothing loads a document to sync |
-   | `Wavefunction::read_chunk_into` (`5e7aa88`) | no |
-   | `SectionStore` (`73163c5`) | no |
-   | `Rope`'s absent leaves + `LeafSource` (`d790a13`) | no |
-   | `SectionStore` as `LeafSource`, the join (`a625ece`) | no |
-   | `Rope::from_skeleton` (`VmHWM` 1.1 MiB vs 5.0 MiB, 2 MiB doc) | no |
-   | `Editor::from_skeleton` + `read_into_faulting` | no — **`main.rs:208,242` still build `Editor::new()`** |
+   | `Manifest` (`5b9f1e2`) | yes — a session syncs a real document |
+   | `Wavefunction::read_chunk_into` (`5e7aa88`) | yes, through `SectionStore::copy_into` |
+   | `SectionStore` (`73163c5`) | yes, during the load |
+   | `Rope`'s absent leaves + `LeafSource` (`d790a13`) | yes, during the load |
+   | `SectionStore` as `LeafSource` (`a625ece`) | yes |
+   | `Rope::from_skeleton` / `Editor::from_skeleton` (`04fa3b5`) | **yes — this is the load** |
+   | `Wavefunction::adopt` (`0d62666`) | **yes — post-seal, so `open` is unreachable in the product** |
+   | `open_document` (this step) | **yes** |
 
-   So the honest statement is **not** "the windowing does not reduce residency" any more — it is that
-   **residency is unchanged because nothing opens a document.** `main.rs:295` still discards the
-   passphrase, so there is no code path that could.
-
-   And the load-time peak that `from_skeleton` removes is **only reachable through a skeleton load**:
-   `from_text` still needs the whole document as a contiguous `&[u8]`, and that is the path every existing
-   caller uses. Until the session calls `from_skeleton` and then `read_into_faulting`, the 24.8 MiB two-copy
-   peak for the maximum document is still what the product does.
+   **What is still not true, precisely:**
+   * **A session can only read its first window.** The load faults in `budget` sections because the paint
+     path reads through `&self` and cannot fault; past the window it counts `runs_missing`, which is safe
+     and wrong to draw. §7 item 4 is that.
+   * **A sparse document is read-only.** Edits refuse on absent leaves.
+   * **`vdf_iterations` is `TEST_VDF_ITERATIONS`**, and the count is *not recorded in the container*, so a
+     container written by a build with different iterations will not open with this one. A real unlock
+     derives it from a measured per-squaring cost (§2.4). **The boot now depends on a value that does not
+     exist yet**, which makes this the most likely thing to break first in the field.
+   * **`SessionContext` holds the `Wavefunction` beside the session**, not inside it, so a store alive for a
+     session's lifetime is still not possible. The load-time store is created, used and dropped — which
+     works because faulted leaves are `SecureBlock`s the rope owns, not views into the store.
 
 9. **`SpanMap::plain` is a claim the sparse rope cannot yet keep.** `Editor::from_skeleton` works because
    every structure in `Editor::empty` is a function of the document's **length**, not its contents — that is

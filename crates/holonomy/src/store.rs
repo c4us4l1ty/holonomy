@@ -342,6 +342,92 @@ impl Drop for SectionStore<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Opening a document for real.
+// ---------------------------------------------------------------------------
+
+/// Resident sections a session keeps by default.
+///
+/// **A policy number, not a property of the type**, and chosen to be small: four sections is 262,080
+/// bytes of page-locked text, which is 3 % of this host's 8.00 MiB `RLIMIT_MEMLOCK` ceiling. A larger
+/// budget is a faster scroll and more headroom; a smaller one is a smaller ceiling. §2.9.4 is where that
+/// trade should be settled against the whole memory picture rather than here.
+pub const DEFAULT_RESIDENT_SECTIONS: usize = 4;
+
+/// A document opened from a container: the editor, and the container it reads from.
+pub struct OpenedDocument {
+    /// A **skeleton** editor — geometry for the whole document, bytes for the first window only.
+    pub editor: holonomy_text::Editor,
+    /// The container. **Not borrowed by `editor`**, and that is the point; see [`open_document`].
+    pub container: Wavefunction,
+}
+
+/// Open a container from a descriptor and load its document into a **sparse** editor.
+///
+/// # The store is a loader, not a resident owner — and that settles the lifetime question
+///
+/// `SectionStore<'c>` borrows the container, so a store held *inside* something that also owns the
+/// container would be self-referential. That would need `ouroboros` or `yoke`, and a dependency plus a
+/// macro to save one lifetime annotation.
+///
+/// **This function sidesteps it, and the fact that it can is the design.** The store exists to *fetch*
+/// leaves; the leaves it fetches are `SecureBlock`s owned by the rope, not views into the store. So the
+/// store can be created, used to fault in the first window, and **dropped** — and the resident bytes stay
+/// resident. [`Wavefunction`] is returned beside the editor rather than borrowed by it, so nothing borrows
+/// anything.
+///
+/// What this does *not* solve is faulting a leaf in **later**, after the session has started. That needs a
+/// store alive for the session's lifetime, and therefore does need the ownership question answered
+/// properly. **It is not needed to open a document and paint it, and doing that first is why this shape
+/// was chosen.**
+///
+/// # What is resident when this returns
+///
+/// The **whole document's geometry** — every leaf slot, `starts`, and therefore `text_len` and every
+/// offset — and the **first `budget` sections' bytes**. Nothing else. `editor.resident_bytes()` is the
+/// number, and it should be well under the budget's ceiling because the budget is counted in sections and
+/// the window is counted in bytes.
+///
+/// # Why the first window is faulted at all
+///
+/// **Because the paint path reads through `&self` and cannot fault.** `Session`'s emitters call
+/// `Editor::read_into`, which is `&self` and refuses an absent leaf; the painter counts that as
+/// `PaintStats::runs_missing` — safe, and wrong to draw. So without a resident first window, opening a
+/// document would open it onto a blank page. That is the honest reason the load reads anything, and it is
+/// a *stopgap*: the real fix is the paint path taking `read_into_faulting`, which is a separate step.
+///
+/// # `vdf_iterations` is caller-supplied, and the product has no value for it yet
+///
+/// The count is **not recorded in the container** — `Wavefunction::open`/`adopt` take it as a
+/// parameter — so a caller must know it out of band. The only constant in the tree is
+/// [`TEST_VDF_ITERATIONS`](holonomy_container::TEST_VDF_ITERATIONS), which is explicitly for tests and
+/// "any caller that does not care about latency". **The product has no production value**, and a real
+/// unlock is supposed to derive one from a measured per-squaring cost (PROJECT.md §2.4). Passing the
+/// test constant here is honest but temporary, and it means **an H1 container written by a future build
+/// with different iterations would not open with this one.**
+pub fn open_document(
+    file: holonomy_container::io::DirectFile,
+    passphrase: &str,
+    vdf_iterations: u64,
+    budget: usize,
+) -> Result<OpenedDocument, StoreError> {
+    let container = Wavefunction::adopt(file, passphrase, vdf_iterations).map_err(|_| StoreError::Read)?;
+    let len = container.content_len() as usize;
+    let mut editor = holonomy_text::Editor::from_skeleton(len);
+
+    // Fault in the first window, so the paint path has something to draw. `Session` owns no store, so
+    // this is the only moment a store exists during the load -- and that is fine, see the type's docs.
+    let window = len.min(budget * SECTION_BYTES);
+    if window > 0 {
+        let mut store = SectionStore::new(&container, budget);
+        let mut buf = vec![0u8; window];
+        editor
+            .read_into_faulting(&mut store, 0, &mut buf)
+            .map_err(|_| StoreError::Read)?;
+    }
+    Ok(OpenedDocument { editor, container })
+}
+
+// ---------------------------------------------------------------------------
 // The join: this store *is* the rope's byte source.
 // ---------------------------------------------------------------------------
 

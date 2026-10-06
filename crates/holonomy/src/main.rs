@@ -66,11 +66,18 @@ struct SessionContext {
     session: Session<'static>,
     /// The container, opened `O_DIRECT | O_SYNC`.
     #[allow(dead_code)]
-    container: DirectFile,
+    container: Option<DirectFile>,
     /// The export sinks, opened `O_WRONLY | O_CREAT | O_TRUNC`.
     sinks: Vec<ExportSink>,
     /// A PPM dump target, if asked for.
     screenshot: Option<File>,
+    /// The container, once the descriptor has been adopted into a [`Wavefunction`].
+    ///
+    /// **Kept beside the session rather than inside it.** `SectionStore` borrows the container, so a store
+    /// owned by the session would be self-referential; holding the `Wavefunction` here and letting the
+    /// session borrow it on demand avoids that without a self-referential-struct dependency. It is `None`
+    /// until the passphrase is read.
+    container_file: Option<holonomy_container::Wavefunction>,
 }
 
 /// The atlas, built once. Leaked so the session's lifetime is not tied to a local.
@@ -244,14 +251,21 @@ fn run() -> Result<(), Fail> {
                     Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
                     metrics,
                 ),
-                container: DirectFile::create_or_open(
-                    args.container
-                        .as_deref()
-                        .unwrap_or_else(|| Path::new("untitled.wavefunction")),
-                )
-                .expect("open the container"),
+                // `Option` because the descriptor is **consumed** by `Wavefunction::adopt` below, and
+                // that can only happen after sealing -- the passphrase does not exist before then. Stage 4
+                // is still the only place a path becomes a descriptor; this only hands the one it opened
+                // to the container rather than opening a second.
+                container: Some(
+                    DirectFile::create_or_open(
+                        args.container
+                            .as_deref()
+                            .unwrap_or_else(|| Path::new("untitled.wavefunction")),
+                    )
+                    .expect("open the container"),
+                ),
                 sinks: open_sinks(&args).expect("open the export sinks"),
                 screenshot: open_screenshot(&args).expect("open the screenshot"),
+                container_file: None,
             })
         })
         .map_err(Fail::Boot)?;
@@ -308,6 +322,56 @@ fn run() -> Result<(), Fail> {
         let ctx = sealed.context_mut();
         ctx.session.state.sealed = true;
         ctx.session.state.zoom_percent = args.zoom;
+
+        // **The passphrase is used now.** It was read above and dropped on the floor (`let _ = &phrase`),
+        // which is why this product had never opened a document: there was no path from a descriptor to
+        // plaintext, because opening one needs the KDF and the KDF needs the passphrase, and the
+        // passphrase only exists after sealing.
+        //
+        // `vdf_iterations` is `TEST_VDF_ITERATIONS`, which is **wrong for production and honest about
+        // being so**: the count is not recorded in the container, and the only constant in the tree is the
+        // test one. A real unlock derives it from a measured per-squaring cost (PROJECT.md 2.4).
+        // **A missing descriptor is a bug, not a user error**, so it is reported and the session carries
+        // on with an empty editor rather than aborting the boot -- an empty editor is what it had before.
+        let Some(fd) = ctx.container.take() else {
+            eprintln!("holonomy: the container descriptor was already taken; starting empty");
+            ctx.session.repaint_all().expect("the first paint");
+            drive(
+                &mut ctx.session,
+                &args,
+                &mut ctx.sinks,
+                ctx.screenshot.as_mut(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("holonomy: {e}");
+            });
+            return;
+        };
+        match holonomy::store::open_document(
+            fd,
+            &phrase,
+            holonomy_container::TEST_VDF_ITERATIONS,
+            holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+        ) {
+            Ok(opened) => {
+                eprintln!(
+                    "holonomy: opened {} bytes, {} resident across {} leaves ({} sections resident)",
+                    opened.editor.text_len(),
+                    opened.editor.resident_bytes(),
+                    opened.editor.resident_count(),
+                    holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+                );
+                ctx.session.editor = opened.editor;
+                ctx.container_file = Some(opened.container);
+            }
+            // **A wrong passphrase is a normal outcome, not a crash**, and it is reported rather than
+            // silently leaving an empty document on screen -- which is what "the product opens nothing"
+            // looks like from the outside.
+            Err(e) => eprintln!(
+                "holonomy: could not open the document ({e:?}); starting with an empty one"
+            ),
+        }
+
         // The first paint is a *full* repaint, because nothing has been painted yet and a
         // damage-limited pass would leave the framebuffer black.
         ctx.session.repaint_all().expect("the first paint");
@@ -321,7 +385,6 @@ fn run() -> Result<(), Fail> {
             eprintln!("holonomy: {e}");
         });
     });
-    let _ = &phrase;
 
     sealed.teardown_and_exit(-1);
 }
