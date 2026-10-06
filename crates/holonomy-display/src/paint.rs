@@ -42,7 +42,9 @@ use holonomy_assets::box_drawing;
 use holonomy_assets::metric;
 use holonomy_assets::payload::Style as AtlasStyle;
 
-use holonomy_render::{AssetId, DamageRect, Node, RasterSource, Rect, SurfaceTree, TextRun};
+use holonomy_render::{
+    AssetId, DamageRect, DocRun, Node, RasterSource, Rect, SurfaceTree, TextRun, TextSource,
+};
 
 use crate::frame::{Frame, FrameError};
 
@@ -61,6 +63,25 @@ pub struct PaintStats {
     pub box_glyphs: u32,
     /// Codepoints with no glyph anywhere. See the module docs: not silently skipped.
     pub missing: u32,
+    /// Glyphs blitted from a [`Node::DocText`] run. Phase 12.
+    ///
+    /// **Separate from `glyphs`, so a frame's stats say whether the page had text on it.** With them
+    /// merged, a session that drew nothing at all and one that drew a page of body text would report the
+    /// same number, and "the document is blank" would be indistinguishable from "the document is short".
+    /// That distinction is the entire point of Phase 12, so it is in the accounting from the first frame.
+    pub doc_glyphs: u32,
+    /// `Node::DocText` runs whose byte range was past the end of the document. Phase 12.
+    ///
+    /// Zero in a healthy session. Non-zero means the geometry and the text disagree -- a run was emitted
+    /// for a line the document does not have -- and that is a bug worth a number rather than a blank
+    /// region nobody can explain.
+    pub runs_missing: u32,
+    /// `Node::DocText` runs longer than [`DocRun::MAX_BYTES`], and so drawn short. Phase 12.
+    ///
+    /// Should be zero: the emitter splits lines at the page measure, so a run that long is a line wider
+    /// than the page. Counted because "a very long line renders truncated with nothing in the stats" is
+    /// the kind of thing that is discovered by a user rather than by a gate.
+    pub runs_truncated: u32,
     /// Images blitted from decoded rasters.
     ///
     /// §2.9.3 requires `missing` to gain "a sibling, `resampled`, so a frame records how much work the
@@ -201,8 +222,36 @@ impl<'a> Painter<'a> {
         damage: Option<DamageRect>,
         rasters: Option<&dyn RasterSource>,
     ) -> Result<PaintStats, FrameError> {
+        self.paint_with(frame, tree, damage, rasters, None)
+    }
+
+    /// Paint `tree`, resolving document text through `text` and images through `rasters`. Phase 12.
+    ///
+    /// **Two sources, one reason.** A [`Node::DocText`] names a byte offset in the document and a
+    /// [`Node::Image`] names an asset, and neither payload can live in the node -- `Node` is `Copy`, and
+    /// `SurfaceTree`'s `before`/`after` ordering depends on that. So both arrive as arguments with the
+    /// lifetime of the call, for exactly the reason [`RasterSource`]'s docs give: a field would mean the
+    /// painter holding a borrow of a struct it lives inside, which is a self-referential `Session` that
+    /// safe Rust cannot express.
+    ///
+    /// Bundling them into one struct was considered and rejected: it would make every one of the ~30
+    /// existing `paint`/`paint_with_rasters` call sites name a type with a field they do not have, to
+    /// add a parameter that is `None` almost everywhere. The cost of two `Option<&dyn>` is one pointer
+    /// per node per frame, copied in `walk`'s recursion.
+    ///
+    /// **`None` text source is a legitimate state**, not a degenerate one: a chrome-only frame has no
+    /// document text in its tree at all, and every [`Node::DocText`] in one that does is counted in
+    /// [`PaintStats::runs_missing`] rather than failing the paint.
+    pub fn paint_with(
+        &mut self,
+        frame: &mut Frame,
+        tree: &SurfaceTree,
+        damage: Option<DamageRect>,
+        rasters: Option<&dyn RasterSource>,
+        text: Option<&dyn TextSource>,
+    ) -> Result<PaintStats, FrameError> {
         self.scratch.stats = PaintStats::default();
-        self.walk(frame, tree, damage, rasters);
+        self.walk(frame, tree, damage, rasters, text);
         Ok(self.scratch.stats)
     }
 
@@ -212,15 +261,16 @@ impl<'a> Painter<'a> {
         tree: &SurfaceTree,
         damage: Option<DamageRect>,
         rasters: Option<&dyn RasterSource>,
+        text: Option<&dyn TextSource>,
     ) {
         for child in &tree.before {
-            self.walk(frame, child, damage, rasters);
+            self.walk(frame, child, damage, rasters, text);
         }
         if let Some(node) = &tree.node {
-            self.node(frame, *node, damage, rasters);
+            self.node(frame, *node, damage, rasters, text);
         }
         for child in &tree.after {
-            self.walk(frame, child, damage, rasters);
+            self.walk(frame, child, damage, rasters, text);
         }
     }
 
@@ -230,6 +280,7 @@ impl<'a> Painter<'a> {
         node: Node,
         damage: Option<DamageRect>,
         rasters: Option<&dyn RasterSource>,
+        text: Option<&dyn TextSource>,
     ) {
         match node {
             Node::Rect(r) => {
@@ -262,6 +313,7 @@ impl<'a> Painter<'a> {
                 self.scratch.stats.rects += 1;
             }
             Node::Text(run) => self.text(frame, run, damage),
+            Node::DocText(run) => self.doc_text(frame, run, damage, text),
             Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
             Node::Icon(_) => {
                 // Icons are hand-authored 1-bit masks from `.rodata`, and nothing in the chrome uses
@@ -420,6 +472,170 @@ impl<'a> Painter<'a> {
             );
             self.scratch.stats.glyphs += 1;
         }
+    }
+
+    /// Draw one line of document text. Phase 12.
+    ///
+    /// # What is different from [`Painter::text`], and why anything is
+    ///
+    /// **Decoding.** `TextRun` is `(first_codepoint, len)` -- consecutive codepoints -- so `text` can
+    /// compute codepoint `k` by addition. A `DocRun` is a *byte* range, so the codepoints must come out
+    /// of UTF-8 decoding, and that is the whole difference in the loop.
+    ///
+    /// **The advance is per-glyph, and this is the fix Phase 12 owns.** `text` advances by `cell_w` for
+    /// every codepoint -- the page's fixed 8 px grid. Here it advances by `m.advance_x`, the font's own
+    /// advance, so a proportional face is *positioned* proportionally. §9B measured the ink widths (9-10
+    /// px for most Latin letters, 14 px for `\sum`) and 9C fixed the *blit* to use the metric's width;
+    /// **the advance was still the grid**, which is why a 10 px glyph in an 8 px cell either overlapped
+    /// its neighbour by 2 px or left a 2 px gap depending on the round face's rounding. PROJECT.md:943
+    /// named this as "not done, and named", and it is done here.
+    ///
+    /// Wrapping is *not* done here and is not this function's job: the emitter splits a line at the page
+    /// measure and emits one run per visual row, so every run here is already short enough to fit.
+    ///
+    /// # Invalid UTF-8 is counted, not skipped
+    ///
+    /// A byte that does not start a valid sequence is drawn as U+FFFD and counted in
+    /// [`PaintStats::missing`]. The document's own bytes come from a container with a Blake2b digest, so
+    /// invalid UTF-8 means the file was written by something else -- and it should look wrong on the page
+    /// rather than vanish. A byte skipped silently is a hole in the text with nothing in the stats.
+    fn doc_text(
+        &mut self,
+        frame: &mut Frame,
+        run: DocRun,
+        damage: Option<DamageRect>,
+        text: Option<&dyn TextSource>,
+    ) {
+        if run.len == 0 {
+            return;
+        }
+        let Some(source) = text else {
+            self.scratch.stats.runs_missing += 1;
+            return;
+        };
+        // Clamped rather than asserted; see `DocRun::MAX_BYTES` for why.
+        let want = run.len.min(DocRun::MAX_BYTES);
+        if run.len > DocRun::MAX_BYTES {
+            self.scratch.stats.runs_truncated += 1;
+        }
+        let Some(bytes) = source.document(run.offset, want) else {
+            self.scratch.stats.runs_missing += 1;
+            return;
+        };
+
+        let cell_w = self.cell_width();
+        let cell_h = self.cell_height();
+        let size = self.atlas_size();
+        let style = atlas_style(run.style);
+        let ascent = i32::from(self.vertical(run.style, size).0);
+
+        // **The line box is culled once, not per glyph.** A run's box is its byte count times the cell
+        // width -- a conservative over-estimate, as `DocRun::bounds` says -- and if that box misses the
+        // damage then every glyph in it does too. Culling per glyph would be the same answer at ~150x
+        // the comparisons for a 150-codepoint line.
+        let box_width = want.saturating_mul(cell_w);
+        let whole = DamageRect::new(run.x.max(0) as u32, run.y.max(0) as u32, box_width, cell_h);
+        if !intersects(whole, damage) {
+            self.scratch.stats.glyphs_skipped += self.count_codepoints(bytes);
+            return;
+        }
+
+        let Some(atlas) = self.atlas else {
+            self.scratch.stats.missing += self.count_codepoints(bytes);
+            return;
+        };
+        let coverage = atlas.coverage();
+
+        let mut pen = run.x;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            // **One codepoint at a time, decoding by hand.** `str::from_utf8(bytes).unwrap_or("")` would
+            // be shorter and wrong: it renders *nothing* for a document that is not UTF-8, which is the
+            // one case where the user most needs to see that something is wrong. `chars()` cannot be
+            // used directly either, because it yields `Err` for the bad byte and stops caring about the
+            // rest -- so the resynchronisation point has to be chosen here.
+            //
+            // The rule is `Utf8Error`'s own: `valid_up_to` is the start of the bad sequence, and
+            // `error_len` is how many bytes to skip over it. `error_len == None` means the sequence ran
+            // off the end of the slice, so one byte is skipped instead -- consuming nothing would spin.
+            let (c, used) = match std::str::from_utf8(&bytes[at..]) {
+                Ok(s) => match s.chars().next() {
+                    Some(c) => (c, c.len_utf8()),
+                    None => break,
+                },
+                Err(e) => {
+                    self.scratch.stats.missing += 1;
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // Decodable bytes *before* the bad one: draw them, and take no penalty. The next
+                        // iteration starts at the bad byte.
+                        let s = std::str::from_utf8(&bytes[at..at + valid])
+                            .expect("valid_up_to is a char boundary by definition");
+                        match s.chars().next() {
+                            Some(c) => (c, c.len_utf8()),
+                            None => break,
+                        }
+                    } else {
+                        ('\u{FFFD}', e.error_len().unwrap_or(1))
+                    }
+                }
+            };
+            at += used;
+            let m = atlas.metric(u32::from(c), style, size);
+            if m.is_blank() {
+                // Two cases, distinguished by whether the face had an advance for it. A **space** has
+                // ink of zero and an advance of its width, and takes the face's advance -- that is what
+                // makes word spacing proportional. `.notdef` has zero for both, and taking `cell_w` for
+                // it would make a page of missing glyphs read as evenly spaced, which looks like a
+                // document rather than like a font that lacks them.
+                if m.advance_x > 0 {
+                    pen += i32::from(m.advance_x);
+                } else {
+                    pen += cell_w as i32;
+                    self.scratch.stats.missing += 1;
+                }
+                continue;
+            }
+            blit_coverage(
+                &mut self.scratch,
+                frame,
+                pen + i32::from(m.bearing_x),
+                run.y + ascent - i32::from(m.bearing_y),
+                u32::from(m.width),
+                u32::from(m.height),
+                run.colour,
+                |row, dst| {
+                    let y = usize::from(m.atlas_y) + row;
+                    let sx = usize::from(m.atlas_x);
+                    let base = y * metric::ATLAS_STRIDE + sx;
+                    for (i, out) in dst.iter_mut().enumerate() {
+                        *out = coverage.get(base + i).copied().unwrap_or(0);
+                    }
+                },
+            );
+            self.scratch.stats.doc_glyphs += 1;
+            pen += i32::from(m.advance_x).max(1);
+        }
+    }
+
+    /// How many codepoints `bytes` holds, for the skipped and missing counts.
+    ///
+    /// A full decode into a `Vec` would be the obvious way and it would allocate on the paint path,
+    /// which is the thing Phase 12 is trying to remove. This walks the sequence counting start bytes,
+    /// which is `O(bytes)` with no allocation and no `char` materialisation.
+    fn count_codepoints(&mut self, bytes: &[u8]) -> u32 {
+        let mut n = 0u32;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            // Continuation bytes are 0b10xxxxxx, so counting the non-continuations counts the
+            // codepoints -- including an invalid sequence, which is counted as one, which is the
+            // conservative direction for a "how much did we skip" figure.
+            if bytes[i] & 0xC0 != 0x80 {
+                n += 1;
+            }
+            i += 1;
+        }
+        n
     }
 
     fn atlas_size(&self) -> u16 {

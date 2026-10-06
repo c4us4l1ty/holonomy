@@ -201,6 +201,125 @@ impl TextRun {
     }
 }
 
+/// A run of glyphs drawn from **document bytes**. Phase 12.
+///
+/// # Why this is a second node kind rather than a change to [`TextRun`]
+///
+/// `TextRun`'s contract is `(first_codepoint, len)`: consecutive codepoints from a starting point,
+/// which is what a chrome label, a box-drawing rule and a table border are -- all synthetic text that
+/// exists nowhere in the document. Document text is not that shape. It is UTF-8, so one codepoint is one
+/// to four bytes, and *consecutive bytes are not consecutive codepoints*. `TextRun` cannot express a
+/// multi-byte character without lying about its length, and cannot express a run that crosses a
+/// multi-byte boundary at all.
+///
+/// **So the contract is extended rather than replaced**, and that is a deliberate departure from
+/// PROJECT.md §Phase 12's "that contract is replaced, and every caller is migrated". Replacing it would
+/// mean every synthetic caller -- the chrome's `hline`, the table's borders, `glyph()` -- grew a
+/// document-byte representation of a string that is not in the document, and the surface tree would
+/// carry a byte offset into a buffer that does not exist for a chrome label. A second kind costs one
+/// enum variant and leaves those callers exactly as they were.
+///
+/// # Why it carries an offset and not the bytes
+///
+/// The same reason [`Node::Image`] carries an `AssetId`: `Node` is `Copy`, and `SurfaceTree`'s
+/// `before`/`after` ordering depends on that. A run's bytes live in the editor's rope, which outlives
+/// the tree and is not owned by it, so the node names *where* the text is rather than holding it. The
+/// painter resolves the offset through the [`TextSource`] it is handed for the frame.
+///
+/// # Why `len` is bytes and not codepoints
+///
+/// Because the caller that knows the answer is the one that read the document, and it read a *byte*
+/// range. It cannot know the codepoint count without decoding, and decoding twice -- once to count,
+/// once to draw -- is the DOM-measurement dependency FR-1.3 forbids. The painter decodes once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocRun {
+    /// Left edge in pixels.
+    pub x: i32,
+    /// Baseline origin: left edge, top of the line box.
+    pub y: i32,
+    /// The document byte offset the run starts at.
+    pub offset: u32,
+    /// How many bytes, not codepoints. The painter decodes UTF-8 from `bytes[offset..offset + len]`.
+    pub len: u32,
+    /// Atlas style.
+    pub style: Style,
+    /// Atlas size index.
+    pub size: u8,
+    /// Packed 0xAARRGGBB.
+    pub colour: u32,
+}
+
+impl DocRun {
+    /// The longest a run may be, in bytes.
+    ///
+    /// **Bytes, not codepoints, and 4x [`TextRun::MAX_LEN`]'s 256** -- so the same nominal length in
+    /// codepoints is the same number of glyphs or more. A run is one *line* of document text, and
+    /// 256 codepoints of UTF-8 can be 1,024 bytes.
+    ///
+    /// There is **no `assert!`**, unlike `TextRun::new`, and the asymmetry is deliberate. `TextRun`'s
+    /// bound is a *layout* guarantee -- a run that long cannot fit the page. This one is a *sanity*
+    /// bound: a caller computing a byte range from a document has already got the right answer, and a
+    /// panic here would turn a cosmetic overflow into a crash. FR-1.2's threat model treats a crash in
+    /// the renderer as worse than a short line. The painter clamps and counts it in
+    /// [`PaintStats::runs_truncated`].
+    pub const MAX_BYTES: u32 = 1024;
+
+    /// A run of `len` document bytes starting at `offset`.
+    pub fn new(
+        x: i32,
+        y: i32,
+        offset: u32,
+        len: u32,
+        style: Style,
+        size: u8,
+        colour: u32,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            offset,
+            len,
+            style,
+            size,
+            colour,
+        }
+    }
+
+    /// Conservative width in pixels: one full cell per *byte*.
+    ///
+    /// Over-estimates by up to 4x for multi-byte text, which is the safe direction for the reason
+    /// [`TextRun::bounds`] gives: a box that is too wide costs a little unnecessary repaint, and one
+    /// that is too narrow leaves stale pixels on the screen. Exactness would mean measuring every glyph
+    /// before drawing any, which is FR-1.3's DOM-measurement dependency.
+    pub fn bounds(&self, line_height: u32, advance: u32) -> Option<DamageRect> {
+        if self.len == 0 || advance == 0 {
+            return None;
+        }
+        let x = self.x.max(0) as u32;
+        let y = self.y.max(0) as u32;
+        Some(DamageRect::new(
+            x,
+            y,
+            self.len.saturating_mul(advance),
+            line_height.max(1),
+        ))
+    }
+}
+
+/// Where a [`Node::DocText`]'s bytes come from.
+///
+/// The same shape of argument as [`RasterSource`], and for the same reason: `holonomy-display` must not
+/// depend on `holonomy-text`, so the rope is reached through a trait that the crate owning it
+/// implements. `Session` passes a borrow of its own `editor`; a test passes a `&[u8]` literal.
+pub trait TextSource {
+    /// The document bytes at `offset`, for `len` bytes, or `None` if the range is not readable.
+    ///
+    /// `None` is not an error path in the product: a run whose offset is past the end of the document
+    /// can only mean the geometry and the text disagree, and the painter counts it in
+    /// [`PaintStats::runs_missing`] rather than failing the frame.
+    fn document(&self, offset: u32, len: u32) -> Option<&[u8]>;
+}
+
 /// An icon: a hand-authored 1-bit mask from `.rodata`.
 ///
 /// # The mask layout
@@ -267,6 +386,12 @@ pub enum Node {
     Rect(Rect),
     /// A run of glyphs.
     Text(TextRun),
+    /// A run of glyphs from **document bytes**. Phase 12.
+    ///
+    /// A second kind rather than a widened [`TextRun`], for the reason [`DocRun`]'s docs give: a
+    /// synthetic run is a codepoint sequence and a document run is a UTF-8 byte range, and one type
+    /// carrying both would have a `len` that means different things depending on a flag.
+    DocText(DocRun),
     /// A 1-bit icon mask.
     Icon(Icon),
     /// A decoded raster, at `rect`, from the asset `asset_id`.
@@ -307,6 +432,7 @@ impl Node {
         let raw = match self {
             Node::Rect(r) => r.bounds(),
             Node::Text(t) => t.bounds(line_height, advance),
+            Node::DocText(t) => t.bounds(line_height, advance),
             Node::Icon(i) => i.bounds(),
             Node::Image { rect, .. } => rect.bounds(),
         }?;
@@ -321,6 +447,7 @@ impl Node {
         match self {
             Node::Rect(_) => NodeKind::Rect,
             Node::Text(_) => NodeKind::Text,
+            Node::DocText(_) => NodeKind::Text,
             Node::Icon(_) => NodeKind::Icon,
             Node::Image { .. } => NodeKind::Image,
         }
@@ -332,7 +459,12 @@ impl Node {
 pub enum NodeKind {
     /// A filled rectangle.
     Rect,
-    /// A run of glyphs.
+    /// A run of glyphs, from [`TextRun`] or from document bytes.
+    ///
+    /// **`DocText` reports `Text` rather than a variant of its own**, and that is deliberate: the
+    /// kind exists to answer "what does a consumer of this field have to handle", and a consumer
+    /// asking "is this text?" wants one answer. Splitting it would force every `match` on `NodeKind`
+    /// to grow an arm that means the same thing, which is how a type stops being a summary.
     Text,
     /// A 1-bit icon mask.
     Icon,

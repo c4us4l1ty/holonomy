@@ -104,7 +104,7 @@ fn print_where_a_keystrokes_time_goes() {
     }
     let at = 0usize;
 
-    let timed = |label: &str, n: usize, mut f: &mut dyn FnMut()| {
+    let timed = |label: &str, n: usize, f: &mut dyn FnMut()| {
         let start = Instant::now();
         for _ in 0..n {
             f();

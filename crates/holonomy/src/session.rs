@@ -53,7 +53,7 @@ use holonomy_render::math::{self, MathNode};
 use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRun};
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
-use holonomy_render::{Node, Rect, SurfaceTree, TextRun};
+use holonomy_render::{DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
 use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
@@ -207,6 +207,20 @@ pub struct SessionStats {
     pub table_newlines: u32,
     /// Table cells drawn in the last paint.
     pub table_cells_drawn: u32,
+    /// Document lines the body-text emitter drew in the last paint. Phase 12.
+    ///
+    /// **The number that answers "is anything on the page".** Zero with a non-empty document means the
+    /// emitter is not running or every line was culled; a document with text on it says so here. Before
+    /// Phase 12 this was always zero, because nothing drew the document's own words.
+    pub lines_drawn: u32,
+    /// Document *bytes* turned into [`DocRun`]s in the last paint. Phase 12.
+    ///
+    /// **Bytes, not glyphs**, and the distinction is deliberate. A line of `é` is two bytes per glyph, so
+    /// a byte count overstates the glyph count by up to 4x. `PaintStats::doc_glyphs` holds the glyph
+    /// figure from the blitter's side, and the two are different numbers answering different questions:
+    /// "how much of the document was on the page" and "how many glyphs were drawn". Asserting them equal
+    /// would be asserting that the document is ASCII.
+    pub glyphs_drawn: u32,
     /// Border runs drawn in the last paint.
     pub table_borders_drawn: u32,
     /// Images inserted by `Ctrl+I` or [`Session::insert_image`].
@@ -325,6 +339,37 @@ pub struct Session<'a> {
     /// session into one per paint. Grown only when the document outgrows it, so steady-state typing
     /// into a document does not reallocate.
     doc_scratch: Vec<u8>,
+    /// Scratch for **one page's worth** of document text, for [`Session::emit_body_text`]. Phase 12.
+    ///
+    /// Sized to [`LINE_SCRATCH_BYTES`] = 48 KiB, which is `Layout::rows` (43) x `DocRun::MAX_BYTES`
+    /// (1,024) rounded up. **This is the buffer that replaces reading the whole document to draw it.**
+    ///
+    /// `doc_scratch` above is whole-document and exists because `emit_tables`, `emit_math`,
+    /// `emit_images`, `publish_line_heights` and `image_blocks` all want random access across the whole
+    /// text. Body text does not: it wants the 43 lines that are on screen. So it gets its own buffer,
+    /// sized to the page, and the 6 MiB that `doc_scratch` costs on a 6 MiB document becomes 48 KiB for
+    /// the part of the paint that draws the document's own words.
+    ///
+    /// **Allocated once, at construction**, and never grown: a line longer than the page's measure is
+    /// drawn truncated (see `emit_body_text`), so a longer line cannot make this grow. If a later phase
+    /// makes wrapping work, this becomes the buffer that grows to the longest *wrapped* line, which is
+    /// still bounded by the page measure and not by the document.
+    line_scratch: Vec<u8>,
+    /// How much of [`Session::line_scratch`] the last body-text emit filled. Phase 12.
+    ///
+    /// **A separate field rather than `line_scratch.len()`**, because `emit_body_text` truncates the
+    /// buffer to what it read and the *capacity* has to stay at [`LINE_SCRATCH_BYTES`] for the buffer to
+    /// be reusable. Slicing by `len()` would be right once and wrong after the next append, and the two
+    /// are indistinguishable at the call site.
+    page_used: usize,
+    /// What the last [`Session::paint`] did, kept whole. Phase 12.
+    ///
+    /// `paint` folds three of `PaintStats`' fields into `SessionStats` as running totals and would drop
+    /// the rest on the floor. The dropped ones are exactly the ones a gate needs —
+    /// [`PaintStats::doc_glyphs`](holonomy_display::paint::PaintStats::doc_glyphs),
+    /// `runs_missing`, `runs_truncated` — because they say what is *on the page now* rather than what
+    /// has been drawn over the session's life.
+    last_paint: holonomy_display::paint::PaintStats,
     /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
     ///
     /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
@@ -429,6 +474,19 @@ impl<'a> Session<'a> {
         let state = ChromeState {
             // The document's first line is on screen at the caret's line.
             scroll_line: 0,
+            // **The document's real totals, not `Default`'s.** `ChromeState::default()` has
+            // `total_lines: 1` and `words: 0`, which is right for an empty document and wrong for every
+            // other one -- and it stayed wrong until the first edit, because `publish_counts` runs from
+            // `after_edit` and nothing called it at construction.
+            //
+            // Phase 12 made that visible for the first time: `emit_body_text` clamps its line loop to
+            // `total_lines`, so a session opened on a three-line document drew **one** line and stopped.
+            // Before Phase 12 nothing read `total_lines` for drawing, only for the status bar, so the bug
+            // was a status bar reading "1 line" on a document with three -- wrong, and unnoticed, because
+            // every gate started from an empty document or made an edit first.
+            words: counts.words,
+            total_lines: counts.lines(),
+            bytes: editor.text_len() as u32,
             ..ChromeState::default()
         };
         Self {
@@ -449,6 +507,13 @@ impl<'a> Session<'a> {
             lines,
             counts,
             doc_scratch: Vec::new(),
+            // Allocated once at construction, not on first use: the first paint happens during
+            // construction's caller, and a `Vec` that grows on the paint path is one allocation per
+            // growth on a path that paints per keystroke. See the field's docs for why this is separate
+            // from `doc_scratch`.
+            line_scratch: vec![0u8; LINE_SCRATCH_BYTES],
+            page_used: 0,
+            last_paint: holonomy_display::paint::PaintStats::default(),
             table_scratch: Vec::new(),
             caret_drawn_at: None,
             math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
@@ -636,7 +701,53 @@ impl<'a> Session<'a> {
         self.after_edit(0)
     }
 
-    /// Capacity of the whole-document scratch buffer, in bytes.
+    /// What the last paint did, from the painter's side. Phase 12.
+///
+/// **Separate from [`SessionStats`], which accumulates.** `SessionStats::pixels` and `glyphs_drawn` are
+/// totals across the session's life; `PaintStats` is one frame. A document with text on it answers
+/// different questions under each — "how much has this session drawn" and "what is on the screen right
+/// now" — and Phase 12's gate needs the second. `Session::paint` folds most of it into `SessionStats` and
+/// would otherwise drop the rest, so this keeps the whole struct.
+pub fn paint_stats(&self) -> &holonomy_display::paint::PaintStats {
+    &self.last_paint
+}
+
+/// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
+///
+/// `Chrome::layout` is a public field on a public field, so this is a convenience rather than a necessity
+/// — but `layout.text` is four chained field accesses, and a gate that measures ink inside the text
+/// column writes it nine times.
+pub fn text_rect(&self) -> DamageRect {
+    self.chrome.layout.text
+}
+
+/// How many bytes of the page buffer the last body-text emit read. Phase 12.
+///
+/// **Public so the gate can assert the emitter reads a page and not a document** -- the claim
+/// `the_body_text_emitter_reads_one_page_and_not_the_document` makes, and the one Phase 12's memory
+/// story rests on.
+pub fn page_used(&self) -> usize {
+    self.page_used
+}
+
+/// Capacity of the body-text buffer, in bytes. Phase 12.
+///
+/// **Public so the gate can assert it stays page-sized.** `tests/session_body_text.rs` paints a 1 MiB
+/// document and then checks this is still [`LINE_SCRATCH_BYTES`] — because a buffer that grows on the
+/// paint path is one allocation per paint, and RSS is `tests/session_rss.rs`'s business while this is the
+/// narrower claim that Phase 12 actually changed.
+pub fn line_scratch_capacity(&self) -> usize {
+    self.line_scratch.capacity()
+}
+
+/// Scroll so that `line` is the first visible line. Phase 12's gate.
+pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
+    self.state.scroll_line = line.min(self.state.total_lines.saturating_sub(1));
+    self.damage = self.chrome.full_damage();
+    Ok(())
+}
+
+/// Capacity of the whole-document scratch buffer, in bytes.
     ///
     /// **Public as of Phase 11** so the RSS gate can name this consumer. It is the largest single
     /// allocation outside the framebuffer and the leaves, and §2.9.4's table did not have it at all —
@@ -1437,12 +1548,29 @@ impl<'a> Session<'a> {
         self.emit_tables(&mut tree, &mut damage);
         self.emit_math(&mut tree, &mut damage);
         self.emit_images(&mut tree, &mut damage);
+        // **Body text last among the emitters, so it draws over the others.** A table, a formula and an
+        // image are all anchored to a document line, and the body text of that line is what a reader
+        // expects to see *behind* them -- a table whose cells are empty still has the paragraph that
+        // introduced it around it. Emitting the body first would put the paragraph's glyphs on top of
+        // the table's borders.
+        self.emit_body_text(&mut tree, &mut damage);
         // The raster source is borrowed *for this call* and not held: the cache is mutated by the next
         // frame's decode and eviction, so a borrow that outlived the paint would be a self-referential
         // `Session` -- the painter is a field and so is the cache it would have to point at.
-        let stats =
-            self.painter
-                .paint_with_rasters(&mut self.frame, &tree, damage, Some(&self.images))?;
+        // **The page buffer is the text source**, and it is a field borrow rather than a `&self` borrow,
+        // so `&mut self.frame` and `&self.images` are live at the same time. `PageText` is a one-field
+        // wrapper over a slice; see its docs for why the trait exists at all.
+        let stats = {
+            let page = PageText(&self.line_scratch[..self.page_used]);
+            self.painter.paint_with(
+                &mut self.frame,
+                &tree,
+                damage,
+                Some(&self.images),
+                Some(&page),
+            )?
+        };
+        self.last_paint = stats;
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
         // The damage goes to the backend as well as to the rasteriser. For the PPM backend that changes
@@ -1569,6 +1697,160 @@ impl<'a> Session<'a> {
     /// lines *below* it are not offset by its height, so text after a tall table overlaps its last
     /// row. A full block layout is a larger change than this, and pretending otherwise by drawing the
     /// table somewhere else would be worse.
+    fn emit_body_text(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+        self.stats.lines_drawn = 0;
+        self.stats.glyphs_drawn = 0;
+
+        let m = self.chrome.metrics;
+        // The **text column**, not the layout: every other emitter works in the text rect's coordinates,
+        // and mixing the two is how a run ends up on the page margin.
+        let l = self.chrome.layout.text;
+        let first = self.state.scroll_line;
+        let last = (first + self.chrome.layout.rows).min(self.state.total_lines);
+        if first >= last {
+            return;
+        }
+        // The page's measure, in whole cells. The wrap point is by *cell count* rather than by measured
+        // pixels because the cell is what every other part of the renderer agrees on: `Caret::locate`
+        // puts the caret at `column * cell_w`, damage rects are `cell_h` tall, and the tables lay
+        // themselves out on cells.
+        let cells_per_row = (l.width / m.cell_w.max(1)).max(1) as usize;
+        let ink = holonomy_render::chrome::colour::INK;
+
+        // --- Pass 1: read every visible line into one page-sized buffer.
+        //
+        // **The buffer holds the whole page, not one line, and that is the point.** A `DocRun` names a byte
+        // offset that the painter resolves at *paint* time, so the bytes it names have to still be there
+        // when the painter runs -- which is after every line has been emitted. A one-line buffer would be
+        // correct for one run and wrong for the other 42, and the failure would be silent: the painter
+        // would resolve each run against whichever line happened to be last.
+        //
+        // So the page is read once, contiguously, and every run's offset is into *this* buffer. It is
+        // [`LINE_SCRATCH_BYTES`] = 48 KiB, against 6 MiB for `doc_scratch` on a 6 MiB document.
+        let mut used = 0usize;
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        for line in first..last {
+            // **The index-shaped accessors, not `line_start`.** `line_start` takes a byte offset and
+            // answers "where does the line containing this byte begin"; a renderer has a line *index*
+            // and wants "where does line N begin". Phase 12's first version passed the index to
+            // `line_start`, which quietly answered with line 0's offset every time.
+            let start = self.lines.line_begin(line as usize);
+            let end = self.lines.line_end(line as usize);
+            let len = end.saturating_sub(start);
+            // The buffer's ceiling is the reason a line can be truncated: a document with one enormous
+            // line would otherwise try to read the whole thing. 48 KiB of text is far more than the page
+            // can show, so the cull below is what normally stops this, and this is the backstop.
+            if used + len > self.line_scratch.len() {
+                break;
+            }
+            if self.editor.read_into(start, &mut self.line_scratch[used..used + len]).is_err() {
+                break;
+            }
+            spans.push((used as u32, len as u32));
+            used += len;
+        }
+        self.line_scratch.truncate(used);
+        self.page_used = used;
+
+        // --- Pass 2: which lines another emitter already draws.
+        //
+        // **This is not an optimisation, it is the thing that makes the page readable.** A formula, a
+        // table and an image are all *inline in a line of prose*: `emit_math` draws the raw LaTeX or the
+        // compiled glyphs at that line's row, and `emit_tables` draws the grid there. If the body-text
+        // emitter also drew the line, the two would be painted on top of each other and the reader would
+        // see the document's own words and the formula's source superimposed.
+        //
+        // The failure is silent, and it is *how* the first version of Phase 12 broke two of Phase 9B's
+        // math gates: their ink-extent assertions suddenly read 9 px wider, because the extent was the
+        // union of the formula and the paragraph around it. Neither gate was wrong — the page was, and the
+        // gates were the only things that noticed.
+        //
+        // **Scanned from the page buffer, not from the document, and that is sound** because a formula
+        // span never crosses a line: `for_each_math_span`'s own docs say an unpaired `$$` "runs to the
+        // end of its line", so every span lies inside one line, and an image anchor is a fixed byte
+        // sequence. Tables are the exception — a table *is* several lines — and those come from the
+        // editor's own span map rather than from a scan, so they cost nothing to enumerate.
+        //
+        // The first version scanned `doc_scratch`, which meant this emitter read the whole document and
+        // undid the page buffer it had just built. That is the specific way the "1.000 bytes per
+        // document byte" claim was false for its own emitter, and it is why the scan is here rather than
+        // left as a call to `read_document`.
+        let mut claimed: Vec<u32> = Vec::new();
+        for span in self.editor.tables().spans() {
+            let a = self.line_index(span.start_byte as usize);
+            let b = self.line_index(span.end_byte.max(span.start_byte) as usize);
+            for line in a..=b {
+                claimed.push(line);
+            }
+        }
+        holonomy_text::for_each_math_span(&self.line_scratch[..used], |span| {
+            claimed.push(first + line_of_span(&spans, span.start as usize));
+        });
+        for at in holonomy_text::scan_anchors(&self.line_scratch[..used]) {
+            claimed.push(first + line_of_span(&spans, at as usize));
+        }
+        claimed.sort_unstable();
+        claimed.dedup();
+
+        // --- Pass 3: one run per line, positioned by the line model.
+        let mut extra: Option<DamageRect> = None;
+        let line_heights = self.state.line_heights.clone();
+        let mut lines = 0u32;
+        let mut glyphs = 0u32;
+        for (row, &(at, len)) in spans.iter().enumerate() {
+            let line = first + row as u32;
+            let y = l.y + line_heights.y(line - first);
+            let rect = DamageRect::new(l.x, y, l.width, m.cell_h);
+            // **Culled by row range, after the read.** Two comparisons rather than a rectangle
+            // intersection: `DamageRect` has no `intersects`, and a general-purpose method used in exactly
+            // one place is a method that will be used in a second place with the wrong semantics.
+            if let Some(d) = damage {
+                if rect.y >= d.bottom() || d.y >= rect.bottom() {
+                    continue;
+                }
+            }
+            // **Skip a line another emitter owns.** `claimed` is sorted and deduplicated, so this is a
+            // binary search; the set is one entry per formula, table line or image on the page, which is
+            // a handful, and a linear scan per row would be O(rows x claims) rather than O(rows log n).
+            if claimed.binary_search(&line).is_ok() {
+                continue;
+            }
+            lines += 1;
+
+            let text = &self.line_scratch[at as usize..(at + len) as usize];
+            let shown = codepoints_upto(text, 0, cells_per_row);
+            // The terminator is not drawn. A `\n` has a glyph in most faces, so drawing it would put a
+            // visible mark at the end of every line.
+            let seg = strip_terminator(&text[..shown]);
+            if !seg.is_empty() {
+                tree.before.push(SurfaceTree::leaf(Node::DocText(DocRun::new(
+                    l.x as i32,
+                    y as i32,
+                    at,
+                    seg.len() as u32,
+                    holonomy_render::Style::REGULAR,
+                    0,
+                    ink,
+                ))));
+                // Bytes, not cells: `SessionStats::glyphs_drawn`'s doc comment says why these two
+                // figures are not the same number.
+                glyphs += seg.len() as u32;
+            }
+            // **A line longer than the measure is truncated, and that is a recorded gap rather than a
+            // finished feature.** `LineHeights` is indexed by *document line*, so a line that wrapped onto
+            // a second visual row would have no row to be on: `caret_line`, the scroll model, the table
+            // anchors and the formula anchors are all document-line indices. Wrapping needs a second index
+            // mapping document line to visual rows, and Phase 13's section manifest is where that belongs
+            // -- it is the same "structure without content" problem, and building it twice would be worse
+            // than building it once.
+            extra = union_opt(extra, Some(rect));
+        }
+
+        self.stats.lines_drawn = lines;
+        self.stats.glyphs_drawn = glyphs;
+        widen(damage, extra);
+    }
+
     fn emit_tables(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
         let spans = self.editor.tables().spans().to_vec();
         if spans.is_empty() {
@@ -2354,6 +2636,23 @@ const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
 /// Fenwick tree -- removes the scan itself rather than making it cheaper.
 pub const SCAN_CHUNK: usize = 4096;
 
+/// How many bytes one page's worth of document text can be. Phase 12.
+///
+/// **48 KiB, and `Layout::rows` is 23 rather than the 43 first written here.** At 1280x800 the text
+/// column is 23 rows of `cell_h`, so the true ceiling is 23 x 1,024 = 23,552 bytes and 48 KiB is twice
+/// that. The overshoot is deliberate: a `rows` figure that depends on the panel size would make this
+/// constant wrong for every panel but this one, and a buffer that is sized from a constant is one that
+/// cannot be resized by accident on the paint path.
+///
+/// **This is the number that replaces 6 MiB.** `doc_scratch` grows to the whole document because
+/// `emit_tables`, `emit_math` and `emit_images` all want random access across the text. Body text does
+/// not: it wants the 43 lines on screen. So it gets its own buffer, sized to the page.
+///
+/// A field rather than a local because a local array passed to `read_into` **escapes** and is promoted to
+/// the heap -- the reason `Session::table_scratch` exists -- which on a path that paints per keystroke
+/// would be one allocation per paint.
+pub const LINE_SCRATCH_BYTES: usize = 48 * 1024;
+
 /// `node`'s box, without emitting anything.
 ///
 /// `math_layout::measure`, re-exported under a name that says what it is for at the call site. There is
@@ -2414,6 +2713,104 @@ fn math_blocks(editor: &Editor, text: &[u8], mm: &MathMetrics) -> Vec<(u32, u32)
         blocks.push((line, measure_only(&node, mm).height));
     });
     blocks
+}
+
+/// Which visible line a page-buffer offset falls in, given the per-line `(offset, len)` spans.
+///
+/// **A binary search over `spans`, which is sorted by offset because it is built in line order.** An
+/// offset past the last line returns the last line, which is the answer a caller that clamps wants: a
+/// formula's closing `$$` on the line after the page has scrolled is attributed to the last visible line,
+/// which is the conservative direction for a "this line is claimed" test.
+///
+/// The fallback is a linear scan rather than a `partition_point`, because `spans` is a dozen entries and
+/// a branch-free binary search over something that small costs more to read than a loop.
+fn line_of_span(spans: &[(u32, u32)], offset: usize) -> u32 {
+    let mut row = 0u32;
+    for &(at, len) in spans {
+        let start = at as usize;
+        if offset < start {
+            return row.saturating_sub(1);
+        }
+        if offset < start + len as usize {
+            return row;
+        }
+        row += 1;
+    }
+    spans.len().saturating_sub(1) as u32
+}
+
+/// Strip a line terminator from a byte slice: `\r\n`, `\n`, or `\r`.
+///
+/// **Both bytes, and CRLF is one terminator rather than two.** A document written on Windows ends its
+/// lines with `\r\n`, and a renderer that draws the `\r` puts a visible mark at the end of every line —
+/// because `\r` has a glyph in most faces, and it is not a blank one. The order matters: stripping `\n`
+/// first and then `\r` handles all three forms with one pass and no lookahead.
+fn strip_terminator(seg: &[u8]) -> &[u8] {
+    let seg = seg.strip_suffix(b"\n").unwrap_or(seg);
+    seg.strip_suffix(b"\r").unwrap_or(seg)
+}
+
+/// A [`TextSource`] over a contiguous run of document bytes. Phase 12.
+///
+/// # Why the session's source is a *page* and not the document
+///
+/// `Editor` cannot lend its text as a slice: its leaves are page-locked and a document is thousands of
+/// them, so there is no contiguous `&[u8]` for the whole rope. **A rope has no slice.** So
+/// [`Session::emit_body_text`] copies the visible page into `line_scratch` and hands *that* to the
+/// painter, and every `DocRun`'s offset is into the page buffer rather than into the document.
+///
+/// That is the same "structure without content" split Phase 13's section manifest is about: what the
+/// renderer needs is a *window*, and the window is contiguous. Phase 13's windowing makes the window
+/// larger without making the copy larger, because a section's text is read once and read wide.
+///
+/// # Why a wrapper and not a bare `&[u8]`
+///
+/// `TextSource` is a trait so `holonomy-display` does not depend on `holonomy-text`, which is the same
+/// division of labour `RasterSource` exists for. A three-line impl over a slice is the price of that, and
+/// it is the same price `RasterSource` costs.
+struct PageText<'a>(&'a [u8]);
+
+impl TextSource for PageText<'_> {
+    fn document(&self, offset: u32, len: u32) -> Option<&[u8]> {
+        let start = usize::try_from(offset).ok()?;
+        let len = usize::try_from(len).ok()?;
+        let end = start.checked_add(len)?;
+        self.0.get(start..end)
+    }
+}
+
+/// Bytes of the segment starting at `from` that hold at most `limit` codepoints.
+///
+/// **Never splits a multi-byte character**, which is the entire job. Counting non-continuation bytes
+/// finds the `limit`-th codepoint start; walking its continuation bytes finds where it ends. No decode,
+/// no allocation, `O(limit)`.
+///
+/// A byte that is not a continuation byte is a codepoint start by definition, so the count is right even
+/// for a malformed document — where the "codepoint" may not be a real one. That is the safe direction:
+/// the painter draws the bytes and counts what it cannot decode, and this only decides where to cut.
+fn codepoints_upto(bytes: &[u8], from: usize, limit: usize) -> usize {
+    if limit == 0 || from >= bytes.len() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] & 0xC0 != 0x80 {
+            if count == limit {
+                break;
+            }
+            count += 1;
+        }
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return bytes.len() - from;
+    }
+    let mut end = i + 1;
+    while end < bytes.len() && bytes[end] & 0xC0 == 0x80 {
+        end += 1;
+    }
+    end - from
 }
 
 /// Read the whole document into `out`, growing it if needed. Returns the bytes read.

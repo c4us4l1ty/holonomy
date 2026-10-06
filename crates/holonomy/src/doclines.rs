@@ -105,6 +105,37 @@ impl DocLines {
         self.geo.line_of_byte(at) as u32
     }
 
+    /// One past the end of line `line`'s stored range, **including its `\n`** if it has one. `O(log n)`.
+    ///
+    /// **The emitter's other half.** `line_start` says where a line begins; a paint needs to know how
+    /// long it is. For every line but the last, that is simply where the next one begins — which is why
+    /// this is one tree lookup and not a scan. For the last line there is no next, so it falls back to
+    /// its own stored length.
+    ///
+    /// **The terminator is included**, deliberately: the caller has the bytes anyway, and stripping a
+    /// `\n` from a slice it already holds is free, whereas asking this method to exclude it would mean
+    /// answering "does this line end in a newline?", which is a question about the *text* that a geometry
+    /// struct has no business answering. Geometry says where a line is; the text says what is in it.
+    pub fn line_end(&self, line: usize) -> usize {
+        self.line_begin(line) + self.geo.line_len(line).unwrap_or(0)
+    }
+
+    /// The document offset at which **line `line`** begins. `O(log n)`.
+    ///
+    /// **The index-shaped twin of [`DocLines::line_start`], and the two being different is a trap worth
+    /// naming.** `line_start(at)` takes a *byte offset* and answers "where does the line containing this
+    /// byte begin", because that is what the caret needs. This takes a *line index* and answers "where
+    /// does line N begin", which is what a renderer needs.
+    ///
+    /// Phase 12's first version of the body-text emitter called `line_start(line)`, and the symptom was
+    /// not an error but a document that drew `one` on row 0, `one\ntwo` on row 1 and the whole document
+    /// on row 2 — because `line_start(1)` means "line containing byte 1", which is line 0, and every
+    /// subsequent line's offset was 0, so each line's read overlapped the previous one's. Both functions
+    /// were correct; the call was not, and nothing in the type system said so because `usize` is `usize`.
+    pub fn line_begin(&self, line: usize) -> usize {
+        self.geo.byte_of(line).unwrap_or(0)
+    }
+
     /// The document offset at which the line containing `at` begins. `O(log n)`.
     pub fn line_start(&self, at: usize) -> usize {
         let line = self.geo.line_of_byte(at);

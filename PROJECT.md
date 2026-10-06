@@ -1290,6 +1290,81 @@ known line index lands on the expected pixel row at 60,000 lines. A 2000-page do
 derives from `LineGeometry`, not from a constant. The clipped-glyph regression test: a `W`, a `∑` and an
 italic `f` at 16 ppem each draw every column the font advances, asserted against `GlyphMetric`.
 
+##### Phase 12, part 1 — the document is on the page
+
+The page behind the chrome is no longer blank. `crates/holonomy/tests/session_body_text.rs`, 12 tests.
+
+**`TextRun`'s contract was extended, not replaced**, and that is a correction to the paragraph above.
+`TextRun` is `(first_codepoint, len)` — consecutive codepoints — which is exactly what a chrome label, a
+box-drawing rule and a table border are. Document text is not that shape: it is UTF-8, so **consecutive
+bytes are not consecutive codepoints**, and `TextRun` cannot express a multi-byte character without
+lying about its length. Replacing the contract would mean every synthetic caller grew a document-byte
+representation of a string that is not in the document. So `Node::DocText(DocRun)` is a second kind,
+carrying a byte offset resolved through a `TextSource` — the same argument-for-pixels shape
+`RasterSource` already is, and for the same reason: `holonomy-display` must not depend on `holonomy-text`.
+
+**The advance is now the font's.** This is what PROJECT.md:943 named "not done, and named". §9B measured
+real advances of 9–10 px for Latin letters and 14 px for `∑`; 9C fixed the *blit* to use the metric's
+width; the *advance* stayed on the 8 px grid, so a 10 px glyph either overlapped its neighbour by 2 px or
+left a gap. `a_glyph_advances_by_its_own_width_not_the_grid` is the regression test, and it is worth
+reading: **the correct answer is *smaller* than the grid's** — `"mmm"` occupies ~29 px of ink against the
+grid's 24 — so a test asserting "more than the grid" would have asserted the bug.
+
+**Two more things were needed before the page was readable, and neither was in the plan.**
+
+1. **Lines claimed by other emitters.** A formula, a table and an image are all inline in a line of
+   prose. Without a claim list the body text and the formula were painted on top of each other — and
+   **the only thing that noticed was two of Phase 9B's math gates**, whose ink-extent assertions read
+   9 px wider. Neither gate was wrong; the page was. The claims are computed from the page buffer, which
+   is sound because `for_each_math_span`'s own docs say an unpaired `$$` "runs to the end of its line" —
+   every span lies inside one line.
+2. **`total_lines` was stale at construction.** `ChromeState::default()` has `total_lines: 1`, and
+   nothing called `publish_counts` at construction, so a session opened on a three-line document reported
+   one line — in the status bar, where it was wrong and unnoticed because every gate started from an
+   empty document or made an edit first. Phase 12 made it visible because the emitter clamps its loop to
+   `total_lines`: **it drew one line and stopped.**
+
+**A third thing was needed because I wrote the first version of the emitter wrong, twice.**
+
+* `line_start(at)` takes a **byte offset** and answers "where does the line containing this byte begin".
+  The renderer has a line *index* and wants "where does line N begin". Passing the index made every line
+  report offset 0, so the page drew `one`, then `one\ntwo`, then the whole document. Both functions were
+  correct; `usize` is `usize`. `DocLines::line_begin` is the index-shaped twin, and the trap is named in
+  its doc comment.
+* **A one-line read buffer cannot serve 43 runs.** A `DocRun` is resolved by the painter *after* every
+  line is emitted, so the bytes a run names must still be present. One buffer per line would be correct
+  for one run and silently wrong for the other 42. The buffer therefore holds **the whole page** —
+  [`LINE_SCRATCH_BYTES`] = 48 KiB, sized from a constant rather than from `Layout::rows` so no panel size
+  can resize it on the paint path.
+
+**What did not land, stated plainly: the memory.** Phase 12 was supposed to remove `doc_scratch`'s
+**1.000 resident bytes per document byte**, and it did not. `tests/session_rss.rs` still measures
+**26.85 MiB with the same 6.00 MiB `doc_scratch`**, and its **2.85 bytes per document byte** is still the
+true figure.
+
+The reason is `publish_line_heights` → `math_blocks_for`, which calls `read_document`
+**unconditionally**: it must, because `for_each_math_span` is a cursor over bytes and *"does this
+document contain any math"* cannot be answered without reading the bytes to find the `$$`. **`Editor` has
+no math accessor at all** — zero hits in `editor.rs`. A gate asserting `doc_scratch_capacity() == 0`
+measured **221,184 bytes** and is now, in its own doc comment, the record of that failure.
+
+So the honest statement of what Phase 12 part 1 delivered is **a page read, not a memory saving**: the
+body-text emitter reads at most `rows × 1,024` bytes and is gated on that
+(`the_body_text_emitter_reads_one_page_and_not_the_document`). The remaining work is one question in
+`holonomy-text` — *does this document contain a formula, a table or an image?* — and once that exists,
+`publish_line_heights`, `emit_tables`, `emit_math` and `emit_images` all take it and `doc_scratch` goes
+to zero.
+
+**Cost: 15,840 bytes** — 1,452,504 → **1,468,344** against the 2,097,152 ceiling. `Layout::rows` is
+**23** at 1280x800, not the 43 first written, so a page is 23,552 bytes and 48 KiB is twice that.
+
+**Not done:** wrapping. A line longer than the page's measure is **truncated**, counted in
+`PaintStats::runs_truncated`. `LineHeights` is indexed by *document line*, so a wrapped line would have no
+row to be on — `caret_line`, the scroll model, the table anchors and the formula anchors are all
+document-line indices. Wrapping needs a document-line → visual-rows index, which is the same
+"structure without content" problem Phase 13's section manifest is, and building it twice would be worse
+than building it once.
+
 #### Phase 13 — Sections: H2's iceberg for text
 
 Make document length a function of the *window*, not of the process. This is the port of H2's
