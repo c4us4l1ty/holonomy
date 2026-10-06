@@ -270,6 +270,35 @@ fn run() -> Result<(), Fail> {
         report.all_pages_locked, report.mlock_errno, report.no_new_privs, report.aslr
     );
 
+    // The `RLIMIT_MEMLOCK` ceiling is printed, and it is printed *because it is the number that
+    // decides whether the format's maximum document can open at all* -- and because on this host it
+    // cannot be raised from inside the process.
+    //
+    // `raise_memlock_to_hard_limit` is a no-op where soft already equals hard, which is what the
+    // rlimits module's own doc says happens here: soft == hard == 8.00 MiB. Going above that needs
+    // `CAP_SYS_RESOURCE` (to raise the hard limit) and the process has none -- `CapEff` reads as 0 --
+    // so `setrlimit` fails with `EPERM` and even `ulimit -l unlimited` is refused by the shell. **The
+    // ceiling is therefore a property of the host, not something the boot can negotiate**, and the
+    // maximum document needs `8,321,040 * 4096/3840 = 8.88 MiB` of page-locked leaves.
+    //
+    // Without this line that is invisible until a leaf allocation fails deep inside the rope, where
+    // it surfaces as `SecureBlockError::MlockFailed` and reads like a bug rather than like a host
+    // limit. `mlockall` is deliberately *not* retired to work around it: that is a real reduction in
+    // coverage for plain heap buffers, and it is recorded in PROJECT.md's Phase 13 rather than done
+    // here.
+    let ceiling = report.limits.memlock_soft_after.unwrap_or(0);
+    eprintln!(
+        "holonomy: RLIMIT_MEMLOCK soft={} ({:.2} MiB) hard={} -- raise it on the host \
+         (LimitMEMLOCK=) to open documents above {:.2} MiB of page-locked text",
+        ceiling,
+        ceiling as f64 / (1024.0 * 1024.0),
+        report
+            .limits
+            .memlock_hard
+            .map_or_else(|| "unknown".to_string(), |h| h.to_string()),
+        (8_321_040.0f64 * 4096.0 / 3840.0) / (1024.0 * 1024.0),
+    );
+
     // The passphrase is read *after* sealing, which is why it has to come from the environment: there
     // is no `open` and no `getenv` guarantee post-filter, and the value must already be in the
     // process's own memory to be scrubbed on the way out.

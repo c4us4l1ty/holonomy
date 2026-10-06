@@ -1647,20 +1647,55 @@ page it maps later**, until `munlockall`.
 So on this host `RLIMIT_MEMLOCK = 8.00 MiB` is consumed by **the process's address space, not by the
 document**: a 6 MiB document costs the same `mlock` whether it is fully resident or one section is, and
 windowing the rope **would not move the ceiling by a byte.** Item 4 — *"`RLIMIT_MEMLOCK` stops being the
-document-size ceiling"* — is therefore **not** a consequence of item 3. It is a separate change and the
-change is to **retire `mlockall` and rely on the per-block `mlock` that `SecureBlock` already does**
-(`LockPolicy::PageLocked`), reserving `LockPolicy::Unlocked` for data that is derived and re-derivable from
-the encrypted store. **Then the residency budget becomes the `mlock` budget**, and item 3 bounds it.
+document-size ceiling"* — is therefore **not** a consequence of item 3. It requires a separate change.
 
-**That is a security decision, not an optimisation, and it is not made here.** `mlockall` gives a blanket
-"nothing in this process is ever swapped" guarantee; per-block locking gives the same guarantee **for every
-block that holds plaintext**, which is what FR-1.2's threat model is about — and it is strictly better for
-the ceiling, because unlocked derivations stop consuming the budget. What must be audited alongside it:
-every `SecureBlock` allocated in a session is `PageLocked` (the store's own gate asserts its policy, because
-an unlocked block holding document text would still pass every other test — it would still be bounded, still
-scrub on eviction, and still return the right bytes); the alt stack, the atlas and the framebuffer either
-carry no plaintext or are explicitly accounted; and `mlock` failure is a *load failure* rather than a
-silently unlocked resident section.
+**Decision, 2026-10-06: `mlockall` is KEPT. It is not being retired.**
+
+Raising the ceiling instead was considered and is **not possible on this host**, which is a measurement
+rather than a preference:
+
+| lever | result |
+| --- | --- |
+| `raise_memlock_to_hard_limit` (already in the boot, `rlimits.rs:144`) | **a no-op here** — soft == hard == 8.00 MiB, which is the case its own doc comment names |
+| raise soft above hard | refused — `EINVAL`, "current limit exceeds maximum limit" |
+| raise the hard limit | refused — `EPERM`, "not allowed to raise maximum limit" |
+| `CAP_SYS_RESOURCE` | **absent** — `CapEff` reads `0000000000000000`, euid 1000 |
+| `ulimit -l unlimited` | refused — "Operation not permitted" |
+| `/etc/security/limits.conf` | no grant; it only *lowers* memlock, and only for the `pipewire` group |
+
+**So the ceiling is a property of the host and the boot cannot negotiate it.** The maximum document needs
+`8,321,040 × 4096/3840 = 8.88 MiB` of page-locked leaves, so it needs a host configured
+`LimitMEMLOCK=infinity` (or ≥ 9 MiB). **`mlockall` was deliberately not retired to work around a limit that
+would have to be raised anyway**, because the retirement *is* a real reduction — see the audit below — and
+spending it to buy nothing would be the worst of both outcomes.
+
+**The audit of what retiring `mlockall` would cost, since it stays on the table:**
+
+| what `mlockall` protects | without it | |
+| --- | --- | --- |
+| `Editor` leaves (`leaf.rs:188`, one `mlock` per 4 KiB `SecureBlock`) | `SecureBlock` already locks per block | no loss |
+| the section store (`store.rs`) | `LockPolicy::PageLocked`, asserted by a gate | no loss |
+| alt stack / tripwire frame (`lib.rs:321`) | a registered `SecureBlock` | no loss |
+| **Argon2id KDF scratch, 128 MiB** (`envelope.rs:63`) | **was never locked anyway** — `MCL_FUTURE` is set at stage 5 and Argon2 runs after sealing | no change |
+| framebuffer | was never in the jail | no change |
+| **plain heap buffers holding derived plaintext** — `Vec<u8>`, `String`, the manifest's trees, `line_scratch` | **lose coverage.** `MCL_FUTURE` marks *every* future mapping `VM_LOCKED`, so these are locked *incidentally* today | **real reduction** |
+
+So the precise statement is: **per-block locking is as strong as `mlockall` for every byte H1 has chosen to
+protect, and strictly weaker for the plain heap buffers holding derived plaintext that `MCL_FUTURE` was
+silently covering.** That is what makes it a security decision. It is tractable — those buffers are finite
+and few, and each should either become a `SecureBlock` or be explicitly zeroed on release — **and it is not
+done before they are.** Retirement is gated on the buffer audit landing first.
+
+**And it is one-way.** `mlockall` is `BOOT_ONLY` in the seccomp table and `munlockall` is not allowlisted at
+all, so after sealing there is no way to reverse the decision from inside the process.
+
+**What landed instead: the ceiling is now visible.** `BootReport` always carried `memlock_soft_after` and
+`memlock_hard`, and `main.rs` printed neither — so the one number deciding whether the maximum document can
+open was captured and then discarded. The boot now prints it beside the document size that needs it, and
+`the_reported_memlock_ceiling_is_the_real_one` pins the reported figure against a **live** `getrlimit` rather
+than against `8.00 MiB`, so the gate stays valid on a host where the maximum document *does* open. Without
+it the ceiling surfaced as `SecureBlockError::MlockFailed` from inside a leaf allocation, which reads like a
+bug rather than like a host limit.
 
 #### Phase 14 — The chrome: pointer input, menus, icons
 
@@ -1732,7 +1767,7 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | container reads one section, refused cases | §Phase 13 | chunk 0 refused as content (it is the master frame), out-of-range refused not clamped, short output refused, and the slot wiped on every path including the error path |
 | resident text is bounded | §Phase 13 | `SectionStore` holds **at most its budget sections at every point** — checked inside the loop over 40 sections and 7 budgets, not after it — and **a document 8× its budget still reads back byte-exact** through a 5-section budget. Page-locked, so an unlocked block holding text could not hide here — `tests/session_store.rs` |
 | eviction releases memory | §Phase 13 | every eviction calls `zeroize_and_release` synchronously, and the released bytes are **counted** (12 loads into 4 slots = 8 evictions, ≥ a section each). The victim is **named**, not merely counted: the least recently used section is the one that goes, and re-reading it costs a load. **"The pages read back as zero" is not asserted here** — `munmap` has already unmapped them; that is `SecureBlock`'s claim and is gated in `holonomy-secure` |
-| `mlock` is not bounded by residency | §Phase 13 | **negative result, deliberately recorded.** The boot chain's `mlockall(MCL_CURRENT\|MCL_FUTURE)` locks the process's whole address space, so **`RLIMIT_MEMLOCK` is spent on pages, not on the document** and windowing the rope cannot move the 8.00 MiB ceiling. Item 4 requires retiring `mlockall` for per-block `mlock` — **a security decision, not made here** — `crates/holonomy/src/store.rs:1` |
+| `mlock` is not bounded by residency | §Phase 13 | **negative result, deliberately recorded.** The boot chain's `mlockall(MCL_CURRENT\|MCL_FUTURE)` locks the process's whole address space, so **`RLIMIT_MEMLOCK` is spent on pages, not on the document** and windowing the rope cannot move the 8.00 MiB ceiling. **Decision 2026-10-06: `mlockall` is kept, and the ceiling cannot be raised on this host** (`CapEff` = 0, soft == hard, `setrlimit` `EPERM`, `ulimit -l` refused) — so the maximum document needs `LimitMEMLOCK=infinity` on the host. The ceiling is now **printed at boot** and pinned against a live `getrlimit`, not against 8.00 MiB — `rlimits.rs`, `the_reported_memlock_ceiling_is_the_real_one` |
 | binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
@@ -1785,15 +1820,16 @@ the desktop build, and none of this needs more than a few tens of KiB.
    did not make it *openable*, because `Editor` still holds the whole document resident.
    **Until then the honest claim is a 3.4 MiB document, and the reason is `mlock` rather than RAM.**
 
-7. **Item 4 is not reachable by windowing, and that is a finding rather than a plan.** Step 2 built the
+7. **Item 4 is not reachable by windowing, and the fallback is not available either.** Step 2 built the
    bounded residency that item 4 was supposed to require, and building it showed the ceiling does not move:
    the boot chain's `mlockall(MCL_CURRENT | MCL_FUTURE)` locks **the process's address space**, not the
-   document, so **the whole 8.00 MiB is already spent no matter how many sections are resident.** Item 4 is
-   therefore *two* changes — make `Editor` sparse **and** retire `mlockall` for the per-block `mlock`
-   `SecureBlock` already does — and **the second is a security decision** (it gives up a blanket
-   "nothing in this process is ever swapped" guarantee for a per-block guarantee that is as strong for every
-   byte of plaintext, which is what FR-1.2's threat model is about). **It is recorded, not made.** See
-   §Phase 13, part 2, step 2b.
+   document, so **the whole 8.00 MiB is already spent no matter how many sections are resident.** The
+   obvious fallback — raise `RLIMIT_MEMLOCK` — **was measured and cannot be done here**: soft == hard ==
+   8.00 MiB, `CapEff` is 0 so there is no `CAP_SYS_RESOURCE`, `setrlimit` returns `EPERM`, and even
+   `ulimit -l unlimited` is refused. **The ceiling is a host property and the maximum document needs
+   `LimitMEMLOCK=infinity`.** `mlockall` was deliberately **kept** rather than retired, since retiring it
+   *is* a real reduction (plain heap buffers holding derived plaintext lose `MCL_FUTURE` coverage) and would
+   have bought nothing. See §Phase 13, part 2, step 2b.
 
 8. **`SectionStore` is gated and unused.** A session's residency is unchanged, because `Editor` does not read
    from it. It is not dead code in the sense of "will be deleted" — it is the mechanism, gated on its own

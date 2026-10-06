@@ -216,6 +216,74 @@ mod tests {
         );
     }
 
+    /// The ceiling the boot prints is the ceiling the process actually has, and it is **not** the one it
+    /// asked for.
+    ///
+    /// `main.rs` prints `memlock_soft_after` beside the document size that needs it, because on this host
+    /// `RLIMIT_MEMLOCK` cannot be raised from inside the process: `CapEff` reads as 0, so there is no
+    /// `CAP_SYS_RESOURCE` to raise the hard limit with, and soft already equals hard at 8.00 MiB. So the
+    /// number that decides whether the maximum document opens is a **host** property, and the only honest
+    /// thing the binary can do is say which one it has.
+    ///
+    /// The assertion that matters is against a *live* `getrlimit`, not against a constant. A test that
+    /// pinned `8.00 MiB` would pass on this host and fail on a host configured for `LimitMEMLOCK=infinity`
+    /// -- which is exactly the host the maximum document needs. Comparing to the live limit is what makes
+    /// this one test valid on both, and it is what catches the failure mode that matters: `soft_after`
+    /// silently reading `0`, which the print would render as "0.00 MiB" without any error.
+    #[test]
+    fn the_reported_memlock_ceiling_is_the_real_one() {
+        let mut limits = Limits::default();
+        raise_memlock_to_hard_limit(&mut limits);
+
+        let (live_soft, live_hard) = getrlimit(libc::RLIMIT_MEMLOCK).expect("getrlimit(RLIMIT_MEMLOCK)");
+        let reported = limits.memlock_soft_after.expect("soft_after was not recorded");
+        assert!(
+            reported > 0,
+            "the boot prints memlock_soft_after as a MiB figure; a 0 would read as '0.00 MiB' with \
+             no error, which is worse than printing nothing"
+        );
+        assert_eq!(
+            reported,
+            live_soft,
+            "boot reported {} but the process has {}",
+            reported,
+            live_soft
+        );
+        assert_eq!(
+            limits.memlock_hard.expect("hard was not recorded"),
+            live_hard,
+            "the hard limit is what the boot suggests raising the host to, so it has to be the real one"
+        );
+        assert_eq!(
+            limits.memlock_soft_before, Some(live_soft),
+            "and 'before' is not the same fact as 'after' unless the bump was a no-op -- if these differ \
+             the raise did something, which is worth knowing rather than assuming"
+        );
+    }
+
+    /// Raising the ceiling is a **host** change, and the binary's own attempt is a no-op. Recorded as a
+    /// test because it is the assumption several parts of the design rest on: that an 8.00 MiB
+    /// `RLIMIT_MEMLOCK` is a property of the machine rather than something the boot can negotiate.
+    ///
+    /// **This test is deliberately not an assertion that the raise *failed*.** Whether soft can reach
+    /// hard is host-dependent, and a host with `LimitMEMLOCK=infinity` has both equal at infinity, which
+    /// also means the bump was a no-op. So the invariant asserted is the one that is true everywhere:
+    /// **the soft limit never exceeds the hard limit after the attempt**, and the recorded values are
+    /// present. A test that hard-coded `8.00 MiB` would encode this host into the suite and would have to
+    /// be deleted the day someone ran it somewhere the maximum document opens.
+    #[test]
+    fn the_memlock_bump_cannot_exceed_the_hard_limit() {
+        let mut limits = Limits::default();
+        raise_memlock_to_hard_limit(&mut limits);
+        let soft = limits.memlock_soft_after.expect("soft_after");
+        let hard = limits.memlock_hard.expect("hard");
+        assert!(
+            soft <= hard,
+            "soft {soft} > hard {hard}: the bump raised past what the host permits, which should have \
+             been refused with EPERM rather than reported as achieved"
+        );
+    }
+
     #[test]
     fn core_dumps_are_sealed_or_reported() {
         let mut limits = Limits::default();
