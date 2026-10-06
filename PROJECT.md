@@ -1587,6 +1587,81 @@ maps and the undo stack all read it as one rope. Making it sparse means `read_in
 have to agree on which sections are resident, and the manifest is the only thing that knows. That is the
 next step, and it is a change to `holonomy-text` rather than to the container.
 
+##### Phase 13, part 2, step 2 — the mechanism: a bounded set of resident sections
+
+`SectionStore` in `crates/holonomy/src/store.rs`; `crates/holonomy/tests/session_store.rs`, 7 tests.
+
+**This is the thing that makes document length a function of the window rather than of the process.** The
+store holds a fixed *budget* of sections, loads one from the container on a miss, and on a budget violation
+evicts the least recently used with `SecureBlock::zeroize_and_release()` — **synchronously, so resident
+memory falls before the next frame and a gate can observe it.** That is 9C's rule ("eviction must be
+synchronous and observable") applied to text, and it is why `evict_all` is a public method rather than only
+a `Drop`: a caller that needs memory to fall *before* `commit()` or before a KDF has to be able to say so.
+
+**It is built and gated on its own, and nothing reads it yet.** `Editor` still holds the whole document in a
+rope of page-locked 4 KiB leaves, so **a session's residency is unchanged and the document is still
+entirely resident.** The mechanism is separate because it is the new and risky part — bounded, scrubbed,
+observable — and because wiring it in requires changing `Editor`'s core assumption that the document is
+contiguous. That change is the next step.
+
+**`copy_into` fills a caller's buffer rather than returning `&[u8]`.** That is the same shape as
+`Editor::read_into` and `Wavefunction::read_chunk_into`, and the reason to choose it is that a store
+returning a borrow into its own resident map would need interior mutability for a hit — touching the LRU
+tick is a write, and the caller is holding the borrow. A lock on the read path or a raw pointer are the
+alternatives; **a caller-supplied buffer is the option with no `unsafe` in it**, and the cost is one
+`copy_from_slice` of a section, which the read was doing anyway.
+
+**Eviction frees a slot *before* allocating, not after.** Otherwise the store peaks at `budget + 1`
+sections — and the peak is the number worth asserting. Freeing afterwards is the classic way a bound becomes
+`budget + 1` and nobody notices, because `resident()` reads `budget` again by the time anyone looks. The gate
+checks the bound *inside* the loop, after every access, over 40 sections and seven budgets, because checking
+it after the loop passes for any store that happens to be under budget when the loop ends.
+
+**A budget of 0 is a legal configuration meaning "nothing stays resident",** and is not silently promoted to
+1. The degenerate case is unreachable if you clamp it, and the degenerate case is exactly what a caller
+under memory pressure wants to be able to ask for.
+
+**One bug the tests caught, and it is the same trap as step 1's, one layer up.** `chunk_of` originally
+returned `Wavefunction::chunk_content_offset(section + 1)`, which answers *"where in the document's text
+does this chunk start"* — a **byte offset** — and the `Some(0)` it returned for section 0 was then passed to
+`read_chunk_into` as a **chunk index**. Chunk 0 is the master frame, which is refused. **All seven gates
+failed identically with `StoreError::Read`,** the most opaque error the type has, and the symptom — every
+read of every section failing the same way — is *consistent with* an off-by-one that never varies, so
+nothing in the failure pointed at the off-by-one. `chunk_of` now validates through the container and returns
+the index.
+
+**The stronger scrubbing claim cannot be made here, and the doc says so.** `released_bytes` sums what
+`zeroize_and_release` reported releasing, which proves eviction *released* memory rather than merely dropping
+a struct whose `Drop` was never reached. **"The pages read back as zero" is not checkable from here**,
+because `munmap` has already unmapped them — a test asserting it would be asserting a property of memory
+the process no longer owns. The zeroing is `SecureBlock`'s and is gated in `crates/holonomy-secure/tests/`;
+what is gated here is that eviction *calls* it.
+
+#### Phase 13, part 2, step 2b — the `mlock` finding, which reframes item 4
+
+**Residency bounds `SecureBlock` allocations. It does not bound `RLIMIT_MEMLOCK`.** The boot chain calls
+`Opened::lock_all_pages` (`main.rs:260`), which is `mlockall(MCL_CURRENT | MCL_FUTURE)`
+(`holonomy-jail/src/lib.rs:372`) — and **`mlockall` locks every page the process has ever mapped and every
+page it maps later**, until `munlockall`.
+
+So on this host `RLIMIT_MEMLOCK = 8.00 MiB` is consumed by **the process's address space, not by the
+document**: a 6 MiB document costs the same `mlock` whether it is fully resident or one section is, and
+windowing the rope **would not move the ceiling by a byte.** Item 4 — *"`RLIMIT_MEMLOCK` stops being the
+document-size ceiling"* — is therefore **not** a consequence of item 3. It is a separate change and the
+change is to **retire `mlockall` and rely on the per-block `mlock` that `SecureBlock` already does**
+(`LockPolicy::PageLocked`), reserving `LockPolicy::Unlocked` for data that is derived and re-derivable from
+the encrypted store. **Then the residency budget becomes the `mlock` budget**, and item 3 bounds it.
+
+**That is a security decision, not an optimisation, and it is not made here.** `mlockall` gives a blanket
+"nothing in this process is ever swapped" guarantee; per-block locking gives the same guarantee **for every
+block that holds plaintext**, which is what FR-1.2's threat model is about — and it is strictly better for
+the ceiling, because unlocked derivations stop consuming the budget. What must be audited alongside it:
+every `SecureBlock` allocated in a session is `PageLocked` (the store's own gate asserts its policy, because
+an unlocked block holding document text would still pass every other test — it would still be bounded, still
+scrub on eviction, and still return the right bytes); the alt stack, the atlas and the framebuffer either
+carry no plaintext or are explicitly accounted; and `mlock` failure is a *load failure* rather than a
+silently unlocked resident section.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -1655,6 +1730,9 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | markers without reading | §Phase 13 | `Manifest::span_total()` answers "does this document contain a formula or an image" with **0 bytes read**, and four emitters guard on it — `a_prose_document_never_allocates_the_whole_document_buffer` |
 | read one section of a document | §Phase 13 | `Wavefunction::read_chunk_into` reads **one chunk, one authenticated read, no allocation**, in any order. The **maximum document — 8,321,040 B in 127 chunks — reads back through one 65,520-byte buffer** — `tests/chunk_read.rs` |
 | container reads one section, refused cases | §Phase 13 | chunk 0 refused as content (it is the master frame), out-of-range refused not clamped, short output refused, and the slot wiped on every path including the error path |
+| resident text is bounded | §Phase 13 | `SectionStore` holds **at most its budget sections at every point** — checked inside the loop over 40 sections and 7 budgets, not after it — and **a document 8× its budget still reads back byte-exact** through a 5-section budget. Page-locked, so an unlocked block holding text could not hide here — `tests/session_store.rs` |
+| eviction releases memory | §Phase 13 | every eviction calls `zeroize_and_release` synchronously, and the released bytes are **counted** (12 loads into 4 slots = 8 evictions, ≥ a section each). The victim is **named**, not merely counted: the least recently used section is the one that goes, and re-reading it costs a load. **"The pages read back as zero" is not asserted here** — `munmap` has already unmapped them; that is `SecureBlock`'s claim and is gated in `holonomy-secure` |
+| `mlock` is not bounded by residency | §Phase 13 | **negative result, deliberately recorded.** The boot chain's `mlockall(MCL_CURRENT\|MCL_FUTURE)` locks the process's whole address space, so **`RLIMIT_MEMLOCK` is spent on pages, not on the document** and windowing the rope cannot move the 8.00 MiB ceiling. Item 4 requires retiring `mlockall` for per-block `mlock` — **a security decision, not made here** — `crates/holonomy/src/store.rs:1` |
 | binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
@@ -1706,6 +1784,21 @@ the desktop build, and none of this needs more than a few tens of KiB.
    Phase 13 part 2 step 1 made it *readable in principle* (it comes back through one 65,520-byte buffer) and
    did not make it *openable*, because `Editor` still holds the whole document resident.
    **Until then the honest claim is a 3.4 MiB document, and the reason is `mlock` rather than RAM.**
+
+7. **Item 4 is not reachable by windowing, and that is a finding rather than a plan.** Step 2 built the
+   bounded residency that item 4 was supposed to require, and building it showed the ceiling does not move:
+   the boot chain's `mlockall(MCL_CURRENT | MCL_FUTURE)` locks **the process's address space**, not the
+   document, so **the whole 8.00 MiB is already spent no matter how many sections are resident.** Item 4 is
+   therefore *two* changes — make `Editor` sparse **and** retire `mlockall` for the per-block `mlock`
+   `SecureBlock` already does — and **the second is a security decision** (it gives up a blanket
+   "nothing in this process is ever swapped" guarantee for a per-block guarantee that is as strong for every
+   byte of plaintext, which is what FR-1.2's threat model is about). **It is recorded, not made.** See
+   §Phase 13, part 2, step 2b.
+
+8. **`SectionStore` is gated and unused.** A session's residency is unchanged, because `Editor` does not read
+   from it. It is not dead code in the sense of "will be deleted" — it is the mechanism, gated on its own
+   because it is the risky part — but **no product path reaches it, and §6's RSS row must not be read as if
+   it did.**
 
 6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
    with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a

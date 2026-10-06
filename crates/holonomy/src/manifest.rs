@@ -477,7 +477,7 @@ impl Manifest {
             // `SECTION_BYTES` in its last section has one more section than the manifest has rows for.
             // Rather than reason about "did it overflow", this asks the question that has an unambiguous
             // answer: does the manifest still tile the document?
-            if let Some(need) = self.needs_rebuild(editor) {
+            if let Some(need) = self.needs_rebuild() {
                 let Ok(text) = editor.text() else {
                     return Sync::Unchanged;
                 };
@@ -518,8 +518,10 @@ impl Manifest {
     /// without an edit having moved a boundary is if the last section has outgrown `SECTION_BYTES` and there
     /// is now one more section than there are rows.
     ///
-    /// The test is the last section's recorded length against its own ceiling, which is `O(1)`.
-    fn needs_rebuild(&self, editor: &Editor) -> Option<usize> {
+    /// The test is the last section's recorded length against its own ceiling, which is `O(1)`. It does not
+    /// need the editor: the last section's own weight is the whole question, and `sync` has already
+    /// established that the lengths disagree by calling this.
+    fn needs_rebuild(&self) -> Option<usize> {
         let last = self.len().saturating_sub(1);
         if (self.bytes.weight(last) as usize) <= SECTION_BYTES {
             None
