@@ -34,6 +34,7 @@
 
 use std::io::{self, Write};
 
+use holonomy_text::ANCHOR_BYTES;
 use holonomy_text::{
     Editor, EditorError, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER, STYLE_ITALIC,
 };
@@ -135,6 +136,20 @@ pub struct HtmlStats {
     pub headers: u32,
     /// Bytes that became an escape sequence rather than themselves.
     pub escaped: u32,
+    /// `<img>` elements emitted, one per anchor that had an asset.
+    pub images: u32,
+    /// Anchors with no asset, rendered as `&#xfffc;`.
+    ///
+    /// Counted rather than ignored: a document whose anchors have lost their assets is a payload whose
+    /// text and catalog disagree, and the HTML is where that finally becomes visible.
+    pub images_missing: u32,
+    /// PNG bytes encoded into `data:` URIs.
+    pub image_bytes: u64,
+    /// Bytes the `<img>` tags occupied, base64 included.
+    ///
+    /// The number that matters for the export's size: base64 is 4/3, so a document of images exports
+    /// about a third larger than its catalog. Reported so that is a known quantity and not a surprise.
+    pub image_tag_bytes: u64,
 }
 
 /// Write `editor`'s text and styling to `sink` as a standalone HTML document.
@@ -194,6 +209,17 @@ pub fn export_body<W: Write>(sink: &mut W, editor: &Editor) -> Result<HtmlStats,
     let runs = editor.spans().runs_in(0, text_len as u32);
     let mut run_ix = 0usize;
     let mut chunk_base = 0usize;
+    // How many anchors have gone past. **A counter, not a search**, and the reason is worth stating:
+    // the first version derived the ordinal from the anchor's byte offset, which meant
+    // `AssetCatalog::ordinal_at(&editor.text()?[..at], at)` -- a whole second copy of the document, per
+    // image, in an exporter whose entire design is to never hold more than `CHUNK_BYTES` at a time. The
+    // walk is already in document order (runs and chunks both advance monotonically), so counting is
+    // exact and costs nothing.
+    let mut anchor_ordinal = 0usize;
+    // Up to two bytes of an anchor that straddled the previous run's end. **A field rather than a
+    // local** for the same reason every other scratch here is: a `Vec` local whose slice is passed on
+    // escapes and is promoted to the heap.
+    let mut carry: Vec<u8> = Vec::with_capacity(2);
 
     while chunk_base < text_len {
         let n = editor.read_into(chunk_base, &mut chunk)?;
@@ -220,9 +246,14 @@ pub fn export_body<W: Write>(sink: &mut W, editor: &Editor) -> Result<HtmlStats,
                 open_delta(&mut w, next, &mut stats)?;
                 open = next;
             }
-            emit_escaped(
+            // `base` is the absolute byte offset of the slice's first byte, so an anchor's ordinal can
+            // be derived from where it sits rather than from a counter that could drift.
+            emit_with_anchors(
                 &mut w,
                 &chunk[from - chunk_base..to - chunk_base],
+                editor.assets(),
+                &mut anchor_ordinal,
+                &mut carry,
                 &mut stats,
             )?;
             stats.text_bytes += (to - from) as u64;
@@ -235,9 +266,140 @@ pub fn export_body<W: Write>(sink: &mut W, editor: &Editor) -> Result<HtmlStats,
         chunk_base = chunk_end;
     }
 
+    // Whatever is still held back is an anchor that was cut in half by the end of the document, which
+    // cannot happen through `insert_image` (the anchor is inserted whole) but can through a hand-edited
+    // text. Emitting it as a character reference is the honest reading: the document really does end
+    // with half an object-replacement character.
+    if !carry.is_empty() {
+        let mut tag = Vec::new();
+        crate::asset::html_missing_into(&mut tag);
+        stats.images_missing += 1;
+        w.write_all(&tag)?;
+        carry.clear();
+    }
+
     close_delta(&mut w, open, Open::NONE)?;
     stats.bytes = w.count();
     Ok(stats)
+}
+
+/// Write `bytes` to `w`, escaping as it goes, with an image anchor becoming an `<img>`.
+///
+/// # Why the anchor is caught here and not by a pass over the text
+///
+/// The exporter walks the document in 64 KiB chunks so it never holds more than that in memory, and a
+/// second pass over the text to find the anchors would be a whole second copy of the document. So the
+/// anchor is caught in the byte stream as it goes past, and `base` is what turns a position in the
+/// document into an ordinal in the catalog.
+///
+/// # Why a partial anchor at a slice's end is not an error
+///
+/// The anchor is three bytes and a run boundary can fall inside it -- `read_into` and `runs_in` both
+/// cut on their own edges. Emitting the first byte of an anchor as text would put a raw `EF` in the
+/// output and the document would be invalid UTF-8; holding it back and re-examining the next slice is
+/// the only correct answer. [`crate::asset::find_anchor`] reports the partial tail, and the escape
+/// filter passes bytes through unchanged, so a held-back byte resumes in the right place.
+fn emit_with_anchors<W: Write>(
+    w: &mut Counted<W>,
+    bytes: &[u8],
+    catalog: &holonomy_text::AssetCatalog,
+    ordinal: &mut usize,
+    carry: &mut Vec<u8>,
+    stats: &mut HtmlStats,
+) -> Result<(), HtmlError> {
+    // **Complete a held-back anchor first.** The bytes the previous slice ended with are the prefix of an
+    // anchor whose rest is at the head of this one, and `find_anchor(bytes)` cannot see them -- so without
+    // this the third byte goes out as raw text and the export is invalid UTF-8. That is exactly what the
+    // first version did, and what `html_finds_an_image_whose_anchor_straddles_a_run_boundary` catches.
+    if !carry.is_empty() {
+        let mut head = [0u8; 3];
+        let clen = carry.len().min(3);
+        let take = (3 - clen).min(bytes.len());
+        head[..clen].copy_from_slice(&carry[..clen]);
+        head[clen..clen + take].copy_from_slice(&bytes[..take]);
+        if clen + take < 3 {
+            // Still short of three. Keep what arrived and emit nothing: the rest is in a later chunk.
+            let mut out = std::mem::take(carry);
+            out.clear();
+            out.extend_from_slice(bytes);
+            *carry = out;
+            return Ok(());
+        }
+        if head == ANCHOR_BYTES {
+            // **Discarded, not emitted.** The held-back bytes are the anchor's own prefix, and the
+            // anchor is about to be written in full -- emitting them first would put a bare `EF BF` in
+            // the output, which is what the first version did and what made this path produce invalid
+            // UTF-8 even though it found the anchor.
+            carry.clear();
+            return emit_anchor(w, &bytes[take..], catalog, ordinal, carry, stats);
+        }
+        // Not an anchor after all: the held-back bytes were ordinary text.
+        emit_escaped(w, carry, stats)?;
+        carry.clear();
+    }
+
+    let (at, partial) = crate::asset::find_anchor(bytes);
+    let Some(at) = at else {
+        // Hold back a partial anchor's lead bytes rather than emitting half a character. They are the
+        // next slice's problem, and `carry` is how the next slice learns about them.
+        let keep = bytes.len().saturating_sub(partial);
+        let mut out = std::mem::take(carry);
+        out.clear();
+        out.extend_from_slice(&bytes[bytes.len() - partial..]);
+        *carry = out;
+        return emit_escaped(w, &bytes[..keep], stats);
+    };
+    if at > 0 {
+        emit_escaped(w, &bytes[..at], stats)?;
+    }
+    emit_anchor(
+        w,
+        &bytes[at + ANCHOR_BYTES.len()..],
+        catalog,
+        ordinal,
+        carry,
+        stats,
+    )
+}
+
+/// Emit the picture for the next anchor, then whatever text follows it.
+///
+/// Split out of [`emit_with_anchors`] because two paths reach it -- a whole anchor inside one slice, and
+/// one completed from the previous slice's carry -- and the second has already consumed the first `take`
+/// bytes, so both must resume on the same remainder. Having it in one place means the image emission and
+/// the ordinal increment cannot happen once on one path and twice on the other.
+fn emit_anchor<W: Write>(
+    w: &mut Counted<W>,
+    rest: &[u8],
+    catalog: &holonomy_text::AssetCatalog,
+    ordinal: &mut usize,
+    carry: &mut Vec<u8>,
+    stats: &mut HtmlStats,
+) -> Result<(), HtmlError> {
+    let mine = *ordinal;
+    *ordinal += 1;
+    match crate::asset::asset_at(catalog, mine) {
+        Some(asset) => {
+            let mut tag = Vec::with_capacity(crate::asset::base64_len(asset.len()) + 64);
+            crate::asset::html_img_into(asset, &mut tag);
+            stats.images += 1;
+            stats.image_bytes += asset.len() as u64;
+            stats.image_tag_bytes += tag.len() as u64;
+            w.write_all(&tag)?;
+        }
+        None => {
+            // An anchor with no asset: the reference survives, the picture does not. A numeric character
+            // reference is the honest rendering of "U+FFFC, unpaired", and it is counted so a document
+            // whose anchors have lost their assets says so here rather than looking like a document with
+            // no images at all.
+            stats.images_missing += 1;
+            let mut tag = Vec::new();
+            crate::asset::html_missing_into(&mut tag);
+            w.write_all(&tag)?;
+        }
+    }
+    stats.text_bytes += ANCHOR_BYTES.len() as u64;
+    emit_with_anchors(w, rest, catalog, ordinal, carry, stats)
 }
 
 /// Write `bytes` to `w`, escaping as it goes.

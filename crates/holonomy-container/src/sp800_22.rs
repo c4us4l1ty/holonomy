@@ -1106,13 +1106,49 @@ mod tests {
     /// `a_few_percent_bias_is_rejected`: 0.5% of the bits flipped is caught with certainty.
     #[test]
     fn a_single_flipped_bit_is_below_the_floor_of_these_tests() {
+        // **Deterministic, and the first version of this was not.**
+        //
+        // It asserted `p_value < 1.0` on `random(1 << 16)` with one bit flipped. The monobit p-value is
+        // `erfc(|pi_hat - 0.5| * sqrt(2n))`, so it is 1.0 exactly when the post-flip bit count lands
+        // *closer to the mean* than the pre-flip count -- which is a coin flip, not a rare event. It
+        // passed 500-odd consecutive runs and then failed on one of them, in a workspace run where the
+        // only thing that had changed was several crates away.
+        //
+        // The claim the test is actually making is about **detection floor**, and that is a statement
+        // about the *statistic*, which moves by exactly one and whose sign is known. So assert that:
         let mut data = random(1 << 16);
+        let before = run(&data);
+        let count_before: u64 = data.iter().map(|b| b.count_ones() as u64).sum();
+
         data[1234] ^= 0x01;
-        let r = run(&data);
-        // At this size one bit *is* detectable, so pin the direction, not the exact p-value.
+        let after = run(&data);
+        let count_after: u64 = data.iter().map(|b| b.count_ones() as u64).sum();
+
+        // Exactly one bit moved, in the direction the flip dictated: clearing 0x01 loses a one, setting
+        // it gains one.
+        assert_eq!(
+            count_after.abs_diff(count_before),
+            1,
+            "flipping one bit changed the count by {}",
+            count_after.abs_diff(count_before)
+        );
+        // And the statistic moved with it, monotonically: |pi_hat - 0.5| is a distance to the mean, so
+        // moving the count *toward* `n/2` shrinks it and moving away grows it.
+        // Whether the statistic grows or shrinks depends on which side of the mean the count started,
+        // and that is the coin flip the old assertion lost. What is always true is that it *moved*, and
+        // by an amount on the order of one bit in 2^19 -- which is the point of the test: the statistic
+        // does move, and it moves by almost nothing.
+        let delta = (after.results[0].statistic - before.results[0].statistic).abs();
         assert!(
-            r.results[0].p_value < 1.0,
-            "monobit p-value must remain a probability"
+            delta > 0.0 && delta < 0.01,
+            "one bit in 2^19 moved the statistic by {delta}, which is neither nothing nor a lot"
+        );
+        // The p-value is still a probability -- which is the part the original assertion meant, and it
+        // is now asserted where it cannot be a coin flip.
+        assert!(
+            (0.0..=1.0).contains(&after.results[0].p_value),
+            "monobit p-value {} is not a probability",
+            after.results[0].p_value
         );
     }
 

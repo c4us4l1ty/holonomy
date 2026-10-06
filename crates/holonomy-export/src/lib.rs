@@ -37,7 +37,8 @@
 //! [`fonts`]: crate::fonts
 //! [`PdfStats::overflowing_runs`]: crate::pdf::PdfStats::overflowing_runs
 
-pub mod fonts;
+pub mod asset;
+mod fonts;
 pub mod html;
 pub mod pdf;
 
@@ -132,6 +133,12 @@ pub enum ExportError {
     Html(HtmlError),
     /// The PDF path failed.
     Pdf(PdfError),
+    /// An image could not be decoded for the PDF's `/XObject`.
+    ///
+    /// Named, with the asset's id in it, because an export that silently dropped a picture would be a
+    /// document that changes between formats -- and a caller needs to know *which* asset, not merely
+    /// that something went wrong.
+    Asset(String),
 }
 
 impl std::fmt::Display for ExportError {
@@ -139,6 +146,7 @@ impl std::fmt::Display for ExportError {
         match self {
             Self::Html(e) => write!(f, "{e}"),
             Self::Pdf(e) => write!(f, "{e}"),
+            Self::Asset(m) => write!(f, "image: {m}"),
         }
     }
 }
@@ -148,6 +156,8 @@ impl std::error::Error for ExportError {
         match self {
             Self::Html(e) => Some(e),
             Self::Pdf(e) => Some(e),
+            // No source: the message is the diagnosis, and there is no upstream error type to point at.
+            Self::Asset(_) => None,
         }
     }
 }

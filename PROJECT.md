@@ -367,9 +367,14 @@ ceiling is ever raised, this table is the thing to re-derive first.
 * **No `png` crate.** Hand-written chunk reader plus `miniz_oxide`. §2.9.1.
 * **No runtime curve evaluation anywhere.** Zero-Bézier Invariant, §2.2, extended to the radical sign.
 * **No image in the export path's way.** HTML and PDF get `<img>`/XObject references resolved at
-  export time from the container; if an image is not in the viewport the exporter reads it from the
-  container fd with `pread64` (allowlisted), never from a decoded cache entry, because a PDF must not
-  depend on scroll position.
+  export time, and **never from a decoded cache entry**, because a PDF must not depend on scroll
+  position. **Amended 2026-10-06:** the rule stands; the mechanism does not, and could not. "Read it
+  from the container fd with `pread64`" names a thing the export path does not have -- the session
+  holds an `Editor` and no container -- so the exporters read `Editor::assets()`, the payload's catalog,
+  which is always present. Nothing is decoded unless an image is actually reached, and neither exporter
+  *can* reach `IcebergCache`: `export` takes an `&Editor` and options, so there is no parameter through
+  which a cache could arrive, and adding one would stop this crate compiling. Asserted structurally
+  rather than in a comment; see §9C's delivered section.
 * **No SVG, no JPEG, no WebP.** One decoder, and PNG is the lossless one that suits documents.
 
 
@@ -842,6 +847,105 @@ scrubbed to zero. Binary ≤ 2.0 MiB.
 
 **Phase 9 gate.** `cargo test -p holonomy-render` plus the integration harness, plus all of §6.
 
+##### 9C delivered — 2026-10-06
+
+The gate passes. Four measurements, then the four things that were not as specified.
+
+**Cost, measured on this host.** Default release binary **1,439,288 B** against the 2,097,152 ceiling:
+**657,864 B of room**, down 336,704 B from 9B's 1,101,944 B. `--features desktop` is **1,536,472 B**,
+560,680 B of room. The decoder's own cost, attributed by symbol size out of an unstripped build
+(`strip = "none"`, so `nm -S` can see it, grouping each symbol to the innermost non-`std` crate in its v0
+mangled path): `holonomy_image` 26,388 B + `miniz_oxide` 26,426 B = **52,814 B = 51.6 KiB**, inside
+§2.9.1's 60 KiB. For scale, the same measurement puts `holonomy_assets` at 69,145 B, `ttf_parser` at
+62,944 B and `brotli_decompressor` at 178,743 B -- so the decoder is not the largest thing the font
+payload costs, and 9C's 336,704 B is the *whole* phase: decoder, payload serializer, catalog, export
+path and session plumbing.
+
+**The frozen container held, and that is now a measurement rather than a hope.** Nothing outside the
+payload has an opinion about a payload byte: `MasterFrame` records only `content_len` and the container
+chops it into 65,520-byte chunks by offset. `crates/holonomy-container/tests/commit_then_read.rs` is
+untouched by 9C and still passes. Assets went into the payload's tail:
+
+```text
+[Doc Header 16B][Text & Spans][Table & Math States][Asset Catalog Header: count u32]
+[Asset: Blake2b 32B | w u16 | h u16 | len u32 | PNG]*
+```
+
+Which meant writing the first document serializer rather than appending to one -- the payload *was* the
+UTF-8 and nothing else.
+
+**Four things were not as specified, and the specifications are amended here rather than quietly met.**
+
+1. **§2.9.5's "resolved at export time from the container" is not what the exporters do, and cannot
+   be.** They read `Editor::assets()` -- the payload's catalog -- which is always present. There is no
+   `pread64` on the container fd in the export path, and there cannot be: the session has no container,
+   so "read it from the container fd" names a thing the export path does not have. The *rule* §2.9.5
+   states is honoured exactly and the *mechanism* it names is not implemented: neither exporter can
+   reach `IcebergCache`, which is asserted structurally by the fact that `export` takes an `&Editor` and
+   nothing else. **Amended §2.9.5 accordingly.**
+2. **An image's position is a character.** U+FFFC OBJECT REPLACEMENT CHARACTER in the document's own
+   bytes; the *n*-th anchor is served by the *n*-th catalog entry. This was forced: the frozen
+   per-entry shape has nowhere to record which anchor an asset belongs to, so the pairing is positional
+   whether it is wanted or not. Everything else falls out -- edits slide the anchor for free, and save
+   and load need no new payload section. The cost, stated rather than glossed: images cannot be
+   reordered without rewriting the text.
+3. **Ctrl+I inserts a committed PNG, not a file the user chose.** `crates/holonomy/assets/test-chart.png`,
+   1920x1080, `include_bytes!`-ed. FR-5.1's `unshare(CLONE_NEWNET)` forbids the network and the sealed
+   50-syscall allowlist has no `openat` on a user path, so "insert image from disk" is a Phase 13
+   question. Everything either side of that is real end to end, and the chart is 1920x1080 precisely so
+   the scaler runs, because a fixture at or below the column width never would.
+4. **At the product's own ratio the scaler is a decimator, not an average.** §2.9.3's headline
+   arithmetic is 1920 -> 640: **exactly 3:1**. `axis_map` places destination pixel `i` at
+   `(i + 0.5) * src/dst - 0.5`, which at `src/dst == 3` is `3i + 1` -- an exact integer, so every
+   interpolation weight is zero and bilinear reduces to nearest. The worse general fact is that bilinear
+   reads *two* adjacent source pixels, so at 6.86:1 a hard edge produces no intermediate values at all.
+   `a_downscale_averages_the_pixels_it_covers` was a 2x1 -> 1x1 case, which is the only integer ratio at
+   which the two samples are guaranteed to straddle everything between them. `axis_map` is right and its
+   pixel-centre convention is pinned; an **area** filter is the correct answer for the downscale path and
+   is **the first thing to change if the images look crunchy**. Recorded in §8. Two tests pin both
+   halves so this cannot change silently, and the chart fixture was rebuilt twice with detail at the
+   *destination* pixel scale before the test could see it at all.
+
+**Three defects found and fixed on the way, all of them silent.**
+
+* **`Editor::delete_range_in_rope` could not delete a multi-byte character.** Undoing an insertion
+  walked forward one byte at a time, re-seeking the cursor to `offset + 1` before each delete, which
+  lands mid-character on the second byte of anything wider than one. Six phases did not notice because
+  every byte offset any test touched was ASCII. Ctrl+I hits it on its first keystroke. Nine tests in
+  `crates/holonomy-text/tests/multibyte_undo.rs`; reverting the fix fails all nine.
+* **The anchor-to-asset pairing was not maintained.** Entry `i` serves anchor `i`, so deleting an anchor
+  without its asset renumbers every later anchor and each then shows the picture that used to be one
+  higher -- invisible while the images are identical, which they are in the fixture, and a **wrong
+  picture** the moment they are not. The payload round trip cannot catch it either: both the text and
+  the catalog are individually valid and mutually inconsistent, so the AEAD tag is valid and the payload
+  decodes. `AssetCatalog` is now maintained at the same five sites `TableMap` is, with an `undo_assets`
+  shadow. The first version's doc comment claimed none of that was necessary and it was wrong; the claim
+  is quoted and retracted in `AssetCatalog`'s own header rather than quietly deleted.
+* **`Painter::image` mixed `/255` and `>>8`.** Red divided by 255, green and blue shifted right by 8 --
+  the standard fast blend, off by up to 1 in 255 on *every* pixel, so an **opaque** pixel came out as
+  (10, 19, 29) where the source said (10, 20, 30). An opaque blit has to be the identity.
+
+**Two pre-existing flakes, both now deterministic.** `no_alloc.rs` caught a full-document `Vec` per
+delete introduced by the obvious way to find an anchor's ordinal; the prefix is now counted in chunks
+through `Rope::read_at`, so a document with a thousand images deletes a character as cheaply as one with
+none. `sp800_22.rs`'s `a_single_flipped_bit_is_below_the_floor_of_these_tests` asserted
+`p_value < 1.0` on a *random* monobit count -- a coin flip, since the p-value is 1.0 exactly when the
+flipped bit moves the count toward the mean. It passed 500-odd runs and then failed one, several crates
+away from anything that could affect it.
+
+**Where 9C stands against §6.** Binary ≤ 2.0 MiB: **657,864 B of room**. Decoded image memory ≤ 8.0 MiB
+over a page-1-to-50 scroll: asserted, and the resident raster is the 640x360 one, not the 7.910 MiB
+native one that §2.9.3's arithmetic says would fit exactly once. Evicted rasters scrubbed: asserted
+through a pointer captured before eviction. Zero-Bézier Invariant: intact -- the scaler is integer
+fixed point, the radical and the box-drawing arms are procedural, and `Asset::dimensions` reads the
+`IHDR` rather than evaluating anything.
+
+**Not done, and named.** `Painter::text` still advances by `cell_width()` rather than the glyph's own
+advance; 9C's commit message calls it and Phase 12 owns it. A document image's alpha is composited onto
+white in the PDF path rather than carried as an `/SMask` -- a budget decision, stated in
+`holonomy-export/src/asset.rs`, and the first thing to change if a document needs a transparent image
+in a PDF.
+
 ---
 
 ### Phase 9X — The developer window (not a product path)
@@ -1128,7 +1232,17 @@ the desktop build, and none of this needs more than a few tens of KiB.
    triangle mask and note it. **Decided and folded into Phase 14:** drawn 1-bit mask, together
    with `▶` `✓` `…`, all of which are outside every declared font range.
 
-3. **Which sizes are we allowed to claim?** Phase 11's gate runs at "the largest prefix this host can
+3. **An area filter for the downscale path.** §2.9.3 makes every image a downscale to page-column
+   width, and the product's own ratio is exactly 3:1 -- at which bilinear's interpolation weights are all
+   zero and the filter is a decimator. At 6.86:1 it reads two of every seven source pixels and a hard
+   edge produces no intermediate values at all. `axis_map` is correct and its pixel-centre convention is
+   pinned; the *filter choice* for large reductions is what is wrong, and an area average is the fix.
+   Pinned from both sides by `an_exact_integer_ratio_has_zero_weights_and_is_a_decimation` and
+   `a_non_integer_ratio_has_fractional_weights_and_still_reads_only_two_pixels` in
+   `crates/holonomy-image/tests/scale_cache.rs`, so it cannot change silently either way. **Not** done
+   in 9C: it is a rewrite of a mutation-verified module and wants its own gate. Full statement in §9C.
+
+4. **Which sizes are we allowed to claim?** Phase 11's gate runs at "the largest prefix this host can
    lock" and therefore passes today at roughly 3.5 MiB, not at 2000 pages. Reaching the full design
    document needs Phase 13's windowing. So until Phase 13 lands, the honest claim is **~950 leaves of
    editing latency, not 2000 pages** — and §6's RSS row is not yet measured at any size.

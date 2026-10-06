@@ -69,12 +69,13 @@ HOLONOMY_X11_LIVE=1 cargo test -p holonomy-x11 --test live -- --test-threads=1
 | `holonomy-crypto` | Argon2id, the VDF, HKDF, the derived-key root |
 | `holonomy-container` | `.wavefunction`: 128 MiB of indistinguishable noise |
 | `holonomy-assets` | Brotli fonts, the A8 glyph atlas, procedural box drawing |
-| `holonomy-text` | CAGR leaves, the style interval map, undo, search, spans |
+| `holonomy-text` | CAGR leaves, the style interval map, undo, search, spans, the document payload and its asset catalog |
 | `holonomy-geometry` | Fenwick line geometry, font-metric line heights |
 | `holonomy-render` | SSE2 blitter, damage tracking, the surface tree, table grids |
 | `holonomy-display` | The `Scanout` trait and its backends |
 | `holonomy-input` | evdev, a code-based keymap, X11 key translation |
 | `holonomy-export` | Streaming HTML, PDF via `pdf-writer` |
+| `holonomy-image` | The PNG chunk reader, the fixed-point scaler, the Iceberg cache |
 | `holonomy-x11` | An X11 core-protocol client, spoken directly over a unix socket |
 
 `H2/` is a superseded Tauri + TypeScript + SQLite stack. It is excluded from the workspace and is
@@ -82,24 +83,41 @@ never a dependency: it is a reference for what to salvage and, mostly, what to r
 
 Fifteen external crates, all vendored into a static musl binary: `argon2`, `blake2`, `chacha20`,
 `chacha20poly1305`, `getrandom`, `hkdf`, `sha2`, `libc`, `pdf-writer`, `ttf-parser`,
-`brotli-decompressor`, `secrecy`, `zeroize`, `inout`, `unicode-normalization`. `holonomy-jail` and
-`holonomy-x11` depend on `libc` and nothing else.
+`brotli-decompressor`, `secrecy`, `zeroize`, `inout`, `unicode-normalization`, `miniz_oxide`.
+`holonomy-jail` and `holonomy-x11` depend on `libc` and nothing else.
+
+`miniz_oxide` is the only addition Phase 9C made, and it is reachable from exactly one crate —
+`holonomy-image`. PROJECT.md §2.9.5's "no `png` crate" is the reason: a hand-written chunk reader plus
+inflate measures **51.6 KiB** of binary, against 80–120 KiB for `png` with `flate2` and `crc32fast`
+dragged in.
 
 ## Status
 
-Phases 0–8 are done and gated. Phase 9X — a window a person can type into, on an ordinary desktop,
-without `sudo` — is done. Phase 9 is in progress: **tables (9A) and LaTeX math (9B) are done and
-gated**; the viewport-bounded image cache (9C) is not started.
+**Phase 9 is done and gated, all three halves of it.** Tables (9A), LaTeX math (9B), and the
+viewport-bounded image cache (9C). Phases 0–8 were done before that, and 9X — a window a person can
+type into on an ordinary desktop without `sudo` — is the designated target.
 
 `Ctrl+T` inserts a 3×3 table and Tab moves between cells. `Ctrl+M` inserts an inline formula: with the
 caret outside it the box draws as compiled math — glyphs from Noto Sans Math for the symbols, Inter
 Italic for the variables, and 1 px integer fills for the fraction bars and radical overlines — and with
-the caret inside it expands in place to the raw LaTeX in monospace.
+the caret inside it expands in place to the raw LaTeX in monospace. `Ctrl+I` inserts an image.
 
-907 tests pass in release. 109 files / 58,214 lines under `crates/*/src` and `crates/*/tests`
-(`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`) — the previous "108 files,
-~53,000 lines" was both off by a file and 3,000 lines light, and had no stated convention to check it
-against.
+**Images.** The container format is frozen, so an image lives in the document payload's tail as a
+content-addressed catalog entry — `BLAKE2b | w u16 | h u16 | len | PNG` — and its *position* is a
+U+FFFC OBJECT REPLACEMENT CHARACTER in the document's own text. That is the design, not an
+implementation detail: the frozen entry shape has nowhere to record which anchor an asset belongs to, so
+the pairing is positional whether it is wanted or not, and a character in the text is the one anchor
+that survives every edit for free. Decoded rasters are page-column-width (§2.9.3's arithmetic), held
+in an Iceberg cache bounded at 8.0 MiB with a ±1-page window, and scrubbed on eviction before the next
+frame. `Ctrl+I` inserts a committed 1920×1080 chart rather than a file you choose, because the sealed
+allowlist has no `openat` on a user path — everything either side of that boundary is real.
+
+**Cost.** 1,439,288 B against the 2,097,152 B ceiling: **657,864 B of room**. The decoder is **51.6 KiB**
+of it, measured by symbol size out of an unstripped build.
+
+**1005 tests pass in release.** 125 files / 67,294 lines under `crates/*/src` and `crates/*/tests`
+(`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`) — the previous "109 files,
+58,214 lines" was measured before Phase 9C and is superseded by this line rather than by a claim.
 
 ## Things that are true and non-obvious
 
@@ -107,6 +125,21 @@ against.
 method on `Opened` that skips `lock_all_pages`, and no way to reach `Sealed` except through
 `PrivilegesDropped::seal`. Reaching for a path after sealing is not a slow failure — it is `SIGSYS`
 and exit 137, which reads like a crash rather than like a design rule.
+
+**The glyphs used to be drawn 17–21 px above the line box meant to hold them, and nothing noticed.**
+`raster.rs` stored `bearing_y` as the distance from the *ascender line* down to the ink's bottom rather
+than from the baseline up to the ink's top, and the painter blitted at `run.y + bearing_y` when every
+caller passes a *line box top*. The two errors compounded. It read as working: every glyph appeared,
+`PaintStats::missing` stayed at zero, and the arithmetic stayed in range. `holonomy-assets/examples/
+probe_linebox.rs` is the gate, and it is a gate rather than a report because a probe that cannot go red
+is not a gate — it is a printout. It measures by symbol-level mutation: revert the bearing formula and
+336 glyphs fall outside the box; revert the line pitch and 210 do.
+
+**A line box of 18 px was `16 ppem + 2`, an identity with nothing to do with the fonts.** The packed
+faces need 20 px (Inter), 22 (JetBrains Mono) and 24 (Noto Sans Math) of ascent-plus-descent at 16 ppem,
+so no placement of the baselines could have contained them. The pitch is now `Atlas::line_pitch()` — the
+tallest ascent plus descent in the atlas, plus the one pixel the rasteriser's antialiasing pad needs —
+and the session and the chrome take it from the atlas rather than from a constant. 25 px at 16 ppem.
 
 **Everything important is an integer.** Table geometry, line heights, cell rectangles and border
 positions are computed in integers and asserted against hand-computed pixel coordinates. "Within a

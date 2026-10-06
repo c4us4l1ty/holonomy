@@ -158,11 +158,24 @@ fn the_binary_is_static_pie() {
 
 /// The desktop feature costs what the X11 client costs, and no more.
 ///
-/// **Run separately**: this test needs a binary built *with* `--features desktop`, and it says so if it
-/// is not looking at one. It is not part of the default gate for that reason -- `cargo test` builds one
-/// binary, and which one depends on the flags it was invoked with.
+/// **Run separately, and in a specific order.** This test needs a binary built *with* `--features
+/// desktop`, and `target/<profile>/release/holonomy` is **one path for two feature sets** -- while
+/// `cargo test` rebuilds the *default* binary on its way to building the test. So:
+///
+/// ```text
+/// cargo test  --release -p holonomy --test release_artifact --no-run
+/// cargo build --release -p holonomy --features desktop
+/// ./target/<profile>/release/deps/release_artifact-* --include-ignored
+/// ```
+///
+/// And then [`the_default_release_binary_carries_no_x11_client`] fails, correctly, because the file it
+/// is looking at is the desktop build. That is not a broken gate; it is two gates over one output path,
+/// and each says so. This one is `#[ignore]`d rather than skipped-and-passing so a plain
+/// `cargo test --workspace` never reports success for something it did not check.
+///
+/// **Measured 2026-10-06:** 1,536,472 bytes, 560,680 bytes of room under the 2,097,152 ceiling.
 #[test]
-#[ignore = "needs `cargo build --release -p holonomy --features desktop` first"]
+#[ignore = "needs `--features desktop` on disk at release_artifact.rs's binary(); see this test's docs"]
 fn the_desktop_build_is_still_static_and_under_the_ceiling() {
     let path = binary();
     let bytes = std::fs::read(&path).expect("read the release binary");
@@ -174,10 +187,24 @@ fn the_desktop_build_is_still_static_and_under_the_ceiling() {
          build one with --features desktop"
     );
     let size = bytes.len() as u64;
+    // Measured, not remembered. The constant used to be a bare `1_101_944` with nothing saying when it
+    // was taken, so it drifted silently through Phase 9C -- which added 336,704 bytes -- and the printed
+    // "more than the N-byte default" line was quietly wrong by a third of a megabyte.
+    //
+    // It is a *floor* now, asserted rather than assumed: the default build's size is a build output,
+    // not a constant, so the check below compares the real number. What is pinned here is only that the
+    // desktop build must not have *shrunk*, because a shrink would mean the X11 client stopped being
+    // linked in and this test stopped testing what it claims to.
+    const KNOWN_DEFAULT_FLOOR: u64 = 1_439_288;
     println!(
-        "the desktop build is {size} bytes, {} more than the {}-byte default",
-        size.saturating_sub(1_101_944),
-        1_101_944
+        "the desktop build is {size} bytes, {} bytes of room; the default build measured at \
+         {KNOWN_DEFAULT_FLOOR} when Phase 9C landed",
+        CEILING.saturating_sub(size)
+    );
+    assert!(
+        size > KNOWN_DEFAULT_FLOOR,
+        "the desktop build is {size} bytes, at or below the {KNOWN_DEFAULT_FLOOR}-byte default, so \
+         --features desktop appears to have linked nothing"
     );
     assert!(
         size <= CEILING,

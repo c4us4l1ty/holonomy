@@ -284,8 +284,10 @@ dependencies = [
 name = "holonomy-export"
 version = "3.0.0-singularity"
 dependencies = [
+ "holonomy-image",
  "holonomy-jail",
  "holonomy-text",
+ "miniz_oxide",
  "pdf-writer",
 ]
 

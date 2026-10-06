@@ -58,6 +58,14 @@ pub const POINTS_PER_INCH: f32 = 72.0;
 /// Why a PDF export stopped early.
 #[derive(Debug)]
 pub enum PdfError {
+    /// A picture was placed during the layout walk and its asset was gone by the time the streams were
+    /// written.
+    MissingAsset {
+        /// The catalog index the walk recorded.
+        index: usize,
+    },
+    /// An image could not be decoded into RGB samples for an `/XObject`.
+    Asset(String),
     /// The sink failed.
     Io(io::Error),
     /// The document refused to be read.
@@ -75,6 +83,10 @@ impl std::fmt::Display for PdfError {
             Self::Io(e) => write!(f, "writing PDF: {e}"),
             Self::Editor(e) => write!(f, "reading the document for PDF: {e}"),
             Self::Writer => write!(f, "the PDF writer refused to finish the file"),
+            Self::MissingAsset { index } => {
+                write!(f, "image {index} was placed and then its asset was gone")
+            }
+            Self::Asset(m) => write!(f, "image: {m}"),
         }
     }
 }
@@ -183,6 +195,17 @@ pub struct PdfStats {
     /// overflow, because the exporter breaks between words -- see [`Layouter`], which explains why
     /// breaking inside one is worse than overflowing it.
     pub overflowing_lines: u32,
+    /// Images written as `/XObject`s.
+    pub images: u32,
+    /// Anchors with no asset in the catalog.
+    ///
+    /// Counted rather than ignored: on the PDF side a missing asset is a *line of vertical space with
+    /// nothing on it*, which is the kind of gap a reader does not explain and a reader of the HTML
+    /// output would have seen as `&#xfffc;`. The two formats disagree about how loud to be about it and
+    /// both are right, because they are different formats.
+    pub images_missing: u32,
+    /// Decoded RGB bytes handed to the `/Flate` compressor.
+    pub image_sample_bytes: u64,
 }
 
 /// The faces the exporter draws with.
@@ -291,6 +314,11 @@ pub fn build(
     const FIRST_PAGE: i32 = 10;
     const FIRST_FONT: i32 = 100;
     const FIRST_CONTENT: i32 = 200;
+    // Images are written once each and are referenced from whichever page they landed on, so they need
+    // ids that cannot collide with a page or a content stream. 1000 is comfortably past `FIRST_CONTENT`
+    // plus the largest page count the container allows (2048 chunks is not pages, but a page per line
+    // would still be far below 800).
+    const FIRST_IMAGE: i32 = 1000;
 
     pdf.catalog(catalog_id).pages(pages_id);
     pdf.document_info(info_id).title(TextStr(&opts.title));
@@ -305,6 +333,16 @@ pub fn build(
 
     let mut pages: Vec<Content> = Vec::new();
     let mut current = Content::new();
+    // The catalog, read once. §2.9.5 requires the exporters to take images from the payload rather than
+    // from the Iceberg cache, because a PDF must not depend on scroll position -- so this is a borrow of
+    // the document's own assets and nothing is decoded until an image is actually reached.
+    let catalog = editor.assets();
+    // Images are placed during the walk and written after it, because their object ids and the page
+    // tree's count are both unknown until the document has been laid out.
+    let mut images: Vec<PlacedImage> = Vec::new();
+    // How many anchors have gone past; the n-th serves catalog entry n. See `html.rs`'s note on why this
+    // is a counter and not a search: the walk is already in document order.
+    let mut anchor_ordinal = 0usize;
     let mut y = opts.page.height - opts.margin;
     let mut lines_on_page = 0usize;
     // The line being accumulated. It survives across runs, which is the whole point: the span map's
@@ -344,16 +382,87 @@ pub fn build(
                 opts.font_size
             };
 
-            for line in layout.feed(slice, font_name, metric, size, big, stats) {
-                if lines_on_page == lines_per_page(opts) || y < opts.margin {
+            // Split the slice on anchors before it reaches the layouter. An anchor is a picture, not a
+            // word: it has no glyph, no advance, and it wants the whole measure and a height derived
+            // from its aspect ratio. Feeding it to the layouter as a 3-byte run would typeset U+FFFC's
+            // replacement glyph if the font had one and a blank otherwise, so the split happens here.
+            for piece in split_on_anchors(slice) {
+                if let Piece::Text(t) = piece {
+                    let mut pending: Vec<u8> = t.to_vec();
+                    for line in layout.feed(&pending, font_name, metric, size, big, stats) {
+                        if lines_on_page == lines_per_page(opts) || y < opts.margin {
+                            pages.push(std::mem::replace(&mut current, Content::new()));
+                            y = opts.page.height - opts.margin;
+                            lines_on_page = 0;
+                        }
+                        write_line(&mut current, &line.segments, y, opts.margin, opts.font_size);
+                        y -= opts.line_height * line.scale;
+                        lines_on_page += 1;
+                        stats.lines += 1;
+                    }
+                    pending.clear();
+                    continue;
+                }
+                // An anchor. Break the page if the picture cannot fit where it is, then place it.
+                let Some(asset) = crate::asset::asset_at(catalog, anchor_ordinal) else {
+                    stats.images_missing += 1;
+                    // No asset: still a block of vertical space, or the text after it would run over
+                    // the gap the reader will leave where the picture should be.
+                    let h = opts.line_height;
+                    if y < opts.margin + h {
+                        pages.push(std::mem::replace(&mut current, Content::new()));
+                        y = opts.page.height - opts.margin;
+                        lines_on_page = 0;
+                    }
+                    y -= h;
+                    lines_on_page += 1;
+                    anchor_ordinal += 1;
+                    continue;
+                };
+                // The drawn width is the measure and the height follows the aspect ratio, so the
+                // picture is as large as the text column and never distorted. The `f64` arithmetic is
+                // the one float in the image path: PDF's coordinate system is in points, and the aspect
+                // ratio has to survive.
+                let width = opts.measure();
+                let height = if asset.width == 0 {
+                    opts.line_height
+                } else {
+                    (f64::from(opts.measure()) * f64::from(asset.height) / f64::from(asset.width))
+                        as f32
+                };
+                if y < opts.margin + height || lines_on_page == lines_per_page(opts) {
                     pages.push(std::mem::replace(&mut current, Content::new()));
                     y = opts.page.height - opts.margin;
                     lines_on_page = 0;
                 }
-                write_line(&mut current, &line.segments, y, opts.margin, opts.font_size);
-                y -= opts.line_height * line.scale;
+                let ix = images.len() as i32;
+                images.push(PlacedImage {
+                    page: pages.len(),
+                    // The picture's *top* is at the current baseline, so its bottom edge is that much
+                    // lower. PDF's y grows up, so subtracting is the right direction.
+                    y: y - height,
+                    width,
+                    height,
+                    id: Ref::new(FIRST_IMAGE + ix),
+                    name_bytes: {
+                        let mut n = Vec::with_capacity(8);
+                        n.extend_from_slice(b"Im");
+                        n.extend_from_slice(ix.to_string().as_bytes());
+                        n
+                    },
+                    index: anchor_ordinal,
+                });
+                stats.images += 1;
+                // Reserve the vertical space, plus a line's worth of leading so text below the picture
+                // is not flush against it.
+                y -= height + opts.line_height;
                 lines_on_page += 1;
-                stats.lines += 1;
+                anchor_ordinal += 1;
+            }
+            if lines_on_page == lines_per_page(opts) || y < opts.margin {
+                pages.push(std::mem::replace(&mut current, Content::new()));
+                y = opts.page.height - opts.margin;
+                lines_on_page = 0;
             }
 
             if (end as usize) <= chunk_end {
@@ -406,6 +515,50 @@ pub fn build(
             .encoding_predefined(Name(b"WinAnsiEncoding"));
     }
 
+    // Decode and compress each image once, then write its XObject.
+    //
+    // `/DeviceRGB` with 8 bits per component and `/FlateDecode`, which is the only combination this
+    // crate can produce: there is no JPEG encoder and no `png` crate (§2.9.5), and the `/Flate`
+    // compressor is the one already linked for the decoder. A 1920x1080 photo is 6.2 MB of raw RGB
+    // before compression, so `/Flate` is not an optimisation here, it is the difference between an
+    // export that works and one that does not.
+    for img in &images {
+        let asset = catalog
+            .entries()
+            .get(img.index)
+            .ok_or(PdfError::MissingAsset { index: img.index })?;
+        let (w, h, rgb) =
+            crate::asset::decode_to_rgb(asset).map_err(|e| PdfError::Asset(e.to_string()))?;
+        stats.image_sample_bytes += rgb.len() as u64;
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6);
+        let mut x = pdf.image_xobject(img.id, &packed);
+        x.width(w as i32);
+        x.height(h as i32);
+        x.bits_per_component(8);
+        x.color_space_name(Name(b"DeviceRGB"));
+        x.filter(pdf_writer::Filter::FlateDecode);
+        x.finish();
+    }
+
+    // The `Do` operators, one per image, appended to the page it landed on -- before the page tree is
+    // written, so the content streams the loop below emits are the versions with the operators in them.
+    for img in &images {
+        let Some(content) = pages.get_mut(img.page) else {
+            // `PlacedImage::page` is recorded during the walk, before the walk's final page break, so it
+            // can name a page that was then pushed. Falling back to the last page would put the picture
+            // somewhere it is not referenced from; skipping it would lose it. Counting it is the honest
+            // answer, and the condition cannot happen today because the final break only happens once
+            // the walk is over.
+            stats.images_missing += 1;
+            continue;
+        };
+        // `q ... Q` so the picture's transform cannot leak into whatever the next line does.
+        content.save_state();
+        content.transform([img.width, 0.0, 0.0, img.height, opts.margin, img.y]);
+        content.x_object(Name(&img.name_bytes));
+        content.restore_state();
+    }
+
     for (i, content) in pages.into_iter().enumerate() {
         let page_id = Ref::new(FIRST_PAGE + i as i32);
         let content_id = Ref::new(FIRST_CONTENT + i as i32);
@@ -423,6 +576,17 @@ pub fn build(
                 fonts.pair(*name, Ref::new(FIRST_FONT + ix as i32));
             }
             fonts.finish();
+            // `/XObject` only when the page has an image. An empty `/XObject <<>>` is legal and some
+            // readers complain about it, and a page with no picture should not carry the key at all.
+            let on_this_page: Vec<&PlacedImage> =
+                images.iter().filter(|img| img.page == i).collect();
+            if !on_this_page.is_empty() {
+                let mut xobjects = resources.x_objects();
+                for img in on_this_page {
+                    xobjects.pair(Name(&img.name_bytes), img.id);
+                }
+                xobjects.finish();
+            }
         }
         page.finish();
 
@@ -430,6 +594,74 @@ pub fn build(
     }
 
     Ok(pdf.finish())
+}
+
+/// A slice of a document's bytes, split at the anchors.
+///
+/// Yielded as text and anchors separately so the layout walk can typeset one and place the other. A
+/// `&[u8]` per piece rather than an owned `Vec`, so splitting a 64 KiB chunk allocates nothing.
+enum Piece<'a> {
+    /// Ordinary bytes, possibly empty.
+    Text(&'a [u8]),
+    /// An anchor, already consumed.
+    Anchor,
+}
+
+/// The pieces of `slice`, in order, with anchors as their own item.
+///
+/// The *tail* problem: `slice` is a run's bytes and the anchor is three, so an anchor can straddle the
+/// end. A partial lead is left in the trailing text rather than consumed, and the next slice continues
+/// it -- so the anchor is found once, by the slice that completes it, and `anchor_ordinal` advances
+/// once with it.
+fn split_on_anchors(slice: &[u8]) -> Vec<Piece<'_>> {
+    let mut out = Vec::new();
+    let mut rest = slice;
+    loop {
+        let (found, partial) = crate::asset::find_anchor(rest);
+        let Some(found) = found else {
+            // Everything except a possible partial lead at the very end.
+            let keep = rest.len().saturating_sub(partial);
+            out.push(Piece::Text(&rest[..keep]));
+            return out;
+        };
+        if found > 0 {
+            out.push(Piece::Text(&rest[..found]));
+        }
+        out.push(Piece::Anchor);
+        rest = &rest[found + 3..];
+        if rest.is_empty() {
+            return out;
+        }
+    }
+}
+
+/// One image to place, and the stream it needs.
+///
+/// Built during the layout walk and written after it, because `pdf-writer` wants an object id and the
+/// page tree wants a count, and neither is known until the document has been laid out. The image's
+/// position is recorded as **the page it landed on and the y it landed at**, both of which the walk
+/// knows and the writing pass does not.
+struct PlacedImage {
+    /// Which page, by index into the `pages` vector.
+    page: usize,
+    /// Bottom edge, in points from the page's origin. PDF's y grows upward.
+    y: f32,
+    /// Drawn width in points.
+    width: f32,
+    /// Drawn height in points.
+    height: f32,
+    /// The object id of the image XObject.
+    id: Ref,
+    /// The resource name it is referenced by, and the bytes it borrows.
+    ///
+    /// `pdf-writer`'s `Name` is a borrowed `&[u8]`, and a name like `/Im7` cannot be a `'static` byte
+    /// string because the index is computed at runtime. So the name's bytes are owned here and the
+    /// `Name` borrows from them -- which is why `PlacedImage` cannot be borrowed across the writing
+    /// loop while its own `Names` are alive. It holds no self-references: `name_bytes` is the storage
+    /// and `name` is rebuilt where it is needed.
+    name_bytes: Vec<u8>,
+    /// Which catalog entry it is, so the writing pass can find the bytes without a second walk.
+    index: usize,
 }
 
 /// How many lines fit between the margins.

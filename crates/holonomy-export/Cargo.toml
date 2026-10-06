@@ -16,4 +16,9 @@ publish.workspace = true
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-text = { path = "../holonomy-text" }
+# PDF has no notion of "a PNG", so an /XObject needs decoded pixels and this is the only decoder the
+# product has (PROJECT.md 2.9.5: one decoder, no `png` crate). The same crate supplies the /Flate
+# compressor for the image samples, so no second compression dependency is introduced.
+holonomy-image = { path = "../holonomy-image" }
+miniz_oxide = "0.9"
 pdf-writer = "0.15"
