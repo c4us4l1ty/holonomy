@@ -225,6 +225,7 @@ dependencies = [
  "holonomy-secure",
  "holonomy-text",
  "holonomy-x11",
+ "libc",
 ]
 
 [[package]]

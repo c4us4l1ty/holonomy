@@ -1031,7 +1031,57 @@ understates CAGR text by ~3.7× (it says ~2.0 MiB for "CAGR text + span map"; me
 ring by ~16× (it says ~3.0 MiB; `crates/holonomy-container/src/io.rs:39-48` allocates 3 × 65,536 =
 0.188 MiB), and it omits the 3.906 MiB framebuffer (`crates/holonomy-display/src/frame.rs:132`). §2.9.4
 is left as written because it is the record of what was believed at the time; **the corrected
-derivation is in Phase 11 and it is the number that governs.**
+derivation is in Phase 11 and it is the number that governs** — and Phase 11 then measured it, which
+found *three* further omissions in §2.9.4's table. See "the 16.0 MiB gate, measured" below.
+
+#### The 16.0 MiB gate, measured — `crates/holonomy/tests/session_rss.rs`
+
+**The measurement, on a 6.00 MiB document (the largest this host can page-lock), typed into and
+painted:**
+
+| consumer | MiB | what it is |
+|---|---|---|
+| framebuffer | 3.91 | `Session::frame`, 1280 × 800 × 4 |
+| scanout copy | 3.91 | `HeadlessScanout::last` — **a second framebuffer** |
+| leaves | 6.40 | 1,639 × 4 KiB page-locked |
+| `doc_scratch` | 6.00 | **a second contiguous copy of the whole document** |
+| geometry | 3.27 | 142,989 lines × 24 B |
+| atlas | 0.46 | |
+| unattributed | 2.89 | binary `.text`/`.rodata`, stack, allocator |
+| **total** | **26.82** | budget 16.0 |
+
+**So the budget is not met at 6 MiB, and the crossover is 2.21 MiB.** The gate asserts the affordable
+document is at least 1.5 MiB — a ratchet set 32 % below today's number, which catches a regression
+that *raises* the per-document-byte cost and deliberately cannot catch a budget that has been quietly
+widened. The measured marginal cost is **2.851 resident bytes per document byte**.
+
+**Three more omissions in §2.9.4's table, found by measuring rather than adding up.** It omitted the
+scanout's second framebuffer (3.91 MiB), the `doc_scratch` buffer (a whole second copy of the
+document, 6.00 MiB), and the line geometry (3.27 MiB). §2.9.4 said 12.4 MiB; the truth is 26.8 MiB, so
+**it was wrong by more than 2×, having been right about nothing that mattered at this scale** — every
+number in it was correct about its own subject and none of the subjects were in the table.
+
+**Phase 11's own geometry budget was wrong by 1.8×, and it is corrected here.** PROJECT.md budgeted
+1.83 MiB for the Fenwick trees, derived at 60,000 lines — a figure inherited from `LineGeometry`'s
+test corpus, which uses short lines. At 44 bytes per line a 6.4 MiB document is 152,000 lines, so the
+projection is **3.33 MiB**. Same failure as the original: a line count used at a scale it was not
+measured at. `the_line_geometry_costs_what_phase_11_budgeted` now asserts the **per-line cost**
+(24 B — two Fenwick `u32` weights plus one `LineMetrics`, four `u32` fields) and *reports* the
+projection.
+
+**What Phase 12 removes, and it is the largest single term.** `doc_scratch`'s 1.000 bytes per document
+byte goes away when `Painter::text` draws from document bytes, taking the marginal cost to ~1.85 and the
+affordable document to ~3.3 MiB. The geometry's 0.545 is the term that grows *worst*, being per line
+rather than per byte — a document of longer lines costs less. **Both have to go for 2000 pages, and
+only Phase 13's windowing removes the need for either to scale.**
+
+**One subtlety worth recording, because it produced a confident wrong number twice.** An unpainted
+framebuffer is **not resident** — `Frame::black`'s pages are untouched and the kernel does not fault
+them in — so an RSS "baseline" taken before the first paint omits 7.81 MiB of framebuffer entirely.
+Subtracting that baseline treats a 7.81 MiB cost as free, and the affine fit overshot by 3× (it claimed
+7.63 MiB would fit). The fixed side is now built from *named consumers* rather than from a subtraction.
+Separately, the floor comparison initially compared MiB against a byte constant — the same class of
+mistake §2.9.4 made: arithmetic that is internally consistent and externally wrong.
 
 **Two ceilings bind before RSS does, and they were not accounted for.** `S_MAX_PAYLOAD` is 8 MiB
 (`crates/holonomy-container/src/layout.rs:85`), so the format caps plaintext at 8 MiB; 8 MiB of text needs
@@ -1353,7 +1403,7 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | evicted rasters scrubbed | §2.9.3 | zero after every eviction, asserted by the allocator |
 | math layout allocations | §2.9 9B | **0** between `MathNode` and frame |
 | table border alignment | §2.9 9A | exact integer pixel coordinates, not ±1 |
-| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured, not derived, as of Phase 11** |
+| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured as of Phase 11**, and **not met at document scale**: 26.82 MiB for a 6 MiB document, crossover 2.21 MiB. §2.9.4's 12.4 MiB estimate omitted the scanout's second framebuffer, the scratch buffer and the geometry |
 | per-keystroke allocations | invariant | **0 on the edit path**, driven through a `Session` (`tests/session_no_alloc.rs`); the paint path is non-zero until Phase 12 |
 | binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |

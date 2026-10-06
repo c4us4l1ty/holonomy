@@ -63,3 +63,14 @@ holonomy-secure = { path = "../holonomy-secure" }
 holonomy-text = { path = "../holonomy-text" }
 # Only for the developer window: the driver's own key events and the window manager's messages.
 holonomy-x11 = { path = "../holonomy-x11", optional = true }
+
+[dev-dependencies]
+# `sysconf(_SC_PAGESIZE)`, for the RSS gate in `tests/session_rss.rs`. `/proc/self/statm` counts
+# resident *pages*, and a gate that hard-codes 4,096 is a gate that is silently wrong on a host with
+# 16 KiB or 64 KiB pages.
+#
+# **Dev-only, and deliberately so.** `libc` is already a dependency of nine other crates, so this costs
+# nothing new in the lockfile, and a dev-dependency is never linked into the binary -- the 1,452,504-byte
+# figure NFR-2.3 gates on is unaffected by this line. The same pattern is in `holonomy-secure`, whose
+# `tests/allocation_failure.rs` calls `getrlimit` and `mlock` directly.
+libc = "0.2"

@@ -636,6 +636,17 @@ impl<'a> Session<'a> {
         self.after_edit(0)
     }
 
+    /// Capacity of the whole-document scratch buffer, in bytes.
+    ///
+    /// **Public as of Phase 11** so the RSS gate can name this consumer. It is the largest single
+    /// allocation outside the framebuffer and the leaves, and §2.9.4's table did not have it at all —
+    /// which is the same class of omission as the missing 3.906 MiB framebuffer, found the same way:
+    /// by measuring instead of adding up. See [`Session::doc_scratch`] for what it is for and when it
+    /// goes away.
+    pub fn doc_scratch_capacity(&self) -> usize {
+        self.doc_scratch.capacity()
+    }
+
     /// The damage accumulated since the last paint: what the next `paint` will touch.
     ///
     /// Read-only. A caller that wants a repaint asks for one with [`Session::repaint_all`]; a caller
