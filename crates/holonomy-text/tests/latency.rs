@@ -639,3 +639,73 @@ fn the_offset_map_costs_more_at_scale_and_that_is_recorded() {
         "at {many_leaves} leaves a keystroke should be well inside {BUDGET_US} us, got {many_ns} ns"
     );
 }
+
+/// Phase 11's measurement for the bulk reader, in throughput rather than per-call latency.
+///
+/// [`Rope::read_at`] copied byte-at-a-time, so a full-document read cost one `byte_at` call per byte.
+/// This records what the bulk path actually costs now, because the whole point of Phase 11 is that
+/// `Editor::text()` sits on the keystroke path eleven times -- so the number that matters is not "how
+/// long is one read" but "how many bytes per second", multiplied by the document size and by eleven.
+///
+/// **The reported rate exceeds DRAM bandwidth, and that is expected.** `holonomy-geometry` records
+/// ~2.2 GB/s as this host's *streaming* figure, which is what a cold read of data larger than the last
+/// level cache sees. This test warms the leaves first and then re-reads the same 3.5 MiB, which fits in
+/// L3 -- so it measures the copy path at cache speed, which is the point: the assertion is that the
+/// reader is no longer paying per-byte dispatch, and a figure in the GB/s range is only reachable by
+/// `copy_from_slice`. The byte-at-a-time reader was nowhere near it -- at an optimistic 3 ns per
+/// `byte_at` call, the 3.7 M bytes read here is ~11 ms *per read*, against **387 µs measured**. And
+/// Phase 11's premise is that this read happens eleven times per keystroke, so the gap is ~110 ms of
+/// copying per keystroke, not 387 µs.
+#[test]
+fn a_full_document_read_is_bounded_by_bandwidth_not_by_per_byte_dispatch() {
+    let doc = document(DOCUMENT_LINES);
+
+    // Largest prefix this host can lock, at 70% so the measurement's own leaves have room -- the same
+    // bisection and headroom `measure_base_edits` uses, and for the same reason.
+    const HEADROOM: f64 = 0.70;
+    let mut lo = 1usize;
+    let mut hi = doc.len();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        match Rope::from_text(&doc[..mid]) {
+            Ok(_) => lo = mid,
+            Err(_) => hi = mid - 1,
+        }
+    }
+    let usable = (lo as f64 * HEADROOM) as usize;
+    assert!(usable > 1_000_000, "only {usable} bytes were loadable");
+
+    let rope = Rope::from_text(&doc[..usable]).expect("load");
+    let bytes = rope.text_len();
+
+    // Warm the leaves into cache first: the first read of a fresh `mmap` pays page faults, and this
+    // test measures the copy path, not the kernel's first-touch behaviour.
+    let mut scratch = vec![0u8; bytes];
+    rope.read_at(0, bytes, &mut scratch).expect("warm");
+
+    const BATCHES: usize = 5;
+    let mut samples = Vec::with_capacity(BATCHES);
+    for _ in 0..BATCHES {
+        let start = Instant::now();
+        rope.read_at(0, bytes, &mut scratch).expect("in range");
+        samples.push(start.elapsed().as_nanos());
+    }
+    samples.sort_unstable();
+    let median_ns = samples[samples.len() / 2];
+    let gbps = bytes as f64 / median_ns as f64;
+
+    println!(
+        "read_at: {:.2} MiB in {} us = {gbps:.2} GB/s ({leaves} leaves)",
+        bytes as f64 / 1_048_576.0,
+        median_ns / 1_000,
+        leaves = rope.leaf_count()
+    );
+
+    // The byte-at-a-time reader needed one call per byte; this asserts the bulk path is copying at a
+    // rate that only a `copy_from_slice` achieves. 0.25 GB/s is the byte-at-a-time order of magnitude
+    // on this host and the bound is set well above it to stay a real gate rather than a timing flake.
+    assert!(
+        gbps > 0.25,
+        "a full-document read ran at {gbps:.2} GB/s, which is per-byte-dispatch territory"
+    );
+}

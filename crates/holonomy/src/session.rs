@@ -288,6 +288,18 @@ pub struct Session<'a> {
     /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
     /// discover what one `set` already knows.
     tables_shape_dirty: bool,
+    /// Scratch for the whole document, reused across paints. Phase 11.
+    ///
+    /// Every paint-path function that needs the document's bytes -- `emit_tables`, `emit_math`,
+    /// `emit_images`, `publish_line_heights`, `image_blocks` -- called `Editor::text()`, which
+    /// allocates a `Vec` the size of the document. Five allocations of 6.4 MiB per keystroke, on the
+    /// paint path, is what `tests/session_no_alloc.rs` measured before this field existed.
+    ///
+    /// A field rather than a local for the reason [`Session::table_scratch`] exists: a local array
+    /// passed to `read_into` escapes and is promoted to the heap, which turns one allocation per
+    /// session into one per paint. Grown only when the document outgrows it, so steady-state typing
+    /// into a document does not reallocate.
+    doc_scratch: Vec<u8>,
     /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
     ///
     /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
@@ -397,6 +409,7 @@ impl<'a> Session<'a> {
             damage: DamageRect::EMPTY,
             active_cell: None,
             tables_shape_dirty: false,
+            doc_scratch: Vec::new(),
             table_scratch: Vec::new(),
             caret_drawn_at: None,
             math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
@@ -731,10 +744,7 @@ impl<'a> Session<'a> {
         &mut self,
         event: holonomy_input::InputEvent,
     ) -> Result<Option<Exit>, SessionError> {
-        // The modifier state is folded *before* dispatch, because `Ctrl+Q` is "ctrl goes down" then
-        // "Q goes down", and the second is only `Ctrl+Q` once the first has landed.
-        let command = self.keymap.dispatch_into(event, &mut self.mods);
-        let Some(command) = command else {
+        let Some(command) = self.dispatch(event) else {
             return Ok(None);
         };
         self.stats.commands += 1;
@@ -746,13 +756,33 @@ impl<'a> Session<'a> {
         Ok(None)
     }
 
+    /// Fold `event` into the modifier state and map it to a command, if it is one.
+    ///
+    /// Split out of [`Session::handle_event`] so that the *edit* path and the *paint* path can be
+    /// driven apart, which is what `tests/session_no_alloc.rs` needs: Phase 11's zero-allocation
+    /// claim is about the model change, and the paint's remaining allocations are Phase 12's work.
+    /// Measured together they are one number that is neither claim.
+    pub fn dispatch(&mut self, event: holonomy_input::InputEvent) -> Option<Command> {
+        // The modifier state is folded *before* dispatch, because `Ctrl+Q` is "ctrl goes down" then
+        // "Q goes down", and the second is only `Ctrl+Q` once the first has landed.
+        self.keymap.dispatch_into(event, &mut self.mods)
+    }
+
     /// Apply one command, damaging what it touched.
     pub fn apply(&mut self, command: Command) -> Result<(), SessionError> {
         match command {
             Command::Insert(c) => {
+                // A stack buffer, not a `Vec`. Phase 11: this was `encode_utf8(&mut buf).as_bytes()
+                // .to_vec()`, which allocated and freed a four-byte heap block on **every
+                // keystroke** -- the last allocation on the edit path, and the one the
+                // `tests/session_no_alloc.rs` gate found after the document copies were gone.
+                //
+                // `encode_utf8` writes into `buf` and borrows it, so the encoded bytes live as long as
+                // this arm; `insert` takes `&[u8]` and does not retain them. Four bytes is the most a
+                // `char` can encode to, so the buffer cannot be too small.
                 let mut buf = [0u8; 4];
-                let bytes = c.encode_utf8(&mut buf).as_bytes().to_vec();
-                self.insert(&bytes)?;
+                let bytes = c.encode_utf8(&mut buf);
+                self.insert(bytes.as_bytes())?;
             }
             // Enter is a newline in ordinary text and a line break *inside* a cell in a table, and
             // the difference is the whole of what makes a table usable: a newline that ended the row
@@ -845,8 +875,10 @@ impl<'a> Session<'a> {
         self.after_edit(bytes.len() as u32)
     }
 
-    /// Run `f` with the table the caret is in, or report that there is none.
-    ///
+    
+
+/// Run `f` with the table the caret is in, or report that there is none.
+///
     /// A closure rather than a returned `ResolvedTable` because that borrows the document bytes, and
     /// the bytes come from [`Editor::text`], which hands over an owned `Vec`. Returning the resolved
     /// table would mean returning a borrow of a local -- so the text has to stay inside this frame,
@@ -1136,24 +1168,28 @@ impl<'a> Session<'a> {
 
     /// The byte offset of the start of the line containing `at`.
     ///
-    /// Scans backwards for the last newline. O(line length), which is bounded by the wrap width and
-    /// not by the document -- and `Editor` deliberately does not own line geometry, so the session
-    /// computes it. See the layering note in `holonomy-input`: a `Command::Up` means "move up" and
-    /// nothing about how many bytes that is.
+    /// Scans backwards for the last newline, in fixed-size chunks read through
+    /// [`Editor::read_into`](holonomy_text::Editor::read_into). **Phase 11**: this used to call
+    /// `self.editor.text()`, which allocates a `Vec` the size of the whole document and copies it
+    /// byte-for-byte -- so a function whose comment claimed "O(line length)" was in fact O(document)
+    /// and allocating, twice per keystroke via [`Session::caret_to`].
+    ///
+    /// `Editor` deliberately does not own line geometry, so the session computes this. See the layering
+    /// note in `holonomy-input`: a `Command::Up` means "move up" and nothing about how many bytes that
+    /// is.
     fn line_start(&self, at: usize) -> usize {
-        let text = self.editor.text().unwrap_or_default();
-        let at = at.min(text.len());
-        text[..at]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |i| i + 1)
+        line_start_in(&self.editor, at)
     }
 
     /// The 0-based line index containing `at`.
+    ///
+    /// Counts newlines in `[0, at)` the same chunked way [`Session::line_start`] does, for the same
+    /// reason. **This is still O(bytes before the caret) and Phase 11 does not pretend otherwise:**
+    /// the honest fix is the Fenwick tree over line heights, which answers this in `O(log n)`, and
+    /// wiring it is Phase 11's third item. What is fixed here is the *allocation* -- the count is the
+    /// remaining cost, not the 6.4 MiB copy that used to accompany it.
     fn line_index(&self, at: usize) -> u32 {
-        let text = self.editor.text().unwrap_or_default();
-        let at = at.min(text.len());
-        text[..at].iter().filter(|&&b| b == b'\n').count() as u32
+        line_index_in(&self.editor, at)
     }
 
     /// Record an edit's consequences: counts, status bar, and the damaged line.
@@ -1189,14 +1225,53 @@ impl<'a> Session<'a> {
     }
 
     /// Recount the words and bytes the status bar shows.
+    ///
+    /// **Phase 11.** This was the third whole-document copy per keystroke, and unlike `line_index` it
+    /// has no O(log n) replacement yet: word count is not a prefix sum. So it is still a full scan, but
+    /// it now streams through [`Editor::read_into`](holonomy_text::Editor::read_into) in
+    /// [`SCAN_CHUNK`] pieces and holds one chunk rather than the document.
+    ///
+    /// The word count is carried across chunk boundaries explicitly. An earlier version counted words
+    /// per chunk and added the chunks, which undercounts every document whose words straddle a
+    /// 4,096-byte boundary -- and 4,096 is not a large boundary relative to a 3.5 MiB document, so that
+    /// is a wrong answer rather than a rounding one. `in_word` is the carry.
     fn refresh_counts(&mut self) {
-        let text = self.editor.text().unwrap_or_default();
-        self.state.bytes = text.len() as u32;
-        self.state.words = text
-            .split(|b| b.is_ascii_whitespace())
-            .filter(|w| !w.is_empty())
-            .count() as u32;
-        self.state.total_lines = text.iter().filter(|&&b| b == b'\n').count().max(1) as u32;
+        let len = self.editor.text_len();
+        self.state.bytes = len as u32;
+        let mut words = 0u32;
+        let mut newlines = 0u32;
+        // Whether the byte before the chunk boundary continued a word. `false` at the document start.
+        let mut in_word = false;
+        let mut chunk = [0u8; SCAN_CHUNK];
+        let mut offset = 0usize;
+        while offset < len {
+            let want = (len - offset).min(SCAN_CHUNK);
+            let got = match self.editor.read_into(offset, &mut chunk[..want]) {
+                Ok(got) => got,
+                Err(_) => break,
+            };
+            if got == 0 {
+                break;
+            }
+            let bytes = &chunk[..got];
+            newlines += bytes.iter().filter(|&&b| b == b'\n').count() as u32;
+            for &b in bytes {
+                let space = b.is_ascii_whitespace();
+                // A word is a maximal run of non-whitespace, so it is counted on its *last* byte --
+                // that way a run split across two chunks is counted once, in the chunk that holds its
+                // final byte, and `in_word` carries the rest.
+                if space {
+                    in_word = false;
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
+            }
+            offset += got;
+        }
+        self.state.words = words;
+        // An empty document is one line, and that is what `ChromeState` initialises to.
+        self.state.total_lines = newlines.max(1);
     }
 
     // ---------------------------------------------------------------- paint
@@ -1268,9 +1343,7 @@ impl<'a> Session<'a> {
         // where a line is 18, so the lines below it have to move or the formula draws over them.
         // `LineHeights::from` merges two blocks that share a line by adding, so a table and a formula
         // starting on one line displace by the sum rather than one overwriting the other.
-        if let Ok(text) = self.editor.text() {
-            blocks.extend(self.math_blocks(&text));
-        }
+        blocks.extend(self.math_blocks_for());
         // Images join the tables and the formulas in the *same* model, for the same reason: an image
         // is taller than any line, so the lines below it have to move or it draws over them. The block
         // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
@@ -1291,11 +1364,11 @@ impl<'a> Session<'a> {
         if self.editor.assets().is_empty() {
             return Vec::new();
         }
-        let Ok(text) = self.editor.text() else {
+        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (ordinal, at) in holonomy_text::scan_anchors(&text).into_iter().enumerate() {
+        for (ordinal, at) in holonomy_text::scan_anchors(text).into_iter().enumerate() {
             let Ok(asset) = self.editor.assets().get(ordinal) else {
                 continue;
             };
@@ -1353,13 +1426,13 @@ impl<'a> Session<'a> {
     /// row. A full block layout is a larger change than this, and pretending otherwise by drawing the
     /// table somewhere else would be worse.
     fn emit_tables(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
-        let spans = self.editor.tables().spans();
+        let spans = self.editor.tables().spans().to_vec();
         if spans.is_empty() {
             self.stats.table_cells_drawn = 0;
             self.stats.table_borders_drawn = 0;
             return;
         }
-        let Ok(text) = self.editor.text() else {
+        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             // A table whose bytes will not read cannot be drawn, and reporting it here would turn a
             // rendering problem into a paint failure. The session's own table operations already
             // surface the same error through `with_table`.
@@ -1375,11 +1448,11 @@ impl<'a> Session<'a> {
         let active = self.active_cell;
 
         for span in spans.iter().copied() {
-            let line = self.line_index(span.start_byte as usize);
+            let line = line_index_in(&self.editor, span.start_byte as usize);
             if line < first || line >= last {
                 continue;
             }
-            let Ok(resolved) = ResolvedTable::new(span, &text) else {
+            let Ok(resolved) = ResolvedTable::new(span, text) else {
                 continue;
             };
             // From the model, not from `row_pitch`: this is the line the model has reserved for the
@@ -1506,7 +1579,7 @@ impl<'a> Session<'a> {
         if self.editor.assets().is_empty() {
             return;
         }
-        let Ok(text) = self.editor.text() else {
+        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             return;
         };
         let l = self.chrome.layout;
@@ -1528,7 +1601,7 @@ impl<'a> Session<'a> {
         let mut drawn = 0u32;
         let mut extra: Option<DamageRect> = None;
         let line_heights = self.state.line_heights.clone();
-        let anchors = holonomy_text::scan_anchors(&text);
+        let anchors = holonomy_text::scan_anchors(text);
 
         for (ordinal, at) in anchors.into_iter().enumerate() {
             let line = self.line_index(at as usize);
@@ -1775,7 +1848,7 @@ impl<'a> Session<'a> {
         self.stats.math_rules = 0;
         self.stats.math_parse_errors = 0;
 
-        let Ok(text) = self.editor.text() else {
+        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             return;
         };
         let m = self.chrome.metrics;
@@ -1809,7 +1882,6 @@ impl<'a> Session<'a> {
         let mut extra: Option<DamageRect> = None;
         let scratch = &mut self.math_scratch;
         let source = &mut self.math_source;
-        let text = text.as_slice();
         let line_of = |at: usize| {
             text[..at.min(text.len())]
                 .iter()
@@ -1961,30 +2033,17 @@ impl<'a> Session<'a> {
 
     /// Add every formula's height to the line-height model, so the lines below it move down.
     ///
-    /// Same model as tables and the same arithmetic: the extra **is** the block's full height, because
-    /// [`LineHeights::from`] is handed pixels and displaces every line from the anchor onward. A
-    /// formula one line tall therefore contributes its `cell_h` and pushes the line below it down by a
-    /// whole line -- which is wrong for an inline formula and right for a displayed one, and the
-    /// distinction is Phase 9B's known limit rather than a bug to be argued about here. Recorded in
-    /// `PROJECT.md` §9B rather than silently approximated.
-    fn math_blocks(&self, text: &[u8]) -> Vec<(u32, u32)> {
+    /// See the free function [`math_blocks`] for the model and why it is a free function. This method
+    /// exists only to build the `MathMetrics` -- which **must match `emit_math` exactly**, because if
+    /// the two disagree the displacement the line model applies is for one formula and the pixels are
+    /// another, and a wrong displacement is invisible in the counters: the formula still draws.
+    fn math_blocks_for(&mut self) -> Vec<(u32, u32)> {
         let mut mm = MathMetrics::new(self.chrome.metrics.cell_w, self.chrome.metrics.cell_h);
-        // Must match `emit_math` exactly. If these two disagree, the displacement the line model
-        // applies is for one formula and the pixels are another -- and a wrong displacement is
-        // invisible in the counters, because the formula still draws.
         mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
-        let mut blocks = Vec::new();
-        holonomy_text::for_each_math_span(text, |span| {
-            let inner = span.inner();
-            // An unparseable formula has no box, so it contributes nothing and the raw text's own line
-            // height stands. That is the same answer the caret-inside mode gives.
-            let Ok(node) = math::parse(&text[inner]) else {
-                return;
-            };
-            let line = self.line_index(span.start as usize);
-            blocks.push((line, measure_only(&node, &mm).height));
-        });
-        blocks
+        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+            return Vec::new();
+        };
+        math_blocks(&self.editor, text, &mm)
     }
 
     // ---------------------------------------------------------------- export
@@ -2131,12 +2190,156 @@ const MATH_RUN_CAPACITY: usize = 64;
 /// in practice: the user is looking at the formula they are editing, which is at the front.
 const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
 
+/// The chunk size for the document scans that replaced whole-document copies. Phase 11.
+///
+/// `Session::line_start`, `Session::line_index` and `Session::refresh_counts` used to call
+/// `Editor::text()`, which allocates a `Vec` the size of the document and copies it byte-for-byte --
+/// six times per keystroke. They now stream through `Editor::read_into` in chunks of this size, so
+/// they hold 4 KiB instead of the document and allocate nothing.
+///
+/// **4 KiB, not larger, and the reason is stack rather than throughput.** These are `&self` methods on
+/// the keystroke path and the buffer is a local `[u8; SCAN_CHUNK]`, so it must live on the stack: the
+/// alternative is a `Session` field, which then needs `&mut self` at every call site -- and
+/// `line_index` is called from inside `emit_tables` and `emit_math` while they hold borrows of other
+/// `Session` fields, so making it `&mut self` is a borrow-checker fight over five call sites rather
+/// than a one-line change. `SCAN_CHUNK = LEAF_CAPACITY` so one chunk is exactly one rope leaf and
+/// `read_into` walks the spine rather than re-splitting ranges.
+///
+/// The cost of the choice: a document scan is `document_bytes / 4096` calls into `read_into`. At 3.5
+/// MiB that is ~900 calls for the line count, which is microseconds. Phase 11's third item -- the
+/// Fenwick tree -- removes the scan itself rather than making it cheaper.
+const SCAN_CHUNK: usize = 4096;
+
 /// `node`'s box, without emitting anything.
 ///
 /// `math_layout::measure`, re-exported under a name that says what it is for at the call site. There is
 /// a `measure` and a `layout_boxed` in `holonomy_render`, and this function needs the box *twice* --
 /// once to centre the formula vertically before laying it out, and once for the damage rectangle --
 /// so it is the measure-only entry point rather than the one that returns a box as a by-product.
+#[inline]
+/// The byte offset of the start of the line containing `at`. Phase 11.
+///
+/// A free function over `&Editor` rather than a `&self` method, for the same reason
+/// [`read_document`] is: the paint-path callers hold a borrow of `doc_scratch` across the call, so a
+/// `&self` method would borrow all of `Session` and conflict with it.
+///
+/// Backwards in chunks, and the *nearest* newline wins, so a chunk containing one returns immediately
+/// rather than continuing to the document start.
+fn line_start_in(editor: &Editor, at: usize) -> usize {
+    let len = editor.text_len();
+    let mut at = at.min(len);
+    while at > 0 {
+        let from = at.saturating_sub(SCAN_CHUNK);
+        let mut chunk = [0u8; SCAN_CHUNK];
+        let want = at - from;
+        let got = match editor.read_into(from, &mut chunk[..want]) {
+            Ok(got) => got,
+            // A read that fails leaves `at` unchanged and would loop forever, so an unreadable range
+            // counts as "no newline in it" and the scan continues from the previous chunk.
+            Err(_) => break,
+        };
+        if let Some(i) = chunk[..got].iter().rposition(|&b| b == b'\n') {
+            return from + i + 1;
+        }
+        at = from;
+    }
+    0
+}
+
+/// The 0-based line index containing `at`. Phase 11.
+///
+/// **Still O(bytes before the caret), and Phase 11 does not pretend otherwise.** The allocation is
+/// gone; the scan is not. The honest fix is the Fenwick tree over line heights, which answers this in
+/// `O(log n)`, and wiring it is Phase 11's third item. What is fixed here is that the count is the
+/// remaining cost rather than a 6.4 MiB copy that accompanied it.
+fn line_index_in(editor: &Editor, at: usize) -> u32 {
+    let end = at.min(editor.text_len());
+    let mut count = 0u32;
+    let mut offset = 0usize;
+    let mut chunk = [0u8; SCAN_CHUNK];
+    while offset < end {
+        let want = (end - offset).min(SCAN_CHUNK);
+        let got = match editor.read_into(offset, &mut chunk[..want]) {
+            Ok(got) => got,
+            Err(_) => break,
+        };
+        // `read_into` returns 0 only past the end, and `offset < end <= text_len`, so a zero here
+        // would be an infinite loop rather than a short read.
+        if got == 0 {
+            break;
+        }
+        count += chunk[..got].iter().filter(|&&b| b == b'\n').count() as u32;
+        offset += got;
+    }
+    count
+}
+
+/// Every formula's `(anchor_line, height_px)`, for the line-height model.
+///
+/// A free function over its arguments rather than a `&self` method, for the reason
+/// [`read_document`] is: its caller holds `&mut Session::doc_scratch` across the call, so a `&self`
+/// method would borrow all of `Session` and conflict with it.
+///
+/// Same model as tables and the same arithmetic: the extra **is** the block's full height, because
+/// [`LineHeights::from`] is handed pixels and displaces every line from the anchor onward. A formula
+/// one line tall therefore contributes its `cell_h` and pushes the line below it down by a whole line
+/// -- which is wrong for an inline formula and right for a displayed one, and the distinction is
+/// Phase 9B's known limit rather than a bug to be argued about here. Recorded in `PROJECT.md` §9B
+/// rather than silently approximated.
+fn math_blocks(editor: &Editor, text: &[u8], mm: &MathMetrics) -> Vec<(u32, u32)> {
+    let mut blocks = Vec::new();
+    holonomy_text::for_each_math_span(text, |span| {
+        let inner = span.inner();
+        // An unparseable formula has no box, so it contributes nothing and the raw text's own line
+        // height stands. That is the same answer the caret-inside mode gives.
+        let Ok(node) = math::parse(&text[inner]) else {
+            return;
+        };
+        let line = line_index_in(editor, span.start as usize);
+        blocks.push((line, measure_only(&node, mm).height));
+    });
+    blocks
+}
+
+/// Read the whole document into `out`, growing it if needed. Returns the bytes read.
+///
+/// Replaced five `Editor::text()` calls on the paint path -- `emit_tables`, `emit_math`, `emit_images`,
+/// `publish_line_heights`, `image_blocks` -- each of which allocated a `Vec` the size of the document
+/// and copied it. Five allocations of the whole document per keystroke is what
+/// `tests/session_no_alloc.rs` measured before this existed.
+///
+/// **A free function taking its two arguments separately, not a `&mut self` method, and that is the
+/// whole point.** `Editor::text()` returned an *owned* `Vec`, so callers held a borrow of nothing and
+/// could reach every other field freely. A method returning `&[u8]` out of a `Session` field borrows
+/// *all* of `self`, and every paint-path caller also needs `&self.chrome`, `&self.editor` and
+/// `&mut self.math_scratch` while the bytes are live -- so the first version of this was five borrow
+/// errors (E0502 and E0503) rather than five one-line changes. Taking `&Editor` and `&mut Vec<u8>` as
+/// arguments borrows two disjoint fields, which is exactly what the callers need.
+///
+/// **This is still a whole-document copy per paint, and Phase 11 does not pretend otherwise.** What
+/// this removes is the *allocation*. What removes the copy is a windowed read -- a paint only needs the
+/// bytes of the lines it is about to draw -- which is Phase 12's change to `Painter::text`'s contract.
+/// Until then the honest state is one copy per paint instead of five, none of them allocating after
+/// the first.
+///
+/// Grown only, never shrunk: a document that stops growing stops allocating.
+fn read_document<'e>(
+    editor: &'e Editor,
+    out: &'e mut Vec<u8>,
+) -> Result<&'e [u8], holonomy_text::EditorError> {
+    let len = editor.text_len();
+    if out.len() < len {
+        // Rounded up to the next multiple of [`SCAN_CHUNK`], because `resize` to exactly `len` means
+        // the *next* keystroke -- which makes the document one byte longer -- reallocates again. That
+        // is one `realloc` per keystroke for as long as the document grows, which is precisely what
+        // the buffer exists to prevent. One extra allocation per 4,096 keystrokes instead.
+        let want = len.next_multiple_of(SCAN_CHUNK);
+        out.resize(want, 0);
+    }
+    let got = editor.read_into(0, out)?;
+    Ok(&out[..got])
+}
+
 #[inline]
 fn measure_only(node: &MathNode, m: &MathMetrics) -> holonomy_render::math_layout::MathBox {
     holonomy_render::math_layout::measure(node, m)

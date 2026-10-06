@@ -744,6 +744,43 @@ impl CagrLeaf {
         (byte & 0xC0) != 0x80
     }
 
+    /// Copy a run of this leaf's text, starting at leaf-local text offset `offset`, into `out`.
+    /// Returns how many bytes were copied, which is `min(out.len(), text_len - offset)`.
+    ///
+    /// This is [`byte_at`](Self::byte_at) done in bulk, and it exists because the byte-at-a-time form
+    /// was on the keystroke path: [`Rope::read_at`] used to call `byte_at` once per byte, and every
+    /// full-document read -- `Rope::to_vec`, and therefore `Editor::text` -- cost one function call
+    /// per byte of a 6.4 MiB document.
+    ///
+    /// The two `copy_from_slice`s rather than one because the gap splits the leaf's text into two
+    /// non-adjacent runs, exactly as [`text_slices`](Self::text_slices) says. When the gap is empty or
+    /// the requested range lies entirely on one side of it, the second copy is zero-length and the
+    /// first covers the whole run.
+    pub fn copy_text_to(&self, offset: usize, out: &mut [u8]) -> Result<usize, LeafError> {
+        let len = self.text_len as usize;
+        if offset >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(len - offset);
+        let gap_start = self.gap_start as usize;
+        let (pre, post) = self.text_slices();
+        // Text offsets `0..gap_start` index `pre`; offsets `gap_start..text_len` index `post` at
+        // `offset - gap_start`. Both slices are long enough because `want <= len - offset`.
+        let n_pre = if offset < gap_start {
+            want.min(gap_start - offset)
+        } else {
+            0
+        };
+        if n_pre > 0 {
+            out[..n_pre].copy_from_slice(&pre[offset..offset + n_pre]);
+        }
+        if n_pre < want {
+            let start = offset + n_pre - gap_start;
+            out[n_pre..want].copy_from_slice(&post[start..start + (want - n_pre)]);
+        }
+        Ok(want)
+    }
+
     /// Read one byte of the leaf's text at leaf-local text offset `offset`.
     pub fn byte_at(&self, offset: usize) -> Result<u8, LeafError> {
         if offset >= self.text_len as usize {

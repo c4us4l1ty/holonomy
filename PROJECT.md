@@ -1074,6 +1074,59 @@ Plus an RSS test that reads `/proc/self/statm`, loads the largest lockable docum
 does not pass. `RLIMIT_MEMLOCK`'s hard limit is asserted to cover the design document, so a host that
 cannot open a 2000-page document fails here rather than at a user.
 
+##### Phase 11, delivered, part 1 — the document copies are gone
+
+The eleven `editor.text()` sites are down to zero whole-document allocations on the edit path, and the
+copy itself got 30× cheaper. Five changes, each gated on output rather than on a timer:
+
+1. **`Rope::read_at` copies per leaf, not per byte.** The inner loop was
+   `for k in 0..take { out[written + k] = leaf.byte_at(w + k)? }` — one call per byte, so a
+   full-document read cost 6.7 M calls. `CagrLeaf::copy_text_to` (`leaf.rs:759`) does the same work as
+   two `copy_from_slice`s, because the gap splits a leaf's text into at most two contiguous runs.
+   **Measured: 3.52 MiB in 387 µs — 9.51 GB/s**, from `a_full_document_read_is_bounded_by_bandwidth_not_by_per_byte_dispatch`.
+   The byte-at-a-time figure for the same read is ~11 ms by arithmetic at 3 ns per call, so ~28×.
+   Gated on byte-identical output by `a_bulk_read_matches_the_byte_at_a_time_reader`, which reads ranges
+   that **straddle a leaf's gap** — the case a naive single `copy_from_slice` gets wrong and the
+   per-byte loop got right for free.
+2. **`line_start`, `line_index` and `refresh_counts` stream in 4 KiB chunks** through `read_into`,
+   holding one `[u8; SCAN_CHUNK]` instead of the document. `refresh_counts` carries `in_word` across
+   chunk boundaries, because counting words per chunk and adding undercounts every document whose
+   words straddle a boundary — 4,096 bytes against a 64 KiB fixture is 16 crossings, so that is a wrong
+   answer rather than a rounding one. Gated by `the_chunked_word_count_survives_a_chunk_boundary`.
+3. **The five paint-path `editor.text()` calls share one buffer** (`Session::doc_scratch`). It is a free
+   function taking `&Editor` and `&mut Vec<u8>` rather than a `&self` method, because a method
+   returning `&[u8]` out of a `Session` field borrows *all* of `self` and every paint-path caller also
+   needs `&self.chrome` and `&mut self.math_scratch` — five call sites became five borrow errors. The
+   buffer grows to a `SCAN_CHUNK` multiple, because resizing to exactly `len` reallocates on the next
+   keystroke.
+4. **`apply`'s `Command::Insert` arm no longer allocates.** It was
+   `c.encode_utf8(&mut buf).as_bytes().to_vec()` — a four-byte heap block allocated and freed on every
+   keystroke. Found by the gate after items 1–3 were done, which is the gate working.
+5. **`Session::dispatch` was split out of `handle_event`**, so the edit path and the paint path can be
+   measured apart.
+
+**`tests/session_no_alloc.rs` is the gate, and it is the answer to a question this audit raised:** how
+did FR-1.2 stay green while the product allocated per keystroke? Because `no_alloc.rs` drives an
+`Editor`, and the product's path is `Session::handle_event`. A gate that cannot see the code it is a
+gate for is not a gate. The new file drives `Session`, on a 64 KiB document, and asserts **0**
+allocations across 1,000 keystrokes — measured at **2,000 before item 4** and 0 after.
+
+**Two honest limits, recorded rather than papered over:**
+
+* **The paint path still allocates, and that is Phase 12's.** A paint builds a fresh `SurfaceTree`
+  whose `Vec`s grow by doubling (192 → 384 → 768 → 1664 → 3328 → 6656 → 13312, measured by the file's
+  size diagnostic) and the `HeadlessScanout` copies the whole 4 MiB frame. So the gate is split: the
+  *edit* path is asserted at zero, and the *paint* path is asserted only to be non-zero —
+  `the_paint_path_still_allocates_and_phase_12_owns_that`, which says so in its own name and becomes an
+  assertion at zero when Phase 12 lands. Asserting zero on the combined number would have been false.
+* **`line_index` is still `O(bytes before the caret)`.** The allocation is gone; the scan is not, and
+  the fix is the Fenwick tree, which is item 3 below. At 3.5 MiB that is ~900 `read_into` calls, which
+  is microseconds — but microseconds per keystroke is not the 0.50 ms budget, it is most of it.
+
+**Cost: 2,624 bytes** — 1,439,288 → 1,441,912 against the 2,097,152 ceiling. The baseline is worth
+correcting in place of the stale 1,101,944 in §9B's cost table: that figure predates 9C and 9X, and the
+measured binary at `e89825c` was 1,439,288.
+
 #### Phase 12 — Draw the document
 
 The page stops being blank. Body text is rendered from document bytes, wrapped to the page measure, and
@@ -1207,7 +1260,8 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | math layout allocations | §2.9 9B | **0** between `MathNode` and frame |
 | table border alignment | §2.9 9A | exact integer pixel coordinates, not ±1 |
 | steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured, not derived, as of Phase 11** |
-| per-keystroke allocations | invariant | **0**, driven through a `Session`, as of Phase 11 — `no_alloc.rs` currently drives an `Editor` |
+| per-keystroke allocations | invariant | **0 on the edit path**, driven through a `Session` (`tests/session_no_alloc.rs`); the paint path is non-zero until Phase 12 |
+| binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
 | `t_kdf` | §2.4 | measured, budget restated — the PRD's 400–550 ms is replaced |

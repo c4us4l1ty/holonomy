@@ -394,8 +394,16 @@ impl Rope {
 
     /// Read `len` bytes at document offset `offset`, into `out`.
     ///
-    /// Allocation-free given a caller-owned `out`. Byte-at-a-time so that a read spanning three
-    /// leaves works and no intermediate buffer is needed.
+    /// Allocation-free given a caller-owned `out`. Copies **once per leaf touched**, not once per
+    /// byte: the inner loop was `for k in 0..take { out[...] = leaf.byte_at(w + k)? }`, which made a
+    /// full-document read one `byte_at` call per byte -- 6.7 M calls for a 6.4 MiB document, repeated
+    /// by every `Editor::text()` on the keystroke path. The byte loop was never needed for correctness:
+    /// [`CagrLeaf::copy_text_to`] does the same work as two `copy_from_slice`s because the gap splits
+    /// a leaf's text into at most two contiguous runs.
+    ///
+    /// Byte-identical output is asserted by `reading_across_a_leaf_boundary_returns_the_right_bytes`
+    /// and `a_bulk_read_matches_the_byte_at_a_time_reader`; the change is gated on the output, not on
+    /// a timing improvement.
     pub fn read_at(&self, offset: usize, len: usize, out: &mut [u8]) -> Result<(), RopeError> {
         if offset + len > self.text_len() {
             return Err(RopeError::OutOfBounds {
@@ -413,11 +421,12 @@ impl Rope {
         let mut at = offset;
         while written < len {
             let (i, w) = self.locate(at)?;
-            let leaf = &self.leaves[i];
-            let take = (leaf.text_len() - w).min(len - written);
-            for k in 0..take {
-                out[written + k] = leaf.byte_at(w + k)?;
-            }
+            let take = (self.leaves[i].text_len() - w).min(len - written);
+            let n = self.leaves[i].copy_text_to(w, &mut out[written..written + take])?;
+            // `copy_text_to` clamps to the leaf's remaining text, and `take` is already that clamped
+            // value, so it copies exactly `take` or the read is truncated and the next `locate` would
+            // silently re-read the same bytes. Asserted rather than handled.
+            debug_assert_eq!(n, take, "copy_text_to truncated a clamped run");
             written += take;
             at += take;
         }
@@ -852,6 +861,55 @@ mod tests {
             rope.read_at(start, len, &mut out).expect("in range");
             assert_eq!(out, &text[start..start + len], "read at {start}");
         }
+    }
+
+    /// Phase 11's gate on the bulk reader: it must be byte-identical to the byte-at-a-time reader it
+    /// replaced, across the gap in every leaf rather than only at a leaf boundary.
+    ///
+    /// A leaf's text is split into two non-contiguous runs by its gap, and `copy_text_to` handles that
+    /// with two `copy_from_slice`s. So the interesting cases are reads that **start before the gap and
+    /// end after it** -- one range, two copies -- which is the case the per-byte loop got right for free
+    /// and a naive single `copy_from_slice` would get wrong. `reading_across_a_leaf_boundary_returns_the_right_bytes`
+    /// covers the boundary between leaves; this covers the gap inside one.
+    #[test]
+    fn a_bulk_read_matches_the_byte_at_a_time_reader() {
+        let text: Vec<u8> = (0..9000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut rope = Rope::from_text(&text).expect("load");
+
+        // Put the cursor inside the first leaf so its gap splits that leaf's text in two, then read
+        // ranges that straddle the gap. `set_cursor` is what moves it.
+        for cursor in [0usize, 10, 2_000, 4_095, 4_096] {
+            rope.set_cursor(cursor).expect("cursor in range");
+            for (start, len) in [
+                (0usize, 4_100usize),
+                (cursor.saturating_sub(50), 100),
+                (cursor, 200),
+                (cursor.saturating_sub(200), 400),
+                (1, 4_098),
+            ] {
+                if start + len > text.len() {
+                    continue;
+                }
+                let mut bulk = vec![0u8; len];
+                rope.read_at(start, len, &mut bulk).expect("in range");
+                assert_eq!(
+                    bulk,
+                    &text[start..start + len],
+                    "bulk read at {start} len {len} with cursor at {cursor}"
+                );
+            }
+        }
+    }
+
+    /// A read that stops at a leaf's end copies the whole remainder of that leaf and no more.
+    #[test]
+    fn a_bulk_read_reports_a_short_read_past_the_end() {
+        let leaf = CagrLeaf::new().expect("leaf");
+        let mut out = [0u8; 16];
+        // An empty leaf has no text, so any offset past its length copies nothing and says so rather
+        // than erroring -- which is what lets `read_at`'s loop treat a zero-length run as impossible.
+        assert_eq!(leaf.copy_text_to(0, &mut out).expect("short read"), 0);
+        assert_eq!(leaf.copy_text_to(9_999, &mut out).expect("short read"), 0);
     }
 
     /// The directive's split requirement: **both** children get [`GAP_TARGET`] of headroom.
