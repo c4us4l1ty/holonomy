@@ -284,6 +284,133 @@ mod tests {
         );
     }
 
+    /// **`munmap` releases the page-lock charge, so locked memory tracks *resident* memory.**
+    ///
+    /// This is the question Phase 13's whole windowing plan rests on, and it was answered wrongly once.
+    /// The claim recorded in PROJECT.md was that "`mlockall` locks the process's address space, so
+    /// `RLIMIT_MEMLOCK` is spent on pages rather than on the document, and windowing cannot move the
+    /// ceiling by a byte." If that were true, bounding `SectionStore`'s residency would be pointless for
+    /// the ceiling and the maximum document would be permanently unopenable at any residency.
+    ///
+    /// **It is false, and this is the measurement that says so.** A locked page that is unmapped is gone,
+    /// and the kernel drops its charge against `RLIMIT_MEMLOCK`. So a bounded resident set bounds the
+    /// locked set too — which means **`SectionStore`'s budget *is* the page-lock budget**, and
+    /// `mlockall` costs nothing on top of it beyond whatever is genuinely resident.
+    ///
+    /// # Why a child process
+    ///
+    /// **`mlockall` is process-wide and `RLIMIT_MEMLOCK` is per-process, so libtest cannot measure this.**
+    /// libtest runs tests on threads in one process; `MCL_CURRENT` cannot even succeed here because the
+    /// test binary is larger than the 8.00 MiB ceiling (`the_kdf_cannot_run_after_mlockall_but_the_session_can`
+    /// documents the same constraint). So the probe runs in a child spawned from `current_exe`, and only
+    /// the child calls `mlockall`. The parent asserts on numbers the child printed.
+    ///
+    /// `MCL_FUTURE` only, never `MCL_CURRENT`: the child is already over the ceiling, and `MCL_FUTURE` is
+    /// the half that marks *new* mappings, which is the mechanism under test.
+    #[test]
+    fn unmapping_releases_the_page_lock_charge() {
+        const CHILD_ENV: &str = "HOLONOMY_MLOCK_PROBE";
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                // The fully-qualified name: `--exact` matches the full path, and a bare
+                // `mlock_probe_child` filters out every test including the one we want, which shows up
+                // as "running 0 tests" and no PROBE line rather than as an obvious mistake.
+                "rlimits::tests::mlock_probe_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("spawn the probe child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout.lines().find_map(|l| l.find("PROBE ").map(|i| &l[i + 6..]));
+        let Some(line) = line else {
+            panic!(
+                "the probe child printed no PROBE line.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let mut f = line.split_whitespace();
+        let mut n = |what: &str| {
+            f.next()
+                .unwrap_or_else(|| panic!("missing field {what} in {line:?}"))
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("non-numeric {what} in {line:?}"))
+        };
+        let mlock_rc = n("mlock_rc");
+        let errno = n("errno");
+        let base = n("base");
+        let full = n("full");
+        let after = n("after");
+        let region_kib = n("region_kib");
+
+        assert_eq!(
+            mlock_rc, 0,
+            "mlockall(MCL_FUTURE) failed with errno {errno}. The probe measures a *new* mapping being \
+             charged and released; without MCL_FUTURE the region would never be locked and the test would \
+             pass for the wrong reason"
+        );
+        assert!(
+            full.saturating_sub(base) >= region_kib / 2,
+            "a {region_kib} kB region that was mapped and touched raised VmLck by only {} kB, so the \
+             charge this test is about did not happen and the release below would prove nothing",
+            full.saturating_sub(base)
+        );
+        assert!(
+            after < full,
+            "VmLck went {base} -> {full} -> {after} kB across mmap+touch+munmap of {region_kib} kB. \
+             If the charge were NOT released, locked memory would track the process's address space \
+             rather than its resident set -- and then bounding Phase 13's residency could not lower the \
+             page-lock ceiling at all, which is the opposite of what the windowing design assumes"
+        );
+    }
+
+    /// The child half of [`unmapping_releases_the_page_lock_charge`]. Inert unless the env var is set,
+    /// so it costs the suite one spawn and asserts nothing on its own.
+    #[test]
+    fn mlock_probe_child() {
+        if std::env::var_os("HOLONOMY_MLOCK_PROBE").is_none() {
+            return;
+        }
+        /// `VmLck` in kB from `/proc/self/status`.
+        fn vm() -> u64 {
+            let Ok(s) = std::fs::read_to_string("/proc/self/status") else {
+                return 0;
+            };
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmLck:"))
+                .and_then(|l| l.split_whitespace().next())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        }
+        const REGION: usize = 2 * 1024 * 1024;
+        let rc = unsafe { libc::mlockall(libc::MCL_FUTURE) };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let base = vm();
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                REGION,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            println!("PROBE {rc} {errno} {base} {base} {base} {}", REGION / 1024);
+            return;
+        }
+        // Fault every page in: `MCL_FUTURE` charges on fault, not on `mmap`.
+        unsafe { std::ptr::write_bytes(p as *mut u8, 0x41, REGION) };
+        let full = vm();
+        unsafe { libc::munmap(p, REGION) };
+        let after = vm();
+        println!("PROBE {rc} {errno} {base} {full} {after} {}", REGION / 1024);
+    }
+
     #[test]
     fn core_dumps_are_sealed_or_reported() {
         let mut limits = Limits::default();
