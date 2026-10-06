@@ -1068,6 +1068,61 @@ impl Rope {
             }
         }
     }
+
+    /// A rope with a correct spine and **no bytes at all**, for a document of `text_len` bytes.
+    ///
+    /// # What this is for, and the number it is trying to move
+    ///
+    /// [`from_text`](Self::from_text) is the only other way to build a rope holding text, and it needs the
+    /// **whole document as a contiguous `&[u8]`**. So loading costs *two* copies at the peak: the caller's
+    /// slice, plus every leaf. For the format's maximum document that is
+    /// `8,321,040 x (1 + 4096/2048)` = **24.8 MiB**, of which the page-locked half is the 8.46 MiB the
+    /// `RLIMIT_MEMLOCK` ceiling refuses.
+    ///
+    /// This constructor moves that to **the spine and nothing else**: `ceil(text_len / 2048)` slots of
+    /// `LeafSlot::Absent`, 24 bytes each, about **97 KiB** for the maximum document. `resident_bytes()` is
+    /// 0 and no `SecureBlock` is ever allocated, so the peak becomes O(leaves) rather than O(document).
+    ///
+    /// # Why the bytes can be absent at all
+    ///
+    /// Because [`locate`](Self::locate) is a binary search over `starts` and reads no leaf memory, **the
+    /// spine *is* the document's geometry**. A rope that knows its own length and where every leaf starts
+    /// can answer every address question; the only thing it cannot do is hand back the bytes, and that is
+    /// [`read_at_faulting`](Self::read_at_faulting)'s job. Geometry and residency are separable, and this
+    /// is the constructor that exploits it.
+    ///
+    /// # Why `GAP_TARGET` and not a fuller leaf
+    ///
+    /// The fill is 2,048 because that is what a *fresh* leaf's gap is set to, so a leaf faulted in by
+    /// [`read_at_faulting`](Self::read_at_faulting) comes back shaped like every other leaf in the rope:
+    /// half text, half gap at the target. Using `LEAF_CAPACITY` would hold more bytes per leaf and halve
+    /// the spine, at the cost of every leaf having **no gap at all** -- so `available()` would report 0
+    /// and a later edit-fault-in would find nowhere to put a byte.
+    ///
+    /// The spine is ~97 KiB either way against an 8 MiB ceiling, so this is not a memory trade: **it is
+    /// about not designing the partition twice.**
+    ///
+    /// # What this does not give you
+    ///
+    /// A skeleton rope is **read-only** until leaves are faulted in, and editing an absent leaf still
+    /// refuses. This removes the *load-time* peak; it does not make a sparse rope writable, which is the
+    /// separate undo-and-spans design question and is not solved by anything here.
+    pub fn from_skeleton(text_len: usize) -> Self {
+        let fill = crate::leaf::GAP_TARGET;
+        // **At least one leaf, even for an empty document.** Every other method would otherwise need an
+        // empty case, and "insert into an empty rope" is the first thing a user does. An empty document is
+        // one slot of length 0, and `resident_bytes()` is still 0.
+        let n = text_len.div_ceil(fill).max(1);
+        let mut leaves = Vec::with_capacity(n);
+        let mut starts = Vec::with_capacity(n);
+        for i in 0..n {
+            let at = i * fill;
+            starts.push(at);
+            // The last slot holds the remainder; every earlier slot is exactly one fill.
+            leaves.push(LeafSlot::Absent { text_len: (text_len - at).min(fill) });
+        }
+        Self { leaves, starts, cursor: 0 }
+    }
 }
 
 /// Where an absent leaf's bytes come from.

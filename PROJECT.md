@@ -1906,10 +1906,37 @@ the desktop build, and none of this needs more than a few tens of KiB.
    because what binds is the **peak**. A fully-resident `Editor` peaks at 8.46 MiB and fails; a 4-section
    budget needs ~256 KiB. See §Phase 13, part 2, step 2b.
 
-8. **`SectionStore` is gated and unused.** A session's residency is unchanged, because `Editor` does not read
-   from it. It is not dead code in the sense of "will be deleted" — it is the mechanism, gated on its own
-   because it is the risky part — but **no product path reaches it, and §6's RSS row must not be read as if
-   it did.**
+8. **Every Phase 13 mechanism is gated and unused, and §6's RSS row must not be read as if otherwise.**
+   The chain is complete *in libraries* and reached *by no product path*:
+
+   | piece | reachable from a session? |
+   | --- | --- |
+   | `Manifest` (`5b9f1e2`) | no — `Session` builds and syncs it, but nothing loads a document to sync |
+   | `Wavefunction::read_chunk_into` (`5e7aa88`) | no |
+   | `SectionStore` (`73163c5`) | no |
+   | `Rope`'s absent leaves + `LeafSource` (`d790a13`) | no |
+   | `SectionStore` as `LeafSource`, the join (`a625ece`) | no |
+   | `Rope::from_skeleton` (`VmHWM` 1.1 MiB vs 5.0 MiB, 2 MiB doc) | no |
+   | `Editor::from_skeleton` + `read_into_faulting` | no — **`main.rs:208,242` still build `Editor::new()`** |
+
+   So the honest statement is **not** "the windowing does not reduce residency" any more — it is that
+   **residency is unchanged because nothing opens a document.** `main.rs:295` still discards the
+   passphrase, so there is no code path that could.
+
+   And the load-time peak that `from_skeleton` removes is **only reachable through a skeleton load**:
+   `from_text` still needs the whole document as a contiguous `&[u8]`, and that is the path every existing
+   caller uses. Until the session calls `from_skeleton` and then `read_into_faulting`, the 24.8 MiB two-copy
+   peak for the maximum document is still what the product does.
+
+9. **`SpanMap::plain` is a claim the sparse rope cannot yet keep.** `Editor::from_skeleton` works because
+   every structure in `Editor::empty` is a function of the document's **length**, not its contents — that is
+   the reassuring half of "what does absent mean for spans". The other half is a live gap:
+   **`SpanMap::plain(text_len)` asserts every byte is plain-styled, and nothing has read the document to
+   check.** A leaf that faults in mid-session has to leave the span map and the undo stack **indistinguishable
+   from one that was resident throughout**, and `SpanMap` currently has no mechanism to be corrected by
+   fault-in. `tests/skeleton_editor.rs` asserts only the span's *extent* and says in a comment that the
+   styling claim is unverified — reading the document to check it would test `SpanMap`, not the constructor.
+   **This is the design question, and it is what stands between the sparse rope and a usable editor.**
 
 6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
    with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a

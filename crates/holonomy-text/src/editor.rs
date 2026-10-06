@@ -297,6 +297,88 @@ impl Editor {
         Ok(Self::empty(rope, len))
     }
 
+    /// An editor over a document of `text_len` bytes whose **bytes are not held**.
+    ///
+    /// # Why this exists, and the number it moves
+    ///
+    /// [`from_text`](Self::from_text) needs the whole document as a contiguous `&[u8]`, so opening one
+    /// costs **two copies at the peak**: that slice plus every page-locked leaf. Measured on a 2 MiB
+    /// document, `VmHWM` peaks at **~5.0 MiB**; this constructor peaks at **~1.1 MiB**, which is the
+    /// process baseline and does not carry the document at all. **~4.6x lower, and O(leaves) rather than
+    /// O(document)** — see `tests/skeleton_load.rs`, which measures `VmHWM` in a child process rather than
+    /// asserting a ratio computed from a struct's field list.
+    ///
+    /// # Why the rest of `Editor` can be built without reading a byte
+    ///
+    /// **Because every other field is a function of the document's *length*, not its contents.**
+    /// [`SpanMap::plain`] records that every byte is plain-styled, which is true of a document H1 has not
+    /// read yet; `TableMap::new` and `AssetCatalog::new` are empty because no table or image has been seen;
+    /// the undo stacks are empty because nothing has been edited. So [`empty`](Self::empty) needs only
+    /// `text_len`, and this constructor is that call with a skeleton rope in place of a filled one.
+    ///
+    /// **This is the reassuring half of the answer to "what does absent mean for spans and undo".** Both
+    /// are happy with a document they have never read, because both are index structures over lengths.
+    /// What they are *not* yet happy about is a **faulted-in edit** — a leaf that arrives mid-session has
+    /// to leave the span map and the undo stack indistinguishable from one that was resident throughout.
+    /// That is the remaining design question, and this constructor does not address it.
+    ///
+    /// # What this does not give you
+    ///
+    /// A skeleton editor is **read-only until leaves are faulted in**: editing an absent leaf
+    /// [`refuses`](Rope::leaf_mut). And **no session calls this yet** — `main.rs` still builds
+    /// `Editor::new()`, an empty document. So the peak win is proven in a gate and not yet reachable from
+    /// the product.
+    pub fn from_skeleton(text_len: usize) -> Self {
+        Self::empty(Rope::from_skeleton(text_len), text_len)
+    }
+
+    /// Bytes of document text currently held, over the resident leaves only.
+    ///
+    /// **The number the page-lock ceiling is spent on**, and the one a session's residency budget is
+    /// enforced against. Delegated rather than reimplemented so there is one definition of "resident".
+    pub fn resident_bytes(&self) -> usize {
+        self.rope.resident_bytes()
+    }
+
+    /// Read `offset..offset+out.len()` into `out`, **faulting absent leaves in from `source`**.
+    ///
+    /// # Why this is a second method and not a change to [`read_into`](Self::read_into)
+    ///
+    /// **Because `read_into` is `&self` and faulting is `&mut self`, and that is structural rather than a
+    /// preference.** `read_into` is called from `&self` contexts all over the paint path -- `session.rs`,
+    /// `doclines.rs`, `counts.rs`, the export sinks -- so it cannot fault. Rather than put a `RefCell` in
+    /// the rope and make "is this leaf resident" a runtime question behind a borrow check on the keystroke
+    /// path, **the two capabilities are two methods.**
+    ///
+    /// The split has a real cost, and it is worth naming: **a `&self` reader cannot fault, so every `&self`
+    /// reader sees `LeafAbsent` on a sparse rope and has to decide what to do with it.** The paint path
+    /// currently counts that as `PaintStats::runs_missing`. That is safe and it is wrong to draw, and it
+    /// stays wrong until the paint path takes the `&mut` variant. **This method is what makes that
+    /// possible; it does not make it happen.**
+    ///
+    /// [`LeafSource`] is passed in rather than stored, because the source is the *caller's* — it owns the
+    /// store, the budget and the eviction policy. An editor holding a source would have to own a container,
+    /// and `holonomy-text` cannot depend on `holonomy-container`.
+    pub fn read_into_faulting(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, EditorError> {
+        let len = self.text_len();
+        if offset >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(len - offset);
+        self.rope.read_at_faulting(source, offset, want, &mut out[..want])?;
+        Ok(want)
+    }
+
+    /// How many leaves currently hold their bytes.
+    pub fn resident_count(&self) -> usize {
+        self.rope.resident_count()
+    }
+
     /// The shared constructor.
     ///
     /// Every allocation an [`Editor`] ever makes happens here, which is what lets the keystroke path
