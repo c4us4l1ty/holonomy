@@ -312,13 +312,49 @@ impl Wavefunction {
     }
 
     /// Open an existing container with a passphrase.
+    ///
+    /// **A two-line convenience over [`adopt`](Self::adopt), and the reason both exist is the boot
+    /// order.** `main.rs` opens every descriptor at stage 4, *before* the seccomp filter is installed at
+    /// stage 8, because the filter's allowlist has **no `openat`** -- so after sealing, no path can become
+    /// a descriptor and reaching for one is `SIGSYS` and exit 137.
+    ///
+    /// The passphrase is read *after* sealing (there is no `getenv` guarantee post-filter), so the container
+    /// **cannot** be decrypted during boot. It has to be opened afterwards, from a descriptor that already
+    /// exists. This method opens its own path and is therefore only usable **before** sealing -- in tests,
+    /// in tools, and nowhere in the product. The product path is [`adopt`](Self::adopt).
     pub fn open(
         path: &Path,
         passphrase: &str,
         vdf_iterations: u64,
     ) -> Result<Self, ContainerError> {
-        let file = DirectFile::open(path)?;
+        Self::adopt(DirectFile::open(path)?, passphrase, vdf_iterations)
+    }
 
+    /// Open a container **from a descriptor the caller already holds**, with a passphrase.
+    ///
+    /// # Why this is the only usable form after sealing
+    ///
+    /// **Because the path can no longer be named.** The boot's rule is that stage 4 is the last moment a
+    /// path can become a descriptor, and it is enforced rather than documented: the seccomp allowlist
+    /// contains no `openat` (`holonomy-jail/src/seccomp/table.rs` lists it under the refused syscalls).
+    /// Since the passphrase only exists after sealing, the only way to reach a container is through a
+    /// descriptor obtained earlier.
+    ///
+    /// **This is `open`'s entire body**, so the two cannot drift: `open` is now a two-line delegate and
+    /// there is no second implementation to keep in step.
+    ///
+    /// # Why this preserves the invariant rather than relaxing it
+    ///
+    /// The tempting alternative is to add `openat` to the allowlist so `open` works after sealing. **That
+    /// gives up the rule the boot exists to enforce** — that the set of open files is fixed before the
+    /// world is closed — and it would do so for the sake of convenience. `adopt` reaches the same place
+    /// without weakening anything: the path was named at stage 4, the descriptor exists, and the container
+    /// simply uses it.
+    pub fn adopt(
+        file: DirectFile,
+        passphrase: &str,
+        vdf_iterations: u64,
+    ) -> Result<Self, ContainerError> {
         // Page 0 carries the salt in its first 32 bytes. `O_DIRECT` cannot read 32 bytes --
         // offset, length and address must all be block multiples -- so read the page.
         let mut page = AlignedBuf::zeroed(IO_ALIGN as usize);
