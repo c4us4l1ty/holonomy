@@ -71,6 +71,19 @@ pub enum RopeError {
         /// The leaf that would have to be made resident.
         leaf: usize,
     },
+    /// A [`LeafSource`] could not produce the bytes it was asked for.
+    ///
+    /// **Deliberately carries no detail, and that is the design rather than an omission.**
+    /// `fetch_leaf` sits on the seam between the rope and whatever stores the document, so whatever fails
+    /// under it — an unreadable chunk, a failed authentication, a truncated final section, a full page-lock
+    /// ceiling — arrives here as one variant with one message. A rope that reported "chunk 47 failed to
+    /// authenticate" would be a decryption oracle with a nicer interface: FR-1.2's threat model treats
+    /// *which* operation failed as sensitive, and `SectionStore::StoreError::Read` is opaque for the same
+    /// reason.
+    ///
+    /// So this is deliberately **not** a wrapper around the source's error type. The source logs or counts
+    /// what it needs; the rope learns only that it has no bytes.
+    SourceUnavailable,
 }
 
 impl std::fmt::Display for RopeError {
@@ -90,6 +103,9 @@ impl std::fmt::Display for RopeError {
                 "leaf {leaf} is not resident and this path cannot fault it in; use \
                  read_at_faulting with a store"
             ),
+            Self::SourceUnavailable => {
+                write!(f, "the byte source could not produce the requested bytes")
+            }
         }
     }
 }

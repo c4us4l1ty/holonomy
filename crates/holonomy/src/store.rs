@@ -135,6 +135,14 @@ pub struct SectionStore<'c> {
     tick: u64,
     /// Reused across loads, so a miss does not allocate a scratch buffer per load.
     scratch: Vec<u8>,
+    /// The destination for `fetch_leaf`, kept separate from `scratch` because that method calls
+    /// [`copy_into`](Self::copy_into), which needs `&mut self` *and* a destination it cannot share with
+    /// the receiver's own fields. Taken out with `mem::take` for the call.
+    ///
+    /// **A second 65,520-byte buffer, deliberately.** The alternative -- reading straight into the leaf's
+    /// destination in `out` -- only works when the leaf starts exactly on a section boundary, which is 1
+    /// leaf in 17. So this is what the straddling case costs, and it is paid once and then reused.
+    fetch_scratch: Vec<u8>,
     stats: StoreStats,
 }
 
@@ -151,6 +159,7 @@ impl<'c> SectionStore<'c> {
             resident: BTreeMap::new(),
             tick: 0,
             scratch: Vec::new(),
+            fetch_scratch: Vec::new(),
             stats: StoreStats::default(),
         }
     }
@@ -173,6 +182,17 @@ impl<'c> SectionStore<'c> {
     /// What the store has done so far.
     pub fn stats(&self) -> StoreStats {
         self.stats
+    }
+
+    /// The fetch buffer's current length, or 0 if it has never been needed.
+    ///
+    /// **Exists to make "reused, not reallocated" observable.** `fetch_leaf` takes this buffer out of
+    /// the store with `mem::take` and puts it back through a closure so that the error paths restore it
+    /// too -- a claim that is easy to state and easy to break, because the naive version restores it on
+    /// the success path only. A test that watches the length across many faults catches the regression
+    /// that a test watching the returned bytes would not.
+    pub fn fetch_buffer_len(&self) -> usize {
+        self.fetch_scratch.len()
     }
 
     /// The container's **chunk index** for a section, or `None` if the document has no such section.
@@ -318,6 +338,102 @@ impl<'c> SectionStore<'c> {
 impl Drop for SectionStore<'_> {
     fn drop(&mut self) {
         self.evict_all();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The join: this store *is* the rope's byte source.
+// ---------------------------------------------------------------------------
+
+/// **A document offset maps to sections by division, and that division is the whole join.**
+///
+/// Section `s` holds document bytes `[s * SECTION_BYTES, (s + 1) * SECTION_BYTES)`. A leaf at `offset`
+/// with `len` bytes therefore touches sections `offset / SECTION_BYTES` through
+/// `(offset + len - 1) / SECTION_BYTES` — and because `65,520 / 3,840 = 17.0625`, **that is two sections
+/// for most leaves**, not one. See [`SectionStore`]'s `fetch_leaf` for what that costs.
+impl holonomy_text::LeafSource for SectionStore<'_> {
+    /// Fill `out` with the `out.len()` document bytes starting at `offset`.
+    ///
+    /// # The two-section case, which is the whole difficulty
+    ///
+    /// A leaf is at most 3,841 bytes and a section is 65,520, so a leaf usually sits inside one section and
+    /// **straddles the boundary in 1 leaf in 17**. When it straddles, the bytes come from two sections, and
+    /// the two `copy_into` calls must not be allowed to evict each other:
+    ///
+    /// * **Pinning both is the store's job, and LRU does not guarantee it.** Loading section `first` and
+    ///   then section `last` are two independent accesses; with a budget of 1 the second evicts the first.
+    ///   The bytes are copied into `out` before the second call, so this particular read is still correct —
+    ///   but a caller that held a *leaf* across two faults would get the wrong pair. **So the invariant is
+    ///   that a leaf's bytes are copied out within one `fetch_leaf`, never re-read from a resident section
+    ///   later.** That is why this assembles into `out` rather than returning a borrow into the store.
+    ///
+    /// * **One reusable scratch buffer, not one per section.** Two `SECTION_BYTES` allocations per fetch
+    ///   would be two allocations per fault, and the keystroke path counts allocations. `scratch` already
+    ///   exists for [`copy_into`](Self::copy_into), so this reuses it and pays nothing.
+    ///
+    /// # Errors carry nothing
+    ///
+    /// Every failure becomes [`RopeError::SourceUnavailable`], which is opaque by design. A rope that
+    /// reported "chunk 47 failed to authenticate" would be a decryption oracle with a nicer interface.
+    fn fetch_leaf(&mut self, offset: usize, out: &mut [u8]) -> Result<usize, holonomy_text::RopeError> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let end = offset.checked_add(out.len()).ok_or(holonomy_text::RopeError::SourceUnavailable)?;
+        let first = (offset / SECTION_BYTES) as u32;
+        let last = ((end - 1) / SECTION_BYTES) as u32;
+
+        // `copy_into` needs `&mut self` *and* a destination, so the destination cannot be a field of
+        // `self` -- `copy_into` uses `self.scratch` internally and the borrow checker will not split a
+        // method receiver from its own field. Taking the buffer out for the call is the way round it, and
+        // it is a move of a `Vec`, not a copy: `fetch_scratch` persists across calls, so after the first
+        // fault this allocates nothing.
+        let mut buf = std::mem::take(&mut self.fetch_scratch);
+        if buf.len() < SECTION_BYTES {
+            buf.resize(SECTION_BYTES, 0);
+        }
+
+        // **A closure rather than early returns**, because `buf` has to go back into `self` on every exit
+        // path including the error ones, and an early `return Err(..)` in the middle of the loop would skip
+        // that -- leaving the next fetch to allocate again. `Drop` cannot cover it either: the buffer has
+        // already been moved out of `self` by the time the error happens.
+        let result = (|| -> Result<usize, holonomy_text::RopeError> {
+            let mut written = 0usize;
+            let mut section = first;
+            while section <= last {
+                let got = self
+                    .copy_into(section, &mut buf[..SECTION_BYTES])
+                    .map_err(|_| holonomy_text::RopeError::SourceUnavailable)?;
+                if got == 0 {
+                    return Err(holonomy_text::RopeError::SourceUnavailable);
+                }
+                let section_start = section as usize * SECTION_BYTES;
+                let section_end = section_start + got;
+                // **Two different offsets, and conflating them was the bug.** `take_start`/`take_end`
+                // are positions *in the section*, and `from` indexes `buf` by them. `written` is the
+                // position in `out`, the *destination*, and must not appear in either. Adding it made
+                // the second section of a straddling leaf read from `section_start + written` instead of
+                // `section_start`, so a 3,841-byte leaf came back 223 bytes short — and the first
+                // 16 leaves in 17 were unaffected, which is why it only showed up here.
+                let take_start = offset.max(section_start);
+                let take_end = end.min(section_end);
+                if take_end > take_start {
+                    let from = take_start - section_start;
+                    let n = take_end - take_start;
+                    out[written..written + n].copy_from_slice(&buf[from..from + n]);
+                    written += n;
+                }
+                section += 1;
+            }
+            debug_assert_eq!(
+                written,
+                out.len(),
+                "the sections did not cover the requested range"
+            );
+            Ok(written)
+        })();
+        self.fetch_scratch = buf;
+        result
     }
 }
 
