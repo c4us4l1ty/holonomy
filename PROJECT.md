@@ -1416,6 +1416,120 @@ a document that has never been rendered. RSS re-measured ≤ 16.0 MiB with the i
 too — **the 8.0 MiB image budget and a full document have never been asserted together**, and
 `crates/holonomy-image/tests/scale_cache.rs:307` passes because it runs with no document in the process.
 
+##### Phase 13, part 1 — the manifest, and the 6 MiB it removed
+
+`crates/holonomy/src/manifest.rs` (items 1 and 2) and `crates/holonomy/tests/session_manifest.rs`, 9
+tests. Items 3 and 4 — on-demand load/evict, and `RLIMIT_MEMLOCK` ceasing to be the ceiling — are not
+started and say so at the end.
+
+**The memory claim is met, and it is the whole of what this part is.** Phase 12 ended by recording that it
+had failed: *"Phase 12 was supposed to remove `doc_scratch`'s **1.000 resident bytes per document byte**,
+and it did not."* The reason was one missing capability, named in the code and in that note:
+
+> `publish_line_heights` → `math_blocks_for` → `read_document` **unconditionally**, because
+> `for_each_math_span` is a cursor over bytes and *"does this document contain any math"* cannot be asked
+> without reading the bytes to find the `$$`.
+
+`Manifest::span_total()` is that question, answered at open and maintained per keystroke. Four emitters now
+guard on it. **`tests/session_rss.rs`, same host, same 6.00 MiB document:**
+
+| | Phase 11/12 | Phase 13 part 1 |
+|---|---|---|
+| `doc_scratch` | **6.00 MiB** | **0.00 MiB** |
+| total RSS | 26.85 MiB | **20.82 MiB** |
+| marginal cost per document byte | 2.852 B | **1.852 B** |
+| document the 16.0 MiB budget affords | 2.20 MiB | **3.40 MiB** |
+
+**1.852 measured against 1.067 leaves + 0.545 geometry = 1.612 derived**, so the 15 % gap that Phase 11
+attributed to "the rope's spine and `Vec` capacity slack" is now the *whole* of it — the third term is
+gone rather than reduced, which is the check that says the removal is real and not an offsetting
+regression elsewhere.
+
+**Section size is 65,520 bytes, and the number is derived from the format rather than chosen.**
+`CHUNK_PLAINTEXT = CHUNK_SLOT − TAG_LEN = 65,536 − 16`. Item 2 predicted "the H1 optimum is expected to be
+*larger*" and that is what happened, for a reason the plan did not anticipate: the container addresses
+plaintext as a slot array (`chunk_offset(omega, i) = omega + i·CHUNK_SLOT`,
+`holonomy-container/src/layout.rs:149`), so a section that is one chunk is **one authenticated `pread64`
+with no offset arithmetic in the load path**. A 64,000-byte section would straddle two chunks and need a
+straddling check in the load path forever. 4 KiB — one rope leaf, the obvious candidate — would give 1,536
+sections and 30,720 bytes of manifest for 6 MiB, and 1,536 reads to walk the document where 97 do.
+`a_section_is_the_size_of_one_container_chunk` fails if the format's chunk size ever moves.
+
+**The design decision that was *not* ported, and the arithmetic that forced it.** Item 1 describes the
+manifest as sizing the scrollbar, which is H2's role for H2's sections. **H1's sections cannot have that
+role.** A 2000-page document at 43 rows a page is 86,000 lines, 1,548,000 px of content; for a 600 px
+scrollbar to move in sub-screen increments the manifest would need **2,580 sections**, which at 6 MiB is
+**2,436 bytes per section** — smaller than a line of prose. H2's sections were *user content*: addressable,
+reorderable, listed in an outline. H1's are an implementation detail, and a user who can see a section
+boundary will ask for it to mean something. **So the scroll geometry stays on `DocLines` — per line,
+`O(log n)`, exact — and the manifest is the residency index.** This is the same rejection of an H2 constant
+that Phase 12 made about the 1500-word section, and it is the second time H2's *numbers* turned out to be
+about a renderer H1 does not have.
+
+**The manifest is 8 bytes per section, and it was 12 until the latency gate deleted a field.** Two
+`Fenwick` trees of `n + 1` `u32`s; 97 sections of 6 MiB is **784 bytes, 0.0013 % of the text**. H2's own
+figure is ~50 KB for 1,300 sections (`H2/crates/holonomy-core/src/manifest.rs:1-6`) = 38 B/section, so this
+is 4.7x cheaper, for the reason that is visible in the two types: H2's entry carries a `String` id, a
+title, two `i64` timestamps and an `OrderKey`, and none of that exists here.
+
+**The field the gate deleted is the part worth recording.** The manifest carried `newlines` — a per-section
+newline count, so a manifest of heights can size a scrollbar. It is *free* to compute here (H2 had to pay
+Loro for its block count: an 8,000-character section that is one paragraph renders 2,070 px while the same
+characters as ten paragraphs render 2,373 px, `H2/.../manifest.rs:29-38`). And **free and exact was still
+wrong**, because keeping it exact is not free:
+
+* Every section but the last has a **constant** length — the cut is at `SECTION_BYTES` from the section's
+  start — so inserting a byte at offset 0 moves no boundary and shifts every section's *content*.
+* So a newline can move from section `k` into section `k + 1`, and **any** section's count can change: all
+  97 are stale, not three of them.
+* `newlines.total() + 1` then disagrees with the line count the editor maintains, and the disagreement was
+  the rebuild trigger. **Measured: 3,300 µs, on one keystroke in ~21 at offset 0 — 6.6x the 500 µs budget**,
+  and it was the entire "worst" column.
+
+Nothing read the distribution, because the scroll geometry is `DocLines`' job. So the field is **removed**
+rather than maintained approximately. A second copy of a quantity another structure maintains exactly is a
+copy that drifts, and this one drifted into a 6.6x budget overrun. The keystroke gate went from
+**worst 5,746 µs** (failing) to **worst 398–419 µs**, and the gate is what caught it —
+`no_keystroke_rebuilds_the_manifest_including_a_newline` is the regression test.
+
+**Three more things the tests caught, each of which was a confident wrong answer rather than an error.**
+
+1. **Anchors were not counted, and six image gates failed at once.** The manifest said zero spans,
+   `emit_images` returned early, and the image simply did not draw — no crash, no log, `doc_glyphs == 0`. A
+   guard whose condition is *derived from a summary* can fail in the direction of quietly drawing nothing,
+   and no amount of unit-testing the summary catches it; only the end-to-end gate for the thing being
+   skipped does. Six tests failing together is the good case.
+2. **`$$` was counted per *byte*, not per *occurrence*.** Toggling a flag once per `$` meant `$$` — two
+   bytes — toggled twice and cancelled, so a formula contributed **zero** spans. Then a second version
+   counted *pairs*, which reported zero for `$$hello` — and that is wrong too: `for_each_math_span` treats
+   an unpaired `$$` as a span running to the end of its line, because that is the normal state while
+   someone is halfway through typing a formula. **One span per opener, paired or not.**
+3. **A mid-document insertion moves the *next* section, not just this one.** Two earlier versions read a
+   section to its own recorded weight, so a `$$` typed mid-document was truncated off the end of the read
+   and never seen; and one read the last section only when the caret was elsewhere, which is wrong for every
+   append because an append's caret *is* in the last section. The end is now re-derived from the cut rule
+   with a `SECTION_BYTES + 4` byte window, because the bytes after the insertion are the only place the
+   new cut can be seen.
+
+**Cost: the keystroke.** Three sections re-measured per keystroke is 196,572 bytes, and the first
+`measure` was a byte-at-a-time loop: **+254 µs, half the budget**, median 106 → 360 µs. It is now a
+word-at-a-time mask test — one branchless test per 8 bytes for the four marker bytes (`$`, and U+FFFC's
+`EF BF BC`), with the byte fallback reached only on a hit, which for prose is once per section. Measured
+**55 µs for three sections**, median at the document's start 176–271 µs and worst 398–419 µs, inside the
+500 µs budget. **The mask test is not sufficient on its own and the unit test says so**:
+`measure_agrees_with_a_byte_scan_on_every_marker_at_every_alignment` puts each marker at every offset from
+0 to 45 and caught that a word-only test **reported zero spans for an anchor at offset 0** — an anchor is
+most of an image's content, so that is a class of error where the manifest says "no images" about a
+document full of them.
+
+**Cost: 15,800 bytes.** 1,468,344 → **1,473,144** against the 2,097,152 ceiling.
+
+**Not started, and named.** Item 3, on-demand load and evict: the manifest knows *where* a section is and
+nothing yet reads it from the container, so `doc_scratch` is 0 because no emitter reads the document, not
+because a windowed reader replaced one. Item 4, `RLIMIT_MEMLOCK` ceasing to be the ceiling: `S_MAX_PAYLOAD`
+is still 8 MiB and still needs 8.53 MiB of `mlock` against this host's 8.00 MiB limit, so **the format's
+maximum document is still unopenable.** Both are item 3's work; this part made the index it will use.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -1470,16 +1584,18 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 | requirement | source | gate |
 |---|---|---|
-| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; **≤ 2.0 MiB** (was 2.5; §2.9.1); **1,452,504 B measured** at Phase 11 |
-| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on this host. **Phase 11 measures the edit half: 106 µs median / 177 µs worst at the start of a 3.1 MiB document, 1–2 µs elsewhere.** The paint half is 749 µs at 3 MiB and is Phase 12's |
+| binary static, stripped | NFR-2.3 | `ldd` → `not a dynamic executable`; **≤ 2.0 MiB** (was 2.5; §2.9.1); **1,473,144 B measured** at Phase 13 part 1 |
+| keystroke→pixel p99.9 | NFR-1.1 | ≤ 0.50 ms on this host. **Measured at Phase 13 part 1: median 176–271 µs / worst 398–419 µs at the start of a 3.1 MiB document, 59–93 µs at its middle, 2–4 µs at its end; paint 144–245 µs, flat in document size.** Phase 11's 106 µs median was before the manifest's three section reads; Phase 12 removed a 749 µs paint term and Phase 13 added 55 µs of edit |
 | image decoder cost | §2.9.1 | ≤ 60 KiB of the binary, measured by section delta |
 | atlas footprint incl. math window | §2.2, §2.9.2 | ≤ 512 KiB |
 | decoded image memory | §2.9.3 | **≤ 8.0 MiB at every point** of a page-1→50 scroll, 10 images |
 | evicted rasters scrubbed | §2.9.3 | zero after every eviction, asserted by the allocator |
 | math layout allocations | §2.9 9B | **0** between `MathNode` and frame |
 | table border alignment | §2.9 9A | exact integer pixel coordinates, not ±1 |
-| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured as of Phase 11**, and **not met at document scale**: 26.82 MiB for a 6 MiB document, crossover 2.21 MiB. §2.9.4's 12.4 MiB estimate omitted the scanout's second framebuffer, the scratch buffer and the geometry |
+| steady-state RSS | NFR-2.1 | ≤ 16.0 MiB with a 2000-page document open — **measured as of Phase 13 part 1, and still not met at document scale**: **20.82 MiB for a 6 MiB document, crossover 3.40 MiB.** `doc_scratch` is 0.00 MiB, down from 6.00. §2.9.4's 12.4 MiB estimate omitted the scanout's second framebuffer, the scratch buffer and the geometry; what remains is 1.067 for page-locked leaves + 0.545 for line geometry + 0.24 for rope slack |
 | per-keystroke allocations | invariant | **0 on the edit path**, driven through a `Session` (`tests/session_no_alloc.rs`); the paint path is non-zero until Phase 12 |
+| section residency index | §Phase 13 | **8 bytes per section** (`2 × (n+1) × u32`); 97 sections of a 6 MiB document = **784 B, 0.0013 % of the text**. A section is one container chunk, so a load is one `pread64` — `tests/session_manifest.rs` |
+| markers without reading | §Phase 13 | `Manifest::span_total()` answers "does this document contain a formula or an image" with **0 bytes read**, and four emitters guard on it — `a_prose_document_never_allocates_the_whole_document_buffer` |
 | binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
@@ -1519,6 +1635,20 @@ the desktop build, and none of this needs more than a few tens of KiB.
    lock" and therefore passes today at roughly 3.5 MiB, not at 2000 pages. Reaching the full design
    document needs Phase 13's windowing. So until Phase 13 lands, the honest claim is **~950 leaves of
    editing latency, not 2000 pages** — and §6's RSS row is not yet measured at any size.
+
+5. **The affordable document is 3.40 MiB, not 8 MiB, and that is an `mlock` ceiling rather than an RSS
+   one.** Phase 13 part 1 moved §6's RSS row from 2.20 MiB to 3.40 MiB, which is real, and the number it
+   is competing against is `S_MAX_PAYLOAD` = 8 MiB. **The gap between 3.40 and 8 is not memory.** A document's
+   text is page-locked while it is resident, 8 MiB of text needs `8 × 4096/3840 = 8.53 MiB` of `mlock`, and
+   this host's `RLIMIT_MEMLOCK` is **8.00 MiB** — so **the format's maximum document is still unopenable**,
+   exactly as Phase 11's audit found, and Phase 13 part 1 did not touch it. Only item 3 fixes it, by never
+   having the whole document resident at once. **Until then the honest claim is a 3.4 MiB document, not an
+   8 MiB one, and the reason is `mlock` rather than RAM.**
+
+6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
+   with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a
+   projection, and none of them is measured at 2000 pages, because the document is not loadable at 2000
+   pages yet (item 5). §6's row is a measurement at 6 MiB; it is not a claim about the design size.
 
 Nothing else is blocked. Phases 0–9 are fully executable on this machine, unprivileged, as
 they stand — Phase 9's two measured dependencies are both satisfied here: `/usr/share/fonts/google-noto/

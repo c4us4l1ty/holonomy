@@ -65,6 +65,11 @@ holonomy-text = { path = "../holonomy-text" }
 holonomy-x11 = { path = "../holonomy-x11", optional = true }
 
 [dev-dependencies]
+# `CHUNK_PLAINTEXT`, for the Phase 13 gate's claim that a section is one container chunk. Only reachable
+# here because the test asserts the *derivation*: if the format's chunk size changes, the section size has
+# to change with it, and `session_manifest.rs::a_section_is_the_size_of_one_container_chunk` is what
+# notices.
+holonomy-container = { path = "../holonomy-container" }
 # `sysconf(_SC_PAGESIZE)`, for the RSS gate in `tests/session_rss.rs`. `/proc/self/statm` counts
 # resident *pages*, and a gate that hard-codes 4,096 is a gate that is silently wrong on a host with
 # 16 KiB or 64 KiB pages.

@@ -223,6 +223,19 @@ pub struct SessionStats {
     pub glyphs_drawn: u32,
     /// Border runs drawn in the last paint.
     pub table_borders_drawn: u32,
+    /// Section-manifest updates, from [`crate::manifest::Sync::OneSection`]. Phase 13.
+    ///
+    /// **Two per keystroke is the expected steady state**, not a smell: [`Manifest::sync`] re-measures the
+    /// caret's section and the last one, because a byte appended at the end belongs to the last section and
+    /// no line count would say so. The gate that asserts this is `tests/session_manifest.rs`'s
+    /// `a_keystroke_updates_sections_and_never_rebuilds_one`.
+    pub section_updates: u64,
+    /// Section-manifest rebuilds, from [`crate::manifest::Sync::Rebuilt`]. Phase 13.
+    ///
+    /// **Should be about one keystroke in forty**, on the newline. A number much above that means
+    /// boundaries are moving on ordinary keystrokes, which is the fixed-size-section tax and would be worth
+    /// a different section size.
+    pub section_rebuilds: u64,
     /// Images inserted by `Ctrl+I` or [`Session::insert_image`].
     pub image_inserts: u32,
     /// Image nodes emitted in the last paint.
@@ -322,6 +335,25 @@ pub struct Session<'a> {
     /// were `O(bytes before the caret)` and ran on every keystroke. See [`crate::doclines`] for why the
     /// terminator convention is this module's problem and not `LineGeometry`'s.
     lines: DocLines,
+    /// The document's sections: where they are, how tall they are, and what they contain. Phase 13.
+    ///
+    /// **The reason this field earns 6 MiB.** `Manifest::span_total` answers *"does this document contain
+    /// a formula, a table or an image?"* without reading it, and four emitters ask that question before
+    /// deciding whether to read the document at all. A document with none of them — which is most
+    /// documents, and all 97% of a book — answers zero from **1,164 bytes of structure**.
+    ///
+    /// Phase 12 could not remove `doc_scratch` because *"does this document contain any math"* could not
+    /// be asked without reading the bytes to find the `$$`. This is the answer to that, and it is a
+    /// question about structure rather than content, which is what a manifest is.
+    manifest: crate::manifest::Manifest,
+    /// Scratch for [`Manifest::sync`]'s two section reads. Phase 13.
+    ///
+    /// Sized to [`crate::manifest::SECTION_BYTES`] and allocated once, like `line_scratch`: a scratch that
+    /// grows on the keystroke path is one allocation per growth, and two section reads per keystroke is
+    /// exactly the place where that would show up. `sync_manifest` takes it with `mem::take` because
+    /// `Manifest::sync` needs `&mut Vec<u8>` and `&self.editor` at the same time, and both are fields of
+    /// `self` — a borrow-checker consequence worth naming rather than working around with a clone.
+    manifest_scratch: Vec<u8>,
     /// The status bar's word and line totals, maintained as deltas. Phase 11 item 4.
     ///
     /// Built by a full scan at construction and folded forward by every edit whose bytes the caller
@@ -466,9 +498,17 @@ impl<'a> Session<'a> {
         // docs call it the cost of typing a newline; it must not also be the cost of the *first*
         // keystroke in a session, which is exactly what happens if the geometry starts as an empty
         // document's -- the first `sync_lines` sees a line-count mismatch and rebuilds.
-        let lines = {
+        //
+        // **One read at open, shared.** `DocLines` and `Manifest` are both built from the document's bytes
+        // and both need all of them, so they share a single `editor.text()`. This is the *open* path, so
+        // the whole-document read is correct here: it happens once, before the first frame, and it is what
+        // lets neither structure ever need it again.
+        let (lines, manifest) = {
             let text = editor.text().unwrap_or_default();
-            DocLines::build(&text, holonomy_geometry::LineMetrics::default())
+            (
+                DocLines::build(&text, holonomy_geometry::LineMetrics::default()),
+                crate::manifest::Manifest::from_text(&text),
+            )
         };
         let counts = TextCounts::scan(&editor);
         let state = ChromeState {
@@ -505,6 +545,8 @@ impl<'a> Session<'a> {
             tables_shape_dirty: false,
             // Built from the document; see the comment at the `DocLines::build` call above.
             lines,
+            manifest,
+            manifest_scratch: vec![0u8; crate::manifest::SECTION_BYTES],
             counts,
             doc_scratch: Vec::new(),
             // Allocated once at construction, not on first use: the first paint happens during
@@ -719,6 +761,17 @@ pub fn paint_stats(&self) -> &holonomy_display::paint::PaintStats {
 /// column writes it nine times.
 pub fn text_rect(&self) -> DamageRect {
     self.chrome.layout.text
+}
+
+/// The document's section manifest. Phase 13.
+///
+/// **Public so the gate can ask it the question four emitters ask.** [`crate::manifest::Manifest::span_total`]
+/// answers *"does this document contain a formula, a table or an image?"* without reading it, which is the
+/// capability Phase 12 named as the blocker it could not remove — and `tests/session_manifest.rs` holds
+/// both directions down: prose must not allocate the whole-document buffer, and a document with a formula
+/// must.
+pub fn manifest(&self) -> &crate::manifest::Manifest {
+    &self.manifest
 }
 
 /// How many bytes of the page buffer the last body-text emit read. Phase 12.
@@ -1427,6 +1480,13 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         // answers with the *previous* document's line numbers. Every edit syncs, so the tree is never
         // stale at the top of this function.
         self.sync_lines();
+        // **And the section manifest**, for the same reason and at the same point: `DocLines` answers line
+        // questions and `Manifest` answers *"does this document contain a formula, table or image?"*,
+        // which is the question four emitters ask before deciding whether to read the whole document.
+        // Synced here rather than lazily because a manifest that is stale about `span_total` would make
+        // `publish_line_heights` skip a formula that exists, and the symptom would be a formula that
+        // silently stops rendering.
+        self.sync_manifest();
         // And the status bar's totals, from the deltas the caller folded. O(1): this is a three-field
         // copy out of `TextCounts`, not a recount. See `publish_counts` for why the two maintained
         // quantities are published at their own points rather than together.
@@ -1495,6 +1555,31 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// [`Session::recount_words_and_lines`] for why it stays.
     pub fn recount_counts(&mut self) {
         self.recount_words_and_lines();
+    }
+
+    /// Bring the section manifest back into agreement with the document. Phase 13.
+    ///
+    /// # Three sections per keystroke, and where the 6 MiB went
+    ///
+    /// [`Manifest::sync`] takes the [`Editor`] rather than the document's bytes **so that it can read three
+    /// sections instead of the whole document**. That is the whole reason it is not `fn sync(&[u8])`: a
+    /// slice-based version is correct and costs 6 MiB per keystroke, which is precisely the number Phase 11
+    /// spent a phase removing. Three sections is 196 KiB — a 32x reduction — and `read_into` allocates
+    /// nothing, so there is no `Vec` growth either.
+    ///
+    /// **The rebuild branch is the only whole-document read on the keystroke path**, and it happens when a
+    /// line appears or vanishes, because fixed-size sections shift. Same trade as `DocLines::sync`, in a
+    /// second currency, and one keystroke in forty.
+    pub fn sync_manifest(&mut self) {
+        let caret = self.editor.caret() as u32;
+        let mut scratch = std::mem::take(&mut self.manifest_scratch);
+        let out = self.manifest.sync(&self.editor, caret, &mut scratch);
+        self.manifest_scratch = scratch;
+        match out {
+            crate::manifest::Sync::OneSection => self.stats.section_updates += 1,
+            crate::manifest::Sync::Rebuilt => self.stats.section_rebuilds += 1,
+            crate::manifest::Sync::Unchanged => {}
+        }
     }
 
     /// Copy the maintained totals into the state the status bar draws from.
@@ -1634,6 +1719,13 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// rather than a scan.
     fn image_blocks(&mut self) -> Vec<(u32, u32)> {
         if self.editor.assets().is_empty() {
+            return Vec::new();
+        }
+        // **And the manifest's span count, which covers anchors as well as formulas.** `scan_anchors` is
+        // the other byte cursor that forces a whole-document read, and it is looking for a marker the
+        // manifest already counted. Same trade as `math_blocks_for`: free, exact, wrong only if the
+        // manifest is stale.
+        if self.manifest.span_total() == 0 {
             return Vec::new();
         }
         let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
@@ -2005,6 +2097,12 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         if self.editor.assets().is_empty() {
             return;
         }
+        // **And the manifest's span count, which counts anchors as well as formulas.** `scan_anchors` is
+        // the other byte cursor that forces a whole-document read. Free, exact, wrong only if the manifest
+        // is stale -- and it is synced on every edit before anything paints.
+        if self.manifest.span_total() == 0 {
+            return;
+        }
         let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             return;
         };
@@ -2274,6 +2372,13 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         self.stats.math_rules = 0;
         self.stats.math_parse_errors = 0;
 
+        // **The manifest answers "is there anything here to draw?" for free.** Phase 12's remaining work,
+        // and the reason this is the whole 6.00 MiB: `read_document` below is the only thing that grows
+        // `doc_scratch`, and it was called unconditionally because the span scanners are byte cursors. The
+        // manifest counted the same markers once at open. `tests/session_manifest.rs` holds this down.
+        if self.manifest.span_total() == 0 {
+            return;
+        }
         let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
             return;
         };
@@ -2464,6 +2569,19 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// the two disagree the displacement the line model applies is for one formula and the pixels are
     /// another, and a wrong displacement is invisible in the counters: the formula still draws.
     fn math_blocks_for(&mut self) -> Vec<(u32, u32)> {
+        // **The 6 MiB read, removed.** Phase 12 named this as the blocker it could not fix: it called
+        // `read_document` unconditionally because `for_each_math_span` is a cursor over bytes and *"does
+        // this document contain any math"* could not be asked without reading them to find the `$$`.
+        // [`crate::manifest::Manifest`] answers it from structure — a `u32` per section, 12 bytes each,
+        // built at open — and the answer is **zero for a document with no formula in it**.
+        //
+        // So the check is free, exact, and wrong only if the manifest is stale, and the manifest is synced
+        // on every edit by [`Session::sync_manifest`] before anything paints. A stale manifest would make
+        // this skip a formula that exists; `tests/session_manifest.rs`'s
+        // `a_formula_appears_and_the_manifest_notices_within_one_keystroke` is what holds that down.
+        if self.manifest.span_total() == 0 {
+            return Vec::new();
+        }
         let mut mm = MathMetrics::new(self.chrome.metrics.cell_w, self.chrome.metrics.cell_h);
         mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
         let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {

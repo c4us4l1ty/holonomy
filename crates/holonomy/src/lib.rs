@@ -16,6 +16,7 @@
 pub mod args;
 pub mod counts;
 pub mod doclines;
+pub mod manifest;
 pub mod session;
 #[cfg(feature = "desktop")]
 pub mod windowed;
