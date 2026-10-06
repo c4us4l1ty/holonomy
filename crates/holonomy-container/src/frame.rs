@@ -69,6 +69,22 @@ pub enum FrameError {
     },
     /// The title was not valid UTF-8.
     TitleNotUtf8,
+    /// Phase 13: a chunk authenticated, but decrypted to fewer bytes than the frame's `content_len` says
+    /// that chunk holds.
+    ///
+    /// **Distinct from `AuthenticationFailed` and from `ChunkCountMismatch`, and the distinction is the
+    /// point.** Authentication passed, so the key is right and the bytes are intact; the frame's own length
+    /// arithmetic is what disagrees. Reporting it as an AEAD failure would tell a user with a perfectly good
+    /// passphrase that they typed it wrong, which is the one answer a word processor must never give
+    /// wrongly.
+    ContentMismatch {
+        /// The chunk that came up short.
+        index: u64,
+        /// Bytes the chunk held.
+        got: u64,
+        /// Bytes the frame said it holds.
+        want: u64,
+    },
     /// The frame's `chunk_count` disagreed with the caller's.
     ChunkCountMismatch {
         /// What the frame says.
@@ -107,6 +123,10 @@ impl core::fmt::Display for FrameError {
             Self::ChunkCountMismatch { frame, caller } => {
                 write!(f, "frame says {frame} chunks, caller expects {caller}")
             }
+            Self::ContentMismatch { index, got, want } => write!(
+                f,
+                "chunk {index} authenticated but held {got} bytes where the frame says {want}"
+            ),
             Self::ContentLengthMismatch {
                 content_len,
                 implied,

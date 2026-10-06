@@ -75,6 +75,16 @@ pub enum ContainerError {
     },
     /// The CSPRNG failed.
     NoEntropy,
+    /// Phase 13: a chunk index that does not exist, or is the master frame.
+    ///
+    /// **A separate variant rather than a generic `Io` error**, because "which chunks exist" is answered by
+    /// [`Wavefunction::chunk_content_offset`] and a caller that gets `None` there should get the same
+    /// answer here. A caller that has to match on an `io::ErrorKind` to discover a bounds violation is a
+    /// caller that will not discover it.
+    NoSuchChunk {
+        /// The index asked for.
+        index: u64,
+    },
 }
 
 impl core::fmt::Display for ContainerError {
@@ -90,6 +100,9 @@ impl core::fmt::Display for ContainerError {
                 write!(f, "{requested} bytes exceeds the {cap}-byte payload cap")
             }
             Self::NoEntropy => f.write_str("the operating system CSPRNG failed"),
+            Self::NoSuchChunk { index } => {
+                write!(f, "chunk {index} does not exist or is the master frame")
+            }
         }
     }
 }
@@ -338,6 +351,124 @@ impl Wavefunction {
         };
         this.ring.chunks = this.frame.chunk_count;
         Ok(this)
+    }
+
+    /// Read **one chunk** of document plaintext into `out`, and return how many bytes it holds. Phase 13.
+    ///
+    /// # Why this exists, and what it is the primitive for
+    ///
+    /// **The container had no way to hand out part of a document.** `read_content` reads all of it — one
+    /// `Vec` of `content_len` bytes, 8 MiB at `S_MAX_PAYLOAD` — and `read_raw` returns *ciphertext*. The
+    /// only other way at the bytes was `Ring::seek`, which is the **write** pipeline's three-stage window
+    /// and needs a `&DirectFile` that `Wavefunction` keeps private.
+    ///
+    /// So a windowed reader had no primitive to build on, and this is it: **one chunk, one authenticated
+    /// read, no allocation.** Phase 13's residency policy wants a section — which is
+    /// [`crate::layout::CHUNK_PLAINTEXT`] bytes by construction — so one call is one section and a load is
+    /// one `pread64` plus one `open_chunk`.
+    ///
+    /// # Why it does not go through the ring
+    ///
+    /// **The ring is three stages and it prefetches.** `seek` moves a sliding window of three chunks and
+    /// reads the neighbours on the way, which is right for sequential `read_content` and wrong here: a
+    /// windowed reader asking for chunk 47 does not want 46 and 48, and on a 97-chunk document prefetching
+    /// every request would read the whole file. So this reads one slot directly and leaves the ring alone.
+    /// The cost is that a caller walking chunks 1..N gets no prefetch, and `read_content` still exists for
+    /// that case.
+    ///
+    /// # The security properties, unchanged
+    ///
+    /// * `open_chunk` **authenticates**. A flipped bit anywhere in the slot — ciphertext or tag — is
+    ///   `AeadError`, and the error is reported rather than returned as plaintext. That is the whole reason
+    ///   the slot is decrypted into a caller-supplied buffer instead of being `read_exact_at`'d and used
+    ///   raw.
+    /// * **Chunk 0 is not readable through this.** It is the master frame, not content, and `read_content`
+    ///   starts at 1. Allowing index 0 here would let a caller confuse the frame's bytes — which carry the
+    ///   title and the KDF parameters — with document text.
+    /// * **The index is bounds-checked against the frame's own `chunk_count`,** which is authenticated data
+    ///   read from chunk 0. So an out-of-range index is refused against a number that came from the sealed
+    ///   frame, not from a caller.
+    /// * The slot buffer is **wiped after the open**, because it held ciphertext and `DirectFile` is
+    ///   `O_DIRECT` throughout; a slot left in a heap allocation is a 64 KiB window onto the file.
+    ///
+    /// # `out` is filled, not appended, and may be longer than the chunk
+    ///
+    /// The return value is the authoritative length, and it is `content_len - chunk_start` for the last
+    /// chunk and `CHUNK_PLAINTEXT` otherwise. `out` is cleared first so a shorter chunk cannot leave the
+    /// tail of a previous longer one visible to a caller that trusts the slice length — the same reasoning
+    /// as `master_frame`'s "exactly one chunk" comment, for a different mistake.
+    pub fn read_chunk_into(
+        &self,
+        index: u64,
+        out: &mut [u8],
+    ) -> Result<usize, ContainerError> {
+        if index == MASTER_FRAME_CHUNK {
+            return Err(ContainerError::NoSuchChunk { index });
+        }
+        if index >= self.frame.chunk_count {
+            return Err(ContainerError::NoSuchChunk { index });
+        }
+        if out.len() < CHUNK_PLAINTEXT {
+            return Err(ContainerError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "a chunk needs {CHUNK_PLAINTEXT} bytes of output and {} were given",
+                    out.len()
+                ),
+            )));
+        }
+        // Content byte 0 is chunk 1's byte 0, so the offset is `(index - 1) * CHUNK_PLAINTEXT`.
+        let start = (index - 1) * CHUNK_PLAINTEXT as u64;
+        let remaining = (self.frame.content_len as u64).saturating_sub(start);
+        let want = remaining.min(CHUNK_PLAINTEXT as u64) as usize;
+
+        let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
+        // **Copy out before wiping, and the order is load-bearing.** `aead::open_chunk` decrypts *in
+        // place* — the module's own doc says "sealed or opened in place" (`aead.rs:4`) — so the plaintext
+        // lands in the first `CHUNK_PLAINTEXT` bytes of the slot that held its own ciphertext. Wiping
+        // first and reading after returns 65,520 zeros for every chunk, which authenticates fine and looks
+        // like a perfectly good chunk of empty document.
+        let opened = (|| -> Result<usize, ContainerError> {
+            self.file
+                .read_exact_at(layout::chunk_offset(self.omega, index), &mut slot)?;
+            let got = aead::open_chunk(
+                &self.root.k_enc,
+                &self.root.n_root,
+                index,
+                slot.as_mut_slice(),
+            )?;
+            if (got as u64) < want as u64 {
+                // A chunk decrypted to fewer bytes than the frame says it holds. That is not a
+                // wrong-passphrase case -- authentication already passed -- so it is a *frame*
+                // disagreement rather than an `Aead` one, which keeps "the file is inconsistent" distinct
+                // from "the key is wrong" instead of folding both into `AuthenticationFailed`.
+                return Err(ContainerError::Frame(FrameError::ContentMismatch {
+                    index,
+                    got: got as u64,
+                    want: want as u64,
+                }));
+            }
+            out[..want].copy_from_slice(&slot.as_slice()[..want]);
+            Ok(want)
+        })();
+        // Wiped on every path including the error path: the slot held ciphertext and then plaintext.
+        slot.wipe();
+        opened
+    }
+
+    /// The plaintext byte offset of chunk `index`'s first byte, or `None` if the chunk does not exist.
+    ///
+    /// **The other half of [`Wavefunction::read_chunk_into`], and the reason it is a method and not
+    /// arithmetic at the call site.** Content byte 0 is chunk 1's byte 0 — chunk 0 is the master frame — so
+    /// the mapping is `(index - 1) * CHUNK_PLAINTEXT`, and getting it wrong is an off-by-one-chunk that
+    /// decrypts successfully and returns *plausible wrong text*. Phase 13's `SectionStore` maps a section
+    /// index to a chunk index through here rather than computing it, for the same reason
+    /// `LineGeometry` is the only thing that converts a line to a byte.
+    pub fn chunk_content_offset(&self, index: u64) -> Option<u64> {
+        if index == MASTER_FRAME_CHUNK || index >= self.frame.chunk_count {
+            return None;
+        }
+        Some((index - 1) * CHUNK_PLAINTEXT as u64)
     }
 
     /// Read the whole document plaintext.

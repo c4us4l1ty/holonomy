@@ -1530,6 +1530,63 @@ because a windowed reader replaced one. Item 4, `RLIMIT_MEMLOCK` ceasing to be t
 is still 8 MiB and still needs 8.53 MiB of `mlock` against this host's 8.00 MiB limit, so **the format's
 maximum document is still unopenable.** Both are item 3's work; this part made the index it will use.
 
+##### Phase 13, part 2, step 1 — the primitive: one chunk of a document, on demand
+
+`Wavefunction::read_chunk_into` and `Wavefunction::chunk_content_offset`;
+`crates/holonomy-container/tests/chunk_read.rs`, 9 tests.
+
+**The container had no way to hand out part of a document.** This is the fact that stopped item 3, and it
+is worth stating plainly because it is not obvious from the API's shape:
+
+* `read_content` reads **all** of it — one `Vec` of `content_len`, 8 MiB at the ceiling.
+* `read_raw` returns **ciphertext**.
+* The only other route to plaintext was `Ring::seek`, which is the **write** pipeline's three-stage sliding
+  window, and it needs a `&DirectFile` that `Wavefunction` keeps private.
+
+So a windowed reader had nothing to stand on. `read_chunk_into` is **one chunk, one authenticated read, no
+allocation**, and a section is `CHUNK_PLAINTEXT` bytes by construction — so one call is one section and a
+load is one `pread64` plus one `open_chunk`.
+
+**It deliberately does not go through the ring.** `seek` prefetches its neighbours, which is right for
+sequential `read_content` and wrong here: a windowed reader asking for chunk 47 does not want 46 and 48, and
+on a 97-chunk document prefetching every request would read the whole file. `chunks_read_the_same_in_any_order`
+is the gate for that, and it matters because `Ring::seek` is *order-sensitive by construction* — a
+windowed reader built on it would read every intervening chunk when walking backwards.
+
+**Security properties, all inherited and one new.** `open_chunk` authenticates, so a flipped bit is an error
+rather than plaintext. **Chunk 0 is refused** — it is the master frame, and its plaintext holds the title and
+the KDF parameters, which are short enough not to look wrong in place of prose. **The index is bounds-checked
+against the frame's own `chunk_count`**, which is authenticated data read from chunk 0, so the check is
+against a number that came from the seal rather than from a caller. The slot is **wiped on every path
+including the error path**.
+
+**Two bugs the tests caught, both silent.**
+
+1. **The copy came after the wipe, so every chunk read back as 65,520 zeros.** `aead::open_chunk` decrypts
+   **in place** — the AEAD module's own doc says "sealed or opened in place" (`aead.rs:4`) — so the plaintext
+   lands in the first `CHUNK_PLAINTEXT` bytes of the slot that held its own ciphertext. Wiping first and
+   reading after is *wipe-then-copy*, and it authenticates perfectly while returning an empty document.
+   **Six of nine tests failed on it and every failure looked like an empty document rather than a bug.**
+2. **The maximum document is 8,321,040 bytes, not `S_MAX_PAYLOAD`.** `chunks_for(n) = n.div_ceil(65,520) + 1`
+   reserves a whole slot for the master frame, and `payload_len(chunks) ≤ 8,388,608` then forces
+   `chunks ≤ 128`, so content is capped at `127 × 65,520`. The 128th slot's trailing **2,032 bytes are
+   unreachable as content — 0.024 % of the payload.** Not fixed here: a partial trailing chunk is a format
+   change and the frame's `chunk_count` is authenticated data. Recorded because it is a number a reader
+   should not have to derive, and because it is smaller than the ceiling it is derived from.
+
+**What this makes possible, and what it does not do.** The maximum document now reads back through **one
+65,520-byte buffer** — `maximum document: 8321040 bytes in 127 chunks` — which is the mechanism item 4
+needs. **It does not yet stop anything being resident.** `Editor` still holds the whole document in a rope of
+page-locked 4 KiB leaves, so `mlock` occupancy is unchanged and **the format's maximum document is still
+unopenable**: 8,321,040 bytes of text needs 8.88 MiB of `mlock` against this host's 8.00 MiB limit.
+
+**The concrete blocker for the rest of item 3, which is a design decision and not a bug.** `Editor` assumes
+the document is contiguous and resident: `text_len()`, `read_into`, the caret, every edit path, the span
+maps and the undo stack all read it as one rope. Making it sparse means `read_into` pulls from the store and
+**an edit that is not in a resident section has to make it resident first** — so the store and the editor
+have to agree on which sections are resident, and the manifest is the only thing that knows. That is the
+next step, and it is a change to `holonomy-text` rather than to the container.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -1596,6 +1653,8 @@ the desktop build, and none of this needs more than a few tens of KiB.
 | per-keystroke allocations | invariant | **0 on the edit path**, driven through a `Session` (`tests/session_no_alloc.rs`); the paint path is non-zero until Phase 12 |
 | section residency index | §Phase 13 | **8 bytes per section** (`2 × (n+1) × u32`); 97 sections of a 6 MiB document = **784 B, 0.0013 % of the text**. A section is one container chunk, so a load is one `pread64` — `tests/session_manifest.rs` |
 | markers without reading | §Phase 13 | `Manifest::span_total()` answers "does this document contain a formula or an image" with **0 bytes read**, and four emitters guard on it — `a_prose_document_never_allocates_the_whole_document_buffer` |
+| read one section of a document | §Phase 13 | `Wavefunction::read_chunk_into` reads **one chunk, one authenticated read, no allocation**, in any order. The **maximum document — 8,321,040 B in 127 chunks — reads back through one 65,520-byte buffer** — `tests/chunk_read.rs` |
+| container reads one section, refused cases | §Phase 13 | chunk 0 refused as content (it is the master frame), out-of-range refused not clamped, short output refused, and the slot wiped on every path including the error path |
 | binary static, stripped, default build | §6 | **1,441,912 B measured** at Phase 11; the 1,101,944 in §9B predates 9C/9X and was stale |
 | document open time | §13 | printed and gated; a 2000-page document is a target, not an extrapolation |
 | KDF peak RSS | NFR, §1.2 | ≤ 400 MiB |
@@ -1638,12 +1697,15 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 5. **The affordable document is 3.40 MiB, not 8 MiB, and that is an `mlock` ceiling rather than an RSS
    one.** Phase 13 part 1 moved §6's RSS row from 2.20 MiB to 3.40 MiB, which is real, and the number it
-   is competing against is `S_MAX_PAYLOAD` = 8 MiB. **The gap between 3.40 and 8 is not memory.** A document's
-   text is page-locked while it is resident, 8 MiB of text needs `8 × 4096/3840 = 8.53 MiB` of `mlock`, and
-   this host's `RLIMIT_MEMLOCK` is **8.00 MiB** — so **the format's maximum document is still unopenable**,
-   exactly as Phase 11's audit found, and Phase 13 part 1 did not touch it. Only item 3 fixes it, by never
-   having the whole document resident at once. **Until then the honest claim is a 3.4 MiB document, not an
-   8 MiB one, and the reason is `mlock` rather than RAM.**
+   competes against is the format's maximum document, which is **8,321,040 bytes, not `S_MAX_PAYLOAD`** —
+   `chunks_for` reserves a whole slot for the master frame and refuses a partial trailing chunk, so 2,032
+   bytes of the payload are unreachable as content. **The gap between 3.40 MiB and 8.32 MB is not memory.**
+   A document's text is page-locked while it is resident, 8,321,040 bytes of text needs
+   `8,321,040 × 4096/3840 = 8.88 MiB` of `mlock`, and this host's `RLIMIT_MEMLOCK` is **8.00 MiB** — so
+   **the format's maximum document is still unopenable**, exactly as Phase 11's audit found.
+   Phase 13 part 2 step 1 made it *readable in principle* (it comes back through one 65,520-byte buffer) and
+   did not make it *openable*, because `Editor` still holds the whole document resident.
+   **Until then the honest claim is a 3.4 MiB document, and the reason is `mlock` rather than RAM.**
 
 6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
    with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a
