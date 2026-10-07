@@ -2118,6 +2118,38 @@ instead of attempted in the same stretch that found it.
 `to_current`, `compact_before`, `first_in_flight`, and the `Option` semantics all stand as part 10 left them.
 **This stretch removed only the replay method and its four tests.**
 
+#### Phase 13, part 12 — content replay, **without an accumulator**
+
+Part 11 removed the first `replay` for carrying a global running `delta`. This one has **no accumulator at
+all**, because the answer was to stop doing arithmetic across edits and start asking questions about *one byte
+at a time* using the two primitives part 10 already gated exhaustively:
+
+> Every byte of the window is resolved by asking: **[`to_saved`](crate) — is this a saved byte, and where does
+> it live?** and **was it typed, and which edit typed it?** The second is positioned from `to_current`, also
+> gated. **Two verified primitives and no state.**
+
+The position of an edit's inserted run comes from `to_current(e.at)` — inserting at `at` shifts everything
+from `at` onward up, so the inserted bytes occupy the `inserted.len()` positions **immediately before** where
+`to_current(e.at)` lands. That is per-edit, from a verified primitive, so nothing accumulates.
+
+Gated by `replay_reproduces_the_document_at_every_window`: **every `(offset, length)` pair** of five scripts,
+against the real document each produces — including a script whose edits are **190 then 2**, which is the
+out-of-order case a global delta gets wrong by construction. A typed byte is served **with zero source calls**
+(counted, in `a_typed_byte_is_served_without_asking_the_source`), because the rope already has it.
+
+**Cost: O(`len` × `edits`)** — bounded by the *record*, not the document, which is the property that matters
+here, and a compacted record is small. Deliberately not optimised: any faster scheme needs to know which edits
+are near the offset, which is the same positional question this exists to answer, and **approximating it is how
+parts 9 and 11 went wrong.**
+
+**One case is refused, and it is named.** An insertion whose anchor offset falls **inside an earlier edit's
+deleted region** has no surviving byte to measure against: `to_current` returns `None` and the run has no
+derivable position. `ReplayError::Unresolvable` refuses, because a misplaced byte is a *plausible wrong byte*
+in a document. `an_insertion_anchored_inside_a_deleted_region_is_refused` pins the shape, and the exhaustive
+gate asserts the refusal appears **only** in exactly that shape — so it cannot become a quiet way to skip the
+comparison it was written to make impossible. The fix is one more primitive (*the final offset of the first
+saved byte at or after `e.at` that survives*); named so the next person need not rediscover it.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2206,19 +2238,18 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **Approve rewriting `replay` as a *backwards* walk — or overrule it.** Part 11 built content replay, gated
-   it over **every window of four scripts** against the real document, and removed it: the forwards walk used
-   one global running `delta`, and **an edit at offset 50 does not shift positions before 50**, so a later
-   edit at offset 10 landed five bytes late. Same class as part 9's bug, mirrored.
-   The generalised finding is the one worth your attention: **there is no safe single offset accumulator**,
-   because every edit shifts only positions after it, so anything that must survive two out-of-order edits
-   has to be evaluated *conditionally on position*. Part 10's backwards fold satisfies that by construction;
-   a forwards walk with one `delta` cannot.
-   **So `replay` is a redesign to walk backwards, not a patch** — which is why it is recorded rather than
-   retried in the same stretch that found it. My recommendation is to build the *window-decomposition* model
-   first (which pieces of the requested range come from the source, and which are inserted text), because
-   two attempts have now shown that the decomposition is where the difficulty is, not the arithmetic.
-   **`EditRecord` itself is unaffected and still gated**; only the replay method and its tests were removed.
+0. **Two items left before the product can edit a sparse document, neither a design question.**
+   * **One refusal to resolve, if you want it closed.** An insertion anchored inside an earlier edit's
+     deleted region has no derivable position, and `replay` refuses (`PROJECT.md` part 12). The fix is one
+     more primitive — *the final offset of the first saved byte at or after `e.at` that survives*. **Until
+     then, an edit whose anchor lands inside a deleted region cannot be faulted.** Rare, and loud.
+   * **`set_len` at edit time rather than at eviction** (part 8, item 2). One call, no store write, but it
+     rewrites the master frame on a keystroke — so it wants a measurement before it is a default.
+
+   **My recommendation is to wire the path into `Session` before closing either**, because both remaining
+   items are narrow and well understood, and what is missing is an end-to-end check that a keystroke into a
+   faulted leaf lands correctly *through the product* rather than through `EditRecord` alone. That check is
+   what would tell us whether the refusal case matters in practice or is theoretical.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop

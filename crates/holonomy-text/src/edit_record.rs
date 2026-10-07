@@ -183,6 +183,140 @@ impl EditRecord {
         Some(at.max(0) as usize)
     }
 
+    /// Where the bytes this edit inserted ended up, in final-document coordinates.
+    ///
+    /// **Derived from [`to_current`](Self::to_current), which is exhaustively gated — and that is the whole
+    /// point of this method.** Parts 9 and 11 each failed because they carried an offset accumulator across
+    /// edits and applied it unconditionally; an edit at 50 does not shift a position at 10. Computing the
+    /// position *per edit*, from a verified primitive, removes the accumulator entirely rather than fixing it.
+    ///
+    /// Inserting at `at` shifts everything from `at` onward up by `inserted.len()`, so the byte that was at
+    /// `at` ends at `to_current(at)` and **the inserted bytes occupy the `inserted.len()` positions
+    /// immediately before it**.
+    ///
+    /// `None` when `at` falls inside an earlier edit's removed run — the overlapping-delete case, where the
+    /// byte this edit inserted at no longer exists to be measured against. **Not worked around**: the caller
+    /// treats it as "this edit's position is not derivable" and says so rather than guessing.
+    fn inserted_run(&self, e: &Edit) -> Option<(usize, usize)> {
+        if e.inserted.is_empty() {
+            return None;
+        }
+        let end = self.to_current(e.at)?;
+        Some((end.checked_sub(e.inserted.len())?, e.inserted.len()))
+    }
+
+    /// The byte currently at `q` if it was **typed**, as `(which edit, index into that edit's inserted
+    /// bytes)`. `None` if `q` is a saved byte.
+    ///
+    /// **Scans every edit's final run, so it is O(edits) — and deliberately so.** Any faster scheme needs to
+    /// know *which* edits are near `q`, which is the same positional question this function exists to answer,
+    /// and answering it with an approximation is how parts 9 and 11 went wrong. A compacted record is small,
+    /// and this is called once per byte of a leaf-sized read, so the cost is bounded by the record rather than
+    /// by the document.
+    fn typed_byte(&self, q: usize) -> Option<(usize, usize)> {
+        for (i, e) in self.edits.iter().enumerate() {
+            if let Some((start, n)) = self.inserted_run(e) {
+                if q >= start && q < start + n {
+                    return Some((i, q - start));
+                }
+            }
+        }
+        None
+    }
+
+    /// Turn the source's **saved** bytes into the **current** bytes for `[current_at, current_at + len)`.
+    ///
+    /// This is the other half of the record, and it is what part 10 left out. [`to_saved`](Self::to_saved)
+    /// answers *where* the rope's bytes live; this produces *what they are*.
+    ///
+    /// `fetch(saved_at, saved_len)` supplies the source's bytes for a saved range, and **may be called more
+    /// than once** when the window needs two disjoint saved ranges.
+    ///
+    /// ## There is no accumulator here, and that is the design
+    ///
+    /// Parts 9 and 11 each failed the same way: a running `delta` applied unconditionally across edits, which
+    /// is wrong because **an edit only shifts positions after it**. So this does not walk at all. Every byte
+    /// of the window is resolved by asking a question about *that byte*:
+    ///
+    /// * [`to_saved`](Self::to_saved) — is this a saved byte, and where does it live? Already exhaustively
+    ///   gated in part 10.
+    /// * [`typed_byte`](Self::typed_byte) — or was it typed, and which edit typed it? Positioned from
+    ///   [`to_current`](Self::to_current), also gated.
+    ///
+    /// **Two verified primitives and no state.** The cost is O(`len` × `edits`) — for a leaf-sized read and a
+    /// compacted record that is small, and it is bounded by the record rather than by the document, which is
+    /// the property that matters here.
+    ///
+    /// ## Refusals
+    ///
+    /// A window starting on a typed byte is a **refusal, not a guess**: the rope already holds those bytes —
+    /// typing is what put them there — so any answer would be a different byte. And a byte that is *neither*
+    /// a saved byte nor a locatable typed one is [`ReplayError::Unresolvable`], which means the record cannot
+    /// describe this document and **saying so is the only safe answer**.
+    pub fn replay<F>(
+        &self,
+        current_at: usize,
+        len: usize,
+        mut fetch: F,
+    ) -> Result<Vec<u8>, ReplayError>
+    where
+        F: FnMut(usize, usize) -> Vec<u8>,
+    {
+        // **Checked for overflow and then discarded**, which looks odd and is not: the window's end is
+        // `current_at + len`, and an overflow would wrap it to a small number, so every byte index below
+        // would be wrong in a way no length check catches. The error variant is the whole of the check.
+        current_at.checked_add(len).ok_or(ReplayError::WindowOutOfRange)?;
+        let mut out = vec![0u8; len];
+        if len == 0 {
+            return Ok(out);
+        }
+
+        // Gather the saved bytes the window needs, as a set of runs so `fetch` is called per run and not
+        // per byte. A run is a maximal ascending stretch of saved offsets with no gap.
+        let mut saved_at: Vec<Option<usize>> = Vec::with_capacity(len);
+        let mut typed: Vec<Option<(usize, usize)>> = Vec::with_capacity(len);
+        for i in 0..len {
+            let q = current_at + i;
+            match self.to_saved(q) {
+                Some(s) => {
+                    saved_at.push(Some(s));
+                    typed.push(None);
+                }
+                None => {
+                    let t = self
+                        .typed_byte(q)
+                        .ok_or(ReplayError::Unresolvable { at: q })?;
+                    saved_at.push(None);
+                    typed.push(Some(t));
+                }
+            }
+        }
+
+        let mut i = 0;
+        while i < len {
+            if let Some(s) = saved_at[i] {
+                let start = i;
+                let mut prev = s;
+                while i < len && saved_at[i] == Some(prev) {
+                    prev += 1;
+                    i += 1;
+                }
+                let n = i - start;
+                let bytes = fetch(s, n);
+                if bytes.len() != n {
+                    return Err(ReplayError::ShortFetch { want: n, got: bytes.len() });
+                }
+                out[start..i].copy_from_slice(&bytes);
+            } else {
+                // A typed byte: no source call at all.
+                let (ei, idx) = typed[i].expect("a non-saved byte was located as typed");
+                out[i] = self.edits[ei].inserted[idx];
+                i += 1;
+            }
+        }
+        Ok(out)
+    }
+
     /// Drop every edit whose whole effect lies before `saved`, which is safe once the rope has written those
     /// bytes back — and is what stops the record growing without bound.
     ///
@@ -228,4 +362,31 @@ impl EditRecord {
         }
         None
     }
+
+}
+
+/// Why [`EditRecord::replay`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayError {
+    /// `current_at + len` overflowed.
+    WindowOutOfRange,
+    /// The source returned fewer bytes than asked for.
+    ///
+    /// **Checked rather than padded**, for the same reason as `Rope::fault_leaf`: zeros would read as a run
+    /// of NULs, which is indistinguishable from real text at this level.
+    ShortFetch {
+        /// How many bytes were asked for.
+        want: usize,
+        /// How many came back.
+        got: usize,
+    },
+    /// A byte the record describes as typed, but which no edit's inserted run covers.
+    ///
+    /// **The record cannot describe this document**, which is a real defect rather than a caller mistake, and
+    /// it is reachable: an edit whose `at` fell inside an earlier edit's removed run has no derivable
+    /// position. Answering with a guess would put a plausible wrong byte in a document, so this refuses.
+    Unresolvable {
+        /// The offset that could not be resolved.
+        at: usize,
+    },
 }

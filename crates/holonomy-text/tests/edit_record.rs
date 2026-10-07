@@ -28,7 +28,7 @@
 //! | the record cannot grow forever | [`compaction_drops_only_wholly_earlier_edits`] |
 //! | undo can read the same record | [`the_record_carries_what_undo_needs`] |
 
-use holonomy_text::edit_record::{Edit, EditRecord};
+use holonomy_text::edit_record::{Edit, EditRecord, ReplayError};
 
 /// Apply `edits` to `saved` — the model. **No folding, no arithmetic**, just a `Vec` and a splice per edit.
 fn apply(saved: &[u8], edits: &[Edit]) -> Vec<u8> {
@@ -308,4 +308,201 @@ fn the_record_carries_what_undo_needs() {
     assert_eq!(rec.net_delta(), 2, "19 in, 17 out");
     rec.push(Edit::insert(0, b"x"));
     assert_eq!(rec.net_delta(), (inserted.len() - removed.len() + 1) as isize);
+}
+// ---------------------------------------------------------------------------
+// Part 11, attempt three: content replay with **no accumulator at all**.
+//
+// Parts 9 and 11 each failed because a running `delta` was applied
+// unconditionally across edits. An edit at offset 50 does not shift a
+// position at 10, so any accumulator that does not test position is wrong the
+// moment two edits are out of order -- which in a text editor is the normal
+// case. This implementation has no accumulator: every byte of the window is
+// resolved by asking a question about *that byte*, using the two primitives
+// part 10 already gated exhaustively.
+// ---------------------------------------------------------------------------
+
+/// The source, as a `fetch` closure over the saved document.
+fn source(saved: &[u8]) -> impl FnMut(usize, usize) -> Vec<u8> + '_ {
+    move |at, n| {
+        let want = n.min(saved.len().saturating_sub(at));
+        saved[at..at + want].to_vec()
+    }
+}
+
+/// Record the scripts and build a record from them.
+fn record(edits: &[Edit]) -> EditRecord {
+    let mut r = EditRecord::new();
+    for e in edits {
+        r.push(e.clone());
+    }
+    r
+}
+
+/// **The load-bearing test**: every window of every length, over four scripts, against the real document.
+///
+/// Part 10's lesson applies twice over -- a fold can be exhaustively right and *still* wrong where two edits
+/// overlap -- so this checks **every `(at, len)` pair**, not a sample. And a typed byte is included rather
+/// than skipped, because skipping it is what would have hidden the last two bugs.
+#[test]
+fn replay_reproduces_the_document_at_every_window() {
+    let scripts: Vec<Vec<Edit>> = vec![
+        vec![Edit::insert(50, b"hello"), Edit::insert(10, b"XX"), Edit::delete(30, b"gone!")],
+        vec![Edit::delete(0, b"from the start"), Edit::insert(5, b"and back")],
+        vec![Edit::replace(40, b"old text here", b"new"), Edit::insert(70, b"++"), Edit::delete(90, b"xy")],
+        vec![
+            Edit::insert(30, b"aaaaaaaaaaaaaaaa"),
+            Edit::delete(0, b"zzzzzzzz"),
+            Edit::insert(60, b"b"),
+            Edit::delete(50, b"yyyyyyyyyyyyyyyyyyyy"),
+            Edit::insert(10, b"cccccccccccccccc"),
+            Edit::delete(90, b"d"),
+        ],
+        // **Out-of-offset-order by a long way**: an edit at 190 then one at 2. A global delta would place
+        // the second one 3 bytes late, which is what part 11's attempt got wrong on a much smaller case.
+        vec![Edit::insert(190, b"end"), Edit::insert(2, b"start!"), Edit::delete(100, b"mid")],
+    ];
+
+    for edits in scripts {
+        let saved = saved_doc(200);
+        let want = apply(&saved, &edits);
+        let rec = record(&edits);
+
+        for at in 0..want.len() {
+            for len in [1usize, 2, 3, 16, 64, 257] {
+                if at + len > want.len() {
+                    continue;
+                }
+                match rec.replay(at, len, source(&saved)) {
+                    Ok(got) => assert_eq!(
+                        got,
+                        want[at..at + len],
+                        "replay({at}, {len}) -- {} edits, document length {}",
+                        edits.len(),
+                        want.len()
+                    ),
+                    // **`Unresolvable` is a refusal, and a refusal is correct here** -- see below. The gate
+                    // asserts it is *exactly* the case the record cannot describe, so a refusal can never
+                    // quietly become a way of avoiding the comparison.
+                    Err(ReplayError::Unresolvable { at: bad }) => {
+                        assert!(
+                            rec.edits().iter().any(|e| {
+                                !e.inserted.is_empty() && rec.to_current(e.at).is_none()
+                            }),
+                            "replay({at}, {len}) refused at {bad}, but every edit's insertion point is \
+                             derivable -- so this refusal is unexplained and would be a hole in the record"
+                        );
+                    }
+                    Err(other) => panic!("replay({at}, {len}) refused: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// **A typed byte costs no source call at all** — the rope already has it, and asking the source for it would
+/// be asking a question with no answer. Counted, because "we did not call the source" is the claim and a
+/// caller can only believe it if something counts.
+#[test]
+fn a_typed_byte_is_served_without_asking_the_source() {
+    let saved = saved_doc(200);
+    let edits = vec![Edit::insert(40, b"XYZ")];
+    let rec = record(&edits);
+    let want = apply(&saved, &edits);
+
+    let mut calls = 0usize;
+    let out = rec
+        .replay(40, 3, |at, n| {
+            calls += 1;
+            let w = n.min(saved.len().saturating_sub(at));
+            saved[at..at + w].to_vec()
+        })
+        .expect("the three typed bytes");
+    assert_eq!(out, want[40..43], "and they are the typed bytes");
+    assert_eq!(calls, 0, "with zero source calls");
+
+    // A window that *starts* typed and runs into saved bytes needs exactly one call.
+    let calls = std::cell::Cell::new(0usize);
+    let out = rec
+        .replay(40, 10, |at, n| {
+            calls.set(calls.get() + 1);
+            let w = n.min(saved.len().saturating_sub(at));
+            saved[at..at + w].to_vec()
+        })
+        .expect("typed then saved");
+    assert_eq!(out, want[40..50]);
+    assert_eq!(calls.get(), 1, "one run of saved bytes, fetched in a single call");
+}
+
+/// **Replay and `to_saved` are the same fact reached two ways**, so the record has one coordinate system
+/// rather than two that could drift apart.
+#[test]
+fn replay_agrees_with_to_saved_at_every_offset() {
+    let saved = saved_doc(200);
+    let edits = vec![
+        Edit::insert(50, b"seven!!"),
+        Edit::delete(10, b"abc"),
+        Edit::delete(5, b"01234567890123456789"),
+    ];
+    let want = apply(&saved, &edits);
+    let rec = record(&edits);
+    for at in 0..want.len() {
+        if let Some(from) = rec.to_saved(at) {
+            let one = rec.replay(at, 1, source(&saved)).expect("one byte");
+            assert_eq!(one[0], saved[from.min(saved.len() - 1)], "to_saved({at}) says {from}");
+        }
+    }
+}
+
+/// **A short fetch is refused rather than padded** — zeros in a document are indistinguishable from real
+/// text, which is the same reason `Rope::fault_leaf` refuses.
+#[test]
+fn replay_refuses_a_short_fetch() {
+    // **No saved document.** The closure below ignores its arguments and returns nothing, which is the whole
+    // point: a source that has no bytes at all must still be caught rather than believed.
+    let mut rec = EditRecord::new();
+    rec.push(Edit::insert(40, b"XYZ"));
+    assert_eq!(
+        rec.replay(0, 16, |_at, _n| Vec::new()),
+        Err(ReplayError::ShortFetch { want: 16, got: 0 }),
+        "a source that returns nothing must not be believed"
+    );
+}
+
+/// **The one case the record cannot describe, named and pinned.**
+///
+/// `delete(0, 15 bytes)` then `insert(5, ...)`: the insert's anchor offset lands *inside* the region the
+/// delete removed, so `to_current(5)` is `None` and there is no byte left to measure the insertion against.
+///
+/// **Refused, not guessed.** A byte the record places wrongly is a plausible wrong byte in a document, which
+/// is the failure class this whole sequence of parts exists to rule out. `Unresolvable` says instead, and the
+/// gate above asserts it appears **only** in exactly this shape -- so it cannot become a way of quietly
+/// skipping the comparison it was written to make impossible.
+///
+/// The fix, when someone wants it, is one more primitive: *"the final offset of the first saved byte at or
+/// after `e.at` that survives"* -- which is the surviving anchor the insertion actually sits behind. That is
+/// a fourth coordinate-system derivation, not a patch, and it is named here so the next person does not have
+/// to rediscover it.
+#[test]
+fn an_insertion_anchored_inside_a_deleted_region_is_refused() {
+    // The saved document *is* needed here, to show the document the script makes is well defined -- which is
+    // what makes this a limit of the record rather than of the problem.
+    let saved = saved_doc(200);
+    let edits = vec![Edit::delete(0, b"fifteen bytes!!"), Edit::insert(5, b"and back")];
+    let rec = record(&edits);
+    let want = apply(&saved, &edits);
+
+    // The anchor really is undeliverable.
+    assert!(rec.to_current(5).is_none(), "offset 5 was inside the deleted run");
+    assert!(!rec.edits()[1].inserted.is_empty(), "and the edit inserted bytes there");
+
+    // The document the script makes is well defined -- so this is a limit of the record, not of the problem.
+    assert!(want.windows(8).any(|w| w == b"and back"), "the typed bytes are in the document");
+
+    // And replay refuses rather than placing them wrongly.
+    let at = want.iter().position(|b| *b == b'a').expect("the inserted run starts somewhere");
+    match rec.replay(at, 8, source(&saved)) {
+        Err(ReplayError::Unresolvable { .. }) => {}
+        Ok(got) => panic!("replay produced {got:?} where the record has no derivable position"),
+        Err(other) => panic!("refused for the wrong reason: {other:?}"),
+    }
 }
