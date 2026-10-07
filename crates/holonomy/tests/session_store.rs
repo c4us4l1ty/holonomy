@@ -84,10 +84,10 @@ fn read(store: &mut SectionStore<'_>, s: u32, text: &[u8]) {
 fn the_resident_set_never_exceeds_its_budget() {
     let text = content(SECTION_BYTES * 40);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
 
     for budget in [1usize, 2, 5, 8, 39, 40, 64] {
-        let mut store = SectionStore::new(&wf, budget);
+        let mut store = SectionStore::new(&mut wf, budget);
         let mut buf = vec![0u8; SECTION_BYTES];
         for s in 0..40u32 {
             store.copy_into(s, &mut buf).expect("read");
@@ -112,8 +112,8 @@ fn the_resident_set_never_exceeds_its_budget() {
 fn a_document_far_larger_than_the_budget_reads_correctly() {
     let text = content(SECTION_BYTES * 40 + 777);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 5);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 5);
 
     for s in 0..=40u32 {
         read(&mut store, s, &text);
@@ -141,8 +141,8 @@ fn a_document_far_larger_than_the_budget_reads_correctly() {
 fn every_eviction_released_memory() {
     let text = content(SECTION_BYTES * 12);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 4);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 4);
 
     let mut buf = vec![0u8; SECTION_BYTES];
     for s in 0..12u32 {
@@ -174,8 +174,8 @@ fn every_eviction_released_memory() {
 fn the_victim_is_the_least_recently_used_section() {
     let text = content(SECTION_BYTES * 8);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 4);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 4);
     let mut buf = vec![0u8; SECTION_BYTES];
 
     for s in 0..4u32 {
@@ -212,8 +212,8 @@ fn the_victim_is_the_least_recently_used_section() {
 fn a_section_already_resident_is_not_read_again() {
     let text = content(SECTION_BYTES * 3);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 8);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 8);
     let mut buf = vec![0u8; SECTION_BYTES];
 
     store.copy_into(1, &mut buf).expect("first");
@@ -236,8 +236,8 @@ fn a_section_already_resident_is_not_read_again() {
 fn a_budget_of_zero_holds_nothing_and_still_returns_bytes() {
     let text = content(SECTION_BYTES * 2);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 0);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 0);
     let mut buf = vec![0u8; SECTION_BYTES];
 
     read(&mut store, 0, &text);
@@ -258,8 +258,8 @@ fn a_budget_of_zero_holds_nothing_and_still_returns_bytes() {
 fn evict_all_empties_the_store_immediately() {
     let text = content(SECTION_BYTES * 6);
     let (path, _wf) = container(&text);
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut store = SectionStore::new(&wf, 6);
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut store = SectionStore::new(&mut wf, 6);
 
     let mut buf = vec![0u8; SECTION_BYTES];
     for s in 0..6u32 {

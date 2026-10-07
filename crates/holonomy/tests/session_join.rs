@@ -62,7 +62,7 @@ fn unique() -> u128 {
 fn container(content: &[u8]) -> (std::path::PathBuf, Wavefunction) {
     let path = scratch_dir().join(format!("join-{}-{}.wavefunction", content.len(), unique()));
     let _ = Wavefunction::create(&path, PASS, "join", content, ITER).expect("create");
-    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
     (path, wf)
 }
 
@@ -76,7 +76,7 @@ fn text(n: usize) -> Vec<u8> {
 fn a_fully_evicted_rope_reads_the_document_back_out_of_a_container() {
     // Three sections' worth, so the store evicts as it goes.
     let doc = text(SECTION * 2 + 4_000);
-    let (path, wf) = container(&doc);
+    let (path, mut wf) = container(&doc);
     let mut rope = Rope::from_text(&doc).expect("load");
     let leaves = rope.leaf_count();
 
@@ -88,7 +88,7 @@ fn a_fully_evicted_rope_reads_the_document_back_out_of_a_container() {
 
     // **A budget of 2 sections, so reading 2+ sections of document forces eviction as it goes.** If the
     // fetch held onto sections instead of copying out, this is where it would break.
-    let mut store = SectionStore::new(&wf, 2);
+    let mut store = SectionStore::new(&mut wf, 2);
     let mut got = vec![0u8; doc.len()];
     rope.read_at_faulting(&mut store, 0, got.len(), &mut got).expect("read the document back");
 
@@ -104,7 +104,7 @@ fn a_fully_evicted_rope_reads_the_document_back_out_of_a_container() {
 #[test]
 fn a_leaf_straddling_a_section_boundary_is_correct() {
     let doc = text(SECTION * 2);
-    let (path, wf) = container(&doc);
+    let (path, mut wf) = container(&doc);
     let mut rope = Rope::from_text(&doc).expect("load");
 
     // The leaf containing document byte `SECTION`, i.e. the first byte of section 1.
@@ -119,7 +119,7 @@ fn a_leaf_straddling_a_section_boundary_is_correct() {
             let mut buf = vec![0u8; rope.leaf_len_of(i)];
             // Evict it, so this cannot pass by reading bytes the rope already had.
             rope.evict_leaf(i).expect("evict");
-            let mut store = SectionStore::new(&wf, 2);
+            let mut store = SectionStore::new(&mut wf, 2);
             rope.read_at_faulting(&mut store, start, buf.len(), &mut buf).expect("fault the straddler");
             assert_eq!(
                 &buf[..],
@@ -167,14 +167,14 @@ fn leaf_and_section_boundaries_do_not_tile_and_that_is_pinned() {
 #[test]
 fn reading_a_sparse_rope_keeps_residency_bounded() {
     let doc = text(SECTION * 3);
-    let (path, wf) = container(&doc);
+    let (path, mut wf) = container(&doc);
     let mut rope = Rope::from_text(&doc).expect("load");
     let leaves = rope.leaf_count();
     for i in 0..leaves {
         rope.evict_leaf(i).expect("evict");
     }
 
-    let mut store = SectionStore::new(&wf, 2);
+    let mut store = SectionStore::new(&mut wf, 2);
     let mut got = vec![0u8; doc.len()];
     rope.read_at_faulting(&mut store, 0, got.len(), &mut got).expect("read");
 
@@ -195,12 +195,12 @@ fn reading_a_sparse_rope_keeps_residency_bounded() {
 #[test]
 fn fetching_reuses_its_buffer() {
     let doc = text(SECTION);
-    let (path, wf) = container(&doc);
+    let (path, mut wf) = container(&doc);
     let mut rope = Rope::from_text(&doc).expect("load");
     for i in 0..rope.leaf_count() {
         rope.evict_leaf(i).expect("evict");
     }
-    let mut store = SectionStore::new(&wf, 2);
+    let mut store = SectionStore::new(&mut wf, 2);
     let mut buf = vec![0u8; 512];
 
     // **One fetch first, then measure.** The buffer starts empty and is allocated on the first fault, so
@@ -238,8 +238,8 @@ fn fetching_reuses_its_buffer() {
 #[test]
 fn a_missing_section_is_opaque_rather_than_specific() {
     let doc = text(SECTION);
-    let (path, wf) = container(&doc);
-    let mut store = SectionStore::new(&wf, 2);
+    let (path, mut wf) = container(&doc);
+    let mut store = SectionStore::new(&mut wf, 2);
     let mut buf = vec![0u8; 128];
     // Way past the end of the document.
     let err = store

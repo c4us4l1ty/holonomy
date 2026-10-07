@@ -43,6 +43,22 @@ impl LeafSource for VecSource {
         out[..n].copy_from_slice(&self.bytes[offset..offset + n]);
         Ok(n)
     }
+
+    /// The write half. A `Vec` source is the document itself, so writing back is assigning into it --
+    /// which is the point: after this, `fetch_leaf` returns bytes as they are *now*.
+    fn store_leaf(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError> {
+        self.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Grow to `text_len`. A `Vec` source can grow, so it must -- a source with the right bytes and the
+    /// old length hands back a short leaf at the end of the document.
+    fn set_len(&mut self, text_len: usize) -> Result<(), RopeError> {
+        if self.bytes.len() < text_len {
+            self.bytes.resize(text_len, 0);
+        }
+        Ok(())
+    }
 }
 
 fn text(n: usize) -> Vec<u8> {

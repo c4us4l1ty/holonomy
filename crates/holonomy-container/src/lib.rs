@@ -589,7 +589,58 @@ impl Wavefunction {
         Ok(())
     }
 
-    /// Re-seal and write chunk 0 from the in-memory frame.
+    /// Change the document's **length**, writing blank chunks for any that are new.
+///
+/// # Why this is not `write_content`
+///
+/// [`write_content`](Self::write_content) takes the whole document, which is precisely what Phase 13 exists
+/// to stop doing — a keystroke cannot hand over 8 MiB. But an edit *changes the document's length*, and a
+/// source that still believes the old length will hand back a short leaf at the end of the document, which
+/// `fault_leaf` refuses as `OutOfBounds`. **That is a length disagreement, not a truncation, and it is
+/// invisible at the edit site** — it surfaces as a failed read somewhere else in the file.
+///
+/// The new chunks are blank because a grown region has no content yet: the rope's leaves hold it, and they
+/// are written back before they are evicted. So growth writes no document bytes at all, which is what makes
+/// it cheap enough to be called from an eviction.
+///
+/// ## Shrinking leaves the freed chunks on disk
+///
+/// Lowering `content_len` and `chunk_count` makes the trailing chunks **unreachable** — the ring refuses to
+/// seek past `chunk_count`, and `chunk_content_offset` returns `None` for them — so they can no longer be
+/// read as document content by this build. They are not *erased*, though: the bytes are ciphertext under a
+/// key that exists, so an attacker with the key could recover them. **This matches what
+/// [`write_content`](Self::write_content) already does on a shrink**, so it is not a new leak, but it is a
+/// real one and re-chaffing the freed region is the fix that neither path currently applies.
+pub fn set_content_len(&mut self, len: usize) -> Result<(), ContainerError> {
+    let chunk_count = chunks_for(len as u64).map_err(|_| ContainerError::PayloadTooLarge {
+        requested: len as u64,
+        cap: layout::S_MAX_PAYLOAD,
+    })?;
+    if !layout::payload_fits(self.omega, payload_len(chunk_count)) {
+        return Err(ContainerError::PayloadTooLarge {
+            requested: payload_len(chunk_count),
+            cap: layout::S_MAX_PAYLOAD,
+        });
+    }
+    if chunk_count == self.frame.chunk_count && len as u64 == self.frame.content_len {
+        return Ok(());
+    }
+
+    let old_chunks = self.frame.chunk_count;
+    if chunk_count > old_chunks {
+        // **Commit per chunk, as `write_content` does**, for the same reason: `stage_blank` discards every
+        // slot, so a single trailing commit would drop the previous chunk's dirty slot before it was written.
+        for index in old_chunks..chunk_count {
+            self.ring.stage_blank(index)?;
+            self.ring.commit(&self.file, self.omega, &self.root.k_enc, &self.root.n_root)?;
+        }
+    }
+    self.frame.content_len = len as u64;
+    self.frame.chunk_count = chunk_count;
+    self.rewrite_master_frame()
+}
+
+/// Re-seal and write chunk 0 from the in-memory frame.
     fn rewrite_master_frame(&mut self) -> Result<(), ContainerError> {
         let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
         let n = self.frame.encode(&mut frame_bytes)?;
@@ -612,6 +663,36 @@ impl Wavefunction {
     pub fn set_title(&mut self, title: &str) -> Result<(), ContainerError> {
         self.frame.title = title.chars().take(frame::MAX_TITLE_LEN).collect();
         self.rewrite_master_frame()
+    }
+
+    /// Replace chunk `index`'s **plaintext** and write it to disk.
+    ///
+    /// # The missing primitive behind Phase 13 part 8
+    ///
+    /// Everything else in this crate either reads a chunk or rewrites the whole payload through
+    /// [`write_content`](Self::write_content). Neither can serve a document being edited in place, where
+    /// **one chunk's 65,520 bytes have changed and the other 126 have not** — and
+    /// `write_content` cannot be used for it because it takes the whole document, which is precisely what
+    /// Phase 13 exists to stop doing.
+    ///
+    /// `index` is a **chunk index**, and index 0 is refused because it is the master frame
+    /// ([`chunk_content_offset`](Self::chunk_content_offset) is the authority on that). `plaintext` may be
+    /// shorter than a full chunk — the last chunk of a document is — and must not be longer.
+    ///
+    /// ## It is a synchronous write, and that is a property rather than an accident
+    ///
+    /// Stage, then commit, then return. A caller that wants to batch several chunks pays this once per
+    /// chunk; a caller that stages without committing gets nothing, because `stage_plaintext` leaves the
+    /// bytes in the ring's scratch slot and the ring holds only three. **There is no partially-applied
+    /// state**: if the write fails the error propagates and the caller knows nothing reached the disk.
+    pub fn write_chunk(&mut self, index: u64, plaintext: &[u8]) -> Result<(), ContainerError> {
+        if self.chunk_content_offset(index).is_none() {
+            return Err(ContainerError::NoSuchChunk { index });
+        }
+        self.ring
+            .stage_plaintext(index, plaintext)
+            .map_err(ContainerError::Ring)?;
+        self.commit().map(|_| ())
     }
 
     /// Write back any pending chunk changes and sync.

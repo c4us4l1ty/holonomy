@@ -1925,6 +1925,60 @@ host's, and in both cases it would be reporting the disk rather than the design.
 1,714 µs across two runs on the same host — **the split held at 84 % and 93 %**, which is why the split is
 the gated quantity.
 
+#### Phase 13, part 8 — the write half of the leaf seam, and a correction to part 7
+
+**The decision, made and built.** Part 7's measurement killed A (write-through: 6.5–10.3× a keystroke,
+84–93 % disk) and left B (origin tracking) against C (dirty-region pin). **C is not viable, and the reason
+is sharper than part 7 gave**: C pins every leaf from the *first edit* onward, so editing near the **top**
+of a document — the common case — pins nearly the whole thing. Part 7 said the window shrinks to
+`min(window, first_edit_offset)`; that is the same thing said more gently, and it is worst exactly when you
+would use it.
+
+Re-deriving the invariant gave a fourth option part 7 did not name, which is both simpler than B and has
+none of B's overlay:
+
+> **A source must return a leaf's bytes as they are *now*, at *current* offsets.** Keep that by **writing
+> back on eviction**, not on edit. An eviction is bounded by the resident budget; a keystroke is not.
+
+Built this stretch, all on the existing paths:
+
+| piece | what it does |
+| --- | --- |
+| `LeafSource::store_leaf(offset, bytes)` | the seam's write half — **required**, not defaulted |
+| `LeafSource::set_len(text_len)` | the seam's **extent** half — default is a no-op, for sources that cannot grow |
+| `Rope::evict_leaf_to(source, i)` | read → save → evict, in one function, so the order cannot be got wrong. `Ok(0)` on an already-absent leaf, because a budget sweep must not fail on the first one |
+| `Ring::stage_plaintext(index, bytes)` | stages modified plaintext **and marks it dirty**. `stage_blank` deliberately does not, which is why there was nowhere for write-back to go |
+| `Wavefunction::write_chunk(index, plaintext)` | replaces one chunk's 65,520 bytes. Neither `read_content` nor `write_content` could do this: the first reads, the second takes the whole document |
+| `Wavefunction::set_content_len(len)` | grows or shrinks the container. New chunks are blank because a grown region has no content yet |
+| `SectionStore::write_at` / `commit_dirty` / `Entry::dirty` | patches the leaf's bytes into overlapping cached sections and marks them; commits **only dirty sections** |
+
+`SectionStore` now borrows `&mut Wavefunction`, because `read_chunk_into` is `&self` but every write is
+`&mut self`. That is the cost of the store being a borrower rather than an owner.
+
+Gated in `crates/holonomy-text/tests/write_back.rs` (6) — a leaf written back, evicted and refaulted comes
+back **with its edit**; ten edited leaves all round-trip; an empty write is a legal no-op; eviction does
+not grow the resident set.
+
+**CORRECTION — part 7's claim that write-back removes the need for origin tracking was half right.** What
+it removes is the need to track a leaf's offset in the **saved** document. It does **not** remove the need
+to track **shift**, and the gate is what showed it: after one insert at offset *p*, every leaf after *p* is
+wrong in the store even though none of them was touched, because a byte that belonged to leaf *L* now
+belongs to leaf *L+1* — so writing *L* back leaves *L+1* one byte short at its new offset. Ten edited leaves
+all round-trip; **the leaves between them do not.** Two open items, both named rather than papered over:
+
+1. **Shift propagation.** Fixing one leaf's length moves a byte across a leaf boundary, so the correction
+   propagates to the tail. Options: write the tail back in decreasing offset order (expensive but simple),
+   a **delta log** — an ordered list of `(offset, ±delta)` applied on fetch — or **C**, which avoids the
+   question by pinning. **Part 7 said B's overlay was unnecessary; it is not.** The overlay is not about
+   origin, it is about shift, and that part is still unpaid.
+2. **`set_len` fires at eviction, not at edit.** Until the first eviction the store is the right bytes at
+   the wrong length, so a whole-document read asks its last leaf for one byte more than exists. Moving
+   `set_len` to the edit path is one call and needs no store write — but it does mean an edit mutates the
+   container's master frame, which is a real cost on a keystroke.
+
+**Neither blocks the seam's direction, and both block editing a document end to end.** Nothing here is
+wired into `Session` yet, so the product still refuses to edit a sparse document.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a

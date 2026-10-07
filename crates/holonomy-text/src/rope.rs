@@ -896,30 +896,72 @@ impl Rope {
         self.set_cursor(offset)
     }
 
-    /// Release leaf `index`'s bytes, keeping its length.
-    ///
-    /// **This is the call that lowers the page-lock charge.** The leaf's `SecureBlock` is dropped, which
+    /// Write leaf `index` back to `source` **and then evict it**, in that order.
+///
+/// # Why this exists rather than leaving the order to the caller
+///
+/// [`Rope::evict_leaf`] documents the required sequence — read, save, evict — and a documented order that
+/// a caller must remember is an order that will eventually be got wrong. Getting it wrong is not caught by
+/// a length check: the leaf is evicted, the store still holds the pre-edit bytes, and the next fault of
+/// that leaf returns **stale content that is the right number of bytes long**. The document is wrong and
+/// says nothing.
+///
+/// So the sequence lives in one function that cannot be decomposed into the wrong order, and it is the
+/// *only* way to shed a leaf on a document backed by a source. [`Rope::evict_leaf`] stays public for the
+/// read-only case — evicting a leaf nobody edited loses nothing.
+///
+/// ## One allocation, and it is the eviction's own
+///
+/// A `Vec` for the leaf's bytes, because `store_leaf` borrows a slice and the leaf's block is dropped
+/// before this returns. **Not on the keystroke path**: this is called when the resident budget is
+/// exceeded, which is bounded by the budget and not by how fast anyone can type.
+///
+/// ## What is refused, and what is not
+///
+/// An absent leaf is a **no-op returning `Ok(0)`**, not an error. A budget-driven eviction sweep asks
+/// "shed anything not in the window", and every leaf outside it is already absent; refusing would make a
+/// sweep that expects to make progress fail on the first one, and the caller would have to pre-filter with
+/// `is_resident` — which is exactly the mistake this function is here to prevent.
+///
+/// [`evict_leaf`](Self::evict_leaf) still refuses a double-evict, and that difference is deliberate: it is
+/// the low-level call, and a caller using it directly is asserting this leaf *was* resident.
+pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Result<usize, RopeError> {
+    if !self.is_resident(index) {
+        return Ok(0);
+    }
+    // Read first, while the block is still mapped. `text_len` rather than the allocated capacity: a
+    // leaf's gap is not part of its text and must never reach the store.
+    let at = self.leaf_offset(index);
+    let len = self.leaf_len(index);
+    let mut buf = vec![0u8; len];
+    self.leaf(index)?.copy_text_to(0, &mut buf)?;
+    source.store_leaf(at, &buf)?;
+    // Zero before the buffer drops. The bytes were plaintext a moment ago and the process is about to
+    // hand the page back to the allocator, where a later allocation could read them.
+    buf.fill(0);
+    // **The length, with the bytes, in the same call.** The source holds the document as it was *before*
+    // the edits this leaf participated in, and its extent moved too. Saving the bytes and forgetting the
+    // length leaves a document whose tail is one edit out of date -- which surfaces as a refused read
+    // near the end, nowhere near the edit that caused it.
+    source.set_len(self.text_len())?;
+    self.evict_leaf(index)
+}
+
+/// Release leaf `index`'s bytes, keeping its length — **without saving them anywhere**.
+///
+/// **Prefer [`Rope::evict_leaf_to`] on any document backed by a source.** This is the low-level call: it
+/// drops the block and forgets the bytes, which is correct for a leaf nobody edited and is **silent data
+/// loss for a leaf somebody did**. That asymmetry is the reason `evict_leaf_to` exists — see its docs for
+/// why the order is not left to the caller.
+///
+/// **This is the call that lowers the page-lock charge.** The leaf's `SecureBlock` is dropped, which
     /// unmaps and scrubs it, and the slot keeps `LeafSlot::Absent { text_len }`. `resident_bytes()` drops
     /// by that leaf's length and `text_len()` does not move.
-    ///
-    /// # Why it returns the bytes rather than taking them
-    ///
-    /// **Because eviction that cannot fail to save them is not eviction, it is deletion.** The caller has
-    /// to get the bytes to a store *before* the block goes; the rope cannot do that itself (no
-    /// dependency on the container crate) and must not pretend to. So this hands the text back and lets
-    /// the caller decide — and the safe order is `take_leaf_bytes` → write to store → `evict_leaf`, which
-    /// is what the gate drives.
-    ///
-    /// Refuses on an already-absent leaf rather than counting it as an eviction, so a double-evict is a
-    /// visible error rather than a second entry in a statistic.
-    ///
-    /// ## The order a caller must use
-    ///
-    /// `evict_leaf` does **not** save the bytes, and cannot: the rope has no dependency on the container
-    /// crate, so it has nowhere to put them. The sequence is therefore
-    /// `read_at_faulting`/`read_at` for the leaf's range → write those bytes to the store →
-    /// `evict_leaf` → **`fsync`/commit in the store before using the buffer**. Evicting first and saving
-    /// after cannot be written, because the bytes are gone once the block is unmapped.
+///
+/// Refuses on an already-absent leaf rather than counting it as an eviction, so a double-evict is a
+    /// visible error rather than a second entry in a statistic. `evict_leaf_to` deliberately differs —
+    /// it returns `Ok(0)` — because it is meant to be called in a sweep over every leaf, where most are
+    /// already absent and a refusal would make the sweep fail on its first iteration.
     pub fn evict_leaf(&mut self, index: usize) -> Result<usize, RopeError> {
         let slot = self.leaves.get_mut(index).ok_or(RopeError::NoLeaves)?;
         match std::mem::replace(slot, LeafSlot::Absent { text_len: 0 }) {
@@ -1277,6 +1319,72 @@ pub trait LeafSource {
     /// LRU evicted the section this leaf came from while the leaf is still resident, which is the case
     /// that decides whether the store and the rope agree.
     fn on_resident(&mut self, _index: usize) {}
+
+    /// Write a leaf's **current** bytes at `offset`, so a later [`fetch_leaf`](Self::fetch_leaf) for
+    /// that offset returns them.
+    ///
+    /// # This is what makes editing and faulting compatible, and it is the whole of Phase 13 part 8
+    ///
+    /// `fetch_leaf` is addressed by document offset, which is true only of a document nobody has edited:
+    /// an insert shifts every later leaf, so after one edit a fault reads the right *number* of bytes
+    /// from one byte too far. Part 7 measured that failure rather than shipping it.
+    ///
+    /// The invariant that repairs it is small and exact:
+    ///
+    /// > **A source must return a leaf's bytes *as they are now*, at *current* offsets.**
+    ///
+    /// And the way to keep it is **write back on eviction, not on edit** — which is what this method
+    /// exists for. The alternative, write-through on every keystroke, was measured at **6.5–10.3× a
+    /// keystroke**, 84–93 % of it an `O_DIRECT` write to this host's disk (`tests/write_through_cost.rs`).
+    /// Paying that per keystroke is not affordable; paying it at an eviction is, because an eviction is
+    /// bounded by the resident budget rather than by typing.
+    ///
+    /// ## Why this needs no origin tracking, which is the part that took longest to see
+    ///
+    /// A leaf's offset in the **saved** document diverges from its offset in the **current** one after
+    /// any edit, and the obvious fix — remember both — implies an overlay of pending edits that every
+    /// fault has to replay. **But if the store holds *current* bytes at *current* offsets, there is no
+    /// second coordinate system to track.** `fetch_leaf(leaf_offset(i), leaf_len(i))` is then simply
+    /// correct, because the store and the rope are describing the same document at the same offsets.
+    /// Nothing to replay, no third spine array, and the one cost B was going to pay does not exist.
+    ///
+    /// ## The required order, and it is not optional
+    ///
+    /// **Read the leaf's bytes → `store_leaf` → [`Rope::evict_leaf`] → the store's own commit.** The
+    /// rope scrubs its block on eviction, so the bytes cannot be recovered afterwards, and a source that
+    /// has cached the section but not written it to disk must be committed before the process relies on
+    /// it. Getting the order wrong is not detectable by a length check — it produces a stale section and
+    /// therefore a document that is right until it is read again.
+    ///
+    /// `offset` and `bytes.len()` are a leaf's current extent and **may be empty**; an empty write is a
+    /// legal no-op rather than an error, because a leaf that shrank to nothing still has to be recorded.
+    fn store_leaf(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError>;
+
+    /// Record the document's **current length**.
+    ///
+    /// # The third half of the seam, and the one that is easiest to forget
+    ///
+    /// "Current state" is not only current *bytes* — it is the current *extent*. A source that holds the
+    /// right bytes but the old length hands back a short leaf at the end of the document, and
+    /// [`fault_leaf`] refuses that as `OutOfBounds { text_len: got }`. **The symptom appears nowhere near
+    /// the cause**: the document is edited at offset 12,000 and the failure is a read at 39,000. Found by
+    /// the gate in `write_back.rs`, which failed with `text_len: 1087` on an 8-byte overshoot — one byte
+    /// short, from one insert.
+    ///
+    /// Called by [`Rope::evict_leaf_to`] alongside the write-back, because both are consequences of the
+    /// same fact: the rope has moved on from what the source last saw. **Grouping them is deliberate** —
+    /// they are one event, and an API that let a caller save the bytes and forget the length would hand it
+    /// a document whose tail is silently one edit out of date.
+    ///
+    /// Monotone is *not* required: shrinking is a legitimate edit, and a source whose backing storage cannot
+    /// shrink should keep the longer allocation and record the smaller length.
+    fn set_len(&mut self, _text_len: usize) -> Result<(), RopeError> {
+        // **A no-op default, and the honest one.** A source that is the document itself — a `Vec`, a
+        // read-only file whose length cannot change — has nothing to do. A source that must grow overrides
+        // this, and the failure it prevents is a refusal on a read far from the edit, so overriding it is
+        // not optional for anything that can grow.
+        Ok(())
+    }
 }
 
 #[cfg(test)]

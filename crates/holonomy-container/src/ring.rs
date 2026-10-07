@@ -247,7 +247,41 @@ impl Ring {
         Ok(())
     }
 
-    /// Rotate the ring one chunk forward. The slot holding `center-1` becomes free.
+    /// Make `index` the centre holding `plaintext`, **and mark it dirty so a [`commit`](Self::commit)
+/// writes it**.
+///
+/// # Why this exists, and why `stage_blank` could not do it
+///
+/// `stage_blank` deliberately leaves `dirty` false, because a blank chunk staged during a growth has not
+/// been given content yet — committing it would write zeroes over the payload. **But a chunk whose
+/// plaintext has been *modified* needs the opposite: marked dirty, so that a commit seals and writes it.**
+/// There was no way to express that, which is why Phase 13 part 8's write-back had nowhere to go.
+///
+/// ## The dirty flag is set even for bytes identical to what is on disk
+///
+/// A caller that cannot cheaply tell the difference would otherwise have to compute one, and a caller that
+/// *can* is expected to skip this call instead. **Writing an unchanged chunk costs one re-encrypt and one
+/// `pwrite`, and is still correct** — the nonce is derived from `index`, not from a counter, so re-sealing
+/// is idempotent in content even though the ciphertext bytes differ. Correctness does not depend on the
+/// caller getting this right; only cost does.
+pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), RingError> {
+    if plaintext.len() > layout::CHUNK_PLAINTEXT {
+        // **`PlaintextTooLarge`, not `OutOfRange`.** The two failure modes here are independent -- a chunk
+        // index past the end, and a payload longer than a chunk -- and conflating them reports the wrong
+        // cause for a bug that is trivial to fix if it is named correctly and maddening if it is not.
+        // `check_range` inside `stage_blank` handles the index case with its own error.
+        return Err(RingError::Aead(AeadError::PlaintextTooLarge {
+            len: plaintext.len(),
+        }));
+    }
+    self.stage_blank(index)?;
+    let slot = self.center_slot;
+    self.slots[slot].as_mut_slice()[..plaintext.len()].copy_from_slice(plaintext);
+    self.dirty[slot] = true;
+    Ok(())
+}
+
+/// Rotate the ring one chunk forward. The slot holding `center-1` becomes free.
     pub fn advance(&mut self) {
         let prev = (self.center_slot + RING_STAGES - 1) % RING_STAGES;
         self.resident[prev] = None;

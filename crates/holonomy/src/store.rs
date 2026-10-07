@@ -92,6 +92,13 @@ struct Entry {
     used: u64,
     /// The section's length, which the last chunk of a document may be shorter than `SECTION_BYTES`.
     len: u32,
+    /// Whether this section's cached bytes differ from what is on disk. Phase 13 part 8.
+    ///
+    /// **The dirty bit is the whole of write-back.** A dirty section is one the rope has edited, so its
+    /// cached plaintext is newer than the file; an eviction has to re-seal and write it before the block
+    /// goes, and a clean section does not. Without it, either every eviction re-encrypts (wasteful) or
+    /// none does (the document silently reverts), and neither failure is visible in the returned bytes.
+    dirty: bool,
 }
 
 /// What a store has done. Phase 13.
@@ -113,6 +120,15 @@ pub struct StoreStats {
     /// `crates/holonomy-secure/tests/`; a test here that claimed otherwise would be asserting a property of
     /// a mapping that no longer exists.
     pub released_bytes: u64,
+    /// Leaf writes back into the cached sections. Phase 13 part 8.
+    pub writes: u64,
+    /// Commits that reached the disk. Phase 13 part 8.
+    ///
+    /// **Separate from `writes` because they answer different questions.** `writes` counts leaf write-backs
+    /// into memory; `commits` counts the expensive re-encrypt-and-write passes. A session that edits without
+    /// ever evicting has many `writes` and no `commits` -- which is the whole design working, and a number
+    /// that would be invisible if both were counted together.
+    pub commits: u64,
 }
 
 /// A bounded set of resident document sections, loaded on demand.
@@ -122,7 +138,7 @@ pub struct StoreStats {
 /// bound. **One container, one store, one budget**, which is the only arrangement where *"resident text
 /// stays bounded"* is a statement about the process rather than about a value.
 pub struct SectionStore<'c> {
-    container: &'c Wavefunction,
+    container: &'c mut Wavefunction,
     /// Maximum resident sections. Enforced before every insert.
     budget: usize,
     /// Resident sections by index. A `BTreeMap` rather than a `Vec<Option<_>>` because the resident set is
@@ -152,7 +168,7 @@ impl<'c> SectionStore<'c> {
     /// **A budget of 0 is allowed and means "nothing stays resident"**, which is a legitimate configuration
     /// for measuring a load with no cache and is not silently promoted to 1. Every other value is what it
     /// says.
-    pub fn new(container: &'c Wavefunction, budget: usize) -> Self {
+    pub fn new(container: &'c mut Wavefunction, budget: usize) -> Self {
         Self {
             container,
             budget,
@@ -295,6 +311,9 @@ impl<'c> SectionStore<'c> {
                 block,
                 used: tick,
                 len: got as u32,
+                // A freshly loaded section matches the file by definition. Marking it dirty would make
+                // every read rewrite the container.
+                dirty: false,
             },
         );
         self.stats.loads += 1;
@@ -302,7 +321,123 @@ impl<'c> SectionStore<'c> {
         Ok(got)
     }
 
-    /// The resident section a load should evict: the oldest by tick.
+    /// Write `bytes` at document offset `into`, patching the cached sections that overlap.
+///
+/// # Why patching the cache is enough, and why that is the design
+///
+/// The invariant this store must keep is **`fetch_leaf` returns bytes as they are *now*, at *current*
+/// offsets** — see [`LeafSource::store_leaf`](holonomy_text::LeafSource::store_leaf). Because the store is
+/// addressed by the same offsets as the rope, **writing the leaf's current bytes at its current offset is
+/// the whole of it**: no second coordinate system, no pending-edit overlay, no replay. That is why
+/// part 8 needs none of what part 7's option B was going to cost.
+///
+/// The bytes go into whichever **resident** sections overlap the range and are marked dirty, so an
+/// eviction re-seals them. A section that is *not* resident is not patched and not marked — it is not in
+/// this store's hands, and the rope still holds the leaf, so the next fault will read the section and the
+/// leaf's bytes will come back correct. **Patching a section would mean loading it, which would mean
+/// spending a resident slot and a decrypt on a write-back** — and it is unnecessary, because an absent
+/// section's on-disk copy is only consulted after the rope has given up the leaf.
+///
+/// ## A leaf that straddles a section boundary writes to both
+///
+/// `65,520 / 2,048 = 32` leaves per section, so a leaf straddles in 1 case in 32. Both sides are patched
+/// and both are marked dirty, or the boundary leaf comes back half-old — and half-old is exactly the shape
+/// of bug that survives a length check.
+///
+/// ## Refusals
+///
+/// A range past the end of the document is refused, because there is no section to hold it and a caller
+/// that computed the offset wrong would otherwise get a silent no-op. An **empty** range is a legal no-op,
+/// because a leaf that shrank to nothing still has to be recorded as having been evicted.
+pub fn write_at(&mut self, into: usize, bytes: &[u8]) -> Result<(), StoreError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let doc_len = self.container.content_len() as usize;
+    let end = into.checked_add(bytes.len()).ok_or(StoreError::Read)?;
+    if end > doc_len {
+        return Err(StoreError::Read);
+    }
+
+    let first = (into / SECTION_BYTES) as u32;
+    let last = ((end - 1) / SECTION_BYTES) as u32;
+    for section in first..=last {
+        let sec_start = section as usize * SECTION_BYTES;
+        // The overlap of [sec_start, sec_start+len) with [into, end).
+        let lo = into.max(sec_start);
+        let hi = end.min(sec_start + SECTION_BYTES);
+        let Some(entry) = self.resident.get_mut(&section) else {
+            continue;
+        };
+        let entry_len = entry.len as usize;
+        // **Clamp to the section's real length, not to SECTION_BYTES.** The last section of a document is
+        // shorter, and writing past it would either panic or, if it is padded, plant bytes outside the
+        // document that a later read could surface.
+        let hi = hi.min(sec_start + entry_len);
+        if lo >= hi {
+            continue;
+        }
+        let at = lo - sec_start;
+        entry.block.as_mut_slice()[at..at + (hi - lo)].copy_from_slice(&bytes[lo - into..hi - into]);
+        entry.dirty = true;
+    }
+    self.stats.writes += 1;
+    Ok(())
+}
+
+/// Re-seal and write every dirty section, and return how many bytes reached the disk.
+///
+/// **The expensive call, and it is here rather than on the keystroke path on purpose.** Part 7 measured
+/// write-through at **6.5–10.3× a keystroke**, 84–93 % of it the `O_DIRECT` write — so this must be driven
+/// by *eviction and save*, which are bounded by the resident budget, and never by typing.
+///
+/// Only dirty sections are written, so a store that has been read but not edited commits nothing. That is
+/// the difference between a commit that costs a millisecond and one that costs nothing, and it is why
+/// `Entry::dirty` exists rather than a blanket rewrite.
+pub fn commit_dirty(&mut self) -> Result<usize, StoreError> {
+    let dirty: Vec<u32> = self.resident.iter().filter(|(_, e)| e.dirty).map(|(s, _)| *s).collect();
+    let mut written = 0usize;
+    for section in dirty {
+        let Some(chunk) = Self::chunk_of(self.container, section) else {
+            // The section is resident so its chunk exists; if it does not, refusing is right and
+            // **leaving it dirty** is what makes the refusal recoverable -- a later commit retries.
+            return Err(StoreError::Read);
+        };
+        // **Read the section's current bytes out, write them, and only then clear the flag.** The order is
+        // the whole safety property: a write that fails leaves `dirty` set, so the bytes are still marked
+        // as needing to reach the disk and a later commit retries. Clearing first would turn a failed
+        // write into a silently lost edit -- the one failure this whole design exists to prevent.
+        let mut buf = self.scratch.split_off(0);
+        if buf.len() < SECTION_BYTES {
+            buf.resize(SECTION_BYTES, 0);
+        }
+        let len = {
+            let entry = self.resident.get(&section).expect("listed from resident");
+            entry.len as usize
+        };
+        self.copy_into(section, &mut buf[..len])?;
+        self.container
+            .write_chunk(chunk, &buf[..len])
+            .map_err(|_| StoreError::Read)?;
+        // Zero the staging copy: it held document plaintext a moment ago and is about to be handed back.
+        buf[..len].fill(0);
+        self.scratch = buf;
+        written += SECTION_BYTES.min(len);
+        // Clear *after* the write succeeded.
+        if let Some(entry) = self.resident.get_mut(&section) {
+            entry.dirty = false;
+        }
+    }
+    self.stats.commits += 1;
+    Ok(written)
+}
+
+/// How many resident sections differ from disk.
+pub fn dirty_sections(&self) -> usize {
+    self.resident.values().filter(|e| e.dirty).count()
+}
+
+/// The resident section a load should evict: the oldest by tick.
     ///
     /// `None` only when nothing is resident, and the caller breaks out rather than spinning.
     fn lru_victim(&self) -> Option<u32> {
@@ -410,7 +545,7 @@ pub fn open_document(
     vdf_iterations: u64,
     budget: usize,
 ) -> Result<OpenedDocument, StoreError> {
-    let container = Wavefunction::adopt(file, passphrase, vdf_iterations).map_err(|_| StoreError::Read)?;
+    let mut container = Wavefunction::adopt(file, passphrase, vdf_iterations).map_err(|_| StoreError::Read)?;
     let len = container.content_len() as usize;
     let mut editor = holonomy_text::Editor::from_skeleton(len);
 
@@ -418,7 +553,7 @@ pub fn open_document(
     // this is the only moment a store exists during the load -- and that is fine, see the type's docs.
     let window = len.min(budget * SECTION_BYTES);
     if window > 0 {
-        let mut store = SectionStore::new(&container, budget);
+        let mut store = SectionStore::new(&mut container, budget);
         let mut buf = vec![0u8; window];
         editor
             .read_into_faulting(&mut store, 0, &mut buf)
@@ -438,6 +573,15 @@ pub fn open_document(
 /// `(offset + len - 1) / SECTION_BYTES` — and because `65,520 / 3,840 = 17.0625`, **that is two sections
 /// for most leaves**, not one. See [`SectionStore`]'s `fetch_leaf` for what that costs.
 impl holonomy_text::LeafSource for SectionStore<'_> {
+    /// Write a leaf's **current** bytes at `into`, patching whichever cached sections they overlap.
+    ///
+    /// This is the write half of the seam, and it is a thin wrapper over [`SectionStore::write_at`] -- the
+    /// reason the rope can shed a leaf without losing it. See that method for why patching the cache rather
+    /// than writing through is sufficient, and why a leaf straddling a section boundary has to do both sides.
+    fn store_leaf(&mut self, into: usize, bytes: &[u8]) -> Result<(), holonomy_text::RopeError> {
+        self.write_at(into, bytes).map_err(|_| holonomy_text::RopeError::SourceUnavailable)
+    }
+
     /// Fill `out` with the `out.len()` document bytes starting at `offset`.
     ///
     /// # The two-section case, which is the whole difficulty
@@ -553,8 +697,8 @@ mod tests {
             1,
         );
         // Only the failure path is needed: the store's constructor never touches the container.
-        if let Ok(container) = container {
-            let store = SectionStore::new(&container, 4);
+        if let Ok(mut container) = container {
+            let store = SectionStore::new(&mut container, 4);
             assert_eq!(store.resident(), 0);
             assert_eq!(store.resident_bytes(), 0);
             assert_eq!(store.budget(), 4);

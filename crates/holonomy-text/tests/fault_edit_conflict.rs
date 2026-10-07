@@ -59,6 +59,14 @@ impl LeafSource for SavedDocument {
         out[..want].copy_from_slice(&self.bytes[offset..offset + want]);
         Ok(want)
     }
+
+    /// **Refuses, and that is the point of this type.** It is the *saved* document and nothing more -- the
+    /// pre-part-8 source, which is what makes this file's hazard reachable at all. A source that cannot
+    /// save has no honest way to answer, and a silent `Ok(())` here would be the same drift this file
+    /// measures, wearing a success.
+    fn store_leaf(&mut self, _offset: usize, _bytes: &[u8]) -> Result<(), RopeError> {
+        Err(RopeError::SourceUnavailable)
+    }
 }
 
 fn read_at(rope: &mut Rope, source: &mut dyn LeafSource, at: usize, len: usize) -> Vec<u8> {
