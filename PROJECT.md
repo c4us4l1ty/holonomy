@@ -1756,7 +1756,7 @@ pub fn insert_at(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError
 | `locate` is a binary search over `starts` — **pure geometry, no leaf bytes** (rope.rs:212) | an absent leaf needs only its **length**; the spine stays fully resident and costs 24 B/leaf (≈ 52 KB for 2,167 leaves) |
 | leaf 3,840 B vs. section 65,520 B, 17.0625 sections/leaf | a fault-in may need **two** sections, pinned together |
 | edits shift every offset after them | a leaf's bytes stop aligning to any section boundary after the first edit; the manifest's `sync` is what re-establishes alignment, so the store and the rope **cannot disagree about what is resident** — that is the coupling the summary named |
-| caret, `insert_byte`, `delete_byte`, `set_gap_offset`, split/merge all mutate leaf bytes | "edit an absent leaf" must **fault it in first**; the alternative is a leaf that is silently wrong |
+| caret, `insert_byte`, `delete_byte`, `set_gap_offset`, split/merge all mutate leaf bytes | "edit an absent leaf" must **fault it in first**; the alternative is a leaf that is silently wrong. **CORRECTION — part 7: faulting first is necessary and *not sufficient*.** An edit shifts every later leaf's offset, so after one edit a fault reads the right *number* of bytes from the wrong *place*. Editing and faulting need a store that is authoritative on the document's **current** state, which does not exist yet. |
 | `any_leaf_contains` is linear in total size and is the destructive-delete gate | a full scrub cannot see through an absent leaf, so eviction must not be allowed to hide bytes from it |
 
 **Sequencing, and why B before A.** B (absent leaves + fault-in) is what removes the 8.46 MiB peak and is
@@ -1832,6 +1832,62 @@ so the paint path still guesses plain and counts `runs_missing`. **Undo of an *a
 real spike**: `UndoStack` hands back its own bytes so plain-text undo does not need the document resident,
 but undoing an image/table edit rescans, which on a sparse rope means faulting the whole document in.
 That needs bounding, not pretending.
+
+#### Phase 13, part 7 — why faulting and editing cannot both be correct yet
+
+**The item this stretch was supposed to do, and the answer it produced.** The sequence was: fault an
+absent leaf before editing it. It was implemented — `insert_byte_faulting`, `delete_byte_faulting`,
+`insert_at_faulting`, `delete_at_faulting` at the rope, `insert_at_faulting`/`delete_at_faulting` at the
+editor — and **it returns `Ok`, puts bytes in the document, and is silently wrong somewhere else.**
+
+**A `LeafSource` is addressed by document offset, and that is only true of an *unmodified* document.** An
+insert at offset `p` shifts every leaf after it by one, so from that moment the rope's leaf offsets and the
+store's offsets are different numbers. A later fault asks the store for "the leaf at offset `q`" and gets
+the right *number* of bytes from one byte too far. **That is exactly the failure the offset-keying was
+introduced to prevent, reintroduced by editing.** Measured in `crates/holonomy-text/tests/fault_edit_conflict.rs`:
+one edit, then one read past the edit point, and the faulted bytes are off by exactly the insertion.
+
+The nastiest property is not that it is wrong but *where* it is wrong: **a read before the edit point is
+unaffected**, so the window keeps rendering correctly right up until a read crosses the edit. On a
+document where the user has typed a hundred characters, every read past the first edit is wrong by a
+hundred bytes, and nothing reports it.
+
+**Why the store cannot follow: there is no write-back path.** `evict_leaf` scrubs the bytes it releases
+and hands them to the caller; `SectionStore::evict` releases memory without telling the container anything.
+So the store holds the document **as it was saved**, permanently, while the rope holds the document **as
+it is now**. One edit later they are different documents, and nothing records that.
+
+**The mutators were removed rather than documented.** A present-and-documented `insert_byte_faulting` is
+*worse* than an absent one: it invites the next person to wire it up, and they would get a passing suite
+and a corrupted document. `there_is_no_faulting_mutator_on_the_rope` asserts the **absence** as a property,
+which is unusual for a test and specific to this reason.
+
+**What survived, and why it is safe: the safe set is exactly the operations that move no byte.** Reads,
+and cursor moves. `fault_leaf` (the one place a leaf is fetched, shared by reads and the cursor), `fault_range`,
+`fault_leaf_containing`, and `set_cursor_faulting` — which is what lets a caret be *placed* in a document
+whose bytes are not all present, and is sound for the same reason reads are: neither moves a byte, so the
+rope's offsets and the store's stay the same numbers for the life of the document.
+
+#### Phase 13, part 7 — the three ways out, and what each costs
+
+All three require the same thing first: **the store has to become the authority on the document's *current*
+state, not its saved state.** There is no version of this where the store stays read-only and editing works.
+
+| option | what it is | cost | what it buys |
+| --- | --- | --- | --- |
+| **A. write-through** | every edit is written into the store immediately, and `evict` is a no-op on dirty bytes | an AES re-encrypt of a 65,520 B section **per keystroke**, against a keystroke budget that FR-1.2 already measures | the simplest correct model: one document, one authority, no tracking |
+| **B. origin tracking** | each leaf remembers the offset it occupies in the **saved** document; edits adjust that mapping, and a fault replays the rope's own edits onto the fetched bytes | ~24 B/leaf of spine (a third array), plus a *pending-edit log* that a fault must replay — and that log is the undo stack's problem again | avoids re-encrypting on every keystroke; edits batch |
+| **C. dirty-region pin** | a leaf that has been edited is **never** refaulted, and the store is authoritative only for leaves before the first edit | simplest of the three; the window shrinks to `min(window, first_edit_offset)` | editing near the top of a document works; editing deep pins that whole prefix |
+
+**C is the cheapest and is a real product, not a compromise** — a document you are *reading* scrolls
+arbitrarily far, and a document you are *editing* is bounded by where you have edited. Its honest cost is
+that it degrades: the more you have edited, the smaller the scrollable window, and eventually the window is
+the whole prefix. **A is the only one that keeps the memory bound under sustained typing**, and its cost is
+a measurable per-keystroke charge rather than a structural one — so **A's cost should be measured before B
+or C is chosen**, not assumed.
+
+**This is the decision the next stretch needs, and it is yours to make.** §7's item on this is the one that
+matters.
 
 #### Phase 14 — The chrome: pointer input, menus, icons
 
@@ -1921,6 +1977,18 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
+0. **Which of Phase 13 part 7's three ways out: write-through, origin tracking, or dirty-region pin?**
+   This is the decision that unblocks editing a document whose bytes are not all present, and it is yours
+   because the three buy different products. **A (write-through)** keeps the memory bound under sustained
+   typing but charges a 65,520 B re-encrypt per keystroke. **C (dirty-region pin)** is the cheapest and
+   is a real product — reading scrolls arbitrarily far, editing is bounded by where you have edited — but
+   degrades as the document gets edited. **B (origin tracking)** avoids the per-keystroke charge at the
+   cost of a third spine array *and* a pending-edit log that a fault must replay, which is the undo
+   problem again. Full statement and costs in Phase 13 part 7.
+   **My recommendation is to measure A's per-keystroke cost first**, because A is the only option whose
+   cost is a number rather than a structure, and a number can turn out to be small enough that B and C's
+   complexity is not warranted.
+
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
    window as the designated target, bare-metal presentation is out of scope rather than deferred, and
@@ -2009,15 +2077,25 @@ the desktop build, and none of this needs more than a few tens of KiB.
      session's lifetime is still not possible. The load-time store is created, used and dropped — which
      works because faulted leaves are `SecureBlock`s the rope owns, not views into the store.
 
-9. **`SpanMap::plain` is a claim the sparse rope cannot yet keep.** `Editor::from_skeleton` works because
-   every structure in `Editor::empty` is a function of the document's **length**, not its contents — that is
-   the reassuring half of "what does absent mean for spans". The other half is a live gap:
-   **`SpanMap::plain(text_len)` asserts every byte is plain-styled, and nothing has read the document to
-   check.** A leaf that faults in mid-session has to leave the span map and the undo stack **indistinguishable
-   from one that was resident throughout**, and `SpanMap` currently has no mechanism to be corrected by
-   fault-in. `tests/skeleton_editor.rs` asserts only the span's *extent* and says in a comment that the
-   styling claim is unverified — reading the document to check it would test `SpanMap`, not the constructor.
-   **This is the design question, and it is what stands between the sparse rope and a usable editor.**
+9. **RESOLVED, and not the way part 6 assumed — see Phase 13 part 6.** `SpanMap::plain(text_len)` did
+   assert every byte is plain-styled, and nothing had read the document to check. Part 6 answered it with a
+   `read_through` watermark and `observe`, on the premise that styling must be **discovered per leaf** as
+   leaves fault in. **That premise was wrong.** The payload *stores* the span table at a computable offset,
+   readable without the text, and it is O(styled runs) rather than O(document bytes) — 96 bytes for an
+   8 MiB document. So the styling is available whole at open, `SpanMap::from_spans` marks a loaded map
+   fully read, and the watermark is the right shape for styling learned *after* open rather than for the
+   load. **`observe` has no production caller and no longer needs one.** `tests/sparse_style.rs` (8),
+   `tests/span_table_sparse.rs` (6).
+
+10. **Faulting and editing cannot both be correct yet — Phase 13 part 7, and it is the item that now
+   stands between the sparse rope and a usable editor.** `LeafSource` is addressed by document offset,
+   which is true only of an *unmodified* document; one edit shifts every later leaf, so a subsequent fault
+   reads the right *number* of bytes from one byte too far. There is no write-back path, so the store
+   holds the saved document permanently while the rope holds the current one. The faulting mutators were
+   **implemented, measured to be silently wrong, and removed** — reads and cursor moves survive, because
+   neither moves a byte. `tests/fault_edit_conflict.rs` (5) pins both the hazard and the surviving safe
+   set. **The decision between write-through, origin tracking and dirty-region pinning is yours** — it is
+   item 0 of this section.
 
 6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
    with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a

@@ -359,7 +359,7 @@ impl Editor {
     /// [`LeafSource`] is passed in rather than stored, because the source is the *caller's* — it owns the
     /// store, the budget and the eviction policy. An editor holding a source would have to own a container,
     /// and `holonomy-text` cannot depend on `holonomy-container`.
-    pub fn read_into_faulting(
+        pub fn read_into_faulting(
         &mut self,
         source: &mut dyn crate::rope::LeafSource,
         offset: usize,

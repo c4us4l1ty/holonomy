@@ -744,25 +744,7 @@ impl Rope {
         let mut at = offset;
         while written < len {
             let (i, w) = self.locate(at)?;
-            if !self.is_resident(i) {
-                let want = self.leaf_len(i);
-                let mut buf = vec![0u8; want];
-                // **By document offset, not by leaf index.** This is the seam's one non-obvious
-                // requirement, and getting it wrong is silent: a rope's leaf boundaries are wherever its
-                // splits and merges left them, so leaf `i` does not begin at `i * LEAF_FILL` -- typing
-                // splits at the cursor and merges pull neighbours together. Keying by index therefore
-                // reads the right *number* of bytes from the wrong *place*, and a document read that way
-                // is wrong in a way no length check catches. The offset is the only stable address, and
-                // it is also what maps to a section: `offset / CHUNK_PLAINTEXT`.
-                let got = source.fetch_leaf(self.leaf_offset(i), &mut buf)?;
-                if got != want {
-                    // A short source padded with zeros would read as a document full of NULs, which is
-                    // indistinguishable from real text at this level. Refuse instead.
-                    return Err(RopeError::OutOfBounds { offset: i, text_len: got });
-                }
-                self.leaves[i] = LeafSlot::Resident(CagrLeaf::with_text(&buf)?);
-                source.on_resident(self.leaf_offset(i));
-            }
+            self.fault_leaf(source, i)?;
             let take = (self.leaf_len(i) - w).min(len - written);
             let n = self.leaf(i)?.copy_text_to(w, &mut out[written..written + take])?;
             debug_assert_eq!(n, take, "copy_text_to truncated a clamped run");
@@ -770,6 +752,148 @@ impl Rope {
             at += take;
         }
         Ok(())
+    }
+
+    /// Make leaf `i` resident, fetching it if it is not.
+    ///
+    /// **The one place a leaf is fetched.** It was inlined in [`read_at_faulting`] and is now shared,
+    /// because a second copy would be a second way to decide when a fault happens -- and the two would
+    /// disagree the moment one of them grew a retry or an `on_resident` call. One fetch, one set of
+    /// checks.
+    ///
+    /// ## It allocates, and that is the right trade here
+    ///
+    /// One `Vec` per fault. On the keystroke path that would be unacceptable, but a fault happens only
+    /// when a read or a cursor move *crosses into* an absent leaf, not once per keystroke. Typing inside
+    /// a resident leaf allocates nothing. Sizing the buffer per fault is what lets this be one function
+    /// shared by the read and cursor paths rather than a caller-owned scratch buffer both would then
+    /// have to keep in sync.
+    pub fn fault_leaf(&mut self, source: &mut dyn LeafSource, i: usize) -> Result<(), RopeError> {
+        if self.is_resident(i) {
+            return Ok(());
+        }
+        let want = self.leaf_len(i);
+        let mut buf = vec![0u8; want];
+        // **By document offset, not by leaf index.** This is the seam's one non-obvious
+        // requirement, and getting it wrong is silent: a rope's leaf boundaries are wherever its
+        // splits and merges left them, so leaf `i` does not begin at `i * LEAF_FILL` -- typing
+        // splits at the cursor and merges pull neighbours together. Keying by index therefore
+        // reads the right *number* of bytes from the wrong *place*, and a document read that way
+        // is wrong in a way no length check catches. The offset is the only stable address, and
+        // it is also what maps to a section: `offset / CHUNK_PLAINTEXT`.
+        //
+        // **And it is the offset in the SAVED document**, which is the whole of the constraint
+        // documented on the faulting methods below.
+        let got = source.fetch_leaf(self.leaf_offset(i), &mut buf)?;
+        if got != want {
+            // A short source padded with zeros would read as a document full of NULs, which is
+            // indistinguishable from real text at this level. Refuse instead.
+            return Err(RopeError::OutOfBounds { offset: i, text_len: got });
+        }
+        self.leaves[i] = LeafSlot::Resident(CagrLeaf::with_text(&buf)?);
+        source.on_resident(self.leaf_offset(i));
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Faulting a leaf in, and where it stops
+    //
+    // `fault_leaf` is the one place a leaf is fetched. Everything above it -- reads, and the cursor
+    // move below -- may fault, because **none of them change a byte.**
+    //
+    // # Why there are no faulting *mutators*, which is the substantive finding
+    //
+    // The obvious next step was `insert_byte_faulting` and friends: fault the leaf, then perform the
+    // edit. It works, and it is **silently wrong**, and the reason is structural rather than a bug to
+    // fix:
+    //
+    // **A `LeafSource` is addressed by document offset, and that is only true of an *unmodified*
+    // document.** An insert at offset `p` shifts every leaf after it by one, so from that moment the
+    // rope's leaf offsets and the store's offsets are different numbers. A later fault asks the store
+    // for "the leaf at offset `q`" and receives the right *number* of bytes from one byte too far --
+    // which is exactly the failure mode offset-keying was introduced to prevent, reintroduced by
+    // editing. `VecSource` in `sparse_rope.rs` and the 1-in-17 straddling arithmetic in
+    // `SectionStore::fetch_leaf` are both correct only for the saved document.
+    //
+    // The store cannot follow, because **there is no write-back path**: `evict_leaf` scrubs the bytes it
+    // releases and hands them to the caller, and `SectionStore::evict` releases memory without telling
+    // the container anything. So the store holds the document *as it was saved*, permanently, while the
+    // rope holds the document *as it is now*, and after one edit the two are different documents.
+    //
+    // A faulting mutator here would return `Ok`, put bytes in the document, and leave a trap for the
+    // next read somewhere else in the file. **That is the worst available outcome**, and it is why the
+    // methods are absent rather than present-and-documented. The ways out are in PROJECT.md Phase 13
+    // part 7, and the load-bearing requirement in every one of them is that the store become the
+    // authority on the document's *current* state rather than its saved state.
+    // ---------------------------------------------------------------------------
+
+    /// Fault in every leaf holding any byte of `[start, end]`.
+    ///
+    /// **A range read, not an edit.** The leaf before `start` is not included: a caller inspecting the
+    /// bytes either side of a boundary asks for a range that includes them, and silently widening the
+    /// range here would make the fetch count depend on something the caller did not ask for.
+    ///
+    /// The walk steps a whole leaf per iteration, so it is O(leaves in the range) rather than O(bytes),
+    /// and each step is one binary search.
+    ///
+    /// **This can fault many leaves**, bounded afterwards by the source's own LRU. The rope does not
+    /// evict, because it has no store -- which is also why it cannot promise residency is bounded.
+    pub fn fault_range(
+        &mut self,
+        source: &mut dyn LeafSource,
+        start: usize,
+        end: usize,
+    ) -> Result<(), RopeError> {
+        let len = self.text_len();
+        if start > end {
+            return Err(RopeError::OutOfBounds { offset: start, text_len: end });
+        }
+        if end > len {
+            return Err(RopeError::OutOfBounds { offset: end, text_len: len });
+        }
+        let mut at = start;
+        while at <= end {
+            let (i, _) = self.locate(at)?;
+            self.fault_leaf(source, i)?;
+            // A zero-length leaf would make `next == at` and spin forever, so this is a `break` rather
+            // than a `+ 1`: an empty document must not hang a fault.
+            let next = self.leaf_offset(i) + self.leaf_len(i);
+            if next <= at {
+                break;
+            }
+            at = next;
+        }
+        Ok(())
+    }
+
+    /// Fault in whichever leaf holds document byte `offset`.
+    ///
+    /// **What a caller means to say**, rather than which leaf that is. Every caller wants "make the
+    /// bytes at this offset present", and none of them should have to run `locate` and then remember
+    /// the `(index, within)` shape -- a caller that dropped the `within` half on the floor would fault
+    /// the right leaf and get a confusing error from `set_cursor` instead.
+    pub fn fault_leaf_containing(
+        &mut self,
+        source: &mut dyn LeafSource,
+        offset: usize,
+    ) -> Result<(), RopeError> {
+        let (i, _) = self.locate(offset)?;
+        self.fault_leaf(source, i)
+    }
+
+    /// Move the cursor, faulting the leaf it lands in.
+    ///
+    /// `set_cursor` refuses an absent leaf rather than leaving the caret in a leaf the rope cannot read,
+    /// which is a state with no way back. Faulting first is what lets a caret be *placed* anywhere in a
+    /// document whose bytes are not all present -- and it is safe here precisely because **moving the
+    /// cursor does not move a byte**, so every other leaf's offset still agrees with the store's.
+    pub fn set_cursor_faulting(
+        &mut self,
+        source: &mut dyn LeafSource,
+        offset: usize,
+    ) -> Result<(), RopeError> {
+        self.fault_leaf_containing(source, offset)?;
+        self.set_cursor(offset)
     }
 
     /// Release leaf `index`'s bytes, keeping its length.
