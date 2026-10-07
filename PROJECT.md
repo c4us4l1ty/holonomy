@@ -1967,10 +1967,9 @@ belongs to leaf *L+1* — so writing *L* back leaves *L+1* one byte short at its
 all round-trip; **the leaves between them do not.** Two open items, both named rather than papered over:
 
 1. **Shift propagation.** Fixing one leaf's length moves a byte across a leaf boundary, so the correction
-   propagates to the tail. Options: write the tail back in decreasing offset order (expensive but simple),
-   a **delta log** — an ordered list of `(offset, ±delta)` applied on fetch — or **C**, which avoids the
-   question by pinning. **Part 7 said B's overlay was unnecessary; it is not.** The overlay is not about
-   origin, it is about shift, and that part is still unpaid.
+   propagates to the tail. **Part 9 resolved this: the edit record must carry content, not deltas** — the
+   `(offset, ±delta)` log was built, gated against a brute-force model, and removed as wrong. See part 9 for
+   the finding, the three sub-findings, and why there is no cheaper record.
 2. **`set_len` fires at eviction, not at edit.** Until the first eviction the store is the right bytes at
    the wrong length, so a whole-document read asks its last leaf for one byte more than exists. Moving
    `set_len` to the edit path is one call and needs no store write — but it does mean an edit mutates the
@@ -1978,6 +1977,61 @@ all round-trip; **the leaves between them do not.** Two open items, both named r
 
 **Neither blocks the seam's direction, and both block editing a document end to end.** Nothing here is
 wired into `Session` yet, so the product still refuses to edit a sparse document.
+
+#### Phase 13, part 9 — the shift log, built, measured, and **removed**: a fold is not enough
+
+Part 8 left one gap — **shift propagation** — and named a **delta log** of `(offset, ±delta)` as the answer.
+It was built, gated against a brute-force model, and **deleted in the same stretch**, because it is wrong.
+
+**What the gate established.** The model applies the same edits to a real `Vec` and reports which saved byte
+landed at each current offset; the log's fold is compared against it at **every** offset, and the model is
+first checked against the actual bytes — *a model that is itself wrong would read like a log bug, and that
+costs an hour of chasing the wrong function.* On a script of six mixed inserts and deletes the fold returned
+**saved 25 where the truth is 28**.
+
+**Why the fold cannot be right, and this is the finding:**
+
+> **Each entry's `at` lives in its own coordinate system — the document as it was when that edit was applied —
+> and an edit can move bytes that a *later* entry's `at` was measured against.**
+
+The fold's running `delta` accounts for entries *wholly before* the read. That is sufficient only when no two
+edits overlap. An edit at offset 5 that removes 20 bytes also removes bytes an earlier edit at offset 10 had
+already shifted, and the offset that later replaces them was computed in a coordinate system the fold has
+already moved past. **No amount of care in the fold fixes this**, because the information needed is *which*
+bytes each removal consumed — that is the pending-edit **content**, not a delta.
+
+Three smaller findings came out of the same attempt, and each is worth more than the code:
+
+1. **`to_saved` must return `Option`, not `usize`.** After an insert of 3 bytes at 40, current offset 40 is
+   the *first inserted byte* and has **no saved origin at all**. A `usize` return hands back `40 - 3 = 37`:
+   a real byte of the saved document, and **not the byte at current 40** — plausible text from one run early,
+   which is the exact failure class this work exists to rule out.
+2. **A log of applied edits is not offset-monotonic.** "Once an entry starts past the read, every later one
+   does too" is **false**: type at 50, then go back and type at 5, and the second entry is invisible to a
+   read at 5. The early-exit optimisation bought nothing and cost correctness.
+3. **`None` must be conservative, not merely correct-when-it-knows.** When a later edit deletes the bytes an
+   earlier one inserted, the offset *does* have a real counterpart — and resolving that means the content
+   again. So `None` has to mean *"the source cannot answer this byte; take it from the rope"*, because a
+   `None` costs a fallback and a wrong number returns wrong text.
+
+**Why it was removed rather than shipped.** A subtly-wrong offset translation is **worse than none**: it
+returns the right *number* of bytes from the wrong *place*, which is the failure mode offset-keying was
+introduced to prevent. The four tests that passed (`compaction`, `saturation`, the boundary case, the prefix
+being free) describe a fold that is right *only when edits do not overlap*, which is not a case that occurs
+in a text editor.
+
+**What this says about the design, which is the part worth keeping.** Part 8's correction — that origin
+tracking is unnecessary but shift tracking is not — **understated it**. The honest statement is stronger:
+
+> **The edit record must carry content, not deltas. There is no cheaper record.**
+
+So part 8's option B's overlay was not optional and not a refinement; it is the **only** correct answer, and
+the useful question is not *whether* to have one but **how to bound it**. The three bounds remain: a delta log
+plus replayed content (**now known to be necessary and to need the content, not just the deltas**), writing
+the tail back in decreasing offset order (simple, O(document) per edit), or C's pin. And the same record is
+what `UndoStack` already builds — **so the second occurrence of that structure is no longer an objection, it
+is the design.** The objection to B was always really "do not build this twice", and the way to not build it
+twice is to build it once and have undo read it.
 
 #### Phase 14 — The chrome: pointer input, menus, icons
 
@@ -2067,19 +2121,17 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **Approve or overrule "B with write-back on eviction" as the answer to Phase 13 part 7.** My
-   recommendation, now measured rather than argued:
-   * **A (write-through) is measured and out** — ~1,130–1,820 µs per keystroke, **6.5–10.3×** a 176 µs
-     keystroke, **84–93 % of it the disk** (`tests/write_through_cost.rs`). Not slow; a different order of
-     operation.
-   * **C (dirty-region pin)** is free per keystroke but its window shrinks to `min(window, first_edit_
-     offset)`, so editing near the end of a document pins nearly all of it. Real product, bounded ceiling.
-   * **B (origin tracking) with write-back on eviction** keeps residency bounded regardless of where you
-     edit, lands writes at eviction and save boundaries instead of per keystroke, and costs ~24 B/leaf of
-     spine — ~52 KB at 2,167 leaves, 0.3 % of the 16 MiB budget. Its one new cost is the pending-edit
-     overlay a fault must replay, bounded by the LRU pressure that already exists.
-   **The remaining argument against B is that its overlay is the undo problem wearing a different hat**, and
-   I would rather you rule on that than have me assume it is acceptable.
+0. **The edit record must carry content, not deltas — and it should be `UndoStack`'s record, built once.**
+   Part 9 built the delta log part 8 recommended, gated it against a brute-force model, and **removed it as
+   wrong**: each entry's `at` lives in the coordinates current when that edit was applied, so an edit that
+   removes bytes a *later* entry's `at` was measured against cannot be folded at all. No cheaper record
+   exists. The open question is therefore **not "whether" but "how to bound it", and the useful answer is
+   that `UndoStack` already builds this structure** — so the objection to building it twice is answered by
+   building it once and having undo read the same record. Three bounds, unchanged in shape and changed in
+   what they must carry:
+   * **an edit log with content**, replayed over a faulted range — necessary, now proven so;
+   * **writing the tail back in decreasing offset order** — simple, O(document) per edit;
+   * **C's pin** — avoids the question, and its ceiling is that editing near the top pins nearly everything.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
