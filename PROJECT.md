@@ -1926,10 +1926,15 @@ the desktop build, and none of this needs more than a few tens of KiB.
      path reads through `&self` and cannot fault; past the window it counts `runs_missing`, which is safe
      and wrong to draw. §7 item 4 is that.
    * **A sparse document is read-only.** Edits refuse on absent leaves.
-   * **`vdf_iterations` is `TEST_VDF_ITERATIONS`**, and the count is *not recorded in the container*, so a
-     container written by a build with different iterations will not open with this one. A real unlock
-     derives it from a measured per-squaring cost (§2.4). **The boot now depends on a value that does not
-     exist yet**, which makes this the most likely thing to break first in the field.
+   * **`vdf_iterations` is derived now**, as `TARGET_VDF_MS` worth of squarings at this host's measured
+     2,664 ns/squaring — **93,843**, against the 8 the boot was using. So the container's KDF was running
+     **8 serial squarings where the design calls for 93,843**, a factor of 11,730. §2.4 asks for
+     `build.rs` to bake this in from a `vdf-calibrate` run; that is still not done, so `VDF_ITERATIONS` is
+     the substituted step.
+   * **The count is still not recorded in the container.** So opening needs it out of band, and a container
+     written by a build calibrated on a substantially different host will not open with this one. Within
+     ~8 % on this host, so the mismatch is currently small — **but the format change that records `T`
+     beside the salt is what makes this robust, and it is not done.**
    * **`SessionContext` holds the `Wavefunction` beside the session**, not inside it, so a store alive for a
      session's lifetime is still not possible. The load-time store is created, used and dropped — which
      works because faulted leaves are `SecureBlock`s the rope owns, not views into the store.

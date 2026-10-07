@@ -328,9 +328,20 @@ fn run() -> Result<(), Fail> {
         // plaintext, because opening one needs the KDF and the KDF needs the passphrase, and the
         // passphrase only exists after sealing.
         //
-        // `vdf_iterations` is `TEST_VDF_ITERATIONS`, which is **wrong for production and honest about
-        // being so**: the count is not recorded in the container, and the only constant in the tree is the
-        // test one. A real unlock derives it from a measured per-squaring cost (PROJECT.md 2.4).
+        // `vdf_iterations` is **derived**: `TARGET_VDF_MS` worth of squarings at this host's measured
+        // per-squaring cost, via `vdf_iterations_for` (PROJECT.md 2.4). It used to be
+        // `TEST_VDF_ITERATIONS` = 8, which is the test constant and 11,730x weaker than the derived
+        // value -- so the container's KDF was running 8 serial squarings where the design calls for 93,843.
+        //
+        // **A build-time constant, deliberately.** The VDF's property is that its cost is fixed in
+        // advance, so a caller who could vary it could be handed a cheap challenge. Calibrating at
+        // runtime would make `T` depend on the machine presenting it.
+        //
+        // **The residual gap, recorded rather than glossed:** the count is not recorded *in the container*,
+        // so opening needs it out of band, and a container written by a build calibrated on a
+        // substantially different host will not open with this one. 2,664 ns is within ~8% of this host's
+        // re-measurement, so the mismatch is currently small -- but the format change that records `T`
+        // beside the salt is what makes this robust, and it is not done.
         // **A missing descriptor is a bug, not a user error**, so it is reported and the session carries
         // on with an empty editor rather than aborting the boot -- an empty editor is what it had before.
         let Some(fd) = ctx.container.take() else {
@@ -350,7 +361,7 @@ fn run() -> Result<(), Fail> {
         match holonomy::store::open_document(
             fd,
             &phrase,
-            holonomy_container::TEST_VDF_ITERATIONS,
+            holonomy_crypto::envelope::VDF_ITERATIONS,
             holonomy::store::DEFAULT_RESIDENT_SECTIONS,
         ) {
             Ok(opened) => {

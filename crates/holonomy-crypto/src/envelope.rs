@@ -261,6 +261,90 @@ pub fn argon2id_k_int(passphrase: &str, salt: &[u8]) -> Result<[u8; K_INT_LEN], 
     Ok(out)
 }
 
+/// The VDF's share of the unlock budget, in milliseconds. PROJECT.md §2.4.
+///
+/// **250 ms is a choice, and here is the argument rather than the number.**
+///
+/// Argon2id at m = 128 MiB, t = 2, p = 2 measures **524 ms** on this host. So the memory-hard half of the
+/// unlock already costs half a second, and NFR-1.3's 400–550 ms total leaves **nothing** for a serial
+/// chain — which is the same conclusion §2.4 reached when it declared the PRD's parameters a
+/// denial of service on the user's own device.
+///
+/// The question is then what a VDF is *for*, given Argon2 is already there. **Argon2 is memory-hard but
+/// parallel**: an attacker with more cores and the same memory goes faster. The VDF is neither — its cost
+/// is strictly serial, and no amount of parallel hardware shortens it. So a second of Argon2 is worth less
+/// against an attacker than a second of VDF, and the marginal security of the serial chain is *higher* per
+/// millisecond.
+///
+/// 250 ms is chosen to make the serial cost **comparable to** the memory-hard cost rather than dominant:
+/// the total unlock lands near **775 ms**, which is over NFR-1.3's original 550 ms and is a deliberate
+/// restatement consistent with §2.4. Going higher buys serial resistance linearly and costs the user
+/// linearly; going lower leaves the serial dimension thin. 250 ms is the point where neither half is
+/// decorative.
+///
+/// **This is a policy number and the security argument is about the shape, not the digits.** What is not
+/// acceptable is a `T` chosen for roundness or copied from another implementation's hardware — see
+/// [`vdf_iterations_for`], which is the only way to obtain one.
+pub const TARGET_VDF_MS: u64 = 250;
+
+/// Measured nanoseconds per Montgomery squaring on the build host.
+///
+/// **Measured, not assumed.** `modulus::tests::calibrate_ns_per_squaring` measured **2,664.2 ns** here,
+/// against the ~2,657 ns median recorded in that test's doc comment and the 2,077 ns PROJECT.md §1.1
+/// measured for a *different* implementation. The spread on this host is roughly ±8 %, so a single reading
+/// is indicative only and this constant is rounded **down** deliberately: see
+/// [`vdf_iterations_for`].
+pub const MEASURED_NS_PER_SQUARING: u64 = 2_664;
+
+/// The iteration count this build uses: [`TARGET_VDF_MS`] worth of squarings at the measured cost.
+///
+/// At 2,664 ns and 250 ms that is `250e6 / 2,664 = 93,843`, so the unlock costs about **250 ms** of VDF on
+/// top of Argon2id's 524 ms.
+///
+/// **A build-time constant, not a runtime measurement**, deliberately: the VDF's whole security property is
+/// that its cost is *known and fixed in advance*, so a caller who could vary it could be given a cheap
+/// challenge. Calibrating at runtime would make `T` depend on the attacker's machine. §2.4 asks for
+/// `build.rs` to bake this in from a calibration run; that is not implemented, so **this constant is the
+/// substituted step and it is the part to replace** — see [`MEASURED_NS_PER_SQUARING`].
+pub const VDF_ITERATIONS: u64 = 93_843;
+
+/// Derive the iteration count for a VDF budget, in squarings.
+///
+/// `T = floor(target_ms * 1e6 / ns_per_squaring)`
+///
+/// # Why this is a function and not a constant
+///
+/// **Because a constant is the bug this exists to prevent.** PROJECT.md §1.1 records the PRD claiming
+/// 300 ns per squaring and 2,077 ns measured, and §2.4 records the PRD claiming 180 ms for Argon2id where
+/// 524 ms was measured — **every hard-coded VDF parameter in the tree's history has been wrong by 3–7×**.
+/// A derivation makes the dependence on host speed explicit and checkable, and it puts the refusal in one
+/// place instead of at each call site.
+///
+/// # Rounding is deliberately **down**, and here is why
+///
+/// `floor` bounds the VDF's cost at the budget rather than above it. Rounding up would let a slow host
+/// overshoot; rounding down can only ever spend slightly *less* than the budget, which costs a fraction of
+/// a percent of security and never a stall. **A budget is a ceiling, so it is enforced as one.**
+///
+/// # Refusals
+///
+/// Both inputs are refused when they would make the arithmetic meaningless rather than being clamped.
+/// `ns_per_squaring == 0` would divide by zero and report an instant VDF, which is the worst possible
+/// failure: a challenge that costs nothing. `target_ms == 0` would produce `T = 0`, and `sequential_squarings`
+/// already refuses zero iterations — refusing here too means the mistake is reported where it is made.
+pub fn vdf_iterations_for(target_ms: u64, ns_per_squaring: u64) -> Result<u64, EnvelopeError> {
+    if ns_per_squaring == 0 {
+        return Err(EnvelopeError::Vdf(VdfError::Uncalibrated));
+    }
+    if target_ms == 0 {
+        return Err(EnvelopeError::Vdf(VdfError::ZeroIterations));
+    }
+    // Saturating, not wrapping: `target_ms * 1e6` overflows u64 at ~1.8e13 ms, which is a number a
+    // caller can type. Saturating gives `u64::MAX / ns` iterations, which is a very slow VDF rather than a
+    // very fast one -- the safe direction for a budget.
+    Ok(target_ms.saturating_mul(1_000_000) / ns_per_squaring)
+}
+
 /// `K_root = Blake2b-512(S_T || K_int)`. FR-4.4.
 ///
 /// `s_t` is the 256-byte little-endian chain output. `k_int` is appended rather than

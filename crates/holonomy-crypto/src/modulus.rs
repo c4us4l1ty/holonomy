@@ -81,6 +81,14 @@ pub enum VdfError {
     ZeroSeed,
     /// `iterations` was zero, which is not a time-lock.
     ZeroIterations,
+    /// The per-squaring cost used to derive the iteration count was zero, so the budget cannot be met.
+    ///
+    /// **Its own variant rather than a reused one.** An earlier version returned [`ZeroSeed`](Self::ZeroSeed)
+    /// here, which is a different failure with a different fix — this one is an uncalibrated host, that one
+    /// is a degenerate seed — and reusing a variant makes `Display` say "seed reduced to zero" about a
+    /// measurement that never happened. A reader debugging a zero-iteration challenge would be sent to look
+    /// at the seed.
+    Uncalibrated,
 }
 
 impl core::fmt::Display for VdfError {
@@ -89,6 +97,9 @@ impl core::fmt::Display for VdfError {
             Self::SeedNotCoprime => "seed is not coprime with N_pub (would degenerate)",
             Self::ZeroSeed => "seed reduced to zero",
             Self::ZeroIterations => "zero iterations",
+            Self::Uncalibrated => {
+                "the per-squaring cost is zero, so an iteration count cannot be derived from it"
+            }
         };
         f.write_str(msg)
     }
