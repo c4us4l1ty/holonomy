@@ -2078,6 +2078,46 @@ the design**, and the second occurrence is now planned rather than accidental.
 **Nothing is wired into `Session`.** The product still refuses to edit a sparse document; this is the
 arithmetic underneath it.
 
+#### Phase 13, part 11 — content replay: a **second** coordinate-system bug, same class as part 9
+
+Part 10 left one thing out: `to_saved` answers *where* the rope's bytes live; **`replay` answers *what they
+are*** — taking the source's saved bytes and splicing in each edit's inserted text. That is the substantive
+half of editing a sparse document. It was built, gated over **every `(offset, length)` window** of four
+scripts against the real document, and **removed** — because the first implementation is wrong in the *same
+class* as part 9's.
+
+**The bug, and it is the mirror image of part 9's.** The walk was *forwards*, laying bytes down in
+final-document order and carrying **one global running `delta`**. It should have been obvious: **an edit at
+offset 50 does not shift positions before 50**, so a later edit at offset 10 lands at 10, not at 15. A single
+running delta applied to every subsequent edit is wrong the moment any two edits are out of offset order —
+which, in a text editor, is the normal case.
+
+Gated output, `replay(0, 16)` on `insert(50)`, `insert(10)`, `delete(30)`:
+
+```text
+got:   [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 88]      # five bytes of saved text, then one 'X'
+want:  [0 1 2 3 4 5 6 7 8 9 88 88 10 11 12 13]      # ten saved, then "XX", then saved again
+```
+
+The `X` is in the right place at the end and the wrong place in the middle: the insert at 10 was placed at
+**15** because the earlier insert at 50 had added 5 to a delta that was then applied to it regardless of
+position.
+
+**What this says, and it generalises part 9's finding rather than adding to it:**
+
+> **There is no safe single offset accumulator.** Every edit shifts only the positions *after* it, so any
+> quantity that must survive two edits in arbitrary order has to be evaluated *conditionally on position* —
+> which is what the backwards fold in part 10 does by construction, and what a forward walk with one `delta`
+> cannot do.
+
+So the fix for `replay` is the same shape as part 10's: **walk backwards**, decomposing the window, rather
+than forwards with an accumulator. That is a redesign rather than a patch, which is why it is recorded here
+instead of attempted in the same stretch that found it.
+
+**What is unaffected.** `EditRecord` and its translation are unchanged and still gated — `to_saved`,
+`to_current`, `compact_before`, `first_in_flight`, and the `Option` semantics all stand as part 10 left them.
+**This stretch removed only the replay method and its four tests.**
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2166,15 +2206,19 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **Approve part 11 — content replay — or overrule it.** The record and its translation are built and gated
-   (part 10). What is left is turning a source's *bytes* into the bytes the rope wants: each edit's inserted
-   text spliced over the fetched range, its removed text skipped. **That is the substantive half of editing a
-   sparse document**, and it is ungated work against a model that does not exist yet — so it wants its own
-   gate built alongside it, not after it.
-   **My recommendation is to build the model first**, because translation proved that a fold can be
-   exhaustively right and still be wrong where two edits overlap, and content replay has strictly more of
-   those cases. A model is a splice-tracking `Vec<Option<usize>>` and about twenty lines; the record is
-   already correct, so the model is what tells us whether replay is.
+0. **Approve rewriting `replay` as a *backwards* walk — or overrule it.** Part 11 built content replay, gated
+   it over **every window of four scripts** against the real document, and removed it: the forwards walk used
+   one global running `delta`, and **an edit at offset 50 does not shift positions before 50**, so a later
+   edit at offset 10 landed five bytes late. Same class as part 9's bug, mirrored.
+   The generalised finding is the one worth your attention: **there is no safe single offset accumulator**,
+   because every edit shifts only positions after it, so anything that must survive two out-of-order edits
+   has to be evaluated *conditionally on position*. Part 10's backwards fold satisfies that by construction;
+   a forwards walk with one `delta` cannot.
+   **So `replay` is a redesign to walk backwards, not a patch** — which is why it is recorded rather than
+   retried in the same stretch that found it. My recommendation is to build the *window-decomposition* model
+   first (which pieces of the requested range come from the source, and which are inserted text), because
+   two attempts have now shown that the decomposition is where the difficulty is, not the arithmetic.
+   **`EditRecord` itself is unaffected and still gated**; only the replay method and its tests were removed.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
