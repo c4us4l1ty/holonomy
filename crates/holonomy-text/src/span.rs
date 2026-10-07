@@ -273,6 +273,39 @@ pub struct SpanMap {
     /// The document length the spans describe. Kept so the map can validate its own bounds without
     /// being handed the length on every call.
     text_len: u32,
+    /// The highest document offset whose **bytes have actually been examined**. Phase 13, part 6.
+    ///
+    /// # Why this exists, and why it is the whole design
+    ///
+    /// [`plain`](Self::plain) makes a claim about **content**: that every byte is plain-styled. For a
+    /// document loaded from a container, that claim is **unverifiable until the bytes are read** — a
+    /// document full of `**bold**` makes it false. So the map needs to be able to say *"I have not
+    /// looked"*, distinctly from *"I looked and it is plain"*.
+    ///
+    /// **The invariant the whole of Phase 13 part 6 rests on: styling is a function of the document's
+    /// bytes, never of which leaves happen to be resident.** Two designs were rejected against it:
+    ///
+    /// * **Correct the map when a leaf faults in.** Then a document's appearance depends on residency —
+    ///   the same document renders differently before and after a scroll — and `style_at` is `&self`, so
+    ///   the correction would have to be a side effect of an unrelated read. A semantic change in the
+    ///   wrong place, producing output that varies without any visible cause.
+    /// * **Never correct it.** Then `plain` is a promise the format has to keep, and every styled
+    ///   document loaded from a container silently loses its styling.
+    ///
+    /// Both fail for the same reason: they make styling depend on *when* something was read rather than
+    /// on *what* it says. The watermark separates the two — the map may record what it has learned, and
+    /// a consumer may ask whether it has learned it yet.
+    ///
+    /// # Monotone, deliberately
+    ///
+    /// **`read_through` only ever increases.** A byte that has been examined does not become unexamined
+    /// because its leaf was evicted, so the watermark is not a residency map and must not be confused with
+    /// one. That is what makes `style_at_known` safe to call at any time: it can only ever report *less*
+    /// certainty as the document grows, never more, and never oscillate.
+    ///
+    /// **It is not the same thing as "how much is resident", and conflating them would be the bug this
+    /// field is easy to write.** Residency goes up and down; this does not.
+    read_through: u32,
 }
 
 /// Spans reserved beyond the document's current run count, so an insert does not grow the `Vec`.
@@ -297,6 +330,10 @@ impl SpanMap {
         Self {
             spans: with_headroom(),
             text_len: 0,
+            // **Zero, not `text_len`.** An empty map has examined nothing, and `plain` is the only place
+            // that knows otherwise -- because it is being handed a length by a caller who has *not* read
+            // the bytes either. That is the whole point of the field.
+            read_through: 0,
         }
     }
 
@@ -318,6 +355,7 @@ impl SpanMap {
         Self {
             spans: with_headroom(),
             text_len,
+            read_through: 0,
         }
     }
 
@@ -325,6 +363,145 @@ impl SpanMap {
     #[inline]
     pub fn text_len(&self) -> u32 {
         self.text_len
+    }
+
+    /// How far the document has been **read**, in bytes. Phase 13, part 6.
+    ///
+    /// Offsets below this have been examined; offsets at or above it have not. **Not** a residency figure
+    /// — see [`SpanMap::read_through`].
+    #[inline]
+    pub fn read_through(&self) -> u32 {
+        self.read_through
+    }
+
+    /// Whether offset `offset` has been **read**, so its style is known rather than assumed.
+    ///
+    /// **The distinction the whole of Phase 13 part 6 exists to express.** `style_at` answers "what style
+    /// does the map say here", which for an unread offset is `plain` *because nobody has looked*. This
+    /// answers "has anyone looked", so a caller can tell those apart instead of acting on a guess.
+    #[inline]
+    pub fn is_read(&self, offset: u32) -> bool {
+        offset < self.read_through
+    }
+
+    /// The style at `offset`, or `None` if those bytes have not been read.
+    ///
+    /// **The `&self` query a caller should reach for on a sparse document.** Where `style_at` has to
+    /// answer something, `style_at_known` is allowed to answer "I don't know" — and a caller that cannot
+    /// tolerate that should use the `&mut` faulting path instead of reading a guess.
+    ///
+    /// **`style_at` is deliberately *not* changed to return `Option`.** It is on the paint path, called
+    /// from `&self` contexts, and the paint path's current behaviour — assume plain, count it in
+    /// `PaintStats::runs_missing` — is the documented stopgap. Changing the signature would force every
+    /// one of those call sites to handle absence at once, before anything knows whether the answer is
+    /// needed. This is the additive step.
+    #[inline]
+    pub fn style_at_known(&self, offset: u32) -> Option<TextIntervalSpan> {
+        self.is_read(offset).then(|| self.style_at(offset))
+    }
+
+    /// Record that the document's bytes up to `through` have been examined, and adopt whatever styling
+    /// they carry.
+    ///
+    /// **This is the `&mut` half, and it is where a fault-in's findings belong.** A leaf that arrives
+    /// carries its own bytes, so the caller computes the spans for that range and hands them over rather
+    /// than having the map guess. The map never looks at document bytes itself.
+    ///
+    /// ## Why it is a *splice of the prefix*, not an insert
+    ///
+    /// The map's invariant is sorted, non-overlapping and **gap-free over `[0, text_len)`**. So the spans
+    /// describing `[0, through)` are exactly the prefix that ends at or before `through`, and replacing
+    /// them with `learned` is: drop the prefix, splice `learned` in front, keep the tail. **One
+    /// representation, one way to hold a span.** An insert-style API here would give the map a second way
+    /// to acquire spans, and the two would diverge invisibly until a merge disagreed.
+    ///
+    /// ## Monotone, and the watermark advances even with nothing learned
+    ///
+    /// `read_through` only ever increases, and **it is advanced even when `learned` is empty** — because an
+    /// unstyled run *is* a finding. Refusing to advance on empty input would leave a genuinely plain region
+    /// permanently unknown, and the map would never learn that a document with no styling is plain.
+    /// `learned.is_empty()` is the common case, not a no-op.
+    ///
+    /// ## Why out-of-range is refused rather than clamped
+    ///
+    /// A clamped region would claim certainty about bytes nobody read, which is precisely the failure this
+    /// design exists to prevent. Refusing is the only safe direction.
+    pub fn observe(&mut self, through: u32, learned: &[TextIntervalSpan]) -> Result<(), SpanError> {
+        if through > self.text_len {
+            return Err(SpanError::OutOfBounds { offset: through as u64, text_len: self.text_len });
+        }
+        if through < self.read_through {
+            // Re-observing a prefix already observed. **Allowed and idempotent**, because a leaf can be
+            // evicted and faulted back in, and the second visit must reach the same state as the first --
+            // that is the "indistinguishable from resident" property, and it is why this is not an error.
+            return Ok(());
+        }
+        // `learned` must tile `[0, through)` exactly: gap-free, sorted, in bounds. Checked rather than
+        // assumed, because a gap here would be a claim about a byte range the map was not told about.
+        let mut want = 0u32;
+        for s in learned {
+            if s.start_byte != want {
+                return Err(SpanError::RangeOutOfBounds {
+                    start: s.start_byte as u64,
+                    end: s.end_byte as u64,
+                    text_len: want,
+                });
+            }
+            if s.end_byte > through {
+                return Err(SpanError::RangeOutOfBounds {
+                    start: s.start_byte as u64,
+                    end: s.end_byte as u64,
+                    text_len: through,
+                });
+            }
+            want = s.end_byte;
+        }
+        if want != through {
+            return Err(SpanError::RangeOutOfBounds {
+                start: want as u64,
+                end: through as u64,
+                text_len: through,
+            });
+        }
+
+        // **Drop the prefix, keep the tail -- but the tail has to be *re-cut* at `through`, not just
+        // sliced.**
+        //
+        // The first version of this did `split_off(partition_point(|s| s.end_byte <= through))` and
+        // appended. That is wrong whenever a span straddles the boundary, and it is wrong *always* in
+        // practice: `SpanMap::plain(len)` holds **one span covering the whole document**, so the slice
+        // kept `plain(0, 1000)` and the result was `[bold(0, 200), plain(0, 1000)]` -- overlapping,
+        // unsorted, and in violation of the map's own invariant. The gate caught it on the first run,
+        // which is the argument for having the invariant asserted rather than described.
+        let mut tail: Vec<TextIntervalSpan> = Vec::new();
+        for s in self.spans.drain(..) {
+            if s.end_byte <= through {
+                continue; // wholly inside the re-observed prefix
+            }
+            if s.start_byte < through {
+                // Straddles: keep only the part from `through` onward, as a *new* span.
+                tail.push(TextIntervalSpan {
+                    start_byte: through,
+                    end_byte: s.end_byte,
+                    style_flags: s.style_flags,
+                    color_rgb: s.color_rgb,
+                });
+                continue;
+            }
+            tail.push(s);
+        }
+        if through < self.text_len && tail.is_empty() {
+            // Everything was inside the prefix, so the unread remainder needs a run of its own or the
+            // gap-free invariant breaks.
+            tail.push(TextIntervalSpan::plain(through, self.text_len));
+        }
+        let mut next = Vec::with_capacity(learned.len() + tail.len());
+        next.extend_from_slice(learned);
+        next.extend_from_slice(&tail);
+        self.spans = next;
+        // **After** the splice, so a refused input leaves the map exactly as it was.
+        self.read_through = through;
+        Ok(())
     }
 
     /// The spans, sorted and non-overlapping.
@@ -830,7 +1007,7 @@ impl SpanMap {
     /// accepted and filled with one plain span, since that is the representation of "no styling" and
     /// it is what `SpanMap::plain` produces. Every other gap is an error.
     pub fn from_spans(spans: Vec<TextIntervalSpan>, text_len: u32) -> Result<Self, SpanError> {
-        let mut m = Self { spans, text_len };
+        let mut m = Self { spans, text_len, read_through: 0 };
         if m.spans.is_empty() {
             if text_len > 0 {
                 m.spans.push(TextIntervalSpan::plain(0, text_len));
