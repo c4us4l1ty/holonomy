@@ -1889,6 +1889,42 @@ or C is chosen**, not assumed.
 **This is the decision the next stretch needs, and it is yours to make.** §7's item on this is the one that
 matters.
 
+#### Phase 13, part 7 — write-through measured: **A is out**
+
+The recommendation above was to measure A's cost before choosing, because it is the only option whose price
+is a number. Measured, in `crates/holonomy-container/tests/write_through_cost.rs` (3 tests), on this host:
+
+| component | cost per 65,536 B section | share |
+| --- | --- | --- |
+| `seal_in_place` — XChaCha20-Poly1305 over 65,520 B | **~120–180 µs** | 7–16 % |
+| `write_exact_at` — one `O_DIRECT` `pwrite` | **~900–1,700 µs** | **84–93 %** |
+| **total charge per keystroke** | **~1,130–1,820 µs** | — |
+
+Against §7 item 6's **176 µs** keystroke, that is **6.5–10.3× a whole keystroke.** **Write-through is out.**
+
+**And the split is the finding, not the total.** A device-dominated charge cannot be optimised by anything
+in this crate — it is the disk. Two consequences:
+
+* **Batching does not make it proportionally cheaper.** B (origin tracking) *defers* the write; it does
+  not reduce it. A deferred write is still ~1 ms when it lands.
+* **What helps is not writing during editing at all**, which is C's rule — and C's rule becomes available
+  for free once the store is not being asked to be authoritative on the edited region.
+
+**So the measurement discriminates between B and C as well**, and points at **B with write-back on
+eviction**: residency stays bounded no matter *where* in the document you edit (which C cannot promise —
+C's window shrinks to `min(window, first_edit_offset)`, so editing near the end pins almost the whole
+document), and writes land at eviction and save boundaries rather than per keystroke. B's extra spine
+array is ~24 B/leaf — about 52 KB at 2,167 leaves, **0.3 % of the 16 MiB budget**, which is not a
+constraint. Its one genuinely new cost is the **pending-edit overlay a fault must replay**, and that is
+bounded by exactly the pressure the LRU already applies.
+
+**A measurement whose subject is the hardware does not belong in a gate.** The gate therefore asserts the
+**split** (`write > 75 %` of the charge) and *reports* the absolute numbers; the decision above is recorded
+here. That is deliberate: a `charge < KEYSTROKE_US` assertion would pass on an NVMe drive and fail on this
+host's, and in both cases it would be reporting the disk rather than the design. The write varied 902 µs to
+1,714 µs across two runs on the same host — **the split held at 84 % and 93 %**, which is why the split is
+the gated quantity.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -1977,17 +2013,19 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **Which of Phase 13 part 7's three ways out: write-through, origin tracking, or dirty-region pin?**
-   This is the decision that unblocks editing a document whose bytes are not all present, and it is yours
-   because the three buy different products. **A (write-through)** keeps the memory bound under sustained
-   typing but charges a 65,520 B re-encrypt per keystroke. **C (dirty-region pin)** is the cheapest and
-   is a real product — reading scrolls arbitrarily far, editing is bounded by where you have edited — but
-   degrades as the document gets edited. **B (origin tracking)** avoids the per-keystroke charge at the
-   cost of a third spine array *and* a pending-edit log that a fault must replay, which is the undo
-   problem again. Full statement and costs in Phase 13 part 7.
-   **My recommendation is to measure A's per-keystroke cost first**, because A is the only option whose
-   cost is a number rather than a structure, and a number can turn out to be small enough that B and C's
-   complexity is not warranted.
+0. **Approve or overrule "B with write-back on eviction" as the answer to Phase 13 part 7.** My
+   recommendation, now measured rather than argued:
+   * **A (write-through) is measured and out** — ~1,130–1,820 µs per keystroke, **6.5–10.3×** a 176 µs
+     keystroke, **84–93 % of it the disk** (`tests/write_through_cost.rs`). Not slow; a different order of
+     operation.
+   * **C (dirty-region pin)** is free per keystroke but its window shrinks to `min(window, first_edit_
+     offset)`, so editing near the end of a document pins nearly all of it. Real product, bounded ceiling.
+   * **B (origin tracking) with write-back on eviction** keeps residency bounded regardless of where you
+     edit, lands writes at eviction and save boundaries instead of per keystroke, and costs ~24 B/leaf of
+     spine — ~52 KB at 2,167 leaves, 0.3 % of the 16 MiB budget. Its one new cost is the pending-edit
+     overlay a fault must replay, bounded by the LRU pressure that already exists.
+   **The remaining argument against B is that its overlay is the undo problem wearing a different hat**, and
+   I would rather you rule on that than have me assume it is acceptable.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
