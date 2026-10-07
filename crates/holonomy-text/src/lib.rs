@@ -17,6 +17,7 @@ pub mod asset;
 mod editor;
 mod leaf;
 mod math_span;
+pub mod edit_record;
 pub mod payload;
 mod rope;
 mod span;

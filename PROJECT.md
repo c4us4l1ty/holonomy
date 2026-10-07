@@ -2033,6 +2033,51 @@ what `UndoStack` already builds — **so the second occurrence of that structure
 is the design.** The objection to B was always really "do not build this twice", and the way to not build it
 twice is to build it once and have undo read it.
 
+#### Phase 13, part 10 — the edit record, and the fix that made it correct
+
+Part 9 removed the delta log as wrong. This is the replacement, and **the fix is one word: backwards.**
+
+> **Each edit's `at` is an offset in the document as it was _before that edit_** — so the edits form a
+> **chain of coordinate systems**, not one. Part 9 walked *forwards* carrying a running delta, which is
+> sufficient only when no two edits overlap: a later edit that spans backwards past an earlier one is measured
+> against coordinates the walk has already passed. Walking **backwards** removes the problem, because each
+> step converts an offset from one system to the *previous* one, and the previous one is exactly what the next
+> edit's `at` uses.
+
+```text
+cur = current_offset                      # in the final document
+for edit in REVERSE application order:
+    if cur < edit.at:                 pass           # before it; unmoved
+    elif cur < edit.at + inserted:    return None    # a typed byte: no saved origin
+    else:                             cur = cur - inserted + removed
+```
+
+`crates/holonomy-text/src/edit_record.rs`, gated by `tests/edit_record.rs` (7 tests). `Edit { at, removed:
+Vec<u8>, inserted: Vec<u8> }` — **the bytes are the point**, and `net_delta` is *derived* from them so it
+cannot disagree with them.
+
+**Gated against a brute-force model at every offset**, over six scripts: interior-only, offset-zero,
+replacements, at-the-end, and repeated grow/shrink. **And the model is checked against the actual bytes
+first**, because a model that is itself wrong reads like a wrong record — part 9 learned that the hard way.
+`overlapping_edits_do_not_break_the_translation` is the case that killed the forward fold, isolated and named.
+
+**This is `UndoStack`'s structure, built once.** Part 9 recorded that the objection to carrying content was
+"do not build this twice", and that the answer is to build it once and have undo read it. This record *is*
+the undo record — same edits, same bytes, same order. **The thing I called the main risk against option B is
+the design**, and the second occurrence is now planned rather than accidental.
+
+**What this still does not do, and it is the substantive half:**
+
+* **It translates offsets; it does not replay content.** Turning the bytes a source holds into the bytes the
+  rope wants needs each edit's inserted text spliced over the fetched range and its removed text skipped.
+  **That is part 11.** Splitting them matters: translation is gateable exhaustively against a model, whereas
+  content replay is easy to get subtly wrong and needs a model of its own — **and building the first alone is
+  what makes the second checkable.**
+* **`set_len` still fires at eviction, not at edit** (part 8, item 2).
+
+**Nothing is wired into `Session`.** The product still refuses to edit a sparse document; this is the
+arithmetic underneath it.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2121,17 +2166,15 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **The edit record must carry content, not deltas — and it should be `UndoStack`'s record, built once.**
-   Part 9 built the delta log part 8 recommended, gated it against a brute-force model, and **removed it as
-   wrong**: each entry's `at` lives in the coordinates current when that edit was applied, so an edit that
-   removes bytes a *later* entry's `at` was measured against cannot be folded at all. No cheaper record
-   exists. The open question is therefore **not "whether" but "how to bound it", and the useful answer is
-   that `UndoStack` already builds this structure** — so the objection to building it twice is answered by
-   building it once and having undo read the same record. Three bounds, unchanged in shape and changed in
-   what they must carry:
-   * **an edit log with content**, replayed over a faulted range — necessary, now proven so;
-   * **writing the tail back in decreasing offset order** — simple, O(document) per edit;
-   * **C's pin** — avoids the question, and its ceiling is that editing near the top pins nearly everything.
+0. **Approve part 11 — content replay — or overrule it.** The record and its translation are built and gated
+   (part 10). What is left is turning a source's *bytes* into the bytes the rope wants: each edit's inserted
+   text spliced over the fetched range, its removed text skipped. **That is the substantive half of editing a
+   sparse document**, and it is ungated work against a model that does not exist yet — so it wants its own
+   gate built alongside it, not after it.
+   **My recommendation is to build the model first**, because translation proved that a fold can be
+   exhaustively right and still be wrong where two edits overlap, and content replay has strictly more of
+   those cases. A model is a splice-tracking `Vec<Option<usize>>` and about twenty lines; the record is
+   already correct, so the model is what tells us whether replay is.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
