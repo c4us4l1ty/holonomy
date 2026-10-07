@@ -2150,6 +2150,55 @@ gate asserts the refusal appears **only** in exactly that shape — so it cannot
 comparison it was written to make impossible. The fix is one more primitive (*the final offset of the first
 saved byte at or after `e.at` that survives*); named so the next person need not rediscover it.
 
+#### Phase 13, part 13 — **CORRECTION to part 8: per-leaf write-back cannot repair a shift**
+
+**Part 8's premise is falsified by measurement.** Part 8 set the repair for sparse editing as one rule:
+
+> **A source must return a leaf's bytes as they are now, at current offsets.**
+
+and gated it with 6 tests. **Those 6 tests are not wrong — they are narrower than the rule.** Every one of
+them uses a `Vec<u8>` as the source, and **a `Vec` has no sections.** Writing a leaf's bytes back into a
+`Vec` overwrites exactly that leaf's range and disturbs nothing else, so a shift is invisible: the tests
+read back the leaf they just wrote and never a later one. `SectionStore` is section-granular — a section is
+65,520 B and a leaf at most 3,841 B — so **writing one leaf back repairs at most 1 leaf in 17 of a section
+and leaves the rest of it holding pre-shift bytes.**
+
+Measured in `tests/write_back_shift.rs`: a 135,040-byte document, `insert(10, "ZZZZZ")`, then **every
+resident leaf written back and committed**, so nothing can be blamed on a missed eviction:
+
+```text
+resident leaves to write back: [0]
+committed 65520 bytes
+the leaf's own bytes wrote back correctly
+first difference at document offset 2053     <-- exactly where leaf 0 ends
+bytes differing from truth: 132987 of 135045
+container content_len 135040, while the in-memory document is 135045
+```
+
+**The write-back worked and repaired 0.15 % of the document.** The length did not grow either, which is
+part 8's `set_len` gap seen end to end: the commit reports success and the document on disk is five bytes
+short of the one in memory.
+
+**What is falsified is not `write_at` — it does what it says. The falsified thing is the premise that
+per-leaf write-back is a substitute for origin tracking:**
+
+> **A shift is not a leaf-local event.** It moves every offset after the edit, and a section cannot hold
+> two coordinate systems at once. Only the edit record can answer this, because it is the one thing that
+> says *the store's byte at offset X is the document's byte at X + delta* — exactly the fact write-back
+> cannot supply.
+
+**So part 8 and part 12 are not two halves of one design. They are two mutually exclusive designs, and
+this is the evidence for which one is real.** Part 12's is. `the_record_does_repair_what_write_back_cannot`
+runs on the same document in the same breath as the gate that falsifies the alternative, so the argument is
+a measurement rather than a preference.
+
+**What survives of part 8, and what does not.** `LeafSource::store_leaf` and `set_len` are sound as
+*mechanisms* — they are how a source learns of a change, and they stay. **What does not survive is the
+claim that they are sufficient.** `store_leaf` is now, on this reading, only useful for a leaf whose
+extent has not moved; a document that has been edited is described by the record, and the record is what a
+fault must consult. This is recorded as a correction rather than a rewrite, and part 8's own text is left
+standing above so the superseded premise stays visible.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2238,18 +2287,23 @@ the desktop build, and none of this needs more than a few tens of KiB.
 
 ## 7. Open items needing you
 
-0. **Two items left before the product can edit a sparse document, neither a design question.**
-   * **One refusal to resolve, if you want it closed.** An insertion anchored inside an earlier edit's
-     deleted region has no derivable position, and `replay` refuses (`PROJECT.md` part 12). The fix is one
-     more primitive — *the final offset of the first saved byte at or after `e.at` that survives*. **Until
-     then, an edit whose anchor lands inside a deleted region cannot be faulted.** Rare, and loud.
-   * **`set_len` at edit time rather than at eviction** (part 8, item 2). One call, no store write, but it
-     rewrites the master frame on a keystroke — so it wants a measurement before it is a default.
+0. **Part 8's write-back premise is falsified; part 12's record is the design.** Measured end to end
+   (`tests/write_back_shift.rs`): per-leaf write-back repaired **0.15 %** of a shifted document, and the
+   commit left it five bytes short while reporting success. **A shift is not a leaf-local event** — it
+   moves every offset after the edit, and a section cannot hold two coordinate systems at once, so
+   write-back cannot substitute for origin tracking. Parts 8 and 12 are **mutually exclusive designs, not
+   two halves of one**, and the gate runs both on the same document so the choice is measured.
 
-   **My recommendation is to wire the path into `Session` before closing either**, because both remaining
-   items are narrow and well understood, and what is missing is an end-to-end check that a keystroke into a
-   faulted leaf lands correctly *through the product* rather than through `EditRecord` alone. That check is
-   what would tell us whether the refusal case matters in practice or is theoretical.
+   **What this changes about wiring `Session`: the fault path must consult the record, not the store
+   alone.** That is the shape I would build, and it is the first item:
+   * **A faulting read that consults the record** — `fetch_leaf` fetches *saved* bytes at saved offsets
+     (which is what the store actually holds) and replays the record over them. This is the seam between
+     part 8 and part 12, and it is one function.
+   * **Every edit pushes to the record** — otherwise the record describes a document nobody edited, and
+     replay is a no-op that looks correct.
+   * **A write-back becomes a commit-time whole-document operation** rather than a per-leaf patch. This is
+     the one genuine design question left, because part 8's `set_len` gap and the shift repair both land
+     here: a commit has to write the current document, not patch sections in place.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
