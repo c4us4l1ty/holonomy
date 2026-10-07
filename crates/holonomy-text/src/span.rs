@@ -1006,8 +1006,18 @@ impl SpanMap {
     /// One exception is made for the empty case: an empty `spans` over a non-empty `text_len` is
     /// accepted and filled with one plain span, since that is the representation of "no styling" and
     /// it is what `SpanMap::plain` produces. Every other gap is an error.
+    ///
+    /// # The map it returns is **fully read**, and that is a correction to Phase 13 part 6
+    ///
+    /// This constructor sets `read_through` to `text_len` rather than 0. An explicit, validated,
+    /// gap-free span list over `[0, text_len)` **is** a claim about every byte of the document, so
+    /// there is nothing unknown to report — and the only production caller is `payload::decode`, which
+    /// got those spans from the payload's stored span table, not from a guess. Leaving the watermark
+    /// at 0 here would make every span loaded from disk report as "not yet read", which is the one
+    /// thing that is definitely false about it, and would send the paint path hunting for a fault that
+    /// cannot happen.
     pub fn from_spans(spans: Vec<TextIntervalSpan>, text_len: u32) -> Result<Self, SpanError> {
-        let mut m = Self { spans, text_len, read_through: 0 };
+        let mut m = Self { spans, text_len, read_through: text_len };
         if m.spans.is_empty() {
             if text_len > 0 {
                 m.spans.push(TextIntervalSpan::plain(0, text_len));
@@ -1077,6 +1087,19 @@ impl SpanMap {
         }
         if start == end {
             return Ok(());
+        }
+        if self.spans.is_empty() {
+            // **Seed the map before styling it.** `style_range` rebuilds the span list from the spans
+            // that are already there, so on an empty map it produced an empty list -- returning `Ok(())`
+            // and styling nothing. `empty_over`'s own documentation invites exactly this ("every query
+            // returns the default style *until the first span is added*") while providing no way to add
+            // one, so the documented authoring path did not work. Silent, and wrong in the direction
+            // that looks fine: a document would come back unstyled rather than refusing to open.
+            //
+            // Seeding a plain run first, rather than special-casing the loop, keeps **one** path for
+            // applying a style. A second code path for the empty case would be a second way to hold a
+            // span, and the two would diverge the moment a merge disagreed.
+            self.spans.push(TextIntervalSpan::plain(0, self.text_len));
         }
         let mut rebuilt = Vec::with_capacity(self.spans.len() + 2);
         for s in self.spans.drain(..) {

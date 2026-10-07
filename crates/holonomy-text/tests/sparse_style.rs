@@ -186,3 +186,45 @@ fn a_refused_observation_leaves_the_map_untouched() {
     m.observe(1_000, &[bold(0, 200), plain(200, 1_000)]).expect("a later good observation works");
     assert_eq!(m.read_through(), 1_000);
 }
+
+/// **Styling an empty map works, and used to silently do nothing.**
+///
+/// `style_range` rebuilds the span list from the spans already present, so on a map with no spans it
+/// returned `Ok(())` and styled nothing — and `empty_over`'s own documentation invited exactly that,
+/// promising the default style "until the first span is added" while offering no way to add one.
+/// Silent, and wrong in the direction that looks fine: the document comes back unstyled rather than
+/// refusing to open.
+///
+/// Found by writing the span-table gate, not by reading this module — which is the argument for gates
+/// that build documents rather than assert on hand-built maps.
+#[test]
+fn styling_an_empty_map_is_not_a_silent_no_op() {
+    let mut m = SpanMap::empty_over(1_000);
+    assert!(m.spans().is_empty(), "it starts with no spans at all");
+    assert_eq!(m.style_at(500).style_flags, 0, "and reports the default style");
+
+    m.style_range(100, 200, STYLE_BOLD, 0).expect("styling a range on an empty map");
+
+    assert_eq!(
+        m.style_at(150).style_flags,
+        STYLE_BOLD,
+        "the range IS styled -- previously this returned Ok and left the map untouched"
+    );
+    assert_eq!(m.style_at(50).style_flags, 0, "outside it, still plain");
+    assert_eq!(m.style_at(900).style_flags, 0, "and after it, still plain");
+    assert_eq!(
+        m.spans().iter().map(|s| s.len()).sum::<u32>(),
+        1_000,
+        "the map is still gap-free over the whole document, which is what the seeding buys"
+    );
+    // And the map's own invariants, asserted here rather than left to the crate-private checker:
+    // sorted, non-overlapping, gap-free, ending exactly at `text_len`.
+    let spans = m.spans();
+    assert_eq!(spans.first().map(|s| s.start_byte), Some(0), "it starts at 0");
+    assert_eq!(spans.last().map(|s| s.end_byte), Some(1_000), "and ends at the document length");
+    assert!(
+        spans.windows(2).all(|w| w[0].end_byte == w[1].start_byte),
+        "and has no gap and no overlap between adjacent spans: {:?}",
+        spans.iter().map(|s| (s.start_byte, s.end_byte)).collect::<Vec<_>>()
+    );
+}

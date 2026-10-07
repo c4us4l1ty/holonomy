@@ -349,6 +349,155 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
     out
 }
 
+/// The payload's 16-byte header, parsed on its own.
+///
+/// # Why this exists, and what it changes
+///
+/// Phase 13 part 6 was written on the premise that a container-loaded document's styling has to be
+/// **discovered** — that a leaf's styling would have to be scanned for as the leaf faults in. **That
+/// premise is wrong, and this type is the proof.** [`encode`](encode) writes the span list into the
+/// payload as 16-byte records immediately after the text, and the header declares how many there are.
+/// So the styling is **stored, authoritative, and at a computable offset** — `HEADER_LEN + text_len` —
+/// which means it can be read without reading the text.
+///
+/// The distinction matters because it turns styling from a per-leaf cost into a one-off cost. A
+/// document's span table is `span_count * 16` bytes: zero for an unstyled document beyond the one
+/// canonical plain span, and at most 65,535 × 16 ≈ 1 MiB at the `u16` cap, which is small beside a
+/// text that may be 8 MiB. **The thing that must be windowed is the text; the spans do not need to
+/// be**, because they scale with the number of styled runs rather than with the number of bytes.
+///
+/// ## Two reads, far apart, and neither of them is the text
+///
+/// Locating the span table costs two independent reads: the header (in the first section, which any
+/// window starting at offset 0 already holds) and then the table itself, at
+/// `HEADER_LEN + text_len`. Everything in between is text and is not touched. **This is the property
+/// [`read_span_table`] is built to make testable**, and the reason it takes two slices rather than one
+/// buffer: a single buffer would quietly require the caller to have the whole text, which is exactly
+/// what Phase 13 is removing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    /// Header flags. Only bits in [`FLAG_MASK`] are defined for [`FORMAT`].
+    pub flags: u16,
+    /// Length of the document text, in bytes.
+    pub text_len: u32,
+    /// How many 16-byte span records follow the text.
+    pub span_count: u16,
+    /// How many table records follow the span records.
+    pub table_count: u16,
+}
+
+impl Header {
+    /// Parse the header out of the front of a payload.
+    ///
+    /// **The same checks [`decode`] applies, in the same order, because it is the same function** —
+    /// `decode` calls this rather than repeating the checks, so a header cannot be accepted by one and
+    /// refused by the other. That divergence would be invisible: the refusal would surface as a
+    /// document that opens with no styling and no error.
+    ///
+    /// Reads at most [`HEADER_LEN`] bytes, and nothing else — the length is checked before the magic
+    /// is read, so a short slice cannot panic.
+    pub fn parse(input: &[u8]) -> Result<Self, PayloadError> {
+        if input.len() < HEADER_LEN {
+            return Err(PayloadError::TooShort {
+                have: input.len(),
+                need: HEADER_LEN,
+            });
+        }
+        if input[OFF_MAGIC..OFF_MAGIC + 4] != MAGIC {
+            return Err(PayloadError::BadMagic);
+        }
+        let format = u16::from_le_bytes([input[OFF_FORMAT], input[OFF_FORMAT + 1]]);
+        if format != FORMAT {
+            return Err(PayloadError::UnsupportedFormat {
+                found: format,
+                want: FORMAT,
+            });
+        }
+        let flags = u16::from_le_bytes([input[OFF_FLAGS], input[OFF_FLAGS + 1]]);
+        if flags & !FLAG_MASK != 0 {
+            return Err(PayloadError::UnknownFlags { found: flags });
+        }
+        let text_len = u32::from_le_bytes([
+            input[OFF_TEXT_LEN],
+            input[OFF_TEXT_LEN + 1],
+            input[OFF_TEXT_LEN + 2],
+            input[OFF_TEXT_LEN + 3],
+        ]);
+        Ok(Self {
+            flags,
+            text_len,
+            span_count: u16::from_le_bytes([input[OFF_SPAN_COUNT], input[OFF_SPAN_COUNT + 1]]),
+            table_count: u16::from_le_bytes([input[OFF_TABLE_COUNT], input[OFF_TABLE_COUNT + 1]]),
+        })
+    }
+
+    /// Payload offset of the **first** span record: `HEADER_LEN + text_len`.
+    ///
+    /// `u64`, not `usize`, because this is a file offset and the payload may be up to 128 MiB on a
+    /// 64-bit host but the arithmetic should not be doing 32-bit overflow thinking.
+    pub const fn span_table_offset(&self) -> u64 {
+        HEADER_LEN as u64 + self.text_len as u64
+    }
+
+    /// How many bytes the span table occupies.
+    pub const fn span_table_bytes(&self) -> u64 {
+        self.span_count as u64 * SPAN_BYTES as u64
+    }
+}
+
+/// Read the span table from a header and its records, **without the text**.
+///
+/// # This is the correction to Phase 13 part 6
+///
+/// The design in part 6 assumed styling had to be computed per leaf as leaves faulted in, and built
+/// `SpanMap::observe` to receive those findings. That is unnecessary here: the payload **stores** the
+/// span table, so the whole of a document's styling arrives from one read of a region that is
+/// `HEADER_LEN + text_len` bytes into the payload and `span_count * 16` bytes long.
+///
+/// `observe` and this function are not alternatives — `observe` remains right for styling learned
+/// *after* open (which nothing produces today, since the map is the only source of style), while this
+/// covers the load. What changes is that **the load no longer needs `observe` at all**, so the paint
+/// path has a complete map from the first paint rather than one that fills in as the user scrolls.
+///
+/// ## Why two slices, not one
+///
+/// Because a single `&[u8]` spanning the payload would *require* the text to be present, and requiring
+/// it is the thing Phase 13 exists to remove. Two slices make the absence structural: there is no
+/// single buffer that could hold the text and the table together unless someone built one on purpose.
+///
+/// ## What it does not do
+///
+/// It does not validate the list against the document. [`SpanMap::from_spans`] does that, and does it
+/// properly — sorted, non-overlapping, gap-free, ending at `text_len`. This function's job is to turn
+/// bytes into records; the map's job is to decide whether the records are true. **Duplicating the
+/// validation here would give the map two ways to acquire spans**, which is the failure `from_spans`
+/// was written to prevent.
+pub fn read_span_table(header: &Header, records: &[u8]) -> Result<Vec<TextIntervalSpan>, PayloadError> {
+    let need = usize::try_from(header.span_table_bytes()).unwrap_or(usize::MAX);
+    if records.len() < need {
+        // **Refused, not padded.** A short table means the container is truncated or the section
+        // holding it was not fully read; returning the spans that did arrive would style part of the
+        // document and leave the rest plain, with no error anywhere — and styling that varies by
+        // position in a file is not a failure a reader would ever notice.
+        return Err(PayloadError::RecordOverruns {
+            what: "span table",
+            need,
+            have: records.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(header.span_count as usize);
+    for i in 0..header.span_count as usize {
+        let s = &records[i * SPAN_BYTES..i * SPAN_BYTES + SPAN_BYTES];
+        out.push(TextIntervalSpan::styled(
+            u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
+            u32::from_le_bytes([s[4], s[5], s[6], s[7]]),
+            u16::from_le_bytes([s[8], s[9]]),
+            u32::from_le_bytes([s[12], s[13], s[14], s[15]]),
+        ));
+    }
+    Ok(out)
+}
+
 /// Read a payload back.
 ///
 /// Every length is checked against what is actually present before it is used, and every count is
@@ -356,36 +505,9 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
 /// whole: a half-read document is worse than a refused one, because the failure would surface as
 /// missing text three screens down rather than as an error at open.
 pub fn decode(input: &[u8]) -> Result<Decoded, PayloadError> {
-    if input.len() < HEADER_LEN {
-        return Err(PayloadError::TooShort {
-            have: input.len(),
-            need: HEADER_LEN,
-        });
-    }
-    if input[OFF_MAGIC..OFF_MAGIC + 4] != MAGIC {
-        return Err(PayloadError::BadMagic);
-    }
-    let format = u16::from_le_bytes([input[OFF_FORMAT], input[OFF_FORMAT + 1]]);
-    if format != FORMAT {
-        return Err(PayloadError::UnsupportedFormat {
-            found: format,
-            want: FORMAT,
-        });
-    }
-    let flags = u16::from_le_bytes([input[OFF_FLAGS], input[OFF_FLAGS + 1]]);
-    if flags & !FLAG_MASK != 0 {
-        return Err(PayloadError::UnknownFlags { found: flags });
-    }
-    let text_len = u32::from_le_bytes([
-        input[OFF_TEXT_LEN],
-        input[OFF_TEXT_LEN + 1],
-        input[OFF_TEXT_LEN + 2],
-        input[OFF_TEXT_LEN + 3],
-    ]);
-    let span_count =
-        u16::from_le_bytes([input[OFF_SPAN_COUNT], input[OFF_SPAN_COUNT + 1]]) as usize;
-    let table_count =
-        u16::from_le_bytes([input[OFF_TABLE_COUNT], input[OFF_TABLE_COUNT + 1]]) as usize;
+    let header = Header::parse(input)?;
+    let text_len = header.text_len;
+    let table_count = header.table_count as usize;
 
     let mut cursor = HEADER_LEN;
     let text_end = cursor
@@ -410,42 +532,14 @@ pub fn decode(input: &[u8]) -> Result<Decoded, PayloadError> {
         .to_owned();
 
     // Text & Spans.
-    let span_bytes = span_count
-        .checked_mul(SPAN_BYTES)
-        .ok_or(PayloadError::RecordOverruns {
-            what: "spans",
-            need: usize::MAX,
-            have: input.len(),
-        })?;
-    let span_end = cursor
-        .checked_add(span_bytes)
-        .ok_or(PayloadError::RecordOverruns {
-            what: "spans",
-            need: usize::MAX,
-            have: input.len(),
-        })?;
-    if span_end > input.len() {
-        return Err(PayloadError::RecordOverruns {
-            what: "spans",
-            need: span_end,
-            have: input.len(),
-        });
-    }
-    let mut span_list = Vec::with_capacity(span_count);
-    for _ in 0..span_count {
-        let s = &input[cursor..cursor + SPAN_BYTES];
-        let start_byte = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-        let end_byte = u32::from_le_bytes([s[4], s[5], s[6], s[7]]);
-        let style_flags = u16::from_le_bytes([s[8], s[9]]);
-        let color_rgb = u32::from_le_bytes([s[12], s[13], s[14], s[15]]);
-        span_list.push(TextIntervalSpan::styled(
-            start_byte,
-            end_byte,
-            style_flags,
-            color_rgb,
-        ));
-        cursor += SPAN_BYTES;
-    }
+    // **Through `read_span_table`, not a second copy of the record parse.** `decode` is the whole-payload
+    // path and this is the sparse one, and they have to agree byte for byte: if either read 14 bytes
+    // where the other read 16, or disagreed about which bytes are padding, the sparse path would
+    // produce a map the full path cannot reproduce -- and the disagreement would show only as styling
+    // that differs between opening a document fully and opening it scrolled, which is not a symptom
+    // anyone would chase to this line.
+    let span_list = read_span_table(&header, &input[cursor..])?;
+    cursor += usize::try_from(header.span_table_bytes()).unwrap_or(usize::MAX);
     // `from_spans` rather than a `style_range` per span: the list has to come back *as it was
     // stored*, and `style_range` normalises, which merges adjacent identically-styled spans. It
     // validates the sorted / non-overlapping / gap-free invariants instead.
@@ -563,8 +657,8 @@ pub fn decode(input: &[u8]) -> Result<Decoded, PayloadError> {
     // `flags` said whether a catalog was present. A payload with the flag clear and bytes after the
     // tables would be a payload this build cannot fully account for, and reading it as an empty
     // catalog would drop data silently -- so the flag is checked, not ignored.
-    if (flags & FLAG_ASSETS != 0) != !assets.is_empty() {
-        return Err(PayloadError::UnknownFlags { found: flags });
+    if (header.flags & FLAG_ASSETS != 0) != !assets.is_empty() {
+        return Err(PayloadError::UnknownFlags { found: header.flags });
     }
 
     Ok(Decoded {

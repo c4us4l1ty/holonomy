@@ -1765,6 +1765,74 @@ exists) removes a 7.94 MiB heap spike but **does not reduce residency on its own
 hold every byte. Doing A first would be a smaller, independently testable change that does not move the
 number anyone is waiting for. **B is being done first.**
 
+#### Phase 13, part 6 — styling on unread bytes, and the correction to part 6's premise
+
+**The design question part 6 answers.** `SpanMap::plain(text_len)` makes a claim about **content** —
+that every byte is plain-styled. For a document loaded from a container that claim is unverifiable: the
+bytes are encrypted, and a document full of `**bold**` makes it false. The question is *what does
+styling mean for a byte nobody has read?*
+
+The invariant that settles it, and the two designs it rejects:
+
+> **Styling must be a function of the document's bytes, never of which leaves happen to be resident.**
+
+| rejected | why it fails |
+| --- | --- |
+| correct the map when a leaf faults in | a document's appearance then depends on residency — the same document renders differently before and after a scroll. Worse, `style_at` is `&self`, so the correction would have to be a **side effect of an unrelated read**: a semantic change in the wrong place, with no visible cause |
+| never correct it | `plain` becomes a promise the format must keep, and every styled document loaded from a container silently loses its styling |
+
+Both make styling depend on *when* something was read rather than on *what* it says. So **unread is a
+distinct state**: `read_through` (a **monotone** watermark of bytes actually examined — a byte that has
+been read does not become unread because its leaf was evicted, so this is *not* a residency map),
+`style_at_known -> Option`, and `observe(through, learned)`. The watermark advances **even when nothing
+was learned**, because an unstyled run *is* a finding; otherwise a genuinely plain document would stay
+permanently unknown. `style_at` is deliberately **not** changed to return `Option` — it is on the paint
+path from `&self` contexts, and "assume plain, count it in `runs_missing`" is the documented stopgap.
+
+**CORRECTION — part 6's premise was wrong, and the correction reverses its cost model.** Part 6 was
+built on the assumption that a container-loaded document's styling had to be **discovered per leaf**,
+scanned for as each leaf faulted in, with `observe` receiving those findings. That is unnecessary. The
+payload **stores** the span table: `payload::encode` writes it as 16-byte records immediately after the
+text, and the 16-byte header declares the count. So styling is stored, authoritative, and at a
+**computable** offset — `HEADER_LEN + text_len` — readable **without the text**.
+
+This inverts the cost. Styling is **O(styled runs), not O(document bytes)**: one canonical plain span
+for an unstyled document, and at most 65,535 × 16 ≈ 1 MiB at the `u16` cap, against a text up to 8 MiB.
+Measured in `span_table_sparse.rs`: an 8 MiB document with three styled runs has a **96-byte** span
+table — three orders of magnitude apart. **The text is what has to be windowed; the span table is not**,
+so it can be loaded eagerly and the paint path has a *complete* map from the first paint rather than one
+that fills in as the user scrolls.
+
+Three things changed because of it:
+
+1. **`payload::Header::parse` + `payload::read_span_table(header, records)`** — the header on its own,
+   and a span-table read that takes **two slices** rather than one buffer. Two slices make the absence of
+   the text *structural*: no single buffer could hold the text and the table together unless someone
+   built one on purpose, and requiring it is what Phase 13 exists to remove.
+2. **`decode` now goes through `read_span_table`** rather than a second copy of the record parse. Two
+   copies is one too many — they agree until someone changes a field offset in one, and the symptom would
+   be styling that differs between opening a document fully and opening it scrolled.
+3. **`SpanMap::from_spans` sets `read_through = text_len`**, not 0. An explicit validated gap-free span
+   list over `[0, text_len)` *is* a claim about every byte, and its only production caller is
+   `payload::decode`. Leaving the watermark at 0 made every span read from disk report as "not yet
+   read" — the one thing definitely false about it — and would have sent the paint path hunting a fault
+   that cannot happen.
+
+**A latent bug found by writing the gate, not by reading the module.** `style_range` rebuilds the span
+list from the spans already present, so on a map with **no spans** it returned `Ok(())` and styled
+**nothing** — and `empty_over`'s own documentation invites exactly that, promising the default style
+"until the first span is added" while providing no way to add one. Silent, and wrong in the direction
+that looks fine: the document comes back unstyled rather than refusing to open. `style_range` now seeds
+a plain run first rather than special-casing the loop, because a second code path for the empty case
+would be a second way to hold a span. It had no production callers.
+
+**What part 6 does *not* claim to have solved.** Nothing calls `observe` in production, and it no longer
+needs to — but it is still the right shape for styling learned *after* open, and `style_at` is unchanged,
+so the paint path still guesses plain and counts `runs_missing`. **Undo of an *anchored* edit remains the
+real spike**: `UndoStack` hands back its own bytes so plain-text undo does not need the document resident,
+but undoing an image/table edit rescans, which on a sparse rope means faulting the whole document in.
+That needs bounding, not pretending.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
