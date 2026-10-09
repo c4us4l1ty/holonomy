@@ -58,8 +58,8 @@
 
 use crate::manifest::SECTION_BYTES;
 use holonomy_container::Wavefunction;
-use std::collections::BTreeMap;
 use holonomy_secure::{LockPolicy, SecureBlock};
+use std::collections::BTreeMap;
 
 /// Why a section could not be produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,8 +302,8 @@ impl<'c> SectionStore<'c> {
             return Ok(got);
         }
 
-        let mut block =
-            SecureBlock::allocate_with(got, LockPolicy::PageLocked).map_err(|_| StoreError::Read)?;
+        let mut block = SecureBlock::allocate_with(got, LockPolicy::PageLocked)
+            .map_err(|_| StoreError::Read)?;
         block.as_mut_slice().copy_from_slice(&self.scratch[..got]);
         self.resident.insert(
             section,
@@ -322,122 +322,155 @@ impl<'c> SectionStore<'c> {
     }
 
     /// Write `bytes` at document offset `into`, patching the cached sections that overlap.
-///
-/// # Why patching the cache is enough, and why that is the design
-///
-/// The invariant this store must keep is **`fetch_leaf` returns bytes as they are *now*, at *current*
-/// offsets** — see [`LeafSource::store_leaf`](holonomy_text::LeafSource::store_leaf). Because the store is
-/// addressed by the same offsets as the rope, **writing the leaf's current bytes at its current offset is
-/// the whole of it**: no second coordinate system, no pending-edit overlay, no replay. That is why
-/// part 8 needs none of what part 7's option B was going to cost.
-///
-/// The bytes go into whichever **resident** sections overlap the range and are marked dirty, so an
-/// eviction re-seals them. A section that is *not* resident is not patched and not marked — it is not in
-/// this store's hands, and the rope still holds the leaf, so the next fault will read the section and the
-/// leaf's bytes will come back correct. **Patching a section would mean loading it, which would mean
-/// spending a resident slot and a decrypt on a write-back** — and it is unnecessary, because an absent
-/// section's on-disk copy is only consulted after the rope has given up the leaf.
-///
-/// ## A leaf that straddles a section boundary writes to both
-///
-/// `65,520 / 2,048 = 32` leaves per section, so a leaf straddles in 1 case in 32. Both sides are patched
-/// and both are marked dirty, or the boundary leaf comes back half-old — and half-old is exactly the shape
-/// of bug that survives a length check.
-///
-/// ## Refusals
-///
-/// A range past the end of the document is refused, because there is no section to hold it and a caller
-/// that computed the offset wrong would otherwise get a silent no-op. An **empty** range is a legal no-op,
-/// because a leaf that shrank to nothing still has to be recorded as having been evicted.
-pub fn write_at(&mut self, into: usize, bytes: &[u8]) -> Result<(), StoreError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    let doc_len = self.container.content_len() as usize;
-    let end = into.checked_add(bytes.len()).ok_or(StoreError::Read)?;
-    if end > doc_len {
-        return Err(StoreError::Read);
-    }
-
-    let first = (into / SECTION_BYTES) as u32;
-    let last = ((end - 1) / SECTION_BYTES) as u32;
-    for section in first..=last {
-        let sec_start = section as usize * SECTION_BYTES;
-        // The overlap of [sec_start, sec_start+len) with [into, end).
-        let lo = into.max(sec_start);
-        let hi = end.min(sec_start + SECTION_BYTES);
-        let Some(entry) = self.resident.get_mut(&section) else {
-            continue;
-        };
-        let entry_len = entry.len as usize;
-        // **Clamp to the section's real length, not to SECTION_BYTES.** The last section of a document is
-        // shorter, and writing past it would either panic or, if it is padded, plant bytes outside the
-        // document that a later read could surface.
-        let hi = hi.min(sec_start + entry_len);
-        if lo >= hi {
-            continue;
+    ///
+    /// # What this store's invariant actually is, and it is not part 8's
+    ///
+    /// Part 8 documented it as *"`fetch_leaf` returns bytes as they are now, at current offsets"* — that a
+    /// store and a rope describing the same document at the same offsets needs no second coordinate system.
+    /// **Part 13 measured that premise false** (`tests/write_back_shift.rs`): a shift moves every offset
+    /// after an edit, a section is 65,520 B against a leaf's 3,841 B, and writing one leaf back repaired
+    /// 0.15 % of a shifted document while reporting success.
+    ///
+    /// **The invariant now is the one part 14 established: this store holds the SAVED document at SAVED
+    /// offsets, and the rope's edit record is what translates.** So this method is called only from
+    /// [`Rope::commit`](holonomy_text::Rope::commit) — whole-document, at the point where the two systems
+    /// coincide and are then equal. **A caller reaching this from anywhere else is writing current bytes
+    /// into a saved-coordinate store**, which is a corruption rather than a shortfall.
+    ///
+    /// ## Why patching the cache is enough, *given* that
+    ///
+    /// A whole-document commit writes every leaf, so every byte of every *resident* section is covered — but
+    /// a section this store does not hold is neither patched nor marked, so its on-disk copy would stay
+    /// pre-shift. **That is why the commit is whole-document *and* why the caller must run
+    /// [`commit_dirty`](Self::commit_dirty) afterwards**: the two together are the whole of getting bytes to
+    /// disk. The alternative — loading a section in order to patch it — would spend a resident slot and a
+    /// decrypt per write, on the operation that is already O(document).
+    ///
+    /// ## A leaf that straddles a section boundary writes to both
+    ///
+    /// `65,520 / 2,048 = 32` leaves per section, so a leaf straddles in 1 case in 32. Both sides are patched
+    /// and both are marked dirty, or the boundary leaf comes back half-old — and half-old is exactly the
+    /// shape of bug that survives a length check.
+    ///
+    /// ## Refusals
+    ///
+    /// A range past the end of the document is refused, because there is no section to hold it and a caller
+    /// that computed the offset wrong would otherwise get a silent no-op. **This is also why
+    /// [`set_len`](holonomy_text::LeafSource::set_len) is called before the writes and not after**: a grown
+    /// document's last leaf writes past the current `content_len`, so growth has to be recorded first. An
+    /// **empty** range is a legal no-op, because a leaf that shrank to nothing still has to be recorded as
+    /// having been evicted.
+    pub fn write_at(&mut self, into: usize, bytes: &[u8]) -> Result<(), StoreError> {
+        if bytes.is_empty() {
+            return Ok(());
         }
-        let at = lo - sec_start;
-        entry.block.as_mut_slice()[at..at + (hi - lo)].copy_from_slice(&bytes[lo - into..hi - into]);
-        entry.dirty = true;
-    }
-    self.stats.writes += 1;
-    Ok(())
-}
-
-/// Re-seal and write every dirty section, and return how many bytes reached the disk.
-///
-/// **The expensive call, and it is here rather than on the keystroke path on purpose.** Part 7 measured
-/// write-through at **6.5–10.3× a keystroke**, 84–93 % of it the `O_DIRECT` write — so this must be driven
-/// by *eviction and save*, which are bounded by the resident budget, and never by typing.
-///
-/// Only dirty sections are written, so a store that has been read but not edited commits nothing. That is
-/// the difference between a commit that costs a millisecond and one that costs nothing, and it is why
-/// `Entry::dirty` exists rather than a blanket rewrite.
-pub fn commit_dirty(&mut self) -> Result<usize, StoreError> {
-    let dirty: Vec<u32> = self.resident.iter().filter(|(_, e)| e.dirty).map(|(s, _)| *s).collect();
-    let mut written = 0usize;
-    for section in dirty {
-        let Some(chunk) = Self::chunk_of(self.container, section) else {
-            // The section is resident so its chunk exists; if it does not, refusing is right and
-            // **leaving it dirty** is what makes the refusal recoverable -- a later commit retries.
+        let doc_len = self.container.content_len() as usize;
+        let end = into.checked_add(bytes.len()).ok_or(StoreError::Read)?;
+        if end > doc_len {
             return Err(StoreError::Read);
-        };
-        // **Read the section's current bytes out, write them, and only then clear the flag.** The order is
-        // the whole safety property: a write that fails leaves `dirty` set, so the bytes are still marked
-        // as needing to reach the disk and a later commit retries. Clearing first would turn a failed
-        // write into a silently lost edit -- the one failure this whole design exists to prevent.
-        let mut buf = self.scratch.split_off(0);
-        if buf.len() < SECTION_BYTES {
-            buf.resize(SECTION_BYTES, 0);
         }
-        let len = {
-            let entry = self.resident.get(&section).expect("listed from resident");
-            entry.len as usize
-        };
-        self.copy_into(section, &mut buf[..len])?;
-        self.container
-            .write_chunk(chunk, &buf[..len])
-            .map_err(|_| StoreError::Read)?;
-        // Zero the staging copy: it held document plaintext a moment ago and is about to be handed back.
-        buf[..len].fill(0);
-        self.scratch = buf;
-        written += SECTION_BYTES.min(len);
-        // Clear *after* the write succeeded.
-        if let Some(entry) = self.resident.get_mut(&section) {
-            entry.dirty = false;
+
+        let first = (into / SECTION_BYTES) as u32;
+        let last = ((end - 1) / SECTION_BYTES) as u32;
+        for section in first..=last {
+            let sec_start = section as usize * SECTION_BYTES;
+            // The overlap of [sec_start, sec_start+len) with [into, end).
+            let lo = into.max(sec_start);
+            let hi = end.min(sec_start + SECTION_BYTES);
+            let Some(entry) = self.resident.get_mut(&section) else {
+                continue;
+            };
+            let entry_len = entry.len as usize;
+            // **Clamp to the section's real length, not to SECTION_BYTES.** The last section of a document is
+            // shorter, and writing past it would either panic or, if it is padded, plant bytes outside the
+            // document that a later read could surface.
+            let hi = hi.min(sec_start + entry_len);
+            if lo >= hi {
+                continue;
+            }
+            let at = lo - sec_start;
+            entry.block.as_mut_slice()[at..at + (hi - lo)]
+                .copy_from_slice(&bytes[lo - into..hi - into]);
+            entry.dirty = true;
         }
+        self.stats.writes += 1;
+        Ok(())
     }
-    self.stats.commits += 1;
-    Ok(written)
-}
 
-/// How many resident sections differ from disk.
-pub fn dirty_sections(&self) -> usize {
-    self.resident.values().filter(|e| e.dirty).count()
-}
+    /// Re-seal and write every dirty section, and return how many bytes reached the disk.
+    ///
+    /// **The expensive call, and it is here rather than on the keystroke path on purpose.** Part 7 measured
+    /// write-through at **6.5–10.3× a keystroke**, 84–93 % of it the `O_DIRECT` write — so this must be driven
+    /// by *eviction and save*, which are bounded by the resident budget, and never by typing.
+    ///
+    /// Only dirty sections are written, so a store that has been read but not edited commits nothing. That is
+    /// the difference between a commit that costs a millisecond and one that costs nothing, and it is why
+    /// `Entry::dirty` exists rather than a blanket rewrite.
+    pub fn commit_dirty(&mut self) -> Result<usize, StoreError> {
+        let dirty: Vec<u32> = self
+            .resident
+            .iter()
+            .filter(|(_, e)| e.dirty)
+            .map(|(s, _)| *s)
+            .collect();
+        let mut written = 0usize;
+        for section in dirty {
+            let Some(chunk) = Self::chunk_of(self.container, section) else {
+                // The section is resident so its chunk exists; if it does not, refusing is right and
+                // **leaving it dirty** is what makes the refusal recoverable -- a later commit retries.
+                return Err(StoreError::Read);
+            };
+            // **Read the section's current bytes out, write them, and only then clear the flag.** The order is
+            // the whole safety property: a write that fails leaves `dirty` set, so the bytes are still marked
+            // as needing to reach the disk and a later commit retries. Clearing first would turn a failed
+            // write into a silently lost edit -- the one failure this whole design exists to prevent.
+            let mut buf = self.scratch.split_off(0);
+            if buf.len() < SECTION_BYTES {
+                buf.resize(SECTION_BYTES, 0);
+            }
+            let len = {
+                let entry = self.resident.get(&section).expect("listed from resident");
+                entry.len as usize
+            };
+            // **Copy the cached bytes directly, never through `copy_into`.**
+            //
+            // `copy_into` reads the section *back from the container* into `buf` -- which is right for a cold
+            // section and **wrong here**, because this is the one call whose whole purpose is to write back a
+            // section whose cache has just been modified. It worked while the cache and the disk agreed, and
+            // broke the moment they did not, which is exactly what a commit is: `commit_path.rs` measured 5
+            // bytes wrong at the head of sections 1 and 2 after a 5-byte insert, because section 1 was read
+            // back at its *saved* length and so overwrote the freshly written bytes at its start with the
+            // pre-edit ones.
+            //
+            // **Five bytes wrong, silently, on a commit that reported success** -- which is the part 13 failure
+            // recurring through a different door. The store's own bytes are the authority for what that section
+            // now holds; the disk is what it is being told.
+            {
+                let entry = self.resident.get(&section).expect("listed from resident");
+                buf[..len].copy_from_slice(&entry.block.as_slice()[..len]);
+            }
+            self.container
+                .write_chunk(chunk, &buf[..len])
+                .map_err(|_| StoreError::Read)?;
+            // Zero the staging copy: it held document plaintext a moment ago and is about to be handed back.
+            buf[..len].fill(0);
+            self.scratch = buf;
+            written += SECTION_BYTES.min(len);
+            // Clear *after* the write succeeded.
+            if let Some(entry) = self.resident.get_mut(&section) {
+                entry.dirty = false;
+            }
+        }
+        self.stats.commits += 1;
+        Ok(written)
+    }
 
-/// The resident section a load should evict: the oldest by tick.
+    /// How many resident sections differ from disk.
+    pub fn dirty_sections(&self) -> usize {
+        self.resident.values().filter(|e| e.dirty).count()
+    }
+
+    /// The resident section a load should evict: the oldest by tick.
     ///
     /// `None` only when nothing is resident, and the caller breaks out rather than spinning.
     fn lru_victim(&self) -> Option<u32> {
@@ -545,7 +578,8 @@ pub fn open_document(
     vdf_iterations: u64,
     budget: usize,
 ) -> Result<OpenedDocument, StoreError> {
-    let mut container = Wavefunction::adopt(file, passphrase, vdf_iterations).map_err(|_| StoreError::Read)?;
+    let mut container =
+        Wavefunction::adopt(file, passphrase, vdf_iterations).map_err(|_| StoreError::Read)?;
     let len = container.content_len() as usize;
     let mut editor = holonomy_text::Editor::from_skeleton(len);
 
@@ -573,13 +607,41 @@ pub fn open_document(
 /// `(offset + len - 1) / SECTION_BYTES` — and because `65,520 / 3,840 = 17.0625`, **that is two sections
 /// for most leaves**, not one. See [`SectionStore`]'s `fetch_leaf` for what that costs.
 impl holonomy_text::LeafSource for SectionStore<'_> {
-    /// Write a leaf's **current** bytes at `into`, patching whichever cached sections they overlap.
+    /// Write a leaf's bytes at `into`, patching whichever cached sections they overlap.
     ///
-    /// This is the write half of the seam, and it is a thin wrapper over [`SectionStore::write_at`] -- the
-    /// reason the rope can shed a leaf without losing it. See that method for why patching the cache rather
+    /// **Called only by [`Rope::commit`](holonomy_text::Rope::commit), whole-document.** Part 8 called it
+    /// per-leaf on eviction and that was measured to be wrong end to end — `tests/write_back_shift.rs`
+    /// repairs 0.15 % of a shifted document — and with part 14's record in the rope a per-leaf write is
+    /// worse than insufficient, because a fault asks this store for *saved* bytes at *saved* offsets while
+    /// this method would be writing *current* bytes at *current* offsets. **The two coordinate systems
+    /// coincide only at commit time, and this is the commit-time write.**
+    ///
+    /// A thin wrapper over [`SectionStore::write_at`] — see that method for why patching the cache rather
     /// than writing through is sufficient, and why a leaf straddling a section boundary has to do both sides.
     fn store_leaf(&mut self, into: usize, bytes: &[u8]) -> Result<(), holonomy_text::RopeError> {
-        self.write_at(into, bytes).map_err(|_| holonomy_text::RopeError::SourceUnavailable)
+        self.write_at(into, bytes)
+            .map_err(|_| holonomy_text::RopeError::SourceUnavailable)
+    }
+
+    /// Record the document's current **extent**, growing or shrinking the container's chunk count to match.
+    ///
+    /// **Part 15 added this, and it is load-bearing rather than bookkeeping.** Part 8's `set_len` was a
+    /// no-op default on this store, which is why `write_back_shift.rs` measured the container's
+    /// `content_len` stuck at 135,040 while the in-memory document was 135,045 — **a commit that reported
+    /// success and left the document on disk five bytes short.**
+    ///
+    /// [`Wavefunction::set_content_len`] is the primitive, and it is not cheap: growth stages and commits a
+    /// blank chunk per new one. **It is called before the leaf writes**, because a grown document's last
+    /// leaf writes at an offset past what the container currently holds and `write_at` refuses a range past
+    /// `content_len`.
+    ///
+    /// **Shrinking lowers `chunk_count`**, which makes the trailing chunks unreachable rather than
+    /// re-chaffed — a real leak, and the same one `Wavefunction::set_content_len` documents for
+    /// `write_content`. Recorded here rather than fixed, because it needs a format decision.
+    fn set_len(&mut self, text_len: usize) -> Result<(), holonomy_text::RopeError> {
+        self.container
+            .set_content_len(text_len)
+            .map_err(|_| holonomy_text::RopeError::SourceUnavailable)
     }
 
     /// Fill `out` with the `out.len()` document bytes starting at `offset`.
@@ -605,11 +667,17 @@ impl holonomy_text::LeafSource for SectionStore<'_> {
     ///
     /// Every failure becomes [`RopeError::SourceUnavailable`], which is opaque by design. A rope that
     /// reported "chunk 47 failed to authenticate" would be a decryption oracle with a nicer interface.
-    fn fetch_leaf(&mut self, offset: usize, out: &mut [u8]) -> Result<usize, holonomy_text::RopeError> {
+    fn fetch_leaf(
+        &mut self,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, holonomy_text::RopeError> {
         if out.is_empty() {
             return Ok(0);
         }
-        let end = offset.checked_add(out.len()).ok_or(holonomy_text::RopeError::SourceUnavailable)?;
+        let end = offset
+            .checked_add(out.len())
+            .ok_or(holonomy_text::RopeError::SourceUnavailable)?;
         let first = (offset / SECTION_BYTES) as u32;
         let last = ((end - 1) / SECTION_BYTES) as u32;
 
@@ -667,6 +735,118 @@ impl holonomy_text::LeafSource for SectionStore<'_> {
     }
 }
 
+/// Write `editor`'s whole current document into the container, and return the bytes that reached the disk.
+///
+/// # One section at a time, and that is the whole design
+///
+/// The document is walked in [`SECTION_BYTES`] chunks. For each chunk: the rope's current bytes for that
+/// range are produced through the edit record, written into the container, flushed, and the chunk's leaves
+/// evicted. **Peak residency is one chunk's leaves, not the document's** — which is the entire reason the
+/// commit is affordable on an 8 MiB document inside an 8 MiB page-lock ceiling.
+///
+/// [`Rope::commit`](holonomy_text::Rope::commit) cannot do this: it reads the whole document into one buffer
+/// so that every read precedes every write, and for a container that buffer *is* the document. Walking
+/// here keeps that ordering *per chunk*, which is sound because a chunk's writes touch only that chunk's
+/// offsets and the record maps them to that chunk's own saved range.
+///
+/// **No closure and no `unsafe`.** The obvious shape — hand the rope a `&mut dyn FnMut` that writes
+/// through the store — needs the store borrowed both as the rope's source and as the closure's capture,
+/// which the borrow checker resolves only through a raw pointer. This crate has no `unsafe` in it and is not
+/// starting now, so the loop is written out instead: read, write, flush, evict, four statements, and the
+/// ordering is visible rather than implied by a higher-order signature.
+///
+/// # Why each chunk is flushed before the next is read
+///
+/// A dirty section still resident when the next chunk loads may be **evicted by the LRU**, and `evict`
+/// scrubs and drops it without writing. A section is therefore flushed inside the loop, not after it: the
+/// write and the flush are one event, so there is no window in which edited bytes exist only in a cache
+/// slot. This is the bug a naive version would have — an edit silently lost to an eviction, which is the
+/// one failure this whole design exists to prevent.
+///
+/// # What is returned
+///
+/// Bytes that reached the disk — `0` for a second commit of an unchanged document, because nothing was
+/// dirty. **It is not a success flag**: a caller needing "the document is saved" compares it against
+/// `editor.text_len()`.
+pub fn commit_document(
+    store: &mut SectionStore<'_>,
+    editor: &mut holonomy_text::Editor,
+) -> Result<usize, StoreError> {
+    let total = editor.text_len() as usize;
+
+    // **Grow before writing.** A grown document's last chunk writes past the container's current
+    // `content_len`, and `write_at` refuses a range past it. This is the same defect as part 8's `set_len`
+    // arriving after the write-back, which left a committed document five bytes short on disk.
+    store
+        .container
+        .set_content_len(total)
+        .map_err(|_| StoreError::Read)?;
+
+    // **Read the whole document, then write it -- and this is the contract, not an optimisation.**
+    //
+    // The edit record says *the source's byte at offset X is the document's byte at X + delta*. That is true
+    // only while the source holds the **saved** document. **Writing chunk 0 makes it false for chunk 0's
+    // offsets**, and the record does not know that: it keeps translating as though those bytes were still
+    // pre-edit. So a leaf faulted *after* the first chunk is written reads current bytes and has the shift
+    // applied on top of them.
+    //
+    // **Measured, and the measurement is why this comment exists.** A chunk-at-a-time version of this
+    // function committed `[137, 17, 148, 28, 159, 192, ..]` as chunk 1 where the truth is
+    // `[39, 170, 50, 181, 61, 192, ..]` -- **five bytes wrong at the head of every section after the
+    // first**, exactly the size of the insert, with the fault path reporting nothing. Two observations
+    // pinned it: the rope read the whole document correctly *immediately before* the commit, and it read the
+    // same range correctly again after chunk 0 was written -- and wrong again only after
+    // `evict_range` forced a refault. **The refault is what read the half-written store.**
+    //
+    // So the loop reads everything first, then writes everything. Nothing about chunking was wrong; its
+    // *position in the sequence* was, and the cost of getting that wrong is a document that is subtly wrong
+    // and says nothing.
+    let mut buf = vec![0u8; total];
+    let mut lo = 0usize;
+    while lo < total {
+        let hi = (lo + SECTION_BYTES).min(total);
+        editor
+            .read_into_faulting(store, lo, &mut buf[lo..hi])
+            .map_err(|_| StoreError::Read)?;
+        lo = hi;
+    }
+
+    // **And only now may the store be written.**
+    let mut written = 0usize;
+    let mut lo = 0usize;
+    while lo < total {
+        let hi = (lo + SECTION_BYTES).min(total);
+        store.write_at(lo, &buf[lo..hi])?;
+        written += store.commit_dirty()?;
+        lo = hi;
+    }
+
+    // **Zero the buffer**: it held the entire document in plaintext and is about to be handed back to the
+    // allocator, where a later allocation could read it.
+    buf.fill(0);
+
+    // **The store now holds this document, so the record describes no difference between them.**
+    editor.forget_record();
+
+    // **Shed the document's leaves last, and only now.**
+    //
+    // The read loop above faulted every leaf in, so the rope is holding the whole document page-locked --
+    // which is exactly what Phase 13 exists to prevent, and it is why `open_document` is handed a budget at
+    // all. Eviction here is safe for two reasons that were *not* both true earlier in this function:
+    //
+    // * **The store has been written**, so a refault reads the committed document rather than the saved one,
+    //   and
+    // * **The record is empty**, so there is nothing left to translate. An eviction before either would
+    //   force a refault that reads a store in the wrong coordinate system -- which is precisely the bug
+    //   measured above, where a mid-loop eviction produced five wrong bytes per section.
+    //
+    // **After the commit, this is a plain memory reclaim rather than a correctness requirement**, which is
+    // why it is last.
+    editor.evict_range(0, total).map_err(|_| StoreError::Read)?;
+
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,7 +882,11 @@ mod tests {
             assert_eq!(store.resident(), 0);
             assert_eq!(store.resident_bytes(), 0);
             assert_eq!(store.budget(), 4);
-            assert_eq!(store.lru_victim(), None, "nothing is resident, so there is no victim");
+            assert_eq!(
+                store.lru_victim(),
+                None,
+                "nothing is resident, so there is no victim"
+            );
         }
     }
 }

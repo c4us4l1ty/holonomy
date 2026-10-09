@@ -2199,6 +2199,105 @@ extent has not moved; a document that has been edited is described by the record
 fault must consult. This is recorded as a correction rather than a rewrite, and part 8's own text is left
 standing above so the superseded premise stays visible.
 
+#### Phase 13, part 14 — the record in the rope, and what it costs to keep it there
+
+**Part 12 built the record and gated it in isolation. Part 14 puts it in the rope**, so every mutator records
+and every fault consults it. `Rope` gains three fields — `record`, `edit_epoch`, and a per-leaf `epochs`
+array — and three consequences:
+
+* **A fault asks the source for *saved* bytes at *saved* offsets.** `fault_leaf` walks
+  `record.saved_runs(current_at, want)` and fetches each run, then `record.fill_typed` writes the typed bytes
+  into the gaps. The store is never asked a question it cannot answer.
+* **One epoch counter replaces any per-leaf staleness flag.** `insert_byte` records *before* it mutates (the
+  offset is pre-edit), bumps `edit_epoch`, and a resident leaf whose `epochs[i] < edit_epoch` is re-fetched
+  rather than trusted.
+* **`from_text` uses `insert_at_unrecorded`, because a document load is not an edit.** Loading 8 MiB through
+  the edit path would put 2,000+ edits in a record describing nothing.
+
+**Two designs were considered and rejected, and the rejections are the load-bearing part of this section.**
+
+*Session-owned record* — rejected: the record has to survive the rope, and the rope is the thing that gets
+rebuilt on a reload. A record that lives outside its document is a record that can describe a document that
+no longer exists.
+
+*`Rc<RefCell<EditRecord>>` shared between rope and caller* — rejected because interior mutability was already
+refused in `CagrLeaf` and this would reopen the same door. The rope owns it outright.
+
+**`RECORD_RESERVE` is 1,536 entries because `no_alloc.rs` types 4,000 characters then deletes 1,000 times on
+one rope, peaking at 1,250 entries.** That measurement is the reserve; the reserve is not a guess.
+
+**`evict_leaf_to` is removed.** Part 13 falsified per-leaf write-back as a *repair*, and part 14 makes it
+*wrong* rather than merely insufficient: with the record in the rope, `store_leaf` writes current bytes into
+a store the next fault will read in saved coordinates. The store holds the saved document, permanently,
+during editing. `write_back.rs` was rewritten as this part's gate — its old `whole()` helper was
+`#[allow(dead_code)]` with a comment saying it could not be called yet, and it is now called on every leaf.
+
+#### Phase 13, part 15 — the commit: whole-document write-back, and the order it has to be in
+
+**§7 item 0's third bullet asked for this. The answer is whole-document, and the reason is part 13's
+measurement rather than a preference:**
+
+> **A commit writes every leaf, and what repairs the shift is that there is no leaf left unwritten.**
+
+The same argument forbids making it incremental, because a partial commit *is* a partial write-back.
+
+**Three orderings in this section are load-bearing, and each one was found by a failing test rather than by
+reasoning.**
+
+**1. The extent is recorded *before* the bytes.** A grown document's last leaf writes at an offset past what
+the source currently holds — a `Vec` source panics on the slice range, a section-granular one refuses the
+range. The first version wrote leaves then called `set_len`, and
+`a_committed_document_reads_back_byte_for_byte` failed on precisely the inserted bytes. **Part 8 had this
+same defect in miniature** — it rode `set_len` along with a per-leaf write — and part 13 measured the result
+as `content_len` five bytes short. *An extent recorded after the content it describes is a length that is
+wrong by exactly the edit.*
+
+**2. Every read precedes every write — including across chunks.** A chunk-at-a-time commit looked sound
+(chunk `k`'s writes touch only chunk `k`'s offsets) and is not, because the record's premise is
+*the source's byte at X is the document's byte at X + delta*, and that is true only while the source holds
+the **saved** document. **Writing chunk 0 makes it false for chunk 0's offsets and the record does not know.**
+The measurement:
+
+```text
+chunk 1 committed as [137, 17, 148, 28, 159, 192, ..]
+truth is                [39, 170, 50, 181, 61, 192, ..]
+five bytes wrong at the head of every section after the first, exactly the size of the insert
+```
+
+Two observations pinned it: the rope read the whole document correctly *immediately before* the commit, and
+correctly again *after* chunk 0 was written — and wrong again only once `evict_range` forced a refault.
+**The refault is what read the half-written store.** So the loop reads everything, then writes everything,
+and eviction happens after the writes rather than between them.
+
+**3. `set_content_len` grows before the writes, and `commit_dirty` must not re-read the section it is
+writing.** `commit_dirty` copied through `copy_into`, which reads the section *back from the container* —
+correct for a cold section and wrong for the one call whose purpose is to write back a just-modified
+section. It now copies the cached block directly. **This is part 13's failure recurring through a different
+door**: five bytes wrong, silently, on a commit that reported success.
+
+**And `commit_dirty` re-reads are why a second commit is not free.** `Entry::dirty` means *cache differs from
+disk*, and the commit's own read repopulates the cache, so the sections genuinely differ again.
+`the_commit_reports_what_it_actually_wrote` asserts the measured behaviour (a full rewrite) rather than the
+number the first draft hoped for.
+
+**A genuine bug part 12 shipped, found by asking a two-edit question.** `typed_byte` located each edit's
+inserted run by *position* — computing `(start, len)` in final coordinates — and handed `Edit::at` straight to
+`to_current`. **`Edit::at` is an offset in the document as it was before that edit**, so for any edit after
+the first length-changing one it names a different byte. On
+`insert(10,"ZZZZZ")`, `insert(81927,"QQ")`, `insert(100000,"tail")` it located the `QQ` run five bytes too
+far, every byte of it came back unlocatable, and `fault_leaf` reported `SourceUnavailable` on every leaf past
+the second edit. A run is also **not contiguous** in the final document, so no `(start, len)` can describe it
+at all: type `abc` at 0, insert `X` at 1, and `abc` sits at 0, 2 and 3.
+
+**The fix is that `typed_byte` is `to_saved` with the index kept** — one backwards walk answering both
+questions, so there is no second reading of the record that could disagree with the first. That also removes
+a limitation part 12 documented as fundamental (`ReplayError::Unresolvable` is no longer reachable from a
+well-formed record), which is why part 12's test for it was rewritten rather than kept: **a fix that removes
+a refusal has to establish that what remains is a real limit and not the same bug wearing a different
+fixture.** `to_saved_and_typed_byte_never_disagree` is the gate, and part 12's suite structurally could not
+write it — every one of its scripts was a single edit, where the two coordinate systems coincide.
+*Exhaustive coverage of one case is not coverage of a composition.*
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2298,12 +2397,19 @@ the desktop build, and none of this needs more than a few tens of KiB.
    alone.** That is the shape I would build, and it is the first item:
    * **A faulting read that consults the record** — `fetch_leaf` fetches *saved* bytes at saved offsets
      (which is what the store actually holds) and replays the record over them. This is the seam between
-     part 8 and part 12, and it is one function.
+     part 8 and part 12, and it is one function. **LANDED as part 14.**
    * **Every edit pushes to the record** — otherwise the record describes a document nobody edited, and
-     replay is a no-op that looks correct.
+     replay is a no-op that looks correct. **LANDED as part 14.**
    * **A write-back becomes a commit-time whole-document operation** rather than a per-leaf patch. This is
      the one genuine design question left, because part 8's `set_len` gap and the shift repair both land
-     here: a commit has to write the current document, not patch sections in place.
+     here: a commit has to write the current document, not patch sections in place. **ANSWERED and LANDED
+     as part 15: whole-document, and the binding constraint is ordering rather than cost** — every read must
+     precede every write, including across chunks, because writing chunk 0 invalidates the record's premise
+     for chunk 0's offsets. See §Phase 13 part 15.
+
+   **So §7 item 0 is answered in full.** What remains for `Session` is not the seam but the *lifetime*: the
+   paint path still reads with `&self` and counts `runs_missing`, and the `SectionStore` is not held for the
+   session. That is the next item, not this one.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
@@ -2403,15 +2509,21 @@ the desktop build, and none of this needs more than a few tens of KiB.
    load. **`observe` has no production caller and no longer needs one.** `tests/sparse_style.rs` (8),
    `tests/span_table_sparse.rs` (6).
 
-10. **Faulting and editing cannot both be correct yet — Phase 13 part 7, and it is the item that now
-   stands between the sparse rope and a usable editor.** `LeafSource` is addressed by document offset,
-   which is true only of an *unmodified* document; one edit shifts every later leaf, so a subsequent fault
-   reads the right *number* of bytes from one byte too far. There is no write-back path, so the store
-   holds the saved document permanently while the rope holds the current one. The faulting mutators were
-   **implemented, measured to be silently wrong, and removed** — reads and cursor moves survive, because
-   neither moves a byte. `tests/fault_edit_conflict.rs` (5) pins both the hazard and the surviving safe
-   set. **The decision between write-through, origin tracking and dirty-region pinning is yours** — it is
-   item 0 of this section.
+10. **RESOLVED in its *cause*, and the mutators still have to be written -- Phase 13 part 14.** Part 7
+    found that faulting and editing cannot both be correct, because `LeafSource` is addressed by document
+    offset and one edit shifts every later leaf; the store held the saved document with no write-back path,
+    so the two were different documents. **Part 14 removed that reason rather than working around it.** The
+    rope owns an `EditRecord`, every mutator records into it, and `fault_leaf` consults it: the source is
+    asked for *saved* bytes at *saved* offsets -- which is exactly what it holds -- and the record turns
+    them into current bytes. **The two coordinate systems are no longer a hazard; they are the design.**
+
+    **So the faulting mutators are absent for the ordinary reason now: they are not written.** They were
+    absent before because writing them would have been silently wrong, and
+    `there_is_no_faulting_mutator_on_the_rope` has been rewritten to pin an *inventory to be extended
+    deliberately* rather than a hazard to be respected. What is load-bearing for whoever adds them:
+    **fault, then record, then edit, in that order** -- an edit's `at` is an offset in the document as it
+    was *before* it, so recording afterwards gives an offset one byte too far, which is the same defect
+    parts 9 and 11 each failed on.
 
 6. **A paint is 144–245 µs and a keystroke is 176–419 µs, and both are inside the budget — on this host,
    with this document size, and with 1 MiB of framebuffer resident.** None of those numbers is a

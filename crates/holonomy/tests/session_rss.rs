@@ -173,19 +173,31 @@ fn try_session(
     doc_bytes: usize,
 ) -> Result<(Session<'static>, &'static Atlas), ()> {
     let metrics = ChromeMetrics::DESKTOP;
-    let mut editor = Editor::new();
     // Whole lines, so a caret near the end of the document is not sitting inside one multi-megabyte
     // unbroken run. The document's *shape* should not decide the measurement.
     let line = "the quick brown fox jumps over the lazy dog\n";
-    while (editor.text_len() as usize) < doc_bytes {
-        editor
-            .insert_at(
-                editor.text_len() as u32,
-                line.as_bytes(),
-                SpanPolicy::GrowIntoInsert,
-            )
-            .map_err(|_| ())?;
+    // **Built as bytes and loaded once, rather than appended with `insert_at`.**
+    //
+    // This loop used `Editor::insert_at`, which is an *edit*, and since Phase 13 part 14 every edit is
+    // recorded in the rope's edit record — so loading 6.40 MiB of document this way recorded ~152,000
+    // edits and cost **17 MiB** of RSS, which pushed the measured marginal cost from 1.852 to 4.709
+    // bytes per document byte and failed two gates.
+    //
+    // **None of that is a cost the product pays**, because the product loads a document through
+    // [`Editor::from_skeleton`] and faults it in; it never appends a document with `insert_at`. So the
+    // fixture was measuring a cost only a *test* can pay. `Rope::insert_at_unrecorded` is the matching
+    // change on the text side — a document load is not an edit, and an API that records one cannot tell
+    // the two apart.
+    //
+    // The bytes are built in one `Vec` and dropped, so the peak is one transient copy — and the
+    // marginal cost is verified below to be the same 1.852 this fixture reported before part 14, which
+    // is what makes this a fixture change rather than a loosened measurement.
+    let mut doc: Vec<u8> = Vec::with_capacity(doc_bytes + line.len());
+    while doc.len() < doc_bytes {
+        doc.extend_from_slice(line.as_bytes());
     }
+    let editor = Editor::from_text(&doc).map_err(|_| ())?;
+    drop(doc);
     let session = Session::new(
         editor,
         Painter::new(atlas, 16),

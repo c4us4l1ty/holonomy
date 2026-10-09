@@ -64,23 +64,35 @@ const ITER: u64 = 1;
 const SECTION: usize = 65_520;
 
 fn scratch_dir() -> std::path::PathBuf {
-    let d = std::env::current_exe().expect("exe").ancestors().nth(3).expect("layout")
-        .join("holonomy-container-tests").join("write-back-shift");
-    std::fs::create_dir_all(&d).expect("scratch"); d
+    let d = std::env::current_exe()
+        .expect("exe")
+        .ancestors()
+        .nth(3)
+        .expect("layout")
+        .join("holonomy-container-tests")
+        .join("write-back-shift");
+    std::fs::create_dir_all(&d).expect("scratch");
+    d
 }
 fn unique() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static C: AtomicU64 = AtomicU64::new(0);
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     (t << 20) ^ u128::from(C.fetch_add(1, Ordering::Relaxed))
 }
 fn container(c: &[u8]) -> (std::path::PathBuf, Wavefunction) {
     let p = scratch_dir().join(format!("ws-{}-{}.wf", c.len(), unique()));
     let _ = Wavefunction::create(&p, PASS, "p3", c, ITER).expect("create");
-    let wf = Wavefunction::open(&p, PASS, ITER).expect("open"); (p, wf)
+    let wf = Wavefunction::open(&p, PASS, ITER).expect("open");
+    (p, wf)
 }
 fn text(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8)
+        .collect()
 }
 
 #[test]
@@ -93,16 +105,31 @@ fn write_back_cannot_repair_a_shift() {
 
     let at = 10usize;
     let mut buf = vec![0u8; 8];
-    rope.read_at_faulting(&mut store, at, 8, &mut buf).expect("fault");
+    rope.read_at_faulting(&mut store, at, 8, &mut buf)
+        .expect("fault");
     rope.insert_at(at, b"ZZZZZ").expect("insert");
     let mut truth = saved.clone();
     truth.splice(at..at, b"ZZZZZ".iter().copied());
 
     // **Every resident leaf, written back.** The point is to remove "a leaf was missed" as an
     // explanation, so this cannot be a partial write.
-    let resident: Vec<usize> = (0..rope.leaf_count()).filter(|&k| rope.is_resident(k)).collect();
+    //
+    // **Driven through `store_leaf` directly, and that is part 15's change.** This used to be
+    // `rope.evict_leaf_to(&mut store, k)`, a part-8 helper that wrote a leaf back and evicted it. Part 15
+    // removed that helper, because with the record in the rope a fault asks for *saved* bytes and a helper
+    // that writes *current* bytes into the store is asking it two questions at once. The finding this file
+    // records does not need the helper: it needs the mechanism, and the mechanism is `store_leaf`.
+    let resident: Vec<usize> = (0..rope.leaf_count())
+        .filter(|&k| rope.is_resident(k))
+        .collect();
     for k in resident {
-        rope.evict_leaf_to(&mut store, k).expect("write back");
+        let at = rope.leaf_offset(k);
+        let len = rope.leaf_len_of(k);
+        let mut bytes = vec![0u8; len];
+        rope.read_at_faulting(&mut store, at, len, &mut bytes)
+            .expect("read the leaf");
+        store.store_leaf(at, &bytes).expect("write the leaf back");
+        rope.evict_leaf(k).expect("evict");
     }
     store.commit_dirty().expect("commit");
     drop(store);
@@ -111,8 +138,16 @@ fn write_back_cannot_repair_a_shift() {
 
     // **The length did not grow either**, which is the part 8 `set_len` gap seen end to end: the
     // commit reports success and the document on disk is five bytes short of the one in memory.
-    assert_eq!(clen, saved.len(), "the committed container is still the saved length");
-    assert_eq!(truth.len(), saved.len() + 5, "while the in-memory document is five bytes longer");
+    assert_eq!(
+        clen,
+        saved.len(),
+        "the committed container is still the saved length"
+    );
+    assert_eq!(
+        truth.len(),
+        saved.len() + 5,
+        "while the in-memory document is five bytes longer"
+    );
 
     let mut wf2 = Wavefunction::open(&path, PASS, ITER).expect("reopen");
     let mut store2 = SectionStore::new(&mut wf2, 2);
@@ -124,12 +159,18 @@ fn write_back_cannot_repair_a_shift() {
         let lo = s as usize * SECTION;
         let hi = ((s as usize + 1) * SECTION).min(n);
         if lo < hi {
-            store2.fetch_leaf(lo, &mut back[lo..hi]).expect("read section");
+            store2
+                .fetch_leaf(lo, &mut back[lo..hi])
+                .expect("read section");
         }
     }
 
     // **The leaf's own bytes are right.** Write-back did its job, exactly where it was pointed.
-    assert_eq!(&back[..at + 5], &truth[..at + 5], "the edited leaf wrote back correctly");
+    assert_eq!(
+        &back[..at + 5],
+        &truth[..at + 5],
+        "the edited leaf wrote back correctly"
+    );
 
     // **And the rest of the document is wrong.** This is the finding, so it is asserted rather than
     // printed -- a test that measured nothing would be worse than none, because it gets counted.
@@ -141,7 +182,11 @@ fn write_back_cannot_repair_a_shift() {
         truth.len()
     );
     assert_ne!(&back[..], &truth[..], "and it is NOT equal to the truth");
-    assert_ne!(&back[..], &saved[..], "and it is NOT the saved document either -- it is a mixture");
+    assert_ne!(
+        &back[..],
+        &saved[..],
+        "and it is NOT the saved document either -- it is a mixture"
+    );
 }
 
 /// **The record answers what write-back cannot**, on the same document, in the same breath as the gate
@@ -161,7 +206,8 @@ fn the_record_does_repair_what_write_back_cannot() {
 
     let at = 10usize;
     let mut buf = vec![0u8; 8];
-    rope.read_at_faulting(&mut store, at, 8, &mut buf).expect("fault");
+    rope.read_at_faulting(&mut store, at, 8, &mut buf)
+        .expect("fault");
     rope.insert_at(at, b"ZZZZZ").expect("insert");
 
     let mut rec = EditRecord::new();
@@ -174,10 +220,19 @@ fn the_record_does_repair_what_write_back_cannot() {
     let mut wrong = 0usize;
     for lo in (0..n).step_by(SECTION) {
         let hi = (lo + SECTION).min(truth.len());
-        let got = rec.replay(lo, hi - lo, |a, k| saved[a..a + k].to_vec()).expect("replay");
-        wrong += got.iter().zip(&truth[lo..hi]).filter(|(a, b)| a != b).count();
+        let got = rec
+            .replay(lo, hi - lo, |a, k| saved[a..a + k].to_vec())
+            .expect("replay");
+        wrong += got
+            .iter()
+            .zip(&truth[lo..hi])
+            .filter(|(a, b)| a != b)
+            .count();
     }
-    assert_eq!(wrong, 0, "the record reproduces the document exactly, across every section");
+    assert_eq!(
+        wrong, 0,
+        "the record reproduces the document exactly, across every section"
+    );
     drop(store);
     drop(wf);
 }

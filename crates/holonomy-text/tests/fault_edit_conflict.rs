@@ -1,37 +1,37 @@
-//! **Why faulting and editing cannot both be correct yet — and what *is* safe.** 5 tests.
+//! **The hazard that stopped faulting and editing from coexisting — and that Part 14 removed.** 5 tests.
 //!
-//! # The finding
+//! # The finding, and it was a real one
 //!
 //! The obvious next step after reads fault in was to let **edits** fault in too: fault the leaf, then
-//! perform the edit. It was implemented. It returned `Ok`, put bytes in the document, and was **silently
-//! wrong** — not wrong at the edit, wrong somewhere else later.
+//! perform the edit. It returned `Ok`, put bytes in the document, and was **silently wrong** — not wrong
+//! at the edit, wrong somewhere else later.
 //!
 //! **A `LeafSource` is addressed by document offset, and that is only true of an unmodified document.**
 //! An insert at offset `p` shifts every leaf after it by one. From that moment the rope's leaf offsets
 //! and the store's offsets are different numbers, and a later fault asks the store for "the leaf at
 //! offset `q`" and receives the right *number* of bytes from one byte too far.
 //!
-//! That is precisely the failure the offset-keying was introduced to prevent, reintroduced by editing.
-//! Nothing about it is detectable at the edit site.
+//! The mutators were **removed rather than documented**, because a present-and-documented version is
+//! worse than an absent one: it invites the next person to wire it up. `there_is_no_faulting_mutator_on_the_rope`
+//! still holds that line.
 //!
-//! ## Why the store cannot follow
+//! # RESOLVED in Phase 13 part 14 — and this file now gates the resolution
 //!
-//! **There is no write-back path.** `evict_leaf` scrubs the bytes it releases and hands them to the
-//! caller; `SectionStore::evict` releases memory without telling the container anything. So the store
-//! holds the document *as it was saved*, permanently, while the rope holds the document *as it is now*.
-//! One edit later they are different documents, and nothing records that.
+//! **The edit record is the missing fact.** Part 13 established that per-leaf write-back cannot substitute
+//! for it (a shift is not a leaf-local event), and part 14 put the record *in the rope*, so a fault asks
+//! the record which saved bytes belong in this leaf and where, fetches each run straight into the leaf's
+//! block, and fills the typed bytes from the record itself.
 //!
-//! The mutators were therefore **removed rather than documented**, because a present-and-documented
-//! version is worse than an absent one: it invites the next person to wire it up.
-//!
-//! # What this file does instead
-//!
-//! It pins the finding so it cannot be rediscovered by reimplementing it, and it gates what *is* safe.
-//! The safe set is exactly **the operations that do not move a byte**: reads, and cursor moves.
+//! **So the hazard test below is inverted, and that is the point.** It used to assert that the store
+//! answers with the *unshifted* bytes and that the rope therefore needs them shifted — i.e. it asserted
+//! the bug, on the reasoning that pinning a failure is better than rediscovering it. It now asserts the
+//! opposite: **the rope gets the shifted bytes**, and the "truth" it previously asserted *against* is what
+//! it now asserts. A test that pins a bug has to be rewritten when the bug is fixed, and until someone
+//! does, it reports the fix as a regression. That is what this one caught, in the stretch the fix landed.
 //!
 //! | what it proves | test |
 //! | --- | --- |
-//! | **the hazard, measured** | [`an_edit_shifts_the_leaves_and_the_store_cannot_follow`] |
+//! | **the hazard is gone — the fault is now correct** | [`an_edit_no_longer_shifts_the_fault_out_by_one_byte`] |
 //! | a faulting read is safe | [`a_faulting_read_of_an_unedited_document_is_correct`] |
 //! | a faulting cursor move is safe | [`a_faulting_cursor_move_does_not_drift_the_store`] |
 //! | reads are unaffected by the removal | [`the_window_still_reads_correctly_after_a_mutation_refuses`] |
@@ -81,7 +81,7 @@ fn read_at(rope: &mut Rope, source: &mut dyn LeafSource, at: usize, len: usize) 
 ///
 /// This is the test that makes the mutators' absence a decision rather than an oversight.
 #[test]
-fn an_edit_shifts_the_leaves_and_the_store_cannot_follow() {
+fn an_edit_no_longer_shifts_the_fault_out_by_one_byte() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
@@ -117,20 +117,31 @@ fn an_edit_shifts_the_leaves_and_the_store_cannot_follow() {
     let after_point = deep + 2 * leaf;
     let got = read_at(&mut rope, &mut store, after_point, 8);
 
-    // What the rope's content actually is: the saved bytes, shifted by one from `deep` onwards, plus
-    // the inserted `Z`.
-    let mut truth = Vec::with_capacity(8);
-    truth.extend_from_slice(&bytes[after_point + 1..after_point + 9]);
+    // **The truth is the real document, built by performing the edit -- not arithmetic on `saved`.**
+    //
+    // This file computed it as `bytes[after_point + 1..]` for years of green tests, and that is
+    // **shifted by two**: inserting one byte at `deep` means `current[q] == saved[q - 1]` for `q > deep`,
+    // so the right answer is `saved[after_point - 1..]`. The assertion it made was `got != truth`, and a
+    // wrong truth satisfies a wrong inequality for the wrong reason. Deriving the document by doing the
+    // edit cannot be off by one, and the cost is a splice.
+    let mut truth_doc = bytes.clone();
+    truth_doc.insert(deep, b'Z');
+    let truth = &truth_doc[after_point..after_point + 8];
 
+    // **The rope asks the record where this leaf's bytes live, so it gets the shifted ones.** This is
+    // the assertion that used to be inverted.
     assert_eq!(
         &got[..],
-        &bytes[after_point..after_point + 8],
-        "the store answers with the saved bytes, unshifted"
+        truth,
+        "the fault past an edit point is now correct -- it used to be off by exactly the insertion"
     );
-    assert_ne!(
-        &got[..],
-        &truth[..],
-        "and the rope needs them shifted by one -- so the faulted leaf is off by exactly the insertion"
+    // **And the store was never wrong.** It holds the saved document, which is what a saved document is
+    // supposed to hold; the translation is the rope's job, and it is the record's job, and neither is
+    // the store's. Asserted so this test cannot be "fixed" by moving the translation into the source.
+    assert_eq!(
+        &store.bytes[after_point..after_point + 8],
+        &bytes[after_point..after_point + 8],
+        "the source still holds the saved bytes, unshifted, and should"
     );
 }
 

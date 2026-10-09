@@ -153,6 +153,44 @@ pub struct Rope {
     starts: Vec<usize>,
     /// Cursor as a document byte offset, always on a UTF-8 boundary.
     cursor: usize,
+    /// What the document used to be, relative to what it is now. Phase 13 part 14.
+    ///
+    /// # Why the rope owns it rather than the session
+    ///
+    /// **Because every edit goes through here, and a fault has to be able to consult it.** Two
+    /// alternatives were rejected on their own merits rather than on convenience:
+    ///
+    /// * *The session owns it.* Then the session must hand it to a fault, but a fault is
+    ///   `read_at_faulting(&mut self, source, ...)` on the rope — so the session would have to pass a
+    ///   `&EditRecord` alongside a `&mut` rope, and **the rope's own edits would have no way to reach
+    ///   it.** The record would describe a document nobody edited, and replay would be a no-op that
+    ///   looks correct.
+    /// * *Shared via `Rc<RefCell<_>>`.* That works and is one allocation, but it puts a runtime borrow
+    ///   check on the keystroke path — and this file already refused interior mutability for exactly
+    ///   that reason when it split `read_at` from `read_at_faulting`.
+    ///
+    /// **So the rope owns it, and the seam stays what it was**: `fetch_leaf(saved_offset, out)` is
+    /// still the only question asked of a source, and it is asked in *saved* coordinates.
+    record: crate::edit_record::EditRecord,
+    /// A counter bumped once per **recorded** edit.
+    ///
+    /// # Why a counter and not a flag
+    ///
+    /// **Because one edit invalidates many leaves, and no flag can say which.** An insert at offset 10
+    /// makes every leaf after it hold pre-edit bytes, so "is this leaf stale?" is not a property of the
+    /// leaf — it is a comparison between *when the leaf was filled* and *when the last edit happened*.
+    /// A boolean would have to be cleared on every leaf after every edit, which is O(leaves) per
+    /// keystroke; the counter makes it O(1) to bump and O(1) to ask.
+    edit_epoch: u64,
+    /// Per leaf, the [`edit_epoch`](Self::edit_epoch) at which its bytes were last brought up to date.
+    ///
+    /// **A parallel array rather than a field on the leaf**, for the same reason `starts` is one:
+    /// `LeafSlot` is about *bytes and lengths*, this is about *geometry*, and the two churn for different
+    /// reasons — a split copies bytes and moves both.
+    ///
+    /// `epochs.len() == leaves.len()`, maintained in exactly the two places `starts` is: `split_at`
+    /// inserts and the merge truncates. A third place would be a place they could disagree.
+    epochs: Vec<u64>,
 }
 
 /// One entry in the spine: bytes held, or only a length remembered.
@@ -301,7 +339,11 @@ impl Rope {
     /// something a caller adds up: one absent leaf releases one page-locked `SecureBlock`, and this is what
     /// shows it.
     pub fn resident_bytes(&self) -> usize {
-        self.leaves.iter().filter(|l| l.is_resident()).map(LeafSlot::text_len).sum()
+        self.leaves
+            .iter()
+            .filter(|l| l.is_resident())
+            .map(LeafSlot::text_len)
+            .sum()
     }
 }
 
@@ -337,10 +379,21 @@ impl Rope {
         ));
         let mut starts = Vec::with_capacity(Self::SPINE_RESERVE);
         starts.push(0);
+        // **Reserved like `leaves` and `starts`, and for the same reason.** `vec![0]` has capacity 1, so
+        // the first leaf split reallocates this array -- and `no_alloc.rs` types 4,000 characters into a
+        // fresh rope, which is enough for one split, and reported *1 reallocation on the typing path*.
+        // Three parallel arrays that must grow together cannot have three different growth policies.
+        let mut epochs = Vec::with_capacity(Self::SPINE_RESERVE);
+        epochs.push(0);
         Self {
             leaves,
             starts,
             cursor: 0,
+            // **An empty rope's contents ARE the saved document**, so there is nothing to record. Every
+            // other constructor says the same, and it is what makes `record` mean "edits since load".
+            record: crate::edit_record::EditRecord::new(),
+            edit_epoch: 0,
+            epochs,
         }
     }
 
@@ -357,7 +410,9 @@ impl Rope {
     /// the honest cost of loading a document and is not on the keystroke path.
     pub fn from_text(text: &[u8]) -> Result<Self, RopeError> {
         let mut rope = Self::new();
-        rope.insert_at(0, text)?;
+        // **Unrecorded**, and the reason is the point: this *is* the saved document. See
+        // `insert_at_unrecorded`.
+        rope.insert_at_unrecorded(0, text)?;
         Ok(rope)
     }
 
@@ -524,6 +579,25 @@ impl Rope {
     /// gate counts allocations across a burst of keystrokes and requires zero for every keystroke
     /// that does not exhaust a leaf's gap.
     pub fn insert_byte(&mut self, ch: u8) -> Result<(), RopeError> {
+        // **Recorded before the edit, because `at` is an offset in the document as it was *before* it.**
+        // Recording after would give an offset one byte too far, and — as parts 9 and 11 both found the
+        // hard way — a coordinate recorded in the wrong system is wrong in a way no length check catches.
+        // **Through the constructor, not a struct literal**, so the inline-or-heap decision lives in
+        // `Bytes` rather than being re-made at each of the four edit sites. A literal here would be a
+        // `Vec` again, and the keystroke would allocate -- which is the bug `Bytes` exists to fix.
+        self.record
+            .push(crate::edit_record::Edit::insert(self.cursor, [ch]));
+        self.note_edit_at_cursor();
+        self.insert_byte_unrecorded(ch)
+    }
+
+    /// [`insert_byte`](Self::insert_byte) without the record entry.
+    ///
+    /// **Exists because three callers need one of the two behaviours and the choice is not a parameter.**
+    /// A document load (`from_text` → `insert_at`) must record nothing, a paste (`insert_at`) must record
+    /// **one** edit for the whole run rather than one per byte, and a keystroke must record one. A
+    /// boolean would put that decision at every call site; a second function puts it in the type.
+    fn insert_byte_unrecorded(&mut self, ch: u8) -> Result<(), RopeError> {
         let (mut index, mut within) = self.locate(self.cursor)?;
 
         // Split when the leaf's gap is down to `GAP_MINIMUM`, not when it is empty.
@@ -556,7 +630,43 @@ impl Rope {
         leaf.insert_byte(ch)?;
         self.cursor += 1;
         self.recompute_starts_from(index);
+        // **The edit made this leaf's bytes current, so it is exempt from the epoch bump.** Stamped
+        // after the write, for the reason `note_edit_at_cursor` gives: a stamp before would be a promise
+        // the code had not yet kept, and the leaf could fail to be edited at all.
+        self.epochs[index] = self.edit_epoch;
         Ok(())
+    }
+
+    /// Mark every resident leaf past the last edit as out of date, by advancing the epoch.
+    ///
+    /// **One increment, and that is the whole cost.** Every leaf whose epoch is not the new one is stale —
+    /// which is every leaf that was not itself the leaf just edited — and the epoch comparison in
+    /// [`fault_leaf`](Self::fault_leaf) is what turns that into a refetch on the next read rather than a
+    /// silent read of pre-edit bytes.
+    ///
+    /// **Called after the record entry and before the bytes move**, so a caller that fails mid-edit
+    /// leaves the rope *more* likely to refetch, which is the safe direction: an unnecessary refetch
+    /// costs a load, and a missing one costs correctness.
+    fn note_edit_at_cursor(&mut self) {
+        self.edit_epoch += 1;
+        // **The leaf holding the cursor is exempt**, and has to be: it is about to be edited *in place*,
+        // so its bytes become current by the edit itself. Stamping it now -- before the edit -- would be
+        // a promise the code has not yet kept, so it is stamped on the way out instead.
+    }
+
+    /// The single byte immediately before the cursor.
+    ///
+    /// **A `Vec` of length one rather than a `u8`, because that is what [`Edit`] stores.** Wrapping it
+    /// here means [`delete_byte`](Self::delete_byte) has one line instead of a match on which leaf held
+    /// the byte, and the two branches that call it — one deleting inside the cursor's leaf, one deleting
+    /// from the previous leaf after a balance — cannot disagree about what was removed.
+    ///
+    /// Goes through [`read_at`](Self::read_at) rather than reaching into a leaf, so it works at a leaf
+    /// boundary without a second implementation.
+    fn byte_before_cursor(&self) -> Result<[u8; 1], RopeError> {
+        let mut one = [0u8; 1];
+        self.read_at(self.cursor - 1, 1, &mut one)?;
+        Ok(one)
     }
 
     /// **FR-1.2. Delete one byte before the cursor. O(1) when the leaf has pre-gap text.**
@@ -584,11 +694,20 @@ impl Rope {
         // `within == 0` means there is no text before the cursor *in this leaf*. There may still be
         // text in an earlier leaf, which is the balance case below.
         if within > 0 {
+            // **The byte is read before it goes, because the record has to carry it.** Part 10's
+            // finding: a deletion cannot be recorded as "N bytes removed here", because the *content*
+            // is what a later replay needs to know which saved bytes are gone. An undo record holds the
+            // removed text; so does this, and for the same reason.
+            let removed = self.byte_before_cursor()?;
+            self.record
+                .push(crate::edit_record::Edit::delete(self.cursor - 1, removed));
+            self.note_edit_at_cursor();
             let leaf = self.leaf_mut(index)?;
             leaf.set_gap_offset(within)?;
             leaf.delete_byte()?;
             self.cursor -= 1;
             self.recompute_starts_from(index);
+            self.epochs[index] = self.edit_epoch;
             return Ok(());
         }
 
@@ -607,12 +726,22 @@ impl Rope {
         );
         let prev = index - 1;
         let prev_len = self.leaf_len(prev);
+        // **Same as the branch above, and recorded from `prev` rather than from `index`** — the deleted
+        // byte is the last byte of the *previous* leaf, so `at` is `cursor - 1` in document coordinates
+        // either way, but the byte itself has to come from the leaf that holds it.
+        let removed = self.byte_before_cursor()?;
+        self.record
+            .push(crate::edit_record::Edit::delete(self.cursor - 1, removed));
+        self.note_edit_at_cursor();
         let leaf = self.leaf_mut(prev)?;
         leaf.set_gap_offset(prev_len)?;
         leaf.delete_byte()?;
         self.cursor -= 1;
         self.try_merge(prev)?;
         self.recompute_starts_from(prev.saturating_sub(1));
+        // **Stamped at `prev` after the merge**, not at `prev` and `prev + 1` before it -- the merge
+        // removes a slot, so the index that survives is the one that has to carry the stamp.
+        self.epochs[prev] = self.edit_epoch;
         Ok(())
     }
 
@@ -638,9 +767,31 @@ impl Rope {
         if bytes.is_empty() {
             return Ok(());
         }
+        // **One edit for the whole run, recorded before it happens.** A paste of 4,096 bytes recorded as
+        // 4,096 edits would make every later fault walk 4,096 of them — and `to_saved` walks the record
+        // per byte, so the cost would be O(paste x window) on the fault path.
+        // **`bytes` is borrowed, not copied**: `Bytes::from(&[u8])` inlines up to `INLINE_BYTES` and
+        // copies only when it must. A paste of 200 bytes allocates once, which is the paste's own cost.
+        self.record
+            .push(crate::edit_record::Edit::insert(offset, bytes));
+        self.note_edit_at_cursor();
+        self.insert_at_unrecorded(offset, bytes)
+    }
+
+    /// [`insert_at`](Self::insert_at) without the record entry — **and the only way a document is
+    /// loaded.**
+    ///
+    /// [`from_text`](Self::from_text) is the *saved document being put in the rope*, so recording it
+    /// would say "the document is the empty document plus 6.4 MiB of inserted text" — true as bytes,
+    /// false as a statement about what has been edited, and it would put 6.4 MiB into a structure whose
+    /// whole purpose is to be small. This is the distinction that makes the record mean what it says.
+    fn insert_at_unrecorded(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
         self.set_cursor(offset)?;
         for &b in bytes {
-            self.insert_byte(b)?;
+            self.insert_byte_unrecorded(b)?;
         }
         Ok(())
     }
@@ -675,7 +826,9 @@ impl Rope {
         while written < len {
             let (i, w) = self.locate(at)?;
             let take = (self.leaf_len(i) - w).min(len - written);
-            let n = self.leaf(i)?.copy_text_to(w, &mut out[written..written + take])?;
+            let n = self
+                .leaf(i)?
+                .copy_text_to(w, &mut out[written..written + take])?;
             // `copy_text_to` clamps to the leaf's remaining text, and `take` is already that clamped
             // value, so it copies exactly `take` or the read is truncated and the next `locate` would
             // silently re-read the same bytes. Asserted rather than handled.
@@ -694,7 +847,6 @@ impl Rope {
         }
         Ok(out)
     }
-
 
     /// Read `len` bytes at `offset`, **faulting absent leaves in from `source` as needed**.
     ///
@@ -746,7 +898,9 @@ impl Rope {
             let (i, w) = self.locate(at)?;
             self.fault_leaf(source, i)?;
             let take = (self.leaf_len(i) - w).min(len - written);
-            let n = self.leaf(i)?.copy_text_to(w, &mut out[written..written + take])?;
+            let n = self
+                .leaf(i)?
+                .copy_text_to(w, &mut out[written..written + take])?;
             debug_assert_eq!(n, take, "copy_text_to truncated a clamped run");
             written += take;
             at += take;
@@ -769,11 +923,47 @@ impl Rope {
     /// shared by the read and cursor paths rather than a caller-owned scratch buffer both would then
     /// have to keep in sync.
     pub fn fault_leaf(&mut self, source: &mut dyn LeafSource, i: usize) -> Result<(), RopeError> {
-        if self.is_resident(i) {
+        // **Resident is not the same as up to date**, and conflating them is the bug this condition used
+        // to hide. A leaf that was already resident when an edit happened holds *pre-edit* bytes: its
+        // length and offset are right, so every check this function used to make passed, and the document
+        // was silently wrong from there to the end. Residency is about memory; currency is about edits,
+        // and only the epoch can answer the second.
+        if self.is_resident(i) && self.epochs[i] == self.edit_epoch {
             return Ok(());
         }
         let want = self.leaf_len(i);
+        let at = self.leaf_offset(i);
         let mut buf = vec![0u8; want];
+
+        // **Part 13 made this a replay, and this is the line that was wrong before.**
+        //
+        // The leaf covers a range of *current* offsets, but the source holds *saved* bytes at *saved*
+        // offsets. So the fetch is not one call at one offset -- it is one call per run the record says
+        // is saved, each written straight into its own slice of `buf`, and then the typed bytes are
+        // filled in from the record.
+        //
+        // Before this, the code asked for `[at, at + want)` from a source holding the pre-edit document,
+        // which returned the right *number* of bytes shifted by the total of every edit before it. The
+        // comment directly above this used to say "and it is the offset in the SAVED document" -- which
+        // described the constraint the code was supposed to satisfy and not what it did.
+        for r in self.record.saved_runs(at, want) {
+            let dst = &mut buf[r.out_at..r.out_at + r.len];
+            let got = source.fetch_leaf(r.saved_at, dst)?;
+            if got != r.len {
+                // Same reasoning as the whole-leaf check below, one run smaller: a short source padded
+                // with zeros reads as NULs, which are indistinguishable from real text here.
+                return Err(RopeError::OutOfBounds {
+                    offset: r.saved_at,
+                    text_len: got,
+                });
+            }
+        }
+        // **After the fetches, and that order is the contract.** `fill_typed` writes only the positions
+        // the record says were typed, so it is safe to run second -- but running it first and fetching
+        // over the top would be correct by luck rather than by design.
+        self.record
+            .fill_typed(at, &mut buf)
+            .map_err(|_| RopeError::SourceUnavailable)?;
         // **By document offset, not by leaf index.** This is the seam's one non-obvious
         // requirement, and getting it wrong is silent: a rope's leaf boundaries are wherever its
         // splits and merges left them, so leaf `i` does not begin at `i * LEAF_FILL` -- typing
@@ -784,14 +974,16 @@ impl Rope {
         //
         // **And it is the offset in the SAVED document**, which is the whole of the constraint
         // documented on the faulting methods below.
-        let got = source.fetch_leaf(self.leaf_offset(i), &mut buf)?;
-        if got != want {
-            // A short source padded with zeros would read as a document full of NULs, which is
-            // indistinguishable from real text at this level. Refuse instead.
-            return Err(RopeError::OutOfBounds { offset: i, text_len: got });
-        }
+        // **The whole-leaf short-read check now lives on each run**, above. There is no single
+        // `got != want` left to make because there is no longer a single fetch: the buffer is assembled
+        // from however many saved runs the record found, plus the typed bytes, and **every source call
+        // is checked as it happens** -- which is a stronger check than the one it replaces, since the old
+        // one could only see a total.
         self.leaves[i] = LeafSlot::Resident(CagrLeaf::with_text(&buf)?);
-        source.on_resident(self.leaf_offset(i));
+        // **Stamped after the fill, never before** -- a stamp applied first would make a leaf that failed
+        // to fetch look current, and the next read would skip it.
+        self.epochs[i] = self.edit_epoch;
+        source.on_resident(at);
         Ok(())
     }
 
@@ -801,30 +993,30 @@ impl Rope {
     // `fault_leaf` is the one place a leaf is fetched. Everything above it -- reads, and the cursor
     // move below -- may fault, because **none of them change a byte.**
     //
-    // # Why there are no faulting *mutators*, which is the substantive finding
+    // # Why there are still no faulting *mutators*, which is now a different reason
     //
-    // The obvious next step was `insert_byte_faulting` and friends: fault the leaf, then perform the
-    // edit. It works, and it is **silently wrong**, and the reason is structural rather than a bug to
-    // fix:
+    // Part 7 implemented `insert_byte_faulting` and friends — fault the leaf, then edit it — measured them
+    // to be **silently wrong**, and removed them. The reason was structural: a `LeafSource` is addressed by
+    // document offset, which is true only of an *unmodified* document, so after one insert the rope's leaf
+    // offsets and the store's offsets are different numbers and a later fault receives the right *number*
+    // of bytes from one byte too far. The store could not follow because there was no write-back path, so
+    // it held the document as it was **saved** while the rope held it as it is **now**.
     //
-    // **A `LeafSource` is addressed by document offset, and that is only true of an *unmodified*
-    // document.** An insert at offset `p` shifts every leaf after it by one, so from that moment the
-    // rope's leaf offsets and the store's offsets are different numbers. A later fault asks the store
-    // for "the leaf at offset `q`" and receives the right *number* of bytes from one byte too far --
-    // which is exactly the failure mode offset-keying was introduced to prevent, reintroduced by
-    // editing. `VecSource` in `sparse_rope.rs` and the 1-in-17 straddling arithmetic in
-    // `SectionStore::fetch_leaf` are both correct only for the saved document.
+    // **Part 14 removed that reason rather than working around it.** The rope now owns an
+    // [`EditRecord`](crate::edit_record::EditRecord), every mutator records into it, and `fault_leaf`
+    // consults it: the store is asked for *saved* bytes at *saved* offsets — which is exactly what it
+    // holds — and the record turns them into current bytes. **The two coordinate systems are no longer a
+    // hazard, they are the design.**
     //
-    // The store cannot follow, because **there is no write-back path**: `evict_leaf` scrubs the bytes it
-    // releases and hands them to the caller, and `SectionStore::evict` releases memory without telling
-    // the container anything. So the store holds the document *as it was saved*, permanently, while the
-    // rope holds the document *as it is now*, and after one edit the two are different documents.
+    // **So the methods are absent for the ordinary reason now: they are not written yet.** They are the
+    // item PROJECT.md §7 names as what stands between a sparse rope and a usable editor, and their absence
+    // is `there_is_no_faulting_mutator_on_the_rope`'s subject — but that test now pins an *inventory* to be
+    // extended deliberately, rather than pinning a hazard to be respected.
     //
-    // A faulting mutator here would return `Ok`, put bytes in the document, and leave a trap for the
-    // next read somewhere else in the file. **That is the worst available outcome**, and it is why the
-    // methods are absent rather than present-and-documented. The ways out are in PROJECT.md Phase 13
-    // part 7, and the load-bearing requirement in every one of them is that the store become the
-    // authority on the document's *current* state rather than its saved state.
+    // What is load-bearing for whoever adds them: **fault, then record, then edit — in that order, with the
+    // record entry made before the bytes move.** An edit's `at` is an offset in the document *as it was
+    // before it*, so recording afterwards gives an offset one byte too far, and parts 9 and 11 each failed
+    // on exactly that.
     // ---------------------------------------------------------------------------
 
     /// Fault in every leaf holding any byte of `[start, end]`.
@@ -846,10 +1038,16 @@ impl Rope {
     ) -> Result<(), RopeError> {
         let len = self.text_len();
         if start > end {
-            return Err(RopeError::OutOfBounds { offset: start, text_len: end });
+            return Err(RopeError::OutOfBounds {
+                offset: start,
+                text_len: end,
+            });
         }
         if end > len {
-            return Err(RopeError::OutOfBounds { offset: end, text_len: len });
+            return Err(RopeError::OutOfBounds {
+                offset: end,
+                text_len: len,
+            });
         }
         let mut at = start;
         while at <= end {
@@ -896,72 +1094,204 @@ impl Rope {
         self.set_cursor(offset)
     }
 
-    /// Write leaf `index` back to `source` **and then evict it**, in that order.
-///
-/// # Why this exists rather than leaving the order to the caller
-///
-/// [`Rope::evict_leaf`] documents the required sequence — read, save, evict — and a documented order that
-/// a caller must remember is an order that will eventually be got wrong. Getting it wrong is not caught by
-/// a length check: the leaf is evicted, the store still holds the pre-edit bytes, and the next fault of
-/// that leaf returns **stale content that is the right number of bytes long**. The document is wrong and
-/// says nothing.
-///
-/// So the sequence lives in one function that cannot be decomposed into the wrong order, and it is the
-/// *only* way to shed a leaf on a document backed by a source. [`Rope::evict_leaf`] stays public for the
-/// read-only case — evicting a leaf nobody edited loses nothing.
-///
-/// ## One allocation, and it is the eviction's own
-///
-/// A `Vec` for the leaf's bytes, because `store_leaf` borrows a slice and the leaf's block is dropped
-/// before this returns. **Not on the keystroke path**: this is called when the resident budget is
-/// exceeded, which is bounded by the budget and not by how fast anyone can type.
-///
-/// ## What is refused, and what is not
-///
-/// An absent leaf is a **no-op returning `Ok(0)`**, not an error. A budget-driven eviction sweep asks
-/// "shed anything not in the window", and every leaf outside it is already absent; refusing would make a
-/// sweep that expects to make progress fail on the first one, and the caller would have to pre-filter with
-/// `is_resident` — which is exactly the mistake this function is here to prevent.
-///
-/// [`evict_leaf`](Self::evict_leaf) still refuses a double-evict, and that difference is deliberate: it is
-/// the low-level call, and a caller using it directly is asserting this leaf *was* resident.
-pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Result<usize, RopeError> {
-    if !self.is_resident(index) {
-        return Ok(0);
+    /// Release every leaf overlapping `[start, end)`, keeping each one's length.
+    ///
+    /// **The other half of a bounded-memory commit.** [`read_at_faulting`](Self::read_at_faulting) brings a
+    /// range resident so its bytes can be copied out; this sheds it again. Between them a caller can walk a
+    /// document of any size while holding one range at a time — which is what
+    /// [`commit_document`](crate::Rope) needs, since the alternative is reading the whole document into a
+    /// buffer the size of the document.
+    ///
+    /// **It costs nothing to shed an edited leaf, and that is part 14's property**: the record still describes
+    /// every edit, so an absent leaf is reconstructed on the next fault rather than lost. Part 8 needed a
+    /// `store_leaf` here precisely because eviction *was* lossy; it no longer is.
+    ///
+    /// **An already-absent leaf is skipped rather than refused.** This is a sweep, and a sweep over a range
+    /// that is partly resident would otherwise fail on the first absent leaf — the caller has no reason to know
+    /// which those are.
+    pub fn evict_range(&mut self, start: usize, end: usize) -> Result<usize, RopeError> {
+        if start >= end {
+            return Ok(0);
+        }
+        if start >= self.text_len() {
+            return Err(RopeError::OutOfBounds {
+                offset: start,
+                text_len: self.text_len(),
+            });
+        }
+        let (first, _) = self.locate(start)?;
+        let mut freed = 0usize;
+        for i in first..self.leaf_count() {
+            let lo = self.leaf_offset(i);
+            if lo >= end {
+                break;
+            }
+            if !self.is_resident(i) {
+                continue;
+            }
+            freed += self.evict_leaf(i)?;
+        }
+        Ok(freed)
     }
-    // Read first, while the block is still mapped. `text_len` rather than the allocated capacity: a
-    // leaf's gap is not part of its text and must never reach the store.
-    let at = self.leaf_offset(index);
-    let len = self.leaf_len(index);
-    let mut buf = vec![0u8; len];
-    self.leaf(index)?.copy_text_to(0, &mut buf)?;
-    source.store_leaf(at, &buf)?;
-    // Zero before the buffer drops. The bytes were plaintext a moment ago and the process is about to
-    // hand the page back to the allocator, where a later allocation could read them.
-    buf.fill(0);
-    // **The length, with the bytes, in the same call.** The source holds the document as it was *before*
-    // the edits this leaf participated in, and its extent moved too. Saving the bytes and forgetting the
-    // length leaves a document whose tail is one edit out of date -- which surfaces as a refused read
-    // near the end, nowhere near the edit that caused it.
-    source.set_len(self.text_len())?;
-    self.evict_leaf(index)
-}
 
-/// Release leaf `index`'s bytes, keeping its length — **without saving them anywhere**.
-///
-/// **Prefer [`Rope::evict_leaf_to`] on any document backed by a source.** This is the low-level call: it
-/// drops the block and forgets the bytes, which is correct for a leaf nobody edited and is **silent data
-/// loss for a leaf somebody did**. That asymmetry is the reason `evict_leaf_to` exists — see its docs for
-/// why the order is not left to the caller.
-///
-/// **This is the call that lowers the page-lock charge.** The leaf's `SecureBlock` is dropped, which
-    /// unmaps and scrubs it, and the slot keeps `LeafSlot::Absent { text_len }`. `resident_bytes()` drops
-    /// by that leaf's length and `text_len()` does not move.
-///
-/// Refuses on an already-absent leaf rather than counting it as an eviction, so a double-evict is a
-    /// visible error rather than a second entry in a statistic. `evict_leaf_to` deliberately differs —
-    /// it returns `Ok(0)` — because it is meant to be called in a sweep over every leaf, where most are
-    /// already absent and a refusal would make the sweep fail on its first iteration.
+    /// Write the whole current document to `source`, then forget the record. **Phase 13 part 15.**
+    ///
+    /// # This is the answer §7 item 0 was asking for, and part 13 is why it is whole-document
+    ///
+    /// Part 8 proposed per-leaf write-back on eviction. Part 13 measured it end to end and **falsified it**:
+    /// a 135,040-byte document, one 5-byte insert, every resident leaf written back and committed, and
+    /// **132,987 of 135,045 bytes still differ from the truth** (`tests/write_back_shift.rs`). A shift moves
+    /// every offset after the edit; a section is 65,520 B and a leaf at most 3,841 B, so a leaf write-back
+    /// repairs at most 1 leaf in 17 of a section and the rest of that section keeps pre-shift bytes. The
+    /// container's `content_len` did not even grow — the commit reported success and left the document on
+    /// disk **five bytes short** of the one in memory.
+    ///
+    /// > **A shift is not a leaf-local event.** It moves every offset after the edit, and a section cannot
+    /// > hold two coordinate systems at once.
+    ///
+    /// So a commit writes **every leaf**, in order, at its current offset. **What repairs the shift is not
+    /// any property of a single write — it is that there is no leaf left unwritten.** And the same argument
+    /// is what forbids making it incremental: a partial commit is a partial write-back, and part 13 is the
+    /// measurement of what that costs.
+    ///
+    /// ## The order, and why `clear` is safe only here
+    ///
+    /// 1. **Read every leaf**, through the record. An absent leaf is faulted in; a resident but pre-edit
+    ///    leaf is re-fetched, because `fault_leaf`'s epoch comparison is exactly that condition.
+    /// 2. **Record the extent** with [`set_len`](LeafSource::set_len) — *before* the bytes, because a grown
+    ///    document's last leaf writes past what the source currently holds.
+    /// 3. **Write every leaf** at its current offset.
+    /// 4. **Clear the record.** The source now holds the current document, so the two coordinate systems
+    ///    coincide and an empty record is the *accurate* description rather than a convenient one.
+    ///
+    /// **Step 2 before step 3 is the same defect twice.** Part 8 recorded the length *after* a per-leaf
+    /// write-back, and part 13 measured the result: the container's `content_len` stayed at 135,040 while
+    /// the in-memory document was 135,045 — a commit that reported success and left the document on disk
+    /// five bytes short. **An extent recorded after the content it describes is a length that is wrong by
+    /// exactly the edit.**
+    ///
+    /// **Every read precedes every write, and that is the whole contract.** Writing leaf 3 while leaf 900 is
+    /// still absent would put *current* bytes at *current* offsets into a store that leaf 900's fault is
+    /// about to read in *saved* coordinates. Interleaving is the bug, not an optimisation.
+    ///
+    /// **Step 3 is why this is not `compact_before`.** Every survivor's `at` is measured in coordinates that
+    /// include the edits before it, so dropping a prefix is a **rebasing** operation and not a truncation.
+    /// Clearing the whole record leaves no survivors and so cannot be wrong. **Whole-document is therefore
+    /// simpler than partial, not merely more expensive** — which is why the product takes it.
+    ///
+    /// ## What it costs, stated rather than discovered
+    ///
+    /// **One document-sized buffer**, so this is O(document) in time and in peak memory, and it is the one
+    /// place in the text path where that is true. Two things make it affordable:
+    ///
+    /// * **A commit is not the keystroke path.** It is bounded by how often a session saves, not by typing.
+    ///   Part 7 measured write-*through* at 6.5–10.3× a keystroke, 84–93 % of it the disk; this is the
+    ///   other extreme, and it is the only one that is correct.
+    /// * **The format caps the document at 8,321,040 B.** That is the entire cost: an 8.32 MB transient
+    ///   buffer at commit time. **It is not comparable to the resident set** — Phase 13 part 2 step 2b
+    ///   measured a 4-section window at ~256 KiB, and one is a transient while the other is a floor. Saying
+    ///   so is the point; letting the transient be quoted as the resident cost would overstate the design
+    ///   by 32×.
+    ///
+    /// **The buffer is zeroed** before it drops, because it held the entire document in plaintext and the
+    /// process is about to hand the page back to the allocator. A commit is also the moment the process
+    /// holds the most plaintext it ever holds, which is worth stating rather than discovering.
+    ///
+    /// ## What it returns, and what the caller must still do
+    ///
+    /// Bytes written. **The caller commits its own storage.** A source that has cached a section but not
+    /// written it must reach the disk before the process relies on it; the rope cannot know whether a
+    /// source writes eagerly or lazily, and guessing would put a silent data-loss path on the one
+    /// operation where losing data is worst.
+    pub fn commit(&mut self, source: &mut dyn LeafSource) -> Result<usize, RopeError> {
+        let n = self.text_len();
+        if n == 0 {
+            // **An empty document still has a length to record**, and a source whose extent is stale
+            // refuses the first fault afterwards with a length error a long way from its cause.
+            source.set_len(0)?;
+            self.record.clear();
+            return Ok(0);
+        }
+
+        let leaves = self.leaf_count();
+        // **One buffer for the whole document**, which is what lets every read precede every write. A
+        // per-leaf buffer would be smaller and would reintroduce exactly the interleaving above.
+        let mut buf = vec![0u8; n];
+        let mut written = 0usize;
+
+        for i in 0..leaves {
+            self.fault_leaf(source, i)?;
+            let at = self.leaf_offset(i);
+            let len = self.leaf_len(i);
+            if len == 0 {
+                continue;
+            }
+            self.leaf(i)?.copy_text_to(0, &mut buf[at..at + len])?;
+            written += len;
+        }
+
+        // **The extent is recorded BEFORE the bytes, and this is not a style choice.**
+        //
+        // A grown document's last leaf writes at an offset past what the source currently holds, so
+        // writing first asks a source to place bytes outside itself — a `Vec` source panics on the slice
+        // range and a section-granular source refuses the range as past the document. The first version of
+        // this function wrote leaves and then called `set_len`, and `a_committed_document_reads_back_byte_for_byte`
+        // failed on it: **the three inserted bytes were the ones past the end.**
+        //
+        // Part 8 put `set_len` after the write-back for the same reason in miniature — it rode along with a
+        // per-leaf write — and part 13 measured that as the container's `content_len` staying five bytes short.
+        // Both failures have the same shape: **an extent recorded after the content it describes.**
+        source.set_len(n)?;
+
+        for i in 0..leaves {
+            let at = self.leaf_offset(i);
+            let len = self.leaf_len(i);
+            if len == 0 {
+                continue;
+            }
+            source.store_leaf(at, &buf[at..at + len])?;
+        }
+
+        buf.fill(0);
+        drop(buf);
+
+        // **The source now holds this document**, so the record describes no difference between them.
+        // **The epoch is deliberately not bumped:** every resident leaf is consistent with the source
+        // again, and re-faulting them all would make a commit cost two passes over the document.
+        self.record.clear();
+        Ok(written)
+    }
+
+    /// Forget every recorded edit, because the source now holds the document as it is.
+    ///
+    /// **Only correct once every leaf has been written to the source**, and the name is the guard: `forget_record`
+    /// says what it does and the caller is the only thing that knows whether the premise holds. A false claim
+    /// here is the worst failure this file has — every later fault reads a document the source does not hold,
+    /// and no length check catches it.
+    ///
+    /// [`commit`](Self::commit) calls this itself and is the ordinary way to do it. This exists for the
+    /// **bounded-memory commit**, which is a loop over the document performed by the caller: each chunk is read,
+    /// written and shed, and only after the last one is the claim true. See `evict_range`, which is the other
+    /// half of that loop.
+    pub fn forget_record(&mut self) {
+        self.record.clear();
+    }
+
+    /// Release leaf `index`'s bytes, keeping its length.
+    ///
+    /// **This is how a leaf is shed, and part 14 is why it no longer loses anything.** Part 8 needed a
+    /// `store_leaf` alongside it, because with no origin tracking the store held the *saved* document and
+    /// a leaf somebody had edited had nowhere else to live. **Part 14 put the edit record in the rope**, so
+    /// an evicted leaf's current bytes are reconstructible: [`fault_leaf`] asks the record which saved
+    /// bytes belong in the leaf and where, fetches each run into place, and fills the typed bytes from the
+    /// record itself. A shed leaf is not lost, it is merely not held.
+    ///
+    /// **This is also the call that lowers the page-lock charge.** The leaf's `SecureBlock` is dropped, which
+    /// unmaps and scrubs it, and the slot keeps `LeafSlot::Absent { text_len }`. `resident_bytes()` drops by
+    /// that leaf's length and `text_len()` does not move.
+    ///
+    /// Refuses on an already-absent leaf rather than counting it as an eviction, so a double-evict is a
+    /// visible error rather than a second entry in a statistic.
     pub fn evict_leaf(&mut self, index: usize) -> Result<usize, RopeError> {
         let slot = self.leaves.get_mut(index).ok_or(RopeError::NoLeaves)?;
         match std::mem::replace(slot, LeafSlot::Absent { text_len: 0 }) {
@@ -1065,6 +1395,10 @@ pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Re
 
         self.leaves.insert(index + 1, LeafSlot::Resident(right));
         self.starts.insert(index + 1, 0);
+        // **Both halves inherit the epoch the left half had.** A split moves text from one leaf to two
+        // without changing any byte's currency, so the right half is exactly as fresh as the left was --
+        // and stamping it with the current epoch when it is *not* fresh would mark stale bytes as good.
+        self.epochs.insert(index + 1, self.epochs[index]);
         self.relink();
         self.recompute_starts_from(index);
         Ok(())
@@ -1081,7 +1415,9 @@ pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Re
     /// stated once, next to the reason it is not the plan's.
     #[inline]
     pub fn should_split(&self, index: usize) -> bool {
-        self.leaves.get(index).is_some_and(LeafSlot::is_resident_and_needs_split)
+        self.leaves
+            .get(index)
+            .is_some_and(LeafSlot::is_resident_and_needs_split)
     }
 
     /// Merge leaf `index` and `index + 1` if both fit.
@@ -1136,6 +1472,9 @@ pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Re
         );
 
         self.leaves.remove(index + 1);
+        // **With the leaf, not with `starts`.** `starts.truncate` follows below; this has to come first
+        // so the two stay the same length.
+        self.epochs.remove(index + 1);
         // `starts` must shrink with `leaves`, or `recompute_starts_from` walks past its end.
         self.starts.truncate(self.leaves.len());
         self.relink();
@@ -1222,12 +1561,13 @@ pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Re
         // outwards from `i` and stops at the first resident slot, and the common case -- an all-resident
         // rope -- finds one immediately, so the cost is two comparisons per leaf rather than a walk.
         for i in 0..n {
-            let next = (i + 1..n).find(|&j| self.is_resident(j)).map_or(ptr::null_mut(), |j| {
-                self.leaves[j].as_resident_ptr()
-            });
-            let prev = (0..i).rev().find(|&j| self.is_resident(j)).map_or(ptr::null_mut(), |j| {
-                self.leaves[j].as_resident_ptr()
-            });
+            let next = (i + 1..n)
+                .find(|&j| self.is_resident(j))
+                .map_or(ptr::null_mut(), |j| self.leaves[j].as_resident_ptr());
+            let prev = (0..i)
+                .rev()
+                .find(|&j| self.is_resident(j))
+                .map_or(ptr::null_mut(), |j| self.leaves[j].as_resident_ptr());
             if let LeafSlot::Resident(l) = &mut self.leaves[i] {
                 l.next = next;
                 l.prev = prev;
@@ -1281,13 +1621,31 @@ pub fn evict_leaf_to(&mut self, source: &mut dyn LeafSource, index: usize) -> Re
         let n = text_len.div_ceil(fill).max(1);
         let mut leaves = Vec::with_capacity(n);
         let mut starts = Vec::with_capacity(n);
+        // **Every leaf is absent, so every leaf is "as up to date as it can be"** -- absent leaves have no
+        // bytes to be stale. The first fault brings one up to date and stamps it.
+        // **Reserved with room to spare**, because a skeleton rope that is then typed into will split,
+        // and `Vec::with_capacity(n)` -- which is what `leaves` and `starts` use here -- leaves no slack.
+        let mut epochs = Vec::with_capacity(n + Self::SPINE_RESERVE);
+        epochs.resize(n, 0);
         for i in 0..n {
             let at = i * fill;
             starts.push(at);
             // The last slot holds the remainder; every earlier slot is exactly one fill.
-            leaves.push(LeafSlot::Absent { text_len: (text_len - at).min(fill) });
+            leaves.push(LeafSlot::Absent {
+                text_len: (text_len - at).min(fill),
+            });
         }
-        Self { leaves, starts, cursor: 0 }
+        // **A skeleton is the saved document exactly.** Every leaf is `Absent`, so nothing has been read
+        // and nothing has been typed; the first fault is a `to_saved` identity. Recording here would put
+        // the whole document into the record as one edit, which is both O(document) memory and a lie.
+        Self {
+            leaves,
+            starts,
+            cursor: 0,
+            record: crate::edit_record::EditRecord::new(),
+            edit_epoch: 0,
+            epochs,
+        }
     }
 }
 
@@ -1320,44 +1678,44 @@ pub trait LeafSource {
     /// that decides whether the store and the rope agree.
     fn on_resident(&mut self, _index: usize) {}
 
-    /// Write a leaf's **current** bytes at `offset`, so a later [`fetch_leaf`](Self::fetch_leaf) for
-    /// that offset returns them.
+    /// Write a leaf's bytes at `offset`.
     ///
-    /// # This is what makes editing and faulting compatible, and it is the whole of Phase 13 part 8
+    /// # CORRECTED by part 13, and the correction is the reason this method is not the repair
     ///
-    /// `fetch_leaf` is addressed by document offset, which is true only of a document nobody has edited:
-    /// an insert shifts every later leaf, so after one edit a fault reads the right *number* of bytes
-    /// from one byte too far. Part 7 measured that failure rather than shipping it.
+    /// Part 8 set the repair for sparse editing as one rule — *a source must return a leaf's bytes as they
+    /// are now, at current offsets* — and gated it with 6 tests in `write_back.rs`. **Those 6 tests are not
+    /// wrong; they are narrower than the rule.** Every one uses a `Vec<u8>` as the source, and **a `Vec`
+    /// has no sections**: writing a leaf's bytes back overwrites exactly that leaf's range and disturbs
+    /// nothing else, so a shift is invisible.
     ///
-    /// The invariant that repairs it is small and exact:
+    /// `SectionStore` is section-granular — a section is 65,520 B and a leaf at most 3,841 B — so writing
+    /// one leaf back repairs at most 1 leaf in 17 of a section and leaves the rest of it holding
+    /// pre-shift bytes. Measured end to end (`tests/write_back_shift.rs`): a 135,040-byte document, one
+    /// 5-byte insert, **every** resident leaf written back and committed, and **132,987 of 135,045 bytes
+    /// still differ from the truth**. The write-back worked and repaired 0.15 % of the document.
     ///
-    /// > **A source must return a leaf's bytes *as they are now*, at *current* offsets.**
+    /// > **A shift is not a leaf-local event.** It moves every offset after the edit, and a section cannot
+    /// > hold two coordinate systems at once.
     ///
-    /// And the way to keep it is **write back on eviction, not on edit** — which is what this method
-    /// exists for. The alternative, write-through on every keystroke, was measured at **6.5–10.3× a
-    /// keystroke**, 84–93 % of it an `O_DIRECT` write to this host's disk (`tests/write_through_cost.rs`).
-    /// Paying that per keystroke is not affordable; paying it at an eviction is, because an eviction is
-    /// bounded by the resident budget rather than by typing.
+    /// **So what survives is the mechanism and not the claim.** This method still does what it says — it
+    /// writes bytes at an offset — and it is still how a source learns of a change at a known-good moment.
+    /// What does not survive is the claim that it is *sufficient*, and with part 14's record in the rope it
+    /// is not merely insufficient but **wrong**: a fault asks for bytes in *saved* coordinates, so a source
+    /// patched with *current* bytes at *current* offsets is being asked two different questions at once.
     ///
-    /// ## Why this needs no origin tracking, which is the part that took longest to see
+    /// **This method is therefore called only from [`Rope::commit`], whole-document, with the record about
+    /// to be cleared.** At that moment the two coordinate systems coincide by construction, which is the
+    /// only condition under which writing current bytes at current offsets is coherent.
     ///
-    /// A leaf's offset in the **saved** document diverges from its offset in the **current** one after
-    /// any edit, and the obvious fix — remember both — implies an overlay of pending edits that every
-    /// fault has to replay. **But if the store holds *current* bytes at *current* offsets, there is no
-    /// second coordinate system to track.** `fetch_leaf(leaf_offset(i), leaf_len(i))` is then simply
-    /// correct, because the store and the rope are describing the same document at the same offsets.
-    /// Nothing to replay, no third spine array, and the one cost B was going to pay does not exist.
+    /// ## Why write-through per keystroke is not the alternative either
     ///
-    /// ## The required order, and it is not optional
+    /// The other way to keep a source current is to write on every edit, and part 7 measured that at
+    /// **6.5–10.3× a keystroke**, **84–93 % of it** an `O_DIRECT` write to this host's disk
+    /// (`tests/write_through_cost.rs`). Unaffordable per keystroke. It is affordable at a commit, because a
+    /// commit is bounded by the document and not by typing — and the document's maximum is 8,321,040 B.
     ///
-    /// **Read the leaf's bytes → `store_leaf` → [`Rope::evict_leaf`] → the store's own commit.** The
-    /// rope scrubs its block on eviction, so the bytes cannot be recovered afterwards, and a source that
-    /// has cached the section but not written it to disk must be committed before the process relies on
-    /// it. Getting the order wrong is not detectable by a length check — it produces a stale section and
-    /// therefore a document that is right until it is read again.
-    ///
-    /// `offset` and `bytes.len()` are a leaf's current extent and **may be empty**; an empty write is a
-    /// legal no-op rather than an error, because a leaf that shrank to nothing still has to be recorded.
+    /// `offset` and `bytes.len()` are a leaf's extent and **may be empty**; an empty write is a legal
+    /// no-op rather than an error, because a leaf that shrank to nothing still has to be recorded.
     fn store_leaf(&mut self, offset: usize, bytes: &[u8]) -> Result<(), RopeError>;
 
     /// Record the document's **current length**.
@@ -1371,10 +1729,14 @@ pub trait LeafSource {
     /// the gate in `write_back.rs`, which failed with `text_len: 1087` on an 8-byte overshoot — one byte
     /// short, from one insert.
     ///
-    /// Called by [`Rope::evict_leaf_to`] alongside the write-back, because both are consequences of the
-    /// same fact: the rope has moved on from what the source last saw. **Grouping them is deliberate** —
-    /// they are one event, and an API that let a caller save the bytes and forget the length would hand it
-    /// a document whose tail is silently one edit out of date.
+    /// **Called by [`Rope::commit`] and by nothing else**, which is the correction part 13 makes to part 8.
+    /// Part 8 called it from a per-leaf write-back on eviction, so the length rode along with a *partial*
+    /// write — and `write_back_shift.rs` measured what that produced end to end: the container's
+    /// `content_len` stayed at
+    /// 135,040 while the in-memory document was 135,045, because the commit reported success and the
+    /// document on disk was **five bytes short of the one in memory**. A length recorded alongside a
+    /// *partial* write describes a document that is half-updated in extent and half-updated in content,
+    /// which is worse than either being stale.
     ///
     /// Monotone is *not* required: shrinking is a legitimate edit, and a source whose backing storage cannot
     /// shrink should keep the longer allocation and record the smaller length.

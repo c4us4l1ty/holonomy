@@ -359,7 +359,7 @@ impl Editor {
     /// [`LeafSource`] is passed in rather than stored, because the source is the *caller's* — it owns the
     /// store, the budget and the eviction policy. An editor holding a source would have to own a container,
     /// and `holonomy-text` cannot depend on `holonomy-container`.
-        pub fn read_into_faulting(
+    pub fn read_into_faulting(
         &mut self,
         source: &mut dyn crate::rope::LeafSource,
         offset: usize,
@@ -370,8 +370,37 @@ impl Editor {
             return Ok(0);
         }
         let want = out.len().min(len - offset);
-        self.rope.read_at_faulting(source, offset, want, &mut out[..want])?;
+        self.rope
+            .read_at_faulting(source, offset, want, &mut out[..want])?;
         Ok(want)
+    }
+
+    /// Release every leaf overlapping `[start, end)`, keeping each one's length.
+    ///
+    /// **A pass-through**, and the rope's docs are the design. Exposed because a bounded-memory commit needs
+    /// both halves — [`read_into_faulting`](Self::read_into_faulting) to bring a range resident and this to shed
+    /// it — and splitting them across two types would mean a caller holding a rope it cannot reach.
+    pub fn evict_range(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<usize, crate::rope::RopeError> {
+        self.rope.evict_range(start, end)
+    }
+
+    /// Forget every recorded edit, because the source now holds the document as it is.
+    ///
+    /// **Only correct immediately after every leaf has been written to the source.** An empty record claims the
+    /// store's bytes are the current document's bytes; if they are not, every later fault reads the wrong
+    /// document and nothing reports it.
+    ///
+    /// **It is public because the commit is a loop**, and a loop cannot be half-in here: the caller walks the
+    /// document writing each chunk, and only at the end is the claim true. [`Rope::commit`] hides this
+    /// because it performs the whole write itself. **So the naming is the guard** — `forget_record` says what
+    /// it does and `record` says what must already be true, and a caller reaching for it mid-loop has to type
+    /// the word.
+    pub fn forget_record(&mut self) {
+        self.rope.forget_record()
     }
 
     /// How many leaves currently hold their bytes.
