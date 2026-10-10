@@ -2414,6 +2414,52 @@ this does not pretend to answer it — `Editor::text_faulting`'s docs say so, an
 one place that holds it. §6's RSS row is unchanged by this part, and the row that *would* change is the one
 this part removes: a paint no longer needs the document.
 
+#### Phase 13, part 17 — §7 item 3: the large-reduction filter is an area average
+
+**The fix is two extra one-dimensional passes and a per-axis choice between them.** `axis_area_map` gives
+each destination pixel a contiguous *footprint* of source pixels rather than two source pixels and a
+weight; `scale_x_area` and `scale_y_area` average the footprint. `use_area(src, dst)` picks the filter per
+axis at `src/dst >= 2`.
+
+**Below the threshold the bytes are exactly what they were** — same `axis_map`, same fixed point, same
+SSE2 `scale_y`. That is not a side effect, it is the reason the threshold is 2: a bilinear sample spans
+exactly two source pixels, so below 2:1 those two pixels *do* cover the footprint and interpolation is a
+legitimate area estimate. **At 2:1 and above it does not**, and that is the defect.
+
+**The two axes choose independently, and that is separability rather than an oversight.** A wide-but-short
+image reduces on one axis and not the other; forcing the passes to agree would apply a downscale filter
+where none is needed — the mirror image of the original defect.
+
+**Three things worth recording, all of them found by writing the gate.**
+
+**One: a 2:1 reduction's exact value moved by one, 127 → 128.** At 2:1 the pixel-centre convention gives
+weight 1/2 exactly, and the fixed-point blend truncates: `(0*128 + 255*128) >> 8 = 127`. 2:1 is *exactly*
+the threshold, so it now takes the area path, which rounds half-up: `(0 + 255 + 1)/2 = 128`.
+`scale_cache.rs`'s test had called 128 "a rounding" one and been right to be suspicious — **of the other
+answer.** Truncation biases every output one step dark *systematically*, so on a gradient it reads as a
+band running down the image rather than as noise. Having picked half-up for the new filter there was no
+case for keeping the other rounding two bytes away in the same call.
+
+**Two: a test named "not a decimation" was asserting a decimation.**
+`session_image.rs`'s `the_raster_is_a_resample_and_not_a_decimation` asserted `(min, max) == (20, 235)` —
+the exact stripe values, i.e. nearest-neighbour — while its name described the defect it had just recorded.
+It passed, and the thing it was named for was still true. **Naming a test after the property rather than
+after the observation is how a test documents a bug as if it were a specification.** It now asserts
+`(92, 163)`, neither of which is a value the chart contains, which is the strong form: *a nearest-neighbour
+filter can only emit source values.*
+
+**Three: an area filter produces greys only where the source varies across a footprint, so the fixture
+has to be chosen or the gate passes against a decimator.** The first version of the hard-edge test put the
+step at the midpoint of a 96-wide source, which at 96 → 14 is **exactly a footprint boundary** — so every
+footprint was constant, every output was 0 or 255, and the test could not tell the two filters apart. The
+edge has to land strictly inside a footprint, and `area_filter.rs`'s `edge_at` says so.
+
+**Also: magnification does not tile, and that is correct.** At 7 → 9 the first two destination pixels both
+cover source 0, because a magnified source pixel *should* inform more than one destination pixel.
+**Contiguity is a property of reductions**, and the first version of the tiling test asserted it for
+magnification too. `scale_y_area` walks the intermediate once per output row, which is sound because it
+only runs on a reducing axis here — but the map is public and does not enforce that.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2544,8 +2590,9 @@ the desktop build, and none of this needs more than a few tens of KiB.
    pinned; the *filter choice* for large reductions is what is wrong, and an area average is the fix.
    Pinned from both sides by `an_exact_integer_ratio_has_zero_weights_and_is_a_decimation` and
    `a_non_integer_ratio_has_fractional_weights_and_still_reads_only_two_pixels` in
-   `crates/holonomy-image/tests/scale_cache.rs`, so it cannot change silently either way. **Not** done
-   in 9C: it is a rewrite of a mutation-verified module and wants its own gate. Full statement in §9C.
+   `crates/holonomy-image/tests/scale_cache.rs`, so it cannot change silently either way. **CLOSED:**
+   `axis_area_map` plus two area passes, chosen per axis by `use_area` at `AREA_THRESHOLD` = 2:1. Gate
+   is `crates/holonomy-image/tests/area_filter.rs` (6 tests). Full statement below.
 
 4. **Which sizes are we allowed to claim?** Phase 11's gate runs at "the largest prefix this host can
    lock" and therefore passes today at roughly 3.5 MiB, not at 2000 pages. Reaching the full design

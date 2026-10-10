@@ -247,36 +247,52 @@ fn a_paint_decodes_the_image_to_page_column_width_and_not_to_native() {
     assert!(s.image_cache_bytes() < s.image_cache_budget());
 }
 
+/// **The raster is an area average at the product's own ratio — which is what this test's name has said
+/// since Phase 9C.**
+///
+/// # What this test asserted until now, and why its name was aspirational
+///
+/// It was written as `the_raster_is_a_resample_and_not_a_decimation` and then asserted the opposite:
+///
+/// ```text
+/// assert_eq!((min, max), (20, 235), "at an exact 3:1 ratio every bilinear weight is zero, so the
+///                                     stripes survive unchanged");
+/// ```
+///
+/// The finding it recorded was real and correct — at 3:1 `axis_map`'s weights are all zero, so the
+/// filter *was* a decimator — but **a test named "not a decimation" that asserts the stripes come
+/// through unchanged is asserting a decimation.** The name described the defect, the assertion described
+/// the behaviour, and the test passed while the thing it was named for was still true. That is a real
+/// hazard of naming a test after the property rather than after the observation.
+///
+/// # What it asserts now
+///
+/// With `use_area` handing 3:1 to the area filter, each destination pixel is the mean of **three**
+/// source pixels. The chart's band is period-2 stripes of 20 and 235, so three consecutive pixels are
+/// always two of one and one of the other:
+///
+/// ```text
+/// 235, 20, 235 -> 490 / 3 -> (490 + 1) / 3 = 163
+///  20, 235, 20 -> 275 / 3 -> (275 + 1) / 3 =  92
+/// ```
+///
+/// **So the pair is `(92, 163)` and not `(20, 235)`** — and neither value is a source value, which is the
+/// whole claim: a decimation can only ever emit values the source contains. This is the end-to-end half
+/// of PROJECT.md §7 item 3; `crates/holonomy-image/tests/area_filter.rs` is the filter-level gate.
+///
+/// **The stripe amplitude shrinks from 215 to 71, and that is correct.** A 2-pixel-period signal cannot
+/// survive a 3:1 reduction at full amplitude — Nyquist says so — and an area average is what reduces it
+/// to the *mean* rather than to whichever phase it happened to sample. What is lost is the aliasing; what
+/// is kept is the band's presence, which the assertions below still require.
 #[test]
 fn the_raster_is_a_resample_and_not_a_decimation() {
-    // §2.9.3 says the scaler runs on *every* image, because every image is a downscale: the cache holds
-    // page-column-width rasters, so a 1920x1080 source is resampled to 640x360 before it is ever
-    // resident. This asserts that the resample happened rather than that a sampler stood in for it.
     let (mut s, _) = with_image();
     s.paint(None).expect("paint");
     let pixels = s.image_cache_pixels(0).expect("resident").to_vec();
     let (rw, rh) = s.chrome_rect_for_image(0);
     assert_eq!((rw, rh), (640, 360));
     let at = |x: u32, y: u32| -> u8 { pixels[(y as usize * rw as usize + x as usize) * 4] };
-    // # The chart's fine-detail band, and a finding about the scaler
-    //
-    // The band is 1-px alternating near-black and near-white stripes, period 2. The product's own ratio
-    // is exactly 3:1 -- 1920 wide to a 640 px column -- and `holonomy_image::scale::axis_map` places
-    // destination pixel `i` at source coordinate `(i + 0.5) * src/dst - 0.5`, which at `src/dst == 3` is
-    // `3i + 1`: an **exact integer**, so every interpolation weight is zero and bilinear degenerates to
-    // nearest. The stripes therefore come through unchanged.
-    //
-    // That is not a defect in `axis_map` -- the pixel-centre convention it implements is the correct one,
-    // and it is the right convention for a general ratio. It is a property of *bilinear* at an exact
-    // integer ratio, and it means §2.9.3's "the SSE2 scaler is exercised on every image" is true of the
-    // *code* and false of the *filter*: at the ratio this product uses, the downscale is a decimation,
-    // and a 3:1 nearest-neighbour reduction of a photograph aliases visibly where an area average would
-    // not.
-    //
-    // So this test asserts what is actually true, and the paired test in
-    // `crates/holonomy-image/tests/scale_cache.rs` asserts that a **non-integer** ratio does average.
-    // Together they state the finding instead of leaving it to be discovered as "the images look
-    // slightly crunchy". Recorded as an open item in PROJECT.md §8.
+
     let band_top = 480 * rh / 1080 + 2;
     let band_bot = 560 * rh / 1080 - 2;
     let x0 = 320 * rw / 1920 + 4;
@@ -292,15 +308,22 @@ fn the_raster_is_a_resample_and_not_a_decimation() {
     let min = values.iter().copied().min().expect("the band is not empty");
     let max = values.iter().copied().max().expect("the band is not empty");
 
-    // The stripes are present: the downscale sampled rather than averaged, because the ratio is exact.
+    // **Neither value is in the source.** That is the strongest form of the claim and it is what makes
+    // this a decimation test rather than a tolerance test: a nearest-neighbour filter emits only source
+    // values, so a band containing anything outside `{20, 235}` cannot have come from one.
     assert_eq!(
         (min, max),
-        (20, 235),
-        "at an exact 3:1 ratio every bilinear weight is zero, so the stripes survive unchanged"
+        (92, 163),
+        "a 3:1 area average of period-2 stripes gives 92 and 163, and neither is a value the chart \
+         contains. (20, 235) would mean the filter decimated."
+    );
+    assert!(
+        !values.contains(&20) && !values.contains(&235),
+        "no destination pixel carries a source value: the band was averaged, not sampled"
     );
 
-    // And the downscaled raster is a faithful picture rather than a smooth blob: the flat colour bands
-    // and the grid are all still there, which is what distinguishes "sampled correctly" from "blurred".
+    // And the picture is still a picture rather than a smooth blob: the flat colour bands and the grid
+    // survive, which is what distinguishes "averaged correctly" from "blurred".
     let row: Vec<u8> = (0..rw).map(|x| at(x, 100)).collect();
     assert!(
         row.iter().any(|&v| v > 150),

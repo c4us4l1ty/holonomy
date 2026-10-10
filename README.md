@@ -172,10 +172,12 @@ Sync and CRDT. A second compositor path. CFF outlines. SVG, JPEG, WebP. Real evd
 input path is driven by a script. Real DRM presentation — `SETCRTC` needs DRM master, so the
 framebuffer path has been verified unprivileged but not presented.
 
-There is also an unclaimed ~30% gap in CIOS throughput on this host: ~2,657 ns per squaring measured
+There was also an unclaimed ~30% gap in CIOS throughput on this host: ~2,657 ns per squaring measured
 here against 2,077 ns on the target. Because the VDF's iteration count `T` is derived from that
-per-squaring cost, the gap translates directly into ~30% more squarings inside the same latency
-budget.
+per-squaring cost, the gap translated directly into ~30% more squarings inside the same latency budget.
+**A container now records `T` beside its salt**, in the one region that is readable before the key that
+would unseal it exists, so a container opens under its own derivation cost rather than the caller's. The
+host gap remains a host gap — it is why the recorded `T` is what it is.
 
 **Editing a container-backed document end to end is also not claimed.** The seam is complete and gated
 — an edit survives an eviction, a fault after an edit is byte-exact, a commit repairs a shift that

@@ -5,6 +5,7 @@
 //! | §2.9.3: the scaler runs on *every* image, because every image is a downscale | [`every_image_is_a_downscale_and_the_scaler_runs_on_all_of_them`] |
 //! | the SSE2 vertical kernel equals the scalar reference exactly | [`the_sse2_vertical_kernel_matches_the_scalar_reference_byte_for_byte`] |
 //! | bilinear interpolation is exact on known values | [`a_downscale_averages_the_pixels_it_covers`] |
+//! | **the large-reduction filter is an area average, not a decimator** | [`and_the_product_ratio_is_handed_to_the_area_filter`] (and `tests/area_filter.rs`) |
 //! | an identity rescale is lossless | [`resampling_to_the_same_size_changes_nothing`] |
 //! | pixel-centre sampling, not left-edge | [`the_sample_map_uses_pixel_centres_not_left_edges`] |
 //! | no float: fixed point only | [`a_resample_is_bit_identical_across_runs`] |
@@ -216,22 +217,65 @@ fn the_fixed_point_products_cannot_overflow_a_u16_lane() {
     );
 }
 
-/// Bilinear interpolation is exact where it should be and averages where it should.
+/// **A downscale averages the pixels it covers — and the exact value moved by one.**
+///
+/// # Why this test's expected number is 128 and not 127
+///
+/// At 2:1 the pixel-centre convention puts the single destination sample at source `x = 0.5`, so
+/// `axis_map` gives `lo = 0`, `weight = 128`, and the fixed-point blend truncates:
+///
+/// ```text
+/// (0 * 128 + 255 * 128) >> 8 = 127        // bilinear, before the area filter
+/// ```
+///
+/// **2:1 is exactly the threshold** ([`AREA_THRESHOLD`]), so that reduction now takes the area path, whose
+/// average rounds half-up: `(0 + 255 + 1) / 2 = 128`. **This test's own old message called 128 "a
+/// rounding" one, and it was right to be suspicious of it — but of the other answer.** Truncation biases
+/// every output one step dark, *systematically*, so on a gradient it reads as a band running down the
+/// image rather than as noise. Half-up is the convention every image API uses, and having picked it for
+/// the new filter there is no case for keeping the other rounding two bytes away in the same call.
+///
+/// So both paths are asserted here, because **both still exist**: at a ratio below 2:1 nothing changed,
+/// and that is the claim worth keeping pinned.
 #[test]
 fn a_downscale_averages_the_pixels_it_covers() {
-    // A 2x1 image of black and white, downscaled to 1x1, must land halfway: the pixel-centre
-    // convention puts the single destination sample at source x = 0.5, i.e. exactly between them.
+    // --- The area path: 2:1 is exactly the threshold, so this is `scale_x_area` / `scale_y_area`.
     let mut src = Rgba::new(2, 1);
     src.pixels[0..4].copy_from_slice(&[0, 0, 0, 255]);
     src.pixels[4..8].copy_from_slice(&[255, 255, 255, 255]);
     let mut out = vec![0u8; 4];
     resample(&src, 1, 1, &mut out).expect("2x1 -> 1x1");
-    // x = (0.5) * 2/1 - 0.5 = 0.5, so lo = 0 with weight 0.5: (0 * 128 + 255 * 128) >> 8 = 127.
     assert_eq!(
         out,
-        vec![127, 127, 127, 255],
-        "a 2x1 black/white pair downscaled to one pixel is the 50% blend, and the exact value \
-         matters: a left-edge convention would give 0 or 255 and a rounding one would give 128"
+        vec![128, 128, 128, 255],
+        "a 2x1 black/white pair downscaled to one pixel is the 50% blend, rounded half-up. A \
+         left-edge convention would give 0 or 255."
+    );
+
+    // --- The bilinear path, unchanged: 3x1 -> 2x1 is 1.5:1, below the threshold, so `axis_map` and
+    // the truncating `>> FRAC` blend are still what run.
+    //
+    // pos(0) = 0.5 * 3/2 - 0.5 = 0.25 -> lo = 0, weight = 1/4
+    // pos(1) = 1.5 * 3/2 - 0.5 = 1.75 -> lo = 1, weight = 3/4
+    //
+    // So both destinations straddle a pair, which is the whole point of bilinear at a ratio under 2:1:
+    // the footprint is under two pixels wide, so two taps cover it.
+    let mut ramp = Rgba::new(3, 1);
+    for (x, v) in [0u8, 100, 200].into_iter().enumerate() {
+        ramp.pixels[x * 4..x * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+    }
+    let mut out2 = vec![0u8; 8];
+    resample(&ramp, 2, 1, &mut out2).expect("3x1 -> 2x1");
+    // (0 * 192 + 100 * 64) >> 8 = 6400 >> 8 = 25
+    assert_eq!(
+        out2[0], 25,
+        "destination 0 is the 1:3 blend of source 0 and 1"
+    );
+    // (100 * 64 + 200 * 192) >> 8 = 44800 >> 8 = 175
+    assert_eq!(
+        out2[4], 175,
+        "destination 1 is the 3:1 blend of source 1 and 2. Both are truncating fixed-point blends, so \
+         the code path below the threshold is byte-for-byte what it was before the area filter."
     );
 }
 
@@ -591,31 +635,38 @@ fn a_scroll_from_page_one_to_fifty_never_exceeds_eight_mib() {
 // ---------------------------------------------------------------------------------------------
 // The exact-integer-ratio finding
 // ---------------------------------------------------------------------------------------------
+//
+// # This section was rewritten, and what changed is the point
+//
+// It used to say: §2.9.3 makes the product downscale every image, its headline arithmetic is 1920 -> 640
+// (**exactly 3:1**), `axis_map`'s pixel-centre convention puts destination pixel `i` at source `3i + 1`,
+// therefore every interpolation weight is zero, therefore the bilinear filter is a **decimator** -- and
+// a hard edge at 6.86:1 produces no intermediate value because two of every seven source pixels are read.
+//
+// **All of that remains true of `axis_map`, and the two tests below still say so.** What changed is that
+// `resample` no longer *uses* `axis_map` at those ratios: `use_area` hands the job to `axis_area_map` at
+// 2:1 and above, so 3:1 now averages three pixels and 6.86:1 averages seven. PROJECT.md §7 item 3 is
+// closed by `crates/holonomy-image/tests/area_filter.rs`.
+//
+// **The tests were rewritten rather than deleted, and the split between them is deliberate.** The pair
+// used to pin one statement from two sides -- "`resample` decimates at 3:1" and "`resample` still reads
+// two adjacent pixels at 6.86:1" -- and after the fix the *second* half is a statement about a function
+// the product no longer calls on that path. Deleting it would have left `axis_map`'s large-reduction
+// behaviour entirely ungated, and a function nothing calls is exactly the function someone will change.
+// So:
+//
+// | test | what it pins now |
+// | --- | --- |
+// | [`an_exact_integer_ratio_makes_axis_map_decimate`] | `axis_map` at 3:1: all weights zero, `lo == 3i+1` |
+// | [`a_non_integer_ratio_gives_axis_map_fractional_weights`] | `axis_map` at 48/7: genuinely fractional weights |
+// | [`and_the_product_ratio_is_handed_to_the_area_filter`] | and `resample` at 3:1 does **not** use it |
+//
+// **The last one is the only assertion here that can fail because of a code change rather than a
+// document change**, and it is what stops the fix from being undone silently.
 
-/// # What this file's header table calls "the scaler runs on every image" turns out to mean
-///
-/// §2.9.3 makes the product downscale every image to page-column width, and its headline arithmetic is
-/// 1920 -> 640: **exactly 3:1**. `axis_map` places destination pixel `i` at source coordinate
-/// `(i + 0.5) * src/dst - 0.5`, which at `src/dst == 3` is `3i + 1` -- an exact integer. Every
-/// interpolation weight is therefore zero and the bilinear filter reduces to nearest-neighbour.
-///
-/// That is the correct behaviour for a bilinear filter at an exact integer ratio, and `axis_map` is
-/// right to do it: the pixel-centre convention it implements is the correct one and the
-/// `the_sample_map_uses_pixel_centres_not_left_edges` test above pins it. What is *not* correct is the
-/// product's arithmetic being built on the assumption that a 3:1 reduction averages. It does not, and a
-/// nearest-neighbour reduction of a photograph at 3:1 aliases visibly where an area average would not.
-///
-/// So the two tests below pin the two halves of that statement, and this comment is the record:
-/// `an_exact_integer_ratio_has_zero_weights_and_is_a_decimation` says what happens at 3:1, and
-/// `a_non_integer_ratio_actually_averages` says what happens at 7:3, so neither can change silently.
-/// The fix, if one is wanted, is an area filter on the downscale path -- a separate change with its own
-/// gate, recorded in PROJECT.md §8 rather than slipped in here.
-///
-/// `crates/holonomy/tests/session_image.rs` asserts the 3:1 half end to end, through a session, an
-/// `IcebergCache` and a `Node::Image`.
-
+/// **`axis_map` at the product's own ratio still decimates — the map is unchanged by the area filter.**
 #[test]
-fn an_exact_integer_ratio_has_zero_weights_and_is_a_decimation() {
+fn an_exact_integer_ratio_makes_axis_map_decimate() {
     let map = axis_map(1920, 640);
     assert_eq!(map.len(), 640);
     assert!(
@@ -623,38 +674,17 @@ fn an_exact_integer_ratio_has_zero_weights_and_is_a_decimation() {
         "at src/dst == 3 every destination pixel lands on a source pixel centre"
     );
     assert!(
-        map.iter()
-            .enumerate()
-            .all(|(i, s)| s.lo as usize == 3 * i + 1),
+        map.iter().enumerate().all(|(i, s)| s.lo as usize == 3 * i + 1),
         "and it lands at source 3i + 1, which is what makes the weights zero"
     );
     // The weights being zero is the whole mechanism; `hi` is still recorded so the second pass can
     // address two rows, and `hi == lo + 1` means "the next one, at weight zero".
     assert!(map.iter().all(|s| s.hi == (s.lo + 1).min(1919)));
-
-    // And the consequence, on pixels rather than on the map: a 1-px checkerboard at 3:1 comes back as
-    // itself.
-    let src = checker(96, 8);
-    let mut dst = vec![0u8; holonomy_image::scale::bytes_for(32, 8)];
-    resample(&src, 32, 8, &mut dst).expect("resample");
-    // Destination `x` therefore carries source `3x + 1`, not `3x` -- which is the map's own claim
-    // showing up in pixels, and would be the whole of a left-edge-vs-centre bug if it were off by one.
-    for y in 0..8u32 {
-        for x in 0..32u32 {
-            let p = dst[(y as usize * 32 + x as usize) * 4];
-            assert_eq!(
-                p,
-                src.pixel(x * 3 + 1, y).expect("in range")[0],
-                "column {x}"
-            );
-        }
-    }
 }
 
+/// **At 7:3 the weights are genuinely fractional**, so the zero at 3:1 is arithmetic and not a clamp.
 #[test]
-fn a_non_integer_ratio_has_fractional_weights_and_still_reads_only_two_pixels() {
-    // 96 -> 14 is 48/7, so no destination pixel lands on a source centre and every weight is genuinely
-    // fractional. This is the case §2.9.3's arithmetic assumed it was getting.
+fn a_non_integer_ratio_gives_axis_map_fractional_weights() {
     let map = axis_map(96, 14);
     assert!(
         map.iter().any(|s| s.weight != 0),
@@ -664,44 +694,50 @@ fn a_non_integer_ratio_has_fractional_weights_and_still_reads_only_two_pixels() 
         map.iter().any(|s| s.weight != 0 && s.weight != ONE),
         "and interior samples must be genuinely fractional, not clamped to an endpoint"
     );
+}
 
-    // **But a fractional weight is not an average.** A hard edge down the middle of a 96 px source,
-    // then 96 -> 14: every destination pixel reads *two adjacent* source pixels, and at 6.86:1 that is
-    // two of every seven. So the edge is either straddled by one of those pairs or missed entirely, and
-    // no column comes out intermediate:
-    let mut img = Rgba::new(96, 4);
-    for y in 0..4 {
-        for x in 0..96 {
-            let at = (y as usize * 96 + x) * 4;
-            img.pixels[at] = if x < 48 { 0 } else { 255 };
-            img.pixels[at + 1] = 128;
-            img.pixels[at + 2] = 64;
-            img.pixels[at + 3] = 255;
+/// **And `resample` at 3:1 does not use that map.**
+///
+/// The 1-px checkerboard is the discriminator. Under decimation at 3:1 it comes back **as itself** --
+/// every destination pixel is exactly the one source pixel `axis_map` picked. Under an area average
+/// every destination pixel is the mean of three source pixels, and for a 235/20 checkerboard that mean is
+/// 90, which is neither. So this one assertion separates the two filters on pixels, and it is the
+/// end-to-end form of PROJECT.md §7 item 3.
+#[test]
+fn and_the_product_ratio_is_handed_to_the_area_filter() {
+    assert!(
+        holonomy_image::scale::use_area(1920, 640),
+        "3:1 is a large reduction and must take the area filter"
+    );
+    assert!(
+        !holonomy_image::scale::use_area(1920, 1920) && !holonomy_image::scale::use_area(96, 96),
+        "magnification and 1:1 are not reductions and must keep the bilinear path"
+    );
+
+    let src = checker(96, 8);
+    let mut dst = vec![0u8; holonomy_image::scale::bytes_for(32, 8)];
+    resample(&src, 32, 8, &mut dst).expect("resample");
+
+    for y in 0..8u32 {
+        for x in 0..32u32 {
+            let got = dst[(y as usize * 32 + x as usize) * 4];
+            // **Three consecutive checkerboard pixels are two of one value and one of the other**, and
+            // which alternates with the parity of the run's first pixel. So the two means are:
+            //
+            //     235, 20, 235 -> 490 / 3 -> (490 + 1) / 3 = 163
+            //     20, 235,  20 -> 275 / 3 -> (275 + 1) / 3 =  92
+            //
+            // Decimation would give 235 or 20 -- the exact source value -- so **either** mean falsifies
+            // it, and asserting the pair is sharper than asserting one of them would be.
+            let (first, mean) = if (3 * x + y) % 2 == 0 { (235, 163) } else { (20, 92) };
+            assert_eq!(
+                got, mean,
+                "column {x} row {y}: a 3:1 area average must be the mean of three source pixels. \
+                 Got {got}, which is source pixel {} -- decimation."
+                    , first
+            );
         }
     }
-    let mut dst = vec![0u8; holonomy_image::scale::bytes_for(14, 4)];
-    resample(&img, 14, 4, &mut dst).expect("resample");
-    let intermediate = (0..14u32)
-        .filter(|&x| {
-            let r = dst[(x as usize) * 4];
-            r > 20 && r < 235
-        })
-        .count();
-    assert_eq!(
-        intermediate, 0,
-        "bilinear reads two adjacent source pixels, so a 6.86:1 reduction of a hard edge produces no \
-         intermediate values at all -- 2 of every 7 source pixels are looked at and the edge is skipped"
-    );
-
-    // This is why `a_downscale_averages_the_pixels_it_covers` above is a 2x1 -> 1x1 case and nothing
-    // larger: 2:1 is the *only* integer ratio at which the two samples a destination pixel reads are
-    // guaranteed to straddle everything in between. Every larger reduction needs an **area** filter, and
-    // that is the open item recorded in PROJECT.md §8 -- not a defect in `axis_map`, which implements the
-    // pixel-centre convention correctly and is pinned for doing so.
-    assert!(
-        (0..14u32).all(|x| dst[(x as usize) * 4] == 0 || dst[(x as usize) * 4] == 255),
-        "the edge is either straddled or missed -- there is no third outcome for a two-tap filter"
-    );
 }
 
 /// A 1-px checkerboard, `w x h`.
