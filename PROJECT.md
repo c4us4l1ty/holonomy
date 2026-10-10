@@ -2460,6 +2460,48 @@ cover source 0, because a magnified source pixel *should* inform more than one d
 magnification too. `scale_y_area` walks the intermediate once per output row, which is sound because it
 only runs on a reducing axis here — but the map is public and does not enforce that.
 
+#### Phase 14 readiness, measured rather than estimated
+
+Phase 14 is four items, and **three of them are blocked on one that does not exist.** Checked, not assumed:
+
+| item | state |
+| --- | --- |
+| pointer input | **absent, and actively discarded** |
+| menus, popup state, grab | **absent** |
+| hand-authored 1-bit icons | **plumbing exists, no data** |
+| tabs sidebar | **absent, and depends on a model that does not exist** |
+
+**Pointer input is not "not written yet" — it is thrown away.** `InputSource::next_event` documents that
+*"`EV_SYN` and every non-`EV_KEY` record are consumed and skipped internally, so a caller never sees one
+and cannot forget to filter them."* That was a good decision at the time and it is the right one for a
+keyboard. **It means a pointer has to be added by changing the trait's contract**, not by writing a new
+source: `InputEvent` is a raw `{kind, code, value}` evdev triple with no `Motion`/`Button`/`Wheel`
+variant, and `evdev.rs`'s filter is what drops the motion. `EV_REL` is defined in `event.rs:51` and
+nothing acts on it.
+
+**Hit testing does not exist either.** `chrome.rs` emits a tree and has no `contains`, no `hit_test`, and
+no notion of which rect is which widget — `Chrome::tree` lays out bands by index, so a pointer could not
+be routed to one even if the events arrived.
+
+**The icons are the only independent item, and they are smaller than they look.** `tree.rs`'s `Icon`
+(1-bit mask, `&'static [u64]`, [`Icon::coverage`]) and `Node::Icon` exist, and `paint.rs:318` handles the
+variant. **Nothing constructs one** — there is no authored bit data anywhere in the tree. So the slice is
+"author the masks and place them", not "build the representation".
+
+**The sidebar is the item with the deepest blocker.** `store::open_document` opens **one** container and
+returns one `OpenedDocument`; there is no document list, no tabs, and `ChromeState` has one `title: String`.
+A tabs sidebar needs a multi-document model that is not on the backlog in any form.
+
+**So the ordering is not preference, it is dependency:**
+
+```text
+pointer (trait change)  ->  hit testing  ->  menus / popup / grab
+                                             ->  tabs sidebar (also needs multi-document)
+icons (independent)
+```
+
+**Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
