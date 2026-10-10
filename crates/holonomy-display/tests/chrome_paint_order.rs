@@ -113,10 +113,17 @@ fn the_title_reaches_the_frame() {
     state.title = "field notes".into();
     let (frame, chrome, _) = paint_chrome(&state);
 
-    // Somewhere in the tab bar there must be ink that is not the background. **Counting any lit pixel
-    // is deliberately weak** -- the exact pixels depend on the atlas's advance widths, and this file is
-    // about paint order, not typography. The assertion is that the chrome drew a glyph at all.
-    let t = chrome.layout.tabs;
+    // **The title band, not the tab bar.** Part 19 removed the tab band (`tab_h: 0`, because the title
+    // band already drew the document's name) -- and the first version of this test still probed
+    // `layout.tabs`, which is now a zero-height rect. **It counted zero lit pixels and failed**, which
+    // is the gate telling the truth about a layout that no longer exists rather than about a paint
+    // order that regressed. A gate that breaks when the design changes is doing its job; a gate that
+    // keeps passing when the design changes is the problem.
+    //
+    // Counting any lit pixel is deliberately weak -- the exact pixels depend on the atlas's advance
+    // widths, and this file is about paint order, not typography. The assertion is that the chrome drew
+    // a glyph at all.
+    let t = chrome.layout.title;
     let lit = (0..t.width)
         .flat_map(|x| (0..t.height).map(move |y| (x, y)))
         .filter(|&(x, y)| pixel(&frame, t.x + x, t.y + y) != c(colour::CHROME))
@@ -142,16 +149,29 @@ fn the_page_is_still_drawn_over_the_chrome() {
         c(colour::PAGE),
         "the middle of the page is not page-coloured: the panel is covering it"
     );
-    // **Left of the page, half way down the canvas.** The first version of this probe asked for
-    // `(page centre, canvas top)` and got 0x5A5A66 -- a `RULE`, not the panel. **The canvas's top row is
-    // where the chrome draws its rules**, so "the canvas is chrome-coloured" asked there is a question
-    // about rules, not about the panel, and it failed for a reason that has nothing to do with the bug.
-    // Five pixels into the gutter, half way down, is a pixel nothing draws on.
+    // **The gutter between the sidebar and the page.** Two earlier probes were wrong here and both
+    // failed for reasons that had nothing to do with the bug being hunted:
+    //
+    // * `(page centre, canvas top)` returned 0x5A5A66 -- a `RULE`, because the canvas's top row is
+    //   where the chrome draws its rules.
+    // * `(canvas.x + 4, canvas mid)` returned the sidebar's band colour, because part 19 put a
+    //   208 px sidebar at x = 0 and `cv.x + 4` is inside it.
+    //
+    // **So the probe is now "a pixel that is provably in neither the sidebar nor the page"**, which is
+    // the only kind of probe that survives the next layout change: the midpoint of the gap between
+    // them, clamped so it is still a real pixel.
     let cv = chrome.layout.canvas;
+    let lo = chrome.layout.sidebar.right();
+    let hi = chrome.layout.page.x;
+    assert!(
+        hi > lo + 2,
+        "the sidebar and the page leave no gutter to probe: sidebar ends at {lo}, page starts at {hi}"
+    );
+    let gx = ((lo + hi) / 2).max(lo);
     assert_eq!(
-        pixel(&frame, cv.x + 4, cv.y + cv.height / 2),
+        pixel(&frame, gx, cv.y + cv.height / 2),
         c(colour::CHROME),
-        "the gutter left of the page is not chrome-coloured"
+        "the gutter at x={gx} is not chrome-coloured: sidebar ends at {lo}, page starts at {hi}"
     );
 }
 
@@ -209,11 +229,17 @@ fn the_panel_is_emitted_before_everything_else() {
 
     let band_colour = c(colour::BAND);
     let panel_colour = c(colour::CHROME);
+    // **How many bands there are changed in part 19** -- the title band and the sidebar are the same
+    // colour as the toolbar and the status bar -- so this is no longer an exact count. What it still
+    // asserts is the one thing that matters: **every band rect is painted after the panel.** A count
+    // would break on every design change and say nothing; this breaks only if a band is drawn behind
+    // the panel, which is the bug.
     let bands = order.iter().filter(|&&(got, _)| got == band_colour).count();
-    assert_eq!(
-        bands, 2,
-        "the toolbar and status bars. Any other number means the chrome gained or lost a band, and \
-         this file's other assertions are about a layout that no longer exists."
+    assert!(
+        bands >= 3,
+        "the toolbar and status bars at least. Got {bands} band-coloured rects, which means the \
+         chrome lost its bands -- and every other assertion in this file is about a layout that is no \
+         longer there."
     );
 
     // A panel rect must exist at all -- otherwise this file would be passing because the chrome drew

@@ -69,6 +69,20 @@ pub mod colour {
     pub const INK_CHROME: u32 = 0xFFD8_D8E0;
     /// Chrome text that is inactive or merely informational.
     pub const INK_DIM: u32 = 0xFF8A_8A96;
+    /// The text on a button: one step brighter than [`INK_CHROME`].
+    ///
+    /// **Separate from `INK_CHROME` so "this item is selected" is a colour rather than a rectangle.**
+    /// The reference's open menu heading is the same weight and a slightly brighter ink inside the
+    /// same pill, and a selected *item* inside a popup is the same again. Three states, two colours,
+    /// and the third state is carried by the pill.
+    pub const INK_STRONG: u32 = 0xFFEA_EAF2;
+    /// The raised surface: the toolbar's pill, a button, a popup, a selected sidebar row.
+    ///
+    /// **One value for all four**, because they are the same surface at different sizes. Giving each
+    /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
+    pub const PILL: u32 = 0xFF33_333C;
+    /// The active sidebar row, one step above [`PILL`].
+    pub const PILL_ACTIVE: u32 = 0xFF3D_3D4A;
     /// The `[SEALED]` badge: the one thing on screen that is a security claim.
     pub const SEALED: u32 = 0xFF5A_C88A;
     /// Accent for a toolbar toggle that is on.
@@ -137,6 +151,15 @@ pub struct ChromeMetrics {
     pub width: u32,
     /// Panel height.
     pub height: u32,
+    /// **The title band**: the app mark, the document name, the save state, and the right-hand
+    /// buttons. Added in part 19.
+    pub title_h: u32,
+    /// **The menu band**: File / Edit / View / … Added in part 19.
+    pub menu_h: u32,
+    /// **The document-tabs sidebar**, when it is open. Added in part 19.
+    pub sidebar_w: u32,
+    /// A toolbar button's box, square. The icons are 16 px and this is the tappable target.
+    pub button: u32,
     /// Document tab bar.
     pub tab_h: u32,
     /// Toolbar: style toggles and zoom.
@@ -167,10 +190,14 @@ impl ChromeMetrics {
     pub const DESKTOP: ChromeMetrics = ChromeMetrics {
         width: 1280,
         height: 800,
-        tab_h: 28,
-        toolbar_h: 26,
+        title_h: 30,
+        menu_h: 22,
+        sidebar_w: 208,
+        button: 26,
+        tab_h: 0,
+        toolbar_h: 34,
         ruler_h: 20,
-        status_h: 22,
+        status_h: 20,
         cell_w: 8,
         cell_h: 18,
         page_pad: 48,
@@ -214,7 +241,23 @@ impl ChromeMetrics {
 
     /// Height the page canvas gets: everything the four bands do not.
     pub const fn canvas_h(&self) -> u32 {
+        // **Every band above the canvas is subtracted, not just the ones that existed when this was
+        // written.** Part 19 added the title and menu bands, and the first version of this still
+        // subtracted four of the six.
+        //
+        // **Measured, because the failure was silent:** with `title_h: 30` and `menu_h: 22`, the old
+        // formula gave a canvas height of 726 starting at y = 106, so `status.y` came out at **832** --
+        // 32 px below the bottom of an 800 px panel. `Layout::new`'s band clamp then gave the status
+        // bar a height of **zero**, so it vanished, with no error anywhere: the clamp is `saturating`
+        // precisely so that a band which does not fit degrades rather than wrapping, and a zero-height
+        // status bar *is* the correct behaviour for a band that does not fit.
+        //
+        // `Layout::new`'s comment already insists the bands partition the panel; this is where that
+        // claim is actually kept, and it is why the fix was to subtract all six rather than to raise
+        // `MIN_HEIGHT`.
         self.height
+            .saturating_sub(self.title_h)
+            .saturating_sub(self.menu_h)
             .saturating_sub(self.tab_h)
             .saturating_sub(self.toolbar_h)
             .saturating_sub(self.ruler_h)
@@ -238,7 +281,7 @@ impl ChromeMetrics {
     /// clamps every band into the panel, all `saturating`, and that is a safety net rather than a
     /// supported size.
     pub const MIN_WIDTH: u32 = 768;
-    pub const MIN_HEIGHT: u32 = 288;
+    pub const MIN_HEIGHT: u32 = 320;
 
     /// Metrics for a panel of `width` x `height`.
     ///
@@ -288,6 +331,28 @@ pub struct Layout {
     pub width: u32,
     /// Panel height.
     pub height: u32,
+    /**The title band: the app mark, the document name, and the right-hand buttons. Part 19.*/
+    pub title: DamageRect,
+    /// The menu band: File / Edit / View / … Part 19.
+    pub menubar: DamageRect,
+    /// The document-tabs sidebar, when it is open. Part 19.
+    pub sidebar: DamageRect,
+    /// The back arrow at the sidebar's head.
+    pub sidebar_back: DamageRect,
+    /// The "+" beside the sidebar's heading.
+    pub sidebar_new: DamageRect,
+    /// How many document rows the sidebar has room for.
+    ///
+    /// **A count, not a `Vec<DamageRect>`, and that is a correction made inside part 19.** The first
+    /// version stored the rows, which made [`Layout`] non-`Copy` -- and then three call sites in
+    /// `session.rs` that did `let l = self.chrome.layout;` stopped compiling, because taking a
+    /// reference to the layout and then calling `&mut self` is a borrow conflict, so the fix was to
+    /// *clone* it. **That is a heap allocation per paint per emitter**, on the one path that has a
+    /// latency budget. Storing a count and computing each row from arithmetic keeps `Layout` `Copy`,
+    /// which is what the rest of the crate is shaped around.
+    pub sidebar_rows: u32,
+    /// One row's height, so [`sidebar_doc`](Self::sidebar_doc) is arithmetic and not a stored value.
+    pub sidebar_row_h: u32,
     /// The document tab bar.
     pub tabs: DamageRect,
     /// The toolbar.
@@ -319,7 +384,13 @@ impl Layout {
     /// right answer for "the status bar is taller than the panel" is a zero-height status bar rather
     /// than a subtraction that wraps to four billion and a `Rect` at `y = -1`.
     pub fn new(m: &ChromeMetrics) -> Self {
-        let tab_y = 0u32;
+        // **Five bands stack from the top: title, menu, tabs, toolbar, ruler.** Part 19 added the
+        // first two. The order is the reference's and it is not arbitrary: the title carries the
+        // document's identity, the menu carries the commands, the tabs carry the documents, and the
+        // toolbar carries the formatting. A user looking for any of them looks top-down.
+        let title_y = 0u32;
+        let menu_y = title_y.saturating_add(m.title_h);
+        let tab_y = menu_y.saturating_add(m.menu_h);
         let toolbar_y = tab_y.saturating_add(m.tab_h);
         let ruler_y = toolbar_y.saturating_add(m.toolbar_h);
         let canvas_y = ruler_y.saturating_add(m.ruler_h);
@@ -369,9 +440,31 @@ impl Layout {
             let y = y.min(panel);
             DamageRect::new(0, y, m.width, h.min(panel - y))
         };
+        // **The sidebar is inside the canvas**, so the page is centred in what is left of it rather
+        // than in the panel. That is the reference's behaviour and it is the one that keeps the page
+        // from jumping sideways when the sidebar opens -- a page that re-centres is a page the reader
+        // loses.
+        let sidebar_w = m.sidebar_w.min(m.width / 2);
+        let sidebar = DamageRect::new(0, canvas_y, sidebar_w, canvas_h);
+        let head = sidebar.height.min(40);
+        let doc_row_h = m.cell_h.saturating_add(14).max(24);
+        // **At least one row, always.** A sidebar with room for no rows cannot show a document, and
+        // "the panel is too short" is a resize rather than a state, so the honest answer is one row
+        // clipped rather than none.
+        let rows_visible = (sidebar.height.saturating_sub(head + 16) / doc_row_h).max(1);
+        let sidebar_back = DamageRect::new(sidebar.x + 8, sidebar.y + 8, 24, 24);
+        let sidebar_new =
+            DamageRect::new(sidebar.right().saturating_sub(32), sidebar.y + 10, 24, 24);
         Self {
             width: m.width,
             height: m.height,
+            title: band(title_y, m.title_h),
+            menubar: band(menu_y, m.menu_h),
+            sidebar,
+            sidebar_back,
+            sidebar_new,
+            sidebar_rows: rows_visible,
+            sidebar_row_h: doc_row_h,
             tabs: band(tab_y, m.tab_h),
             toolbar: band(toolbar_y, m.toolbar_h),
             ruler: band(ruler_y, m.ruler_h),
@@ -384,6 +477,24 @@ impl Layout {
             gutter_right,
             rows: text.height / m.cell_h.max(1),
         }
+    }
+
+    /// Document row `i` of the sidebar, if the sidebar is that tall.
+    ///
+    /// **`None` past [`sidebar_rows`](Self::sidebar_rows), and not a clamped rect.** The caller asked
+    /// for a row that is not on screen; answering with the last row would make row 40 clickable when
+    /// row 5 is the last one drawn, which is the off-by-N that a hit test must not have.
+    pub fn sidebar_doc(&self, i: usize) -> Option<DamageRect> {
+        if i as u32 >= self.sidebar_rows {
+            return None;
+        }
+        let head = self.sidebar.height.min(40);
+        Some(DamageRect::new(
+            self.sidebar.x + 8,
+            self.sidebar.y + head + 16 + (i as u32) * self.sidebar_row_h,
+            self.sidebar.width.saturating_sub(16),
+            self.sidebar_row_h.saturating_sub(4),
+        ))
     }
 
     /// The page's top-left, for a [`Rect`].
@@ -591,6 +702,29 @@ pub struct ChromeState {
     pub caret_line: u32,
     /// Caret column, 0-based.
     pub caret_column: u32,
+    /// Whether the document-tabs sidebar is open.
+    ///
+    /// **A flag rather than a width, and the width is always [`ChromeMetrics::sidebar_w`].** A sidebar
+    /// that animates its width needs a width in the state and a rectangle that moves every frame;
+    /// this needs a boolean and a rectangle that is either there or is not. The animation is not worth
+    /// a per-frame layout on a panel where the sidebar is 208 px wide.
+    pub sidebar_open: bool,
+    /// The documents in the sidebar: their titles, not their models.
+    ///
+    /// **Titles, and that is the whole of the boundary.** `Session` owns the documents; the chrome owns
+    /// the list. Everything the chrome draws from a document is a title and an is-active bit, and
+    /// putting a model here would make the renderer responsible for the thing it is a view of.
+    pub docs: Vec<String>,
+    /// Which entry of [`docs`](Self::docs) is active.
+    pub active_doc: usize,
+    /// The paragraph style's name, as the toolbar shows it.
+    pub style_name: String,
+    /// The font's name, as the toolbar shows it.
+    pub font_name: String,
+    /// The font size in points, as the toolbar shows it.
+    pub font_size: u32,
+    /// Which menu is open, if any. An index into [`MENUS`](crate::chrome::MENUS).
+    pub open_menu: Option<usize>,
     /// Words in the document.
     pub words: u32,
     /// Bytes in the document.
@@ -627,6 +761,13 @@ impl Default for ChromeState {
     fn default() -> Self {
         Self {
             title: "untitled".to_string(),
+            sidebar_open: true,
+            docs: Vec::new(),
+            active_doc: 0,
+            style_name: "Normal text".to_string(),
+            font_name: "Inter".to_string(),
+            font_size: 11,
+            open_menu: None,
             sealed: false,
             zoom_percent: 100,
             caret_line: 0,
@@ -810,6 +951,61 @@ pub fn ascending_runs(text: &str) -> Vec<AscendingRun> {
 
 // ---------------------------------------------------------------- the tree
 
+/// The menu bar's headings, left to right.
+///
+/// **A `const`, so the order is fixed at compile time**, and `ChromeState::open_menu` is an index into
+/// this. An index rather than an enum because a menu *is* a position in this list: painting heading `i`
+/// and testing `open_menu == Some(i)` cannot disagree when both are `i`.
+pub const MENUS: &[&str] = &[
+    "File",
+    "Edit",
+    "View",
+    "Insert",
+    "Format",
+    "Tools",
+    "Extensions",
+    "Help",
+];
+
+/// The menu bar's heading boxes, and where the next one starts.
+///
+/// **The width is measured, not tabulated.** A `const` table of eight widths would need a column per
+/// menu and would be wrong the moment a heading was renamed, and the measurement is `str::len()`
+/// because every heading is ASCII -- **which is a property of [`MENUS`] and not an accident**, and the
+/// assertion in `menu_width_is_measured_not_tabulated` is what keeps it one.
+pub fn menu_boxes(l: &Layout) -> (u32, Vec<DamageRect>) {
+    let mut x = l.menubar.x + 12;
+    let mut out = Vec::with_capacity(MENUS.len());
+    for m in MENUS {
+        let w = menu_width(m);
+        out.push(DamageRect::new(x, l.menubar.y, w, l.menubar.height));
+        x += w + MENU_GAP;
+    }
+    (x, out)
+}
+
+/// The width of one heading's box: the text plus its padding, in cells.
+///
+/// **Two cells of padding on each side.** One is not enough -- the boxes would touch and the seam
+/// would be ambiguous, which is exactly what [`DamageRect::contains`]'s half-open rule is there to
+/// resolve, and a rule that is needed because the layout is too tight is a sign the layout is too
+/// tight.
+pub const fn menu_width(m: &str) -> u32 {
+    (m.len() as u32 + 4) * crate::chrome::CHROME_CELL_W
+}
+
+/// The gap between two heading boxes.
+pub const MENU_GAP: u32 = 2;
+
+/// The chrome's text cell width.
+///
+/// **Duplicated rather than reached through [`ChromeMetrics`], because [`menu_width`] is a `const`.**
+/// A `const fn` cannot read a runtime metrics struct, and making the menu bar's geometry depend on a
+/// runtime value would mean the headings move when the font metrics are recalibrated -- which is a
+/// rearrangement nobody would ask for. The value is `ChromeMetrics::cell_w`'s and the test
+/// `the_menu_cell_width_is_the_metrics_cell_width` says so, so the two cannot drift apart silently.
+pub const CHROME_CELL_W: u32 = 8;
+
 /// The chrome, for one panel size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chrome {
@@ -951,83 +1147,40 @@ impl Chrome {
             ));
         }
 
-        // Tab bar text: the title on the left, the badge on the right.
-        push_text(
-            &mut chrome.before,
-            m,
-            l.tabs.y + (l.tabs.height - m.cell_h) / 2,
-            &state.title,
-            Style::MONOSPACE,
-            colour::INK_CHROME,
-            0,
-        );
+        // --- the title band, the menu band, the toolbar and the sidebar. Part 19.
+        //
+        // **All four read their geometry from `widgets::`**, so what is painted here and what
+        // `widgets::hit` answers cannot drift. That is the entire reason `widgets.rs` exists: the
+        // failure mode of a hit test is a button that is drawn in one place and pressed in another,
+        // and the only cure is for there to be one place.
+        paint_title(&mut chrome.before, m, l, state);
+        paint_menubar(&mut chrome.before, m, l, state);
+        paint_toolbar(&mut chrome.before, m, l, state);
+        if state.sidebar_open {
+            paint_sidebar(&mut chrome.before, m, l, state);
+        }
+
+        // **The tab band is gone** (`tab_h: 0` as of part 19). It drew the document's name at the
+        // left of a 28 px band, and the title band now draws the same name at the left of a 30 px band
+        // with the app mark beside it -- so for one phase the name appeared twice, with the second
+        // copy's band empty. **A band that has nothing in it is a band that should not exist**, and the
+        // reference has no such row either: its document name sits in the same line as the menus.
+        //
+        // **The `[SEALED]` badge moves to the title band** rather than disappearing: a sealed session
+        // is the one state where the user most needs to be told, and it was never the title that
+        // mattered for that.
         if state.sealed {
             push_text(
                 &mut chrome.before,
                 m,
-                l.tabs.y + (l.tabs.height - m.cell_h) / 2,
+                l.title.y + (m.title_h - m.cell_h) / 2,
                 "[SEALED]",
                 Style::MONOSPACE,
                 colour::SEALED,
-                l.width as i32 - m.cell_w as i32 * 10,
+                (l.title.right() - 14 * m.cell_w) as i32,
             );
         }
 
-        // Toolbar: the toggles.
-        for (i, (slot, _label, short, style)) in StyleFlags::SLOTS.iter().enumerate() {
-            let r = self.toggle_rect(i);
-            let on = state.styles.get(*slot);
-            // The box: `│` on both sides, `─` above and below. Four glyphs, so it reads as a box at
-            // 1-cell scale without needing a `Rect` border that would alias against the glyph.
-            let ring = [
-                (r.x, r.y, rune::DR, 0, 0),
-                (r.right().saturating_sub(1), r.y, rune::DL, 0, 0),
-                (r.x, r.bottom().saturating_sub(1), rune::UR, 0, 0),
-                (
-                    r.right().saturating_sub(1),
-                    r.bottom().saturating_sub(1),
-                    rune::UL,
-                    0,
-                    0,
-                ),
-            ];
-            for (x, y, cp, dx, dy) in ring {
-                let _ = (dx, dy);
-                chrome.before.push(glyph(
-                    x,
-                    y,
-                    cp,
-                    if on { colour::ACTIVE } else { colour::RULE_DIM },
-                ));
-            }
-            // The short form, centred in the box.
-            let cx = r.x + (r.width - m.cell_w) / 2;
-            let cy = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
-            push_text(
-                &mut chrome.before,
-                m,
-                cy,
-                short,
-                *style,
-                if on { colour::ACTIVE } else { colour::INK_DIM },
-                cx as i32,
-            );
-            let _ = slot;
-        }
-        // Zoom, right-aligned.
-        let zoom = format!("{}%", state.zoom_percent);
-        let zx = l.width as i32 - m.cell_w as i32 * (zoom.chars().count() as i32 + 2);
-        push_text(
-            &mut chrome.before,
-            m,
-            l.toolbar.y + (l.toolbar.height - m.cell_h) / 2,
-            &zoom,
-            Style::MONOSPACE,
-            colour::INK_DIM,
-            zx,
-        );
-
-        // Status bar: `Ln 3, Col 12 · 412 words · 2.4 KiB` and a dirty flag on the right.
         let status = format!(
             "Ln {}, Col {}  {} words  {} B",
             state.caret_line + 1,
@@ -1126,6 +1279,400 @@ impl Chrome {
 /// call sites and made "which of these four numbers is a signed coordinate" a question at each one.
 /// Clamping to zero also means a band that collapsed to nothing draws nothing instead of wrapping to
 /// four billion pixels.
+// ---------------------------------------------------------------- the new chrome bands
+//
+// **Four emitters, and they are the only place in the crate that knows the reference's layout.** Each
+// takes its geometry from [`crate::widgets`], so the paint path and the hit-test path read the same
+// numbers. A band that was drawn from `Layout` arithmetic of its own would be a band the pointer could
+// not find, and the symptom -- "the button is there but clicking it does nothing" -- is the single most
+// expensive kind of UI bug to diagnose because everything looks right.
+
+/// The title band: the app mark, the document's name, and the buttons on the right.
+///
+/// **The name is left-aligned after the mark and the buttons are right-anchored**, so the name gets
+/// whatever room is left rather than a fixed column. A fixed column is a fixed column that a long
+/// document name eventually overflows, and overflow at the left of a title bar truncates the mark.
+fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
+    into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::BAND));
+
+    // The app mark: a document icon, at the left, at the band's own size rather than the toolbar's.
+    let icon_y = l.title.y + (m.title_h - crate::icons::SIZE) / 2;
+    into.push(SurfaceTree::leaf(crate::Node::Icon(
+        crate::icons::IconId::Doc.at(14, icon_y as i32, colour::INK_CHROME),
+    )));
+    push_text(
+        into,
+        m,
+        l.title.y + (m.title_h - m.cell_h) / 2,
+        &state.title,
+        Style::MONOSPACE,
+        colour::INK_CHROME,
+        14 + crate::icons::SIZE as i32 + 10,
+    );
+
+    for (btn, r) in crate::widgets::place_title(l, 12) {
+        let icon = match btn {
+            crate::widgets::TitleButton::Star => crate::icons::IconId::Star,
+            crate::widgets::TitleButton::Folder => crate::icons::IconId::Folder,
+            crate::widgets::TitleButton::Cloud => crate::icons::IconId::Cloud,
+            crate::widgets::TitleButton::History => crate::icons::IconId::History,
+            crate::widgets::TitleButton::Comments => crate::icons::IconId::Comment,
+            crate::widgets::TitleButton::Share => crate::icons::IconId::Lock,
+        };
+        // **Share is a button with a label**, so it is drawn as one; the rest are the icon alone,
+        // centred in their own box.
+        // **Share is the one button that is an icon *and* a label, and they are laid out left to right.**
+        //
+        // The first version centred the lock in the button and then drew "Share" at a fixed offset
+        // from the left, so a 110 px button put the lock at x + 47 and the text at x + 30 -- the text
+        // started *before* the icon and ran through it. The fix is not a bigger offset, it is that a
+        // button with a label does not centre its icon: the icon goes where the label goes, and the
+        // label follows it. That is why this is a branch and not a constant.
+        if matches!(btn, crate::widgets::TitleButton::Share) {
+            into.push(fill(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                colour::PILL,
+            ));
+            let cy = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
+            let ix = r.x + m.cell_w / 2;
+            into.push(SurfaceTree::leaf(crate::Node::Icon(
+                crate::icons::IconId::Lock.at(
+                    ix as i32,
+                    r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
+                    colour::INK_CHROME,
+                ),
+            )));
+            push_text(
+                into,
+                m,
+                cy,
+                "Share",
+                Style::MONOSPACE,
+                colour::INK_CHROME,
+                ix as i32 + crate::icons::SIZE as i32 + m.cell_w as i32 / 2,
+            );
+            continue;
+        }
+        let ix = r.x + (r.width.saturating_sub(crate::icons::SIZE)) / 2;
+        into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
+            ix as i32,
+            r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
+            colour::INK_CHROME,
+        ))));
+    }
+}
+
+/// The menu band: the headings, and the open menu's popup underneath.
+///
+/// **The popup is drawn here rather than in the session**, because the popup's geometry is a function of
+/// the band it hangs from and of the heading that opened it, and both are the chrome's. **What a menu
+/// item *does* is the session's**, and the session reads [`crate::chrome::MENUS`] for the same index.
+fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
+    // **No band fill here either, and for the same reason `paint_toolbar`'s gives.** The first version
+    // pushed `fill(.., CHROME)` for the menu band, which is the panel's own colour -- so it painted the
+    // panel over the chrome's toolbar band and made that band invisible. `Chrome::tree` owns the band
+    // fills; an emitter that re-fills its band has to know the band is not the panel, and neither of
+    // these two needs to know anything at all.
+    let (_, boxes) = menu_boxes(l);
+    for (i, r) in boxes.iter().enumerate() {
+        let open = state.open_menu == Some(i);
+        if open {
+            into.push(fill(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                colour::PILL,
+            ));
+        }
+        push_text(
+            into,
+            m,
+            r.y + (r.height.saturating_sub(m.cell_h)) / 2,
+            MENUS[i],
+            Style::MONOSPACE,
+            if open {
+                colour::INK_STRONG
+            } else {
+                colour::INK_CHROME
+            },
+            r.x as i32 + 2 * m.cell_w as i32,
+        );
+    }
+
+    // The popup, if one is open.
+    if let Some(i) = state.open_menu {
+        if let Some(r) = boxes.get(i) {
+            paint_popup(into, m, l, r, MENUS[i]);
+        }
+    }
+}
+
+/// An open menu's popup: a panel under its heading, with the items.
+///
+/// **Drawn at a fixed height per item and anchored under the heading's left edge**, which is what makes
+/// a menu readable: the items start where the heading does, so the eye does not have to travel. The
+/// width is the widest label plus padding, computed here rather than tabulated, because the items are
+/// data.
+fn paint_popup(
+    into: &mut Vec<SurfaceTree>,
+    m: &ChromeMetrics,
+    l: &Layout,
+    anchor: &DamageRect,
+    _name: &str,
+) {
+    let items = crate::menus::items_for(anchor_index(anchor, l));
+    let pad = 2 * m.cell_w;
+    let label_w = items
+        .iter()
+        .map(|it| (it.label.len() as u32 + 2) * m.cell_w)
+        .max()
+        .unwrap_or(40)
+        .max(14 * m.cell_w);
+    let row_h = m.cell_h + 6;
+    let w = label_w + pad * 2;
+    let h = (items.len() as u32).saturating_mul(row_h) + pad;
+    let x = anchor.x as i32;
+    let y = (l.menubar.bottom()) as i32;
+
+    // **Clipped to the panel.** A popup near the right edge that ran off would be drawn into the
+    // scrollbar's pixels, and the renderer would have to notice and clip -- which is the shape of thing
+    // this chrome has spent part 18 cleaning up.
+    let x = x.min(l.width as i32 - w as i32).max(0);
+    let y = y.min(l.height as i32 - h as i32).max(0);
+
+    into.push(fill(x, y, w, h, colour::PILL));
+    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
+        x,
+        y,
+        w,
+        1,
+        colour::RULE,
+    ))));
+
+    for (i, it) in items.iter().enumerate() {
+        let ry = y + pad as i32 + (i as i32) * row_h as i32;
+        let cy = ry + (row_h / 2 - m.cell_h / 2) as i32;
+        if let Some(icon) = it.icon {
+            into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
+                x + pad as i32,
+                ry + 3,
+                colour::INK_CHROME,
+            ))));
+        }
+        push_text(
+            into,
+            m,
+            cy as u32,
+            it.label,
+            Style::MONOSPACE,
+            colour::INK_CHROME,
+            x + pad as i32 + 2 * m.cell_w as i32,
+        );
+        // **The accelerator, right-aligned, because the reference puts it there** and a reader looking
+        // for "Ctrl+K" looks at the right edge of the row.
+        if let Some(acc) = it.accelerator {
+            push_text(
+                into,
+                m,
+                cy as u32,
+                acc,
+                Style::MONOSPACE,
+                colour::INK_DIM,
+                x + (w - pad - acc.len() as u32 * m.cell_w) as i32,
+            );
+        }
+    }
+}
+
+/// Which heading `anchor` is, or `0`.
+///
+/// **A linear search, and that is deliberate.** It is called once per paint, over eight boxes, and a
+/// binary search would need `anchor` to be sorted relative to something. The alternative -- threading
+/// the index down from the caller that already has it -- is a second signature carrying an index the
+/// caller could get wrong, which is a worse trade than eight comparisons.
+fn anchor_index(anchor: &DamageRect, l: &Layout) -> usize {
+    menu_boxes(l)
+        .1
+        .iter()
+        .position(|r| r.x == anchor.x)
+        .unwrap_or(0)
+}
+
+/// The toolbar: a pill, then one button per [`TOOLBAR`](crate::widgets::TOOLBAR) entry.
+///
+/// **The pill is the whole width of the band minus its inset**, rather than being fitted to its
+/// contents. It is what makes the toolbar read as one control surface rather than as a row of loose
+/// icons, and fitting it would mean recomputing the pill's width every time a tool was added.
+fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
+    // **No band fill, for the reason `paint_menubar`'s gives.** The first version of this emitter
+    // pushed `fill(.., CHROME)` for the toolbar band -- the same colour as the panel -- so it painted
+    // the panel's colour over the chrome's own toolbar band and the band became invisible. `Chrome::tree`
+    // already fills that band; an emitter that re-fills its band has to know what colour it is, and
+    // this one does not need to know anything. **The pill below is a different surface**: it is a
+    // control, and it *is* this emitter's to draw.
+    let pill = DamageRect::new(
+        8,
+        l.toolbar.y + 3,
+        l.width.saturating_sub(16),
+        l.toolbar.height.saturating_sub(6),
+    );
+    into.push(fill(
+        pill.x as i32,
+        pill.y as i32,
+        pill.width,
+        pill.height,
+        colour::PILL,
+    ));
+
+    let mut prev_separated = false;
+    for p in crate::widgets::place_toolbar(l, 8) {
+        if p.tool.separated() && !prev_separated {
+            // The separator is drawn on the tool's *left* edge, in the gap before it.
+            let sx = p.rect.x as i32 - (crate::widgets::SEPARATOR / 2) as i32 - 1;
+            into.push(fill(
+                sx,
+                p.rect.y as i32 + 4,
+                1,
+                p.rect.height.saturating_sub(8),
+                colour::RULE,
+            ));
+        }
+        prev_separated = p.tool.separated();
+
+        let cx = p.rect.x as i32;
+        let cy = p.rect.y as i32;
+        let ih = crate::icons::SIZE as i32;
+        let iy = cy + (p.rect.height as i32 - ih) / 2;
+
+        // **The label is the outer branch, not the inner one.** The first version matched on `icon()`
+        // and put the label inside the `Some` arm with `has_label` as a sub-condition, which sent the
+        // three labelled controls -- the ones whose icon is `None` -- straight into the `None` arm and
+        // its `unreachable!()`. **It compiled, and it panicked on the first paint**, because a `match`
+        // that assumes two categories are really three has to put one of them somewhere it does not
+        // belong. The order is now the order the reference draws in: icon, label, chevron.
+        let ix = if p.tool.has_label() {
+            cx + m.cell_w as i32
+        } else {
+            cx + (p.rect.width as i32 - ih) / 2
+        };
+        if let Some(icon) = p.tool.icon() {
+            into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
+                ix,
+                iy,
+                colour::INK_CHROME,
+            ))));
+        }
+        if p.tool.has_label() {
+            push_text(
+                into,
+                m,
+                p.rect.y + (p.rect.height.saturating_sub(m.cell_h)) / 2,
+                &p.tool.label(state),
+                Style::MONOSPACE,
+                colour::INK_CHROME,
+                ix + ih as i32 + 4,
+            );
+            // The chevron that says "this opens a popup".
+            into.push(SurfaceTree::leaf(crate::Node::Icon(
+                crate::icons::IconId::ChevronDown.at(
+                    p.rect.right() as i32 - ih as i32 - 4,
+                    iy,
+                    colour::INK_DIM,
+                ),
+            )));
+        }
+    }
+}
+
+/// The sidebar: a back arrow, a heading, a "+", and one row per document.
+fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
+    into.push(fill(
+        0,
+        l.sidebar.y as i32,
+        l.sidebar.width,
+        l.sidebar.height,
+        colour::BAND,
+    ));
+    // The sidebar's right edge.
+    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
+        l.sidebar.right() as i32 - 1,
+        l.sidebar.y as i32,
+        1,
+        l.sidebar.height,
+        colour::RULE_DIM,
+    ))));
+
+    into.push(SurfaceTree::leaf(crate::Node::Icon(
+        crate::icons::IconId::ArrowLeft.at(
+            l.sidebar_back.x as i32 + 4,
+            l.sidebar_back.y as i32 + 4,
+            colour::INK_CHROME,
+        ),
+    )));
+    push_text(
+        into,
+        m,
+        l.sidebar_back.y,
+        "Document tabs",
+        Style::MONOSPACE,
+        colour::INK_DIM,
+        l.sidebar_back.right() as i32 + 8,
+    );
+    into.push(SurfaceTree::leaf(crate::Node::Icon(
+        crate::icons::IconId::Plus.at(
+            l.sidebar_new.x as i32 + 4,
+            l.sidebar_new.y as i32 + 4,
+            colour::INK_CHROME,
+        ),
+    )));
+
+    for i in 0..l.sidebar_rows as usize {
+        let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else {
+            break;
+        };
+        let active = i == state.active_doc;
+        if active {
+            into.push(fill(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                colour::PILL,
+            ));
+        }
+        into.push(SurfaceTree::leaf(crate::Node::Icon(
+            crate::icons::IconId::Doc.at(
+                r.x as i32 + 8,
+                r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
+                colour::INK_CHROME,
+            ),
+        )));
+        let ty = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
+        push_text(
+            into,
+            m,
+            ty,
+            title,
+            Style::MONOSPACE,
+            colour::INK_CHROME,
+            r.x as i32 + 8 + crate::icons::SIZE as i32 + 8,
+        );
+        if active {
+            into.push(SurfaceTree::leaf(crate::Node::Icon(
+                crate::icons::IconId::Overflow.at(
+                    r.right() as i32 - crate::icons::SIZE as i32 - 8,
+                    r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
+                    colour::INK_DIM,
+                ),
+            )));
+        }
+    }
+}
+
 fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
     SurfaceTree::leaf(crate::Node::Rect(Rect::new(x, y, width, height, colour)))
 }

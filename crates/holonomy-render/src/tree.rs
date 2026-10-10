@@ -265,15 +265,7 @@ impl DocRun {
     pub const MAX_BYTES: u32 = 1024;
 
     /// A run of `len` document bytes starting at `offset`.
-    pub fn new(
-        x: i32,
-        y: i32,
-        offset: u32,
-        len: u32,
-        style: Style,
-        size: u8,
-        colour: u32,
-    ) -> Self {
+    pub fn new(x: i32, y: i32, offset: u32, len: u32, style: Style, size: u8, colour: u32) -> Self {
         Self {
             x,
             y,

@@ -315,12 +315,80 @@ impl<'a> Painter<'a> {
             Node::Text(run) => self.text(frame, run, damage),
             Node::DocText(run) => self.doc_text(frame, run, damage, text),
             Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
-            Node::Icon(_) => {
-                // Icons are hand-authored 1-bit masks from `.rodata`, and nothing in the chrome uses
-                // one. Refusing to draw them beats drawing a wrong one: a silently blank icon is a bug
-                // report with no reproduction, and a silently *wrong* one is worse. Counted, so it
-                // appears in the stats rather than in nothing.
-                self.scratch.stats.rects_skipped += 1;
+            Node::Icon(icon) => self.icon(frame, &icon, damage),
+        }
+    }
+
+    /// Blit a 1-bit icon mask.
+    ///
+    /// # This arm used to be a refusal, and the refusal is the story
+    ///
+    /// `Node::Icon` counted a skipped rect and drew nothing, with the comment *"nothing in the chrome
+    /// uses one"*. **That was true when it was written and it stayed true for the whole of Phase 13**,
+    /// because the chrome drew its toolbar with `[` and `]` box-drawing runes and its menus did not
+    /// exist. So the icon path was never exercised by anything, and a whole node type sat in the tree
+    /// doing nothing.
+    ///
+    /// **It is worth being clear about what the refusal cost.** The `Icon` type, the `coverage`
+    /// accessor, the bit-order documentation and the tests all existed and were all correct, and the
+    /// chrome still rendered its controls as `[B][M][H][u]` in bracket glyphs that no test objected
+    /// to. **A refusal is a claim about the future, and this one was made about a future that had
+    /// already been designed and not built.**
+    ///
+    /// # The blit
+    ///
+    /// **One bit per pixel, opaque, with no blending** — which is what a mask in a monochrome palette
+    /// means. A set bit writes the icon's colour; a clear bit writes nothing at all. That is not an
+    /// optimisation, it is the definition: blending a cleared pixel would put the foreground colour at
+    /// some fraction over the background, and a 1-bit format has no fraction to blend by.
+    ///
+    /// **Clipped to the damage** like every other node, and the clip is applied to the *mask* rather
+    /// than to the destination, so a partially damaged icon does the pixels that are damaged and
+    /// leaves the rest for the next frame.
+    fn icon(&mut self, frame: &mut Frame, icon: &holonomy_render::Icon, damage: Option<DamageRect>) {
+        let Some(bounds) = icon.bounds() else {
+            return;
+        };
+        // **Counted after the clip, and skipped when the clip is empty** -- which is what the `Rect`
+        // arm does and what `a_damage_rect_outside_everything_paints_nothing` asserts for the whole
+        // tree. The first version of this counted unconditionally, so painting with a damage rect
+        // entirely off the panel reported 30 rectangles drawn when it had drawn none.
+        let clip = match damage {
+            Some(d) => {
+                let c = bounds.clip(&d);
+                if c.is_empty() {
+                    self.scratch.stats.rects_skipped += 1;
+                    return;
+                }
+                c
+            }
+            None => bounds,
+        };
+        self.scratch.stats.rects += 1;
+
+        // **`row` is a count of `u32`s, not of bytes.** `Frame::pixels()` is `&[u32]`, so the stride
+        // from one row to the next is `width` *pixels* -- and the first version of this used
+        // `width * 4`, which is the stride in **bytes**. Every row therefore landed four times further
+        // down than it should have: a toolbar icon at y = 89 was written at y = 355, which is on the
+        // page. The icon was drawn, brightly, in the wrong place, and the toolbar looked empty.
+        //
+        // **It is worth naming why this was hard to see.** The factor of four is not a wild
+        // displacement -- it is a displacement *to somewhere plausible*, inside the frame, past every
+        // bounds check, so nothing complained. The visible symptom ("the icons are not where they
+        // should be, and there are icons where there should not be") reads as a layout bug, and the
+        // layout was fine.
+        let row = frame.width() as usize;
+        let colour = icon.colour & 0x00FF_FFFF;
+        for y in clip.y..clip.bottom() {
+            let mask_y = y - bounds.y;
+            let dst_row = y as usize * row;
+            for x in clip.x..clip.right() {
+                if !icon.coverage(x - bounds.x, mask_y) {
+                    continue;
+                }
+                if let Some(p) = frame.pixels_mut().get_mut(dst_row + x as usize) {
+                    *p = colour;
+                }
             }
         }
     }

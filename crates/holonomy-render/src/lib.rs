@@ -28,7 +28,9 @@ pub mod math_layout;
 
 pub mod chrome;
 pub mod icons;
+pub mod menus;
 pub mod table;
+pub mod widgets;
 
 pub use chrome::{
     AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, LineHeights,
@@ -44,7 +46,8 @@ pub use math_layout::{
 };
 pub use table::{BorderIter, BorderRun, GridError, TableGrid};
 pub use tree::{
-    DocRun, Icon, Node, NodeKind, Raster, RasterSource, Rect, Style, SurfaceTree, TextSource, TextRun,
+    DocRun, Icon, Node, NodeKind, Raster, RasterSource, Rect, Style, SurfaceTree, TextRun,
+    TextSource,
 };
 // `Node::Image` carries an `AssetId` and `RasterSource::raster` is keyed by one, so a consumer of
 // either needs the type in scope. Re-exported here because `tree` is private and the alternative is

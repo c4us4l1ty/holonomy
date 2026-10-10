@@ -90,6 +90,26 @@ impl DamageRect {
         y >= self.y && y < self.bottom()
     }
 
+    /// Whether the point `(x, y)` is inside, **half-open on the right and bottom**.
+    ///
+    /// # Why this is here rather than in the widget code
+    ///
+    /// **Because three of part 19's hit tests needed it and each would have written it slightly
+    /// differently.** Adjacent buttons on the toolbar share an edge, and a hit test that uses `<=` on
+    /// the right picks the *right* button when the pointer is on the seam. Half-open intervals tile
+    /// without a seam, which is the same reason the paint bands in [`Layout`](crate::chrome::Layout)
+    /// stack with `saturating_add`.
+    ///
+    /// **The arguments are `i32` because that is what a pointer event carries.** Clamping a negative
+    /// coordinate to zero here rather than letting the caller do it means "left of the sidebar" and
+    /// "above the title bar" are both simply `false`, and no caller has to remember to check.
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x as i32
+            && y >= self.y as i32
+            && x < (self.x + self.width) as i32
+            && y < (self.y + self.height) as i32
+    }
+
     /// The smallest rect containing both. Empty if either is empty.
     ///
     /// # `saturating` rather than wrapping

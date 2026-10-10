@@ -2502,6 +2502,52 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 19 — the chrome, built from the reference in `Plan/`
+
+**`Plan/` holds sixteen screenshots of the reference editor and the note that built it.** The screenshots
+are the specification: title band with the app mark and the save state, menu bar, a toolbar of icons, a
+ruler, a document-tabs sidebar, and the two states that matter — a menu open and a dropdown open. This
+part builds that, and the note's architecture is respected throughout: no SVG runtime, no font parsing
+for chrome, no DOM, nothing allocated per paint except three `String`s for three labels.
+
+**`widgets.rs` exists because hit testing is the one piece of UI logic that is invisibly duplicated.**
+Write `hit(x, y)` beside the layout arithmetic and there are two functions that each compute where Bold
+is. They agree on the day they are written; on the day someone adds a separator they do not, and nothing
+fails. **So `TOOLBAR` is a `const`**, `place_toolbar` gives each entry a rect, and `hit` answers with the
+entry. A widget that is not in the list is not drawn, and one that is in it is both — by construction,
+not by discipline. `tests/widgets.rs` asserts `hit` agrees with `place_toolbar` for every widget, which
+is the assertion that would fail if the list ever grew a second geometry.
+
+**Three defects found on the way, and the third is the one worth reading.**
+
+**1. The icon blit used a byte stride as a `u32` element index.** `frame.pixels()` is `&[u32]`, so the
+stride from one row to the next is `width` *pixels*; the first version used `width * 4`, which is the
+stride in **bytes**. Every row landed four times further down: a toolbar icon at y = 89 was written at
+y = 355, on the page. **The factor of four is not a wild displacement, it is a displacement to somewhere
+plausible** — inside the frame, past every bounds check — so nothing complained and the symptom read as
+a layout bug.
+
+**2. The emitters re-filled their own bands.** `paint_toolbar` and `paint_menubar` each pushed a
+`CHROME` rect over the band `Chrome::tree` had already filled in `BAND` — and `CHROME` is the panel's
+colour, so the toolbar band became invisible. **An emitter that re-fills its band has to know what
+colour the band is**, and neither of these two needs to know anything: the panel is already there.
+
+**3. The gate that was supposed to catch (2) was asserting a layout that no longer existed.**
+`chrome_paint_order.rs` probes `(canvas.x + 4, canvas mid)` for "the gutter is chrome-coloured", and
+part 19 put a 208 px sidebar at x = 0. The probe was inside the sidebar, so it read `BAND` and failed
+for a reason that had nothing to do with paint order. The probe is now "a pixel that is provably in
+neither the sidebar nor the page", which is the only kind of probe that survives the next change.
+**Two of that file's five tests had been rewritten by the change and both rewrites were wrong in the
+same direction** — a fixed coordinate chosen without asking what is now at it.
+
+**And the honest summary of the previous part's finding.** The icon path was a **refusal** — `Node::Icon`
+counted a skipped rect and drew nothing, with the comment *"nothing in the chrome uses one"*. That was
+true when it was written and stayed true for all of Phase 13, because the chrome drew its toolbar with
+`[` and `]` box-drawing runes. **So `Icon`, `coverage`, the bit-order docs and the icon tests all
+existed, were all correct, and the chrome still rendered its controls as antenna-like shapes.** A
+refusal is a claim about the future, and this one was made about a future that had already been designed
+and not built.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a

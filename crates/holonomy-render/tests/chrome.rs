@@ -24,7 +24,12 @@ use holonomy_render::{DamageRect, Node, NodeKind};
 fn the_bands_stack_with_no_gap_and_no_overlap() {
     let m = ChromeMetrics::DESKTOP;
     let l = Layout::new(&m);
-    assert_eq!(l.tabs.y, 0);
+    assert_eq!(l.title.y, 0);
+    assert_eq!(l.menubar.y, l.title.bottom(), "the menu bar follows the title");
+    assert_eq!(l.tabs.y, l.menubar.bottom());
+    // **The tab band is zero-height as of part 19**, so `tabs.bottom() == toolbar.y` is an identity
+    // rather than an arrangement. It is kept in the chain because the tab band still exists as a
+    // band, and a chain that quietly dropped it would go on asserting a layout nobody has.
     assert_eq!(
         l.toolbar.y,
         l.tabs.bottom(),
@@ -44,13 +49,25 @@ fn the_bands_stack_with_no_gap_and_no_overlap() {
 fn the_bands_cover_the_panel_exactly_once() {
     let m = ChromeMetrics::DESKTOP;
     let l = Layout::new(&m);
-    let covered: u32 = [l.tabs, l.toolbar, l.ruler, l.canvas, l.status]
-        .iter()
-        .map(|r| r.height)
-        .sum();
+    // **Seven bands as of part 19, and the tab band is one of them at zero height.** The reference's
+    // chrome stacks title / menu / tabs / toolbar / ruler / canvas / status; part 19 set `tab_h: 0`
+    // because the title band already drew the document's name and a band with nothing in it should
+    // not exist. **A zero-height band contributes nothing to the sum and does not break the
+    // partition** -- which is the property this test is for, and it is why removing a band was safe.
+    //
+    // The first version of this update listed the old five and failed with `left: 748, right: 800`:
+    // the 30 px title band and the 22 px menu band were simply not in the list. **A gate that names
+    // its bands has to be updated when the bands change, and the failure it gives is the right one** --
+    // it said the bands did not cover the panel, which is exactly what an unlisted band looks like.
+    let covered: u32 = [
+        l.title, l.menubar, l.tabs, l.toolbar, l.ruler, l.canvas, l.status,
+    ]
+    .iter()
+    .map(|r| r.height)
+    .sum();
     assert_eq!(
         covered, m.height,
-        "the five bands must partition the panel's height"
+        "the seven bands must partition the panel's height"
     );
 }
 
@@ -253,6 +270,32 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     }
     for (_, _label, short, _) in holonomy_render::chrome::StyleFlags::SLOTS {
         v.push((*short).to_string());
+    }
+    // **The labels part 19 added.** The chrome now draws a menu bar, a labelled toolbar and a
+    // sidebar, and this function is the list every text run is checked against -- so a label that is
+    // drawn but not listed here shows up as "run N+M is not an ascending run of any label the chrome
+    // draws", which is a *true* statement about the list and a false statement about the chrome.
+    //
+    // **The sidebar's document titles are listed from `state`, not hard-coded**, because they are
+    // data: a gate that hard-coded "Journal" would fail the moment a session had a different
+    // document, and would be wrong for the right reason.
+    v.extend(state.docs.iter().cloned());
+    v.extend(chrome::MENUS.iter().map(|m| (*m).to_string()));
+    v.push("Share".to_string());
+    v.push("Document tabs".to_string());
+    v.push(state.style_name.clone());
+    v.push(state.font_label());
+    // The popup's items, because an open menu draws them and the gate's state opens none -- so this is
+    // what keeps the popup's labels from being an untested third source of runs.
+    for menu in holonomy_render::menus::MENUS {
+        for item in *menu {
+            v.push(item.label.to_string());
+            if let Some(a) = item.accelerator {
+                if !a.is_empty() {
+                    v.push(a.to_string());
+                }
+            }
+        }
     }
     v
 }
@@ -740,7 +783,19 @@ fn the_bands_partition_the_panel_at_any_size() {
             "{w}x{h}: the panel size is kept"
         );
         let mut at = 0u32;
-        for b in [l.tabs, l.toolbar, l.ruler, l.canvas, l.status] {
+        // **Seven bands, in paint order, and the list must start at 0 and end at the height.** A
+        // missing band shows up here as `b.y == at` failing on the band *after* the gap, which is what
+        // the first version of this update reported: `left: 52, right: 0` -- the toolbar starts at 52
+        // because the title and menu bands are above it and were not in the list.
+        for b in [
+            l.title,
+            l.menubar,
+            l.tabs,
+            l.toolbar,
+            l.ruler,
+            l.canvas,
+            l.status,
+        ] {
             assert_eq!(
                 b.y, at,
                 "{w}x{h}: a band does not start where the last one ended"
