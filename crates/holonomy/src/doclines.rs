@@ -259,7 +259,11 @@ mod tests {
         let d = DocLines::build(text, metrics());
         assert_eq!(d.len(), 3, "two newlines make three lines");
         assert_eq!(d.line_start(0), 0);
-        assert_eq!(d.line_start(6), 6, "the second line starts after 'alpha\\n'");
+        assert_eq!(
+            d.line_start(6),
+            6,
+            "the second line starts after 'alpha\\n'"
+        );
         assert_eq!(d.line_start(12), 12, "the third starts after 'bravo\\n'");
         assert_eq!(
             d.line_start(19),
@@ -267,7 +271,11 @@ mod tests {
             "an offset at the end is on the last line, so its start is that line's"
         );
         // And the inverse, for every byte.
-        for (at, want) in (0..6).map(|i| (i, 0)).chain((6..12).map(|i| (i, 1))).chain((12..19).map(|i| (i, 2))) {
+        for (at, want) in (0..6)
+            .map(|i| (i, 0))
+            .chain((6..12).map(|i| (i, 1)))
+            .chain((12..19).map(|i| (i, 2)))
+        {
             assert_eq!(d.line_of(at), want, "byte {at} is on line {want}");
         }
     }
@@ -370,7 +378,10 @@ mod tests {
         e.insert_at(0, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
         text.insert(0, b'x');
-        assert_eq!(d.sync(&e, expected_lines(&text), 1, metrics()), Sync::OneLine);
+        assert_eq!(
+            d.sync(&e, expected_lines(&text), 1, metrics()),
+            Sync::OneLine
+        );
         assert_agrees(&d, &text);
     }
 
@@ -383,7 +394,10 @@ mod tests {
         e.insert_at(4, b"\n", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
         text.insert(4, b'\n');
-        assert_eq!(d.sync(&e, expected_lines(&text), 5, metrics()), Sync::Rebuilt);
+        assert_eq!(
+            d.sync(&e, expected_lines(&text), 5, metrics()),
+            Sync::Rebuilt
+        );
         assert_agrees(&d, &text);
     }
 
@@ -398,7 +412,10 @@ mod tests {
         let d = DocLines::build(&text, metrics());
         assert_agrees(&d, &text);
         // The long line's stored length must be the whole body plus its newline.
-        assert_eq!(d.geometry().line_len(0).expect("line 0"), SCAN_CHUNK * 3 + 1);
+        assert_eq!(
+            d.geometry().line_len(0).expect("line 0"),
+            SCAN_CHUNK * 3 + 1
+        );
     }
 
     /// The comparison the whole design rests on, run over a document with lines of every length from 0

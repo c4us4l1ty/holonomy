@@ -81,8 +81,22 @@ pub mod colour {
     /// **One value for all four**, because they are the same surface at different sizes. Giving each
     /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
     pub const PILL: u32 = 0xFF33_333C;
-    /// The active sidebar row, one step above [`PILL`].
-    pub const PILL_ACTIVE: u32 = 0xFF3D_3D4A;
+    /// A hovered widget, one step above [`PILL`].
+    ///
+    /// **A separate value rather than `PILL_ACTIVE` reused for hover.** The two are one step apart on
+    /// purpose: hover is "you are here" and press is "this is happening", and a menu item that looked
+    /// the same either way would not tell you which of the two your click had reached.
+    pub const PILL_HOVER: u32 = 0xFF38_3845;
+    /// A held or selected widget, one step above [`PILL_HOVER`].
+    pub const PILL_ACTIVE: u32 = 0xFF42_4252;
+    /// An open menu's panel, **lighter than everything it can be drawn over**.
+    ///
+    /// **This is the third surface and it needed its own value**, which the first version did not
+    /// give it: the popup was drawn in [`PILL`], which is also the toolbar's pill. A menu that hangs
+    /// over the toolbar and the sidebar is then drawn in exactly the colour of both, and it reads as
+    /// *floating text* rather than as a panel -- the items are legible and the menu is invisible.
+    /// `a_popup_is_a_lighter_plane_than_anything_it_covers` is the gate, and it would have caught it.
+    pub const POPUP: u32 = 0xFF46_4654;
     /// The `[SEALED]` badge: the one thing on screen that is a security claim.
     pub const SEALED: u32 = 0xFF5A_C88A;
     /// Accent for a toolbar toggle that is on.
@@ -230,12 +244,26 @@ impl ChromeMetrics {
     ///
     /// `cell_w`, `width`, `height`, `columns` and the padding are untouched -- only the vertical
     /// bands that contain text, and only upward.
+    /// Set the line pitch, raising every band that must be at least one line tall.
+    ///
+    /// # Why zero is left alone, and that is a CORRECTION
+    ///
+    /// **The original was `band.max(cell_h)` on all five bands.** Part 19 set `tab_h: 0` — a band with
+    /// nothing in it should not exist — and this turned it into 25 px in *every running session*, the
+    /// moment `Session::new` called `with_line_pitch(atlas.line_pitch())`. The panel grew a 25 px empty
+    /// strip between the menu bar and the toolbar, in the product, and the `shot` example rendered it
+    /// without anybody reading it as a band at all.
+    ///
+    /// **`.max()` cannot tell "too small" from "deliberately absent".** It is the right operation for
+    /// a band that must fit a line of text and the wrong one for a band that has been switched off,
+    /// and the difference is only visible at zero — which is exactly why it survived part 19 and was
+    /// caught by a *click* landing on the wrong row of the page.
     pub fn with_line_pitch(mut self, cell_h: u32) -> Self {
         self.cell_h = cell_h;
-        self.tab_h = self.tab_h.max(cell_h);
-        self.toolbar_h = self.toolbar_h.max(cell_h);
-        self.ruler_h = self.ruler_h.max(cell_h);
-        self.status_h = self.status_h.max(cell_h);
+        self.tab_h = at_least_a_line(self.tab_h, cell_h);
+        self.toolbar_h = at_least_a_line(self.toolbar_h, cell_h);
+        self.ruler_h = at_least_a_line(self.ruler_h, cell_h);
+        self.status_h = at_least_a_line(self.status_h, cell_h);
         self
     }
 
@@ -353,6 +381,19 @@ pub struct Layout {
     pub sidebar_rows: u32,
     /// One row's height, so [`sidebar_doc`](Self::sidebar_doc) is arithmetic and not a stored value.
     pub sidebar_row_h: u32,
+    /// The text cell width, copied from [`ChromeMetrics::cell_w`].
+    ///
+    /// **Copied so that [`widgets::hit`] does not need the metrics.** Part 20's hit test has to
+    /// answer "which menu item is this point in", and a popup row's height is a function of the cell
+    /// height. Threading `&ChromeMetrics` into `hit` would mean every one of its eight gates grows a
+    /// second argument and every caller has to keep the two lifetimes straight; three copied `u32`s on
+    /// a `Copy` struct is cheaper than that, and the gate `the_layouts_cell_metrics_are_the_metrics`'
+    /// is what stops them drifting apart.
+    pub cell_w: u32,
+    /// The text cell height, copied from [`ChromeMetrics::cell_h`].
+    pub cell_h: u32,
+    /// A toolbar button's edge, copied from [`ChromeMetrics::button`].
+    pub button: u32,
     /// The document tab bar.
     pub tabs: DamageRect,
     /// The toolbar.
@@ -465,6 +506,9 @@ impl Layout {
             sidebar_new,
             sidebar_rows: rows_visible,
             sidebar_row_h: doc_row_h,
+            cell_w: m.cell_w,
+            cell_h: m.cell_h,
+            button: m.button,
             tabs: band(tab_y, m.tab_h),
             toolbar: band(toolbar_y, m.toolbar_h),
             ruler: band(ruler_y, m.ruler_h),
@@ -477,6 +521,47 @@ impl Layout {
             gutter_right,
             rows: text.height / m.cell_h.max(1),
         }
+    }
+
+    /// The document position a click at `(x, y)` lands on, if it landed on the page.
+    ///
+    /// # This is the inverse of [`Caret::locate`], and it has to agree with it exactly
+    ///
+    /// `locate` answers "where is the caret"; this answers "where did the pointer go". A click
+    /// places the caret, so the two are the same fact computed in two directions, and **a disagreement
+    /// of one pixel puts the caret in the next cell** -- which on a click near the right edge of a line
+    /// lands the caret one column past the end, and on a click below the last line lands it on a row
+    /// that is not on screen.
+    ///
+    /// **Uniform rows only.** `locate` places row `r` at `text.y + line_heights.y(r)`, which accounts
+    /// for table rows of varying height; this computes `row = (y - text.y) / cell_h`. With no tables
+    /// — which is every document this session can hold today — they are the same arithmetic. **The
+    /// gate `clicking_a_row_puts_the_caret_on_that_row` is what would fail first if a document with
+    /// tables landed**, and it is written to fail rather than to quietly put the caret a row early.
+    ///
+    /// **Clamped to the text column rather than rejected.** A click to the left of the first character
+    /// is a click on line 1, not a click nowhere: a pointer is a coarse instrument and refusing it
+    /// would make the left third of the page unclickable.
+    #[must_use]
+    pub fn caret_at(&self, state: &ChromeState, x: i32, y: i32) -> Option<(u32, u32)> {
+        if !self.page.contains(x, y) {
+            return None;
+        }
+        let t = self.text;
+        let row = if y < t.y as i32 {
+            0
+        } else {
+            u32::try_from(y - t.y as i32).ok()? / self.cell_h
+        };
+        if row >= self.rows {
+            return None;
+        }
+        let column = if x < t.x as i32 {
+            0
+        } else {
+            u32::try_from(x - t.x as i32).ok()? / self.cell_w
+        };
+        Some((row + state.scroll_line, column))
     }
 
     /// Document row `i` of the sidebar, if the sidebar is that tall.
@@ -725,6 +810,22 @@ pub struct ChromeState {
     pub font_size: u32,
     /// Which menu is open, if any. An index into [`MENUS`](crate::chrome::MENUS).
     pub open_menu: Option<usize>,
+    /// Where the pointer is, once it has moved. `None` until the first motion event.
+    ///
+    /// **`None` and not `(0, 0)`.** The session's decoder starts the pointer at the origin so that
+    /// the first `REL_X` moves it by its delta, and that is the right answer for *accumulating*; it
+    /// is the wrong answer for *drawing*, because a chrome that has never seen a pointer should not
+    /// draw one hovering over its first widget. **These are different questions with different right
+    /// answers**, which is why there are two values rather than one.
+    pub cursor: Option<(i32, i32)>,
+    /// What the pointer is over, for the chrome's own highlight.
+    pub hover: Option<crate::widgets::Hit>,
+    /// What is held down, so a button reads as pressed while the pointer is on it.
+    ///
+    /// **Set on the press, cleared on the release, and never on a motion event** -- so a drag off a
+    /// button leaves it looking pressed until the button comes up, which is what every native
+    /// toolchain does and is why a drag off a button does not fire it.
+    pub pressed: Option<crate::widgets::Hit>,
     /// Words in the document.
     pub words: u32,
     /// Bytes in the document.
@@ -768,6 +869,9 @@ impl Default for ChromeState {
             font_name: "Inter".to_string(),
             font_size: 11,
             open_menu: None,
+            cursor: None,
+            hover: None,
+            pressed: None,
             sealed: false,
             zoom_percent: 100,
             caret_line: 0,
@@ -996,6 +1100,20 @@ pub const fn menu_width(m: &str) -> u32 {
 
 /// The gap between two heading boxes.
 pub const MENU_GAP: u32 = 2;
+
+/// `band`, unless it is zero, in which case it stays zero.
+///
+/// **A `const fn` of its own so the rule has one name.** There are four call sites and the rule is the
+/// whole of the correction above; a helper makes "which bands does this touch" a one-line question.
+const fn at_least_a_line(band: u32, cell_h: u32) -> u32 {
+    if band == 0 {
+        0
+    } else if band > cell_h {
+        band
+    } else {
+        cell_h
+    }
+}
 
 /// The chrome's text cell width.
 ///
@@ -1279,6 +1397,49 @@ impl Chrome {
 /// call sites and made "which of these four numbers is a signed coordinate" a question at each one.
 /// Clamping to zero also means a band that collapsed to nothing draws nothing instead of wrapping to
 /// four billion pixels.
+// ---------------------------------------------------------------- pointer state
+//
+// **Three functions, and they are the whole of the chrome's response to a pointer.** Every emitter
+// that draws a clickable thing asks them two questions and nothing else -- is this hovered, is this
+// pressed -- and the answers come from `ChromeState`, which the session wrote.
+//
+// **They are functions rather than a field on `Hit` because `Hit` has to stay `Copy` and hashable for
+// `hit()` to return it cheaply, and because a widget's look is a question about *state*, not a
+// property of what it is.** Nothing about `Hit::Tool(Tool::Bold)` says whether it is currently under
+// the pointer; that is a fact about the world.
+
+/// Whether `h` is what the pointer is over.
+#[inline]
+fn hovered(state: &ChromeState, h: crate::widgets::Hit) -> bool {
+    state.hover == Some(h)
+}
+
+/// Whether `h` is what is held down.
+///
+/// **Hover and press are different colours, and the difference is one step.** The reference dims a
+/// button while it is held, which is the only affordance that tells you the press was received before
+/// the release fires whatever it was going to fire.
+#[inline]
+fn pressed(state: &ChromeState, h: crate::widgets::Hit) -> bool {
+    state.pressed == Some(h)
+}
+
+/// The surface a widget's hover or press state is drawn on.
+///
+/// **One call site per emitter rather than a shared `push_state`**, because what is drawn underneath
+/// differs -- a toolbar button sits on the pill, a popup row sits on the popup, a menu heading sits on
+/// the panel -- and a helper that did not know that would have to take the background as an argument
+/// and then be wrong twice.
+fn state_fill(state: &ChromeState, h: crate::widgets::Hit) -> Option<u32> {
+    if pressed(state, h) {
+        Some(colour::PILL_ACTIVE)
+    } else if hovered(state, h) {
+        Some(colour::PILL_HOVER)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------- the new chrome bands
 //
 // **Four emitters, and they are the only place in the crate that knows the reference's layout.** Each
@@ -1321,6 +1482,9 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         };
         // **Share is a button with a label**, so it is drawn as one; the rest are the icon alone,
         // centred in their own box.
+        if let Some(c) = state_fill(state, crate::widgets::Hit::Title(btn)) {
+            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
+        }
         // **Share is the one button that is an icon *and* a label, and they are laid out left to right.**
         //
         // The first version centred the lock in the button and then drew "Share" at a fixed offset
@@ -1379,6 +1543,9 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     let (_, boxes) = menu_boxes(l);
     for (i, r) in boxes.iter().enumerate() {
         let open = state.open_menu == Some(i);
+        // **Open outranks hovered.** A heading whose menu is down is filled whether or not the pointer
+        // is on it, because it stays filled after the pointer leaves -- and a heading that lost its
+        // fill the moment the pointer left would tell the user the menu had closed.
         if open {
             into.push(fill(
                 r.x as i32,
@@ -1387,6 +1554,8 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 r.height,
                 colour::PILL,
             ));
+        } else if let Some(c) = state_fill(state, crate::widgets::Hit::Menu(i)) {
+            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
         }
         push_text(
             into,
@@ -1405,9 +1574,7 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
     // The popup, if one is open.
     if let Some(i) = state.open_menu {
-        if let Some(r) = boxes.get(i) {
-            paint_popup(into, m, l, r, MENUS[i]);
-        }
+        paint_popup(into, m, l, state, i);
     }
 }
 
@@ -1421,52 +1588,63 @@ fn paint_popup(
     into: &mut Vec<SurfaceTree>,
     m: &ChromeMetrics,
     l: &Layout,
-    anchor: &DamageRect,
-    _name: &str,
+    state: &ChromeState,
+    index: usize,
 ) {
-    let items = crate::menus::items_for(anchor_index(anchor, l));
+    // **The geometry comes from `widgets::popup`, not from here.** The first version computed the
+    // popup's width, height and row positions inline, from `menus::items_for`, and the hit test had
+    // nothing to test against -- which is the exact duplication `widgets.rs` exists to prevent, and
+    // this function was the other half of it. **One function, two consumers**, so a row that is drawn
+    // is a row that can be clicked, by construction.
+    // **A menu with no items draws nothing, and that is not an error.** `open_menu` is set from a
+    // heading index and every heading has items, so this arm is unreachable through the session -- but
+    // `popup` is `Option` because a *caller* could pass a bad index, and the answer to that is a
+    // silent no-op rather than a panic inside a paint.
+    let Some(pop) = crate::widgets::popup(l, index) else {
+        return;
+    };
+    let items = crate::menus::items_for(index);
     let pad = 2 * m.cell_w;
-    let label_w = items
-        .iter()
-        .map(|it| (it.label.len() as u32 + 2) * m.cell_w)
-        .max()
-        .unwrap_or(40)
-        .max(14 * m.cell_w);
-    let row_h = m.cell_h + 6;
-    let w = label_w + pad * 2;
-    let h = (items.len() as u32).saturating_mul(row_h) + pad;
-    let x = anchor.x as i32;
-    let y = (l.menubar.bottom()) as i32;
+    let x = pop.rect.x as i32;
+    let y = pop.rect.y as i32;
 
-    // **Clipped to the panel.** A popup near the right edge that ran off would be drawn into the
-    // scrollbar's pixels, and the renderer would have to notice and clip -- which is the shape of thing
-    // this chrome has spent part 18 cleaning up.
-    let x = x.min(l.width as i32 - w as i32).max(0);
-    let y = y.min(l.height as i32 - h as i32).max(0);
-
-    into.push(fill(x, y, w, h, colour::PILL));
+    into.push(fill(x, y, pop.rect.width, pop.rect.height, colour::POPUP));
+    // The rule under the heading, which is what makes a popup read as *belonging to* that heading
+    // rather than as a floating panel.
     into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
         x,
         y,
-        w,
+        pop.rect.width,
         1,
         colour::RULE,
     ))));
 
     for (i, it) in items.iter().enumerate() {
-        let ry = y + pad as i32 + (i as i32) * row_h as i32;
-        let cy = ry + (row_h / 2 - m.cell_h / 2) as i32;
+        let Some(row) = pop.rows.get(i) else { break };
+        // **Hover and press come from the session, not from a re-hit-test here.** The painter does not
+        // know where the pointer is -- it is told. A painter that re-derived the hit would be a second
+        // hit test, which is the thing that has just been removed.
+        if row_is_live(state, index, i) {
+            into.push(fill(
+                row.x as i32,
+                row.y as i32,
+                row.width,
+                row.height,
+                colour::PILL_ACTIVE,
+            ));
+        }
+        let cy = row.y + (row.height.saturating_sub(m.cell_h)) / 2;
         if let Some(icon) = it.icon {
             into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
                 x + pad as i32,
-                ry + 3,
+                row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
                 colour::INK_CHROME,
             ))));
         }
         push_text(
             into,
             m,
-            cy as u32,
+            cy,
             it.label,
             Style::MONOSPACE,
             colour::INK_CHROME,
@@ -1475,31 +1653,34 @@ fn paint_popup(
         // **The accelerator, right-aligned, because the reference puts it there** and a reader looking
         // for "Ctrl+K" looks at the right edge of the row.
         if let Some(acc) = it.accelerator {
-            push_text(
-                into,
-                m,
-                cy as u32,
-                acc,
-                Style::MONOSPACE,
-                colour::INK_DIM,
-                x + (w - pad - acc.len() as u32 * m.cell_w) as i32,
-            );
+            if !acc.is_empty() {
+                push_text(
+                    into,
+                    m,
+                    cy,
+                    acc,
+                    Style::MONOSPACE,
+                    colour::INK_DIM,
+                    x + (pop.rect.width - pad - acc.len() as u32 * m.cell_w) as i32,
+                );
+            }
         }
     }
 }
 
-/// Which heading `anchor` is, or `0`.
+/// Whether popup row `row` of `menu` is under the pointer or held down.
 ///
-/// **A linear search, and that is deliberate.** It is called once per paint, over eight boxes, and a
-/// binary search would need `anchor` to be sorted relative to something. The alternative -- threading
-/// the index down from the caller that already has it -- is a second signature carrying an index the
-/// caller could get wrong, which is a worse trade than eight comparisons.
-fn anchor_index(anchor: &DamageRect, l: &Layout) -> usize {
-    menu_boxes(l)
-        .1
-        .iter()
-        .position(|r| r.x == anchor.x)
-        .unwrap_or(0)
+/// **A comparison against the session's own `hover` and `pressed`, and nothing else.** The painter
+/// does not re-derive the hit: a painter that did would be a second hit test, which is precisely the
+/// duplication `widgets.rs` was written to remove. **Hover and press draw the same row** because the
+/// reference's highlighted menu item is the same surface either way -- and a menu you are holding open
+/// over a row does not look different from a menu you are pointing at.
+///
+/// The two are separate `Hit` values only so the session can clear `pressed` on a release that
+/// happened off the widget. **They render identically, which is why one function reads both.**
+fn row_is_live(state: &ChromeState, menu: usize, row: usize) -> bool {
+    let h = crate::widgets::Hit::MenuItem { menu, row };
+    state.hover == Some(h) || state.pressed == Some(h)
 }
 
 /// The toolbar: a pill, then one button per [`TOOLBAR`](crate::widgets::TOOLBAR) entry.
@@ -1542,6 +1723,19 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             ));
         }
         prev_separated = p.tool.separated();
+
+        // **Hover and press, drawn before the glyph.** The glyph goes on top of the state surface,
+        // which is the point of the state surface -- it is behind the thing it is a state of. Drawing
+        // it after would put a rectangle over the icon and make a hovered button look pressed-in.
+        if let Some(c) = state_fill(state, crate::widgets::Hit::Tool(p.tool)) {
+            into.push(fill(
+                p.rect.x as i32,
+                p.rect.y as i32,
+                p.rect.width,
+                p.rect.height,
+                c,
+            ));
+        }
 
         let cx = p.rect.x as i32;
         let cy = p.rect.y as i32;
@@ -1635,14 +1829,19 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             break;
         };
         let active = i == state.active_doc;
+        // **Active outranks hovered, for the same reason an open menu heading does.** The active row
+        // is filled whether or not the pointer is on it; hovering *another* row shows that it is
+        // there, which is the one piece of information a sidebar needs to offer.
         if active {
             into.push(fill(
                 r.x as i32,
                 r.y as i32,
                 r.width,
                 r.height,
-                colour::PILL,
+                colour::PILL_ACTIVE,
             ));
+        } else if let Some(c) = state_fill(state, crate::widgets::Hit::Doc(i)) {
+            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
         }
         into.push(SurfaceTree::leaf(crate::Node::Icon(
             crate::icons::IconId::Doc.at(
@@ -1678,17 +1877,6 @@ fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
 }
 
 /// A `TextRun` for one glyph at `x, y`.
-fn glyph(x: u32, y: u32, cp: u32, c: u32) -> SurfaceTree {
-    SurfaceTree::leaf(crate::Node::Text(TextRun::new(
-        x as i32,
-        y as i32,
-        cp,
-        1,
-        Style::MONOSPACE,
-        0,
-        c,
-    )))
-}
 
 /// A horizontal rule of `n` `─` glyphs starting at `x`, `y`.
 ///

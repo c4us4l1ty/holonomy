@@ -88,6 +88,13 @@ pub mod event {
     pub const CONFIGURE_NOTIFY: u8 = 22;
     /// PropertyNotify.
     pub const PROPERTY_NOTIFY: u8 = 28;
+    /// `MotionNotify`.
+    ///
+    /// **Added in part 20, and the constant rather than the literal `6`** that the size table two
+    /// hundred lines below still uses. A bare `6` with a comment is a magic number waiting for the
+    /// next reader to wonder about, and the table's own comment says the previous version of this
+    /// file asserted the documentation and not the wire -- so the numbers here are named.
+    pub const MOTION_NOTIFY: u8 = 6;
     /// ClientMessage.
     pub const CLIENT_MESSAGE: u8 = 33;
     /// Any event with this bit set was sent by a client with `SendEvent`, not by the server.
@@ -106,6 +113,13 @@ pub mod mask {
     pub const BUTTON_RELEASE: u32 = 0x0000_0008;
     /// ExposureMask. Without it the window arrives blank and nothing ever asks for a repaint.
     pub const EXPOSURE: u32 = 0x0000_8000;
+    /// `PointerMotionMask`.
+    ///
+    /// **Without it a windowed session has no pointer at all.** `ButtonPress` alone gives you clicks
+    /// and no movement, which is enough to press a button and not enough to know you are over one --
+    /// so hover, drag and "release outside the thing you pressed" would all be unavailable while
+    /// looking implemented.
+    pub const POINTER_MOTION: u32 = 0x0000_0040;
     /// StructureNotifyMask. `ConfigureNotify` is how a resize is discovered.
     pub const STRUCTURE_NOTIFY: u32 = 0x0002_0000;
     /// FocusChangeMask.
@@ -561,9 +575,26 @@ pub enum Event {
         event_y: i16,
     },
     /// A button came up.
+    ///
+    /// **The position is here, and it used to be discarded.** The decoder read `event_x` and
+    /// `event_y` and threw them away, because there was nothing to give them to. Now there is: a
+    /// release has to be routed, and **routing a release without a position means either sending it
+    /// to the same place as the press -- wrong, if the pointer moved -- or not sending it at all,
+    /// which leaves a button stuck down.** The bytes were in the packet the whole time.
     ButtonRelease {
         /// The button number.
         button: u8,
+        /// X within the event window.
+        event_x: i16,
+        /// Y within the event window.
+        event_y: i16,
+    },
+    /// The pointer moved.
+    MotionNotify {
+        /// X within the event window.
+        event_x: i16,
+        /// Y within the event window.
+        event_y: i16,
     },
     /// A region of the window needs repainting, in window coordinates.
     Expose {
@@ -672,10 +703,25 @@ impl Event {
                 let _time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
-                let _event_x = r.i16();
-                let _event_y = r.i16();
+                let event_x = r.i16();
+                let event_y = r.i16();
                 let _state = r.u16();
-                Self::ButtonRelease { button }
+                Self::ButtonRelease {
+                    button,
+                    event_x,
+                    event_y,
+                }
+            }
+            event::MOTION_NOTIFY => {
+                // The same 28-byte layout as a button press: 1 code, 1 unused, 2 sequence, 2 x,
+                // 2 y, then whatever. **Only `x` and `y` are read**, because the only consumer of a
+                // motion event is the hit test and it wants a position -- and reading more than the
+                // consumer needs is how a protocol layer starts making decisions.
+                let _unused = r.u8();
+                let _sequence = r.u16();
+                let event_x = r.i16();
+                let event_y = r.i16();
+                Self::MotionNotify { event_x, event_y }
             }
             // 1 code, 1 unused, 2 sequence, 2 x, 2 y, 2 width, 2 height, 2 count, 13 unused.
             event::EXPOSE => {
@@ -907,7 +953,7 @@ mod tests {
             event::KEY_RELEASE,
             event::BUTTON_PRESS,
             event::BUTTON_RELEASE,
-            6, // MotionNotify
+            event::MOTION_NOTIFY,
             event::EXPOSE,
             event::CLIENT_MESSAGE,
             event::CONFIGURE_NOTIFY,

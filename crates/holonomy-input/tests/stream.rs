@@ -30,9 +30,16 @@ fn run(src: &mut dyn InputSource) -> Vec<Command> {
     let km = Keymap::us();
     let mut mods = ModifierState::new();
     let mut out = Vec::new();
+    // **Keys only, and the `if let` is the whole of the change.** Part 20 made `next_event` return
+    // `Event`, which is keys *and* pointer, so a stream of either can arrive here. The keymap takes
+    // an `InputEvent` and there is no defensible way to hand it a `Button`, so the filter is here --
+    // **in the one place whose entire job is to turn events into commands**, rather than pushed back
+    // down into the contract so that every caller in the workspace repeats it.
     while let Some(ev) = src.next_event().expect("scripted stream never errors") {
-        if let Some(cmd) = km.dispatch_into(ev, &mut mods) {
-            out.push(cmd);
+        if let holonomy_input::Event::Key(key) = ev {
+            if let Some(cmd) = km.dispatch_into(key, &mut mods) {
+                out.push(cmd);
+            }
         }
     }
     out

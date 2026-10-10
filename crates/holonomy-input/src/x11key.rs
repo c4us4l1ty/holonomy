@@ -54,6 +54,9 @@ pub const fn keycode_for(evdev: u16) -> Option<u8> {
     }
 }
 
+/// `BTN_LEFT`, for the arithmetic in [`x_button`].
+const BTN_LEFT: u16 = crate::pointer::BTN_LEFT;
+
 /// The key event an X event carries, or `None` if it carries no key.
 ///
 /// A `KeyPress` becomes a press, a `KeyRelease` a release. Everything else -- exposure, focus, the
@@ -70,6 +73,71 @@ pub fn key_event(event: &Event) -> Option<InputEvent> {
         code: evdev_code(code)?,
         value,
     })
+}
+
+/// The pointer event an X event carries, or `None` if it carries no pointer.
+///
+/// # Why this is a separate function and not a second arm of `key_event`
+///
+/// **`key_event` returns an [`InputEvent`](crate::InputEvent), which cannot express a position.**
+/// Bolt one into it and it stops being "the key event" while still being called that, and the next
+/// caller reaches for it on a `MotionNotify` and gets a `None` they have to explain. Two functions,
+/// each total, each returning one kind of thing.
+///
+/// # The button numbering, which is the trap
+///
+/// **X numbers buttons from 1; evdev numbers them from `0x110`.** Mapping `1 -> BTN_LEFT` is not a
+/// cast, it is a decision, and getting it wrong means the right button does the left thing --
+/// silently, because both are "a button".
+///
+/// **Buttons 4 and 5 are the wheel**, not buttons, on every X mouse. A pointer event for a wheel
+/// notch has to say so, or a scroll would arrive as a click at a fixed position.
+pub fn pointer_event(event: &Event) -> Option<crate::pointer::Event> {
+    use crate::pointer::Event as P;
+    match event {
+        Event::MotionNotify { event_x, event_y } => Some(P::Motion {
+            x: *event_x as i32,
+            y: *event_y as i32,
+        }),
+        Event::ButtonPress {
+            button,
+            event_x,
+            event_y,
+        } => {
+            let (x, y) = (*event_x as i32, *event_y as i32);
+            match button {
+                4 => Some(P::Wheel { dy: 1, x, y }),
+                5 => Some(P::Wheel { dy: -1, x, y }),
+                b => Some(P::Button {
+                    button: x_button(*b),
+                    pressed: true,
+                    x,
+                    y,
+                }),
+            }
+        }
+        Event::ButtonRelease {
+            button,
+            event_x,
+            event_y,
+        } => Some(P::Button {
+            button: x_button(*button),
+            pressed: false,
+            x: *event_x as i32,
+            y: *event_y as i32,
+        }),
+        _ => None,
+    }
+}
+
+/// X's button number as an evdev button.
+///
+/// **X's 1 is evdev's `BTN_LEFT`, and the offset is 0x110 - 1.** Written as arithmetic rather than a
+/// table so a fourth and fifth X button map to `BTN_SIDE` and `BTN_EXTRA` without a new arm, and so
+/// the gate can assert the arithmetic rather than a list.
+fn x_button(button: u8) -> crate::pointer::Button {
+    let code = BTN_LEFT + (button.saturating_sub(1) as u16);
+    crate::pointer::Button::from_code(code).unwrap_or(crate::pointer::Button::Other(code))
 }
 
 #[cfg(test)]

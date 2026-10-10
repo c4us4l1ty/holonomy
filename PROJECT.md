@@ -2502,6 +2502,106 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 20 — the pointer: the contract that said the mouse did not exist
+
+**Part 19's readiness note measured this and called it a blocker. The blocker was a sentence in a
+trait's doc comment.** `InputSource::next_event` returned `InputEvent` and dropped every non-`EV_KEY`
+record *by contract*:
+
+> `EV_SYN` and every non-`EV_KEY` record are consumed and skipped internally, so a caller never sees
+> one and cannot forget to filter them.
+
+That is a well-written sentence about a keyboard input layer. It was the wrong contract for an editor
+with a toolbar. **`EV_REL` is defined in the same file, in the same vocabulary, and `EV_REL` is
+motion** — the mouse existed the whole time and the crate was discarding it. A caller could not "forget
+to filter" a pointer event, because a caller could not obtain one.
+
+**The replacement is not "stop filtering".** The filtering moved to where the information to filter by
+exists:
+
+* `pointer::Record` — one decoded 24-byte record, no coalescing. Pure parsing.
+* `pointer::Event` — what a whole `EV_SYN` frame accumulates to. `Key`, `Motion`, `Button`, `Wheel`.
+* `decode` is **unchanged**, and must stay unchanged: three gates and the whole keymap are stated
+  against "returns `EV_KEY` and nothing else", and one of them asserts that a `BTN_LEFT` record decodes
+  to a *key* — which is true, and is exactly the confusion `decode_record` exists to resolve.
+
+**One rule governs the join, and it is a rule about a collision between two requirements:**
+
+> **Motion accumulates to the frame boundary; everything else is emitted as it arrives.**
+
+* Motion must coalesce, because a mouse's `REL_X` and `REL_Y` are one movement and emitting per record
+  makes a diagonal drag a staircase.
+* Keys must *not* coalesce, because `ScriptedInputSource::from_events_bare` writes no `EV_SYN` at all
+  and there is a gate asserting it produces the same commands as the spaced version. A per-frame
+  coalescer would take five bare keystrokes and emit one.
+
+Buttons are the exception in timing only: emitted immediately, carrying the position accumulated so
+far — correct because evdev orders a frame motion-then-button.
+
+**Four defects, and three of them were found by gates whose fixtures were themselves wrong first.**
+
+**1. The click carried the position from *before* the frame.** The decoder accumulated `REL_X` into a
+frame buffer and applied it at `EV_SYN`, so a `BTN_LEFT` in the same frame saw `(0, 0)` when the
+pointer was at `(40, 20)` — **a caret placed 40 pixels left of where the user clicked.** The gate's
+fixture was wrong first (it put an `EV_SYN` after *every* record, so a diagonal was two frames and the
+decoder was right to emit two motions), and fixing the fixture exposed the real bug underneath.
+
+**2. `Frame::fold` set `moved = true` unconditionally**, so a frame carrying only `REL_HWHEEL` reported
+movement with `dx == dy == wheel == 0` and emitted `Event::Motion` at the current position. **The
+comment said a horizontal notch produces nothing and the code produced a no-op that looked like
+motion.** `a_horizontal_wheel_notch_is_dropped_not_faked` is the gate, and a comment disagreeing with
+the code is the exact thing it exists to catch.
+
+**3. `with_line_pitch` resurrected the tab band part 19 deliberately removed.** It did
+`self.tab_h = self.tab_h.max(cell_h)`, and `.max()` cannot tell "too small" from "switched off" — the
+difference is only visible at zero. Every real session grew a 25 px empty strip between the menu bar
+and the toolbar. **It surfaced as a click landing on the wrong row of the page**, which is a
+frighteningly indirect symptom of a layout default.
+
+**4. `Session::line_start(at)` takes a byte offset, and the click path passed it a line index.** It
+silently returned the start of line 0 for every line below the first, so every click on row *n* landed
+on row 0. **The gate's fixture is a three-line document specifically because a one-line document
+cannot tell the two apart** — and the sibling test is a line of `éa` because ASCII cannot tell a byte
+walk from a character walk.
+
+**And the design, which is the part that matters.** `widgets.rs` from part 19 said hit testing is the
+one piece of UI logic that fails *invisibly*. This part is the proof:
+
+* `widgets::TOOLBAR` is a `const`. `hit` answers with an entry in it. **A widget that is drawn is a
+  widget that can be clicked, by construction.**
+* `widgets::popup(l, index)` is the *only* place a popup's geometry is computed, and both the painter
+  and the hit test call it. Part 19's first `paint_popup` computed its own — the exact duplication the
+  file was written to prevent, sitting in the same module.
+* `widgets::hit_rect` is the inverse of `hit`, and it exists because a hover highlight has to be
+  invalidated when the pointer leaves. Without it the only way to invalidate a button is to repaint the
+  panel: **1,024,000 pixels per mouse event at 125 Hz.**
+* `Layout` grew `cell_w`, `cell_h` and `button` so `hit` needs no metrics — three copied `u32`s on a
+  `Copy` struct, against threading a second argument through eight gates and every caller.
+
+**The grab, and why a gate had to be written for it.** While a menu is open it swallows everything that
+is not one of its rows. The `Insert` popup hangs over the toolbar's left buttons; without the grab, a
+click there would dismiss the menu *and* press Undo. **It is invisible in every gate that only ever
+clicks the popup itself**, which is all of them until this one.
+
+**What is not wired, and is counted rather than hidden.** `SessionStats` has four new counters, and the
+reason there are four is that "clicks" is not a useful number: twenty-one toolbar buttons in front of
+a document model with no bold, no colour and no font size is a lot of buttons that draw, hover,
+press and do nothing, and a single counter would make that indistinguishable from a broken routing
+path. **`pointer_inert` is the honest number for this build and it is large.** Three tools fire —
+Undo, Redo, Image — and `Collapse` toggles the sidebar. Every other button is `None` from
+`tool_command`, and the gate that counts them says so in a number.
+
+`menu_command` matches on the item's *label*, and that is the acknowledged weakness: renaming "Undo" to
+"Revert" silently makes it inert. The right fix is a command id on `menus::Item` that the session
+interprets and the renderer passes through, and it is the next thing to do.
+
+**Also not done:** the three dropdowns the reference has where `Zoom`, `Style` and `Font` sit; submenus;
+and drag. And one recorded finding rather than a fix — **`Session::caret_column` is a byte count, not
+a character count**, so a caret after a two-byte `é` is drawn one cell too far right. That is
+pre-existing and affects every keystroke, not just clicks; `clicking_a_column_puts_the_caret_after_
+that_character` asserts the byte offset, which is the part that is about the click, and says why it
+does not assert the column.
+
 #### Phase 14, part 19 — the chrome, built from the reference in `Plan/`
 
 **`Plan/` holds sixteen screenshots of the reference editor and the note that built it.** The screenshots

@@ -7,6 +7,18 @@
 //! go through [`RecordDecoder`], and [`crate::ScriptedInputSource`] is a [`InputSource`] that simply
 //! hands its bytes to the same decoder.
 //!
+//! # Frames, not records: `next_event` returns an [`Event`]
+//!
+//! `next_event` used to return an `InputEvent` and drop every non-`EV_KEY` record by contract. That
+//! contract is gone, because `EV_REL` is motion and **a mouse exists**; see the
+//! [`pointer`](crate::pointer) module for what replaced it and what it costs.
+//!
+//! **The decoder here is where the coalescing happens**, and its rule is one sentence: **motion
+//! accumulates until the kernel says the frame is over, and everything else is emitted as it
+//! arrives.** Keys are emitted per record rather than per frame on purpose — a per-frame coalescer
+//! would take five bare keystrokes and emit one, and there is a gate asserting that a fixture written
+//! without `EV_SYN` produces the same commands as one written with them.
+//!
 //! # Partial reads are real
 //!
 //! `read` on an evdev node returns whole records, but nothing in the interface promises it will, and
@@ -17,7 +29,8 @@
 //!
 //! [`InputSource`]: crate::InputSource
 
-use crate::event::{decode, InputEvent, RECORD_BYTES};
+use crate::event::{InputEvent, RECORD_BYTES};
+use crate::pointer::{decode_record, Event, Frame, Pointer, Record};
 
 /// Why a source could not produce an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +78,25 @@ pub fn errno_name(e: i32) -> &'static str {
 
 /// Somewhere events come from.
 pub trait InputSource {
-    /// The next key event, or `None` when the source has nothing and never will.
+    /// The next event, or `None` when the source has nothing and never will.
     ///
-    /// `EV_SYN` and every non-`EV_KEY` record are consumed and skipped internally, so a caller never
-    /// sees one and cannot forget to filter them. `None` means a *closed* stream; a device that went
-    /// away is [`InputError::Read`] with `ENODEV`.
-    fn next_event(&mut self) -> Result<Option<InputEvent>, InputError>;
+    /// # What this returns, and why it changed
+    ///
+    /// **It used to return [`InputEvent`] and drop every non-`EV_KEY` record by contract**, on the
+    /// reasoning that a caller "cannot forget to filter" a record it never sees. That reasoning is
+    /// sound for a keyboard and wrong for an editor: `EV_REL` is defined in the same file, in the same
+    /// vocabulary, and **is the mouse**. A contract that makes the mouse unreachable is not a
+    /// convenience.
+    ///
+    /// So it returns [`Event`], which is keys *and* motion *and* buttons *and* the wheel. **The
+    /// filtering did not disappear — it moved**, to the place where the information to filter by
+    /// exists: `decode_record` turns a keyboard code into `Record::Key` and a `BTN_LEFT` into
+    /// `Record::Button`, so `Record::Noise` really is only noise, and a caller that is handed an
+    /// `Event` has been handed something it can act on.
+    ///
+    /// `None` means a *closed* stream; a device that went away is [`InputError::Read`] with
+    /// `ENODEV`.
+    fn next_event(&mut self) -> Result<Option<Event>, InputError>;
 
     /// A name for the status bar and for logs.
     fn describe(&self) -> &'static str;
@@ -86,6 +112,10 @@ pub struct RecordDecoder {
     buf: Vec<u8>,
     /// Where the next complete record starts.
     cursor: usize,
+    /// Where the pointer is, accumulated out of `REL_X`/`REL_Y`.
+    pointer: Pointer,
+    /// Motion since the last frame boundary.
+    frame: Frame,
 }
 
 impl Default for RecordDecoder {
@@ -103,6 +133,8 @@ impl RecordDecoder {
         Self {
             buf: Vec::with_capacity(RECORDS_PER_READ * RECORD_BYTES),
             cursor: 0,
+            pointer: Pointer::new(),
+            frame: Frame::default(),
         }
     }
 
@@ -128,18 +160,101 @@ impl RecordDecoder {
         self.buf.extend_from_slice(bytes);
     }
 
-    /// The next `EV_KEY` record, skipping `EV_SYN` and everything else.
-    pub fn next_event(&mut self) -> Option<InputEvent> {
+    /// The next event, coalescing motion to the frame boundary.
+    ///
+    /// # The order, and why it is that order
+    ///
+    /// Records are scanned in order, and the first one that *is* an event is returned:
+    ///
+    /// 1. **A key.** Emitted immediately. Never held for the frame, because a per-frame rule would
+    ///    drop keystrokes from a stream with no `EV_SYN` in it.
+    /// 2. **A button.** Emitted immediately, carrying the position accumulated so far. Correct
+    ///    because evdev orders a frame as motion-then-button, so the movement that preceded the click
+    ///    is already in the position.
+    /// 3. **An `EV_SYN`.** The boundary. If motion accumulated and nothing else was emitted in this
+    ///    frame, it becomes a [`Event::Motion`] or a [`Event::Wheel`].
+    /// 4. **Anything else.** Skipped, which is what `Record::Noise` is for.
+    ///
+    /// **A frame with both motion and a button yields two events**, the button first and the motion
+    /// second. That is not a tidy story but it is a true one: they are two things that happened, and
+    /// a session that applies them in order ends in the right place either way.
+    pub fn next_event(&mut self) -> Option<Event> {
         loop {
             if self.buf.len() - self.cursor < RECORD_BYTES {
                 return None;
             }
             let record = &self.buf[self.cursor..self.cursor + RECORD_BYTES];
             self.cursor += RECORD_BYTES;
-            if let Some(ev) = decode(record) {
-                return Some(ev);
+            let mut bytes = [0u8; RECORD_BYTES];
+            bytes.copy_from_slice(record);
+            match decode_record(&bytes) {
+                Record::Key(ev) => return Some(Event::Key(ev)),
+                Record::Button { button, pressed } => {
+                    self.pointer.press(button, pressed);
+                    return Some(Event::Button {
+                        button,
+                        pressed,
+                        x: self.pointer.x,
+                        y: self.pointer.y,
+                    });
+                }
+                Record::Motion { axis, delta } => {
+                    // **The position moves here, on the record, and not at the frame boundary.**
+                    //
+                    // The first version accumulated the delta into `frame` and added it to
+                    // `pointer.x` when it saw `EV_SYN` -- which meant a `BTN_LEFT` in the same frame
+                    // saw the position from *before* the frame. `a_click_carries_the_movement_that_
+                    // preceded_it` caught it: the click was at (0, 0) when the pointer was at
+                    // (40, 20), so a caret placed from a click would have landed 40 pixels left of
+                    // where the user clicked.
+                    //
+                    // **Applying it per record makes the boundary do nothing but report.** The
+                    // boundary's only remaining job is to decide *whether there was any motion* --
+                    // because a frame that folded nothing should emit nothing, which is the
+                    // horizontal-wheel rule -- and to clear the accumulator.
+                    self.frame.fold(axis, delta);
+                    match axis {
+                        crate::pointer::REL_X => {
+                            self.pointer.x = self.pointer.x.saturating_add(delta).max(0)
+                        }
+                        crate::pointer::REL_Y => {
+                            self.pointer.y = self.pointer.y.saturating_add(delta).max(0)
+                        }
+                        _ => {}
+                    }
+                }
+                Record::Noise if axis_is_syn(&bytes) => {
+                    let frame = self.frame;
+                    self.frame = Frame::default();
+                    if !frame.moved {
+                        continue;
+                    }
+                    // **Nothing to apply: the records already moved the pointer.** See the arm above.
+                    if frame.wheel != 0 {
+                        return Some(Event::Wheel {
+                            dy: frame.wheel,
+                            x: self.pointer.x,
+                            y: self.pointer.y,
+                        });
+                    }
+                    return Some(Event::Motion {
+                        x: self.pointer.x,
+                        y: self.pointer.y,
+                    });
+                }
+                Record::Noise => continue,
             }
         }
+    }
+
+    /// Where the pointer is, as this decoder has accumulated it.
+    ///
+    /// **Exposed so a source can carry the position across `next_event` calls** — which is what a
+    /// scripted fixture of `REL_X` records needs in order to produce the same absolute positions a
+    /// device would. A caller that cannot ask where the pointer is has no way to answer "and where
+    /// was it when the button went down", and that question is the whole of hit testing.
+    pub const fn pointer(&self) -> Pointer {
+        self.pointer
     }
 
     /// Bytes held that do not yet form a record.
@@ -215,7 +330,7 @@ impl ScriptedInputSource {
 }
 
 impl InputSource for ScriptedInputSource {
-    fn next_event(&mut self) -> Result<Option<InputEvent>, InputError> {
+    fn next_event(&mut self) -> Result<Option<Event>, InputError> {
         match self.decoder.next_event() {
             Some(ev) => Ok(Some(ev)),
             // `pending() != 0` here means the fixture is truncated mid-record, which is a fixture bug
@@ -248,7 +363,7 @@ mod tests {
     fn a_record_decodes() {
         let mut d = RecordDecoder::new();
         d.push(&encode(InputEvent::press(30)));
-        assert_eq!(d.next_event(), Some(InputEvent::press(30)));
+        assert_eq!(d.next_event(), Some(Event::Key(InputEvent::press(30))));
         assert_eq!(d.next_event(), None);
     }
 
@@ -260,8 +375,8 @@ mod tests {
         bytes.extend_from_slice(&encode(InputEvent::release(30)));
         bytes.extend_from_slice(&encode(syn_report()));
         let mut d = RecordDecoder::from_bytes(&bytes);
-        assert_eq!(d.next_event(), Some(InputEvent::press(30)));
-        assert_eq!(d.next_event(), Some(InputEvent::release(30)));
+        assert_eq!(d.next_event(), Some(Event::Key(InputEvent::press(30))));
+        assert_eq!(d.next_event(), Some(Event::Key(InputEvent::release(30))));
         assert_eq!(d.next_event(), None);
     }
 
@@ -275,7 +390,7 @@ mod tests {
         assert_eq!(d.pending(), RECORD_BYTES - 1);
 
         d.push(&full[RECORD_BYTES - 1..]);
-        assert_eq!(d.next_event(), Some(InputEvent::press(30)));
+        assert_eq!(d.next_event(), Some(Event::Key(InputEvent::press(30))));
         assert_eq!(d.pending(), 0);
     }
 
@@ -289,7 +404,7 @@ mod tests {
                 assert_eq!(d.next_event(), None, "after {i} bytes");
             }
         }
-        assert_eq!(d.next_event(), Some(InputEvent::press(30)));
+        assert_eq!(d.next_event(), Some(Event::Key(InputEvent::press(30))));
     }
 
     #[test]
@@ -313,12 +428,21 @@ mod tests {
     #[test]
     fn the_scripted_source_ends_cleanly() {
         let evs = press_seq(&[30, 31, 32]);
+        // **`Event::Key` wrapped, because part 20 widened what `next_event` returns.** The comparison
+        // is still *the same assertion* -- three keys in, three events out, in order -- which is the
+        // property this gate has always been about. What changed is the wrapper, and that a
+        // contract change should be a mechanical edit in a test whose subject is something else.
+        let want: Vec<crate::pointer::Event> = evs
+            .iter()
+            .copied()
+            .map(crate::pointer::Event::Key)
+            .collect();
         let mut src = ScriptedInputSource::from_events(&evs);
         let mut got = Vec::new();
         while let Some(ev) = src.next_event().expect("no error") {
             got.push(ev);
         }
-        assert_eq!(got, evs);
+        assert_eq!(got, want);
         assert!(src.is_drained());
         // And it stays ended.
         assert_eq!(src.next_event().expect("no error"), None);
@@ -339,8 +463,16 @@ mod tests {
         while let Some(ev) = bare.next_event().expect("no error") {
             b.push(ev);
         }
-        assert_eq!(a, evs);
-        assert_eq!(b, evs);
+        // **This is the gate that forbids a per-frame coalescer**, and it is the reason the decoder
+        // emits keys per record rather than per frame. `from_events_bare` writes no `EV_SYN` at all,
+        // so a coalescer keyed on the boundary would take these three keystrokes and return one.
+        let want: Vec<crate::pointer::Event> = evs
+            .iter()
+            .copied()
+            .map(crate::pointer::Event::Key)
+            .collect();
+        assert_eq!(a, want);
+        assert_eq!(b, want);
         assert_eq!(a, b, "the EV_SYN filter changed the stream");
     }
 
@@ -365,7 +497,7 @@ mod tests {
         let mut src = ScriptedInputSource::new(&bytes);
         assert_eq!(
             src.next_event().expect("no error"),
-            Some(InputEvent::press(30))
+            Some(Event::Key(InputEvent::press(30)))
         );
         assert_eq!(src.next_event().expect("no error"), None);
     }
@@ -402,4 +534,14 @@ mod tests {
         assert_eq!(errno_name(4), "EINTR");
         assert_eq!(errno_name(9999), "?");
     }
+}
+
+/// Whether a 24-byte record is an `EV_SYN` frame boundary.
+///
+/// **Read from the bytes rather than from a decoded `Record`, because `decode_record` collapses
+/// `EV_SYN` into [`Record::Noise`]** along with `EV_MSC` and everything else -- and the boundary is
+/// the one piece of "noise" the decoder absolutely cannot ignore. Keeping the check here, against
+/// the raw record, is what makes it possible to see.
+fn axis_is_syn(bytes: &[u8]) -> bool {
+    u16::from_le_bytes([bytes[16], bytes[17]]) == crate::event::EV_SYN
 }

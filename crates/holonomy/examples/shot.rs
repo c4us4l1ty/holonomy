@@ -48,6 +48,34 @@ fn main() {
     if std::env::args().any(|a| a == "--menu") {
         s.state.open_menu = Some(3); // Insert, which is the screenshot with the menu down.
     }
+    // `--hover=NAME` and `--press=NAME` put the pointer on a toolbar tool, so a screenshot can show
+    // the two state surfaces. **The name is resolved through `place_toolbar`** -- the same list the
+    // hit test reads -- so the screenshot cannot show a widget the pointer could not reach.
+    for arg in std::env::args().skip(1) {
+        let Some((flag, want)) = arg.split_once('=') else {
+            continue;
+        };
+        if !matches!(flag, "--hover" | "--press") {
+            continue;
+        }
+        let layout = s.chrome_layout();
+        let Some(tool) = holonomy_render::widgets::place_toolbar(&layout, 8)
+            .into_iter()
+            .find(|p| p.tool.name() == want)
+            .map(|p| p.tool)
+        else {
+            eprintln!("no tool named {want:?}; try one of:");
+            for p in holonomy_render::widgets::place_toolbar(&layout, 8) {
+                eprintln!("  {}", p.tool.name());
+            }
+            continue;
+        };
+        let hit = holonomy_render::widgets::Hit::Tool(tool);
+        s.state.hover = Some(hit);
+        if flag == "--press" {
+            s.state.pressed = Some(hit);
+        }
+    }
     s.repaint_all().expect("paint");
     let f = s.frame();
     let (w, h) = (f.width(), f.height());

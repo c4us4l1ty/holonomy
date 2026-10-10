@@ -250,6 +250,7 @@ impl Window {
             | mask::KEY_RELEASE
             | mask::BUTTON_PRESS
             | mask::BUTTON_RELEASE
+            | mask::POINTER_MOTION
             | mask::EXPOSURE
             | mask::STRUCTURE_NOTIFY
             | mask::FOCUS_CHANGE
@@ -1006,5 +1007,10 @@ mod tests {
         assert_ne!(m & mask::KEY_RELEASE, 0, "KeyReleaseMask");
         assert_ne!(m & mask::STRUCTURE_NOTIFY, 0, "StructureNotifyMask");
         assert_ne!(m & mask::BUTTON_PRESS, 0, "ButtonPressMask");
+        assert_ne!(
+            m & mask::POINTER_MOTION,
+            0,
+            "PointerMotionMask: without it there is no pointer, only clicks"
+        );
     }
 }

@@ -465,12 +465,7 @@ impl Manifest {
     /// measured `section_rebuilds / section_updates` ratio in `tests/session_manifest.rs` is what would show
     /// a regression here, and the gate asserts `a_newline_rebuilds_the_manifest_and_a_letter_does_not`
     /// because a *letter* rebuilding would mean the cheap path had stopped working.
-    pub fn sync(
-        &mut self,
-        editor: &Editor,
-        caret: u32,
-        scratch: &mut Vec<u8>,
-    ) -> Sync {
+    pub fn sync(&mut self, editor: &Editor, caret: u32, scratch: &mut Vec<u8>) -> Sync {
         if editor.text_len() != self.total_bytes() {
             // **The section count can have changed, and that is the only thing a length disagreement
             // means.** The last section absorbs every byte after the last cut, so a document that grows past
@@ -722,9 +717,7 @@ fn starts_marker(bytes: &[u8], at: usize) -> bool {
 /// One byte of the fallback: take a marker if one starts here, advance `i`.
 fn step(bytes: &[u8], i: &mut usize, spans: &mut u32) {
     let b = bytes[*i];
-    if b == ANCHOR[0]
-        && *i + ANCHOR.len() <= bytes.len()
-        && bytes[*i..*i + ANCHOR.len()] == ANCHOR
+    if b == ANCHOR[0] && *i + ANCHOR.len() <= bytes.len() && bytes[*i..*i + ANCHOR.len()] == ANCHOR
     {
         *spans += 1;
         *i += ANCHOR.len();
@@ -767,7 +760,6 @@ const HIGHS: u64 = 0x8080_8080_8080_8080;
 fn has_zero(x: u64) -> u64 {
     x.wrapping_sub(LANES) & !x & HIGHS
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1024,7 +1016,11 @@ mod tests {
             "a byte appended at the end belongs to the last section: one section's length changed and \
              nothing else did"
         );
-        assert_eq!(d.total_bytes(), e.text_len(), "and the manifest now agrees about the length");
+        assert_eq!(
+            d.total_bytes(),
+            e.text_len(),
+            "and the manifest now agrees about the length"
+        );
 
         // A letter in the middle of a line is also a one-section update, and does not move a boundary.
         e.insert_at(8, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
@@ -1143,11 +1139,19 @@ mod tests {
         let mut at = 0u32;
         for i in 0..d.len() as u32 {
             let s = d.section(i).expect("section");
-            assert_eq!(s.start, at, "step {step}: section {i} starts at {at}, not {}", s.start);
+            assert_eq!(
+                s.start, at,
+                "step {step}: section {i} starts at {at}, not {}",
+                s.start
+            );
             assert!(s.end > s.start, "step {step}: section {i} is empty");
             at = s.end;
         }
-        assert_eq!(at as usize, text.len(), "step {step}: sections cover the document");
+        assert_eq!(
+            at as usize,
+            text.len(),
+            "step {step}: sections cover the document"
+        );
     }
 }
 
@@ -1197,21 +1201,35 @@ mod word_at_a_time_tests {
             for marker in markers {
                 let mut v = vec![b'.'; FILL];
                 v[pos..pos + marker.len()].copy_from_slice(marker);
-                assert_eq!(super::measure(&v), reference(&v), "marker {marker:?} at {pos}");
+                assert_eq!(
+                    super::measure(&v),
+                    reference(&v),
+                    "marker {marker:?} at {pos}"
+                );
             }
         }
 
         // A document that is nothing but markers, at every length up to two words plus a tail.
         for len in 0..40usize {
-            let v: Vec<u8> = (0..len).map(|i| if i % 2 == 0 { b'$' } else { b'.' }).collect();
-            assert_eq!(super::measure(&v), reference(&v), "alternating, length {len}");
+            let v: Vec<u8> = (0..len)
+                .map(|i| if i % 2 == 0 { b'$' } else { b'.' })
+                .collect();
+            assert_eq!(
+                super::measure(&v),
+                reference(&v),
+                "alternating, length {len}"
+            );
         }
 
         // And a real anchor sequence ending exactly at the buffer's end, which is the case the
         // eight-bytes-short loop exists for.
         let mut v = vec![b'.'; 30];
         v.extend_from_slice(&super::ANCHOR);
-        assert_eq!(super::measure(&v), reference(&v), "an anchor as the last three bytes");
+        assert_eq!(
+            super::measure(&v),
+            reference(&v),
+            "an anchor as the last three bytes"
+        );
 
         // And realistic prose, because the byte loop is only correct for markers the *whole* document
         // contains, and the tests above each have exactly one.

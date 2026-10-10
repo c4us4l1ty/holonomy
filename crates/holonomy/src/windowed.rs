@@ -192,10 +192,39 @@ pub fn run(
                     // A click is a request for the keyboard, and a window manager is entitled to take
                     // the focus back at any time -- measured on GNOME, which answers `SetInputFocus` and
                     // then sends `FocusOut`.
+                    //
+                    // **The press is handled as well as focused, and in this order.** The first version
+                    // matched `ButtonPress` and only took the focus, so every click in a window was a
+                    // click that did nothing: the driver had the event, the session had the routing,
+                    // and the arm that matched the event chose neither. **Focus first** because a
+                    // window manager's `FocusOut` round trip must not delay the click's own paint --
+                    // but handle it in the same arm, because an arm that *matches* an event and then
+                    // declines to act on it is the shape of this bug.
                     holonomy_x11::Event::ButtonPress { .. } => {
                         window_of(&mut session)?
                             .focus()
                             .map_err(WindowedError::Desktop)?;
+                        let Some(p) = x11key::pointer_event(&ev) else {
+                            continue;
+                        };
+                        session
+                            .handle_pointer(&mut crate::store::NoSource, p)
+                            .map_err(WindowedError::Session)?;
+                    }
+                    // Motion, release and the wheel: routed, never focused on, never interpreted here.
+                    //
+                    // **`x11key::pointer_event` is the only place X's button numbering and X's
+                    // "buttons 4 and 5 are the wheel" convention are translated.** The driver sees a
+                    // `PointerEvent` or `None` and knows nothing about either convention, which is what
+                    // makes it the same code the scripted path runs.
+                    ev @ (holonomy_x11::Event::ButtonRelease { .. }
+                    | holonomy_x11::Event::MotionNotify { .. }) => {
+                        let Some(p) = x11key::pointer_event(&ev) else {
+                            continue;
+                        };
+                        session
+                            .handle_pointer(&mut crate::store::NoSource, p)
+                            .map_err(WindowedError::Session)?;
                     }
                     // The title bar's close button, forwarded as `WM_DELETE_WINDOW`.
                     holonomy_x11::Event::ClientMessage { data1, .. }

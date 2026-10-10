@@ -21,7 +21,7 @@
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
-use crate::event::InputEvent;
+use crate::pointer::Event;
 use crate::source::{InputError, InputSource, RecordDecoder, RECORDS_PER_READ};
 
 /// A [`InputSource`] over an already-open evdev descriptor.
@@ -139,7 +139,7 @@ impl EvdevSource {
 }
 
 impl InputSource for EvdevSource {
-    fn next_event(&mut self) -> Result<Option<InputEvent>, InputError> {
+    fn next_event(&mut self) -> Result<Option<Event>, InputError> {
         if let Some(ev) = self.decoder.next_event() {
             return Ok(Some(ev));
         }
@@ -238,10 +238,16 @@ mod tests {
         dev.write_events(&evs);
 
         let mut src = read_end(&dev);
-        assert_eq!(src.next_event().expect("read"), Some(InputEvent::press(30)));
+        // **Every expectation is wrapped in `Event::Key`,** because `next_event` returns the pointer
+        // enum as of part 20. The wrapper is mechanical and that is the point: the change to the
+        // input contract should have been a one-token edit in a hundred places, and it was.
         assert_eq!(
             src.next_event().expect("read"),
-            Some(InputEvent::release(30))
+            Some(Event::Key(InputEvent::press(30)))
+        );
+        assert_eq!(
+            src.next_event().expect("read"),
+            Some(Event::Key(InputEvent::release(30)))
         );
     }
 
@@ -294,11 +300,17 @@ mod tests {
         let mut src = read_end(&dev);
 
         // One read brings both in; one decode consumes one, leaving the other buffered.
-        assert_eq!(src.next_event().expect("read"), Some(InputEvent::press(30)));
+        assert_eq!(
+            src.next_event().expect("read"),
+            Some(Event::Key(InputEvent::press(30)))
+        );
         // `poll_in` must report "nothing new" rather than issuing a second read, which would be a
         // syscall for an event already in hand.
         assert_eq!(src.poll_in().expect("no error"), 0);
-        assert_eq!(src.next_event().expect("read"), Some(InputEvent::press(31)));
+        assert_eq!(
+            src.next_event().expect("read"),
+            Some(Event::Key(InputEvent::press(31)))
+        );
     }
 
     #[test]
@@ -325,7 +337,7 @@ mod tests {
         dev.write_events(&evs);
         let mut src = read_end(&dev);
         for want in &evs {
-            assert_eq!(src.next_event().expect("read"), Some(*want));
+            assert_eq!(src.next_event().expect("read"), Some(Event::Key(*want)));
         }
     }
 }

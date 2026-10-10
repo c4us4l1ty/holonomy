@@ -45,14 +45,21 @@ pub mod evdev;
 pub mod event;
 pub mod keymap;
 pub mod modifiers;
+pub mod pointer;
 pub mod source;
 #[cfg(feature = "desktop")]
 pub mod x11key;
 
 pub use evdev::EvdevSource;
-pub use event::{decode, encode, syn_report, InputEvent, EV_KEY, EV_MSC, EV_SYN, RECORD_BYTES};
+pub use event::{
+    decode, encode, syn_report, InputEvent, EV_ABS, EV_KEY, EV_MSC, EV_REL, EV_SYN, RECORD_BYTES,
+};
 pub use keymap::{Command, Hotkey, Keymap};
 pub use modifiers::ModifierState;
+pub use pointer::{
+    decode_record, encode_record, Button, Event, Frame, Pointer, Record, BTN_LEFT, BTN_MIDDLE,
+    BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
+};
 pub use source::{
     errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, RECORDS_PER_READ,
 };

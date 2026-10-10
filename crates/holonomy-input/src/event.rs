@@ -49,6 +49,13 @@ pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 /// `EV_REL`. Relative axis motion -- mice and trackballs. Never a keystroke.
 pub const EV_REL: u16 = 0x02;
+/// `EV_ABS`. Absolute axis positions -- a tablet, a touchscreen, a light gun.
+///
+/// **Defined here and deliberately not acted on.** It is in the vocabulary because the kernel has it
+/// and a stream carrying it must be *recognised* as something other than keyboard input; see
+/// [`crate::pointer::decode_record`], which maps it to `Record::Noise` with a note about why a scale
+/// guess would be worse than a refusal.
+pub const EV_ABS: u16 = 0x03;
 /// `EV_MSC`. `EV_MSC_SCAN` carries the USB HID scancode, which is a *different* numbering again.
 pub const EV_MSC: u16 = 0x04;
 

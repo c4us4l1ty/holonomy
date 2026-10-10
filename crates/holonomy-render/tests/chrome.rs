@@ -25,7 +25,11 @@ fn the_bands_stack_with_no_gap_and_no_overlap() {
     let m = ChromeMetrics::DESKTOP;
     let l = Layout::new(&m);
     assert_eq!(l.title.y, 0);
-    assert_eq!(l.menubar.y, l.title.bottom(), "the menu bar follows the title");
+    assert_eq!(
+        l.menubar.y,
+        l.title.bottom(),
+        "the menu bar follows the title"
+    );
     assert_eq!(l.tabs.y, l.menubar.bottom());
     // **The tab band is zero-height as of part 19**, so `tabs.bottom() == toolbar.y` is an identity
     // rather than an arrangement. It is kept in the chain because the tab band still exists as a
@@ -788,13 +792,7 @@ fn the_bands_partition_the_panel_at_any_size() {
         // the first version of this update reported: `left: 52, right: 0` -- the toolbar starts at 52
         // because the title and menu bands are above it and were not in the list.
         for b in [
-            l.title,
-            l.menubar,
-            l.tabs,
-            l.toolbar,
-            l.ruler,
-            l.canvas,
-            l.status,
+            l.title, l.menubar, l.tabs, l.toolbar, l.ruler, l.canvas, l.status,
         ] {
             assert_eq!(
                 b.y, at,

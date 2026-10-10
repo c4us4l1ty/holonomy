@@ -53,7 +53,7 @@ use holonomy_render::math::{self, MathNode};
 use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRun};
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
-use holonomy_render::{DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
+use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
 use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
@@ -266,6 +266,37 @@ pub struct SessionStats {
     /// unparseable formula as its own source, which is exactly what an edited one looks like. Without
     /// this counter, a formula that stopped compiling three edits ago would sit there looking fine.
     pub math_parse_errors: u32,
+
+    // ---------------------------------------------------------------- pointer, part 20
+    //
+    // **Four counters, and the reason there are four is that "clicks" is not a useful number.**
+    //
+    // A chrome with twenty-one toolbar buttons, eight menus and a sidebar in front of a session whose
+    // document model has no bold, no colour and no font size is going to have a lot of buttons that
+    // are drawn, hovered, pressed and do nothing. **A single counter would make that indistinguishable
+    // from a broken routing path** -- both would read "clicks happened, nothing happened". These four
+    // separate the three that work from the one that does not.
+    /// Pointer events delivered, of every kind.
+    ///
+    /// **Every kind, including motion**, so this is the mouse's event rate rather than a click count.
+    /// A 125 Hz mouse over the toolbar produces this number in the hundreds per second; the other
+    /// three are what make that not alarming.
+    pub pointer_events: u64,
+    /// Presses that landed on a widget.
+    pub pointer_presses: u32,
+    /// Presses that produced a [`Command`] the session applied.
+    ///
+    /// **The routing works if this is non-zero.** Every gate in `tests/pointer.rs` that asserts a
+    /// click did something asserts this moved.
+    pub pointer_commands: u32,
+    /// Presses on a widget that has no action behind it yet.
+    ///
+    /// **The honest number for this build, and it is large.** Bold, italic, underline, the font
+    /// controls, print, spellcheck and most menu items are buttons with nothing behind them, because
+    /// the document model has no representation for any of them. **Counted rather than swallowed**,
+    /// because a count that is zero would mean either that every button works or that nothing is
+    /// being hit-tested, and those need to be distinguishable.
+    pub pointer_inert: u32,
 }
 
 /// A pre-opened export sink.
@@ -957,6 +988,31 @@ impl<'a> Session<'a> {
         self.editor.caret()
     }
 
+    /// The caret's line and column, for a status bar and for a driver's hit testing.
+    ///
+    /// **Two accessors rather than one `Option<(u32, u32)>`,** because both halves are always
+    /// available and a pair of `u32`s that can be `None` is a `None` that is never `Some`. A gate
+    /// asserting a click landed on row 1 column 3 should not have to unwrap anything, and neither
+    /// should a driver that wants to draw its own cursor.
+    pub fn caret_line(&self) -> u32 {
+        self.state.caret_line
+    }
+
+    /// The caret's column within its line. See [`Session::caret_line`].
+    pub fn caret_column(&self) -> u32 {
+        self.state.caret_column
+    }
+
+    /// The chrome's computed layout.
+    ///
+    /// **Public because a driver needs it to turn panel coordinates into something it can act on**,
+    /// and part 20's `hit_rect` and `caret_at` are only half a feature without a way to ask where
+    /// anything is. It is a copy of a `Copy` struct, so a caller that wants it per event pays
+    /// thirty-two bytes rather than a heap allocation.
+    pub fn chrome_layout(&self) -> holonomy_render::chrome::Layout {
+        self.chrome.layout
+    }
+
     /// The document's images, in document order.
     pub fn assets(&self) -> &holonomy_text::AssetCatalog {
         self.editor.assets()
@@ -1147,14 +1203,401 @@ impl<'a> Session<'a> {
         bytes: &mut dyn holonomy_text::LeafSource,
         source: &mut dyn InputSource,
     ) -> Result<Exit, SessionError> {
+        // **The loop branches on the event's kind, and that is the whole of what part 20 changed
+        // here.** A key goes to `handle_event_with`, which folds the modifier state and dispatches
+        // through the keymap. A pointer event goes to `handle_pointer`, which hit-tests against the
+        // chrome. **They share the `tick_with` afterwards**, because a hover highlight and a keystroke
+        // both need the frame's damage drained and both need the blink advanced -- which is the
+        // existing reason that call is outside the branch and not inside each arm.
         while let Some(event) = source.next_event().map_err(session_io)? {
-            if let Some(exit) = self.handle_event_with(bytes, event)? {
-                return Ok(exit);
+            match event {
+                holonomy_input::Event::Key(k) => {
+                    if let Some(exit) = self.handle_event_with(bytes, k)? {
+                        return Ok(exit);
+                    }
+                }
+                pointer => {
+                    self.handle_pointer(bytes, pointer)?;
+                }
             }
             // The blink may want a repaint even with no input.
             self.tick_with(bytes)?;
         }
         Ok(Exit::StreamEnded)
+    }
+
+    /// Fold one pointer event into the chrome and act on it.
+    ///
+    /// # What this is, structurally
+    ///
+    /// **Three cases, in the order the hardware produces them**: a motion event moves the pointer and
+    /// recomputes what is under it; a press marks the widget and acts; a release clears the mark. A
+    /// wheel is a fourth and it does not go through the widget list at all -- it scrolls, which is a
+    /// property of the document rather than of a control.
+    ///
+    /// # Why motion damages two rects and not one
+    ///
+    /// Moving the pointer changes *two* things on screen: the widget it left stops being hovered, and
+    /// the one it arrived at starts. Damaging only the new one leaves a button lit under a pointer
+    /// that is somewhere else, **and that stale highlight is permanent** because nothing else will
+    /// ever invalidate it. So the damage is the union of the old hover's rect and the new one's, which
+    /// is why [`widgets::hit_rect`] exists: without the inverse of `hit`, the only way to invalidate a
+    /// widget you have just left is to repaint the whole panel, at 1,024,000 pixels, on every mouse
+    /// movement.
+    pub fn handle_pointer(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        event: holonomy_input::Event,
+    ) -> Result<(), SessionError> {
+        use holonomy_input::Event as P;
+        self.stats.pointer_events += 1;
+        let Some((x, y)) = event.position() else {
+            // A key, which cannot reach here: `run_with` branches before calling. **And `position()`
+            // returning `None` for a key is the assertion that they are different kinds of thing.**
+            return Ok(());
+        };
+
+        match event {
+            P::Motion { .. } => {
+                let before = self.state.hover;
+                // **`hover_at` returns `Hit`, and `Hit::None` becomes `None` here rather than being
+                // stored as a `Some(Hit::None)`.** The `Option` answers "is the pointer over
+                // anything", and a `Some(Hit::None)` would make every caller that compares against
+                // `None` wrong in a way no type checker catches -- `state.hover == None` would be
+                // false while the pointer was over nothing, and the emitters would all draw hover
+                // states for nothing.
+                let after = match self.hover_at(x, y) {
+                    widgets::Hit::None => None,
+                    h => widgets::hit_rect(&self.chrome.layout, &self.state, h).map(|_| h),
+                };
+                if before == after && self.state.cursor == Some((x, y)) {
+                    return Ok(());
+                }
+                self.state.cursor = Some((x, y));
+                self.state.hover = after;
+                for h in [before, after].into_iter().flatten() {
+                    if let Some(r) = widgets::hit_rect(&self.chrome.layout, &self.state, h) {
+                        self.invalidate(r);
+                    }
+                }
+                // **The popup, in full, whenever a menu is open.** Hover inside a popup changes one
+                // row; hover *outside* one closes it, and closing it redraws the popup and the
+                // heading it was hanging from. Neither is inside a widget's rect, so neither is
+                // covered by the loop above.
+                if self.state.open_menu.is_some() {
+                    let l = self.chrome.layout;
+                    if let Some(pop) = widgets::popup(&l, self.state.open_menu.unwrap_or(0)) {
+                        self.invalidate(pop.rect);
+                    }
+                    self.invalidate(l.menubar);
+                }
+            }
+            P::Wheel { dy, .. } => {
+                // **Only over the page.** A wheel over a popup should scroll the popup, which does not
+                // scroll, and a wheel over the sidebar should scroll the sidebar, which does not
+                // either. Scrolling the document under an open popup would move the thing the user is
+                // reading while the menu they are choosing from stays put.
+                let over_page =
+                    widgets::hit(&self.chrome.layout, &self.state, x, y) == widgets::Hit::Page;
+                if over_page && dy != 0 {
+                    self.scroll_by(i64::from(dy) * 3);
+                }
+            }
+            P::Button {
+                button: holonomy_input::Button::Left,
+                pressed: true,
+                ..
+            } => {
+                self.stats.pointer_presses += 1;
+                let hit = self.hover_at(x, y);
+                self.state.pressed = (hit != widgets::Hit::None).then_some(hit);
+                self.press(hit, x, y, bytes)?;
+            }
+            P::Button {
+                button: holonomy_input::Button::Left,
+                pressed: false,
+                ..
+            } => {
+                // **The release clears `pressed` and does nothing else.** A click is decided on the
+                // *press*, not the release, and that is what makes a drag off a button not fire it --
+                // the button is pressed when the pointer is on it, `pressed` is cleared by the
+                // release wherever it happened, and the command was already applied. **A
+                // release-driven model would need a drag threshold**, and a threshold is a guess about
+                // how far is far enough; deciding on the press needs no guess.
+                self.state.pressed = None;
+                self.damage = self.chrome.full_damage();
+            }
+            // **Right and middle buttons are not bound, and are counted as nothing.**
+            //
+            // Not as `pointer_inert`: that counter is about a *widget* that has no action, and this is
+            // a button that was never going to have one. A context menu is the obvious future and it
+            // is not this build.
+            _ => {}
+        }
+        self.tick_with(bytes)?;
+        Ok(())
+    }
+
+    /// What is under `(x, y)`, with the open menu's grab applied.
+    ///
+    /// # The grab
+    ///
+    /// **A menu that is open swallows everything that is not one of its rows.** While a popup is down,
+    /// a pointer over the toolbar highlights nothing and a press there dismisses the menu without
+    /// pressing the button. Without this, opening a menu and clicking away would also click whatever
+    /// was underneath -- which is the single most irritating thing a menu can do, and it is invisible
+    /// in every test that only ever clicks the popup.
+    fn hover_at(&self, x: i32, y: i32) -> widgets::Hit {
+        let l = &self.chrome.layout;
+        if let Some(index) = self.state.open_menu {
+            match widgets::popup(l, index).and_then(|p| p.row_at(x, y)) {
+                Some(row) => return widgets::Hit::MenuItem { menu: index, row },
+                // The heading itself is still live: hovering it and pressing it toggles the menu.
+                None => {
+                    if widgets::hit(l, &self.state, x, y) == widgets::Hit::Menu(index) {
+                        return widgets::Hit::Menu(index);
+                    }
+                    return widgets::Hit::None;
+                }
+            }
+        }
+        widgets::hit(l, &self.state, x, y)
+    }
+
+    /// Act on a press.
+    ///
+    /// **The menu first, and it is the only branch that closes a menu.** Everything else either runs a
+    /// command or leaves the menu alone; the dismissal lives here so there is exactly one place where
+    /// "a menu is open and this is not a row" becomes "the menu is closed".
+    ///
+    /// **`x` and `y` are parameters rather than read off the event**, because the press is decided on
+    /// the widget the *press* was over, and a `Hit` carries no position -- it is a small enum and
+    /// giving every variant an `x, y` would put four numbers on the twenty-one `Tool` cases for the
+    /// sake of one of them. The page is the only widget whose action needs a position, and it is the
+    /// only branch that reads them.
+    fn press(
+        &mut self,
+        hit: widgets::Hit,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        use widgets::{Hit, Tool};
+        match hit {
+            Hit::MenuItem { menu, row } => {
+                let Some(item) = holonomy_render::menus::item_at(menu, row) else {
+                    return Ok(());
+                };
+                self.state.open_menu = None;
+                self.damage = self.chrome.full_damage();
+                if let Some(cmd) = menu_command(menu, item) {
+                    self.run_clicked(cmd)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            Hit::Menu(index) => {
+                // **A toggle, not "open".** Clicking the heading of the menu that is already down
+                // closes it, which is the one behaviour a menu has that is not obvious from having
+                // looked at a screenshot of it.
+                self.state.open_menu = (self.state.open_menu != Some(index)).then_some(index);
+                self.damage = self.chrome.full_damage();
+            }
+            Hit::Tool(tool) => {
+                self.state.open_menu = None;
+                self.damage = self.chrome.full_damage();
+                match tool {
+                    Tool::Collapse => {
+                        self.state.sidebar_open = !self.state.sidebar_open;
+                        self.damage = self.chrome.full_damage();
+                    }
+                    _ => {
+                        if let Some(cmd) = tool_command(tool) {
+                            self.run_clicked(cmd)?;
+                        } else {
+                            self.stats.pointer_inert += 1;
+                        }
+                    }
+                }
+            }
+            Hit::Title(btn) => {
+                self.state.open_menu = None;
+                self.damage = self.chrome.full_damage();
+                if let Some(cmd) = title_command(btn) {
+                    self.run_clicked(cmd)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            Hit::Doc(index) => {
+                // **Switching is a state change, not a command.** There is no `Command::OpenDocument`
+                // because there is one document: `state.docs` is a list of *titles* the sidebar draws,
+                // and part 19 was explicit that the models are not here. So the row is highlighted,
+                // the active index moves, and `Session::adopt_document` is still the only way a
+                // document gets in. **A second click on the already-active row is not an error** and
+                // does nothing.
+                self.state.open_menu = None;
+                self.state.active_doc = index;
+                self.damage = self.chrome.full_damage();
+            }
+            Hit::NewDoc => {
+                self.state.open_menu = None;
+                // **Counted, not faked.** `state.docs` is a list of titles and there is nowhere to put
+                // a new one; inventing an "Untitled 2" row with no document behind it would make the
+                // sidebar lie about what is open.
+                self.stats.pointer_inert += 1;
+                self.damage = self.chrome.full_damage();
+            }
+            Hit::SidebarBack => {
+                self.state.open_menu = None;
+                self.state.sidebar_open = false;
+                self.damage = self.chrome.full_damage();
+            }
+            Hit::Page => {
+                self.state.open_menu = None;
+                self.click_page(bytes, x, y)?;
+            }
+            Hit::None => {
+                // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
+                // already turned "the pointer is not over the popup" into `Hit::None`, so reaching
+                // here with a menu open *is* the dismissal.
+                if self.state.open_menu.is_some() {
+                    self.state.open_menu = None;
+                    self.damage = self.chrome.full_damage();
+                }
+            }
+            Hit::Dismiss => {}
+        }
+        let _ = bytes;
+        Ok(())
+    }
+
+    /// Place the caret from a click on the page.
+    ///
+    /// **A click places the caret and does not clear the selection**, because there is no selection
+    /// yet. When one lands, the same line becomes the rule; a gate will be written then and not now,
+    /// because a gate written for a feature that does not exist tests nothing.
+    fn click_page(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        x: i32,
+        y: i32,
+    ) -> Result<(), SessionError> {
+        let Some((line, column)) = self.chrome.layout.caret_at(&self.state, x, y) else {
+            return Ok(());
+        };
+        let at = self.offset_of(line, column, bytes)?;
+        self.caret_to(at)?;
+        // **`caret_to` damages both caret cells**, so the repaint this needs is already queued. Adding
+        // `full_damage` on top of it would have been the reflex, and it would have cost a million
+        // pixels per click for no reason: the caret's two cells are the only pixels that changed.
+        Ok(())
+    }
+
+    /// Add `r` to the pending damage.
+    ///
+    /// **`self.damage` is a [`DamageRect`], not a tracker**, so "add" is a union rather than an
+    /// accumulation. A tracker would carry a list and answer "was this ever damaged", and nothing
+    /// here asks that question -- the paint wants a bounding box and nothing else. An empty rect is
+    /// skipped because [`DamageRect::union`] treats `EMPTY` as the identity but a caller that unions
+    /// forty hover rects should not pay for the forty.
+    #[inline]
+    fn invalidate(&mut self, r: DamageRect) {
+        if !r.is_empty() {
+            self.damage = self.damage.union(&r);
+        }
+    }
+
+    /// The byte offset of `(line, column)`, clamped into the line.
+    ///
+    /// # Why this walks characters and not bytes
+    ///
+    /// **Because `column` is a column and an offset is a byte count, and the two are the same only on
+    /// ASCII.** The first version walked `column` *bytes*, so a click in column 1 of a line starting
+    /// with a two-byte `é` landed between the two bytes of that character -- and `caret_to`, which
+    /// rounds down to a codepoint boundary, then put the caret *before* it. The gate
+    /// `clicking_a_column_puts_the_caret_after_that_character` is a line of `éa` for exactly this
+    /// reason, and it caught it on the first run: caret 0, expected 2.
+    ///
+    /// **The walk is over UTF-8 scalar values, not grapheme clusters.** A combining sequence is two
+    /// scalars and one glyph, so a click in the middle of one puts the caret between its parts -- which
+    /// is what every editor without a full text-shaping layout does, and saying so is better than
+    /// implying a cluster-aware implementation.
+    ///
+    /// **Clamped to the line's end rather than the document's**, because a click past the last
+    /// character of a short line is a click at the end of that line and not a click on the next one.
+    /// That is why clicking the white space right of a short paragraph does not move the caret down.
+    fn offset_of(
+        &mut self,
+        line: u32,
+        column: u32,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<usize, SessionError> {
+        /// Bytes read per rope call. A click on column 80 must not be 80 rope walks, and this is the
+        /// same chunk the document scan uses.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        // **`lines.line_begin(line)`, not `Session::line_start(at)`.** Those two are one argument and
+        // two different questions: `line_begin` takes a *line index* and gives a byte offset,
+        // `line_start` takes a *byte offset* and gives the offset of the line containing it. Passing a
+        // line index to `line_start` silently returns the start of line 0 for every line below the
+        // first, so every click on row 1 landed on row 0. **`a_click_on_the_page_puts_the_caret_under
+        // _the_pointer` found it on the first run**, and the gate's fixture is a three-line document
+        // specifically because a one-line document cannot tell the two apart.
+        let start = self.lines.line_begin(line as usize);
+        let mut at = start;
+        let mut left = column;
+        while left > 0 {
+            // **A whole chunk, not `left` bytes.** The first version asked for exactly `left` bytes,
+            // so a click in column 1 of a line starting with a two-byte `é` read *one* byte, saw
+            // `0xC3`, decided the character was two wide, and advanced one byte anyway because only
+            // one was in hand -- landing the caret between the two bytes of one character.
+            // `caret_to` then rounded down and put it before the `é`. **You cannot tell how wide a
+            // UTF-8 character is without reading all of it.**
+            let room = self.editor.text_len().saturating_sub(at);
+            let n = room.min(CHUNK);
+            if n == 0 {
+                break;
+            }
+            let got = self.editor.read_into_faulting(source, at, &mut buf[..n])?;
+            if got == 0 {
+                break;
+            }
+            let mut i = 0;
+            while i < got && left > 0 {
+                let b = buf[i];
+                // **The newline ends the line, so `column` stops here.** Not "skip it and carry on" --
+                // a click past the end of a line's text is a click at its end.
+                if b == b'\n' {
+                    return Ok(at + i);
+                }
+                // Advance one whole scalar. A continuation byte is 10xxxxxx; the width is the
+                // leading byte's, and a malformed sequence is one byte so the loop cannot stall.
+                let w = match b {
+                    0x00..=0x7F => 1,
+                    0xC0..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF7 => 4,
+                    _ => 1,
+                };
+                i += w.min(got - i).max(1);
+                left -= 1;
+            }
+            at += i;
+        }
+        Ok(at)
+    }
+
+    /// Apply a command a click produced, and count it.
+    ///
+    /// **`self.apply` rather than a dispatch through the keymap**, because a click already *is* the
+    /// dispatch: there is no chord to fold and no modifier state to read, and routing a button press
+    /// back through the keymap would mean inventing a fake chord for it.
+    fn run_clicked(&mut self, command: holonomy_input::Command) -> Result<(), SessionError> {
+        self.stats.commands += 1;
+        self.stats.pointer_commands += 1;
+        self.apply(command)?;
+        Ok(())
     }
 
     /// One pass of the loop's frame work: repaint what the last edit damaged, then blink.
@@ -3383,4 +3826,86 @@ fn session_io(e: holonomy_input::InputError) -> SessionError {
             "the scripted input stream ended mid-record",
         )),
     }
+}
+
+// ---------------------------------------------------------------- what a click means
+//
+// **Three functions, one shape, and the shape is the point.** Each takes what was clicked and returns
+// the [`Command`] it means, or `None` for "this button is drawn, hoverable, pressable, and has nothing
+// behind it yet".
+//
+// # Why `None` and not a stub command
+//
+// **Because a stub command is a lie that survives.** `Command::Bold` that the session ignores would
+// make a click on Bold look like it did something -- it would bump `stats.commands`, take a paint, and
+// leave the document unchanged. `None` says the honest thing, and the caller counts it in
+// [`SessionStats::pointer_inert`] so the number is visible rather than inferred.
+//
+// # The mapping is by *meaning*, not by position
+//
+// `tool_command` matches on the [`Tool`] variant, so moving a button in `TOOLBAR` cannot change what
+// it does. A table indexed by list position would have that property inverted, and the first toolbar
+// edit would have silently swapped two buttons' behaviour.
+//
+// # What is not here, and why
+//
+// **`Zoom`, `Style` and `Font` are the three that would obviously be next** -- they are dropdowns in
+// the reference and they need a second popup each, which is the same `widgets::popup` machinery with
+// different contents. They are `None` because *they* are not built, not because the table is
+// incomplete, and a gate asserts the count so the two cannot be confused.
+
+/// What a toolbar button means, or `None` for a button with no action behind it.
+fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::widgets::Tool;
+    Some(match tool {
+        Tool::Undo => Command::Hotkey(Hotkey::Undo),
+        Tool::Redo => Command::Hotkey(Hotkey::Redo),
+        Tool::Image => Command::Hotkey(Hotkey::InsertImage),
+        // `Tool::Collapse` is handled in `Session::press` rather than here, because it toggles a
+        // chrome flag and is not a document command. **Listed as `None` here rather than omitted** so
+        // that this function's arms are exactly the `Tool` variants -- adding a tool makes this
+        // non-exhaustive and the compiler says so.
+        _ => return None,
+    })
+}
+
+/// What a title-bar button means, or `None`.
+fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::widgets::TitleButton;
+    Some(match btn {
+        TitleButton::Cloud => Command::Hotkey(Hotkey::Save),
+        _ => return None,
+    })
+}
+
+/// What a menu item means, or `None`.
+///
+/// **Matched on the label, and that is the weakness.** `menus::Item` has no command field, because a
+/// `Node`-shaped item would have to know what it does and the renderer must not decide what a command
+/// is (see `menus.rs`'s header). The consequence is that a menu item's meaning lives in a string
+/// comparison, and **renaming "Undo" to "Revert" silently makes it inert**. The alternative -- a
+/// command id on the item, which the session interprets and the renderer passes through -- is the
+/// right design and is the next thing to do; it is not done here because adding an id to every item in
+/// eight menus is a change to `menus.rs`'s public shape and this part is already the one that changed
+/// the input contract.
+///
+/// **`menu` is in the signature for the same reason and for a real reason**: `File > Print` and
+/// `Tools > Spelling` mean different things and the label distinguishes them today. It is there so
+/// adding the id does not change this function's signature.
+fn menu_command(
+    menu: usize,
+    item: &holonomy_render::menus::Item,
+) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::chrome::MENUS;
+    let heading = MENUS.get(menu).copied().unwrap_or("");
+    Some(match (heading, item.label) {
+        (_, "Undo") => Command::Hotkey(Hotkey::Undo),
+        (_, "Redo") => Command::Hotkey(Hotkey::Redo),
+        (_, "Select all") => Command::Hotkey(Hotkey::DocumentEnd),
+        ("Insert", "Table") => Command::Hotkey(Hotkey::InsertTable),
+        _ => return None,
+    })
 }

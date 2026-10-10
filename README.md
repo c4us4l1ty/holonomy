@@ -169,8 +169,20 @@ byte and "the server said `BadValue`" does not say which field.
 ## Not done, and not claimed
 
 Sync and CRDT. A second compositor path. CFF outlines. SVG, JPEG, WebP. Real evdev on hardware — the
-input path is driven by a script. Real DRM presentation — `SETCRTC` needs DRM master, so the
+input path is driven by a script, though the pointer path now decodes real `EV_REL` and `BTN_*` records
+through the same decoder a device uses. Real DRM presentation — `SETCRTC` needs DRM master, so the
 framebuffer path has been verified unprivileged but not presented.
+
+**Most of the toolbar does nothing yet, and the build says so rather than hiding it.** The chrome, the
+menus, the sidebar and the hit testing are real and gated; the *commands* behind the buttons are
+mostly not. Undo, Redo, Image and the sidebar's collapse are wired. Bold, italic, underline, the font
+controls, print, spellcheck and most menu items are drawn, hovered and pressable, and do nothing —
+because the document model has no representation for any of them. **`SessionStats::pointer_inert` counts
+every one of those presses**, so the number is visible rather than inferred: if it were ever zero it
+would mean either that every button works or that nothing is being hit-tested, and those two need to be
+distinguishable. Also not built: the dropdowns behind Zoom, Style and Font, submenus, drag, and a
+multi-document model behind the sidebar (`state.docs` is a list of *titles*; `adopt_document` is still
+the only way a document gets in).
 
 There was also an unclaimed ~30% gap in CIOS throughput on this host: ~2,657 ns per squaring measured
 here against 2,077 ns on the target. Because the VDF's iteration count `T` is derived from that

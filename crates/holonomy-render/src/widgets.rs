@@ -322,6 +322,132 @@ impl ChromeState {
     }
 }
 
+/// An open menu's popup: the panel and one row per item.
+///
+/// # Why this is a function and not painted inline
+///
+/// Because the painter and the hit test both need it, and **a widget drawn one way and clicked
+/// another is the single most expensive bug in a UI** — the symptom is "the button is there but
+/// clicking it does nothing", which reads as a routing problem and is a geometry problem. The
+/// discipline is the one the whole of this file exists for: **one list, painted and hit-tested.**
+///
+/// # The `Vec`
+///
+/// **One allocation per paint, and only while a menu is open.** Thirty-four icons and twenty-one
+/// toolbar buttons are painted every frame without a single allocation; a popup's rows are `Vec`
+/// because their number is *data* — a menu with six items has six rows and a menu with fourteen has
+/// fourteen, and an array would have to be sized for fourteen and padded. The trade is explicit: a
+/// popup open is a state the user is in for under a second, and the paint path's zero-allocation
+/// claim is about the frame, not about the state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Popup {
+    /// The popup's panel.
+    pub rect: DamageRect,
+    /// One row per item, in [`crate::menus::MENUS`] order.
+    pub rows: Vec<DamageRect>,
+    /// Which menu this is.
+    pub menu: usize,
+}
+
+impl Popup {
+    /// The row at `(x, y)`, if the point is in one.
+    ///
+    /// **The rows, not `rect`.** A popup's panel has a border and padding, and a click on the border is
+    /// a click on nothing — so testing `rect` would make a 4 px strip of every popup a clickable row.
+    pub fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.rows.iter().position(|r| r.contains(x, y))
+    }
+}
+
+/// Where menu `index`'s popup is, and its rows.
+///
+/// **`None` for an index with no menu**, which is what makes the caller's job total: a bad index is a
+/// paint-time mistake in a caller and the answer is "draw nothing", not "panic inside a paint".
+/// A panic in a paint takes the session with it.
+#[must_use]
+pub fn popup(l: &Layout, index: usize) -> Option<Popup> {
+    let items = crate::menus::items_for(index);
+    if items.is_empty() {
+        return None;
+    }
+    let (_, boxes) = crate::chrome::menu_boxes(l);
+    let anchor = boxes.get(index)?;
+    let pad = 2 * l.cell_w;
+    let label_w = items
+        .iter()
+        .map(|it| (it.label.len() as u32 + 2) * l.cell_w)
+        .max()
+        .unwrap_or(40)
+        .max(14 * l.cell_w);
+    let row_h = l.cell_h + 6;
+    let w = label_w + pad * 2;
+    let h = (items.len() as u32).saturating_mul(row_h) + pad;
+
+    // **Clamped to the panel, not to the heading.** `Extensions` is the longest heading and its popup
+    // is 336 px wide; anchored without a clamp it runs off the right edge and the last two items are
+    // drawn into the scrollbar. The clamp is on the panel because that is where the pixels stop.
+    let x = (anchor.x as i32).min(l.width as i32 - w as i32).max(0);
+    let y = (l.menubar.bottom() as i32)
+        .min(l.height as i32 - h as i32)
+        .max(0);
+
+    let rows = (0..items.len())
+        .map(|i| {
+            DamageRect::new(
+                x as u32,
+                (y + pad as i32 + (i as i32) * row_h as i32) as u32,
+                w,
+                row_h,
+            )
+        })
+        .collect();
+    Some(Popup {
+        rect: DamageRect::new(x as u32, y as u32, w, h),
+        rows,
+        menu: index,
+    })
+}
+
+/// The rect a [`Hit`] is drawn at, or `None` if it is not drawn.
+///
+/// # Why the inverse lookup exists
+///
+/// **Because a hover highlight has to be invalidated when the pointer leaves, and the only way to know
+/// where it was drawn is to ask the same code that drew it.** The alternative -- repaint the whole
+/// panel on every mouse movement -- is a million pixels per event at 125 Hz, which is 128 megapixels
+/// a second on a machine whose entire premise is that it does not do that.
+///
+/// # It is a search, and that is the honest cost
+///
+/// `Hit` has eight arms and no rect, so this walks the widget list looking for the one that matches.
+/// **Eight comparisons on a mouse move, against a million-pixel repaint.** The reverse -- storing the
+/// rect in `Hit` -- would make it O(1) at the cost of making `Hit` non-`Copy` and four words wide,
+/// which every `hover == Some(h)` comparison in the painters would then pay for. **The search is the
+/// cheaper mistake.**
+pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
+    match h {
+        Hit::Tool(t) => place_toolbar(l, 8)
+            .into_iter()
+            .find(|p| p.tool == t)
+            .map(|p| p.rect),
+        Hit::Title(b) => place_title(l, 12)
+            .into_iter()
+            .find(|(k, _)| *k == b)
+            .map(|(_, r)| r),
+        Hit::Menu(i) => crate::chrome::menu_boxes(l).1.get(i).copied(),
+        Hit::MenuItem { menu, row } => popup(l, menu)?.rows.get(row).copied(),
+        Hit::Doc(i) => l.sidebar_doc(i),
+        Hit::NewDoc => state.sidebar_open.then_some(l.sidebar_new),
+        Hit::SidebarBack => state.sidebar_open.then_some(l.sidebar_back),
+        // **A widget that is not drawn has no rect.** `Page` is the body text -- a hover there would
+        // mean outlining the whole page, which is not an affordance any reference has -- and `Dismiss`
+        // is the chrome's own chevron, drawn as part of the collapse button rather than on its own.
+        // Returning `None` means a pointer moving over the page damages nothing, which is correct:
+        // nothing changed.
+        Hit::Page | Hit::Dismiss | Hit::None => None,
+    }
+}
+
 /// Anything the pointer can be over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -329,6 +455,13 @@ pub enum Hit {
     Tool(Tool),
     /// A menu-bar heading, by index into [`MENUS`](crate::chrome::MENUS).
     Menu(usize),
+    /// A row of an open popup: which menu, which row.
+    MenuItem {
+        /// Index into [`MENUS`](crate::chrome::MENUS).
+        menu: usize,
+        /// Row within that menu's items.
+        row: usize,
+    },
     /// A title-bar button.
     Title(TitleButton),
     /// A document in the sidebar, by index.
@@ -390,6 +523,24 @@ pub fn place_title(l: &Layout, pad: u32) -> Vec<(TitleButton, DamageRect)> {
 /// handles a case that is the normal case.
 pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     let at = |r: &DamageRect| r.contains(x, y);
+
+    // **The open popup is tested first, and it is the only thing that can be tested first.**
+    //
+    // A popup is an overlay: it covers the toolbar and part of the sidebar. If the bands were tested
+    // in their paint order the pointer over a popup's rows would come back as `Hit::Tool` for
+    // whatever was underneath, and the menu would be unclickable while looking perfectly clickable.
+    //
+    // **This is also the grab.** A click that lands on a popup row chooses it, and a click that lands
+    // anywhere else — *including on the widget underneath* — falls through and is dismissed by the
+    // session. The fall-through is deliberate and is what every native menu does: clicking the
+    // toolbar button you used to dismiss the menu must not also press that button.
+    if let Some(index) = state.open_menu {
+        if let Some(pop) = popup(l, index) {
+            if let Some(row) = pop.row_at(x, y) {
+                return Hit::MenuItem { menu: index, row };
+            }
+        }
+    }
 
     // **Title bar first, then the menu bar, then the toolbar**: the bands do not overlap, so the order
     // is for readability rather than for correctness, and the tests assert that it does not matter.

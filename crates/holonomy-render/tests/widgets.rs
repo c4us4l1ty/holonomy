@@ -292,7 +292,9 @@ fn the_bands_themselves_are_not_widgets() {
     // **And with the sidebar closed, its rows are gone.** A hit test that ignores `sidebar_open` makes
     // a closed sidebar still clickable, which is invisible until the pointer lands there.
     st.sidebar_open = false;
-    let r = l.sidebar_doc(0).expect("the row still exists; only the sidebar is closed");
+    let r = l
+        .sidebar_doc(0)
+        .expect("the row still exists; only the sidebar is closed");
     assert_eq!(
         hit(
             &l,
@@ -311,6 +313,37 @@ fn the_bands_themselves_are_not_widgets() {
 /// **`menu_width` is a `const fn`, so it cannot read a `ChromeMetrics`** -- it uses
 /// [`CHROME_CELL_W`](holonomy_render::chrome::CHROME_CELL_W) instead. That is the one thing in the
 /// chrome's geometry that can drift from the font metrics, so it is asserted rather than assumed.
+/// **A popup is a lighter plane than anything it can be drawn over.**
+///
+/// **The first version painted popups in `PILL`, which is also the toolbar's pill.** A menu hangs
+/// over the toolbar and over the sidebar, so it was drawn in the colour of both — and the items were
+/// legible while the *panel* was not. It read as floating text. This asserts the property rather than
+/// the value, so a palette re-tune that broke it would fail here rather than in a screenshot nobody
+/// was looking at.
+#[test]
+fn a_popup_is_a_lighter_plane_than_anything_it_covers() {
+    use holonomy_render::chrome::colour;
+    let popup = colour::POPUP & 0x00FF_FFFF;
+    for (name, under) in [
+        ("the toolbar pill", colour::PILL),
+        ("a band", colour::BAND),
+        ("the panel", colour::CHROME),
+        ("the hovered row", colour::PILL_HOVER),
+    ] {
+        assert_ne!(
+            popup,
+            under & 0x00FF_FFFF,
+            "a popup drawn in the colour of {name} is not a popup; it is the thing it covers"
+        );
+    }
+    // **And brighter than all of them**, because it is a raised surface and everything else is
+    // recessed or flat. A darker overlay would work on a light theme and this is a dark one.
+    assert!(
+        popup > (colour::PILL_HOVER & 0x00FF_FFFF),
+        "the popup must be the lightest plane in the chrome, or it reads as a hole"
+    );
+}
+
 #[test]
 fn the_menu_headings_are_measured_not_tabulated() {
     assert_eq!(
