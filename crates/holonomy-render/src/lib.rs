@@ -27,6 +27,7 @@ pub mod math;
 pub mod math_layout;
 
 pub mod chrome;
+pub mod icons;
 pub mod table;
 
 pub use chrome::{

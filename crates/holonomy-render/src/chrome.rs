@@ -882,13 +882,29 @@ impl Chrome {
         let mut root = SurfaceTree::group();
 
         // --- chrome: panel, bands, rules.
-        let mut chrome = SurfaceTree::leaf(crate::Node::Rect(Rect::new(
-            0,
-            0,
-            l.width,
-            l.height,
-            colour::CHROME,
-        )));
+        //
+        // **The panel is in `before`, not in `node`, and that is a CORRECTION.** It used to be
+        // `SurfaceTree::leaf(Node::Rect(panel))`, which puts the panel in `node` and every band, rule
+        // and label in `before` -- and `Painter::walk` draws `before`, then `node`, then `after`. **So
+        // the panel painted last and erased the entire chrome.** The symptom was that the editor
+        // rendered as a bare page on a flat panel with no tab bar, no toolbar, no ruler, no status bar
+        // and no title: everything the chrome drew, the chrome's own background drew over. Only the
+        // page and the caret survived, because they hang off `root`, whose `node` is `None`.
+        //
+        // **It was invisible to every gate for the same reason the paint path's fault was:** the gates
+        // assert what the chrome *emits* -- node counts, colours, bounds -- and this was a statement
+        // about *paint order between two siblings*, which nothing asserted. See
+        // `crates/holonomy-render/tests/chrome_paint_order.rs`.
+        let mut chrome = SurfaceTree::group();
+        chrome
+            .before
+            .push(SurfaceTree::leaf(crate::Node::Rect(Rect::new(
+                0,
+                0,
+                l.width,
+                l.height,
+                colour::CHROME,
+            ))));
         let band = |y: u32, h: u32| fill(0, y as i32, l.width, h, colour::BAND);
         chrome.before.push(band(l.toolbar.y, l.toolbar.height));
         chrome.before.push(band(l.status.y, l.status.height));
