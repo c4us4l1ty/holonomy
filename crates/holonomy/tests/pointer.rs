@@ -184,9 +184,9 @@ fn a_click_on_a_menu_heading_opens_that_menu() {
     let cy = (r.y + r.height / 2) as i32;
 
     feed(&mut s, &move_and_click(cx, cy));
-    assert_eq!(s.state.open_menu, Some(3), "Insert is open");
+    assert_eq!(s.state.open, Some(widgets::Open::Menu(3)), "Insert is open");
     assert!(
-        widgets::popup(&l, 3).is_some(),
+        widgets::popup(&l, &s.state, Some(widgets::Open::Menu(3))).is_some(),
         "and it has items, so there is something to click"
     );
 }
@@ -206,9 +206,9 @@ fn a_second_click_on_the_same_heading_closes_it() {
     let cy = (r.y + r.height / 2) as i32;
 
     feed(&mut s, &move_and_click(cx, cy));
-    assert_eq!(s.state.open_menu, Some(1));
+    assert_eq!(s.state.open, Some(widgets::Open::Menu(1)));
     feed(&mut s, &move_and_click(cx, cy));
-    assert_eq!(s.state.open_menu, None, "the toggle, not 'open'");
+    assert_eq!(s.state.open, None, "the toggle, not 'open'");
 }
 
 /// **A click on a popup row dismisses the menu.**
@@ -227,10 +227,10 @@ fn a_click_on_a_popup_row_dismisses_the_menu() {
         &mut s,
         &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),
     );
-    assert_eq!(s.state.open_menu, Some(1));
+    assert_eq!(s.state.open, Some(widgets::Open::Menu(1)));
 
     // Row 0 of Edit is "Undo", which is a real command.
-    let pop = widgets::popup(&l, 1).expect("Edit has items");
+    let pop = widgets::popup(&l, &s.state, Some(widgets::Open::Menu(1))).expect("Edit has items");
     let row = pop.rows[0];
     let before = s.caret();
     feed(
@@ -240,7 +240,7 @@ fn a_click_on_a_popup_row_dismisses_the_menu() {
             (row.y + row.height / 2) as i32,
         ),
     );
-    assert_eq!(s.state.open_menu, None, "one press, and the menu is gone");
+    assert_eq!(s.state.open, None, "one press, and the menu is gone");
     assert!(
         s.stats.pointer_commands > 0,
         "and it was not an inert press"
@@ -266,7 +266,7 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
         &mut s,
         &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),
     );
-    assert_eq!(s.state.open_menu, Some(3));
+    assert_eq!(s.state.open, Some(widgets::Open::Menu(3)));
 
     // The Undo button, which is under the popup's left edge.
     let undo = widgets::place_toolbar(&l, 8)
@@ -280,7 +280,7 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
     let commands_before = s.stats.pointer_commands;
 
     feed(&mut s, &move_and_click(bx, by));
-    assert_eq!(s.state.open_menu, None, "the click dismissed the menu");
+    assert_eq!(s.state.open, None, "the click dismissed the menu");
     assert_eq!(
         s.stats.pointer_commands, commands_before,
         "and did not also press Undo"
@@ -410,7 +410,8 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         let commands_before = s.stats.pointer_commands;
         let inert_before = s.stats.pointer_inert;
         let sidebar_before = s.state.sidebar_open;
-        s.state.open_menu = None;
+        let before_open = s.state.open;
+        s.state.open = None;
         feed(
             &mut s,
             &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),
@@ -418,16 +419,22 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         let fired = s.stats.pointer_commands - commands_before;
         let inert = s.stats.pointer_inert - inert_before;
         let toggled = (s.state.sidebar_open != sidebar_before) as u32;
+        let opened = u32::from(s.state.open != before_open);
 
-        // **A press is exactly one of three things, and never two.** The two counters are an
-        // alternative, not a spectrum: a tool that fired *and* was counted inert would be counted
-        // as working and not working, which is the state this whole file exists to make
-        // distinguishable.
+        // **A press is exactly one of four things, and never two.** The counters are alternatives,
+        // not a spectrum: a tool that fired *and* was counted inert would be counted as working and
+        // not working, which is the state this whole file exists to make distinguishable.
+        //
+        // **The fourth is `opened`, added in part 21** when Zoom, Style and Font grew dropdowns. The
+        // first version of this test asserted `fired + inert + toggled == 1` and Zoom came back 0 --
+        // which was the gate correctly reporting that a press had an outcome it did not know about.
+        // **The fix is to name the outcome, not to relax the sum.** A relaxed `>= 0` would have
+        // passed and told us nothing.
         assert_eq!(
-            fired + inert + toggled,
+            fired + inert + toggled + opened,
             1,
-            "{} must fire a command, be counted inert, or toggle the sidebar -- exactly once. \
-             Got {fired} fired, {inert} inert, {toggled} toggled.",
+            "{} must fire a command, be counted inert, toggle the sidebar, or open a dropdown -- \
+             exactly once. Got {fired} fired, {inert} inert, {toggled} toggled, {opened} opened.",
             p.tool.name()
         );
         if matches!(
@@ -443,6 +450,16 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
                 "Collapse toggles the sidebar, and does not also fire"
             );
         }
+        if p.tool.has_dropdown() {
+            assert_eq!(
+                opened,
+                1,
+                "{} opens a dropdown, and does not also fire or count inert",
+                p.tool.name()
+            );
+        }
+        // Leave nothing open for the next tool.
+        s.state.open = None;
     }
     assert_eq!(
         wired, 3,

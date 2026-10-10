@@ -45,8 +45,22 @@ fn main() {
     ];
     s.state.active_doc = 3;
     s.state.sidebar_open = true;
-    if std::env::args().any(|a| a == "--menu") {
-        s.state.open_menu = Some(3); // Insert, which is the screenshot with the menu down.
+    // `--popup=MENU` opens a menu bar popup and `--dropdown=TOOL` opens a toolbar dropdown, so a
+    // screenshot can show the two overlay states the reference captures.
+    for arg in std::env::args().skip(1) {
+        if let Some(v) = arg.strip_prefix("--popup=") {
+            if let Ok(i) = v.parse::<usize>() {
+                s.state.open = Some(holonomy_render::widgets::Open::Menu(i));
+            }
+        }
+        if let Some(v) = arg.strip_prefix("--dropdown=") {
+            for p in holonomy_render::widgets::place_toolbar(&s.chrome_layout(), 8) {
+                if p.tool.name() == v {
+                    s.state.open = Some(holonomy_render::widgets::Open::Tool(p.tool));
+                    break;
+                }
+            }
+        }
     }
     // `--hover=NAME` and `--press=NAME` put the pointer on a toolbar tool, so a screenshot can show
     // the two state surfaces. **The name is resolved through `place_toolbar`** -- the same list the

@@ -287,7 +287,7 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     v.extend(chrome::MENUS.iter().map(|m| (*m).to_string()));
     v.push("Share".to_string());
     v.push("Document tabs".to_string());
-    v.push(state.style_name.clone());
+    v.push(state.style_name().to_string());
     v.push(state.font_label());
     // The popup's items, because an open menu draws them and the gate's state opens none -- so this is
     // what keeps the popup's labels from being an untested third source of runs.

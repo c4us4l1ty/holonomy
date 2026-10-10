@@ -802,14 +802,23 @@ pub struct ChromeState {
     pub docs: Vec<String>,
     /// Which entry of [`docs`](Self::docs) is active.
     pub active_doc: usize,
-    /// The paragraph style's name, as the toolbar shows it.
-    pub style_name: String,
-    /// The font's name, as the toolbar shows it.
-    pub font_name: String,
-    /// The font size in points, as the toolbar shows it.
-    pub font_size: u32,
-    /// Which menu is open, if any. An index into [`MENUS`](crate::chrome::MENUS).
-    pub open_menu: Option<usize>,
+    /// Which of [`STYLES`](crate::menus::STYLES) is current, as an index.
+    ///
+    /// **An index and not the name**, and this is a CORRECTION made in part 21. It used to be
+    /// `style_name: String`, which meant a `String` on the state and a `String` formatted for the
+    /// toolbar on *every paint* — and two fields that could disagree, since nothing tied the name to
+    /// the list. **An index into a `const` list is the whole state, is a byte, and makes the name a
+    /// borrow.** `ChromeState::style_name` is the accessor.
+    pub style_index: usize,
+    /// Which of [`FONTS`](crate::menus::FONTS) is current, as an index. See [`style_index`](Self::style_index).
+    pub font_index: usize,
+    /// Which popup is open, if any.
+    ///
+    /// **One value, and the type is the argument for it.** Part 20 had `open_menu: Option<usize>`;
+    /// part 21 added the toolbar's three dropdowns, and the alternative to an enum was a second
+    /// `Option` — and a state in which a menu and a dropdown were both open, drawn on top of each
+    /// other, with no rule about which one the pointer meant. **See [`Open`](crate::widgets::Open).**
+    pub open: Option<crate::widgets::Open>,
     /// Where the pointer is, once it has moved. `None` until the first motion event.
     ///
     /// **`None` and not `(0, 0)`.** The session's decoder starts the pointer at the origin so that
@@ -865,10 +874,9 @@ impl Default for ChromeState {
             sidebar_open: true,
             docs: Vec::new(),
             active_doc: 0,
-            style_name: "Normal text".to_string(),
-            font_name: "Inter".to_string(),
-            font_size: 11,
-            open_menu: None,
+            style_index: 0,
+            font_index: 0,
+            open: None,
             cursor: None,
             hover: None,
             pressed: None,
@@ -1542,7 +1550,7 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     // these two needs to know anything at all.
     let (_, boxes) = menu_boxes(l);
     for (i, r) in boxes.iter().enumerate() {
-        let open = state.open_menu == Some(i);
+        let open = state.open == Some(crate::widgets::Open::Menu(i));
         // **Open outranks hovered.** A heading whose menu is down is filled whether or not the pointer
         // is on it, because it stays filled after the pointer leaves -- and a heading that lost its
         // fill the moment the pointer left would tell the user the menu had closed.
@@ -1572,9 +1580,12 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         );
     }
 
-    // The popup, if one is open.
-    if let Some(i) = state.open_menu {
-        paint_popup(into, m, l, state, i);
+    // **Every popup is drawn by one function, whichever kind it is.** The menu bar does not draw the
+    // menu bar's popups and the toolbar does not draw the toolbar's dropdowns -- `paint_popup` is
+    // called once, from the chrome, and is handed the open value. That is why `Open` is an enum: a
+    // popup is a popup, and the two things that can be one do not need to know about each other.
+    if state.open.is_some() {
+        paint_popup(into, m, l, state);
     }
 }
 
@@ -1584,13 +1595,7 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 /// a menu readable: the items start where the heading does, so the eye does not have to travel. The
 /// width is the widest label plus padding, computed here rather than tabulated, because the items are
 /// data.
-fn paint_popup(
-    into: &mut Vec<SurfaceTree>,
-    m: &ChromeMetrics,
-    l: &Layout,
-    state: &ChromeState,
-    index: usize,
-) {
+fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
     // **The geometry comes from `widgets::popup`, not from here.** The first version computed the
     // popup's width, height and row positions inline, from `menus::items_for`, and the hit test had
     // nothing to test against -- which is the exact duplication `widgets.rs` exists to prevent, and
@@ -1600,10 +1605,10 @@ fn paint_popup(
     // heading index and every heading has items, so this arm is unreachable through the session -- but
     // `popup` is `Option` because a *caller* could pass a bad index, and the answer to that is a
     // silent no-op rather than a panic inside a paint.
-    let Some(pop) = crate::widgets::popup(l, index) else {
+    let Some(pop) = crate::widgets::popup(l, state, state.open) else {
         return;
     };
-    let items = crate::menus::items_for(index);
+    let items = pop.open.items(state);
     let pad = 2 * m.cell_w;
     let x = pop.rect.x as i32;
     let y = pop.rect.y as i32;
@@ -1624,7 +1629,7 @@ fn paint_popup(
         // **Hover and press come from the session, not from a re-hit-test here.** The painter does not
         // know where the pointer is -- it is told. A painter that re-derived the hit would be a second
         // hit test, which is the thing that has just been removed.
-        if row_is_live(state, index, i) {
+        if row_is_live(state, pop.open, i) {
             into.push(fill(
                 row.x as i32,
                 row.y as i32,
@@ -1634,10 +1639,26 @@ fn paint_popup(
             ));
         }
         let cy = row.y + (row.height.saturating_sub(m.cell_h)) / 2;
+        let icon_y = row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2;
+        // **The tick goes in the left gutter, at a fixed offset, and the icon follows it.**
+        //
+        // A fixed offset and not "after whatever is there" is what makes the label column line up
+        // between a ticked row and an unticked one -- `widgets::popup` computes the panel's width
+        // assuming the tick is always in that column, and a row without one must not shift its label
+        // left to fill the gap. **The alternative — no tick at all — is what part 20 shipped, and the
+        // zoom dropdown in the reference's screenshot has a tick on its current value.**
+        if it.checked {
+            into.push(SurfaceTree::leaf(crate::Node::Icon(
+                crate::icons::IconId::Check.at(x + pad as i32, icon_y, colour::INK_STRONG),
+            )));
+        }
+        // **Then the icon, one column right of where the tick would be**, so a row with a tick and an
+        // icon and a row with only an icon have their *labels* in the same place.
+        let icon_x = x + pad as i32 + 2 * m.cell_w as i32;
         if let Some(icon) = it.icon {
             into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
-                x + pad as i32,
-                row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
+                icon_x,
+                icon_y,
                 colour::INK_CHROME,
             ))));
         }
@@ -1647,8 +1668,12 @@ fn paint_popup(
             cy,
             it.label,
             Style::MONOSPACE,
-            colour::INK_CHROME,
-            x + pad as i32 + 2 * m.cell_w as i32,
+            if it.checked {
+                colour::INK_STRONG
+            } else {
+                colour::INK_CHROME
+            },
+            icon_x + 2 * m.cell_w as i32,
         );
         // **The accelerator, right-aligned, because the reference puts it there** and a reader looking
         // for "Ctrl+K" looks at the right edge of the row.
@@ -1668,7 +1693,7 @@ fn paint_popup(
     }
 }
 
-/// Whether popup row `row` of `menu` is under the pointer or held down.
+/// Whether popup row `row` is under the pointer or held down.
 ///
 /// **A comparison against the session's own `hover` and `pressed`, and nothing else.** The painter
 /// does not re-derive the hit: a painter that did would be a second hit test, which is precisely the
@@ -1678,8 +1703,8 @@ fn paint_popup(
 ///
 /// The two are separate `Hit` values only so the session can clear `pressed` on a release that
 /// happened off the widget. **They render identically, which is why one function reads both.**
-fn row_is_live(state: &ChromeState, menu: usize, row: usize) -> bool {
-    let h = crate::widgets::Hit::MenuItem { menu, row };
+fn row_is_live(state: &ChromeState, open: crate::widgets::Open, row: usize) -> bool {
+    let h = crate::widgets::Hit::MenuItem { open, row };
     state.hover == Some(h) || state.pressed == Some(h)
 }
 

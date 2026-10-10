@@ -130,7 +130,7 @@ impl Tool {
     pub fn label(self, state: &ChromeState) -> String {
         match self {
             Tool::Zoom => state.zoom_label(),
-            Tool::Style => state.style_label(),
+            Tool::Style => state.style_name().to_string(),
             Tool::Font => state.font_label(),
             // **An empty `String` rather than a panic.** `label` is called from the painter inside a
             // `match` that has already established `has_label`, so this arm is unreachable in the
@@ -166,6 +166,16 @@ impl Tool {
             Tool::Mode => "mode",
             Tool::Collapse => "collapse",
         }
+    }
+
+    /// **Whether this tool opens a dropdown.**
+    ///
+    /// **A property of the tool, not of whether a dropdown happens to exist for it**, so a caller
+    /// asking "does this button open something?" gets an answer from the same list that decides where
+    /// the button is. `menus::dropdown_items` is the authority on which tools have rows; this is the
+    /// cheap answer, and the gate `the_two_dropdown_lists_agree` is what stops them drifting apart.
+    pub const fn has_dropdown(self) -> bool {
+        matches!(self, Tool::Zoom | Tool::Style | Tool::Font)
     }
 
     /// The width this tool occupies, in pixels.
@@ -303,26 +313,80 @@ fn chrome_button(l: &Layout) -> u32 {
 }
 
 impl ChromeState {
-    /// The zoom label, with the percent sign the reference shows.
+    /// The current paragraph style's name, borrowed from the list rather than owned by the state.
+    ///
+    /// **A `&str` out of a `const`, so this allocates nothing.** Part 19 stored `style_name: String`
+    /// and had three `format!`s on the paint path for the toolbar's labels; part 21 deleted both
+    /// fields and made every label a borrow. **The paint path's zero-allocation claim is about the
+    /// frame, and this is the frame.**
+    pub fn style_name(&self) -> &'static str {
+        crate::menus::STYLES
+            .get(self.style_index)
+            .copied()
+            .unwrap_or("Normal text")
+    }
+
+    /// The current font's name. See [`style_name`](Self::style_name).
+    pub fn font_name(&self) -> &'static str {
+        crate::menus::FONTS
+            .get(self.font_index)
+            .copied()
+            .unwrap_or("Inter")
+    }
+
+    /// The current font size, as the toolbar shows it beside the face.
+    ///
+    /// **A plain `11`, and the font size is not a state field.** Part 19 had `font_size: u32` and the
+    /// toolbar showed `"Inter 11"`; there is no operation in this build that changes a size, so a
+    /// field for it is a number nothing can move. **`Action::SetFont` changes the face, not the
+    /// size**, and the day a size control exists this becomes a field again.
+    pub const FONT_SIZE: u32 = 11;
+
+    /// The font control's label: the face and the size, as the reference shows them.
+    pub fn font_label(&self) -> String {
+        format!("{} {}", self.font_name(), Self::FONT_SIZE)
+    }
+
+    /// The zoom control's label.
     pub fn zoom_label(&self) -> String {
         format!("{}%", self.zoom_percent)
     }
-    /// The style's name, borrowed from the chrome rather than allocated per call.
+}
+
+/// Which popup is open, if any.
+///
+/// # Why this is one value and not two
+///
+/// **Part 20 had `ChromeState::open_menu: Option<usize>`, and part 21 needed a second kind of popup**
+/// — the zoom, style and font dropdowns on the toolbar. The obvious move was a second `Option`, and the
+/// obvious result was a state in which a menu *and* a dropdown were both open, two overlays drawn on
+/// top of each other, and a hit test with no rule about which one the pointer meant.
+///
+/// **So it is one enum, and that is the whole argument for it:** there is at most one popup, and the
+/// type says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Open {
+    /// A menu-bar heading's popup, by index into [`MENUS`](crate::chrome::MENUS).
+    Menu(usize),
+    /// A labelled toolbar control's dropdown.
+    Tool(Tool),
+}
+
+impl Open {
+    /// The popup's rows for `state`, or an empty slice when there are none.
     ///
-    /// **`&'static str` is a lie for a runtime string and this is where it is told.** The chrome owns
-    /// `style_name`, so the honest return type is `&str`; the lifetime elision above is why the toolbar
-    /// takes a `String` and formats it. Kept as three small methods so the toolbar does not match on
-    /// three tool variants to find out which string to print.
-    pub fn style_label(&self) -> String {
-        self.style_name.clone()
-    }
-    /// The font's name and size, as the reference shows them: `Inter 11`.
-    pub fn font_label(&self) -> String {
-        format!("{} {}", self.font_name, self.font_size)
+    /// **The one place "what is in this popup" is decided**, for the same reason
+    /// [`crate::menus::items_for`] is for the menus. A caller that asked `Tool::Zoom` and a caller that
+    /// asked `Open::Menu(0)` get different things, and neither of them knows how the other is spelled.
+    pub fn items(self, state: &ChromeState) -> Vec<crate::menus::Item> {
+        match self {
+            Open::Menu(i) => crate::menus::items_for(i).to_vec(),
+            Open::Tool(t) => crate::menus::dropdown_items(t, state),
+        }
     }
 }
 
-/// An open menu's popup: the panel and one row per item.
+/// An open popup: the panel and one row per item.
 ///
 /// # Why this is a function and not painted inline
 ///
@@ -330,66 +394,78 @@ impl ChromeState {
 /// another is the single most expensive bug in a UI** — the symptom is "the button is there but
 /// clicking it does nothing", which reads as a routing problem and is a geometry problem. The
 /// discipline is the one the whole of this file exists for: **one list, painted and hit-tested.**
-///
-/// # The `Vec`
-///
-/// **One allocation per paint, and only while a menu is open.** Thirty-four icons and twenty-one
-/// toolbar buttons are painted every frame without a single allocation; a popup's rows are `Vec`
-/// because their number is *data* — a menu with six items has six rows and a menu with fourteen has
-/// fourteen, and an array would have to be sized for fourteen and padded. The trade is explicit: a
-/// popup open is a state the user is in for under a second, and the paint path's zero-allocation
-/// claim is about the frame, not about the state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Popup {
     /// The popup's panel.
     pub rect: DamageRect,
     /// One row per item, in [`crate::menus::MENUS`] order.
     pub rows: Vec<DamageRect>,
-    /// Which menu this is.
-    pub menu: usize,
+    /// Which popup this is.
+    pub open: Open,
 }
 
 impl Popup {
     /// The row at `(x, y)`, if the point is in one.
     ///
-    /// **The rows, not `rect`.** A popup's panel has a border and padding, and a click on the border is
-    /// a click on nothing — so testing `rect` would make a 4 px strip of every popup a clickable row.
+    /// **The rows, not `rect`.** A popup's panel has padding, and a click on the padding is a click on
+    /// nothing — so testing `rect` would make a strip of every popup a clickable row.
     pub fn row_at(&self, x: i32, y: i32) -> Option<usize> {
         self.rows.iter().position(|r| r.contains(x, y))
     }
 }
 
-/// Where menu `index`'s popup is, and its rows.
+/// Where an open popup is, and its rows.
 ///
-/// **`None` for an index with no menu**, which is what makes the caller's job total: a bad index is a
-/// paint-time mistake in a caller and the answer is "draw nothing", not "panic inside a paint".
-/// A panic in a paint takes the session with it.
+/// **`None` when there is no popup or it has no rows**, which is what makes the caller's job total: a
+/// bad index is a paint-time mistake in a caller and the answer is "draw nothing", not "panic inside
+/// a paint". **A panic in a paint takes the session with it.**
 #[must_use]
-pub fn popup(l: &Layout, index: usize) -> Option<Popup> {
-    let items = crate::menus::items_for(index);
+pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popup> {
+    let open = open?;
+    let items = open.items(state);
     if items.is_empty() {
         return None;
     }
-    let (_, boxes) = crate::chrome::menu_boxes(l);
-    let anchor = boxes.get(index)?;
+    // **A menu hangs from its heading; a dropdown hangs from its button.** That is the whole of the
+    // difference between the two, and it is why this is an `Open` rather than two functions — the
+    // rows differ, the clamp is the same, and the anchor is one line.
+    let anchor_x = match open {
+        Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
+        Open::Tool(tool) => {
+            place_toolbar(l, 8)
+                .into_iter()
+                .find(|p| p.tool == tool)?
+                .rect
+                .x
+        }
+    };
+    let anchor_y = match open {
+        Open::Menu(_) => l.menubar.bottom(),
+        Open::Tool(_) => l.toolbar.bottom(),
+    };
+
     let pad = 2 * l.cell_w;
-    let label_w = items
+    // **The tick column.** A dropdown that shows a check needs room for it, or the tick lands on the
+    // label -- so the width is computed over `label + icon + tick` rather than `label` alone.
+    let widest = items
         .iter()
-        .map(|it| (it.label.len() as u32 + 2) * l.cell_w)
+        .map(|it| {
+            let icon = if it.icon.is_some() { 2 } else { 0 };
+            let tick = if it.checked { 2 } else { 0 };
+            (it.label.len() as u32 + 2 + icon + tick) * l.cell_w
+        })
         .max()
         .unwrap_or(40)
         .max(14 * l.cell_w);
     let row_h = l.cell_h + 6;
-    let w = label_w + pad * 2;
+    let w = widest + pad * 2;
     let h = (items.len() as u32).saturating_mul(row_h) + pad;
 
-    // **Clamped to the panel, not to the heading.** `Extensions` is the longest heading and its popup
+    // **Clamped to the panel, not to the anchor.** `Extensions` is the longest heading and its popup
     // is 336 px wide; anchored without a clamp it runs off the right edge and the last two items are
     // drawn into the scrollbar. The clamp is on the panel because that is where the pixels stop.
-    let x = (anchor.x as i32).min(l.width as i32 - w as i32).max(0);
-    let y = (l.menubar.bottom() as i32)
-        .min(l.height as i32 - h as i32)
-        .max(0);
+    let x = (anchor_x as i32).min(l.width as i32 - w as i32).max(0);
+    let y = (anchor_y as i32).min(l.height as i32 - h as i32).max(0);
 
     let rows = (0..items.len())
         .map(|i| {
@@ -404,7 +480,7 @@ pub fn popup(l: &Layout, index: usize) -> Option<Popup> {
     Some(Popup {
         rect: DamageRect::new(x as u32, y as u32, w, h),
         rows,
-        menu: index,
+        open,
     })
 }
 
@@ -435,7 +511,7 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
             .find(|(k, _)| *k == b)
             .map(|(_, r)| r),
         Hit::Menu(i) => crate::chrome::menu_boxes(l).1.get(i).copied(),
-        Hit::MenuItem { menu, row } => popup(l, menu)?.rows.get(row).copied(),
+        Hit::MenuItem { open, row } => popup(l, state, Some(open))?.rows.get(row).copied(),
         Hit::Doc(i) => l.sidebar_doc(i),
         Hit::NewDoc => state.sidebar_open.then_some(l.sidebar_new),
         Hit::SidebarBack => state.sidebar_open.then_some(l.sidebar_back),
@@ -455,11 +531,11 @@ pub enum Hit {
     Tool(Tool),
     /// A menu-bar heading, by index into [`MENUS`](crate::chrome::MENUS).
     Menu(usize),
-    /// A row of an open popup: which menu, which row.
+    /// A row of an open popup: which popup, which row.
     MenuItem {
-        /// Index into [`MENUS`](crate::chrome::MENUS).
-        menu: usize,
-        /// Row within that menu's items.
+        /// Which popup is open.
+        open: Open,
+        /// Row within that popup's items.
         row: usize,
     },
     /// A title-bar button.
@@ -534,11 +610,12 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     // anywhere else — *including on the widget underneath* — falls through and is dismissed by the
     // session. The fall-through is deliberate and is what every native menu does: clicking the
     // toolbar button you used to dismiss the menu must not also press that button.
-    if let Some(index) = state.open_menu {
-        if let Some(pop) = popup(l, index) {
-            if let Some(row) = pop.row_at(x, y) {
-                return Hit::MenuItem { menu: index, row };
-            }
+    if let Some(pop) = popup(l, state, state.open) {
+        if let Some(row) = pop.row_at(x, y) {
+            return Hit::MenuItem {
+                open: pop.open,
+                row,
+            };
         }
     }
 

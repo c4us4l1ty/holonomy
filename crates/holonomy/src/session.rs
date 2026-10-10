@@ -1284,12 +1284,15 @@ impl<'a> Session<'a> {
                 // row; hover *outside* one closes it, and closing it redraws the popup and the
                 // heading it was hanging from. Neither is inside a widget's rect, so neither is
                 // covered by the loop above.
-                if self.state.open_menu.is_some() {
+                if let Some(open) = self.state.open {
                     let l = self.chrome.layout;
-                    if let Some(pop) = widgets::popup(&l, self.state.open_menu.unwrap_or(0)) {
+                    if let Some(pop) = widgets::popup(&l, &self.state, Some(open)) {
                         self.invalidate(pop.rect);
                     }
-                    self.invalidate(l.menubar);
+                    // **The opener is invalidated as well as the popup**, because a popup that closes
+                    // takes its opener's highlight with it. Damaging only the popup would leave the
+                    // heading lit with nothing drawn over it.
+                    self.invalidate(opener_rect(&l, open));
                 }
             }
             P::Wheel { dy, .. } => {
@@ -1349,13 +1352,17 @@ impl<'a> Session<'a> {
     /// in every test that only ever clicks the popup.
     fn hover_at(&self, x: i32, y: i32) -> widgets::Hit {
         let l = &self.chrome.layout;
-        if let Some(index) = self.state.open_menu {
-            match widgets::popup(l, index).and_then(|p| p.row_at(x, y)) {
-                Some(row) => return widgets::Hit::MenuItem { menu: index, row },
-                // The heading itself is still live: hovering it and pressing it toggles the menu.
+        if let Some(open) = self.state.open {
+            match widgets::popup(l, &self.state, Some(open)).and_then(|p| p.row_at(x, y)) {
+                Some(row) => return widgets::Hit::MenuItem { open, row },
+                // The thing that opened it is still live: hovering it and pressing it toggles it.
                 None => {
-                    if widgets::hit(l, &self.state, x, y) == widgets::Hit::Menu(index) {
-                        return widgets::Hit::Menu(index);
+                    let opener = match open {
+                        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
+                        widgets::Open::Tool(t) => widgets::Hit::Tool(t),
+                    };
+                    if widgets::hit(l, &self.state, x, y) == opener {
+                        return opener;
                     }
                     return widgets::Hit::None;
                 }
@@ -1384,14 +1391,19 @@ impl<'a> Session<'a> {
     ) -> Result<(), SessionError> {
         use widgets::{Hit, Tool};
         match hit {
-            Hit::MenuItem { menu, row } => {
-                let Some(item) = holonomy_render::menus::item_at(menu, row) else {
+            Hit::MenuItem { open, row } => {
+                let Some(item) = open.items(&self.state).get(row).copied() else {
                     return Ok(());
                 };
-                self.state.open_menu = None;
+                let action = item.action;
+                // **The popup closes before the action runs, and that order is load-bearing.** An
+                // action that changes what the popup would contain -- choosing a zoom level leaves
+                // the zoom control as the thing the user is holding -- would otherwise fight with the
+                // rows still on screen. Close, damage, act: three lines, in that order.
+                self.state.open = None;
                 self.damage = self.chrome.full_damage();
-                if let Some(cmd) = menu_command(menu, item) {
-                    self.run_clicked(cmd)?;
+                if let Some(action) = action {
+                    self.apply_action(action)?;
                 } else {
                     self.stats.pointer_inert += 1;
                 }
@@ -1400,11 +1412,20 @@ impl<'a> Session<'a> {
                 // **A toggle, not "open".** Clicking the heading of the menu that is already down
                 // closes it, which is the one behaviour a menu has that is not obvious from having
                 // looked at a screenshot of it.
-                self.state.open_menu = (self.state.open_menu != Some(index)).then_some(index);
+                let open = widgets::Open::Menu(index);
+                self.state.open = (self.state.open != Some(open)).then_some(open);
                 self.damage = self.chrome.full_damage();
             }
             Hit::Tool(tool) => {
-                self.state.open_menu = None;
+                // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
+                // the same reason: the user needs a way to close it with the gesture that opened it.**
+                if tool.has_dropdown() {
+                    let open = widgets::Open::Tool(tool);
+                    self.state.open = (self.state.open != Some(open)).then_some(open);
+                    self.damage = self.chrome.full_damage();
+                    return Ok(());
+                }
+                self.state.open = None;
                 self.damage = self.chrome.full_damage();
                 match tool {
                     Tool::Collapse => {
@@ -1421,7 +1442,7 @@ impl<'a> Session<'a> {
                 }
             }
             Hit::Title(btn) => {
-                self.state.open_menu = None;
+                self.state.open = None;
                 self.damage = self.chrome.full_damage();
                 if let Some(cmd) = title_command(btn) {
                     self.run_clicked(cmd)?;
@@ -1436,12 +1457,12 @@ impl<'a> Session<'a> {
                 // the active index moves, and `Session::adopt_document` is still the only way a
                 // document gets in. **A second click on the already-active row is not an error** and
                 // does nothing.
-                self.state.open_menu = None;
+                self.state.open = None;
                 self.state.active_doc = index;
                 self.damage = self.chrome.full_damage();
             }
             Hit::NewDoc => {
-                self.state.open_menu = None;
+                self.state.open = None;
                 // **Counted, not faked.** `state.docs` is a list of titles and there is nowhere to put
                 // a new one; inventing an "Untitled 2" row with no document behind it would make the
                 // sidebar lie about what is open.
@@ -1449,20 +1470,20 @@ impl<'a> Session<'a> {
                 self.damage = self.chrome.full_damage();
             }
             Hit::SidebarBack => {
-                self.state.open_menu = None;
+                self.state.open = None;
                 self.state.sidebar_open = false;
                 self.damage = self.chrome.full_damage();
             }
             Hit::Page => {
-                self.state.open_menu = None;
+                self.state.open = None;
                 self.click_page(bytes, x, y)?;
             }
             Hit::None => {
                 // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
                 // already turned "the pointer is not over the popup" into `Hit::None`, so reaching
                 // here with a menu open *is* the dismissal.
-                if self.state.open_menu.is_some() {
-                    self.state.open_menu = None;
+                if self.state.open.is_some() {
+                    self.state.open = None;
                     self.damage = self.chrome.full_damage();
                 }
             }
@@ -1586,6 +1607,64 @@ impl<'a> Session<'a> {
             at += i;
         }
         Ok(at)
+    }
+
+    /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
+    ///
+    /// # Why the session, and not the renderer
+    ///
+    /// **Because `Action` has no meaning of its own.** `Action::Undo` is the sentence "this row says
+    /// Undo"; turning it into an edit is the session's job, and `holonomy-render` does not know a
+    /// `Command` exists. **Part 20 did this by comparing the row's label**, so renaming a menu entry
+    /// changed the program's behaviour; now it is a `match` on an enum, and adding a variant is a
+    /// compile error here rather than a silent no-op.
+    ///
+    /// **Three of the arms change chrome state rather than the document** -- zoom, style, font -- and
+    /// routing them through here too is the point: there is exactly one function that says what every
+    /// action in the product means, and a dropdown value is an action like any other.
+    fn apply_action(&mut self, action: holonomy_render::menus::Action) -> Result<(), SessionError> {
+        use holonomy_render::menus::Action;
+        match action {
+            Action::SetZoom(pct) => {
+                self.set_zoom(pct);
+                self.stats.pointer_commands += 1;
+            }
+            Action::SetStyle(i) => {
+                self.state.style_index =
+                    usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
+                self.damage = self.chrome.full_damage();
+                self.stats.pointer_commands += 1;
+            }
+            Action::SetFont(i) => {
+                self.state.font_index =
+                    usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
+                // **The face is recorded and nothing else happens.** §2.2.1 builds the atlas from one
+                // body face, so choosing another name changes the toolbar's label and not one pixel of
+                // the page. Saying so here rather than in the renderer is deliberate: the renderer
+                // draws the choice, and the session admits what it costs.
+                self.damage = self.chrome.full_damage();
+                self.stats.pointer_commands += 1;
+            }
+            other => {
+                if let Some(cmd) = action_command(other) {
+                    self.run_clicked(cmd)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the zoom, clamped to the range the metrics accept.
+    ///
+    /// **25..=400 because that is what `--zoom` takes and what §2.9.3's image-cache thresholds were
+    /// measured against.** A value outside it would resample the page column to a width nothing
+    /// downstream expects, and the first symptom would be an image that looked wrong rather than a
+    /// zoom that was refused -- so it is clamped here, where the reason can be written down.
+    fn set_zoom(&mut self, percent: u16) {
+        self.state.zoom_percent = u32::from(percent).clamp(25, 400);
+        self.damage = self.chrome.full_damage();
     }
 
     /// Apply a command a click produced, and count it.
@@ -3880,32 +3959,64 @@ fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_
     })
 }
 
-/// What a menu item means, or `None`.
+/// What an [`Action`](holonomy_render::menus::Action) means, as a [`Command`].
 ///
-/// **Matched on the label, and that is the weakness.** `menus::Item` has no command field, because a
-/// `Node`-shaped item would have to know what it does and the renderer must not decide what a command
-/// is (see `menus.rs`'s header). The consequence is that a menu item's meaning lives in a string
-/// comparison, and **renaming "Undo" to "Revert" silently makes it inert**. The alternative -- a
-/// command id on the item, which the session interprets and the renderer passes through -- is the
-/// right design and is the next thing to do; it is not done here because adding an id to every item in
-/// eight menus is a change to `menus.rs`'s public shape and this part is already the one that changed
-/// the input contract.
+/// # This replaces part 20's label comparison, and that replacement is the point
 ///
-/// **`menu` is in the signature for the same reason and for a real reason**: `File > Print` and
-/// `Tools > Spelling` mean different things and the label distinguishes them today. It is there so
-/// adding the id does not change this function's signature.
-fn menu_command(
-    menu: usize,
-    item: &holonomy_render::menus::Item,
-) -> Option<holonomy_input::Command> {
+/// Part 20 wrote:
+///
+/// ```text
+/// Some(match (heading, item.label) { (_, "Undo") => …, ("Insert", "Table") => … })
+/// ```
+///
+/// and noted that renaming a menu entry silently makes it inert. **The fix is that there is no
+/// `item.label` here at all.** A row says `Action::Undo`; this function says what that means. The
+/// renderer passes the value through without interpreting it and this function interprets it without
+/// having seen the row — **neither half can get the other's detail wrong**, which is the property a
+/// `match` on a string does not have.
+///
+/// **Public so a gate can call it with an `Action` and no menu at all** — which is how
+/// `an_action_is_routed_without_a_menu_open_around_it` proves the decision does not depend on where
+/// the row came from. A private function could only be reached by clicking, and every click would
+/// carry a `label` with it, which is the coupling being removed.
+///
+/// **The `None`s are the honest remainder.** `Save` and `Close` have no action in this build, and
+/// `SelectAll` maps to `DocumentEnd` because there is no selection to make. `SetZoom`, `SetStyle`
+/// and `SetFont` never reach here — `Session::apply_action` handles those first, because they change
+/// chrome state rather than issuing a document command.
+pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy_input::Command> {
     use holonomy_input::{Command, Hotkey};
-    use holonomy_render::chrome::MENUS;
-    let heading = MENUS.get(menu).copied().unwrap_or("");
-    Some(match (heading, item.label) {
-        (_, "Undo") => Command::Hotkey(Hotkey::Undo),
-        (_, "Redo") => Command::Hotkey(Hotkey::Redo),
-        (_, "Select all") => Command::Hotkey(Hotkey::DocumentEnd),
-        ("Insert", "Table") => Command::Hotkey(Hotkey::InsertTable),
-        _ => return None,
+    use holonomy_render::menus::Action;
+    Some(match action {
+        Action::Undo => Command::Hotkey(Hotkey::Undo),
+        Action::Redo => Command::Hotkey(Hotkey::Redo),
+        Action::SelectAll | Action::DocumentEnd => Command::Hotkey(Hotkey::DocumentEnd),
+        Action::DocumentStart => Command::Hotkey(Hotkey::DocumentStart),
+        Action::InsertTable => Command::Hotkey(Hotkey::InsertTable),
+        Action::InsertImage => Command::Hotkey(Hotkey::InsertImage),
+        Action::InsertMath => Command::Hotkey(Hotkey::InsertMath),
+        // **The two with no action in this build**, listed so the compiler says so when they are
+        // added rather than leaving them to be discovered as a dead row.
+        Action::Save | Action::Close => return None,
+        Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) => return None,
     })
+}
+
+/// The rect of whatever opened `open`, for invalidating.
+///
+/// **A free function, not a method**, because it is geometry and not state — and because
+/// [`widgets::hit_rect`] already has the machinery. This is `Hit`'s rect for the opener, and writing
+/// it as a third spelling of "where is that widget" would be exactly the duplication part 19 was
+/// about.
+///
+/// **`ChromeState::default()` and not the session's own state, deliberately.** The opener's rect does
+/// not depend on any state — a menu heading is where the menu bar puts it — and taking `&self` here
+/// would borrow the session for a value that is a constant function of the layout.
+fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> DamageRect {
+    let h = match open {
+        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
+        widgets::Open::Tool(t) => widgets::Hit::Tool(t),
+    };
+    widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h)
+        .unwrap_or(DamageRect::new(0, 0, 0, 0))
 }

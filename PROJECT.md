@@ -2502,6 +2502,90 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 21 — what a row means: `Action`, and the three dropdowns
+
+**Part 20 ended with a sentence naming its own worst weakness:**
+
+> `menu_command` matches on the item's *label*, and that is the acknowledged weakness: renaming "Undo"
+> to "Revert" silently makes it inert.
+
+**This is the part that fixes that sentence, and the fix is the interesting part.**
+
+The routing was:
+
+```text
+Some(match (heading, item.label) { (_, "Undo") => …, ("Insert", "Table") => … })
+```
+
+**A display string was load-bearing.** Both halves compiled, both typechecked, and a typo in a word a
+user reads would have changed what the program does — with no test failing, because every test agreed
+with the string. That is worse than a compile error: it is a coupling that *looks* covered.
+
+**The replacement is `menus::Action`: a value with no interpretation attached.**
+
+* The renderer draws it and passes it through. `holonomy-render` does not know a `Command` exists.
+* The session interprets it. `action_command(Action) -> Option<Command>` is a `match` on an enum with
+  **no `_` arm**, so adding a variant is a compile error everywhere that has to handle it.
+
+**And it lives in `holonomy-render`, not `holonomy-input`, and that placement is the argument.** Neither
+crate depends on the other — verified, not assumed. An `Action` is a *UI vocabulary*, not an input one:
+`holonomy-input` knows chords and commands and nothing about what a menu is; `holonomy-render` knows
+what a menu item is and nothing about what a keystroke does. `Action` is the sentence between them — "this
+row says Undo" — and it belongs with the rows.
+
+**The two gates that make the claim checkable rather than asserted:**
+
+* `an_action_is_routed_without_a_menu_open_around_it` calls `action_command(Action::Undo)` with no menu
+  open, no row, and no `label` anywhere. Part 20's routing could *only* be reached by clicking a row, and
+  every row carries a label — so "does the label decide?" had no answer that did not involve a label.
+  **This is what makes the question answerable**, which is why `action_command` is `pub`.
+* `renaming_a_label_does_not_change_what_a_row_does` builds a second `Item` by hand with the label
+  `"Revert"` and the same `action`, and asserts the two route identically. It cannot mutate a `const`'s
+  label, so it asserts the real property instead: **no function between a row and its effect takes an
+  `Item`.**
+
+**The dropdowns, and the `Open` enum.** Part 20's `ChromeState` had `open_menu: Option<usize>`. Adding
+Zoom/Style/Font dropdowns meant a second `Option`, and the obvious failure state is a menu *and* a
+dropdown both open, drawn on top of each other, with a hit test and no rule about which one the pointer
+meant. **So it is one enum, `widgets::Open { Menu(usize), Tool(Tool) }`, and the type is the argument:**
+there is at most one popup. `only_one_popup_is_open_at_a_time` asserts the behaviour as well, because an
+enum can still be set to the wrong arm.
+
+`Open::items(state)` is the single place "what is in this popup" is decided — the same discipline as part
+19's `widgets::popup`, generalised. The painter and the hit test both call it, so **the two cannot
+disagree about which row is which**, which is the bug class part 19's file exists to prevent.
+
+**Two design points that were decided against the obvious alternative:**
+
+* **`ZOOMS` is `&[(&str, u16)]`, not `&[u16]`.** The first version formatted `"{}%"` at the point of use,
+  which meant the row's *text* was computed while the row's *meaning* came from a different array, and
+  the two could be out of step. One entry carries both, so "125" and "125%" cannot disagree. It also
+  means `Item::label` stays `&'static str` and every menu stays a `const`.
+* **`checked` is a flag on the `Item`, not a set of chosen indices on the popup.** A tick is a property
+  of the *row* — a row that is not chosen cannot be drawn with a tick — and a parallel list of indices
+  would be a second thing to keep in step with the rows. More importantly, `dropdown_items` computes the
+  tick *by comparing the row's value to the state*, so **the tick cannot be on the wrong row**: the same
+  comparison that draws it is the one that will be acted on.
+
+**And a correction to part 19, made here because this is where the fields died.** `ChromeState` had
+`style_name: String` and `font_name: String`, and `Tool::label` ran `format!` for the zoom label and for
+`"Inter 11"` — **three heap allocations on every paint of every frame**, on the path with a latency
+budget, for three labels. They are now `style_index: usize` and `font_index: usize` into
+`menus::STYLES` and `menus::FONTS`, and `style_name()`/`font_name()` return `&'static str` out of a
+`const`. Two of the three allocations are gone; `font_label` still formats because `"Inter 11"` is two
+values with a space between them. `FONT_SIZE` is a `const`, not a field — **there is no operation in this
+build that changes a size, so a field for it is a number nothing can move.**
+
+`tool_command`'s gate had to change too, and the change is worth recording: it asserted
+`fired + inert + toggled == 1` and Zoom came back 0. **The gate was right and the code was new** — a
+press now has a fourth outcome. The fix was to *name* the outcome (`opened`), not to relax the sum to
+`>= 0`, which would have passed and said nothing.
+
+**The inventory, because "everything is wired" would be a lie.** 54 menu items across eight headings:
+**6 carry an action** — Undo, Redo, Select all, Close, Insert > Image, Insert > Table — and **48 draw
+and do nothing.** `every_wired_menu_item_carries_an_action` prints the 48 by name and counts them, so the
+list cannot drift silently in either direction.
+
 #### Phase 14, part 20 — the pointer: the contract that said the mouse did not exist
 
 **Part 19's readiness note measured this and called it a blocker. The blocker was a sentence in a
@@ -2594,6 +2678,8 @@ Undo, Redo, Image — and `Collapse` toggles the sidebar. Every other button is 
 `menu_command` matches on the item's *label*, and that is the acknowledged weakness: renaming "Undo" to
 "Revert" silently makes it inert. The right fix is a command id on `menus::Item` that the session
 interprets and the renderer passes through, and it is the next thing to do.
+**(Part 21 did exactly that: `menus::Action`, `action_command`, and `crate::holonomy/tests/actions.rs`.
+This paragraph stays as written because "the next thing to do" was true when it was written.)**
 
 **Also not done:** the three dropdowns the reference has where `Zoom`, `Style` and `Font` sit; submenus;
 and drag. And one recorded finding rather than a fix — **`Session::caret_column` is a byte count, not
@@ -2601,6 +2687,7 @@ a character count**, so a caret after a two-byte `é` is drawn one cell too far 
 pre-existing and affects every keystroke, not just clicks; `clicking_a_column_puts_the_caret_after_
 that_character` asserts the byte offset, which is the part that is about the click, and says why it
 does not assert the column.
+**(Part 21 built the three dropdowns. Submenus, drag, and `caret_column` remain not done.)**
 
 #### Phase 14, part 19 — the chrome, built from the reference in `Plan/`
 
