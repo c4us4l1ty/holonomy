@@ -2502,6 +2502,86 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 22 — the caret's column counts characters, and the desync it uncovered
+
+**Part 20 fixed half of this bug and recorded the other half rather than asserting around it:**
+
+> `Session::caret_to` computes it as `caret - line_start(caret)` -- a **byte** offset -- so for a caret
+> at byte 2 of `éa` it reports column 2, and `Caret::locate` then draws the caret at
+> `text.x + 2 * cell_w`, one cell right of where the click put it.
+
+The half that was fixed is `offset_of`: part 20 made a *click* in column 1 of `éa` land at byte 2
+rather than between the `é`'s bytes. **The inverse was never done** — having arrived at a byte offset,
+the column computed from it was still a byte count. **And it was never only a click bug:** every
+keystroke goes through the same `caret_to`, so typing `é` has always moved the drawn caret one cell too
+far.
+
+**`refresh_caret_column` counts UTF-8 scalars, and the count is "bytes that are not continuation
+bytes" — no decode and no table.** A scalar starts at any byte that is not `0b10xxxxxx`; that is the
+whole rule, and it is the same walk `offset_of` takes the other way. It is O(line length), read in
+64-byte chunks through a **stack** buffer so `tests/session_no_alloc.rs` stays green.
+
+**Why one function with two capabilities rather than two implementations.** `Session::apply` is public
+*so that* a driver with its own event source can drive it — a stated reason, in the gate for it — so
+`caret_to` cannot take a `&mut dyn LeafSource` and was not given one. **It reads resident text and
+falls back to the byte count when the range is not resident.** `paint_with` calls the *same function*
+with a source, immediately before `chrome.tree` — **and that position in the function is the whole
+argument for it**, because `Caret::locate` runs inside `chrome.tree`. So the column the renderer reads
+is the authoritative one, and the fallback window is a window in which nothing is drawn. This mirrors
+the split `Editor` already documents between `read_into` and `read_into_faulting`.
+
+**The fast path is what `SessionStats::caret_column_scans` exists to measure.** A caret at the start of
+its line returns 0 without reading anything, and that is the common case — `DocumentStart`, `Home`,
+typing at the beginning of a line. The scan runs on every caret move, so "is it correct" is the other
+seven tests' job and "**does it run when there is nothing to count**" needed a number rather than a
+claim.
+
+**Where it stops, stated rather than fixed.** A combining mark is a second scalar at the same place, and
+a CJK ideograph is two cells wide, and **this counter gets both wrong.** The same character spelled
+precomposed (`é`) and decomposed (`e` + U+0301) lands in two different columns, which
+`a_combining_sequence_counts_two_scalars_and_documents_the_limit` asserts on purpose. The fix is a
+display-width table, and the caret's x would need the same table.
+
+## The desync this uncovered: `Session::new` had never placed its caret
+
+**`state` in `new_with` was built with `..ChromeState::default()`, so `caret_line` and `caret_column`
+were 0 — while `editor.caret()` is wherever the document builder left it.** Every gate that seeds a
+document with `insert_at` leaves the caret at the end of it, so **a session opened on a three-line
+document reported "line 0, column 0" and drew the caret at the top-left of the page** while the model
+said the very end of the last line.
+
+**It was invisible for twelve phases because both halves of the arithmetic were zero.** A byte count of
+0 times `cell_w` is 0, which is a perfectly sensible column for column 0, and nothing contradicted it
+until the column started being computed from the editor's actual caret.
+
+**How it surfaced is the part worth recording.** `a_space_advances_the_pen_rather_than_stacking_glyphs`
+— a Phase 12 gate about glyph advances — failed by **exactly one `cell_w`**, because `"a a"` now drew a
+caret one cell further right than `"aa"`. **A gate measuring ink extent found a caret it had never been
+able to see.** The gate's fixture was wrong (it never pinned the caret), and the fix was to pin it there
+rather than to change the measurement, because the measurement was right and the thing that moved was not
+what the gate is about. **A gate that measures ink extent must pin the caret, or it is partly measuring
+the caret.**
+
+`new_with` now calls `caret_to` on the editor's own position after construction, so it goes through the
+same code that keeps the two in step from there on.
+
+**Three fixture lessons from writing the gate, all of them the same lesson.**
+
+1. **A fixture whose two quantities coincide cannot tell a correct answer from a wrong one.** The
+   sparse gate padded a long line with ASCII, so the byte count and the character count were *equal* —
+   every assertion was vacuous. It failed at `65524 != 2` with a byte count that was correct as a byte
+   count, which is what said so. The padding is now made of two-byte characters and both numbers are
+   asserted as constants.
+2. **The obvious way to make a rope sparse is the way that does not reach the code.** "Evict the caret's
+   line and move onto it" cannot work: `caret_to` reads around the destination, finds the leaf absent, and
+   returns `LeafAbsent` — **part 16's rule doing its job** — before the column scan runs. The reachable
+   state is a caret whose *line prefix* is in an absent leaf and whose own byte is in a resident one, so
+   the fixture is a line long enough to cross a section boundary with section 0 evicted.
+3. **A row cannot be asserted on an unpainted session.** `ChromeState::line_heights` is a model the
+   chrome owns and `publish_line_heights` fills it, so before a paint every row is at y = 0 and
+   `Caret::locate` puts the caret on the first row whatever `caret_line` says. The row assertion is
+   after a repaint, and says why.
+
 #### Phase 14, part 21 — what a row means: `Action`, and the three dropdowns
 
 **Part 20 ended with a sentence naming its own worst weakness:**
@@ -2687,7 +2767,9 @@ a character count**, so a caret after a two-byte `é` is drawn one cell too far 
 pre-existing and affects every keystroke, not just clicks; `clicking_a_column_puts_the_caret_after_
 that_character` asserts the byte offset, which is the part that is about the click, and says why it
 does not assert the column.
-**(Part 21 built the three dropdowns. Submenus, drag, and `caret_column` remain not done.)**
+**(Part 21 built the three dropdowns. Submenus and drag remain not done. Part 22 fixed the
+`caret_column` finding — it is a character count now — and in doing so found that `Session::new` had
+never placed its caret at all; see the part-22 section above.)**
 
 #### Phase 14, part 19 — the chrome, built from the reference in `Plan/`
 

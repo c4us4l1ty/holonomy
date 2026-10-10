@@ -58,12 +58,7 @@ fn with_text(text: &str) -> Session<'static> {
     }
     let m = ChromeMetrics::DESKTOP;
     let scanout = HeadlessScanout::new(m.width, m.height);
-    Session::new(
-        ed,
-        Painter::new(shared_atlas(), 0),
-        Box::new(scanout),
-        m,
-    )
+    Session::new(ed, Painter::new(shared_atlas(), 0), Box::new(scanout), m)
 }
 
 /// How many non-background pixels are in `rect`.
@@ -121,13 +116,11 @@ fn the_documents_own_words_are_on_the_page() {
     s.paint(None).expect("paint");
     let stats = *s.paint_stats();
     assert_eq!(
-        s.stats.lines_drawn,
-        1,
+        s.stats.lines_drawn, 1,
         "one line of text should have been emitted"
     );
     assert_eq!(
-        s.stats.glyphs_drawn,
-        5,
+        s.stats.glyphs_drawn, 5,
         "five bytes of 'hello' should have become one run"
     );
     assert_eq!(stats.doc_glyphs, 5, "five glyphs blitted");
@@ -200,7 +193,10 @@ fn a_multibyte_character_is_never_split_across_the_measure() {
         s.stats.glyphs_drawn, 8,
         "four two-byte characters are eight bytes"
     );
-    assert_eq!(stats.doc_glyphs, 4, "and four glyphs — not eight, and not two broken ones");
+    assert_eq!(
+        stats.doc_glyphs, 4,
+        "and four glyphs — not eight, and not two broken ones"
+    );
     assert_eq!(
         stats.missing, 0,
         "nothing should be undecodable: a line of valid UTF-8 must not produce replacement characters"
@@ -282,8 +278,21 @@ fn ink_extent(s: &Session<'_>) -> u32 {
 #[test]
 fn a_space_advances_the_pen_rather_than_stacking_glyphs() {
     let mut tight = with_text("aa");
+    // **Park the caret at column 0 in both, and the reason is a bug this gate found in part 22.**
+    //
+    // `with_text` leaves the caret at the end of the document, and `ink_extent` measures the *rightmost
+    // ink in the text column* — which includes the caret. So "aa" and "a a" differed by a whole cell of
+    // caret, not by the space, and the gate failed by exactly `cell_w`. It had been passing for twelve
+    // phases because `Session::new` never reconciled `ChromeState::caret_column` with the editor's caret,
+    // so the caret was always drawn at column 0 and contributed nothing to the rightmost pixel.
+    //
+    // **A gate that measures ink extent must pin the caret, or it is partly measuring the caret.** That
+    // is the fixture lesson; the fix is here and not in the measurement, because the measurement is
+    // right and the thing that moved was not what the gate is about.
+    tight.caret_to(0).expect("park the caret");
     tight.paint(None).expect("paint");
     let mut spaced = with_text("a a");
+    spaced.caret_to(0).expect("park the caret");
     spaced.paint(None).expect("paint");
     let gap = ink_extent(&spaced).saturating_sub(ink_extent(&tight));
     let cell_w = tight.chrome.metrics.cell_w;
@@ -315,7 +324,10 @@ fn scrolling_moves_the_ink_to_the_row_the_geometry_says() {
     let text: String = (0..60).map(|i| format!("l{:02}\n", i)).collect();
     let mut s = with_text(&text);
     let rows = s.chrome.layout.rows;
-    assert!(rows < 60, "the fixture must be taller than the page, or there is nothing to scroll");
+    assert!(
+        rows < 60,
+        "the fixture must be taller than the page, or there is nothing to scroll"
+    );
 
     s.paint(None).expect("first paint");
     let top = first_inked_row(&s).expect("ink on the first page");
@@ -330,8 +342,7 @@ fn scrolling_moves_the_ink_to_the_row_the_geometry_says() {
     // has 61 lines -- 60 terminated and one empty. A text editor shows that empty last line, and so does
     // this. `TextCounts::lines()`'s "`newlines + 1`" convention is the same fact stated once.
     assert_eq!(
-        s.stats.lines_drawn,
-        11,
+        s.stats.lines_drawn, 11,
         "lines 50..60 plus the empty last line, on a page holding {rows} rows"
     );
     // **30 on the second page against 69 on the first**, and that difference *is* the scroll. The first
@@ -345,8 +356,7 @@ fn scrolling_moves_the_ink_to_the_row_the_geometry_says() {
         "the first page holds {rows} lines of three characters"
     );
     assert_eq!(
-        second_page.doc_glyphs,
-        30,
+        second_page.doc_glyphs, 30,
         "the second page holds the 10 lines from line 50 plus the empty last one"
     );
 
@@ -514,7 +524,10 @@ fn a_document_frame_is_distinguishable_from_a_blank_page() {
 
     // An empty document is **one line**, not zero -- the same convention `TextCounts::lines()` and
     // `LineHeights` use, and the one a status bar showing "0 lines" on a new file would contradict.
-    assert_eq!(blank.stats.lines_drawn, 1, "an empty document is one line, not zero");
+    assert_eq!(
+        blank.stats.lines_drawn, 1,
+        "an empty document is one line, not zero"
+    );
     assert!(
         filled.stats.lines_drawn > 0,
         "a document with text must have drawn a line"
@@ -526,4 +539,3 @@ fn a_document_frame_is_distinguishable_from_a_blank_page() {
         ink_in_text_column(&blank)
     );
 }
-

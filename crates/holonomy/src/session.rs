@@ -297,6 +297,15 @@ pub struct SessionStats {
     /// because a count that is zero would mean either that every button works or that nothing is
     /// being hit-tested, and those need to be distinguishable.
     pub pointer_inert: u32,
+    /// Caret moves whose column was computed by walking text rather than by subtracting offsets.
+    ///
+    /// **A measurement, not a warning.** Part 22 added a scan over the caret's line prefix to count
+    /// UTF-8 scalars, and the first thing it had to answer was "does this fire on every keystroke, or
+    /// only when the caret is not at a column boundary?" — so the number is there rather than asserted
+    /// from reading the code. **A caret at the start of its line does no scan at all** and is not
+    /// counted, which is what makes the difference visible: `DocumentStart`, `Home`, and typing at the
+    /// beginning of a line all leave this at zero.
+    pub caret_column_scans: u32,
 }
 
 /// A pre-opened export sink.
@@ -671,7 +680,7 @@ impl<'a> Session<'a> {
             bytes: editor.text_len() as u32,
             ..ChromeState::default()
         };
-        Self {
+        let mut s = Self {
             editor,
             chrome,
             state,
@@ -710,7 +719,27 @@ impl<'a> Session<'a> {
             // window, and `max(1)` keeps a degenerate layout from producing a zero-width resample --
             // which would be a division by zero inside `holonomy_image::scale::axis_map`.
             image_column_width: u32::max(chrome.layout.text.width, 1),
-        }
+        };
+        // **The chrome's caret is reconciled with the editor's, and this was a real desync.**
+        //
+        // `state` above is `..ChromeState::default()`, so `caret_line` and `caret_column` were 0 — while
+        // `editor.caret()` is wherever the document builder left it, which for every gate that seeds a
+        // document with `insert_at` is **the end of the document**. So a session opened on a three-line
+        // document reported "line 0, column 0" and **drew the caret at the top-left of the page** while
+        // the model said the end of the last line.
+        //
+        // **It was invisible for twelve phases because `caret_column` was a byte count and `Caret::locate`
+        // multiplied it by `cell_w`; both were 0, so the arithmetic agreed with itself.** Part 22 started
+        // computing the column from the editor's actual caret and it surfaced immediately, as
+        // `a_space_advances_the_pen_rather_than_stacking_glyphs` failing by exactly one cell on `"a a"`
+        // against `"aa"` — **the caret ink at the end of one line and not the other.** That gate was
+        // measuring ink extent and found a caret it had never been able to see.
+        //
+        // `caret_to` rather than a direct assignment, so this goes through the same code that keeps the
+        // two in step from here on, and the full damage it queues is what a first frame wants anyway.
+        s.caret_to(s.editor.caret() as usize)
+            .expect("a caret at the editor's own position is inside the document");
+        s
     }
 
     /// Capacity of the reusable run buffer, so a gate can assert it did not grow.
@@ -1515,6 +1544,99 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// Recompute [`ChromeState::caret_column`] as a count of UTF-8 scalars, and return it if complete.
+    ///
+    /// # This is the inverse of [`offset_of`](Self::offset_of), and it exists because of it
+    ///
+    /// `offset_of` was fixed in part 20: a column is characters, so a click in column 1 of a line
+    /// starting with a two-byte `é` lands after the `é` and not between its bytes. **The other half
+    /// of that fix was never made.** `caret_to` computed the column as `caret - line_start` — a *byte*
+    /// count — so the same `éa` reported column 2 for a caret at byte 2, and `Caret::locate` drew the
+    /// caret at `text.x + 2 * cell_w`, **one cell right of where the click had just put it.**
+    ///
+    /// That is not only a click bug: every keystroke goes through the same `caret_to`, so typing `é`
+    /// has always moved the drawn caret one cell too far. `tests/pointer.rs` recorded the finding
+    /// rather than asserting `== 1` (which would fail) or `== 2` (which would enshrine it).
+    ///
+    /// # Why scalars, and what that does and does not claim
+    ///
+    /// **`Painter::text` advances `cell_w` per UTF-8 scalar** — `TextRun`'s `k` indexes scalars — so
+    /// the caret cell has to be the scalar index to land under the right glyph. **A combining mark is
+    /// a second scalar at the same place**, and a CJK ideograph is two cells wide, and **this counter
+    /// gets both wrong.** That is recorded rather than fixed: the fix is a display-width table, and
+    /// adding one to make a counter correct in a case this build cannot produce would be the kind of
+    /// untested machinery this project has declined four times.
+    ///
+    /// # Why one function with two capabilities
+    ///
+    /// **Because there are two callers with two different needs, and two implementations would be two
+    /// things to keep in step.** `caret_to` has no source — see its note — and reads resident text.
+    /// `paint_with` has one, reads whatever it likes, and runs immediately before `chrome.tree`, so the
+    /// column the renderer reads is the authoritative one. Same function, same arithmetic, two
+    /// capabilities — the split `Editor` already draws between `read_into` and `read_into_faulting`.
+    ///
+    /// # The cost, and the fast path
+    ///
+    /// **O(line length), not O(document)** — bounded by the line the caret is on, read in 64-byte
+    /// chunks through a **stack** buffer so `tests/session_no_alloc.rs` stays green. **A caret at the
+    /// start of its line returns 0 without reading anything**, which is the common case for
+    /// `DocumentStart`, `Home`, and typing at the beginning of a line, and it is why the scan count in
+    /// `SessionStats` exists rather than the count being merely asserted here.
+    ///
+    /// # The failure is a fallback and not an error
+    ///
+    /// **`None` when the range could not be read in full**, which on a resident rope means an absent
+    /// leaf. The state keeps the byte count, and the paint path tries again with a source. **This is
+    /// the one window in which `caret_column()` reports a byte count**, and it is a window in which
+    /// the caret's line is not painted — the paint path fetches it — so no pixel is placed from it.
+    fn refresh_caret_column(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Option<u32> {
+        let caret = self.editor.caret() as usize;
+        let start = self.line_start(caret);
+        let span = caret.checked_sub(start)?;
+        if span == 0 {
+            // **The fast path, and the reason it is a fast path rather than a special case.** Zero
+            // bytes to count, so there is nothing to read and nothing to get wrong.
+            self.state.caret_column = 0;
+            return Some(0);
+        }
+        self.stats.caret_column_scans += 1;
+        /// Bytes per rope call. The same chunk `offset_of` uses, for the same reason: a column scan
+        /// must not be one rope walk per character.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut scalars = 0u32;
+        let mut at = start;
+        while at < caret {
+            let n = CHUNK.min(caret - at);
+            // **One loop, two readers.** The difference is the `match` and nothing else, which is the
+            // whole argument for not writing the walk twice.
+            let got = match source.as_deref_mut() {
+                Some(src) => self
+                    .editor
+                    .read_into_faulting(src, at, &mut buf[..n])
+                    .ok()?,
+                None => self.editor.read_into(at, &mut buf[..n]).ok()?,
+            };
+            // **A short read means the rest is not there**, and counting what arrived would be a
+            // number that is wrong by an unknown amount -- worse than the byte count it replaces,
+            // because the byte count at least has a stated meaning.
+            if got < n {
+                return None;
+            }
+            // **A UTF-8 scalar starts at any byte that is not a continuation byte**, which is the
+            // whole test: `0b10xxxxxx` continues a scalar started earlier, everything else starts one.
+            // This is the same rule `offset_of` walks the other way, and it needs no table and no
+            // decode -- a scalar's *length* is only needed to skip it, and counting does not skip.
+            scalars += buf[..n].iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32;
+            at += n;
+        }
+        self.state.caret_column = scalars;
+        Some(scalars)
+    }
+
     /// Add `r` to the pending damage.
     ///
     /// **`self.damage` is a [`DamageRect`], not a tracker**, so "add" is a union rather than an
@@ -2180,10 +2302,22 @@ impl<'a> Session<'a> {
         // would give the new position, which is the one thing that is not yet stale.
         let old_cell = self.caret_cell();
         self.editor.caret_to(at)?;
-        // The caret's *column* within its line, for the status bar.
-        let line_start = self.line_start(self.editor.caret() as usize);
-        self.state.caret_column =
-            ((self.editor.caret() as usize).saturating_sub(line_start)) as u32;
+        // The caret's *column* within its line, for the status bar and for `Caret::locate`'s cell.
+        //
+        // **This is a scalar count and not a byte offset, as of part 22**, and the call carries no
+        // source because the keystroke path cannot take one: `Session::apply` is public *so that* a
+        // driver with its own event source can drive it, and a `&mut dyn LeafSource` parameter would
+        // undo that — 43 gate sites and the documented reason for the method's visibility.
+        //
+        // **`None`, so this is a resident read.** On a document that is entirely in memory — every
+        // gate, and every document shorter than the resident budget — that is a memcpy and the count
+        // is exact. On a container-backed document whose caret line is not resident it cannot be, and
+        // `refresh_caret_column` falls back to the byte count. `paint_with` recomputes it with a
+        // faulting source before the chrome's tree, so the value the *renderer* uses is exact
+        // whenever the line is painted — which is whenever the caret can be drawn at all. See
+        // `refresh_caret_column` for why there is one function and two capabilities rather than two
+        // implementations.
+        let _ = self.refresh_caret_column(None);
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
         // **A caret move is a repaint, and this used not to be one.**
         //
@@ -2424,6 +2558,18 @@ impl<'a> Session<'a> {
         // chrome's tree and `Caret::locate` both read it: a table that pushed the lines below it down
         // but was published afterwards would move the text and leave the caret behind.
         self.publish_line_heights(source);
+        // **The caret's column is recomputed here, with a faulting source, immediately before the
+        // chrome's tree — and that position in this function is the whole argument for it.**
+        //
+        // `Caret::locate` runs inside `chrome.tree` and reads `state.caret_column` to place the
+        // caret's cell, so **whatever this call leaves is what gets drawn.** The `None` read in
+        // `caret_to` is best-effort because the keystroke path cannot take a source; this one is not,
+        // and it runs on the frame that draws, so a caret on a line that was not resident when it
+        // moved is still drawn under the right glyph.
+        //
+        // **A read error here does not fail the paint.** `None` leaves the previous value, which is
+        // the byte count — a status bar number, not a reason to lose a frame over.
+        let _ = self.refresh_caret_column(Some(&mut *source));
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
         // they have to be painted in the page's coordinate space and clipped by the same damage the

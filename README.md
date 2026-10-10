@@ -189,6 +189,14 @@ the only way a document gets in).
 face, so `Action::SetFont` records the choice without changing a pixel of the page. That is stated in
 the session's handler rather than left to be discovered.
 
+**The caret counts characters, and the case where it does not is recorded.** `caret_column` is a count
+of UTF- scalars, so a caret after a two-byte `é` is drawn in the right place — it was a byte count
+until Phase 14 part 22, and a caret after any non-ASCII character was drawn a cell too far right.
+**A combining mark is a second scalar at the same place and a CJK ideograph is two cells wide, so both
+are still counted wrong.** Fixing that needs a display-width table, and the caret's position would need
+the same one; nothing here pretends otherwise, and a gate asserts the limitation rather than leaving it
+to be found by accident.
+
 There was also an unclaimed ~30% gap in CIOS throughput on this host: ~2,657 ns per squaring measured
 here against 2,077 ns on the target. Because the VDF's iteration count `T` is derived from that
 per-squaring cost, the gap translated directly into ~30% more squarings inside the same latency budget.
