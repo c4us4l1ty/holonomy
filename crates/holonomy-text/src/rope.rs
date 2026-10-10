@@ -174,23 +174,20 @@ pub struct Rope {
     record: crate::edit_record::EditRecord,
     /// A counter bumped once per **recorded** edit.
     ///
-    /// # Why a counter and not a flag
+    /// **Diagnostic only, and that is a correction to part 14 rather than a plan.** Part 14 built a
+    /// per-leaf `epochs` array alongside this counter and made
+    /// `is_resident(i) && epochs[i] == edit_epoch` the fault condition, reasoning that one edit
+    /// invalidates many leaves. **It does not.** An edit changes the bytes of one leaf; every other leaf
+    /// keeps exactly what it had, and only its *offset* moves — and an offset is derived from `starts`,
+    /// not stored on the leaf, so moving it needs no invalidation. See
+    /// [`fault_leaf`](Self::fault_leaf) for the measurement: a 16-byte read cost **25.5 ms**, and
+    /// `tests/session_latency.rs` stopped finishing.
     ///
-    /// **Because one edit invalidates many leaves, and no flag can say which.** An insert at offset 10
-    /// makes every leaf after it hold pre-edit bytes, so "is this leaf stale?" is not a property of the
-    /// leaf — it is a comparison between *when the leaf was filled* and *when the last edit happened*.
-    /// A boolean would have to be cleared on every leaf after every edit, which is O(leaves) per
-    /// keystroke; the counter makes it O(1) to bump and O(1) to ask.
+    /// **Kept because it is the one number that says "how many edits has this rope seen", and the record
+    /// says that too but only in aggregate.** It is read by `fault_epoch` for a gate and by nothing on
+    /// any hot path. A future change that *does* need per-leaf staleness has to establish that leaves
+    /// change bytes other than the edited one — which is the claim this counter's array got wrong.
     edit_epoch: u64,
-    /// Per leaf, the [`edit_epoch`](Self::edit_epoch) at which its bytes were last brought up to date.
-    ///
-    /// **A parallel array rather than a field on the leaf**, for the same reason `starts` is one:
-    /// `LeafSlot` is about *bytes and lengths*, this is about *geometry*, and the two churn for different
-    /// reasons — a split copies bytes and moves both.
-    ///
-    /// `epochs.len() == leaves.len()`, maintained in exactly the two places `starts` is: `split_at`
-    /// inserts and the merge truncates. A third place would be a place they could disagree.
-    epochs: Vec<u64>,
 }
 
 /// One entry in the spine: bytes held, or only a length remembered.
@@ -383,8 +380,6 @@ impl Rope {
         // the first leaf split reallocates this array -- and `no_alloc.rs` types 4,000 characters into a
         // fresh rope, which is enough for one split, and reported *1 reallocation on the typing path*.
         // Three parallel arrays that must grow together cannot have three different growth policies.
-        let mut epochs = Vec::with_capacity(Self::SPINE_RESERVE);
-        epochs.push(0);
         Self {
             leaves,
             starts,
@@ -393,7 +388,6 @@ impl Rope {
             // other constructor says the same, and it is what makes `record` mean "edits since load".
             record: crate::edit_record::EditRecord::new(),
             edit_epoch: 0,
-            epochs,
         }
     }
 
@@ -633,11 +627,10 @@ impl Rope {
         // **The edit made this leaf's bytes current, so it is exempt from the epoch bump.** Stamped
         // after the write, for the reason `note_edit_at_cursor` gives: a stamp before would be a promise
         // the code had not yet kept, and the leaf could fail to be edited at all.
-        self.epochs[index] = self.edit_epoch;
         Ok(())
     }
 
-    /// Mark every resident leaf past the last edit as out of date, by advancing the epoch.
+    /// Advance the edit counter. See [`edit_epoch`](Self::edit_epoch) for why it is not a staleness test.
     ///
     /// **One increment, and that is the whole cost.** Every leaf whose epoch is not the new one is stale —
     /// which is every leaf that was not itself the leaf just edited — and the epoch comparison in
@@ -707,7 +700,6 @@ impl Rope {
             leaf.delete_byte()?;
             self.cursor -= 1;
             self.recompute_starts_from(index);
-            self.epochs[index] = self.edit_epoch;
             return Ok(());
         }
 
@@ -739,9 +731,6 @@ impl Rope {
         self.cursor -= 1;
         self.try_merge(prev)?;
         self.recompute_starts_from(prev.saturating_sub(1));
-        // **Stamped at `prev` after the merge**, not at `prev` and `prev + 1` before it -- the merge
-        // removes a slot, so the index that survives is the one that has to carry the stamp.
-        self.epochs[prev] = self.edit_epoch;
         Ok(())
     }
 
@@ -923,12 +912,31 @@ impl Rope {
     /// shared by the read and cursor paths rather than a caller-owned scratch buffer both would then
     /// have to keep in sync.
     pub fn fault_leaf(&mut self, source: &mut dyn LeafSource, i: usize) -> Result<(), RopeError> {
-        // **Resident is not the same as up to date**, and conflating them is the bug this condition used
-        // to hide. A leaf that was already resident when an edit happened holds *pre-edit* bytes: its
-        // length and offset are right, so every check this function used to make passed, and the document
-        // was silently wrong from there to the end. Residency is about memory; currency is about edits,
-        // and only the epoch can answer the second.
-        if self.is_resident(i) && self.epochs[i] == self.edit_epoch {
+        // **Residency alone, and that is a CORRECTION to part 14.**
+        //
+        // Part 14 wrote `if self.is_resident(i) && self.epochs[i] == self.edit_epoch`, on the reasoning
+        // in a comment that said: *"A leaf that was already resident when an edit happened holds pre-edit
+        // bytes: its length and offset are right, so every check this function used to make passed, and
+        // the document was silently wrong from there to the end."*
+        //
+        // **That reasoning is false, and it is false about content rather than about position.** An edit
+        // at offset `p` changes the *bytes* of the one leaf holding `p`. Every other leaf keeps exactly
+        // the bytes it had. What moves is its *offset* -- and an offset is not stored on the leaf, it is
+        // derived from `starts`, so moving it needs no invalidation at all. A resident leaf is therefore
+        // always current, and the epoch test threw away a correct answer and rebuilt it from the source.
+        //
+        // **What the part-14 comment was actually describing is the pre-part-14 bug**: a fault that asked
+        // a source for bytes at a *current* offset and got them shifted. That is a fault's problem -- a
+        // fault is the only thing that asks the source for anything -- and the record already answers it.
+        // Residency is not a proxy for "did anyone move this", and using it as one turned a *read* into a
+        // whole-document refetch.
+        //
+        // **The cost, measured, is why this is written down rather than patched quietly.** With the epoch
+        // test, a 3 MiB document built by appending has 819 leaves of which exactly one is current, so
+        // **every read re-faulted 818 of them** -- each a fresh page-locked 4 KiB block. A 16-byte read at
+        // offset 0 measured **25.5 ms**. `tests/session_latency.rs`, which paints a 3 MiB document twenty
+        // times, went from **0.32 s to not finishing**.
+        if self.is_resident(i) {
             return Ok(());
         }
         let want = self.leaf_len(i);
@@ -980,9 +988,6 @@ impl Rope {
         // is checked as it happens** -- which is a stronger check than the one it replaces, since the old
         // one could only see a total.
         self.leaves[i] = LeafSlot::Resident(CagrLeaf::with_text(&buf)?);
-        // **Stamped after the fill, never before** -- a stamp applied first would make a leaf that failed
-        // to fetch look current, and the next read would skip it.
-        self.epochs[i] = self.edit_epoch;
         source.on_resident(at);
         Ok(())
     }
@@ -1398,7 +1403,6 @@ impl Rope {
         // **Both halves inherit the epoch the left half had.** A split moves text from one leaf to two
         // without changing any byte's currency, so the right half is exactly as fresh as the left was --
         // and stamping it with the current epoch when it is *not* fresh would mark stale bytes as good.
-        self.epochs.insert(index + 1, self.epochs[index]);
         self.relink();
         self.recompute_starts_from(index);
         Ok(())
@@ -1474,7 +1478,6 @@ impl Rope {
         self.leaves.remove(index + 1);
         // **With the leaf, not with `starts`.** `starts.truncate` follows below; this has to come first
         // so the two stay the same length.
-        self.epochs.remove(index + 1);
         // `starts` must shrink with `leaves`, or `recompute_starts_from` walks past its end.
         self.starts.truncate(self.leaves.len());
         self.relink();
@@ -1625,8 +1628,6 @@ impl Rope {
         // bytes to be stale. The first fault brings one up to date and stamps it.
         // **Reserved with room to spare**, because a skeleton rope that is then typed into will split,
         // and `Vec::with_capacity(n)` -- which is what `leaves` and `starts` use here -- leaves no slack.
-        let mut epochs = Vec::with_capacity(n + Self::SPINE_RESERVE);
-        epochs.resize(n, 0);
         for i in 0..n {
             let at = i * fill;
             starts.push(at);
@@ -1644,7 +1645,6 @@ impl Rope {
             cursor: 0,
             record: crate::edit_record::EditRecord::new(),
             edit_epoch: 0,
-            epochs,
         }
     }
 }

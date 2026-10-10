@@ -59,9 +59,23 @@ pub struct TextCounts {
 impl TextCounts {
     /// Count the whole document. One `O(document)` pass: at construction, and as the repair path.
     pub fn scan(editor: &Editor) -> Self {
-        let text = editor.text().unwrap_or_default();
+        Self::scan_bytes(&editor.text().unwrap_or_default())
+    }
+
+    /// Count from bytes the caller already has. **Part 16.**
+    ///
+    /// # Why this is a separate function rather than `scan` taking a source
+    ///
+    /// Because at open the caller has *already* read the whole document for [`DocLines`](crate::doclines::DocLines)
+    /// and [`Manifest`](crate::manifest::Manifest), and reading it a second time for the counts is a
+    /// second whole-document copy for two integers.
+    ///
+    /// **`scan` keeps its `&Editor` signature** because the repair path — `undo`/`redo` rescanning — has a
+    /// resident document and no source to hand. Two callers with different needs is not a reason to make
+    /// one of them pay.
+    pub fn scan_bytes(text: &[u8]) -> Self {
         let (mut words, mut newlines, mut in_word) = (0u32, 0u32, false);
-        for &b in &text {
+        for &b in text {
             if b == b'\n' {
                 newlines += 1;
             }
@@ -235,34 +249,34 @@ mod tests {
     }
 
     /// Typing the first letter of a new document is one word. Phase 11.
-///
-/// **This is the case that caught the seam bug**, and it is here because it is the one shape the other
-/// tests never had: every other test starts from a document that already has text, so the byte after
-/// the run is always present and the seam is judged against a real neighbour. In an empty document
-/// there is no byte after the run, which is the only situation where the old and new seam differ by
-/// construction -- and the buggy version netted **zero** for it. The bug surfaced much later, as an
-/// underflow in a delete during the full-session gate, several keystrokes downstream.
-#[test]
-fn inserting_into_an_empty_document_counts_one_word() {
-    let mut e = editor_with("");
-    let mut c = TextCounts::scan(&e);
-    assert_eq!(c.words, 0);
-    e.insert_at(0, b"T", SpanPolicy::GrowIntoInsert)
-        .expect("room");
-    c.after_insert(&e, 0, b"T");
-    agrees(&c, &e, "first letter");
-    assert_eq!(c.words, 1, "the first letter is one word");
-
-    // And typing the rest of a sentence one character at a time, which is what a keystroke does.
-    for (i, b) in b"he quick brown fox".iter().enumerate() {
-        let at = i + 1;
-        e.insert_at(at as u32, &[*b], SpanPolicy::GrowIntoInsert)
+    ///
+    /// **This is the case that caught the seam bug**, and it is here because it is the one shape the other
+    /// tests never had: every other test starts from a document that already has text, so the byte after
+    /// the run is always present and the seam is judged against a real neighbour. In an empty document
+    /// there is no byte after the run, which is the only situation where the old and new seam differ by
+    /// construction -- and the buggy version netted **zero** for it. The bug surfaced much later, as an
+    /// underflow in a delete during the full-session gate, several keystrokes downstream.
+    #[test]
+    fn inserting_into_an_empty_document_counts_one_word() {
+        let mut e = editor_with("");
+        let mut c = TextCounts::scan(&e);
+        assert_eq!(c.words, 0);
+        e.insert_at(0, b"T", SpanPolicy::GrowIntoInsert)
             .expect("room");
-        c.after_insert(&e, at, &[*b]);
-        agrees(&c, &e, &format!("typing byte {i}"));
+        c.after_insert(&e, 0, b"T");
+        agrees(&c, &e, "first letter");
+        assert_eq!(c.words, 1, "the first letter is one word");
+
+        // And typing the rest of a sentence one character at a time, which is what a keystroke does.
+        for (i, b) in b"he quick brown fox".iter().enumerate() {
+            let at = i + 1;
+            e.insert_at(at as u32, &[*b], SpanPolicy::GrowIntoInsert)
+                .expect("room");
+            c.after_insert(&e, at, &[*b]);
+            agrees(&c, &e, &format!("typing byte {i}"));
+        }
+        assert_eq!(c.words, 4);
     }
-    assert_eq!(c.words, 4);
-}
 
     /// A word typed into the middle of an existing word makes **one** word, not two. This is the seam
     /// arithmetic's whole reason for existing, and a naive "count the run" gets it wrong.
@@ -302,7 +316,11 @@ fn inserting_into_an_empty_document_counts_one_word() {
             .expect("room");
         c.after_insert(&e, 3, b"\n");
         agrees(&c, &e, "append a newline");
-        assert_eq!(c.lines(), 3, "the trailing newline makes an empty third line");
+        assert_eq!(
+            c.lines(),
+            3,
+            "the trailing newline makes an empty third line"
+        );
 
         let e = editor_with("a\nb\n");
         let c = TextCounts::scan(&e);
@@ -314,7 +332,13 @@ fn inserting_into_an_empty_document_counts_one_word() {
     fn an_empty_document_is_one_line_and_no_words() {
         let e = editor_with("");
         let c = TextCounts::scan(&e);
-        assert_eq!(c, TextCounts { words: 0, newlines: 0 });
+        assert_eq!(
+            c,
+            TextCounts {
+                words: 0,
+                newlines: 0
+            }
+        );
         assert_eq!(c.lines(), 1);
     }
 

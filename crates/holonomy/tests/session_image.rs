@@ -137,13 +137,13 @@ fn ctrl_i_reaches_the_image_code_through_the_real_keymap() {
     // Undo it so the keystroke under test starts from a document with no anchor. The catalog loses the
     // asset *with* the anchor -- the pairing is positional, so leaving it behind would serve the next
     // anchor this one wrong picture.
-    s.editor.undo().expect("undo the helper's insert");
+    s.editor_mut().undo().expect("undo the helper's insert");
     assert_eq!(
-        s.editor.image_anchors().expect("anchors").len(),
+        s.image_anchors().expect("anchors").len(),
         0,
         "the anchor is gone"
     );
-    assert_eq!(s.editor.assets().len(), 0, "and so is its asset");
+    assert_eq!(s.assets().len(), 0, "and so is its asset");
 
     s.apply(cmd.expect("ctrl+i decodes")).expect("apply");
     assert_eq!(
@@ -152,8 +152,8 @@ fn ctrl_i_reaches_the_image_code_through_the_real_keymap() {
     );
     // One anchor and one asset, not two: the undo took the helper's asset away with its anchor, so
     // Ctrl+I starts from an empty catalog rather than appending to a stale one.
-    assert_eq!(s.editor.assets().len(), 1);
-    assert_eq!(s.editor.image_anchors().expect("anchors").len(), 1);
+    assert_eq!(s.assets().len(), 1);
+    assert_eq!(s.image_anchors().expect("anchors").len(), 1);
 }
 
 #[test]
@@ -191,12 +191,12 @@ fn a_bare_i_is_still_the_letter_i() {
 #[test]
 fn the_anchor_is_a_uffc_and_the_catalog_holds_the_png() {
     let (s, _) = with_image();
-    let text = s.editor.text().expect("text");
+    let text = s.text().expect("text");
     assert!(
         text.windows(3).any(|w| w == holonomy_text::ANCHOR_BYTES),
         "no U+FFFC anchor"
     );
-    let asset = &s.editor.assets().entries()[0];
+    let asset = &s.assets().entries()[0];
     assert_eq!(asset.png.as_slice(), TEST_CHART_PNG);
     assert_eq!((asset.width, asset.height), (1920, 1080));
     assert_eq!(asset.id, holonomy_text::AssetId::of(TEST_CHART_PNG));
@@ -204,8 +204,8 @@ fn the_anchor_is_a_uffc_and_the_catalog_holds_the_png() {
 
 #[test]
 fn the_whole_payload_round_trips_with_an_image_in_it() {
-    let (s, _) = with_image();
-    let payload = s.editor.payload().expect("payload");
+    let (mut s, _) = with_image();
+    let payload = s.editor_mut().payload().expect("payload");
     let back = holonomy_text::Editor::from_payload(&payload).expect("reopen");
     assert_eq!(back.assets().len(), 1);
     assert_eq!(back.assets().entries()[0].png.as_slice(), TEST_CHART_PNG);
@@ -541,7 +541,7 @@ fn three_images_at_the_column_width_all_fit_in_the_budget() {
     s.paint(None).expect("paint");
     // Three *distinct* catalog entries even though the bytes are identical: entry `i` serves anchor
     // `i`, and deduplicating would leave the second anchor pointing at the first anchor's slot.
-    assert_eq!(s.editor.assets().len(), 3);
+    assert_eq!(s.assets().len(), 3);
     assert_eq!(
         s.image_cache_len(),
         1,

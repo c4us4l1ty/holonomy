@@ -265,9 +265,9 @@ fn rss_probe_child() {
     // `Frame`), so a session has *two* 1280 × 800 buffers resident, not one. §2.9.4 omitted the
     // framebuffer entirely; omitting it twice is what left 6.7 MiB of this measurement unexplained.
     let scanout_bytes = (m.width as usize) * (m.height as usize) * 4;
-    let leaves = session.editor.leaf_count();
+    let leaves = session.leaf_count();
     let lines = session.state.total_lines as usize;
-    let text = session.editor.text_len() as u64;
+    let text = session.text_len() as u64 as u64;
 
     println!(
         "PROBE {total} {loaded} {baseline} {leaves} {frame} {atlas_bytes} {scratch} {scanout_bytes} \

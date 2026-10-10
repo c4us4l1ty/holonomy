@@ -596,6 +596,51 @@ pub fn open_document(
     Ok(OpenedDocument { editor, container })
 }
 
+impl SectionStore<'_> {
+    /// Make `section` resident, so a following [`write_at`](Self::write_at) can patch it.
+    ///
+    /// # Why a commit has to ask for this, and it is part 16's fault-condition correction
+    ///
+    /// [`write_at`](Self::write_at) patches the **resident** sections and silently skips the rest, on the
+    /// reasoning that an absent section's on-disk copy is only consulted after the rope has given up the
+    /// leaf. **That reasoning is about eviction, and a commit is not an eviction.**
+    ///
+    /// It used to work by accident. The commit's read loop went through `read_into_faulting`, and part 14's
+    /// fault condition refetched every leaf — including resident ones — so every read called
+    /// `fetch_leaf`, which loaded the section into this store's cache as a side effect. The write then found
+    /// the cache populated.
+    ///
+    /// **Part 16 removed the epoch condition, and the accident went with it.** A resident leaf is not
+    /// refetched, so a document the rope already holds produces no `fetch_leaf` at all, and a store built
+    /// *after* the rope was filled — which is what the product does, and what `commit_path.rs` does — has an
+    /// empty cache. `write_at` then patched nothing and `commit_dirty` wrote nothing.
+    ///
+    /// The failure was silent and complete: a commit that reported **0 bytes written** for a 40 KB document,
+    /// and five tests failed at once.
+    ///
+    /// **So the dependency is made explicit rather than incidental.** `write_at`'s precondition is "the
+    /// section is resident", this establishes it, and the commit calls it. A caller that writes a range the
+    /// rope still holds should call this first; the alternative — having `write_at` load what it patches —
+    /// would spend a resident slot and a decrypt on *every* leaf write, which is the cost part 8's docs said
+    /// it was avoiding, and which is still worth avoiding at eviction time.
+    ///
+    /// **The loaded bytes are discarded and the scratch is zeroed**: the section is about to be overwritten
+    /// with the current document, so what is in it has no further use, but it is still plaintext.
+    pub fn ensure_resident(&mut self, section: u32) -> Result<(), StoreError> {
+        if self.resident.contains_key(&section) {
+            return Ok(());
+        }
+        let mut buf = std::mem::take(&mut self.scratch);
+        if buf.len() < SECTION_BYTES {
+            buf.resize(SECTION_BYTES, 0);
+        }
+        let result = self.copy_into(section, &mut buf);
+        buf.fill(0);
+        self.scratch = buf;
+        result.map(|_| ())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The join: this store *is* the rope's byte source.
 // ---------------------------------------------------------------------------
@@ -735,6 +780,47 @@ impl holonomy_text::LeafSource for SectionStore<'_> {
     }
 }
 
+/// A [`LeafSource`] that has no document behind it.
+///
+/// # Why this exists rather than `Option<&mut dyn LeafSource>`
+///
+/// **The paint path's requirement is now structural, and this makes it so.** Before part 16 the emitters
+/// read through `&self`, could not fault, and counted every run past the resident window in
+/// `runs_missing` — safe, and wrong to draw. Threading an `Option` would have worked and would have left
+/// the failure one `None` away, on the one path where a missing argument is a blank page.
+///
+/// **So the source is a required argument and this is what "there is none" looks like.** A session over
+/// an in-memory `Editor` — every gate in this workspace, and the product's state before a container is
+/// opened — passes this and behaves exactly as part 15 left it. **The behaviour is unchanged for them and
+/// changed for the product**, which is the correct direction: the capability is added where the document
+/// is, and no existing caller can accidentally lose a page.
+///
+/// Every method refuses. **A refusal rather than zeros**, because a page of zeros is a page of document
+/// that is silently not the document, and `runs_missing` is the count of exactly that.
+pub struct NoSource;
+
+impl holonomy_text::LeafSource for NoSource {
+    fn fetch_leaf(
+        &mut self,
+        _offset: usize,
+        _out: &mut [u8],
+    ) -> Result<usize, holonomy_text::RopeError> {
+        Err(holonomy_text::RopeError::SourceUnavailable)
+    }
+
+    fn store_leaf(
+        &mut self,
+        _offset: usize,
+        _bytes: &[u8],
+    ) -> Result<(), holonomy_text::RopeError> {
+        Err(holonomy_text::RopeError::SourceUnavailable)
+    }
+
+    fn set_len(&mut self, _text_len: usize) -> Result<(), holonomy_text::RopeError> {
+        Err(holonomy_text::RopeError::SourceUnavailable)
+    }
+}
+
 /// Write `editor`'s whole current document into the container, and return the bytes that reached the disk.
 ///
 /// # One section at a time, and that is the whole design
@@ -816,6 +902,10 @@ pub fn commit_document(
     let mut lo = 0usize;
     while lo < total {
         let hi = (lo + SECTION_BYTES).min(total);
+        // **Residency first, and explicitly.** The read loop above may never have called this store --
+        // the rope may already have held every byte, in which case nothing was loaded and
+        // `write_at` would patch nothing and report a commit that wrote 0 bytes.
+        store.ensure_resident((lo / SECTION_BYTES) as u32)?;
         store.write_at(lo, &buf[lo..hi])?;
         written += store.commit_dirty()?;
         lo = hi;

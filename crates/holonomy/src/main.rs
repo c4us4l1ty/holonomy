@@ -219,8 +219,12 @@ fn run() -> Result<(), Fail> {
         );
         s.state.zoom_percent = args.zoom;
         s.state.sealed = false;
-        s.repaint_all().map_err(Fail::Session)?;
-        drive(&mut s, &args, &mut sinks, screenshot.as_mut())?;
+        // **No container here**, so no store and no fetching: this is the pre-open path, an empty editor
+        // on a headless frame. `NoSource` refuses every fetch, which is exactly right -- there is nothing
+        // to fetch and every byte is already in the rope.
+        let mut bytes = holonomy::store::NoSource;
+        s.repaint_all_with(&mut bytes).map_err(Fail::Session)?;
+        drive(&mut s, &args, &mut sinks, screenshot.as_mut(), &mut bytes)?;
         return Ok(());
     }
 
@@ -345,13 +349,18 @@ fn run() -> Result<(), Fail> {
         // **A missing descriptor is a bug, not a user error**, so it is reported and the session carries
         // on with an empty editor rather than aborting the boot -- an empty editor is what it had before.
         let Some(fd) = ctx.container.take() else {
+            // **No descriptor means no `Wavefunction` either** -- `container_file` is only filled by the
+            // adopt below -- so this path has nothing to fetch from and `NoSource` is the honest source.
+            // Not a fallback for a store that could not be built: it is the same state.
             eprintln!("holonomy: the container descriptor was already taken; starting empty");
-            ctx.session.repaint_all().expect("the first paint");
+            let mut bytes = holonomy::store::NoSource;
+            ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
             drive(
                 &mut ctx.session,
                 &args,
                 &mut ctx.sinks,
                 ctx.screenshot.as_mut(),
+                &mut bytes,
             )
             .unwrap_or_else(|e| {
                 eprintln!("holonomy: {e}");
@@ -372,8 +381,36 @@ fn run() -> Result<(), Fail> {
                     opened.editor.resident_count(),
                     holonomy::store::DEFAULT_RESIDENT_SECTIONS,
                 );
-                ctx.session.editor = opened.editor;
                 ctx.container_file = Some(opened.container);
+
+                // **The document goes in through `adopt_document`, not by assigning the field.** The
+                // session was built before the passphrase existed, so its `DocLines`, `Manifest` and
+                // `TextCounts` describe an *empty* document; assigning `editor` left all three stale and
+                // the product painted one empty line over a real document. `adopt_document` rebuilds all
+                // three and forces a full repaint, because the frame holds the previous document's
+                // pixels. See `Session::adopt_document`'s docs for the whole of it.
+                let mut opened_store = holonomy::store::SectionStore::new(
+                    ctx.container_file.as_mut().expect("just assigned"),
+                    holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+                );
+                // **Reported, not fatal.** An empty editor is what the product had before any of this,
+                // and a session that starts with nothing beats one that refuses to start. The store is
+                // dropped first because it borrows `container_file`, and clearing the field is what
+                // makes `store` below come out `None` -- which is how the paint path learns there is
+                // nothing to fetch from.
+                let adopted = ctx.session.adopt_document(opened.editor, &mut opened_store);
+                drop(opened_store);
+                if let Err(e) = adopted {
+                    eprintln!(
+                        "holonomy: could not read the document ({e:?}); starting with an empty one"
+                    );
+                    ctx.container_file = None;
+                }                // **Rebuilt, because the store borrows the container that just arrived.** The store
+                // `open_document` used is gone with that call; this one is the session's. Building it
+                // here rather than before the open is the whole of the ordering -- a store over the old
+                // container would read the wrong bytes and the symptom would be a correct-looking
+                // document that is one revision old.
+
             }
             // **A wrong passphrase is a normal outcome, not a crash**, and it is reported rather than
             // silently leaving an empty document on screen -- which is what "the product opens nothing"
@@ -385,13 +422,51 @@ fn run() -> Result<(), Fail> {
 
         // The first paint is a *full* repaint, because nothing has been painted yet and a
         // damage-limited pass would leave the framebuffer black.
-        ctx.session.repaint_all().expect("the first paint");
-        drive(
-            &mut ctx.session,
-            &args,
-            &mut ctx.sinks,
-            ctx.screenshot.as_mut(),
-        )
+        //
+        // **Through the store when there is one.** This is the line that makes a container-backed document
+        // draw past its first window: `repaint_all_with` faults, and every visible line is fetched. With
+        // `repaint_all` it would read `&self`, hit an absent leaf, and truncate the page -- which is what
+        // `tests/session_open_document.rs`'s `text_past_the_first_window_is_drawn_not_counted` is the gate
+        // for.
+        // **One place that knows whether there is a store.** Everything below needs a
+        // `&mut dyn LeafSource`, and deciding that separately at each site is how one of them ends up
+        // passing `NoSource` to a document that is on disk.
+        //
+        // **Built after the open, and that ordering is load-bearing.** The store borrows the container,
+        // so it cannot be constructed before `container_file` is assigned -- and constructing it over the
+        // *old* container would read the wrong bytes, with the symptom being a correct-looking document
+        // that is one revision old.
+        //
+        // **It borrows `container_file` beside the session rather than living inside it.** That is what
+        // `SessionContext`'s own doc comment says the field is for, and part 16 is the first code that
+        // needs it: before, nothing on the paint path asked for bytes at all. The borrow is legal because
+        // `session` and `container_file` are disjoint fields -- no self-referential struct, no `unsafe`.
+        let mut store = ctx.container_file.as_mut().map(|wf| {
+            holonomy::store::SectionStore::new(wf, holonomy::store::DEFAULT_RESIDENT_SECTIONS)
+        });
+        match store.as_mut() {
+            Some(store) => {
+                ctx.session.repaint_all_with(store).expect("the first paint");
+                drive(
+                    &mut ctx.session,
+                    &args,
+                    &mut ctx.sinks,
+                    ctx.screenshot.as_mut(),
+                    store,
+                )
+            }
+            None => {
+                let mut bytes = holonomy::store::NoSource;
+                ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
+                drive(
+                    &mut ctx.session,
+                    &args,
+                    &mut ctx.sinks,
+                    ctx.screenshot.as_mut(),
+                    &mut bytes,
+                )
+            }
+        }
         .unwrap_or_else(|e| {
             eprintln!("holonomy: {e}");
         });
@@ -406,17 +481,18 @@ fn drive(
     args: &Args,
     sinks: &mut [ExportSink],
     screenshot: Option<&mut File>,
+    bytes: &mut dyn holonomy_text::LeafSource,
 ) -> Result<(), Fail> {
     let exit = match &args.script {
         Some(path) => {
-            let bytes = std::fs::read(path).map_err(io)?;
-            let mut src = ScriptedInputSource::new(&bytes);
-            s.run(&mut src).map_err(Fail::Session)?
+            let script = std::fs::read(path).map_err(io)?;
+            let mut src = ScriptedInputSource::new(&script);
+            s.run_with(bytes, &mut src).map_err(Fail::Session)?
         }
         None => {
             let mut src =
                 EvdevSource::open(Path::new(EVDEV_NODE)).map_err(|e| Fail::Session(e.into()))?;
-            s.run(&mut src).map_err(Fail::Session)?
+            s.run_with(bytes, &mut src).map_err(Fail::Session)?
         }
     };
     eprintln!(
@@ -424,7 +500,7 @@ fn drive(
         s.stats.commands, s.stats.edits, s.stats.frames
     );
 
-    s.repaint_all().map_err(Fail::Session)?;
+    s.repaint_all_with(bytes).map_err(Fail::Session)?;
 
     for sink in sinks.iter_mut() {
         let report = s.export(sink, "holonomy").map_err(Fail::Session)?;

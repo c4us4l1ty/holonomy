@@ -97,7 +97,7 @@ fn a_prose_document_never_allocates_the_whole_document_buffer() {
         0,
         "painting {} bytes of prose allocated a {}-byte whole-document buffer: a formula, a table or \\
          an image was looked for by reading the document instead of by asking the manifest",
-        s.editor.text_len(),
+        s.text_len() as usize,
         s.doc_scratch_capacity()
     );
 
@@ -258,7 +258,7 @@ fn no_keystroke_rebuilds_the_manifest_including_a_newline() {
     // The manifest still describes the document.
     assert_eq!(
         s.manifest().total_bytes(),
-        s.editor.text_len(),
+        s.text_len() as usize,
         "after two edits the manifest's byte count must agree with the document's"
     );
 }
@@ -322,7 +322,7 @@ fn the_manifest_costs_eight_bytes_a_section_against_the_document() {
 fn the_manifest_agrees_with_a_scan_of_the_document_it_describes() {
     let text = prose();
     let s = with_text(&text);
-    let full = s.editor.text().expect("read");
+    let full = s.text().expect("read");
     let m: &Manifest = s.manifest();
     assert_eq!(m.total_bytes(), full.len(), "byte count");
     // And no markers, because the fixture is prose.

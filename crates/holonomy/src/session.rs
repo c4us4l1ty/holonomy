@@ -281,7 +281,16 @@ pub struct ExportSink {
 /// An editor, its chrome, and the loop.
 pub struct Session<'a> {
     /// The document.
-    pub editor: Editor,
+    ///
+    /// **Private as of part 16**, and that is the fix rather than a style choice. Assigning
+    /// `session.editor = opened.editor` compiles, runs, and leaves a session whose `DocLines`,
+    /// `Manifest` and `TextCounts` describe the *previous* document -- which is what the product did for
+    /// its entire life, painting one empty line over a real document. See
+    /// [`adopt_document`](Self::adopt_document); the only supported way to put a document in here.
+    ///
+    /// **Read access is unchanged**, because a dozen gates and the export path read it and none of them
+    /// can corrupt the session by looking.
+    editor: Editor,
     /// The chrome geometry.
     pub chrome: Chrome,
     /// What the chrome shows.
@@ -471,6 +480,86 @@ impl<'a> Session<'a> {
         scanout: Box<dyn Scanout>,
         metrics: ChromeMetrics,
     ) -> Self {
+        Self::new_with(
+            editor,
+            painter,
+            scanout,
+            metrics,
+            &mut crate::store::NoSource,
+        )
+    }
+
+    /// Replace the editor with an opened one, and rebuild everything derived from the document.
+    ///
+    /// # Why this exists rather than assigning `session.editor = opened.editor`
+    ///
+    /// **Because that assignment is the bug.** A `Session` is built before the passphrase exists -- it has
+    /// to be, because it is built before `seccomp` -- so it is constructed over `Editor::new()`, and the
+    /// container's document is dropped in afterwards. `DocLines`, `Manifest` and `TextCounts` were all
+    /// built from the **empty** editor at construction and were never rebuilt, so `total_lines` stayed 1
+    /// and `emit_body_text` drew a single empty line.
+    ///
+    /// **It was invisible for the same reason it is easy to reintroduce**: `Editor::new()` and an opened
+    /// editor are both `Editor`, the field is public, and every in-memory gate assigns documents through
+    /// `Editor::insert_at` on a session that was built with the document already in it. **No gate was
+    /// ever in the state this product is in**, which is constructed empty and given a document later.
+    ///
+    /// So the field is private now, and this is the only way in. **The whole-document read happens here**,
+    /// once, through `bytes` -- which is why the two are one parameter rather than two steps a caller
+    /// could get wrong.
+    pub fn adopt_document(
+        &mut self,
+        mut editor: Editor,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut text = editor
+            .text_faulting(bytes)
+            .map_err(|_| crate::store::StoreError::Read)?;
+        self.lines = DocLines::build(&text, holonomy_geometry::LineMetrics::default());
+        self.manifest = crate::manifest::Manifest::from_text(&text);
+        self.counts = TextCounts::scan_bytes(&text);
+        text.fill(0);
+
+        self.editor = editor;
+        self.state.words = self.counts.words;
+        self.state.total_lines = self.counts.lines();
+        self.state.bytes = self.editor.text_len() as u32;
+        self.state.scroll_line = 0;
+        self.caret_drawn_at = None;
+        // **A full repaint, not a damage-limited one.** The frame holds the *previous* document's
+        // pixels and there is no relationship between them and this one's, so a damage-limited pass
+        // would leave the old document's words on screen with the new one's geometry.
+        self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// [`new`](Self::new) against a document whose bytes may not be resident. **The product's constructor.**
+    ///
+    /// # Why this exists, and the failure it fixes is worth the whole paragraph
+    ///
+    /// `new` built three things from the document's bytes -- [`DocLines`], [`Manifest`] and
+    /// [`TextCounts`] -- and each read the **whole** document through `&self`. On a container-backed
+    /// document larger than the resident window that read returns `LeafAbsent`, and the code's
+    /// `unwrap_or_default()` turned it into **an empty geometry over a non-empty document**.
+    ///
+    /// **The symptom was a session that reported one line and painted no body text**, on a document that
+    /// was in fact 450 KB of text sitting in the container. Every in-memory gate passed, because on an
+    /// in-memory editor the whole-document read always succeeds -- so the entire test suite could be green
+    /// and the product could not open a document at all. `tests/session_open_document.rs`'s
+    /// `text_past_the_first_window_is_drawn_not_counted` is the gate, and it is the *first* test in this
+    /// project that could have caught it, because it is the first one whose document does not fit in the
+    /// window.
+    ///
+    /// **The failure was silent because a default is a plausible answer.** An empty `DocLines` is a valid
+    /// `DocLines`; it is only wrong in combination with a non-empty `text_len`, and nothing checked that
+    /// combination.
+    pub fn new_with(
+        mut editor: Editor,
+        painter: Painter<'a>,
+        scanout: Box<dyn Scanout>,
+        metrics: ChromeMetrics,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Self {
         // # The line pitch comes from the faces, not from the constant
         //
         // `ChromeMetrics::DESKTOP.cell_h` is 18, which is `16 ppem + 2` -- an arithmetic identity with
@@ -503,14 +592,36 @@ impl<'a> Session<'a> {
         // and both need all of them, so they share a single `editor.text()`. This is the *open* path, so
         // the whole-document read is correct here: it happens once, before the first frame, and it is what
         // lets neither structure ever need it again.
-        let (lines, manifest) = {
-            let text = editor.text().unwrap_or_default();
-            (
+        //
+        // **One read, faulting, shared by all three.** `DocLines` and `Manifest` both need the whole
+        // document and `TextCounts::scan` wants to walk it too, so this is the one place that pays for
+        // it. `text_faulting` rather than `text` is the part 16 change.
+        let (lines, manifest, counts) = {
+            let mut text = editor.text_faulting(bytes).unwrap_or_default();
+            let built = (
                 DocLines::build(&text, holonomy_geometry::LineMetrics::default()),
                 crate::manifest::Manifest::from_text(&text),
-            )
+                TextCounts::scan_bytes(&text),
+            );
+            // **Zeroed before it drops.** This is the entire document in plaintext and the block is
+            // about to end, handing the page back to the allocator where a later allocation could read
+            // it. Doing it here rather than behind a `Drop` keeps it visible at the one place that
+            // holds the bytes.
+            text.fill(0);
+            built
         };
-        let counts = TextCounts::scan(&editor);
+        // **The cross-check that would have caught the bug above.** A document with bytes has at least one
+        // line, so `total_lines == 1 && text_len > 0` is the exact shape of "the whole-document read
+        // failed and the default stood in". It is a `debug_assert` rather than a hard one because a
+        // source that genuinely cannot produce bytes should degrade to an empty view rather than refuse
+        // to start -- but **the product path is covered**, so in a release build the pair is only
+        // visible through `total_lines()`, which `tests/session_open_document.rs` asserts on.
+        debug_assert!(
+            counts.lines() > 0 || editor.text_len() == 0,
+            "a document with bytes has lines: total_lines={} text_len={}",
+            counts.lines(),
+            editor.text_len()
+        );
         let state = ChromeState {
             // The document's first line is on screen at the caret's line.
             scroll_line: 0,
@@ -744,63 +855,145 @@ impl<'a> Session<'a> {
     }
 
     /// What the last paint did, from the painter's side. Phase 12.
-///
-/// **Separate from [`SessionStats`], which accumulates.** `SessionStats::pixels` and `glyphs_drawn` are
-/// totals across the session's life; `PaintStats` is one frame. A document with text on it answers
-/// different questions under each — "how much has this session drawn" and "what is on the screen right
-/// now" — and Phase 12's gate needs the second. `Session::paint` folds most of it into `SessionStats` and
-/// would otherwise drop the rest, so this keeps the whole struct.
-pub fn paint_stats(&self) -> &holonomy_display::paint::PaintStats {
-    &self.last_paint
-}
+    ///
+    /// **Separate from [`SessionStats`], which accumulates.** `SessionStats::pixels` and `glyphs_drawn` are
+    /// totals across the session's life; `PaintStats` is one frame. A document with text on it answers
+    /// different questions under each — "how much has this session drawn" and "what is on the screen right
+    /// now" — and Phase 12's gate needs the second. `Session::paint` folds most of it into `SessionStats` and
+    /// would otherwise drop the rest, so this keeps the whole struct.
+    pub fn paint_stats(&self) -> &holonomy_display::paint::PaintStats {
+        &self.last_paint
+    }
 
-/// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
-///
-/// `Chrome::layout` is a public field on a public field, so this is a convenience rather than a necessity
-/// — but `layout.text` is four chained field accesses, and a gate that measures ink inside the text
-/// column writes it nine times.
-pub fn text_rect(&self) -> DamageRect {
-    self.chrome.layout.text
-}
+    /// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
+    ///
+    /// `Chrome::layout` is a public field on a public field, so this is a convenience rather than a necessity
+    /// — but `layout.text` is four chained field accesses, and a gate that measures ink inside the text
+    /// column writes it nine times.
+    pub fn text_rect(&self) -> DamageRect {
+        self.chrome.layout.text
+    }
 
-/// The document's section manifest. Phase 13.
-///
-/// **Public so the gate can ask it the question four emitters ask.** [`crate::manifest::Manifest::span_total`]
-/// answers *"does this document contain a formula, a table or an image?"* without reading it, which is the
-/// capability Phase 12 named as the blocker it could not remove — and `tests/session_manifest.rs` holds
-/// both directions down: prose must not allocate the whole-document buffer, and a document with a formula
-/// must.
-pub fn manifest(&self) -> &crate::manifest::Manifest {
-    &self.manifest
-}
+    /// The document's section manifest. Phase 13.
+    ///
+    /// **Public so the gate can ask it the question four emitters ask.** [`crate::manifest::Manifest::span_total`]
+    /// answers *"does this document contain a formula, a table or an image?"* without reading it, which is the
+    /// capability Phase 12 named as the blocker it could not remove — and `tests/session_manifest.rs` holds
+    /// both directions down: prose must not allocate the whole-document buffer, and a document with a formula
+    /// must.
+    pub fn manifest(&self) -> &crate::manifest::Manifest {
+        &self.manifest
+    }
 
-/// How many bytes of the page buffer the last body-text emit read. Phase 12.
-///
-/// **Public so the gate can assert the emitter reads a page and not a document** -- the claim
-/// `the_body_text_emitter_reads_one_page_and_not_the_document` makes, and the one Phase 12's memory
-/// story rests on.
-pub fn page_used(&self) -> usize {
-    self.page_used
-}
+    /// How many bytes of the page buffer the last body-text emit read. Phase 12.
+    ///
+    /// **Public so the gate can assert the emitter reads a page and not a document** -- the claim
+    /// `the_body_text_emitter_reads_one_page_and_not_the_document` makes, and the one Phase 12's memory
+    /// story rests on.
+    pub fn page_used(&self) -> usize {
+        self.page_used
+    }
 
-/// Capacity of the body-text buffer, in bytes. Phase 12.
-///
-/// **Public so the gate can assert it stays page-sized.** `tests/session_body_text.rs` paints a 1 MiB
-/// document and then checks this is still [`LINE_SCRATCH_BYTES`] — because a buffer that grows on the
-/// paint path is one allocation per paint, and RSS is `tests/session_rss.rs`'s business while this is the
-/// narrower claim that Phase 12 actually changed.
-pub fn line_scratch_capacity(&self) -> usize {
-    self.line_scratch.capacity()
-}
+    /// Capacity of the body-text buffer, in bytes. Phase 12.
+    ///
+    /// **Public so the gate can assert it stays page-sized.** `tests/session_body_text.rs` paints a 1 MiB
+    /// document and then checks this is still [`LINE_SCRATCH_BYTES`] — because a buffer that grows on the
+    /// paint path is one allocation per paint, and RSS is `tests/session_rss.rs`'s business while this is the
+    /// narrower claim that Phase 12 actually changed.
+    pub fn line_scratch_capacity(&self) -> usize {
+        self.line_scratch.capacity()
+    }
 
-/// Scroll so that `line` is the first visible line. Phase 12's gate.
-pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
-    self.state.scroll_line = line.min(self.state.total_lines.saturating_sub(1));
-    self.damage = self.chrome.full_damage();
-    Ok(())
-}
+    // ---------------------------------------------------------------------------
+    // Read access to the document
+    //
+    // **These exist because `editor` is private, and the privacy is the point.** `session.editor =
+    // opened.editor` compiled, ran, and left a session whose `DocLines`, `Manifest` and `TextCounts`
+    // described an *empty* document — the product painted one blank line over a real file for its entire
+    // life. See [`adopt_document`](Self::adopt_document).
+    //
+    // **Reads stay open.** A reader cannot leave the session inconsistent; a writer can and did. So the
+    // field is closed and every use of it is a named accessor, which is also what lets each one say why
+    // it is safe.
+    // ---------------------------------------------------------------------------
 
-/// Capacity of the whole-document scratch buffer, in bytes.
+    /// The document's bytes, for a caller that needs the whole thing — the export path, the window's
+    /// title, a gate.
+    ///
+    /// **A read accessor rather than a public field, and that is the difference between the two.**
+    /// [`adopt_document`](Self::adopt_document) exists because *assigning* the field left the geometry
+    /// stale; reading it is harmless, and making it private would only have pushed every reader to add a
+    /// method for the same thing. **The asymmetry is deliberate: reads open, writes are mediated.**
+    pub fn text(&self) -> Result<Vec<u8>, holonomy_text::EditorError> {
+        self.editor.text()
+    }
+
+    /// The document's length in bytes.
+    ///
+    /// **`u32`, not `Result`**, because `Editor::text_len` cannot fail — the rope's length is arithmetic
+    /// over leaf lengths and every leaf has one whether resident or not. An earlier draft of this
+    /// accessor returned `Result` and the compiler found four call sites doing arithmetic on it.
+    pub fn text_len(&self) -> u32 {
+        self.editor.text_len() as u32
+    }
+
+    /// The editor, mutably — for a gate that needs to drive the document directly.
+    ///
+    /// # This is an escape hatch, and it is narrow on purpose
+    ///
+    /// **Editing through it is fine. Replacing the document through it is what broke the product**, and
+    /// that is `adopt_document`'s job because it rebuilds the three structures that describe the bytes.
+    ///
+    /// So the rule is: **mutate through this, never assign.** Every mutation goes through
+    /// [`Editor`](holonomy_text::Editor)'s own paths, which record into the edit record and update the
+    /// geometry -- the session's `after_edit` then reconciles what a raw editor call cannot. A gate that
+    /// types into a document needs this; no production path does, which is why it is not used by one.
+    pub fn editor_mut(&mut self) -> &mut Editor {
+        &mut self.editor
+    }
+
+    /// The caret's byte offset.
+    pub fn caret(&self) -> u32 {
+        self.editor.caret()
+    }
+
+    /// The document's images, in document order.
+    pub fn assets(&self) -> &holonomy_text::AssetCatalog {
+        self.editor.assets()
+    }
+
+    /// The byte offset of every image anchor, in document order.
+    ///
+    /// **A `Result`, because the editor scans the document for the anchor bytes** and that scan is a
+    /// whole-document read. On a container-backed document it needs a source, which is why this is a
+    /// gate-level accessor and not something the paint path uses — `emit_images` goes through the
+    /// manifest instead, which is O(styled runs).
+    pub fn image_anchors(&self) -> Result<Vec<u32>, holonomy_text::EditorError> {
+        self.editor.image_anchors()
+    }
+
+    /// How many leaves currently hold their bytes.
+    pub fn leaf_count(&self) -> usize {
+        self.editor.leaf_count()
+    }
+
+    /// How many lines the document has, as the geometry counts them.
+    ///
+    /// **The geometry's answer, not a scan.** `DocLines` is built at open for the whole document from
+    /// offsets alone, so this is O(1) and available before a single byte has been read. That is what
+    /// makes "scroll to the end" usable on a document whose bytes are not resident -- a line count that
+    /// needed the bytes would defeat the point of windowing.
+    pub fn total_lines(&self) -> u32 {
+        self.state.total_lines
+    }
+    /// Scroll so that `line` is the first visible line. Phase 12's gate.
+    pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
+        self.state.scroll_line = line.min(self.state.total_lines.saturating_sub(1));
+        self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// Capacity of the whole-document scratch buffer, in bytes.
     ///
     /// **Public as of Phase 11** so the RSS gate can name this consumer. It is the largest single
     /// allocation outside the framebuffer and the leaves, and §2.9.4's table did not have it at all —
@@ -914,7 +1107,23 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     pub fn repaint_all(&mut self) -> Result<(), SessionError> {
         let damage = Some(self.chrome.full_damage());
         self.caret_drawn_at = None;
-        self.paint(damage)
+        self.paint_with(damage, &mut crate::store::NoSource)
+    }
+
+    /// [`repaint_all`](Self::repaint_all) against a byte source. **The product's first paint.**
+    ///
+    /// **The `caret_drawn_at` reset is copied from `repaint_all` rather than shared, and it matters.**
+    /// That field is the "the caret is already where I left it" cache; a full repaint erases the caret with
+    /// the page's text, so the cache is a lie until it is cleared. Dropping the line here would make the
+    /// first paint of a freshly opened document skip the caret blink -- a small bug, and exactly the kind
+    /// that a copy-paste shim introduces.
+    pub fn repaint_all_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        let damage = Some(self.chrome.full_damage());
+        self.caret_drawn_at = None;
+        self.paint_with(damage, bytes)
     }
 
     /// Run `source` to exhaustion, or until Ctrl+Q.
@@ -922,12 +1131,28 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// Returns why it stopped. Every command is counted, so a stream that produced nothing shows up
     /// as `stats.commands == 0` rather than as silence.
     pub fn run(&mut self, source: &mut dyn InputSource) -> Result<Exit, SessionError> {
+        self.run_with(&mut crate::store::NoSource, source)
+    }
+
+    /// [`run`](Self::run) over a document whose bytes may not be resident.
+    ///
+    /// **This is the product's loop.** `run` is the same loop with a
+    /// [`NoSource`](crate::store::NoSource), which is correct for an in-memory editor and cannot fetch.
+    ///
+    /// The name `run_with` rather than a parameter on `run` is deliberate: an input source is what the
+    /// loop *reads*, and a byte source is what it *reads the document through*. Overloading one name for
+    /// two unrelated roles is how a caller ends up passing the wrong one.
+    pub fn run_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        source: &mut dyn InputSource,
+    ) -> Result<Exit, SessionError> {
         while let Some(event) = source.next_event().map_err(session_io)? {
-            if let Some(exit) = self.handle_event(event)? {
+            if let Some(exit) = self.handle_event_with(bytes, event)? {
                 return Ok(exit);
             }
             // The blink may want a repaint even with no input.
-            self.tick()?;
+            self.tick_with(bytes)?;
         }
         Ok(Exit::StreamEnded)
     }
@@ -945,16 +1170,25 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// therefore calls [`Session::handle_event`] and this in turn. The Phase 8 loop is unchanged --
     /// `run` is exactly these two calls.
     pub fn tick(&mut self) -> Result<(), SessionError> {
+        self.tick_with(&mut crate::store::NoSource)
+    }
+
+    /// [`tick`](Self::tick) against a byte source. See [`run_with`](Self::run_with) for why the byte
+    /// source is a separate parameter rather than part of the session.
+    pub fn tick_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
         if !self.damage.is_empty() {
             // `paint` clears `damage` itself, so this does not need to.
-            self.paint(Some(self.damage))?;
+            self.paint_with(Some(self.damage), bytes)?;
         }
         let caret = self.caret_cell();
         // `advance` reports only a transition *to visible*; see `Blink` for why the other
         // direction is free.
         if let Some(damage) = self.blink.advance(caret) {
             self.state.caret_visible = self.blink.visible();
-            self.paint(Some(damage))?;
+            self.paint_with(Some(damage), bytes)?;
         }
         Ok(())
     }
@@ -972,6 +1206,20 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         &mut self,
         event: holonomy_input::InputEvent,
     ) -> Result<Option<Exit>, SessionError> {
+        self.handle_event_with(&mut crate::store::NoSource, event)
+    }
+
+    /// [`handle_event`](Self::handle_event) against a byte source. **The windowed path's call.**
+    ///
+    /// The X11 driver has no [`InputSource`], so it calls this one event at a time -- which is why the
+    /// byte source has to reach this function and not only [`run_with`](Self::run_with). A driver that
+    /// forgot it would compile, run, and draw a blank page; see
+    /// [`NoSource`](crate::store::NoSource) for why the alternative was worse.
+    pub fn handle_event_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        event: holonomy_input::InputEvent,
+    ) -> Result<Option<Exit>, SessionError> {
         let Some(command) = self.dispatch(event) else {
             return Ok(None);
         };
@@ -980,7 +1228,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
             return Ok(Some(Exit::Quit));
         }
         self.apply(command)?;
-        self.tick()?;
+        self.tick_with(bytes)?;
         Ok(None)
     }
 
@@ -1105,7 +1353,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     }
 
     /// Run `f` with the table the caret is in, or report that there is none.
-///
+    ///
     /// A closure rather than a returned `ResolvedTable` because that borrows the document bytes, and
     /// the bytes come from [`Editor::text`], which hands over an owned `Vec`. Returning the resolved
     /// table would mean returning a borrow of a local -- so the text has to stay inside this frame,
@@ -1297,8 +1545,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
             return Ok(());
         }
         self.editor.delete_at(start as u32, INDENT.len() as u32)?;
-        self.counts
-            .after_delete(&self.editor, start, INDENT);
+        self.counts.after_delete(&self.editor, start, INDENT);
         self.after_edit(INDENT.len() as u32)
     }
 
@@ -1616,29 +1863,62 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
 
     // ---------------------------------------------------------------- paint
 
-    /// Repaint `damage` and present.
+    /// Repaint `damage` and present, **with no byte source** -- a session over an in-memory editor.
+    ///
+    /// **Every gate in this workspace uses this**, because a resident document's `read_into` always
+    /// succeeds and there is nothing to fault. The product path uses [`paint_with`](Self::paint_with).
+    /// The two are the same function: this one passes a [`NoSource`](crate::store::NoSource), which
+    /// refuses, which is a no-op on a document whose bytes are already held.
     pub fn paint(&mut self, damage: Option<DamageRect>) -> Result<(), SessionError> {
+        self.paint_with(damage, &mut crate::store::NoSource)
+    }
+
+    /// Repaint `damage` and present, fetching bytes from `source` when a leaf is not resident.
+    ///
+    /// # This is part 16's whole change, and it is one argument
+    ///
+    /// The emitters used to read through `&self` and `break` on an absent leaf: `page_used` stopped
+    /// growing, `PageText::document` answered `None` past that point, and each answer was counted in
+    /// `runs_missing`. **A page of correct text with a blank tail past the resident window**, which is
+    /// what a container-backed document showed on every page but the first.
+    ///
+    /// `&mut dyn LeafSource` is a parameter rather than a field because a `SectionStore` borrows the
+    /// container and a store owned by the session would be a self-referential struct. **The product
+    /// builds one at the call site** (`main.rs`) and holds the container beside the session -- two
+    /// disjoint fields, so the borrow is legal and no lifetime surgery is needed.
+    ///
+    /// **Faulting a paint is correct and not a side effect**: the rope's record translates a window's
+    /// saved bytes into current ones, and *fetching* a leaf changes nothing about the document. See
+    /// `Rope::fault_leaf`.
+    pub fn paint_with(
+        &mut self,
+        damage: Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
         // The caret goes *under* the page's text in paint order, so the caret's rect is erased by
         // repainting the page and then redrawn -- which is why the damage includes it whenever it
         // moves.
         // The line-height model is rebuilt from the tables *before* the chrome's tree, because the
         // chrome's tree and `Caret::locate` both read it: a table that pushed the lines below it down
         // but was published afterwards would move the text and leave the caret behind.
-        self.publish_line_heights();
+        self.publish_line_heights(source);
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
         // they have to be painted in the page's coordinate space and clipped by the same damage the
         // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
         let mut damage = damage;
-        self.emit_tables(&mut tree, &mut damage);
-        self.emit_math(&mut tree, &mut damage);
-        self.emit_images(&mut tree, &mut damage);
+        // **Each emitter is passed the source by reborrow**, so all four see the same store and none of
+        // them can hold it across the next one's call. `&mut *source` rather than `source`: the emitters
+        // take `&mut dyn LeafSource`, and moving the `&mut` would spend it.
+        self.emit_tables(&mut tree, &mut damage, &mut *source);
+        self.emit_math(&mut tree, &mut damage, &mut *source);
+        self.emit_images(&mut tree, &mut damage, &mut *source);
         // **Body text last among the emitters, so it draws over the others.** A table, a formula and an
         // image are all anchored to a document line, and the body text of that line is what a reader
         // expects to see *behind* them -- a table whose cells are empty still has the paragraph that
         // introduced it around it. Emitting the body first would put the paragraph's glyphs on top of
         // the table's borders.
-        self.emit_body_text(&mut tree, &mut damage);
+        self.emit_body_text(&mut tree, &mut damage, source);
         // The raster source is borrowed *for this call* and not held: the cache is mutated by the next
         // frame's decode and eviction, so a borrow that outlived the paint would be a self-referential
         // `Session` -- the painter is a field and so is the cache it would have to point at.
@@ -1680,7 +1960,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// paints per keystroke, and it is the next thing to fix. It is called out here rather than left to
     /// be discovered, because the whole point of this function is to stop pretending the geometry is
     /// free.
-    fn publish_line_heights(&mut self) {
+    fn publish_line_heights(&mut self, source: &mut dyn holonomy_text::LeafSource) {
         let pitch = self.chrome.metrics.cell_h.max(1);
         let spans: Vec<TableSpan> = self.editor.tables().spans().to_vec();
         let mut blocks: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
@@ -1700,12 +1980,12 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         // where a line is 18, so the lines below it have to move or the formula draws over them.
         // `LineHeights::from` merges two blocks that share a line by adding, so a table and a formula
         // starting on one line displace by the sum rather than one overwriting the other.
-        blocks.extend(self.math_blocks_for());
+        blocks.extend(self.math_blocks_for(source));
         // Images join the tables and the formulas in the *same* model, for the same reason: an image
         // is taller than any line, so the lines below it have to move or it draws over them. The block
         // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
         // using the source height would displace by a factor of three at 1920x1080.
-        blocks.extend(self.image_blocks());
+        blocks.extend(self.image_blocks(source));
         self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
     }
 
@@ -1717,7 +1997,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     ///
     /// Returns nothing when the document has no images, which is the common case and costs one `is_empty`
     /// rather than a scan.
-    fn image_blocks(&mut self) -> Vec<(u32, u32)> {
+    fn image_blocks(&mut self, source: &mut dyn holonomy_text::LeafSource) -> Vec<(u32, u32)> {
         if self.editor.assets().is_empty() {
             return Vec::new();
         }
@@ -1728,9 +2008,14 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         if self.manifest.span_total() == 0 {
             return Vec::new();
         }
-        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
             return Vec::new();
         };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
         let mut out = Vec::new();
         for (ordinal, at) in holonomy_text::scan_anchors(text).into_iter().enumerate() {
             let Ok(asset) = self.editor.assets().get(ordinal) else {
@@ -1789,7 +2074,12 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// lines *below* it are not offset by its height, so text after a tall table overlaps its last
     /// row. A full block layout is a larger change than this, and pretending otherwise by drawing the
     /// table somewhere else would be worse.
-    fn emit_body_text(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+    fn emit_body_text(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
         self.stats.lines_drawn = 0;
         self.stats.glyphs_drawn = 0;
 
@@ -1835,7 +2125,19 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
             if used + len > self.line_scratch.len() {
                 break;
             }
-            if self.editor.read_into(start, &mut self.line_scratch[used..used + len]).is_err() {
+            // **Faulting, and that is the change.** `read_into` takes `&self` and cannot fetch, so a line
+            // past the resident window ended the loop -- one absent leaf truncated the page and every
+            // run after it counted as missing. `read_into_faulting` asks the record which saved bytes
+            // belong in this line and fetches them, so a page anywhere in the document draws.
+            //
+            // **`break` still, and is still right**: it is the line-scratch ceiling (48 KiB), a backstop
+            // for a document with one enormous line. A fetch failure here means the source could not
+            // produce the bytes at all, and there is nothing further down the page to draw.
+            if self
+                .editor
+                .read_into_faulting(source, start, &mut self.line_scratch[used..used + len])
+                .is_err()
+            {
                 break;
             }
             spans.push((used as u32, len as u32));
@@ -1915,15 +2217,16 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
             // visible mark at the end of every line.
             let seg = strip_terminator(&text[..shown]);
             if !seg.is_empty() {
-                tree.before.push(SurfaceTree::leaf(Node::DocText(DocRun::new(
-                    l.x as i32,
-                    y as i32,
-                    at,
-                    seg.len() as u32,
-                    holonomy_render::Style::REGULAR,
-                    0,
-                    ink,
-                ))));
+                tree.before
+                    .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
+                        l.x as i32,
+                        y as i32,
+                        at,
+                        seg.len() as u32,
+                        holonomy_render::Style::REGULAR,
+                        0,
+                        ink,
+                    ))));
                 // Bytes, not cells: `SessionStats::glyphs_drawn`'s doc comment says why these two
                 // figures are not the same number.
                 glyphs += seg.len() as u32;
@@ -1943,19 +2246,29 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         widen(damage, extra);
     }
 
-    fn emit_tables(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+    fn emit_tables(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
         let spans = self.editor.tables().spans().to_vec();
         if spans.is_empty() {
             self.stats.table_cells_drawn = 0;
             self.stats.table_borders_drawn = 0;
             return;
         }
-        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
             // A table whose bytes will not read cannot be drawn, and reporting it here would turn a
             // rendering problem into a paint failure. The session's own table operations already
             // surface the same error through `with_table`.
             return;
         };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
         let m = self.chrome.metrics;
         let l = self.chrome.layout;
         let first = self.state.scroll_line;
@@ -1966,7 +2279,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         let active = self.active_cell;
 
         for span in spans.iter().copied() {
-            let line = line_index_in(&self.editor, span.start_byte as usize);
+            let line = line_index_in(&mut self.editor, span.start_byte as usize, source);
             if line < first || line >= last {
                 continue;
             }
@@ -2092,7 +2405,12 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// nearest-neighbour stretch is a different picture rather than a worse one. So the rect has to be
     /// the raster the cache holds, which is the page-column-width one. §2.9.3's downscaling is therefore
     /// not an optimisation that paint can skip: it is what makes the blit a copy.
-    fn emit_images(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+    fn emit_images(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
         self.stats.images_drawn = 0;
         if self.editor.assets().is_empty() {
             return;
@@ -2103,9 +2421,14 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         if self.manifest.span_total() == 0 {
             return;
         }
-        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
             return;
         };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
         let l = self.chrome.layout;
         let first = self.state.scroll_line;
         let last = first + l.rows;
@@ -2366,7 +2689,12 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// stepped fill, both integer-aligned. A 1 px line drawn from a glyph outline is antialiased at
     /// both ends and so does not meet the glyph beside it exactly; at 1x that seam is visible. This is
     /// PROJECT.md §2.9.2 point 4 applied, and it is why the radical is a shape rather than U+221A.
-    fn emit_math(&mut self, tree: &mut SurfaceTree, damage: &mut Option<DamageRect>) {
+    fn emit_math(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
         self.stats.math_compiled = 0;
         self.stats.math_raw = 0;
         self.stats.math_rules = 0;
@@ -2379,9 +2707,14 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         if self.manifest.span_total() == 0 {
             return;
         }
-        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
             return;
         };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
         let m = self.chrome.metrics;
         let l = self.chrome.layout;
         let mut mm = MathMetrics::new(m.cell_w, m.cell_h);
@@ -2568,7 +2901,7 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
     /// exists only to build the `MathMetrics` -- which **must match `emit_math` exactly**, because if
     /// the two disagree the displacement the line model applies is for one formula and the pixels are
     /// another, and a wrong displacement is invisible in the counters: the formula still draws.
-    fn math_blocks_for(&mut self) -> Vec<(u32, u32)> {
+    fn math_blocks_for(&mut self, source: &mut dyn holonomy_text::LeafSource) -> Vec<(u32, u32)> {
         // **The 6 MiB read, removed.** Phase 12 named this as the blocker it could not fix: it called
         // `read_document` unconditionally because `for_each_math_span` is a cursor over bytes and *"does
         // this document contain any math"* could not be asked without reading them to find the `$$`.
@@ -2584,10 +2917,15 @@ pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
         }
         let mut mm = MathMetrics::new(self.chrome.metrics.cell_w, self.chrome.metrics.cell_h);
         mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
-        let Ok(text) = read_document(&self.editor, &mut self.doc_scratch) else {
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
             return Vec::new();
         };
-        math_blocks(&self.editor, text, &mm)
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        math_blocks(&mut self.editor, text, &mm, source)
     }
 
     // ---------------------------------------------------------------- export
@@ -2784,14 +3122,21 @@ pub const LINE_SCRATCH_BYTES: usize = 48 * 1024;
 /// gone; the scan is not. The honest fix is the Fenwick tree over line heights, which answers this in
 /// `O(log n)`, and wiring it is Phase 11's third item. What is fixed here is that the count is the
 /// remaining cost rather than a 6.4 MiB copy that accompanied it.
-fn line_index_in(editor: &Editor, at: usize) -> u32 {
+fn line_index_in(
+    editor: &mut Editor,
+    at: usize,
+    source: &mut dyn holonomy_text::LeafSource,
+) -> u32 {
     let end = at.min(editor.text_len());
     let mut count = 0u32;
     let mut offset = 0usize;
     let mut chunk = [0u8; SCAN_CHUNK];
     while offset < end {
         let want = (end - offset).min(SCAN_CHUNK);
-        let got = match editor.read_into(offset, &mut chunk[..want]) {
+        // **Faulting, for the same reason `read_document` is.** A line index that stopped counting at the
+        // resident window would number every table, formula and image after it as being on line 0 --
+        // which is worse than not drawing it, because it draws it in the wrong place.
+        let got = match editor.read_into_faulting(source, offset, &mut chunk[..want]) {
             Ok(got) => got,
             Err(_) => break,
         };
@@ -2818,7 +3163,12 @@ fn line_index_in(editor: &Editor, at: usize) -> u32 {
 /// -- which is wrong for an inline formula and right for a displayed one, and the distinction is
 /// Phase 9B's known limit rather than a bug to be argued about here. Recorded in `PROJECT.md` §9B
 /// rather than silently approximated.
-fn math_blocks(editor: &Editor, text: &[u8], mm: &MathMetrics) -> Vec<(u32, u32)> {
+fn math_blocks(
+    editor: &mut Editor,
+    text: &[u8],
+    mm: &MathMetrics,
+    source: &mut dyn holonomy_text::LeafSource,
+) -> Vec<(u32, u32)> {
     let mut blocks = Vec::new();
     holonomy_text::for_each_math_span(text, |span| {
         let inner = span.inner();
@@ -2827,7 +3177,7 @@ fn math_blocks(editor: &Editor, text: &[u8], mm: &MathMetrics) -> Vec<(u32, u32)
         let Ok(node) = math::parse(&text[inner]) else {
             return;
         };
-        let line = line_index_in(editor, span.start as usize);
+        let line = line_index_in(editor, span.start as usize, source);
         blocks.push((line, measure_only(&node, mm).height));
     });
     blocks
@@ -2953,10 +3303,17 @@ fn codepoints_upto(bytes: &[u8], from: usize, limit: usize) -> usize {
 /// the first.
 ///
 /// Grown only, never shrunk: a document that stops growing stops allocating.
-fn read_document<'e>(
-    editor: &'e Editor,
-    out: &'e mut Vec<u8>,
-) -> Result<&'e [u8], holonomy_text::EditorError> {
+/// **Faulting**, as of part 16. It took `&Editor` and could not, so on a container-backed document every
+/// whole-document read past the resident window returned `SourceUnavailable` and the emitters that need
+/// one -- tables, math, images -- silently drew nothing.
+///
+/// **`&mut Editor` is the price of asking for the bytes**, and it is the right trade: the alternative was
+/// a table, a formula or an image that is in the container and not on the screen.
+fn read_document(
+    editor: &mut Editor,
+    out: &mut Vec<u8>,
+    source: &mut dyn holonomy_text::LeafSource,
+) -> Result<usize, holonomy_text::EditorError> {
     let len = editor.text_len();
     if out.len() < len {
         // Rounded up to the next multiple of [`SCAN_CHUNK`], because `resize` to exactly `len` means
@@ -2966,8 +3323,7 @@ fn read_document<'e>(
         let want = len.next_multiple_of(SCAN_CHUNK);
         out.resize(want, 0);
     }
-    let got = editor.read_into(0, out)?;
-    Ok(&out[..got])
+    editor.read_into_faulting(source, 0, out)
 }
 
 #[inline]

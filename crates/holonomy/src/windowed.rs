@@ -269,7 +269,7 @@ fn report(session: &Session<'_>, events: u64, start: Instant) {
         // was typed. Without it, "1 compiled, 0 procedural fills" for a `\frac` is an unexplained
         // number: the counters say the formula compiled and drew no bar, which means the thing that
         // compiled was not the thing that was typed. Reading the bytes settles it.
-        if let Ok(text) = session.editor.text() {
+        if let Ok(text) = session.text() {
             let mut shown = 0usize;
             holonomy_text::for_each_math_span(&text, |sp| {
                 shown += 1;

@@ -178,11 +178,10 @@ per-squaring cost, the gap translates directly into ~30% more squarings inside t
 budget.
 
 **Editing a container-backed document end to end is also not claimed.** The seam is complete and gated
-— an edit survives an eviction, a fault after an edit is byte-exact, and a commit repairs a shift that
-per-leaf write-back provably could not — but two things are not built. The faulting *mutators* do not
-exist, so an edit is refused if its leaf is not already resident, and the paint path still reads
-through `&self`, which cannot fault, so text outside the first window is counted in `runs_missing`
-rather than drawn. Both are Phase 13 items; see `PROJECT.md` §7.
+— an edit survives an eviction, a fault after an edit is byte-exact, a commit repairs a shift that
+per-leaf write-back provably could not, and **a document larger than the resident window paints on any
+page**. What is not built is the faulting *mutators*: an edit is refused if its leaf is not already
+resident, so typing past the window does not yet work. See `PROJECT.md` §7.
 
 ## Licence
 

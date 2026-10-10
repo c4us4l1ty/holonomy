@@ -434,6 +434,36 @@ impl Editor {
         Ok(self.rope.to_vec()?)
     }
 
+    /// [`text`](Self::text) over a document whose bytes may not be resident. **Part 16.**
+    ///
+    /// # What this is for, and it is exactly one caller
+    ///
+    /// Opening. `DocLines`, `Manifest` and `TextCounts` are each built from the document's bytes at
+    /// session construction, and on a container-backed document **none of them could be built at all**:
+    /// `text()` takes `&self`, cannot fault, and a document larger than the resident window returned
+    /// `LeafAbsent`, which `unwrap_or_default()` turned into *an empty geometry over a non-empty
+    /// document*. The symptom was a session that reported one line and painted no body text at all on a
+    /// 7-section document, while every in-memory gate passed -- because on an in-memory editor the read
+    /// always succeeds.
+    ///
+    /// **It is one caller and that is deliberate.** A whole-document `Vec` on any other path is the
+    /// allocation Phase 13 exists to remove; at open it happens once, before the first frame, and it is
+    /// what lets `DocLines` and `Manifest` never need it again. PROJECT.md's "build the geometry from
+    /// offsets, not bytes" remains the open question, and this does not pretend to answer it -- it makes
+    /// the product correct and leaves the peak recorded.
+    ///
+    /// **The vector is the caller's to zero** and this cannot do it, because it returns the buffer rather
+    /// than filling one. A caller that lets it drop hands a whole document back to the allocator.
+    pub fn text_faulting(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+    ) -> Result<Vec<u8>, EditorError> {
+        let len = self.rope.text_len();
+        let mut out = vec![0u8; len];
+        self.rope.read_at_faulting(source, 0, len, &mut out)?;
+        Ok(out)
+    }
+
     /// The document's images, in document order.
     #[must_use]
     pub fn assets(&self) -> &AssetCatalog {

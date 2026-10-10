@@ -199,7 +199,7 @@ fn a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact() {
 
     // --- The document is exactly what the keystrokes said: type, delete "lazy", retype it,
     //     undo the retype, redo it. Undo and redo cancel, so the end state is the sentence.
-    let text = String::from_utf8(sess.editor.text().expect("utf-8")).expect("utf-8");
+    let text = String::from_utf8(sess.text().expect("utf-8")).expect("utf-8");
     assert_eq!(text, sentence, "the paragraph was mangled: {text:?}");
     assert!(
         sess.stats.edits > 50,
@@ -213,10 +213,10 @@ fn a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact() {
     // undos: past the bound there is nothing left and the honest answer is `NothingToUndo`. So the
     // gate unwinds until it is refused, counts how deep that was, and redoes exactly that many --
     // which tests the depth *and* the round trip, and does not pretend the bound is 500.
-    let before = sess.editor.text_len();
+    let before = sess.text_len();
     let mut unwound = 0u32;
     for _ in 0..500 {
-        match sess.editor.undo() {
+        match sess.editor_mut().undo() {
             Ok(_) => unwound += 1,
             Err(holonomy_text::EditorError::NothingToUndo) => break,
             Err(e) => panic!("undo failed unexpectedly: {e}"),
@@ -231,20 +231,20 @@ fn a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact() {
         unwound >= 50,
         "the session only made {unwound} undoable levels out of its own keystrokes"
     );
-    let at_bottom = sess.editor.text_len();
+    let at_bottom = sess.text_len();
     assert!(
         at_bottom < before,
         "unwinding {unwound} levels left {at_bottom} of {before} bytes"
     );
     for _ in 0..unwound {
-        sess.editor.redo().expect("redo");
+        sess.editor_mut().redo().expect("redo");
     }
     assert_eq!(
-        sess.editor.text_len(),
+        sess.text_len(),
         before,
         "redoing every undone level must restore the length exactly"
     );
-    let redone = String::from_utf8(sess.editor.text().expect("utf-8")).expect("utf-8");
+    let redone = String::from_utf8(sess.text().expect("utf-8")).expect("utf-8");
     assert_eq!(
         redone, sentence,
         "and restore the text, not just its length"
@@ -276,7 +276,7 @@ fn a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact() {
     assert!(ppm_bytes.starts_with(b"P6\n1280 800\n255\n"));
 
     // --- Commit to the container, then reopen it and check the bytes.
-    let text: Vec<u8> = sess.editor.text().expect("utf-8");
+    let text: Vec<u8> = sess.text().expect("utf-8");
     commit(&container, &text);
     container.sync().expect("sync");
     let reopened = DirectFile::open(&container_path).expect("reopen the container");
@@ -466,12 +466,12 @@ fn a_resize_changes_the_frame_and_not_the_text() {
     for ev in type_str("resizing") {
         s.handle_event(ev).expect("a character");
     }
-    let text_before = s.editor.text().expect("the document text");
+    let text_before = s.text().expect("the document text");
     assert!(!text_before.is_empty(), "the harness typed nothing");
     // The chrome state holds the caret as line/column rather than a byte offset, which is what
     // the renderer needs; the editor holds the offset. Both must be unchanged, since a resize that
     // moved either would put the caret in a different place in a document it did not change.
-    let caret_before = (s.state.caret_line, s.state.caret_column, s.editor.caret());
+    let caret_before = (s.state.caret_line, s.state.caret_column, s.caret());
 
     // Grow, then shrink below the starting size, then back.
     for (w, h) in [(1600u32, 1000u32), (900, 500), (1280, 800)] {
@@ -485,12 +485,12 @@ fn a_resize_changes_the_frame_and_not_the_text() {
     }
 
     assert_eq!(
-        s.editor.text().expect("the document text"),
+        s.text().expect("the document text"),
         text_before,
         "the document is unchanged"
     );
     assert_eq!(
-        (s.state.caret_line, s.state.caret_column, s.editor.caret()),
+        (s.state.caret_line, s.state.caret_column, s.caret()),
         caret_before,
         "and the caret has not moved: a resize is not an edit"
     );
@@ -661,7 +661,7 @@ fn ctrl_t_then_tab_through_a_three_by_three_appends_a_row() {
     );
 
     // And the table is intact as *data*: nine original cells plus three empty ones, resolvable.
-    let text = s.editor.text().expect("the document");
+    let text = s.text().expect("the document");
     let resolved = holonomy_text::ResolvedTable::new(grown, &text).expect("the span resolves");
     let cells = resolved.cells().expect("every cell");
     assert_eq!(cells.len(), 12, "four rows of three");
@@ -709,10 +709,10 @@ fn shift_tab_walks_back_and_stops_at_the_first_cell() {
         Some((0, 0)),
         "and Left at a cell's start goes to the previous cell, rather than moving a byte"
     );
-    let before = s.editor.caret();
+    let before = s.caret();
     press_shift(&mut s, holonomy_input::KEY_TAB).expect("Shift+Tab at the first cell");
     assert_eq!(
-        (s.active_cell().map(|c| (c.row, c.col)), s.editor.caret()),
+        (s.active_cell().map(|c| (c.row, c.col)), s.caret()),
         (Some((0, 0)), before),
         "backwards from the first cell is nowhere: the caret does not move and the cell does not wrap"
     );
@@ -732,23 +732,23 @@ fn shift_tab_walks_back_and_stops_at_the_first_cell() {
 fn tab_outside_a_table_indents_and_shift_tab_takes_it_back() {
     let m = ChromeMetrics::DESKTOP;
     let (mut s, _atlas) = session(Editor::new(), m);
-    s.editor.caret_to(0).expect("caret to the start");
+    s.editor_mut().caret_to(0).expect("caret to the start");
 
     press(&mut s, holonomy_input::KEY_TAB).expect("Tab");
     assert_eq!(
-        s.editor.text().expect("the document"),
+        s.text().expect("the document"),
         b"    ".to_vec(),
         "Tab outside a table is four spaces"
     );
     press(&mut s, holonomy_input::KEY_TAB).expect("Tab again");
     assert_eq!(
-        s.editor.text().expect("the document").len(),
+        s.text().expect("the document").len(),
         8,
         "and eight after a second"
     );
     press_shift(&mut s, holonomy_input::KEY_TAB).expect("Shift+Tab");
     assert_eq!(
-        s.editor.text().expect("the document"),
+        s.text().expect("the document"),
         b"    ".to_vec(),
         "Shift+Tab removes exactly one level"
     );

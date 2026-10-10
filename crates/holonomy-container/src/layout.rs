@@ -58,6 +58,33 @@ pub const SALT_LEN: usize = 32;
 /// Where the master salt lives. Fixed, and *not* Ω — see the module docs.
 pub const SALT_OFFSET: u64 = 0;
 
+/// Length of the recorded VDF iteration count. 8 bytes, at [`VDF_ITERATIONS_OFFSET`].
+pub const VDF_ITERATIONS_LEN: usize = 8;
+
+/// Where the recorded VDF iteration count lives, immediately after the salt.
+///
+/// # Why it is here and not in the master frame
+///
+/// **The master frame records `vdf_iterations` and it is useless there.** The frame is chunk 0, chunk 0 is
+/// sealed under a key derived *from the VDF*, and the VDF's cost is what is in question — so reading the
+/// recorded value requires having already run the computation whose parameters you are trying to learn.
+/// That is a circle, and it is why `MasterFrame::with_kdf_params` carries the comment *"purely a record;
+/// nothing reads it back to derive anything."*
+///
+/// Page 0 is the one region that is **plaintext**, because the salt has to be readable before any key
+/// exists. Putting `T` beside it is the only place a container can state its own derivation cost and have
+/// that statement available at the moment the cost is about to be paid.
+///
+/// **Little-endian**, matching `Omega`'s convention (FR-2.3.3) and for the same reason: both are read out of
+/// a fixed plaintext page rather than a serialised structure, and byte order is a bijection either way, so
+/// the argument is conformance and not correctness.
+///
+/// **Zero means "not recorded."** A container written before this field existed has whatever the chaff
+/// generator put at this offset, which is not reliably zero — so the value is only *trusted* when it is
+/// non-zero **and** the salt beside it decrypted the container. See
+/// [`Wavefunction::open`](crate::Wavefunction::open) for the check, which is the part that matters.
+pub const VDF_ITERATIONS_OFFSET: u64 = SALT_LEN as u64;
+
 /// Alignment required of every `O_DIRECT` transfer: the file offset and the buffer address.
 pub const IO_ALIGN: u64 = 4096;
 

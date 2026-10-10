@@ -29,6 +29,7 @@ use std::path::Path;
 use holonomy_crypto::envelope::ExposeSecret;
 use holonomy_crypto::envelope::SALT_LEN;
 use holonomy_crypto::envelope::{self, Derived, EnvelopeError, RootMaterial};
+use layout::{VDF_ITERATIONS_LEN, VDF_ITERATIONS_OFFSET};
 
 use aead::AeadError;
 use chaff::{Chaff, ChaffError};
@@ -159,6 +160,21 @@ impl Wavefunction {
         false
     }
 
+    /// The VDF iteration count this container was written with.
+    ///
+    /// **From the master frame**, which is the copy that is authenticated — the plaintext one at
+    /// [`layout::VDF_ITERATIONS_OFFSET`] is what the *derivation* used, and this is what the container
+    /// then says about itself. They agree for any container this code wrote; they are read separately
+    /// because only one of them is verifiable before the key exists and only one of them is
+    /// authenticated after it does.
+    ///
+    /// Public so a test can assert a container reopened under a *different* caller's `T` is the one that
+    /// got used, rather than inferring it from the fact that opening succeeded. `gate.rs`'s
+    /// `a_container_opens_with_its_own_vdf_count_and_not_the_callers` is that test.
+    pub fn vdf_iterations(&self) -> u64 {
+        self.frame.vdf_iterations
+    }
+
     /// Content plaintext length.
     pub fn content_len(&self) -> u64 {
         self.frame.content_len
@@ -249,6 +265,14 @@ impl Wavefunction {
         let mut page = AlignedBuf::zeroed(IO_ALIGN as usize);
         chaff.fill(0, page.as_mut_slice())?;
         page.as_mut_slice()[..SALT_LEN].copy_from_slice(&salt);
+        // **The VDF's iteration count, beside the salt, in the clear.**
+        //
+        // It has to be in the clear for the reason in [`layout::VDF_ITERATIONS_OFFSET`]: the master frame
+        // that also records it is sealed under a key derived from the very number being recorded, so
+        // reading it back requires having already run the computation.
+        page.as_mut_slice()
+            [VDF_ITERATIONS_OFFSET as usize..VDF_ITERATIONS_OFFSET as usize + VDF_ITERATIONS_LEN]
+            .copy_from_slice(&vdf_iterations.to_le_bytes());
         file.write_exact_at(0, &page)?;
 
         // Leading chaff: [IO_ALIGN, omega).
@@ -355,15 +379,47 @@ impl Wavefunction {
         passphrase: &str,
         vdf_iterations: u64,
     ) -> Result<Self, ContainerError> {
-        // Page 0 carries the salt in its first 32 bytes. `O_DIRECT` cannot read 32 bytes --
-        // offset, length and address must all be block multiples -- so read the page.
+        // Page 0 carries the salt in its first 32 bytes and the VDF's iteration count in the next 8.
+        // `O_DIRECT` cannot read 40 bytes -- offset, length and address must all be block multiples --
+        // so read the page.
         let mut page = AlignedBuf::zeroed(IO_ALIGN as usize);
         file.read_exact_at(SALT_OFFSET, &mut page)?;
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&page.as_slice()[..SALT_LEN]);
+        let recorded_vdf = u64::from_le_bytes(
+            page.as_slice()[VDF_ITERATIONS_OFFSET as usize
+                ..VDF_ITERATIONS_OFFSET as usize + VDF_ITERATIONS_LEN]
+                .try_into()
+                .map_err(|_| {
+                    ContainerError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the VDF iteration field is truncated",
+                    ))
+                })?,
+        );
         drop(page);
 
-        let (root, omega) = Self::derive(passphrase, &salt, vdf_iterations)?;
+        // **The container's own `T` wins over the caller's, and this is the whole point of the field.**
+        //
+        // Before it, `T` was a build-time constant the *caller* supplied and the container never said
+        // what it had been built with. So a container written on a host whose squaring cost differs from
+        // this one's could not be opened by this build: the root key derived here would not be the root
+        // key the writer used. PROJECT.md recorded that as an ~8% gap on this host and an open
+        // correctness hole on any host that moved.
+        //
+        // **A recorded zero falls back to the caller**, because that is what a container written before
+        // this field existed has at this offset — and the chaff there is not guaranteed to be zero. The
+        // fallback is safe in the only direction that matters: **if the count is wrong the derivation
+        // produces a wrong root key and chunk 0 fails to authenticate**, so a wrong value cannot open a
+        // container. A container that opens is one whose `T` matched; a fallback that guessed wrong fails
+        // loudly rather than silently.
+        let iterations = if recorded_vdf == 0 {
+            vdf_iterations
+        } else {
+            recorded_vdf
+        };
+
+        let (root, omega) = Self::derive(passphrase, &salt, iterations)?;
         let chaff = Chaff::new(&root.k_chaff);
 
         // Read chunk 0 with a ring bounded to exactly one chunk. The real chunk count is
@@ -433,11 +489,7 @@ impl Wavefunction {
     /// chunk and `CHUNK_PLAINTEXT` otherwise. `out` is cleared first so a shorter chunk cannot leave the
     /// tail of a previous longer one visible to a caller that trusts the slice length — the same reasoning
     /// as `master_frame`'s "exactly one chunk" comment, for a different mistake.
-    pub fn read_chunk_into(
-        &self,
-        index: u64,
-        out: &mut [u8],
-    ) -> Result<usize, ContainerError> {
+    pub fn read_chunk_into(&self, index: u64, out: &mut [u8]) -> Result<usize, ContainerError> {
         if index == MASTER_FRAME_CHUNK {
             return Err(ContainerError::NoSuchChunk { index });
         }
@@ -590,57 +642,58 @@ impl Wavefunction {
     }
 
     /// Change the document's **length**, writing blank chunks for any that are new.
-///
-/// # Why this is not `write_content`
-///
-/// [`write_content`](Self::write_content) takes the whole document, which is precisely what Phase 13 exists
-/// to stop doing — a keystroke cannot hand over 8 MiB. But an edit *changes the document's length*, and a
-/// source that still believes the old length will hand back a short leaf at the end of the document, which
-/// `fault_leaf` refuses as `OutOfBounds`. **That is a length disagreement, not a truncation, and it is
-/// invisible at the edit site** — it surfaces as a failed read somewhere else in the file.
-///
-/// The new chunks are blank because a grown region has no content yet: the rope's leaves hold it, and they
-/// are written back before they are evicted. So growth writes no document bytes at all, which is what makes
-/// it cheap enough to be called from an eviction.
-///
-/// ## Shrinking leaves the freed chunks on disk
-///
-/// Lowering `content_len` and `chunk_count` makes the trailing chunks **unreachable** — the ring refuses to
-/// seek past `chunk_count`, and `chunk_content_offset` returns `None` for them — so they can no longer be
-/// read as document content by this build. They are not *erased*, though: the bytes are ciphertext under a
-/// key that exists, so an attacker with the key could recover them. **This matches what
-/// [`write_content`](Self::write_content) already does on a shrink**, so it is not a new leak, but it is a
-/// real one and re-chaffing the freed region is the fix that neither path currently applies.
-pub fn set_content_len(&mut self, len: usize) -> Result<(), ContainerError> {
-    let chunk_count = chunks_for(len as u64).map_err(|_| ContainerError::PayloadTooLarge {
-        requested: len as u64,
-        cap: layout::S_MAX_PAYLOAD,
-    })?;
-    if !layout::payload_fits(self.omega, payload_len(chunk_count)) {
-        return Err(ContainerError::PayloadTooLarge {
-            requested: payload_len(chunk_count),
+    ///
+    /// # Why this is not `write_content`
+    ///
+    /// [`write_content`](Self::write_content) takes the whole document, which is precisely what Phase 13 exists
+    /// to stop doing — a keystroke cannot hand over 8 MiB. But an edit *changes the document's length*, and a
+    /// source that still believes the old length will hand back a short leaf at the end of the document, which
+    /// `fault_leaf` refuses as `OutOfBounds`. **That is a length disagreement, not a truncation, and it is
+    /// invisible at the edit site** — it surfaces as a failed read somewhere else in the file.
+    ///
+    /// The new chunks are blank because a grown region has no content yet: the rope's leaves hold it, and they
+    /// are written back before they are evicted. So growth writes no document bytes at all, which is what makes
+    /// it cheap enough to be called from an eviction.
+    ///
+    /// ## Shrinking leaves the freed chunks on disk
+    ///
+    /// Lowering `content_len` and `chunk_count` makes the trailing chunks **unreachable** — the ring refuses to
+    /// seek past `chunk_count`, and `chunk_content_offset` returns `None` for them — so they can no longer be
+    /// read as document content by this build. They are not *erased*, though: the bytes are ciphertext under a
+    /// key that exists, so an attacker with the key could recover them. **This matches what
+    /// [`write_content`](Self::write_content) already does on a shrink**, so it is not a new leak, but it is a
+    /// real one and re-chaffing the freed region is the fix that neither path currently applies.
+    pub fn set_content_len(&mut self, len: usize) -> Result<(), ContainerError> {
+        let chunk_count = chunks_for(len as u64).map_err(|_| ContainerError::PayloadTooLarge {
+            requested: len as u64,
             cap: layout::S_MAX_PAYLOAD,
-        });
-    }
-    if chunk_count == self.frame.chunk_count && len as u64 == self.frame.content_len {
-        return Ok(());
-    }
-
-    let old_chunks = self.frame.chunk_count;
-    if chunk_count > old_chunks {
-        // **Commit per chunk, as `write_content` does**, for the same reason: `stage_blank` discards every
-        // slot, so a single trailing commit would drop the previous chunk's dirty slot before it was written.
-        for index in old_chunks..chunk_count {
-            self.ring.stage_blank(index)?;
-            self.ring.commit(&self.file, self.omega, &self.root.k_enc, &self.root.n_root)?;
+        })?;
+        if !layout::payload_fits(self.omega, payload_len(chunk_count)) {
+            return Err(ContainerError::PayloadTooLarge {
+                requested: payload_len(chunk_count),
+                cap: layout::S_MAX_PAYLOAD,
+            });
         }
-    }
-    self.frame.content_len = len as u64;
-    self.frame.chunk_count = chunk_count;
-    self.rewrite_master_frame()
-}
+        if chunk_count == self.frame.chunk_count && len as u64 == self.frame.content_len {
+            return Ok(());
+        }
 
-/// Re-seal and write chunk 0 from the in-memory frame.
+        let old_chunks = self.frame.chunk_count;
+        if chunk_count > old_chunks {
+            // **Commit per chunk, as `write_content` does**, for the same reason: `stage_blank` discards every
+            // slot, so a single trailing commit would drop the previous chunk's dirty slot before it was written.
+            for index in old_chunks..chunk_count {
+                self.ring.stage_blank(index)?;
+                self.ring
+                    .commit(&self.file, self.omega, &self.root.k_enc, &self.root.n_root)?;
+            }
+        }
+        self.frame.content_len = len as u64;
+        self.frame.chunk_count = chunk_count;
+        self.rewrite_master_frame()
+    }
+
+    /// Re-seal and write chunk 0 from the in-memory frame.
     fn rewrite_master_frame(&mut self) -> Result<(), ContainerError> {
         let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
         let n = self.frame.encode(&mut frame_bytes)?;

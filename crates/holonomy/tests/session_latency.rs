@@ -157,7 +157,7 @@ fn an_edit_at_document_scale_stays_within_the_keystroke_budget() {
             let _ = s.apply(c);
         }
     }
-    let len = s.editor.text_len();
+    let len = s.text_len() as usize;
 
     for (name, at) in [
         ("start", 0usize),
@@ -202,8 +202,8 @@ fn an_edit_at_document_scale_stays_within_the_keystroke_budget() {
 fn a_paint_does_not_get_more_expensive_as_the_document_does() {
     let (mut small, _a) = session(64 * 1024);
     let (mut large, _b) = session(DOC_BYTES);
-    let at_small = small.editor.text_len() / 2;
-    let at_large = large.editor.text_len() / 2;
+    let at_small = small.text_len() as usize / 2;
+    let at_large = large.text_len() as usize / 2;
 
     // Warm both, so neither pays first-touch.
     for s in [&mut small, &mut large] {

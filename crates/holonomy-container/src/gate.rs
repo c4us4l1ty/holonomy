@@ -35,6 +35,111 @@ fn content(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+/// **A container opens with its own recorded `T`, not the caller's.** PROJECT.md §7's last format item.
+///
+/// # What was broken, and it is a correctness hole rather than an inconvenience
+///
+/// `T` was a build-time constant the *caller* passed to both `create` and `open`, and the container
+/// nowhere recorded what it had been built with. So a container written by a build calibrated on a host
+/// whose CIOS squaring cost differed from the reader's **could not be opened at all**: the reader derives
+/// a different root key and chunk 0 fails to authenticate.
+///
+/// PROJECT.md measured that gap at ~8 % on this host today — small, and entirely a function of how far
+/// the host has moved since the container was written. It is not an 8 % problem. It is an opening problem
+/// that happens to be 8 % wide today.
+///
+/// # What is asserted
+///
+/// A container written with `T = 8` opens when the caller asks for `T = 40`, and **fails** when the
+/// caller asks for a count the container did not record *and* the file has no recorded count. The second
+/// half matters as much as the first: **the recorded value must actually be consulted**, not merely
+/// preferred when it happens to agree.
+#[test]
+fn a_container_opens_with_its_own_vdf_count_and_not_the_callers() {
+    let dir = scratch_dir("vdf_recorded");
+    let path = dir.join("vdf.wavefunction");
+    let written_with = TEST_VDF_ITERATIONS; // 8
+
+    {
+        let wf = Wavefunction::create(&path, "correct horse", "T", b"payload", written_with)
+            .expect("create with a small T");
+        assert_eq!(
+            wf.vdf_iterations(),
+            written_with,
+            "the container records the T it was created with"
+        );
+    }
+
+    // **The caller's T is wrong on purpose.** If the container's were ignored, this would fail.
+    let wrong = written_with * 5;
+    let wf = Wavefunction::open(&path, "correct horse", wrong)
+        .expect("open with the container's own recorded T, not the caller's");
+    assert_eq!(
+        wf.vdf_iterations(),
+        written_with,
+        "and the container still says what it was created with"
+    );
+
+    // **And the salt is unchanged by the field**, which is the thing a format change could plausibly
+    // break: a container whose salt moved is a container nobody can open, including its author's.
+    let mut wf2 = Wavefunction::open(&path, "correct horse", wrong).expect("reopen");
+    let got = wf2.read_content().expect("read the payload back");
+    assert_eq!(
+        got, b"payload",
+        "the content round-tripped through the new field"
+    );
+}
+
+/// **A container with no recorded `T` still opens with the caller's — the legacy path.**
+///
+/// Written by hand, because the only honest way to produce one is to be a container from before the field
+/// existed: this takes a real container and zeroes the eight bytes, which is exactly what a reader meets
+/// when it cannot trust them.
+///
+/// **And the fallback is safe only because a wrong `T` fails loudly.** A count that does not match
+/// produces a wrong root key, and chunk 0 does not authenticate — so no plausible wrong value can ever
+/// *open* a container, only fail to. That is what makes accepting a value from the file safe at all.
+#[test]
+fn a_container_without_a_recorded_vdf_count_falls_back_to_the_callers() {
+    let dir = scratch_dir("vdf_legacy");
+    let path = dir.join("legacy.wavefunction");
+
+    {
+        let wf = Wavefunction::create(&path, "correct horse", "T", b"payload", TEST_VDF_ITERATIONS)
+            .expect("create");
+        drop(wf);
+    }
+
+    // **Zero the recorded bytes**, on the raw file, so the container is genuinely un-recorded.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(&path)
+            .expect("reopen for editing");
+        f.seek(SeekFrom::Start(layout::VDF_ITERATIONS_OFFSET))
+            .expect("seek");
+        f.seek(SeekFrom::Start(layout::VDF_ITERATIONS_OFFSET))
+            .expect("seek back");
+        f.write_all(&[0u8; layout::VDF_ITERATIONS_LEN])
+            .expect("zero the field");
+        f.sync_all().expect("sync");
+    }
+
+    // **With the right `T` it opens, because that is the only count that can produce the right key.**
+    let wf = Wavefunction::open(&path, "correct horse", TEST_VDF_ITERATIONS)
+        .expect("an un-recorded container opens on the caller's T");
+    assert_eq!(wf.content_len(), 7, "and its content is intact");
+
+    // **With a different `T` it does not**, which is the property that makes the whole scheme safe: a
+    // recorded count that is wrong cannot silently open the wrong thing.
+    assert!(
+        Wavefunction::open(&path, "correct horse", TEST_VDF_ITERATIONS + 1).is_err(),
+        "a count the container was not written with must fail, not open something"
+    );
+}
+
 /// The PRD's gate, end to end.
 #[test]
 fn create_write_read_round_trip() {

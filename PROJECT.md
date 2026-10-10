@@ -2298,6 +2298,122 @@ fixture.** `to_saved_and_typed_byte_never_disagree` is the gate, and part 12's s
 write it — every one of its scripts was a single edit, where the two coordinate systems coincide.
 *Exhaustive coverage of one case is not coverage of a composition.*
 
+#### Phase 13, part 16 — the paint path takes a byte source, and the product could not open a document
+
+**§7's next item was "make the paint path take `read_into_faulting` and hold a `SectionStore`". That is a
+one-argument change, and doing it found that the product has never once painted a container-backed
+document.**
+
+> The session painted **one empty line** over any document larger than the resident window, and the whole
+> test suite was green.
+
+**Three distinct defects, and the last two are why the first one was survivable.**
+
+**1. The emitters read through `&self` and gave up.** `emit_body_text` `break`s on an absent leaf, so
+`page_used` stops growing, `PageText::document` answers `None` past that point, and every answer counts in
+`runs_missing`. Safe, and wrong to draw. `read_document` — used by tables, math and images — returned
+`Err` outright and those emitters drew nothing at all.
+
+**2. `Session::new` built the geometry from a document that was not there yet.** `DocLines`, `Manifest` and
+`TextCounts` each read the whole document at construction, and on a container-backed document that read
+returns `LeafAbsent` — which `unwrap_or_default()` turned into **an empty geometry over a non-empty
+document**. The symptom was `total_lines == 1`, and since `emit_body_text` clamps its line loop to
+`total_lines`, the page drew a single empty line.
+
+**3. The product assigns the editor after construction, so the geometry described an *empty* document even
+when the read would have worked.** `main.rs` does `ctx.session.editor = opened.editor` — which compiles,
+because both are `Editor`. The session is built before the passphrase exists (it must be: before `seccomp`),
+so it is constructed over `Editor::new()` and the real document is dropped in afterwards, and nothing
+rebuilt the three structures.
+
+**Defect 3 is the one worth generalising from.** It is invisible to the entire test suite, because **no gate
+was ever in the state the product is in** — every gate builds a session over a document it already has, or
+inserts into it afterwards. Making `editor` private and routing every replacement through
+`Session::adopt_document` is the fix; the twenty-odd read accessors are the cost, and they are the right
+trade because **a reader cannot leave a session inconsistent and a writer could and did.**
+
+#### A CORRECTION to part 14, found by the change above: residency alone is currency
+
+**Part 14's `fault_leaf` condition was `is_resident(i) && epochs[i] == edit_epoch`, and it was wrong.** Its
+justification, in the code, was that *"a leaf that was already resident when an edit happened holds
+pre-edit bytes: its length and offset are right, so every check this function used to make passed, and the
+document was silently wrong from there to the end."*
+
+**That claim is false, and it is false about content rather than about position.** An edit at offset `p`
+changes the bytes of the leaf holding `p` and of no other leaf. Every other leaf keeps exactly the bytes it
+had. What moves is its *offset*, and an offset is derived from `starts` rather than stored on the leaf, so
+moving it needs no invalidation at all. The per-leaf `epochs` array is deleted.
+
+**The cost, measured, is the reason this is a finding and not a patch:**
+
+```text
+a 16-byte read at offset 0, 3 MiB document, 818 of 819 leaves "stale":   25.5 ms
+tests/session_latency.rs, which paints a 3 MiB document twenty times:    0.32 s -> did not finish
+after the correction, twenty warm paints:                                518 ns
+```
+
+**Nothing caught it, and the reason is the part worth keeping.** `fault_edit_conflict.rs` asserted that a
+fault produces *correct bytes* — which the epoch condition also does, because the refetch is correct, just
+ruinously. **A defect that makes the right answer more expensive than necessary is invisible to a
+correctness gate**, and a phase about correctness does not run the timing gates. `tests/fault_residency.rs`
+(4) is written about *work* rather than bytes: it counts fetches, and three of its four tests fail against
+the removed condition.
+
+#### And the correction broke a commit, which is the third thing worth writing down
+
+**The commit's write path had been relying on the bug.** `SectionStore::write_at` patches the **resident**
+sections and silently skips the rest, on the reasoning that an absent section's on-disk copy is only read
+after the rope has given up the leaf. That reasoning is about **eviction**, and a commit is not an
+eviction.
+
+It worked by accident. The commit's read loop went through `read_into_faulting`, and part 14's epoch
+condition refetched *every* leaf — resident ones included — so every read called `fetch_leaf`, which loaded
+the section into the store's cache as a side effect. The write then found the cache populated.
+
+**Removing the epoch condition removed the accident.** A resident leaf is not refetched, so a document the
+rope already holds produces no `fetch_leaf` at all, and a store built *after* the rope was filled — which is
+what the product does, and what `commit_path.rs` does — has an **empty cache**. `write_at` patched nothing
+and `commit_dirty` wrote nothing:
+
+```text
+all five tests in crates/holonomy/tests/commit_path.rs:   assertion `left == right` failed
+                                                            left: 0    right: 40006
+```
+
+**So the dependency is now explicit.** `SectionStore::ensure_resident` establishes the precondition
+`write_at` actually has, and `commit_document` calls it per chunk. The alternative — having `write_at` load
+what it patches — would spend a resident slot and a decrypt on every leaf write, which is the cost part 8's
+docs said it was avoiding and which is still worth avoiding *at eviction time*.
+
+**The generalisable half:** a load with no visible purpose is not obviously a load, and a code path whose
+correctness depends on one is a path whose correctness depends on a coincidence. Two changes in one part, in
+the same file, in the same subsystem.
+
+#### The gate could not fail at first, and that is the second lesson
+
+`text_past_the_first_window_is_drawn_not_counted` was written with a **three-section** document against a
+**four-section** budget, and passed immediately — because a three-section document fits entirely inside the
+window, so there was never anything past it to be missing. A gate that cannot fail is worse than no gate,
+because it is counted.
+
+The fixture is now **seven sections against a budget of four**, and there is a test whose only job is to
+assert the fixture:
+
+```
+the_first_window_is_smaller_than_the_document
+```
+
+**and it did fail.** `total_lines` was 1. So the ordering is load-bearing in the file itself: precondition,
+then the gate that depends on it. `an_opened_document_paints_its_text`, the test this section's work
+extends, says in its own comments "the first window should cover the visible page" — **it was never a claim
+about documents at all**, and eleven phases read it as one.
+
+**What is still true and worth stating.** The open path reads the whole document once, into one buffer, to
+build `DocLines` and `Manifest`. PROJECT.md's "build the geometry from offsets, not bytes" is still open, and
+this does not pretend to answer it — `Editor::text_faulting`'s docs say so, and the buffer is zeroed at the
+one place that holds it. §6's RSS row is unchanged by this part, and the row that *would* change is the one
+this part removes: a paint no longer needs the document.
+
 #### Phase 14 — The chrome: pointer input, menus, icons
 
 Drawn natively, by the existing surface tree, at the Phase 5 blitter. Not a web interface, not a
@@ -2407,9 +2523,9 @@ the desktop build, and none of this needs more than a few tens of KiB.
      precede every write, including across chunks, because writing chunk 0 invalidates the record's premise
      for chunk 0's offsets. See §Phase 13 part 15.
 
-   **So §7 item 0 is answered in full.** What remains for `Session` is not the seam but the *lifetime*: the
-   paint path still reads with `&self` and counts `runs_missing`, and the `SectionStore` is not held for the
-   session. That is the next item, not this one.
+   **So §7 item 0 is answered in full.** What remained for `Session` was the *lifetime*: the paint path
+   read with `&self` and counted `runs_missing`, and the `SectionStore` was not held for the session.
+   **LANDED as part 16**, and it found that the product had never painted a container-backed document.
 
 1. **`SETCRTC` needs DRM master**, and there is no longer a bare-silicon target to need it.
    Verified everything else on the DRM path unprivileged. **Closed 2026-10-05:** with the desktop
@@ -2516,6 +2632,11 @@ the desktop build, and none of this needs more than a few tens of KiB.
     rope owns an `EditRecord`, every mutator records into it, and `fault_leaf` consults it: the source is
     asked for *saved* bytes at *saved* offsets -- which is exactly what it holds -- and the record turns
     them into current bytes. **The two coordinate systems are no longer a hazard; they are the design.**
+
+    **The `Session` half of this is landed as part 16**: the paint path takes a `&mut dyn LeafSource`, the
+    product builds a `SectionStore` at the call site beside the container, and a document of any size paints
+    on any page. `Session::editor` is private and `adopt_document` is the only way a document goes in — the
+    field being public is what let the product swap a document in and keep an empty geometry.
 
     **So the faulting mutators are absent for the ordinary reason now: they are not written.** They were
     absent before because writing them would have been silently wrong, and

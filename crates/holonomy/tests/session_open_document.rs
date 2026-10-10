@@ -30,12 +30,12 @@
 //! real framebuffer, and it is the one that would fail if the paint path's `&self` reads hit an absent
 //! leaf — which they do, past the first window.
 
+use holonomy::session::Session;
 use holonomy::store::{open_document, DEFAULT_RESIDENT_SECTIONS};
 use holonomy_container::io::DirectFile;
 use holonomy_container::Wavefunction;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
-use holonomy::session::Session;
 
 const PASS: &str = "correct horse battery staple";
 const ITER: u64 = holonomy_container::TEST_VDF_ITERATIONS;
@@ -119,9 +119,17 @@ fn the_opened_document_is_the_containers_text() {
 
     let mut got = vec![0u8; doc.len()];
     let n = opened.editor.read_into(0, &mut got).expect("read");
-    assert_eq!(n, doc.len(), "the whole document is readable, not just the first window");
+    assert_eq!(
+        n,
+        doc.len(),
+        "the whole document is readable, not just the first window"
+    );
     assert_eq!(got, doc, "and it is the container's text");
-    assert_eq!(opened.container.content_len(), doc.len() as u64, "the container agrees on the length");
+    assert_eq!(
+        opened.container.content_len(),
+        doc.len() as u64,
+        "the container agrees on the length"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -174,7 +182,8 @@ fn residency_is_a_window_and_not_the_document() {
         let expected = window.div_ceil(FILL) * FILL;
 
         assert_eq!(
-            resident, expected,
+            resident,
+            expected,
             "budget {budget}: a {window} B window is {} leaves of {FILL} B",
             window.div_ceil(FILL)
         );
@@ -189,7 +198,10 @@ fn residency_is_a_window_and_not_the_document() {
             opened.editor.resident_count(),
             window.div_ceil(FILL)
         );
-        assert!(opened.editor.resident_count() > 0, "budget {budget}: something is resident");
+        assert!(
+            opened.editor.resident_count() > 0,
+            "budget {budget}: something is resident"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -204,7 +216,12 @@ fn an_opened_document_paints_its_text() {
 
     let m = holonomy_render::chrome::ChromeMetrics::DESKTOP;
     let scanout = HeadlessScanout::new(m.width, m.height);
-    let mut s = Session::new(opened.editor, Painter::new(shared_atlas(), 0), Box::new(scanout), m);
+    let mut s = Session::new(
+        opened.editor,
+        Painter::new(shared_atlas(), 0),
+        Box::new(scanout),
+        m,
+    );
     s.repaint_all().expect("paint");
 
     let stats = s.paint_stats();
@@ -216,6 +233,143 @@ fn an_opened_document_paints_its_text() {
     assert_eq!(
         stats.runs_missing, 0,
         "the first window should cover the visible page, so nothing should be missing: {stats:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The page past the first window is drawn, not counted — Phase 13 part 16.**
+///
+/// [`an_opened_document_paints_its_text`] above scrolls nowhere, so it only ever proves the *first* page.
+/// It says so itself: "the first window should cover the visible page". **A document with three sections
+/// has a first window of four, so this test cannot be made to fail by the state part 14 left behind** —
+/// hence the size and the scroll both matter, and both are asserted here rather than assumed.
+///
+/// Before part 16 the paint path read through `&self`, so a line whose leaf was absent could not be
+/// fetched and the emitter `break`s: `page_used` stops growing, `PageText::document` returns `None` for
+/// everything past that point, and each such run is counted in `runs_missing`. **Safe, and wrong to draw** —
+/// so the symptom was a page of correct text with a blank tail and a non-zero counter nobody was reading.
+///
+/// | what it proves | test |
+/// | --- | --- |
+/// | the window really is smaller than the document | [`the_first_window_is_smaller_than_the_document`] |
+/// | **and text past it still reaches the frame** | [`text_past_the_first_window_is_drawn_not_counted`] |
+/// | scrolling all the way to the end, likewise | [`the_last_page_paints_too`] |
+#[test]
+fn the_first_window_is_smaller_than_the_document() {
+    // **Seven sections against a budget of four**, so the window cannot cover the document. This number
+    // is load-bearing in a way that is easy to get wrong: an earlier version of this test used
+    // `2 * SECTION_BYTES + 40_000`, which is three sections, and every test in the file passed -- because
+    // a three-section document fits entirely inside a four-section window, so there was never anything
+    // past the window to be missing. **A gate that cannot fail is worse than no gate**, and this one
+    // failed in exactly that way before it was a gate at all.
+    let doc = text(SECTION_BYTES * 7);
+    let path = make(&doc);
+    let opened = open(&path, DEFAULT_RESIDENT_SECTIONS);
+
+    assert!(
+        opened.editor.resident_bytes() < doc.len(),
+        "the first window is {} of the document's {} bytes -- if it were the whole document, nothing \
+         past it could ever be missing and this file would be measuring nothing",
+        opened.editor.resident_bytes(),
+        doc.len()
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The page past the first window is drawn.** The one that fails before part 16.
+#[test]
+fn text_past_the_first_window_is_drawn_not_counted() {
+    let doc = text(SECTION_BYTES * 7);
+    let path = make(&doc);
+    let opened = open(&path, DEFAULT_RESIDENT_SECTIONS);
+    let holonomy::store::OpenedDocument {
+        editor,
+        mut container,
+    } = opened;
+
+    let m = holonomy_render::chrome::ChromeMetrics::DESKTOP;
+    let scanout = HeadlessScanout::new(m.width, m.height);
+    // **Built empty and given the document afterwards, exactly as the product does it.** The product's
+    // session is constructed before the passphrase exists -- it has to be, it is built before `seccomp` --
+    // so this ordering is not a test convenience, it is the shape of the real thing. `Session::new` over
+    // an empty editor and `adopt_document` afterwards is the only sequence the product takes, and a gate
+    // that used any other would be measuring a program that does not exist.
+    let mut s = Session::new(
+        holonomy_text::Editor::new(),
+        Painter::new(shared_atlas(), 0),
+        Box::new(scanout),
+        m,
+    );
+    let mut store = holonomy::store::SectionStore::new(&mut container, DEFAULT_RESIDENT_SECTIONS);
+    s.adopt_document(editor, &mut store)
+        .expect("adopt the document");
+    drop(store);
+    let mut store = holonomy::store::SectionStore::new(&mut container, DEFAULT_RESIDENT_SECTIONS);
+
+    // **Scroll past the window's end.** `scroll_to` takes a line index, so this needs the geometry, and
+    // the geometry covers the whole document without reading it -- which is the point part 3 established.
+    let total_lines = s.total_lines();
+    let deep = (total_lines * 3 / 4).min(total_lines.saturating_sub(1));
+    s.scroll_to(deep).expect("scroll into the last quarter");
+    // **Through the store, as the product does.** `repaint_all` would paint an in-memory session, and
+    // with the editor's bytes absent it would truncate the page -- which is precisely the bug.
+    s.repaint_all_with(&mut store)
+        .expect("paint past the window");
+
+    let stats = s.paint_stats();
+    assert!(
+        stats.doc_glyphs > 0,
+        "scrolled to line {deep} of {total_lines} and painted no glyphs: {stats:?}"
+    );
+    assert_eq!(
+        stats.runs_missing, 0,
+        "the visible page is past the resident window and the paint path could not fault for it. \
+         Each missing run is a line of the document that is in the container and not on the screen. \
+         stats: {stats:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The last page paints too**, which is the furthest the scroll can reach and so the case where the
+/// document's tail — the bytes a *deletion* would have shortened — is on screen.
+#[test]
+fn the_last_page_paints_too() {
+    let doc = text(SECTION_BYTES * 7);
+    let path = make(&doc);
+    let opened = open(&path, DEFAULT_RESIDENT_SECTIONS);
+    let holonomy::store::OpenedDocument {
+        editor,
+        mut container,
+    } = opened;
+
+    let m = holonomy_render::chrome::ChromeMetrics::DESKTOP;
+    let scanout = HeadlessScanout::new(m.width, m.height);
+    // **Built empty and given the document afterwards, exactly as the product does it.** The product's
+    // session is constructed before the passphrase exists -- it has to be, it is built before `seccomp` --
+    // so this ordering is not a test convenience, it is the shape of the real thing. `Session::new` over
+    // an empty editor and `adopt_document` afterwards is the only sequence the product takes, and a gate
+    // that used any other would be measuring a program that does not exist.
+    let mut s = Session::new(
+        holonomy_text::Editor::new(),
+        Painter::new(shared_atlas(), 0),
+        Box::new(scanout),
+        m,
+    );
+    let mut store = holonomy::store::SectionStore::new(&mut container, DEFAULT_RESIDENT_SECTIONS);
+    s.adopt_document(editor, &mut store)
+        .expect("adopt the document");
+    drop(store);
+    let mut store = holonomy::store::SectionStore::new(&mut container, DEFAULT_RESIDENT_SECTIONS);
+
+    let last = s.total_lines().saturating_sub(1);
+    s.scroll_to(last).expect("scroll to the end");
+    s.repaint_all_with(&mut store).expect("paint the end");
+
+    assert_eq!(
+        s.paint_stats().runs_missing,
+        0,
+        "the document's last page is the furthest a paint can be asked for: {stats:?}",
+        stats = s.paint_stats()
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -238,7 +392,11 @@ fn a_wrong_passphrase_opens_nothing() {
     // "no such chunk", "failed authentication" and "I/O error" into one variant so a caller cannot
     // build a decryption oracle out of which failure occurred. So the assertion is that it is *the*
     // read failure, and nothing more specific is available by design.
-    assert_eq!(err, holonomy::store::StoreError::Read, "the refusal must be an opaque read failure");
+    assert_eq!(
+        err,
+        holonomy::store::StoreError::Read,
+        "the refusal must be an opaque read failure"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -250,4 +408,3 @@ fn shared_atlas() -> &'static holonomy_assets::atlas::Atlas {
         Box::leak(Box::new(atlas))
     })
 }
-

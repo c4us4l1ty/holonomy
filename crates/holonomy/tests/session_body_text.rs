@@ -391,8 +391,8 @@ fn a_paint_over_a_big_document_costs_what_a_small_one_does() {
     let big_us = time(&mut big);
     println!(
         "paint: {small_us} us for {} bytes, {big_us} us for {} bytes",
-        small.editor.text_len(),
-        big.editor.text_len()
+        small.text_len(),
+        big.text_len()
     );
     // **4x**, not 1x: a repaint allocates nothing but does touch `l.width` pixels per row, and the
     // measurement is noisy enough that 1x would flake. What 4x rules out is the failure mode that
@@ -401,8 +401,8 @@ fn a_paint_over_a_big_document_costs_what_a_small_one_does() {
         big_us <= small_us.saturating_mul(4).max(100),
         "a paint over a {} byte document took {big_us} us against {small_us} us over {} bytes, so \
          the paint is scaling with the document rather than with the page",
-        big.editor.text_len(),
-        small.editor.text_len()
+        big.text_len(),
+        small.text_len()
     );
 }
 
@@ -431,10 +431,10 @@ fn the_body_text_buffer_is_a_page_not_a_document() {
     // times a page. The claim worth making is "the buffer does not grow with the document", and half is
     // the loosest bound that still fails if the buffer ever becomes document-sized.
     assert!(
-        s.line_scratch_capacity() * 2 < s.editor.text_len(),
+        s.line_scratch_capacity() * 2 < s.text_len() as usize,
         "a {} byte buffer against a {} byte document is not the page-sized buffer Phase 12 is for",
         s.line_scratch_capacity(),
-        s.editor.text_len()
+        s.text_len()
     );
     assert!(
         s.stats.lines_drawn > 0,
@@ -488,11 +488,11 @@ fn the_body_text_emitter_reads_one_page_and_not_the_document() {
     );
     // And the document it did *not* read is an order of magnitude larger.
     assert!(
-        s.page_used() * 10 < s.editor.text_len(),
+        s.page_used() * 10 < s.text_len() as usize,
         "the emitter read {} bytes of a {} byte document: that is a whole-document read wearing a \
          page-sized hat",
         s.page_used(),
-        s.editor.text_len()
+        s.text_len()
     );
     assert!(
         s.stats.lines_drawn > 0,

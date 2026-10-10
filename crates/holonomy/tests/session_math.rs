@@ -83,13 +83,13 @@ fn ctrl_m_inserts_a_formula_with_the_caret_inside_it() {
     let mut s = with_text("x = ");
     s.apply(ctrl_m()).expect("Ctrl+M applies");
 
-    let text = s.editor.text().expect("read the document");
+    let text = s.text().expect("read the document");
     assert_eq!(
         text, b"x = $$$$",
         "Ctrl+M writes four delimiters, not two, so the formula exists before it is typed into"
     );
     assert_eq!(
-        s.editor.caret(),
+        s.caret(),
         6,
         "the caret lands between the two middle `$`, which is where the LaTeX goes"
     );
@@ -100,7 +100,7 @@ fn ctrl_m_inserts_a_formula_with_the_caret_inside_it() {
     assert_eq!(span.end, 8);
     assert!(span.is_empty(), "nothing has been typed into it yet");
     assert!(
-        span.contains(s.editor.caret()),
+        span.contains(s.caret()),
         "and the caret position it left is a position `contains` agrees is inside"
     );
 }
@@ -161,7 +161,7 @@ fn a_formula_compiles_only_when_the_caret_is_outside_it() {
 fn a_compiled_fraction_draws_its_bar_as_a_procedural_fill() {
     let mut s = with_text("");
     s.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s.editor, "\\frac{1}{2}");
+    type_into(s.editor_mut(), "\\frac{1}{2}");
     // Park the caret past the closing `$$` with two Rights.
     //
     // **Not** a newline, which was the first attempt and was wrong in an instructive way: a newline
@@ -185,7 +185,7 @@ fn a_compiled_fraction_draws_its_bar_as_a_procedural_fill() {
     // A radical adds its overline, so the fill count goes to two for one formula with both.
     let mut s2 = with_text("");
     s2.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s2.editor, "\\sqrt{2}");
+    type_into(s2.editor_mut(), "\\sqrt{2}");
     s2.apply(Command::Right).expect("Right");
     s2.apply(Command::Right).expect("Right");
     s2.paint(None).expect("paint");
@@ -204,7 +204,7 @@ fn an_unparseable_formula_falls_back_to_raw_latex_and_says_so() {
     s.apply(ctrl_m()).expect("Ctrl+M");
     // `\fra` is a real LaTeX command that this grammar does not implement, so it is
     // `UnsupportedCommand` rather than `UnknownCommand` -- see `math.rs`.
-    type_into(&mut s.editor, "\\fra");
+    type_into(s.editor_mut(), "\\fra");
     s.apply(Command::Right).expect("Right");
     s.apply(Command::Right).expect("Right");
     s.paint(None).expect("paint");
@@ -253,7 +253,7 @@ fn a_formula_taller_than_a_line_pushes_the_lines_below_it_down() {
     );
 
     s.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s.editor, "\\frac{1}{2}");
+    type_into(s.editor_mut(), "\\frac{1}{2}");
     s.paint(None).expect("paint");
 
     // The model displaces every line from the anchor **onward, the anchor included** -- that is
@@ -275,7 +275,7 @@ fn a_formula_taller_than_a_line_pushes_the_lines_below_it_down() {
     // A second formula on line 1 adds to the running total rather than replacing it.
     s.apply(Command::Newline).expect("Newline");
     s.apply(ctrl_m()).expect("Ctrl+M on line 1");
-    type_into(&mut s.editor, "\\frac{1}{2}");
+    type_into(s.editor_mut(), "\\frac{1}{2}");
     s.paint(None).expect("paint");
     assert_eq!(
         s.state.line_heights.y(2),
@@ -289,7 +289,7 @@ fn a_formula_taller_than_a_line_pushes_the_lines_below_it_down() {
 fn typing_inside_a_formula_does_not_reallocate_the_run_buffer() {
     let mut s = with_text("");
     s.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s.editor, "\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}");
+    type_into(s.editor_mut(), "\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}");
     s.paint(None).expect("paint");
     let after_paint = s.math_run_capacity();
     assert!(
@@ -312,7 +312,7 @@ fn typing_inside_a_formula_does_not_reallocate_the_run_buffer() {
 fn the_session_reports_the_latex_of_the_formula_the_caret_is_in() {
     let mut s = with_text("before ");
     s.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s.editor, "\\alpha");
+    type_into(s.editor_mut(), "\\alpha");
     assert_eq!(
         s.active_math_source().expect("read").as_deref(),
         Some(&b"\\alpha"[..])
@@ -346,7 +346,7 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
     let src = "abc";
     let mut real = with_text("");
     real.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut real.editor, src);
+    type_into(real.editor_mut(), src);
     real.apply(Command::Right).expect("Right");
     real.apply(Command::Right).expect("Right");
     real.paint(None).expect("paint");
@@ -488,7 +488,7 @@ fn a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width() {
 
     let mut s = with_text("");
     s.apply(ctrl_m()).expect("Ctrl+M");
-    type_into(&mut s.editor, "\\sum");
+    type_into(s.editor_mut(), "\\sum");
     s.apply(Command::Right).expect("Right");
     s.paint(None).expect("paint");
     assert_eq!(s.stats.math_compiled, 1, "`\\sum` should have compiled");
