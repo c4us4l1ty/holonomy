@@ -2502,6 +2502,73 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 24 — bold is stored, and this is where it started being drawn
+
+**The same investigation that found the zoom, applied to the next inert toolbar button, found a larger
+version of it.**
+
+`Editor::style_range` writes style flags into the span map. `Session::toggle_bold` calls it. The flags
+survive undo — `holonomy-text/tests/style_undo.rs` proves that. **And nothing ever read them.**
+`emit_body_text` emitted **one `DocRun` per line with `Style::REGULAR` hardcoded**, and `Editor::style_at`
+was called from nowhere in the product, only from `holonomy-text`'s own tests.
+
+**So a document with every character set bold painted pixel-for-pixel like the same document unstyled.**
+The gate for that asserted the *opposite* — that the two frames are identical — and it was green, which
+is how the bug was confirmed rather than suspected. Inverting it is the whole of part 24.
+
+**Everything needed was already written and unused.** `SpanMap::runs_in(start, end)` returns the styled
+runs in a range, and its own doc says what it is for:
+
+> What a renderer walks: for each visible line, the runs it must draw, each with a colour and an atlas
+> style.
+
+`TextIntervalSpan::atlas_style` collapses the four flag combinations onto the four faces the atlas has.
+**Neither had a caller.** The emitter now walks `runs_in`, emits one run per style, and takes its style
+from `atlas_style()` rather than matching on `style_flags` itself — re-deciding that would be a second
+answer to a question with one right one.
+
+**And the x advances by codepoints, not bytes.** The grid is cells, so the run after two two-byte
+characters starts at cell 2 and not byte 4. Part 22 made the *caret* count characters from the opposite
+direction; positioning runs by bytes would have put every bold run after the first non-ASCII character
+one cell too far right.
+
+**The performance claim I made was false, and the gate that would have caught it caught it.**
+
+I wrote that an unstyled document has an **empty** span map, so the styled loop never runs and the
+feature costs nothing. **`SpanMap::plain(text_len)` seeds one plain span over the whole text.** So the map
+is never empty, the loop does run, and what is actually true is narrower: **every plain span resolves to
+atlas style 0**, so the emitter produces the same one `DocRun` per line it always did. The gate now
+asserts *that* — the runs and their resolved styles — rather than an emptiness that was never going to
+hold. **Same output, one extra branch**, and the branch is the claim.
+
+**Three fixture errors in one gate file, each of which had to be fixed before the measurement meant
+anything.**
+
+1. **Rows were measured from `Layout::page`, not `Layout::text`.** The page rect is the top of the white
+   sheet; the text rect is the top of the first line. Every row came out three rows lower than it was,
+   and the failure looked like a positioning bug rather than an arithmetic one.
+2. **The styled range started with a space.** `"éé bold"` styled `(4, 8)` is `" bol"` — and a space is the
+   same glyph in both faces, so the first *differing pixel* was one cell later than the run's first cell.
+   The test failed for the right reason at the wrong place. Now the fixture is `"ééab"` with bytes 4..6
+   styled, so the run starts at cell 2 and byte 4 and the two cannot be confused.
+3. **`doc_glyphs == 16` for a fifteen-character line.** A space advances the pen and is **not** counted as
+   a glyph, so 13 was the right answer. **An assertion about a counter whose semantics are not pinned is
+   an assertion about a coincidence** — the fixture is now space-free.
+
+**And a second false comment, in `holonomy-text/tests/sparse_style.rs`:**
+
+> `style_at` still answers, because it is on the paint path and must not change shape yet.
+
+**It was not on the paint path.** The stopgap was justified by a coupling that did not exist — the same
+class as `set_zoom`'s image-cache thresholds. It is on the paint path now, and the comment says so and
+records that it was not before.
+
+Bite-checked: reverting the emitter to the single `REGULAR` run fails 4 of the 7.
+
+**Still not wired:** `Tool::Bold` and `Tool::Italic` are on the toolbar and still inert. Making the button
+honest needs a *range*, and there is no selection — "bold the next thing I type" is a pending-style model
+and not a `style_range` call, and that is a design decision rather than a patch.
+
 #### Phase 14, part 23 — what the zoom control actually does, measured rather than assumed
 
 **I went looking for the next inert toolbar button and found a false comment instead.**

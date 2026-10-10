@@ -173,6 +173,13 @@ input path is driven by a script, though the pointer path now decodes real `EV_R
 through the same decoder a device uses. Real DRM presentation — `SETCRTC` needs DRM master, so the
 framebuffer path has been verified unprivileged but not presented.
 
+**Character styling is stored and now drawn.** `Editor::style_range` writes style flags into the span map
+and `Session::toggle_bold` calls it, and the flags survive undo — but until Phase 14 part 24 the body-text
+emitter emitted one run per line with `Style::REGULAR` hardcoded, so a fully-bolded document painted
+pixel-for-pixel like an unstyled one. It now walks `SpanMap::runs_in` and emits one run per style. **The
+Bold and Italic *buttons* are still inert**: wiring them needs a range, and there is no selection, so
+"bold the next thing I type" is a pending-style model rather than a `style_range` call.
+
 **Most of the toolbar does nothing yet, and the build says so rather than hiding it.** The chrome, the
 menus, the sidebar and the hit testing are real and gated; the *commands* behind the buttons are
 mostly not. Undo, Redo, Image and the sidebar's collapse are wired, and **the Zoom, Style and Font

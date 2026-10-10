@@ -1031,6 +1031,21 @@ impl<'a> Session<'a> {
         &mut self.editor
     }
 
+    /// The editor, for reading — **and part 24 is why this exists.**
+    ///
+    /// **A gate could not previously ask the session what styling it held.** `editor_mut` was the only
+    /// accessor and it needs `&mut self`, so the only way to look was to borrow mutably and give the
+    /// borrow back, which reads as a gate that wants to change something when it wants to read something.
+    ///
+    /// **Read-only, and the read-only part is the point.** [`Editor::spans`] hands out `&SpanMap`, and
+    /// `SpanMap` has no interior mutability on its read paths — `style_at` and `runs_in` are `&self` — so
+    /// this accessor cannot corrupt the session by looking. That is the same property
+    /// [`editor_mut`](Self::editor_mut)'s own note gives for read access, stated here because this is the
+    /// accessor that makes it true.
+    pub fn editor(&self) -> &Editor {
+        &self.editor
+    }
+
     /// The caret's byte offset.
     pub fn caret(&self) -> u32 {
         self.editor.caret()
@@ -2931,20 +2946,116 @@ impl<'a> Session<'a> {
             // The terminator is not drawn. A `\n` has a glyph in most faces, so drawing it would put a
             // visible mark at the end of every line.
             let seg = strip_terminator(&text[..shown]);
-            if !seg.is_empty() {
+            if seg.is_empty() {
+                extra = union_opt(extra, Some(rect));
+                continue;
+            }
+            // Bytes, not cells: `SessionStats::glyphs_drawn`'s doc comment says why these two figures are
+            // not the same number.
+            glyphs += seg.len() as u32;
+            let shown_len = seg.len() as u32;
+
+            // --- Pass 3a: one run per *style*, not one per line. Part 24.
+            //
+            // **This used to emit one `DocRun` per line with `Style::REGULAR` hardcoded**, and
+            // `Editor::style_at` was called from nowhere in the product -- only from `holonomy-text`'s own
+            // tests. So `Session::toggle_bold` wrote style flags into the span map, the flags survived
+            // undo, and **nothing ever drew them**: a document with every character set bold painted
+            // pixel-for-pixel like the same document unstyled. `crates/holonomy/tests/style_render.rs`
+            // measured that before this change and asserts the opposite now.
+            //
+            // **`SpanMap::runs_in` is what a renderer walks, and its own doc says so** -- "for each
+            // visible line, the runs it must draw, each with a colour and an atlas style". It existed,
+            // it was correct, and nothing called it.
+            //
+            // **The empty case is the whole of the performance argument.** A document with no styling at
+            // all has an empty span map, `runs_in` returns nothing, and this loop does not execute: the
+            // line is emitted as the single `REGULAR` run it always was. **This is the paint path, with a
+            // latency budget and a gate that measures it, so the feature must cost nothing for the
+            // documents that do not use it** -- and `runs_in` returns an empty `Vec` for exactly that
+            // case, before it looks at a single span.
+            let runs = self.editor.spans().runs_in(at, at + shown_len);
+            if runs.is_empty() {
                 tree.before
                     .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
                         l.x as i32,
                         y as i32,
                         at,
-                        seg.len() as u32,
+                        shown_len,
                         holonomy_render::Style::REGULAR,
                         0,
                         ink,
                     ))));
-                // Bytes, not cells: `SessionStats::glyphs_drawn`'s doc comment says why these two
-                // figures are not the same number.
-                glyphs += seg.len() as u32;
+                extra = union_opt(extra, Some(rect));
+                continue;
+            }
+
+            // --- Pass 3b: the styled runs, each positioned by how many cells precede it on this line.
+            //
+            // **The x advances by the cell count, not the byte count,** because the grid is cells: a bold
+            // run that started after two two-byte characters starts at cell 2, and starting it at byte 4
+            // would put it two cells right of the character before it. Part 22 made the caret count
+            // characters for the same reason and from the opposite direction.
+            let mut cell_x: u32 = 0;
+            let mut cursor = 0usize; // byte index into `seg`
+            for (span, lo, hi) in runs {
+                // **Skip anything past the drawn prefix.** `runs_in` is asked for `[at, at + shown_len)`
+                // so this cannot happen today; it is a bound rather than a belief, because `seg` was
+                // truncated to the measure and a run clipped to a range the caller then shortened would
+                // otherwise index out of it.
+                let (lo, hi) = (lo.max(at).min(at + shown_len), hi.min(at + shown_len));
+                if hi <= lo {
+                    continue;
+                }
+                let (lo, hi) = ((lo - at) as usize, (hi - at) as usize);
+                // **Advance over the plain text before this run**, one run's worth of `REGULAR`.
+                if lo > cursor {
+                    let gap = &seg[cursor..lo];
+                    push_doc_run(
+                        tree,
+                        l.x + cell_x * m.cell_w,
+                        y,
+                        at + cursor as u32,
+                        gap.len() as u32,
+                        holonomy_render::Style::REGULAR,
+                        ink,
+                    );
+                    cell_x += codepoint_count(gap);
+                    cursor = lo;
+                }
+                let run = &seg[cursor..hi];
+                if !run.is_empty() {
+                    // **`Style(span.atlas_style())`, and not a match on `span.style_flags`.** The span
+                    // already knows how to resolve flags to an atlas index -- `atlas_style` is the
+                    // function that collapses four flag combinations onto four faces -- and re-deciding
+                    // that here would be a second answer to a question with one right one.
+                    push_doc_run(
+                        tree,
+                        l.x + cell_x * m.cell_w,
+                        y,
+                        at + cursor as u32,
+                        run.len() as u32,
+                        holonomy_render::Style(span.atlas_style()),
+                        ink,
+                    );
+                    cell_x += codepoint_count(run);
+                    cursor = hi;
+                }
+            }
+            // **Whatever is left is plain**, which is the tail after the last styled run. Without this a
+            // line ending in styled-then-plain text loses its tail, and the symptom is text that vanishes
+            // when you make the middle of a line bold.
+            if cursor < seg.len() {
+                let tail = &seg[cursor..];
+                push_doc_run(
+                    tree,
+                    l.x + cell_x * m.cell_w,
+                    y,
+                    at + cursor as u32,
+                    tail.len() as u32,
+                    holonomy_render::Style::REGULAR,
+                    ink,
+                );
             }
             // **A line longer than the measure is truncated, and that is a recorded gap rather than a
             // finished feature.** `LineHeights` is indexed by *document line*, so a line that wrapped onto
@@ -3960,6 +4071,45 @@ impl TextSource for PageText<'_> {
         let end = start.checked_add(len)?;
         self.0.get(start..end)
     }
+}
+
+/// How many codepoints `bytes` holds, which is how many cells wide it is on the page.
+///
+/// **The same rule as [`codepoints_upto`](Self) applied to a whole slice**, because a byte that is not
+/// a continuation byte *is* a codepoint start. Part 24 needs it to advance the pen between the styled
+/// runs of one line: **the grid is cells, so the next run's x is the number of codepoints before it and
+/// not the number of bytes.** Using bytes there would put every run after the first multi-byte character
+/// one cell too far right, which is the same arithmetic the caret got wrong in part 22 and the opposite
+/// direction.
+///
+/// **`O(len)`, no decode and no allocation**, so calling it per run is a scan of the line rather than of
+/// the document: a line is at most `cells_per_row` codepoints wide, and the runs tile it.
+fn codepoint_count(bytes: &[u8]) -> u32 {
+    bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32
+}
+
+/// Push one body-text run at `x`, `y`, in `style`.
+///
+/// **A free function rather than a method** because it holds no session state and takes seven arguments
+/// that are all values — the same reason `strip_terminator` and `codepoints_upto` are free. **Part 24
+/// added it because the styled path emits four runs per line** (the plain gaps and the tail) and writing
+/// the `DocRun::new` call out four times is how four slightly different calls drift apart.
+fn push_doc_run(
+    tree: &mut SurfaceTree,
+    x: u32,
+    y: u32,
+    at: u32,
+    len: u32,
+    style: holonomy_render::Style,
+    ink: u32,
+) {
+    if len == 0 {
+        return;
+    }
+    tree.before
+        .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
+            x as i32, y as i32, at, len, style, 0, ink,
+        ))));
 }
 
 /// Bytes of the segment starting at `from` that hold at most `limit` codepoints.
