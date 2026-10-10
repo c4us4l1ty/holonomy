@@ -80,6 +80,10 @@ pub enum Action {
     SetStyle(u8),
     /// **Choose a font by index**, into [`FONTS`].
     SetFont(u8),
+    /// **Arm or disarm bold for the next character typed.**
+    ToggleBold,
+    /// **Arm or disarm italic for the next character typed.**
+    ToggleItalic,
 }
 
 impl Action {
@@ -99,6 +103,8 @@ impl Action {
             Action::SetZoom(_) => "set-zoom",
             Action::SetStyle(_) => "set-style",
             Action::SetFont(_) => "set-font",
+            Action::ToggleBold => "toggle-bold",
+            Action::ToggleItalic => "toggle-italic",
         }
     }
 }
@@ -286,6 +292,8 @@ const INSERT: &[Item] = &[
 
 const FORMAT: &[Item] = &[
     sub("Text", IconId::Bold),
+    act("Bold", Action::ToggleBold),
+    act("Italic", Action::ToggleItalic),
     plain("Paragraph"),
     plain("Lists"),
     Item {

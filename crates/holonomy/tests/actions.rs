@@ -270,9 +270,9 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 6,
-        "the six rows that mean something: Undo, Redo, Select all, Close, Insert > Image and \
-         Insert > Table. Adding one changes this number."
+        with_action, 8,
+        "the eight rows that mean something: Undo, Redo, Select all, Close, Insert > Image, \
+         Insert > Table, and Format > Bold and Format > Italic. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
@@ -280,7 +280,11 @@ fn every_wired_menu_item_carries_an_action() {
     assert_eq!(
         without.len(),
         48,
-        "the 48 rows that draw and do nothing, out of 54 menu items in the eight headings. The \
+        "the 48 rows that draw and do nothing, out of 56 menu items in the eight headings. \
+         **48 and not 46, because part 25 *added* two wired rows rather than converting two unwired \
+         ones** — Bold and Italic are new rows in Format, so the unwired count did not move and the \
+         total went from 54 to 56. The first draft of this edit subtracted from both and was wrong. \
+         The \
          list is printed because \"everything is wired\" is not true here and pretending otherwise \
          would be the worse answer: what matters is that the count is stable and the rows are named. \
          Got: {without:?}"

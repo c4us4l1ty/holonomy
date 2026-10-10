@@ -54,7 +54,7 @@ use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRu
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
 use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
-use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD};
+use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD, STYLE_ITALIC};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
@@ -350,6 +350,40 @@ pub struct Session<'a> {
     /// **Read access is unchanged**, because a dozen gates and the export path read it and none of them
     /// can corrupt the session by looking.
     editor: Editor,
+    /// The style flags armed at the caret, or 0 for none. **Part 25.**
+    ///
+    /// **A field and not a zero-width span**, because `SpanMap::style_range` returns `Ok(())` for
+    /// `start == end` and stores nothing — so "the next character typed is bold" has nowhere to live in
+    /// the span map, and had to live here. The check was worth doing before designing around it.
+    ///
+    /// **`holonomy_text`'s `STYLE_BOLD` and `STYLE_ITALIC` are the values**, not `1` and `2`: the
+    /// chrome's [`ChromeState::styles`](holonomy_render::ChromeState::styles) is a pair of bools and this
+    /// is a bit set, and the two must agree. `armed_style` is the one function that reads both and
+    /// `set_armed_style` the one that writes them, so the agreement is not a convention.
+    ///
+    /// # Why this is an `Option` and not a `u16`, which is the whole design of part 25
+    ///
+    /// **`Session::insert` uses `SpanPolicy::GrowIntoInsert`** — "a span ending exactly at the insertion
+    /// point grows and inserted text inherits the *preceding* span's style" — and it does so for a good
+    /// reason that predates any toggle: *typing at the end of a bold word should keep it bold.*
+    ///
+    /// **That and a Bold button cannot both be expressed by a flag.** With a plain `u16` that starts at
+    /// 0, turning Bold off leaves the flag at 0, the insert inherits bold from the character before the
+    /// caret, and **the button says off while the next character comes out bold.** The first version of
+    /// this part had exactly that bug and `disarming_stops_the_next_character_being_bold` caught it.
+    ///
+    /// So there are **three** states and not two:
+    ///
+    /// | `pending_style` | meaning | the insert |
+    /// |---|---|---|
+    /// | `None` | the user has expressed nothing | inherits, `GrowIntoInsert` wins |
+    /// | `Some(flags)` with flags | armed | restyled to `flags` |
+    /// | `Some(0)` | **explicitly plain** | restyled to plain, overriding inheritance |
+    ///
+    /// **And `ChromeState::styles`' two bools can express it**, because the bools answer "is this on" and
+    /// the `Option` answers "has the user said anything". `Some(0)` shows as both buttons off, which is
+    /// correct: the user is looking at "not bold", and what they cannot see is the `Option` behind it.
+    pending_style: Option<u16>,
     /// The chrome geometry.
     pub chrome: Chrome,
     /// What the chrome shows.
@@ -701,6 +735,9 @@ impl<'a> Session<'a> {
         };
         let mut s = Self {
             editor,
+            // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
+            // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
+            pending_style: None,
             chrome,
             state,
             frame,
@@ -1480,6 +1517,27 @@ impl<'a> Session<'a> {
                 self.damage = self.chrome.full_damage();
             }
             Hit::Tool(tool) => {
+                // **An armed toggle, before the dropdown check and before `tool_command`.** Part 25.
+                //
+                // **It goes first because the alternative is two special cases.** `tool_command` maps a
+                // tool to a `Command` and `has_dropdown` says whether it opens a popup; a third
+                // question — "does this tool set a flag?" — fits alongside them as one more arm rather
+                // than as a special case inside either.
+                //
+                // **`armed_style()` then `set_armed_style()`, never a direct field write**, so the
+                // model and the chrome cannot come apart. That is the whole discipline of this part and
+                // it is one function pair.
+                if let Some(slot) = holonomy_render::chrome::StyleFlags::slot_for(tool) {
+                    let (bold, italic) = self.armed_style();
+                    let (bold, italic) = match slot {
+                        holonomy_render::chrome::StyleFlagsSlot::Bold => (!bold, italic),
+                        holonomy_render::chrome::StyleFlagsSlot::Italic => (bold, !italic),
+                    };
+                    self.set_armed_style(bold, italic);
+                    self.damage = self.chrome.full_damage();
+                    self.stats.pointer_chrome += 1;
+                    return Ok(());
+                }
                 // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
                 // the same reason: the user needs a way to close it with the gesture that opened it.**
                 if tool.has_dropdown() {
@@ -1765,6 +1823,55 @@ impl<'a> Session<'a> {
         Ok(at)
     }
 
+    /// The armed style flags, for a gate that wants the model's own view rather than the chrome's.
+    ///
+    /// **`pending_style()` and [`armed_style`](Self::armed_style) are the same reader.** The public one
+    /// exists because a gate must not have to ask the chrome what it believes is armed: **a test that reads
+    /// both sides of a "these must agree" claim is the only kind that can check it.** Part 25's
+    /// `the_model_and_the_chrome_agree_after_every_transition` is that test.
+    pub fn pending_style(&self) -> Option<u16> {
+        self.pending_style
+    }
+
+    /// Arm or disarm a style toggle at the caret, in the model and in the chrome at once.
+    ///
+    /// **One function for both halves, and that is the whole reason this part exists in this shape.**
+    /// `pending_style` is a `u16` in the session and `ChromeState::styles` is a pair of bools in the render
+    /// crate, which knows nothing about `u16` flags. **Two copies of one value, written in two places, is a
+    /// value that will disagree** — and the disagreement would show as a Bold button that lights up and types
+    /// ordinary text, which is a state no gate in this project would think to look for.
+    ///
+    /// **So `armed_style` is the only reader of `pending_style` and `set_armed_style` the only writer, and
+    /// they are adjacent.** `apply_action` and the toolbar's press both go through the setter.
+    fn set_armed_style(&mut self, bold: bool, italic: bool) {
+        self.state.styles.bold = bold;
+        self.state.styles.italic = italic;
+        // **`Some(flags)` and never `None`, and that is the deliberate part.** Un-pressing Bold when nothing
+        // else is armed writes `Some(0)` rather than `None`, because `None` means "inherit from the
+        // character before the caret" and inheriting bold after the user turned bold off is the bug this
+        // option type exists to prevent. **`None` is for a session nobody has toggled anything in.**
+        let mut f = 0u16;
+        if bold {
+            f |= STYLE_BOLD;
+        }
+        if italic {
+            f |= STYLE_ITALIC;
+        }
+        self.pending_style = Some(f);
+    }
+
+    /// The armed flags, read from the model rather than from the chrome.
+    ///
+    /// **`&self` and the session, not a `pub` accessor on the chrome**, so a gate cannot ask the chrome what
+    /// it thinks is armed and conclude the two agree.
+    fn armed_style(&self) -> (bool, bool) {
+        // **Through `unwrap_or(0)`, so "the user said nothing" and "the user said plain" both read as
+        // nothing armed** — which is right for the two bools and wrong for the model, and the difference is
+        // the whole reason the model is an `Option`.
+        let f = self.pending_style.unwrap_or(0);
+        (f & STYLE_BOLD != 0, f & STYLE_ITALIC != 0)
+    }
+
     /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
     ///
     /// # Why the session, and not the renderer
@@ -1786,6 +1893,18 @@ impl<'a> Session<'a> {
                 // **`pointer_chrome`, not `pointer_commands`.** Part 21 put it here, and this is the
                 // correction: no `Command` was produced and nothing about the document changed. The
                 // zoom label moves, and `tests/zoom.rs` measures that as the only pixel it moves.
+                self.stats.pointer_chrome += 1;
+            }
+            Action::ToggleBold => {
+                let (bold, italic) = self.armed_style();
+                self.set_armed_style(!bold, italic);
+                self.damage = self.chrome.full_damage();
+                self.stats.pointer_chrome += 1;
+            }
+            Action::ToggleItalic => {
+                let (bold, italic) = self.armed_style();
+                self.set_armed_style(bold, !italic);
+                self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
             Action::SetStyle(i) => {
@@ -2055,6 +2174,26 @@ impl<'a> Session<'a> {
         self.editor
             .insert_at(self.editor.caret(), bytes, SpanPolicy::GrowIntoInsert)?;
         self.counts.after_insert(&self.editor, at, bytes);
+        // **Arm, applied to what was just typed.** Part 25.
+        //
+        // **Not before the insert, because `style_range` drops a zero-width range** — `SpanMap::
+        // style_range` returns `Ok(())` for `start == end` and stores nothing, so "bold the next
+        // character" cannot be a span parked at the caret. It is a field on the session, and the only
+        // place the document can show it is on bytes that exist.
+        //
+        // **After, and over `[at, at + len)`, which is the range this insert produced.** Applying it to
+        // the caret alone would bold nothing on a newline — `insert` is called for `\n` too — and
+        // applying it to the whole line would restyle text the user did not touch.
+        //
+        // **A style change is an edit**, so it goes through `after_edit` like one: it is in the undo
+        // stack, it repaints the line, and `SessionStats::edits` counts it. **Two edits per typed
+        // character when a toggle is armed, and one when none is** — which is the cost of the feature
+        // and is stated here rather than left to be noticed on the keystroke benchmark.
+        if let Some(armed) = self.pending_style.filter(|_| !bytes.is_empty()) {
+            self.editor
+                .style_range(at as u32, (at + bytes.len()) as u32, armed, 0)?;
+            self.after_edit(0)?;
+        }
         self.after_edit(bytes.len() as u32)
     }
 
@@ -4342,6 +4481,9 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // added rather than leaving them to be discovered as a dead row.
         Action::Save | Action::Close => return None,
         Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) => return None,
+        // **Arming a style is a chrome-state change, not a command** -- the same shape as the three
+        // above, and `Session::apply_action` handles it before this function is reached.
+        Action::ToggleBold | Action::ToggleItalic => return None,
     })
 }
 

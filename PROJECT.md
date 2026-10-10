@@ -2502,6 +2502,92 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 25 — the dead toolbar toggles, and the three states a toggle needs
+
+**`ChromeState::styles` was a `StyleFlags` with four slots and no reader.** No caller in the workspace
+touched `styles`, `StyleFlags::get`, or `StyleFlags::SLOTS`.
+
+**`SLOTS`' one caller is the finding.** `holonomy-render/tests/chrome.rs` pushed its four short forms —
+`B`, `I`, `M`, `H` — into **the list of labels the chrome is allowed to draw**. And `Tool::label` returns
+an empty `String` for every tool except Zoom, Style and Font, so **the chrome never drew one of them**.
+**A label list is a permission list, so dead code here made a gate *weaker*, silently, in exchange for
+nothing** — four entries that catch nothing and only make room for a run that should have failed.
+
+**Two slots deleted rather than left unreachable.** `Mono` and `Heading` have no button: `Tool::Style` is
+a dropdown of paragraph styles, which is a different thing from a heading *toggle*. A slot no button can
+set is a slot someone will eventually read and believe can be set.
+
+**Bold and Italic are real now.** `Tool::Bold` and `Tool::Italic` arm a style at the caret;
+`paint_toolbar` fills an armed button with `PILL_ACTIVE`; `Format > Bold` and `Format > Italic` carry
+`Action::ToggleBold`/`ToggleItalic` and reach the same code.
+
+### The design question underneath, which is why this was not a patch
+
+**Arming a style is not a zero-width span.** `SpanMap::style_range` returns `Ok(())` for `start == end`
+and stores nothing, so "the next character typed will be bold" has nowhere to live in the span map.
+
+**And `SpanPolicy::GrowIntoInsert` — which `Session::insert` uses, for a good reason that predates any
+toggle: _typing at the end of a bold word should keep it bold_ — cannot be expressed by a flag.** With a
+plain `u16` starting at 0, turning Bold off leaves the flag at 0, the insert inherits bold from the
+character before the caret, and **the button says off while the next character comes out bold.** The
+first version had exactly that bug and `disarming_stops_the_next_character_being_bold` caught it.
+
+**So there are three states and not two**, which is the whole content of `pending_style: Option<u16>`:
+
+| `pending_style` | meaning | the insert |
+|---|---|---|
+| `None` | the user has expressed nothing | inherits; `GrowIntoInsert` wins |
+| `Some(flags)` | armed | restyled to `flags` |
+| `Some(0)` | **explicitly plain** | restyled to plain, overriding inheritance |
+
+**`ChromeState::styles`' two bools express it anyway**, because the bools answer _"is this on"_ and the
+`Option` answers _"has the user said anything"_. `Some(0)` shows as both buttons off, which is right.
+
+**Two copies of one value, and one function pair.** `pending_style()` and `armed_style` read, and
+`set_armed_style` writes both. The failure they prevent is **a Bold button that lights up and types
+ordinary text** — and `the_model_and_the_chrome_agree_after_every_transition` is the gate, because a test
+that reads both sides of a "these must agree" claim is the only kind that can check it.
+
+**A style change is an edit**: it goes through `after_edit`, so it is in the undo stack and it repaints
+the line. **Two edits per typed character while a toggle is armed, one when none is** — the cost of the
+feature, stated here rather than left to turn up on the keystroke benchmark.
+
+### Three defects the gates found, and one I blamed on the wrong thing
+
+1. **The armed fill was drawn in `PILL`.** `PILL` is the toolbar pill's own fill — the colour the button
+   already is — so filling a button with it is invisible. The gate probed a pixel and found it unchanged.
+   There are three colours in a row: `PILL` unraised, `PILL_HOVER` under the pointer, `PILL_ACTIVE`
+   held or selected. **A toggle that is on and a button under the pointer must not look the same**, which
+   is why it is `PILL_ACTIVE` and not `PILL_HOVER`.
+2. **The pixel gates left the pointer parked on the button**, so the button was *hovered* for the rest of
+   the test and a hover fill explained the pixels. **A toggle that is on and a button under the pointer
+   are drawn by the same machinery with the same shape**, so a gate that measures pixels without moving
+   the pointer away cannot tell them apart — and will pass an armed toggle that draws nothing.
+3. **The band test counted non-black pixels**, and `PILL` and `PILL_ACTIVE` are both non-black: 43,520
+   before and 43,520 after, with a filled button in between. **A count of "pixels that are not the
+   background" cannot see a change of background.** It now counts *differing* pixels and asserts the box
+   they lie in is the button's own rect.
+
+**And one false explanation of my own, kept because it is the lesson.** Counting inert buttons gave 11
+where 12 was expected, and I attributed it to stale layout rects — clicking Collapse toggles the sidebar
+and moves the buttons. **`Collapse` is last in `TOOLBAR`, so nothing follows it and the rects were
+correct.** The cause was four lines away: **the dropdown grab.** Clicking Zoom opens its dropdown, and an
+open popup swallows every press that is not one of its rows, so `style`, `font` and `size-down` after it
+were *dismissed* rather than pressed. **That is correct product behaviour and a broken fixture**, and the
+difference between the two is exactly what part 20 wrote the grab for.
+
+**The routing gate re-reads its layout per tool now, with the honest reason**: a gate that walks a
+layout its own loop can change should not depend on the order of the list it walks. The first draft of
+that comment claimed the stale rects were causing the wrong answer; they were not.
+
+**The inert set, stated as a number.** 21 toolbar buttons: 3 fire a command (Undo, Redo, Image), 1
+toggles the sidebar (Collapse), 3 open a dropdown (Zoom, Style, Font), 2 arm a style (Bold, Italic), and
+**12 are inert** — print, spellcheck, paint-format, size-up, underline, text-colour, highlight, link,
+comment, overflow, mode, size-down. `bold_and_italic_left_the_inert_set_and_nothing_else_did` is the
+gate, because **a button silently leaving the inert set is the thing `pointer_inert` exists to prevent.**
+
+Bite-checked: making the toggle write only the chrome and not the model fails 6 of the 7.
+
 #### Phase 14, part 24 — bold is stored, and this is where it started being drawn
 
 **The same investigation that found the zoom, applied to the next inert toolbar button, found a larger

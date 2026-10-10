@@ -177,8 +177,10 @@ framebuffer path has been verified unprivileged but not presented.
 and `Session::toggle_bold` calls it, and the flags survive undo — but until Phase 14 part 24 the body-text
 emitter emitted one run per line with `Style::REGULAR` hardcoded, so a fully-bolded document painted
 pixel-for-pixel like an unstyled one. It now walks `SpanMap::runs_in` and emits one run per style. **The
-Bold and Italic *buttons* are still inert**: wiring them needs a range, and there is no selection, so
-"bold the next thing I type" is a pending-style model rather than a `style_range` call.
+Bold and Italic buttons work as of part 25**: they arm a style for the next character typed, the armed
+button is filled, and un-arming means *explicitly plain* rather than "go back to inheriting", because
+`SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Twelve of the
+twenty-one toolbar buttons remain inert and are counted as such.
 
 **Most of the toolbar does nothing yet, and the build says so rather than hiding it.** The chrome, the
 menus, the sidebar and the hit testing are real and gated; the *commands* behind the buttons are

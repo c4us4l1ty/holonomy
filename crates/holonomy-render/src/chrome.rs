@@ -590,46 +590,79 @@ impl Layout {
 
 // ---------------------------------------------------------------- state
 
-/// Which style toggles are on, for the toolbar.
+/// Which style toggles are armed at the caret, for the toolbar. **Part 25 makes this live.**
+///
+/// # What this was, and the four parts of it that were not
+///
+/// **`StyleFlags` modelled four toggles — bold, italic, mono, heading — and nothing read it.** No
+/// caller in the workspace touched `styles`, `StyleFlags::get`, or `StyleFlags::SLOTS`. The only
+/// reference anywhere was `holonomy-render/tests/chrome.rs` pushing `SLOTS`' four short forms into the
+/// list of labels the chrome is allowed to draw.
+///
+/// **And the chrome never drew those labels.** `Tool::label` returns an empty `String` for every tool
+/// except Zoom, Style and Font, so the toolbar draws icons and `SLOTS`' `B`, `I`, `M` and `H` were never
+/// emitted. **The gate was therefore four phantom labels wider than the chrome is** — dead code that made
+/// a gate *weaker*, which is the quietest kind of dead code there is and the reason it survived.
+///
+/// # What is here now, and what is still not
+///
+/// **Two slots and two buttons.** `StyleFlagsSlot::Mono` and `::Heading` are **deleted** rather than left
+/// unreachable: the toolbar has no mono and no heading button — `Tool::Style` is a dropdown of paragraph
+/// styles, a different thing from a heading *toggle* — and a slot no button can set is a slot someone
+/// will read one day and believe can be set. `SLOTS` is gone with them, for the reason in the paragraph
+/// above: **nothing drew it, and its one caller wanted it not to exist.**
+///
+/// **These flags say "the next thing typed will be bold."** They are *armed at the caret*, not applied
+/// to a range, because there is no selection. `Session::pending_style` is the same fact in the model and
+/// this is the same fact in the chrome — **two copies of one value, which is a thing to be suspicious
+/// of**, and `tests/armed_style.rs` is what keeps them in step rather than a comment claiming they are.
+///
+/// **They do not retro-style what is already typed.** Pressing Bold and then pressing Left and typing
+/// does not bold the character before the caret: that needs a selection, and inventing one is a
+/// different part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StyleFlags {
+    /// Bold is armed for the next character typed.
     pub bold: bool,
+    /// Italic is armed for the next character typed.
     pub italic: bool,
-    pub mono: bool,
-    pub heading: bool,
 }
 
 impl StyleFlags {
-    /// The four toolbar slots, in display order, with their labels and short forms.
-    pub const SLOTS: [(StyleFlagsSlot, &'static str, &'static str, Style); 4] = [
-        (StyleFlagsSlot::Bold, "Bold", "B", Style::BOLD),
-        (StyleFlagsSlot::Italic, "Italic", "I", Style::ITALIC),
-        (StyleFlagsSlot::Mono, "Mono", "M", Style::MONOSPACE),
-        (StyleFlagsSlot::Heading, "Head", "H", Style::BOLD),
-    ];
-
-    /// Whether `slot` is on.
+    /// Whether `slot` is armed.
     pub const fn get(&self, slot: StyleFlagsSlot) -> bool {
         match slot {
             StyleFlagsSlot::Bold => self.bold,
             StyleFlagsSlot::Italic => self.italic,
-            StyleFlagsSlot::Mono => self.mono,
-            StyleFlagsSlot::Heading => self.heading,
+        }
+    }
+
+    /// The slot `tool` toggles, if it toggles one.
+    ///
+    /// **A function rather than a `match` at each of the two call sites**, because the pairing of a
+    /// button with the flag it sets is the thing most likely to be got wrong: a button that drew its
+    /// active state from one flag and set another would light up and do nothing, which is a state no
+    /// gate in this project would think to look for.
+    pub const fn slot_for(tool: crate::widgets::Tool) -> Option<StyleFlagsSlot> {
+        match tool {
+            crate::widgets::Tool::Bold => Some(StyleFlagsSlot::Bold),
+            crate::widgets::Tool::Italic => Some(StyleFlagsSlot::Italic),
+            _ => None,
         }
     }
 }
 
 /// Which toolbar toggle a query is about.
+///
+/// **Two variants, because there are two buttons.** `Mono` and `Heading` were deleted in part 25: the
+/// toolbar has no such button, and an unreachable variant of a `Copy` enum that a `match` must still
+/// cover is a variant somebody will eventually cover with `Some(true)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StyleFlagsSlot {
     /// Bold.
     Bold,
     /// Italic.
     Italic,
-    /// Monospace.
-    Mono,
-    /// Heading.
-    Heading,
 }
 
 /// Per-line vertical geometry, as a uniform pitch plus a sparse table of extra heights.
@@ -1760,6 +1793,36 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 p.rect.height,
                 c,
             ));
+        }
+
+        // **An armed toggle, drawn between the hover surface and the glyph.** Part 25.
+        //
+        // **`PILL_ACTIVE` and not `PILL`, and the first version used `PILL` and drew nothing.**
+        // `PILL` is the toolbar pill's own fill — the colour the button already is — so filling a button
+        // with it is invisible, and the gate that caught it probed a pixel and found it unchanged. There
+        // are three colours in a row: `PILL` unraised, `PILL_HOVER` under the pointer, `PILL_ACTIVE`
+        // held or selected. **An armed toggle is the third one.**
+        //
+        // **Distinct from hover, which is the point.** A toggle that is *on* and a button that is *under
+        // the pointer* are different facts, and giving them the same colour would make them
+        // indistinguishable, which is the one thing a toolbar button must not do.
+        //
+        // **After the hover fill, before the glyph, for the reason the hover fill is there at all:** the
+        // glyph goes on top of the state surface, because the surface is behind the thing it is a state
+        // of. Drawn after the glyph it would put a rectangle over the icon.
+        //
+        // **And it is drawn whether or not the pointer is anywhere near the button**, which is the whole
+        // point: the state is the document's, not the pointer's.
+        if let Some(slot) = crate::chrome::StyleFlags::slot_for(p.tool) {
+            if state.styles.get(slot) {
+                into.push(fill(
+                    p.rect.x as i32,
+                    p.rect.y as i32,
+                    p.rect.width,
+                    p.rect.height,
+                    colour::PILL_ACTIVE,
+                ));
+            }
         }
 
         let cx = p.rect.x as i32;

@@ -302,10 +302,13 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
 fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     let mut s = session("x");
     let l = s.chrome_layout();
+    // **Print, and not Bold.** This gate used `Tool::Bold` and part 25 armed a style from it, so Bold is
+    // no longer an example of a button with nothing behind it. **Print is, and there is nothing behind
+    // it** — no print backend, and adding one is not something to invent to make a test pass.
     let bold = widgets::place_toolbar(&l, 8)
         .into_iter()
-        .find(|p| p.tool == widgets::Tool::Bold)
-        .expect("the toolbar has Bold")
+        .find(|p| p.tool == widgets::Tool::Print)
+        .expect("the toolbar has Print")
         .rect;
     let inert_before = s.stats.pointer_inert;
     let commands_before = s.stats.pointer_commands;
@@ -321,6 +324,79 @@ fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     assert_eq!(
         s.stats.pointer_commands, commands_before,
         "and not as a command that quietly did nothing"
+    );
+}
+
+/// **Bold is no longer in the inert set, and neither is Italic — and that is the only change.**
+///
+/// **CORRECTION, part 25.** The gate above used `Tool::Bold` as its example of a button with nothing
+/// behind it, and it was right when it was written. **Part 25 armed a style from that button**, so Bold
+/// and Italic left the inert set and this test needed a different example rather than a deletion.
+///
+/// **The claim it now makes is the one worth keeping: the inert set shrank by exactly two and no
+/// further.** A toolbar button silently leaving the inert set is the thing this file exists to prevent —
+/// `pointer_inert` is only meaningful if moving out of it is a deliberate, counted act, and asserting
+/// the *size* of the change is what makes it one.
+#[test]
+fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
+    let mut s = session("x");
+    let mut inert = Vec::new();
+    let mut chrome = Vec::new();
+    // **The popup is closed after every click, and that is what this gate had to learn.**
+    //
+    // The first version clicked all twenty-one tools in one pass and came back with eleven inert
+    // instead of twelve, missing `size-down`. **The cause is the dropdown grab.** Clicking Zoom opens
+    // its dropdown, and an open popup swallows every press that is not one of its rows — so `style`,
+    // `font` and `size-down` after it were *dismissed* rather than pressed, and did nothing at all.
+    //
+    // **That is correct product behaviour and a broken fixture**, and the difference between the two is
+    // exactly what part 20 wrote the grab for. Part 21's routing gate clears `state.open` before each
+    // press for this reason; this gate did not, and paid for it with a number that looked like
+    // arithmetic being wrong.
+    for name in widgets::TOOLBAR.iter().map(|t| t.name()) {
+        let r = widgets::place_toolbar(&s.chrome_layout(), 8)
+            .into_iter()
+            .find(|p| p.tool.name() == name)
+            .unwrap_or_else(|| panic!("the toolbar has {name}"))
+            .rect;
+        let i0 = s.stats.pointer_inert;
+        let c0 = s.stats.pointer_chrome;
+        // **Nothing open, so the press belongs to this tool.** See the note above.
+        s.state.open = None;
+        feed(
+            &mut s,
+            &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),
+        );
+        if s.stats.pointer_inert > i0 {
+            inert.push(name);
+        }
+        if s.stats.pointer_chrome > c0 {
+            chrome.push(name);
+        }
+    }
+    assert!(
+        !inert.contains(&"bold") && !inert.contains(&"italic"),
+        "Bold and Italic must not be counted inert: {inert:?}"
+    );
+    assert_eq!(
+        chrome,
+        vec!["bold", "italic"],
+        "**and the tools that change chrome state are exactly these**, in toolbar order. A third would \\
+         mean something else started claiming to work without a decision."
+    );
+    // **Zoom, Style and Font are not in that list, and their absence is the point.** They *open a
+    // dropdown* and return before anything is applied, so they are counted by the routing gate's
+    // `opened` and not here. The first version of this assertion expected `["zoom", "bold", "italic"]`
+    // and the compiler was right: a dropdown's opener has changed nothing yet.
+    //
+    // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 21 tools:
+    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), 3 open a dropdown (Zoom,
+    // Style, Font), 2 change chrome state (Bold, Italic), and the rest are inert.
+    assert_eq!(
+        inert.len(),
+        12,
+        "**twelve inert buttons**, which is 21 minus 3 commands, 1 toggle, 3 dropdowns and 2 chrome \\
+         changes. The list is {inert:?}"
     );
 }
 
@@ -405,8 +481,23 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
     let mut s = session("abc");
     let l = s.chrome_layout();
     let mut wired = 0;
-    for p in widgets::place_toolbar(&l, 8) {
-        let r = p.rect;
+    // **The layout is re-read inside the loop, and the honest reason is a hazard that does not fire
+    // today.** Clicking Collapse toggles the sidebar, which changes `Layout` and moves every toolbar
+    // button after it — **and Collapse is last in `TOOLBAR`, so nothing after it exists and the
+    // rects-taken-once version of this loop was accidentally correct.**
+    //
+    // **It is re-read anyway.** A gate that walks a layout the loop itself can change should not depend
+    // on the order of the list it is walking, and re-reading costs one `Layout` copy per tool. The
+    // first draft of this comment claimed the stale rects *were* causing a wrong answer, measured eleven
+    // inert buttons against an expected twelve, and pointed at this. **The cause was the popup grab
+    // four lines away and this was not it** — the same lesson as part 24's three fixture errors: a
+    // number that is wrong has one cause and the nearest explanation is usually not it.
+    for name in widgets::TOOLBAR.iter().map(|t| t.name()) {
+        let (p, r) = widgets::place_toolbar(&s.chrome_layout(), 8)
+            .into_iter()
+            .find(|p| p.tool.name() == name)
+            .map(|p| (p.tool, p.rect))
+            .unwrap_or_else(|| panic!("the toolbar has {name}"));
         let commands_before = s.stats.pointer_commands;
         let inert_before = s.stats.pointer_inert;
         let chrome_before = s.stats.pointer_chrome;
@@ -441,27 +532,27 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
             "{} must fire a command, be counted inert, toggle the sidebar, open a dropdown, or change \
              the chrome -- exactly once. Got {fired} fired, {inert} inert, {toggled} toggled, \
              {opened} opened, {chrome} chrome.",
-            p.tool.name()
+            p.name()
         );
         if matches!(
-            p.tool,
+            p,
             widgets::Tool::Undo | widgets::Tool::Redo | widgets::Tool::Image
         ) {
-            assert_eq!(fired, 1, "{} should have fired", p.tool.name());
+            assert_eq!(fired, 1, "{} should have fired", p.name());
             wired += 1;
         }
-        if p.tool == widgets::Tool::Collapse {
+        if p == widgets::Tool::Collapse {
             assert_eq!(
                 toggled, 1,
                 "Collapse toggles the sidebar, and does not also fire"
             );
         }
-        if p.tool.has_dropdown() {
+        if p.has_dropdown() {
             assert_eq!(
                 opened,
                 1,
                 "{} opens a dropdown, and does not also fire or count inert",
-                p.tool.name()
+                p.name()
             );
         }
         // Leave nothing open for the next tool.

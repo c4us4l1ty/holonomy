@@ -272,10 +272,22 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     if state.sealed {
         v.push("[SEALED]".to_string());
     }
-    for (_, _label, short, _) in holonomy_render::chrome::StyleFlags::SLOTS {
-        v.push((*short).to_string());
-    }
-    // **The labels part 19 added.** The chrome now draws a menu bar, a labelled toolbar and a
+    // **Part 25 deleted the four lines that used to be here.** They pushed `StyleFlags::SLOTS`' short
+    // forms -- `B`, `I`, `M`, `H` -- into this list of labels the chrome is allowed to draw, and
+    // **`Tool::label` returns an empty `String` for every tool except Zoom, Style and Font**, so the
+    // chrome never drew one of them. The list was four labels wider than the chrome is.
+    //
+    // **Which made the gate weaker, silently, in exchange for nothing.** A label list is a permission
+    // list: an entry that is never drawn costs nothing and catches nothing, and the only thing it does
+    // is make room for a run that should have failed. **This list is now exactly what the chrome
+    // draws**, and the comment below -- which explains why the list has to track the chrome -- is the
+    // reason `StyleFlags` could sit here, unused and unquestioned, for as long as it did.
+    //
+    // **What replaced the armed-toggle drawing is a rect, not a label**, so the armed Bold button needs
+    // no entry here at all: `armed_toggles_draw_a_surface_and_no_glyph` in this file is the gate for
+    // it, and it asserts on pixels rather than on text runs.
+    //
+    // The labels part 19 added. The chrome now draws a menu bar, a labelled toolbar and a
     // sidebar, and this function is the list every text run is checked against -- so a label that is
     // drawn but not listed here shows up as "run N+M is not an ascending run of any label the chrome
     // draws", which is a *true* statement about the list and a false statement about the chrome.
