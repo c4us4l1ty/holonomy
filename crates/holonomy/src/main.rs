@@ -217,7 +217,7 @@ fn run() -> Result<(), Fail> {
             Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
             metrics,
         );
-        s.state.zoom_percent = args.zoom;
+        s.set_zoom(args.zoom);
         s.state.sealed = false;
         // **No container here**, so no store and no fetching: this is the pre-open path, an empty editor
         // on a headless frame. `NoSource` refuses every fetch, which is exactly right -- there is nothing
@@ -325,7 +325,7 @@ fn run() -> Result<(), Fail> {
     sealed.run_session(|sealed| {
         let ctx = sealed.context_mut();
         ctx.session.state.sealed = true;
-        ctx.session.state.zoom_percent = args.zoom;
+        ctx.session.set_zoom(args.zoom);
 
         // **The passphrase is used now.** It was read above and dropped on the floor (`let _ = &phrase`),
         // which is why this product had never opened a document: there was no path from a descriptor to

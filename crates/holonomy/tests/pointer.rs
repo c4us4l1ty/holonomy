@@ -409,6 +409,7 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         let r = p.rect;
         let commands_before = s.stats.pointer_commands;
         let inert_before = s.stats.pointer_inert;
+        let chrome_before = s.stats.pointer_chrome;
         let sidebar_before = s.state.sidebar_open;
         let before_open = s.state.open;
         s.state.open = None;
@@ -420,21 +421,26 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         let inert = s.stats.pointer_inert - inert_before;
         let toggled = (s.state.sidebar_open != sidebar_before) as u32;
         let opened = u32::from(s.state.open != before_open);
+        let chrome = s.stats.pointer_chrome - chrome_before;
 
-        // **A press is exactly one of four things, and never two.** The counters are alternatives,
+        // **A press is exactly one of five things, and never two.** The counters are alternatives,
         // not a spectrum: a tool that fired *and* was counted inert would be counted as working and
         // not working, which is the state this whole file exists to make distinguishable.
         //
-        // **The fourth is `opened`, added in part 21** when Zoom, Style and Font grew dropdowns. The
+        // **The fourth was `opened`, added in part 21** when Zoom, Style and Font grew dropdowns. The
         // first version of this test asserted `fired + inert + toggled == 1` and Zoom came back 0 --
         // which was the gate correctly reporting that a press had an outcome it did not know about.
-        // **The fix is to name the outcome, not to relax the sum.** A relaxed `>= 0` would have
-        // passed and told us nothing.
+        //
+        // **The fifth is `chrome`, added in part 23.** Part 21 counted a zoom choice as `fired`, which
+        // claimed a `Command` was produced; none was, and part 23 measured that a zoom change moves one
+        // label and nothing else. **Both times the fix was to name the outcome rather than relax the
+        // sum** -- a `>= 0` would have passed and told us nothing.
         assert_eq!(
-            fired + inert + toggled + opened,
+            fired + inert + toggled + opened + chrome,
             1,
-            "{} must fire a command, be counted inert, toggle the sidebar, or open a dropdown -- \
-             exactly once. Got {fired} fired, {inert} inert, {toggled} toggled, {opened} opened.",
+            "{} must fire a command, be counted inert, toggle the sidebar, open a dropdown, or change \
+             the chrome -- exactly once. Got {fired} fired, {inert} inert, {toggled} toggled, \
+             {opened} opened, {chrome} chrome.",
             p.tool.name()
         );
         if matches!(

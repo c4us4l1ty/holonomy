@@ -293,10 +293,29 @@ pub struct SessionStats {
     ///
     /// **The honest number for this build, and it is large.** Bold, italic, underline, the font
     /// controls, print, spellcheck and most menu items are buttons with nothing behind them, because
-    /// the document model has no representation for any of them. **Counted rather than swallowed**,
+    /// the document model has no representation for any of them. **Counted rather than swallowed**
     /// because a count that is zero would mean either that every button works or that nothing is
     /// being hit-tested, and those need to be distinguishable.
     pub pointer_inert: u32,
+    /// Presses that changed the chrome's state and nothing else.
+    ///
+    /// # Why this exists, and what part 21 got wrong
+    ///
+    /// Part 21 routed the three dropdowns — zoom, style, font — through `apply_action` and counted each
+    /// as `pointer_commands`. **That was wrong by that field's own definition**, which says *presses that
+    /// produced a `Command` the session applied*: none of the three produces a `Command` at all, and
+    /// `apply_action` handles them before `action_command` is ever reached.
+    ///
+    /// **So the counter was claiming a document edit that did not happen.** The four alternatives a press
+    /// can have — a command, a chrome-state change, a toggle, or nothing — need four counters, and this
+    /// is the third. Zeroing it would mean "no button changes anything about the window", which is a
+    /// different and less useful claim than "no button edits the document".
+    ///
+    /// **The three that land here are not doing nothing**, which is the whole reason this is not
+    /// `pointer_inert`: choosing a face changes the toolbar's label, choosing a style changes the style
+    /// control's label, and choosing a zoom changes the zoom label — and **part 23 measured that last one
+    /// and found it is the *only* pixel that moves.** `tests/zoom.rs` is the measurement.
+    pub pointer_chrome: u32,
     /// Caret moves whose column was computed by walking text rather than by subtracting offsets.
     ///
     /// **A measurement, not a warning.** Part 22 added a scan over the caret's line prefix to count
@@ -1749,13 +1768,16 @@ impl<'a> Session<'a> {
         match action {
             Action::SetZoom(pct) => {
                 self.set_zoom(pct);
-                self.stats.pointer_commands += 1;
+                // **`pointer_chrome`, not `pointer_commands`.** Part 21 put it here, and this is the
+                // correction: no `Command` was produced and nothing about the document changed. The
+                // zoom label moves, and `tests/zoom.rs` measures that as the only pixel it moves.
+                self.stats.pointer_chrome += 1;
             }
             Action::SetStyle(i) => {
                 self.state.style_index =
                     usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
                 self.damage = self.chrome.full_damage();
-                self.stats.pointer_commands += 1;
+                self.stats.pointer_chrome += 1;
             }
             Action::SetFont(i) => {
                 self.state.font_index =
@@ -1765,7 +1787,7 @@ impl<'a> Session<'a> {
                 // the page. Saying so here rather than in the renderer is deliberate: the renderer
                 // draws the choice, and the session admits what it costs.
                 self.damage = self.chrome.full_damage();
-                self.stats.pointer_commands += 1;
+                self.stats.pointer_chrome += 1;
             }
             other => {
                 if let Some(cmd) = action_command(other) {
@@ -1778,14 +1800,39 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// Set the zoom, clamped to the range the metrics accept.
+    /// Set the zoom, and repaint.
     ///
-    /// **25..=400 because that is what `--zoom` takes and what §2.9.3's image-cache thresholds were
-    /// measured against.** A value outside it would resample the page column to a width nothing
-    /// downstream expects, and the first symptom would be an image that looked wrong rather than a
-    /// zoom that was refused -- so it is clamped here, where the reason can be written down.
-    fn set_zoom(&mut self, percent: u16) {
-        self.state.zoom_percent = u32::from(percent).clamp(25, 400);
+    /// # CORRECTION, part 23: this does not zoom
+    ///
+    /// **The doc this replaced said `25..=400` because "§2.9.3's image-cache thresholds were measured
+    /// against" it. That was false.** No code reads `zoom_percent` except the toolbar's label and the
+    /// dropdown's tick — there is no image-cache coupling, and the claim was a plausible-sounding
+    /// sentence attached to a number that meant nothing.
+    ///
+    /// **So: this sets a label.** It is kept, and `crates/holonomy/tests/zoom.rs` measures exactly how
+    /// little it does — *every pixel that changes when the zoom changes lies inside the zoom button's
+    /// own rect*, and the page is pixel-identical at 50% and at 200%.
+    ///
+    /// **Public as of part 23, and that is the second thing the bite check found.** It was private, so
+    /// the three product paths that set the zoom from `--zoom` assigned `state.zoom_percent` directly
+    /// and **bypassed this function entirely** — which meant a gate could not reach the one place a
+    /// zoom would live, and `tests/zoom.rs` set the field directly too. **A gate that assigns the field
+    /// tests the field, not the feature**, and it stayed green when `set_zoom` was given a real cell
+    /// scale. The three `--zoom` sites now call this, so there is one writer, and it is the one the
+    /// gates exercise.
+    ///
+    /// **The clamp stays, and is still worth having**, for the reason a clamp is worth having at all:
+    /// the number is drawn, it comes from `--zoom` on a command line, and a value outside the range the
+    /// chrome can lay out would make the label wider than the button that holds it. The gate
+    /// `the_zoom_label_fits_its_button_at_both_ends_of_the_clamp` is what that is worth.
+    ///
+    /// **What real zoom needs, stated because the next person will otherwise assume this is a small
+    /// omission:** the glyphs are rasterised at one size. Scaling `cell_w` and `cell_h` alone would
+    /// space the text out without enlarging it. **A zoom needs the atlas rebuilt at the new ppem**, and
+    /// then a decision about how many sizes stay resident, which is an atlas-budget question and not a
+    /// chrome one. That is a phase, not a patch.
+    pub fn set_zoom(&mut self, percent: u32) {
+        self.state.zoom_percent = percent.clamp(25, 400);
         self.damage = self.chrome.full_damage();
     }
 

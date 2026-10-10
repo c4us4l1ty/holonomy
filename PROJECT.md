@@ -2502,6 +2502,79 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 23 — what the zoom control actually does, measured rather than assumed
+
+**I went looking for the next inert toolbar button and found a false comment instead.**
+
+`Session::set_zoom` said:
+
+> **25..=400 because that is what `--zoom` takes and what §2.9.3's image-cache thresholds were measured
+> against.**
+
+**There is no image-cache coupling.** The only readers of `zoom_percent` in the whole workspace are
+the toolbar's label (`widgets.rs:352`) and the dropdown's tick (`menus.rs`). Nothing rescales, nothing
+rebuilds a layout, nothing reads it.
+
+**Measured, not grepped.** Two sessions over the same three-line document, painted at 100% and at 200%:
+
+```text
+layout equal at 100 vs 200: true
+cell_w 8 / 8
+page rect identical
+pixels differing inside the page: 0
+pixels differing in the whole frame: 55
+differing bounding box: x 136..=143 y 67..=77
+zoom button rect:          x 107..=168 y 60..=77
+box inside the zoom button: true
+```
+
+**Every pixel that changes when the zoom changes is inside the zoom button's own rect.** That is now a
+gate — `every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label` — because a claim of the form
+"the page does not change" is one a one-pixel regression could satisfy, and "some pixels changed" is one
+anything could.
+
+**So `zoom_percent` is a number the toolbar prints.** Three paths reach it and all three look like they
+work:
+
+* `--zoom 200` on the command line, in `main.rs` twice and `windowed.rs` once.
+* **F11 / Shift+F11 / F12**, which `Keymap::us` decodes to `Command::ZoomIn`/`ZoomOut`/`ZoomReset` and
+  which `Session::apply` drops in one arm that does nothing. **A key that decodes and then vanishes is
+  the hardest kind of nothing to notice**: the keymap test passes, the command exists, and the window
+  ignores you.
+* The zoom dropdown, which part 21 built and which counted its choices as `pointer_commands`.
+
+**What real zoom needs, so the next person does not assume this is a small omission:** the glyphs are
+rasterised at **one** size. Scaling `cell_w` and `cell_h` alone would space the text out without
+enlarging it. **A zoom needs the atlas rebuilt at the new ppem**, and then a decision about how many
+sizes stay resident — which is an atlas-budget question and not a chrome one. That is a phase.
+
+**A correction to the counter, and to part 21.** `pointer_commands` says *presses that produced a
+`Command` the session applied*, and part 21 counted `Action::SetZoom` there. **No `Command` is produced**
+— `apply_action` handles the three chrome actions before `action_command` is reached — so the counter
+was claiming an edit that does not happen, and part 23's measurement made that worse rather than merely
+loose. `SessionStats::pointer_chrome` is the third alternative: **a press that changed chrome state and
+nothing else.** `pointer.rs`'s routing gate grew its sum from four outcomes to five, again by **naming
+the outcome rather than relaxing the assertion**.
+
+**The bite check found a second thing, and it is the reason this part is worth more than a comment.**
+
+Giving `set_zoom` a real cell scale left **all six new tests green.** The reason: they set
+`s.state.zoom_percent` directly, and `set_zoom` was *private* — so the three `--zoom` sites assigned the
+field too, and **the one function a zoom would live in was unreachable from every gate.** A gate that
+assigns the field tests the field, not the feature.
+
+`set_zoom` is public now, the three `--zoom` sites call it, and **re-running the bite check fails 4 of
+the 6.** The `u16` that came with it was not a type-system detail: **`Action::SetZoom(u16)` was the
+third spelling of a concept that is `u32` in `ChromeState` and `u32` on the command line**, and it cost
+a real conversion at the boundary. Part 21's note argued `u16` was "the smallest honest width for a
+percentage with a thousands' digit" — true, and beside the point. **A width chosen for economy and then
+paid for at every boundary is not a saving.**
+
+**Where the keys were left, and why.** Dropped, deliberately, and asserted as dropped by
+`the_zoom_keys_are_decoded_and_dropped`. Wiring F11 to a label-only zoom would be **worse than F11 doing
+nothing**: the user presses it, the number in the toolbar changes, the page does not. **The honest
+states are "it does nothing" and "it zooms", and this build is in the first.**
+
 #### Phase 14, part 22 — the caret's column counts characters, and the desync it uncovered
 
 **Part 20 fixed half of this bug and recorded the other half rather than asserting around it:**

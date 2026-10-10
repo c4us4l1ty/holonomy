@@ -326,9 +326,26 @@ fn a_dropdown_ticks_the_current_value_and_applies_a_new_one() {
     click_rect(&mut s, pop.rows[target]);
     assert_eq!(s.state.zoom_percent, 150, "the state moved");
     assert_eq!(s.state.open, None, "and the dropdown closed");
+    // **`pointer_chrome`, not `pointer_commands` — corrected in part 23.**
+    //
+    // Part 21 asserted `pointer_commands`, because it read as "the press did something". It did not do
+    // a *command*, and `pointer_commands` says *presses that produced a `Command` the session applied* —
+    // `Action::SetZoom` is handled in `apply_action` before `action_command` is reached, and no
+    // `Command` exists. Part 23 then measured what a zoom change actually moves and found it to be the
+    // label and nothing else, which made the wrong count worse rather than merely loose: the counter was
+    // reporting a document edit that does not happen.
     assert!(
-        s.stats.pointer_commands > 0,
-        "counted as a command, not as inert"
+        s.stats.pointer_chrome > 0,
+        "counted as a chrome-state change, which is what it is"
+    );
+    assert_eq!(
+        s.stats.pointer_commands, 0,
+        "**and not as a command**, because no `Command` was produced and no document byte changed"
+    );
+    assert_eq!(
+        s.stats.pointer_inert, 0,
+        "and not as inert either, because the label did change — a fourth outcome, which is why \
+         `pointer_chrome` exists"
     );
 
     // **Re-opening ticks the new value, because the tick is computed from the state and not stored.**

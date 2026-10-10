@@ -75,7 +75,7 @@ pub enum Action {
     /// **A payload on an otherwise empty enum**, because "zoom to 125%" and "zoom to 150%" are the
     /// same action at different values and listing six variants would make every `match` on `Action`
     /// six arms longer for no gain.
-    SetZoom(u16),
+    SetZoom(u32),
     /// **Choose a paragraph style by index**, into [`STYLES`].
     SetStyle(u8),
     /// **Choose a font by index**, into [`FONTS`].
@@ -378,7 +378,14 @@ pub const FONTS: &[&str] = &[
 /// `&'static str` and every menu can stay a `const`. A zoom dropdown with a fixed list has fixed
 /// labels; a dropdown whose labels were computed would need an owned `Item`, and that is a much
 /// larger change for no gain.
-pub const ZOOMS: &[(&str, u16)] = &[
+///
+/// **CORRECTION, part 23: `u32` and not the `u16` part 21 chose.** Part 21's note argued that `u16` is
+/// "the smallest honest width for a percentage with a thousands' digit" — which is true, and beside
+/// the point. **`ChromeState::zoom_percent` is a `u32` and `--zoom` is a `u32`**, so `u16` was the third
+/// spelling of one concept, and it cost a real conversion: part 23 made `set_zoom` public so the
+/// `--zoom` sites could reach it, and the compiler rejected `set_zoom(args.zoom)` because the types
+/// disagreed. **A width chosen for economy and then paid for at every boundary is not a saving.**
+pub const ZOOMS: &[(&str, u32)] = &[
     ("50%", 50),
     ("75%", 75),
     ("100%", 100),
@@ -412,13 +419,7 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
     match tool {
         Tool::Zoom => ZOOMS
             .iter()
-            .map(|&(label, z)| {
-                chosen(
-                    label,
-                    Action::SetZoom(z),
-                    u32::from(z) == state.zoom_percent,
-                )
-            })
+            .map(|&(label, z)| chosen(label, Action::SetZoom(z), z == state.zoom_percent))
             .collect(),
         Tool::Style => STYLES
             .iter()

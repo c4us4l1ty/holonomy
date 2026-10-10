@@ -119,7 +119,7 @@ pub fn run(
         Box::new(desktop),
         metrics,
     );
-    session.state.zoom_percent = args.zoom;
+    session.set_zoom(args.zoom);
     session.repaint_all().map_err(WindowedError::Session)?;
 
     let start = Instant::now();

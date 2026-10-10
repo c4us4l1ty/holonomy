@@ -168,6 +168,9 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --width N            Panel width in pixels (default 1280).
   --height N           Panel height in pixels (default 800).
   --zoom N             Zoom percentage, 25..=400 (default 100).
+                         CORRECTION, part 23: this does not zoom. It sets the
+                         number the toolbar prints; the page does not change.
+                         See PROJECT.md part 23 and crates/holonomy/tests/zoom.rs.
   --headless           No DRM, no evdev, no jail.
   --dry-run            Print the boot plan and exit without opening anything.
 

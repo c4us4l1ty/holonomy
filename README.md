@@ -189,6 +189,13 @@ the only way a document gets in).
 face, so `Action::SetFont` records the choice without changing a pixel of the page. That is stated in
 the session's handler rather than left to be discovered.
 
+**The zoom control does not zoom, and that is measured rather than asserted.** `--zoom 200`, F11 and the
+zoom dropdown all set `zoom_percent`, and **every pixel that changes when it changes is inside the zoom
+button's own rect** — the page is pixel-identical at 50% and at 200%. Real zoom needs the glyph atlas
+rebuilt at a new ppem, which is an atlas-budget question rather than a chrome one. The keys are left
+decoding-and-dropped on purpose: wiring them to a label-only zoom would be worse than keys that do
+nothing.
+
 **The caret counts characters, and the case where it does not is recorded.** `caret_column` is a count
 of UTF- scalars, so a caret after a two-byte `é` is drawn in the right place — it was a byte count
 until Phase 14 part 22, and a caret after any non-ASCII character was drawn a cell too far right.
