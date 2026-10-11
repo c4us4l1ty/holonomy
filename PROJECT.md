@@ -2573,6 +2573,109 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 29 — text colour, and the half of the span record nobody read
+
+**`TextIntervalSpan` has carried `color_rgb` since phase 4 and nothing in the product ever read it.**
+
+Not the renderer, not the session. It is a documented field, an argument to
+`SpanMap::style_range`, **a term in `same_style` — so a coloured run is a different run** — restored by
+undo, and printed by `Display`. **And `emit_body_text` passed `colour::INK` to every `DocRun`, whatever
+the span said.**
+
+**This is part 24's defect with the other half of the same field.** Part 24's title is *"bold is stored,
+and this is where it started being drawn"*: `style_flags` was in the span, the emitter emitted one run
+per line with `Style::REGULAR` hardcoded, and a fully-bolded document painted pixel-for-pixel like an
+unstyled one. **`color_rgb` sat in the record one line away and had the same fate.** Part 24 fixed half
+of it and did not say so.
+
+## The fix, and what it took to reach the renderer
+
+**One function, `Session::span_ink`.** `color_rgb`'s own doc says *"Zero means the document's default
+colour, not opaque black"*, so `0` is *unspecified* and passing it through would paint every
+uncoloured span in `0x00000000` — and the alpha byte is what the blitter reads, so the text would
+vanish. The alpha byte is added in that one function and nowhere else.
+
+**`menus::COLOURS`, `Action::SetColour(u8)`, `Tool::TextColour` as a fourth dropdown, and
+`ChromeState::colour_index`** — all four because a renderer fix with no way to reach it is the
+"capability exists unused" trap a third time. `pending_colour: Option<u32>` arms the colour for typed
+text, the same three-state shape as part 25's `pending_style`, and **as a second edit** so that
+un-arming one of the two does not un-arm the other.
+
+## The bite check caught a gate that did not gate
+
+**With the renderer fix reverted — `ink` passed unconditionally, the exact defect — all six gates
+still passed.**
+
+Because splitting a line into runs *also* moves the text after the run (below), **"the frames differ"
+was satisfied by the shift and not by any colour at all.** A gate that passes when the feature is
+removed is worse than no gate: it is a report that the feature exists, sent from a build where it does
+not.
+
+**So the claim became the colour's own pixels** — `crimson_pixels`, a hue test rather than an equality
+test because the blitter antialiases and only a glyph's stem is near the pure value. **With the bite
+applied, two of the six now fail**, which is the number a bite check is for.
+
+## Second finding: a run boundary moves the text after it
+
+Measured, comparing a styled row against the plain document:
+
+```text
+plain        :   0 columns differ
+bold  6..11  :   7 columns differ, first at x=47
+colour 6..11 :   5 columns differ, first at x=47
+```
+
+and the row's ink ends at **143 px** plain and **141 px** with `bravo` bold. **Five columns differing for
+a colour change is far too many for five letters**, and the extras are all to the *right*.
+
+**To the two functions that disagree:**
+
+* **`Session::emit_body_text` positions each run at `text.x + cell_x * cell_w`** — the fixed 8 px
+  grid, which is what the caret, the ruler, the tables and the wrap point all use.
+* **`Painter::doc_text` advances its pen by `m.advance_x.max(1)`** — the font's own metric.
+
+**So a run boundary is a discontinuity.** A line drawn as one run accumulates the font's advances; a
+line split into runs snaps back to the grid at every boundary, and the text after it moves.
+
+**Older than parts 28 and 29.** Part 24 made multi-run lines reachable through the document model and
+its gates passed anyway, because they asserted ink *extent* on the styled row and never the position of
+the row's tail.
+
+**Not fixed here, and that is a decision rather than an oversight.** **The right answer has not been
+measured**: either the painter moves onto `cell_w`, or `ChromeMetrics::cell_w` becomes the font's
+advance, and the first would move every measured number in this project. `a_run_boundary_moves_the_
+text_after_it` asserts the *current* behaviour, so it fails loudly when someone fixes it and whoever
+fixes it has to say why.
+
+## Three corrections, all mine
+
+**1. `COLOURS` called `0xB0_4A_8A` "Teal".** It has *red* as its largest channel: it is a mauve. **The
+gate's own hue test found it** — zero teal pixels next to an entry named teal. Now `0x008C_C8C0`.
+
+**2. The glyph overhang is two pixels, not one.** The first draft allowed one, reasoned from
+`bearing_x` being signed. **Measured on `bravo`: the left edge reaches 369 against a cell starting at
+368, and the right reaches 410 against a cell ending at 408.** The painter blits at `run.x + bearing_x`
+and draws `m.width` wide, so a glyph can overhang *either* side. One would have been a guess.
+
+**3. This gate was written asserting the opposite of what is true.** Its first draft asked whether a
+colour *survives* undo, on the reading that `SpanMap::style_range` pushes nothing onto the undo stack —
+which it does not. **But the undo entry is pushed by the session's `after_edit`, not by the span map**,
+so one undo does take the colour back. **What survives from the wrong reading is a half-false comment:**
+`Session::insert` says of arming a style *"**it is in the undo stack**"*, which is true of the product's
+path and false of `SpanMap::style_range` called directly — and the mechanism is the part a reader would
+go looking for.
+
+## Also recorded: two frames, 1,898 pixels apart, unexplained
+
+After an undo and a full repaint, a session differs from a freshly built one by **1,898 pixels in a box
+of `(0, 51, 905, 792)`** — the bottom two rows of the menu band and the top two of the toolbar, across
+its whole width. **It is not the colour**; the span is clean and the colour's cells are elsewhere.
+
+**Two separately built sessions differ in the toolbar after one of them has been through an edit and an
+undo.** Existing fixtures do not show it because they compare sessions that took the same path.
+**Recorded rather than asserted either way**: `== 0` would be a red gate forever and `== 1898` would
+enshrine a number nobody understands.
+
 #### Phase 14, part 28 — selection
 
 **The highest-leverage item on the list, and the first one that was a model rather than a button.**

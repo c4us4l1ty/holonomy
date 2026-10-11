@@ -179,8 +179,9 @@ emitter emitted one run per line with `Style::REGULAR` hardcoded, so a fully-bol
 pixel-for-pixel like an unstyled one. It now walks `SpanMap::runs_in` and emits one run per style. **The
 Bold and Italic buttons work as of part 25**: they arm a style for the next character typed, the armed
 button is filled, and un-arming means *explicitly plain* rather than "go back to inheriting", because
-`SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Twelve of the
-twenty-one toolbar buttons remain inert and are counted as such.
+`SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Eleven of the
+twenty-one toolbar buttons remain inert and are counted as such — text colour was the twelfth to stop
+being one, in part 29.
 
 **Selection exists, and it is a model rather than a highlight.** `Editor` holds `Option<u32>` — the
 anchor — and the focus *is* the caret, so there is no second copy of the caret anywhere; every caret
@@ -194,12 +195,19 @@ and `Up`/`Down` land on the start of the target line rather than preserving the 
 needs the target line's length, `Session::apply` takes no `LeafSource`, and clamping against a line that
 may not be resident would be a guess.
 
+**Text colour is stored and now drawn.** `TextIntervalSpan::color_rgb` had been in the span since phase
+4 — a documented field, an argument to `style_range`, a term in `same_style` so a coloured run is a
+different run, restored by undo — **and nothing in the product ever read it.** The emitter passed
+`colour::INK` to every run, so a coloured document painted like an uncoloured one. That is part 24's
+defect for the other half of the same record. It now draws, and the toolbar's text-colour button is a
+fourth real dropdown with six colours; selecting text and choosing one colours it, and with nothing
+selected it arms the next character.
+
 **Most of the toolbar does nothing yet, and the build says so rather than hiding it.** The chrome, the
 menus, the sidebar and the hit testing are real and gated; the *commands* behind the buttons are
 mostly not. Undo, Redo, Image and the sidebar's collapse are wired, and **the Zoom, Style and Font
-dropdowns are real — they open, they tick the current value, and choosing one applies it.** Bold, italic,
-underline, print, spellcheck and 48 of the 54 menu items are drawn, hovered and pressable, and do
-nothing — because the document model has no representation for any of them.
+dropdowns are real — they open, they tick the current value, and choosing one applies it.** Underline, print, spellcheck and 48 of the
+54 menu items are drawn, hovered and pressable, and do nothing — because the document model has no representation for any of them.
 **`SessionStats::pointer_inert` counts every one of those presses**, so the number is visible rather
 than inferred: if it were ever zero it would mean either that every button works or that nothing is
 being hit-tested, and those two need to be distinguishable. Also not built: submenus, and a
@@ -224,6 +232,15 @@ than inserting where the user is looking. The obvious fix was implemented and re
 every fixture exercises and `tests/session_no_alloc.rs` then reported **2 allocations** for a
 1,000-keystroke burst at offset 0 against 0 at the end of the document. **One 131,040-byte realloc,
 measured by size and not identified.**
+
+**Bolding or colouring a word moves the text after it.** `emit_body_text` places each run on the
+fixed 8 px cell grid — what the caret, the ruler, the tables and the wrap point all use — and
+`Painter::doc_text` advances its pen by the font's own advance metric. **They disagree, so a run
+boundary is a discontinuity**: measured, bolding `bravo` in `alpha bravo charlie` changes 7 columns
+against the plain document, all of them to the right. It predates part 28 and part 29 — part 24 made
+multi-run lines reachable and its gates missed it because they asserted ink extent rather than the
+position of the row's tail. **Not fixed**, because neither answer (move the painter onto the grid, or
+make `cell_w` the font's advance) has been measured against the rest of the project.
 
 **The zoom control does not zoom, and that is measured rather than asserted.** `--zoom 200`, F11 and the
 zoom dropdown all set `zoom_percent`, and **every pixel that changes when it changes is inside the zoom

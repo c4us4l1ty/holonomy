@@ -395,6 +395,18 @@ pub struct Session<'a> {
     /// the `Option` answers "has the user said anything". `Some(0)` shows as both buttons off, which is
     /// correct: the user is looking at "not bold", and what they cannot see is the `Option` behind it.
     pending_style: Option<u16>,
+    /// **The colour the next character typed will be, or `None` if the user has said nothing.**
+    /// Part 29.
+    ///
+    /// **`Option<u32>` for the same reason [`pending_style`](Self) is an `Option<u16>`**, and with the
+    /// same three states: `None` inherit, `Some(rgb)` arm, **`Some(0)` is *not* "plain"** -- `0` is
+    /// what the span field calls "the document's default colour", so writing `Some(0)` and writing
+    /// `None` mean the same thing and the distinction would be a lie.
+    ///
+    /// **Why a field and not a span parked at the caret**, which is the reasoning part 25 recorded for
+    /// the same question: `SpanMap::style_range` returns `Ok(())` for `start == end` and stores
+    /// nothing, so "the next character is crimson" cannot be a zero-width span.
+    pending_colour: Option<u32>,
     /// The chrome geometry.
     pub chrome: Chrome,
     /// What the chrome shows.
@@ -773,6 +785,7 @@ impl<'a> Session<'a> {
             keymap: Keymap::us(),
             mods: ModifierState::new(),
             page_drag: false,
+            pending_colour: None,
             blink: Blink::new(Blink::DEFAULT_PERIOD),
             stats: SessionStats::default(),
             damage: DamageRect::EMPTY,
@@ -2041,6 +2054,16 @@ impl<'a> Session<'a> {
         (f & STYLE_BOLD != 0, f & STYLE_ITALIC != 0)
     }
 
+    /// **The colour armed for typed text, or 0 for "the document's default".** Part 29.
+    ///
+    /// **The colour twin of [`armed_style`](Self), and the `unwrap_or(0)` is the same shape and the
+    /// same reason:** "the user said nothing" and "the user chose the default" both read as nothing
+    /// armed, which is right for the span field -- `0` *is* the default -- and is why this returns a
+    /// plain `u32` rather than an `Option` the way `armed_style` returns two `bool`s.
+    fn armed_colour(&self) -> u32 {
+        self.pending_colour.unwrap_or(0)
+    }
+
     /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
     ///
     /// # Why the session, and not the renderer
@@ -2079,16 +2102,43 @@ impl<'a> Session<'a> {
             Action::ToggleBold => {
                 // **A selection means "style this range", and that takes precedence over arming.**
                 // Part 28 — the thing part 24's own note said selection would unlock.
-                if !self.style_selection(!self.armed_style().0, self.armed_style().1)? {
+                if !self.style_selection(
+                    !self.armed_style().0,
+                    self.armed_style().1,
+                    self.armed_colour(),
+                )? {
                     self.set_armed_style(!self.armed_style().0, self.armed_style().1);
                 }
                 self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
             Action::ToggleItalic => {
-                if !self.style_selection(self.armed_style().0, !self.armed_style().1)? {
+                if !self.style_selection(
+                    self.armed_style().0,
+                    !self.armed_style().1,
+                    self.armed_colour(),
+                )? {
                     self.set_armed_style(self.armed_style().0, !self.armed_style().1);
                 }
+                self.damage = self.chrome.full_damage();
+                self.stats.pointer_chrome += 1;
+            }
+            // **Part 29: the fourth dropdown, and the first whose value reaches the document.**
+            //
+            // **`style_selection` with a colour rather than flags**, which is why it takes the value
+            // and not an index: the session has already resolved the index through `COLOURS` and the
+            // span field wants `0x00RRGGBB`. Everything else about the rule -- a selection styles the
+            // range, no selection arms the next character -- is part 28's and is not restated here.
+            Action::SetColour(i) => {
+                let n = holonomy_render::menus::COLOURS.len().saturating_sub(1);
+                let idx = usize::from(i).min(n);
+                self.state.colour_index = idx;
+                let rgb = holonomy_render::menus::COLOURS[idx].1;
+                // **Arm *and* apply.** A selection is styled; with no selection the colour waits for
+                // the next character, which is what the control means with nothing selected and is
+                // part 25's rule for the two style toggles.
+                self.pending_colour = Some(rgb);
+                self.style_selection(self.armed_style().0, self.armed_style().1, rgb)?;
                 self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
@@ -2418,6 +2468,17 @@ impl<'a> Session<'a> {
         if let Some(armed) = self.pending_style.filter(|_| !bytes.is_empty()) {
             self.editor
                 .style_range(at as u32, (at + bytes.len()) as u32, armed, 0)?;
+            self.after_edit(0)?;
+        }
+        // **The armed colour, over the same range, and as a second edit.** Part 29.
+        //
+        // **Separate from the style arm above rather than merged into one `style_range` call**, because
+        // they are armed independently: a user can have Bold on and no colour, or a colour and no
+        // bold. **Merging them would make one of the two un-clearable**, which is exactly the bug
+        // part 25 found when un-arming Bold left the flag at 0 and the next character came out bold.
+        if let Some(rgb) = self.pending_colour.filter(|_| !bytes.is_empty()) {
+            self.editor
+                .style_range(at as u32, (at + bytes.len()) as u32, 0, rgb)?;
             self.after_edit(0)?;
         }
         self.after_edit(bytes.len() as u32)
@@ -2904,7 +2965,12 @@ impl<'a> Session<'a> {
     /// selects a paragraph, bolds it and then selects the next one has not lost anything by the first
     /// selection being still there — and clearing it would make a second Bold press (to un-bold) do
     /// nothing, because there would be no range left to un-bold.
-    fn style_selection(&mut self, bold: bool, italic: bool) -> Result<bool, SessionError> {
+    fn style_selection(
+        &mut self,
+        bold: bool,
+        italic: bool,
+        colour: u32,
+    ) -> Result<bool, SessionError> {
         let Some(sel) = self.editor.selection() else {
             return Ok(false);
         };
@@ -2919,7 +2985,10 @@ impl<'a> Session<'a> {
         // a user who has Bold armed and then selects a word and presses Bold has made the *next*
         // character bold too, which is what every editor does and is not a decision this should make
         // silently in either direction.
-        self.editor.style_range(sel.start, sel.end, flags, 0)?;
+        // **`colour` and not `0`, which is part 29.** Part 24 wired this call with a literal zero
+        // because nothing could produce anything else; `TextIntervalSpan::color_rgb` had been in the
+        // record since phase 4 with nothing to put in it.
+        self.editor.style_range(sel.start, sel.end, flags, colour)?;
         self.after_edit(0)?;
         Ok(true)
     }
@@ -3793,7 +3862,7 @@ impl<'a> Session<'a> {
                         at + cursor as u32,
                         run.len() as u32,
                         holonomy_render::Style(span.atlas_style()),
-                        ink,
+                        span_ink(&span, ink),
                     );
                     cell_x += codepoint_count(run);
                     cursor = hi;
@@ -4869,6 +4938,35 @@ fn push_doc_run(
         ))));
 }
 
+/// **The ink a span draws in: its own colour, or the document's.** Part 29.
+///
+/// ## Why `color_rgb` needed a helper rather than an expression at the call site
+///
+/// **Because `0` means two things and they must not collapse.** `TextIntervalSpan::color_rgb`'s own
+/// doc says *"Zero means the document's default colour, not opaque black"* — so `0` is not black, it
+/// is *unspecified*. Passing `span.color_rgb` straight through would paint every uncoloured span in
+/// `0x00000000`, and the alpha byte is what the blitter reads, so the page's text would disappear.
+///
+/// **The alpha byte is added here and nowhere else.** `DocRun::colour` is packed `0xAARRGGBB` and a
+/// span's is `0x00RRGGBB`, so `| 0xFF00_0000` is the one conversion and it belongs in one function.
+///
+/// ## Why this was not written in phase 4 or 6
+///
+/// **Because nothing called it.** `color_rgb` is a documented field, an argument to `style_range`, a
+/// term in `same_style` -- so it split runs and survived undo -- and **the renderer never read it.**
+/// Part 24 is the same story for `style_flags`, one field away in the same record, and this is the
+/// half that was still outstanding when part 28's selection made a range available to colour.
+///
+/// `crates/holonomy/tests/text_colour.rs` is the gate, and its first run reported **zero** differing
+/// pixels.
+fn span_ink(span: &holonomy_text::TextIntervalSpan, ink: u32) -> u32 {
+    if span.color_rgb == 0 {
+        ink
+    } else {
+        0xFF00_0000 | (span.color_rgb & 0x00FF_FFFF)
+    }
+}
+
 /// Push a filled rectangle into `tree`'s **back** layer. Part 28.
 ///
 /// **A free function beside [`push_doc_run`](Self) rather than a method, and for the reason that one
@@ -5117,7 +5215,9 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // **The two with no action in this build**, listed so the compiler says so when they are
         // added rather than leaving them to be discovered as a dead row.
         Action::Save | Action::Close => return None,
-        Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) => return None,
+        Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) | Action::SetColour(_) => {
+            return None
+        }
         // **Arming a style is a chrome-state change, not a command** -- the same shape as the three
         // above, and `Session::apply_action` handles it before this function is reached.
         Action::ToggleBold | Action::ToggleItalic => return None,

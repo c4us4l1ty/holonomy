@@ -174,8 +174,17 @@ impl Tool {
     /// asking "does this button open something?" gets an answer from the same list that decides where
     /// the button is. `menus::dropdown_items` is the authority on which tools have rows; this is the
     /// cheap answer, and the gate `the_two_dropdown_lists_agree` is what stops them drifting apart.
+    /// **`Tool::TextColour` joined them in part 29**, which took the toolbar from three dropdowns and
+    /// twelve inert buttons to four and eleven.
+    ///
+    /// **The chevron is drawn from this and not from a separate list**, which is the whole point of
+    /// asking the tool: a button drawn with a chevron that the hit test does not know about is the
+    /// "drawn one way, clicked another" bug this file exists to prevent.
     pub const fn has_dropdown(self) -> bool {
-        matches!(self, Tool::Zoom | Tool::Style | Tool::Font)
+        matches!(
+            self,
+            Tool::Zoom | Tool::Style | Tool::Font | Tool::TextColour
+        )
     }
 
     /// The width this tool occupies, in pixels.

@@ -1000,6 +1000,17 @@ pub struct ChromeState {
     pub style_index: usize,
     /// Which of [`FONTS`](crate::menus::FONTS) is current, as an index. See [`style_index`](Self::style_index).
     pub font_index: usize,
+    /// **Which of [`COLOURS`](crate::menus::COLOURS) is current, as an index.** Part 29.
+    ///
+    /// **The same index-into-a-`const`-list argument as [`style_index`](Self)**, and for the same
+    /// reason: it is a byte, it makes the name a borrow, and it cannot disagree with the list.
+    ///
+    /// **Which is what the choice means here rather than what the document says.** `style_index` and
+    /// `font_index` tick the current paragraph style and face, which the document has opinions about.
+    /// **A colour is a property of a span**, so this ticks the colour the user *last chose* -- and a
+    /// document whose text is four different colours ticks exactly one of them, which is the honest
+    /// answer for a control with one swatch.
+    pub colour_index: usize,
     /// Which popup is open, if any.
     ///
     /// **One value, and the type is the argument for it.** Part 20 had `open_menu: Option<usize>`;
@@ -1093,6 +1104,7 @@ impl Default for ChromeState {
             active_doc: 0,
             style_index: 0,
             font_index: 0,
+            colour_index: 0,
             open: None,
             cursor: None,
             hover: None,

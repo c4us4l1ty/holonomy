@@ -78,6 +78,14 @@ pub enum Action {
     SetZoom(u32),
     /// **Choose a paragraph style by index**, into [`STYLES`].
     SetStyle(u8),
+    /// **Colour the text by index into [`COLOURS`].** Part 29.
+    ///
+    /// **An index and not a `u32` colour**, for the same reason [`Action::SetZoom`] carries a
+    /// percentage rather than a pixel value: *"`zoom to 125%` and `zoom to 150%` are the same action at
+    /// different values and listing six variants would make every `match` on `Action` six arms longer
+    /// for no gain."* **And an index into a `const` list rather than a `String` name**, which is
+    /// part 21's correction to `ChromeState::style_name`.
+    SetColour(u8),
     /// **Choose a font by index**, into [`FONTS`].
     SetFont(u8),
     /// **Arm or disarm bold for the next character typed.**
@@ -103,6 +111,7 @@ impl Action {
             Action::SetZoom(_) => "set-zoom",
             Action::SetStyle(_) => "set-style",
             Action::SetFont(_) => "set-font",
+            Action::SetColour(_) => "set-colour",
             Action::ToggleBold => "toggle-bold",
             Action::ToggleItalic => "toggle-italic",
         }
@@ -402,6 +411,41 @@ pub const ZOOMS: &[(&str, u32)] = &[
     ("200%", 200),
 ];
 
+/// **The text colours the toolbar offers, and the values [`SpanMap::style_range`] takes.**
+///
+/// ## Why a `const` list and not a table in the renderer
+///
+/// **Part 21's reason, unchanged.** The chrome needs the index to tick the current choice and the
+/// label to draw it; the session needs the index to apply it and the value to write into the span.
+/// **One list, two readers, and an index that cannot disagree with a name** — which is what part 21
+/// got wrong when `ChromeState` carried a `style_name: String`.
+///
+/// ## Why six
+///
+/// **Six is what a swatch grid fits in one column without scrolling, and one is not enough to be a
+/// choice.** The full palette of a word processor is a grid of dozens; this is a dropdown, so it is a
+/// list, and a list of dozens is a scrollbar -- which this popup does not have. **Six is a number
+/// chosen for the popup, and `COLOURS` is where to change it.**
+///
+/// ## Why `0x00RRGGBB` and not `0xAARRGGBB`
+///
+/// **Because that is what the span field is.** `TextIntervalSpan::color_rgb`'s doc says so, and the
+/// `|` of an alpha byte happens in exactly one function -- `Session::span_ink` -- rather than being
+/// something each reader has to remember.
+pub const COLOURS: &[(&str, u32)] = &[
+    ("Crimson", 0x00D1_2B45),
+    // **`0x008C_C8C0` and not `0x00B0_4A8A`, which this said "Teal" for two days.** `0xB0_4A_8A` has
+    // *red* as its largest channel: it is a mauve. **A colour whose name is wrong is a colour nobody
+    // can find**, and the palette is the only place the user sees these values, so it is worth being
+    // right. The gate's own hue test found it -- it counted zero teal pixels next to a palette entry
+    // named teal, and the second entry's value was the reason.
+    ("Teal", 0x008C_C8C0),
+    ("Forest", 0x00B0_4A3C),
+    ("Amber", 0x00C0_7A_1E),
+    ("Violet", 0x0075_4A_C0),
+    ("Slate", 0x005A_5A_66),
+];
+
 /// The item at `(menu, row)`, if there is one.
 ///
 /// **The hit-test entry point**, and the counterpart of `items_for`: the popup's rows are numbered from
@@ -438,6 +482,14 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
             .iter()
             .enumerate()
             .map(|(i, name)| chosen(name, Action::SetFont(i as u8), i == state.font_index))
+            .collect(),
+        // **Part 29.** The fourth dropdown, and the first one whose rows carry a value the *document*
+        // holds rather than a value the *chrome* holds -- which is the difference between a tick that
+        // means "this is the current font" and one that means "this is the colour you last chose".
+        Tool::TextColour => COLOURS
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| chosen(name, Action::SetColour(i as u8), i == state.colour_index))
             .collect(),
         // **Every other tool opens nothing**, and `None` rather than an empty `Vec` so the caller can
         // tell "no dropdown" from "a dropdown with no rows" — which is the difference between a

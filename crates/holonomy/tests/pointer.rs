@@ -390,12 +390,20 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // and the compiler was right: a dropdown's opener has changed nothing yet.
     //
     // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 21 tools:
-    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), 3 open a dropdown (Zoom,
-    // Style, Font), 2 change chrome state (Bold, Italic), and the rest are inert.
+    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **4 open a dropdown**
+    // (Zoom, Style, Font, TextColour), 2 change chrome state (Bold, Italic), and the rest are inert.
+    //
+    // **Eleven, and it was twelve until part 29.** `Tool::TextColour` joined `has_dropdown` and opened
+    // a palette of six colours, which put it in the same category as Zoom and **took it out of the
+    // inert list** -- the first of the twelve to leave it. **The list in the assertion message is the
+    // evidence** and it no longer contains `text-colour`; everything else is where it was.
+    //
+    // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
+    // reason the comment above gives: opening a popup has applied nothing yet.
     assert_eq!(
         inert.len(),
-        12,
-        "**twelve inert buttons**, which is 21 minus 3 commands, 1 toggle, 3 dropdowns and 2 chrome \\
+        11,
+        "**eleven inert buttons**, which is 21 minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome \
          changes. The list is {inert:?}"
     );
 }
