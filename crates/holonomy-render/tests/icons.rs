@@ -189,11 +189,17 @@ fn no_two_icons_share_a_mask() {
 /// covered. So `ALL` is checked against the enum's own discriminants.
 #[test]
 fn the_all_list_and_the_match_agree() {
+    // **33, not 34: part 33 removed `IconId::Print`.** The icon existed only for the toolbar's Print
+    // button, and that button was removed rather than wired up -- a button that does nothing and
+    // never will is a lie about the product, and inventing a print backend to keep a gate green
+    // would be the more expensive lie. **The mask, the enum variant and the `ALL` entry went
+    // together**, which is what this gate is for: had any one of them stayed, it would have said so.
     assert_eq!(
         IconId::ALL.len(),
-        34,
+        33,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
-         `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`."
+         `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. Part 33 removed \
+         `Print`, so this is one fewer than it was."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.

@@ -2585,6 +2585,165 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 33 — the caret gets a pen, and the print button is gone
+
+**Part 30's standing decision, taken. And the largest remaining item on the backlog, closed.**
+
+## The defect, one more time, with the numbers it produced
+
+At 16 ppem, `cell_w` is the Monospace face's advance — **10** — and the body is Inter, which is
+proportional. `'a'` advances 9 and `'W'` advances 16 **in the same cell of 10**:
+
+```text
+caret at column 10     part 30: 10 px BEHIND the glyph      part 32: 10 px AHEAD
+caret at column 40     40 px behind                          40 px ahead
+```
+
+**Part 30 measured this and deferred the decision. Part 33 takes it.**
+
+## What changed, and it is two things that are each not enough
+
+**The caret is placed by the pen.** `ChromeState` gained `caret_pen_x: Option<u32>` — the pen's
+position in pixels from the text column's left edge — and `Caret::locate` prefers it. **`None` is
+"not known on this frame"** and is different from `Some(0)`; the fallback is the old grid
+expression, because a caret on the grid is 10 px out and a missing caret is worse.
+
+**And a click is resolved by the pen**, through `Session::column_at_pen`, which walks the line's
+glyphs and splits each one's cell at its **midpoint**.
+
+**Placing the caret by the pen while hit-testing by the grid is worse than either being wrong.** A
+caret drawn 10 px from the glyph but landing where the user clicked is a caret that does not go where
+the pointer went, and `a_click_and_the_drawn_cell_agree_in_both_directions` caught exactly that on
+the first run: **249 against 250**. **This is the finding worth keeping from this part** — the fix
+had to be made in two places at once and the first version made it in one.
+
+**The midpoint rule is why the click is not a division.** A division cannot know where a glyph's
+centre is; every editor without shaping puts the caret before or after a glyph by where inside it
+you clicked, and expressing that requires the glyph's own advance.
+
+## The selection highlight moved too, and had to
+
+**The highlight was `col * cell_w` and the caret is now at the pen**, so a grid-placed highlight would
+start up to a cell right of the caret at its left edge: **the caret outside its own highlight.** That
+is the defect the caret fix would have made *worse*, so `pen_at` places both edges from the same walk
+that places the runs.
+
+**The clip to the visible measure is on bytes now, not columns**, because the pen has no column to
+clip: the last glyph the page shows is the last one inside `shown`, and its advance is where the pen is.
+
+## Three costs, and one of them was a gate I did not know was load-bearing
+
+### `runs_in` allocates, and `reconcile_caret` is the edit path
+
+**The first version used `SpanMap::runs_in`, which returns a `Vec`, and
+`typing_through_a_session_allocates_nothing` failed on the first run.** `refresh_caret_pen` is called
+from `reconcile_caret`, and that is the path whose zero-allocation invariant
+`tests/session_no_alloc.rs` asserts.
+
+**It now walks `SpanMap::spans()` — a slice — by index**, taking each span's `(end_byte, atlas_style)`
+as owned values. **A closure over `&self` does not work either**, because the walk reads the line
+through `&mut self.editor`; so the lookup is inlined. The alternative, `SpanMap::style_at` by value,
+is O(spans) *per glyph*: linear on an unstyled document and quadratic on a styled one.
+
+### The pen had to be refreshed wherever the column is, and is not only in `paint_with`
+
+**`Caret::locate` runs inside `chrome.tree`, so whatever the state holds is what gets drawn** — that
+is part 22's argument, and it applies to the pen exactly as it does to the column. The first version
+refreshed the pen only in `paint_with`, and `tests/grid_vs_glyphs.rs`, which reads the state straight
+after a `caret_to`, **drew the caret at 240 with a pen of 90 available.** **Two fields of the same
+kind, one refreshed and one not: part 22's defect wearing a new hat.**
+
+### Nine gates measured text position in the wrong unit
+
+Not defects — **instruments**. Every one reported a number that was right:
+
+```text
+caret_column     249 against 250, and 290 against 310
+selection         41 against 50,  44 against 50,  54 against 60, 286 against 300
+pointer         (1, 4) against (1, 3)
+grid_vs_glyphs   330 against 340
+```
+
+**Every one of them said `n * cell_w`, which asserts that N glyphs are N monospace cells wide. They
+are not, and that is part 30's defect written down as a test.** Each was rewritten in the unit the
+thing is in — the glyph's own advance, read from the atlas with `Painter::advance_of`'s two-case rule
+— and `pen()` appears three times across three files because **a gate that calls the product's own
+function would not be a test of the product.**
+
+## Five corrections, and the fourth is the one to read
+
+1. **A bounding box is not a tail.** Carried from part 31.
+2. **`pen()` summing `advance_x` predicted 44 px for `bravo\n` against a measured 54**, because `\n`
+   has no advance of its own and takes the cell. **The two-case rule is the rule**, and a helper that
+   gets it wrong is a third opinion about where a space is.
+3. **`pen("bra")` and not `3 * cell_w` for a click.** `bravo` is `b` 10, `r` 6, `a` 9, `v` 9, `o` 10,
+   so 30 px is past `v`'s midpoint and lands on **column 4**. **A click expressed in the grid and
+   resolved on the pen is a gate about one of the two and silent about the other** — the same trap as
+   the product-side failure above.
+4. **The round trip is no longer an identity, and the gate that said it was was wrong.**
+   `a_click_and_the_drawn_cell_agree_in_both_directions` asserted `text.x + cell_w` for the caret's x
+   on a fixture of `éa`, **which asserts that a proportional glyph is as wide as a monospace cell.**
+   **A click is made in pixels and a caret is drawn in pixels**, so the only honest round trip is
+   "click at a pixel, land on the column whose glyph covers it, and be drawn at that column's pen."
+5. **A sum of two pens is not a pen.** `a_selection_across_two_lines_highlights_both` asserted
+   `widths[0] + widths[1] == 14 * cell_w` — *"together they are every one of the selection's 14
+   bytes"*. **Row 1's pen restarts at the left edge of the text column**, so the two widths do not
+   compose into the pen of the concatenation. **The claim is about glyphs and is now stated in
+   glyphs**: six on row 0 and eight on row 1, each width the pen of exactly those.
+
+## What the caret is now, measured
+
+```text
+column 10 of forty 'a's   text.x + 90     ten advances of 9   NOT ten cells of 10
+column 40 of forty 'a's   text.x + 360    forty advances of 9
+column 10 of ten 'W's     text.x + 160    ten advances of 16  NOT 100 and NOT 90
+```
+
+**Three glyphs, three answers, and only one of them is a fixed grid.** `grid_vs_glyphs.rs`'s defect
+gate is flipped — *the same measurement with the sign removed* — and now asserts all three.
+
+## Both bite checks, independently
+
+**Reverting only `Caret::locate` to the grid:** `caret_column` 3 red, `grid_vs_glyphs` 1 red,
+`pointer` 1 red — **and `selection` stays green**, because the highlight does not read the caret's
+x. **Reverting only `pen_at` to the grid:** `selection` 4 red. **They are two independent claims and
+each is checked.**
+
+## The print button is removed, not wired up
+
+**The user asked for it and the reasoning matters more than the diff.**
+
+`Tool::Print`, `IconId::Print`, the `PRINT` mask and the File menu's `Print` item are gone, together.
+**A button that does nothing and never will is a lie about the product**, and the two ways to fix it —
+build a print backend, or leave the button — were both worse than removing it. **This is a sandboxed
+text editor that cannot open a file dialog**; a Print item in its File menu is a claim about a
+capability it does not have, sitting next to Export and Import.
+
+**Four places had to agree and two of them would have failed loudly if they had not:**
+
+- `pointer.rs` used `Tool::Print` as *the canonical example of an inert button*, with a comment
+  explaining that wiring one up "is not something to invent to make a test pass". **The gate
+  outlived its subject** — it moved to `Tool::Spellcheck`, which is inert for the same reason Print
+  was and is a feature someone will actually want. **The doc records all three tools this gate has
+  used**, because a gate that quietly changes its subject stops being evidence for anything.
+- `icons.rs`'s `the_all_list_and_the_match_agree` counts the set: **34 → 33.** It exists precisely
+  so that an enum variant removed in one place and left in another is caught, and it is.
+- The File menu's item count is asserted against `MENUS`, and the lengths still agree.
+
+**Ten inert toolbar buttons remain**, not eleven, and they are counted as such rather than faked.
+
+## Not done, and not claimed
+
+- **The ruler's ticks and the tables' cells are still on the grid.** They are chrome furniture in the
+  Monospace face's unit and are *right* there — a ruler that counts cells counts the grid the chrome
+  is drawn on.
+- **The wrap point and the truncation are in cells.** 80 of them at 800 px and a mean advance of 8.58
+  is 93 glyphs, so a long line is clipped a little *before* the page edge rather than a little after
+  it, which is the safe direction to be wrong in.
+- **`repaint_all` is still not idempotent.** Part 31's finding, gated, untouched.
+- **A combining mark is two scalars and one glyph** and the caret can land between the parts. That is
+  what every editor without full shaping does; it is recorded in `refresh_caret_column` and was not
+  made worse here.
 #### Phase 14, part 32 — the type size, and the rasteriser that had been discarding a parameter
 
 **"The app is way too tiny." Part 27 raised the window. The type had stayed at 16 ppem through

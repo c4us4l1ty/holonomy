@@ -277,17 +277,27 @@ fn every_wired_menu_item_carries_an_action() {
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
     // is stable and visible.
+    // **47 of 55, and it was 48 of 56 until part 33 removed the File menu's `Print` item.**
+    //
+    // **This gate has now been through two different edits and both were subtractions that were
+    // *not* subtractions from both sides**, which is worth stating plainly:
+    //
+    // * **Part 25 added two wired rows** (Bold and Italic in Format) rather than converting two
+    //   unwired ones, so the unwired count did not move and the *total* went 54 -> 56. **The first
+    //   draft of that edit subtracted from both and was wrong.**
+    // * **Part 33 removed a row outright.** An unwired one, so the unwired count moved down by one
+    //   *and* the total did. **48/56 -> 47/55.**
+    //
+    // **A gate that prints the list is what made the second edit safe to get right.** The list is
+    // printed because "everything is wired" is not true here and pretending otherwise would be the
+    // worse answer: what matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
-        without.len(),
-        48,
-        "the 48 rows that draw and do nothing, out of 56 menu items in the eight headings. \
-         **48 and not 46, because part 25 *added* two wired rows rather than converting two unwired \
-         ones** — Bold and Italic are new rows in Format, so the unwired count did not move and the \
-         total went from 54 to 56. The first draft of this edit subtracted from both and was wrong. \
-         The \
-         list is printed because \"everything is wired\" is not true here and pretending otherwise \
-         would be the worse answer: what matters is that the count is stable and the rows are named. \
-         Got: {without:?}"
+        (without.len(), without.len() + with_action),
+        (47, 55),
+        "**47 unwired of 55 menu items** in the eight headings. Part 33 removed File > Print, which \
+         was unwired, so both counts moved. The list is printed because \"everything is wired\" is \
+         not true here: what matters is that the count is stable and the rows are named. Got: \
+         {without:?}"
     );
 }
 

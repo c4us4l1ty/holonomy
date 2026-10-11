@@ -196,8 +196,8 @@ emitter emitted one run per line with `Style::REGULAR` hardcoded, so a fully-bol
 pixel-for-pixel like an unstyled one. It now walks `SpanMap::runs_in` and emits one run per style. **The
 Bold and Italic buttons work as of part 25**: they arm a style for the next character typed, the armed
 button is filled, and un-arming means *explicitly plain* rather than "go back to inheriting", because
-`SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Eleven of the
-twenty-one toolbar buttons remain inert and are counted as such — text colour was the twelfth to stop
+`SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Ten of the
+twenty toolbar buttons remain inert and are counted as such — text colour was the twelfth to stop
 being one, in part 29.
 
 **The type is 24 ppem and the chrome scales with it, and the cell is the font's own advance.** `--ppem`
@@ -214,11 +214,15 @@ definition of how far the pen moves, with the space-advance and `.notdef` cases 
 gets silently wrong. Bolding still moves the text after it, and that is typography: bold advances differ
 from regular, and the movement is bounded by the difference between the two faces' advances.
 
-**The caret is still in the wrong place, and part 30's decision is what is being waited on.** The body is
-Inter, which is proportional, so no fixed cell can place a caret inside it: `'a'` advances 9 and `'W'` 16
-in the same cell of 10. Measured at 16 ppem, the caret is **10, 20 and 40 px *ahead*** of the glyph it
-points at at columns 10, 20 and 40 — part 30 measured it *behind*, because the cell was 8. **The sign
-moved with the cell and the error is still one pixel a column.** `tests/grid_vs_glyphs.rs` holds it.
+**The caret is at the pen, and so is the click that places it.** The body is Inter, which is
+proportional, so no fixed cell can place a caret inside it: `'a'` advances 9 and `'W'` 16 in the same
+cell of 10, and a caret on that grid was 10, 20 and 40 px from the glyph at columns 10, 20 and 40 —
+*behind* before part 32 moved the cell, *ahead* after. Part 33 gave the caret a pen
+(`ChromeState::caret_pen_x`, written by the session's walk over the line) **and gave clicks the same
+walk** (`Session::column_at_pen`, splitting each glyph's cell at its midpoint). **Both, not either:**
+placing the caret by the pen while hit-testing on the grid is worse than either being wrong, and a
+gate caught it at 249 against 250 on the first run. The selection highlight moved with the caret,
+because a grid-placed highlight would have put the caret outside its own highlight.
 
 **§2.9.3's image budget was measured against a 640 px page column** — 80 cells of 8. **It is now
 1,120 px**, 80 cells of 14. **The budget has not been re-measured and the number in §2.9.3 is no longer
@@ -285,6 +289,12 @@ error's sign depends on the letters.** The caret is drawn 10 px behind the glyph
 the chrome onto the font's would make 80 columns 800 px instead of 640 px and invalidate every number
 §2.9.3 measured. **Not decided here** — `tests/grid_vs_glyphs.rs` asserts the whole of it, so each fact
 fails the day it is fixed.
+
+**There is no Print button.** `Tool::Print`, its icon, its mask and the File menu's `Print` item were
+removed in part 33 rather than wired up: a button that does nothing and never will is a lie about the
+product, and this is a sandboxed text editor that cannot open a file dialog, so a Print item next to
+Export and Import is a claim about a capability it does not have. **Ten toolbar buttons remain inert**
+and are counted as such.
 
 **A full repaint is not idempotent.** `repaint_all()` twice on an unchanged session differs from once
 by **970 pixels**, deterministically and in the same place: rows 51–54, the bottom of the menu band and

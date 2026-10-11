@@ -1777,9 +1777,23 @@ impl<'a> Session<'a> {
         y: i32,
         extend: bool,
     ) -> Result<(), SessionError> {
-        let Some((line, column)) = self.chrome.layout.caret_at(&self.state, x, y) else {
+        let Some((line, grid_column)) = self.chrome.layout.caret_at(&self.state, x, y) else {
             return Ok(());
         };
+        // **The column by the pen, and not the grid column.** Part 33.
+        //
+        // **`Layout::caret_at` divides `x - text.x` by `cell_w`**, and that was the right inverse of
+        // the old `column * cell_w` — but the caret is now placed by the pen, so the grid column is no
+        // longer the inverse of anything and **a click and the drawn caret disagree by up to a cell**.
+        // `a_click_and_the_drawn_cell_agree_in_both_directions` is the gate that says so, and it caught
+        // this on the first run of part 33: **249 against 250**.
+        //
+        // **`grid_column` is still read, and still used as the fallback**, for the case where the line's
+        // bytes cannot be read: a click that cannot be resolved by the pen is a click on a line that is
+        // not resident, and the grid column is one cell out rather than the click being dropped.
+        let column = self
+            .column_at_pen(line, x - self.chrome.layout.text.x as i32, bytes)
+            .unwrap_or(grid_column);
         let at = self.offset_of(line, column, bytes)? as u32;
         if extend {
             self.extend_to(at)?;
@@ -1792,6 +1806,114 @@ impl<'a> Session<'a> {
             self.select_at(at, at)?;
         }
         Ok(())
+    }
+
+    /// **The glyph column whose cell contains `dx` pixels into the text column.** Part 33.
+    ///
+    /// # Why this exists, and what was wrong before
+    ///
+    /// **The click was resolved by `dx / cell_w`**, which is the exact inverse of a caret placed by
+    /// `column * cell_w` and **the wrong inverse of a caret placed by the pen.** Placing the caret on
+    /// the pen while hit-testing on the grid is the worst of the two: correct for a monospaced face
+    /// and wrong for every letter, in a direction the letters choose. **Measured, `dx` 10 landed the
+    /// caret at pen 249 where the drawing puts the boundary at 250.**
+    ///
+    /// # What it does
+    ///
+    /// **Walks the line's glyphs, accumulating each one's real advance, and returns the index of the
+    /// glyph whose half-open cell contains `dx`.** The boundary rule is **the midpoint**, so a click in
+    /// the left half of a glyph puts the caret before it and a click in the right half puts it after —
+    /// which is what every editor does and what a division cannot do, because a division has no way to
+    /// know where a glyph's centre is.
+    ///
+    /// # The cost, and the fallback
+    ///
+    /// **One pass over one line, in 64-byte chunks through a stack buffer**, the same shape as
+    /// [`refresh_caret_pen`](Self::refresh_caret_pen) and for the same reasons. **`None` when the line
+    /// cannot be read in full**, and the caller falls back to the grid column: a click on a line that
+    /// is not resident is better served by one cell out than by no click.
+    fn column_at_pen(
+        &mut self,
+        line: u32,
+        dx: i32,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Option<u32> {
+        let dx = u32::try_from(dx).unwrap_or(0);
+        let start = self.lines.line_begin(line as usize) as u32;
+        let end = self.lines.line_end(line as usize) as u32;
+        // **A click left of the text column is column 0**, which is what the grid arm answered and is
+        // still right: there is no glyph before the first one.
+        if dx == 0 || end <= start {
+            return Some(0);
+        }
+        // **The slice, not `runs_in`, for the same reason as `refresh_caret_pen`.** A drag resolves a
+        // column per pointer event and this is called once per event; the edit path's zero-allocation
+        // gate would catch it eventually, and the paint path has no reason to allocate either.
+        let span_count = self.editor.spans().spans().len();
+        let mut si = self
+            .editor
+            .spans()
+            .spans()
+            .iter()
+            .position(|s| s.end_byte > start)
+            .unwrap_or(span_count);
+        let mut run_end = self
+            .editor
+            .spans()
+            .spans()
+            .get(si)
+            .map_or(end, |s| s.end_byte);
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut pen = 0u32;
+        let mut column = 0u32;
+        let mut at = start;
+        while at < end {
+            let n = CHUNK.min((end - at) as usize);
+            let got = self
+                .editor
+                .read_into_faulting(source, at as usize, &mut buf[..n])
+                .ok()?;
+            if got < n {
+                return None;
+            }
+            let mut from = 0usize;
+            while from < n {
+                while (at + from as u32) >= run_end && si < span_count {
+                    si += 1;
+                    run_end = self
+                        .editor
+                        .spans()
+                        .spans()
+                        .get(si)
+                        .map_or(end, |s| s.end_byte);
+                }
+                let style = self
+                    .editor
+                    .spans()
+                    .spans()
+                    .get(si)
+                    .filter(|_| (at + from as u32) < run_end)
+                    .map_or(holonomy_render::Style::REGULAR, |sp| {
+                        holonomy_render::Style(sp.atlas_style())
+                    });
+                // **One scalar at a time, because the boundary is per glyph.** A chunk-wide advance
+                // would give the click the whole chunk's midpoint, which is not a column.
+                let len = scalar_len(&buf[from..n]).min(n - from);
+                let adv = pen_of(&self.painter, &buf[from..from + len], style);
+                // **The glyph owns `[pen, pen + adv)`, and the midpoint rule splits it at
+                // `pen + adv / 2`.** `>=` on the right edge is what puts a click past the last glyph on
+                // the last column rather than one past it.
+                if dx < pen.saturating_add(adv / 2) {
+                    return Some(column);
+                }
+                pen = pen.saturating_add(adv);
+                column += 1;
+                from += len;
+            }
+            at += n as u32;
+        }
+        Some(column)
     }
 
     /// Select `[anchor, focus)`, collapsing anything already selected. Part 28.
@@ -1824,6 +1946,9 @@ impl<'a> Session<'a> {
         self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
         let _ = self.refresh_caret_column(None);
+        // **And the pen, for the reason in `reconcile_caret`.** A drag moves the caret every pointer
+        // event and a gate reads the state after one; the pen has to be current there too.
+        let _ = self.refresh_caret_pen(None);
         // **Scroll too, because a shift-arrow to a line off the page needs it as much as a plain one.**
         self.scroll_line_into_view(self.state.caret_line);
         self.damage = self.chrome.full_damage();
@@ -1901,9 +2026,9 @@ impl<'a> Session<'a> {
             let got = match source.as_deref_mut() {
                 Some(src) => self
                     .editor
-                    .read_into_faulting(src, at, &mut buf[..n])
+                    .read_into_faulting(src, at as usize, &mut buf[..n])
                     .ok()?,
-                None => self.editor.read_into(at, &mut buf[..n]).ok()?,
+                None => self.editor.read_into(at as usize, &mut buf[..n]).ok()?,
             };
             // **A short read means the rest is not there**, and counting what arrived would be a
             // number that is wrong by an unknown amount -- worse than the byte count it replaces,
@@ -1920,6 +2045,134 @@ impl<'a> Session<'a> {
         }
         self.state.caret_column = scalars;
         Some(scalars)
+    }
+
+    /// **Where the caret's pen reaches on its own line, in pixels from the text column's left edge.**
+    /// Part 33.
+    ///
+    /// # Why this exists, and why it is not `refresh_caret_column`
+    ///
+    /// **`refresh_caret_column` counts scalars, and scalars are not a distance.** It answers "which
+    /// glyph", which is what a click needs to convert a column into an offset; it does not answer "how
+    /// far", because the document is proportional and `'a'` is 9 px where `'W'` is 16. **The caret was
+    /// being placed by multiplying a glyph index by the chrome's monospace cell**, which is part 30's
+    /// standing decision and the largest remaining item on the backlog.
+    ///
+    /// **So the two questions are two functions.** One counts glyphs and is called by the keystroke
+    /// path that has no source; this one measures distance and is called only from `paint_with`,
+    /// which has a source and draws. **Merging them would put a second concern into a function whose
+    /// invariants are documented and load-bearing** — the stack buffer, the 64-byte chunk, the
+    /// faulting read, the short-read fallback — for no saving, since the paint path reads the line
+    /// anyway.
+    ///
+    /// # The cost, and why it is a second pass
+    ///
+    /// **O(line length), read in 64-byte chunks through a stack buffer**, exactly as
+    /// [`refresh_caret_column`](Self::refresh_caret_column) does, so `tests/session_no_alloc.rs`
+    /// stays green. **It is a second pass over one line, and that is a deliberate trade**: the two
+    /// walks ask different questions of the same bytes, the column's is needed by the click path and
+    /// the pen's by nothing else, and a single fused walk would have to answer both from the same
+    /// read to save one pass over at most 80-odd bytes. **A caret at the start of its line returns
+    /// `Some(0)` without reading anything**, which is `Home`, `DocumentStart` and every keystroke at
+    /// the beginning of a line.
+    ///
+    /// # Why the styled runs are queried and not assumed Regular
+    ///
+    /// **Because a bold glyph advances by the bold face's metric**, and part 31 established that the
+    /// emitter places a run using that face's advances. **A pen that assumed Regular would put the
+    /// caret back on the grid for exactly the runs where the grid was wrong**, which is the worst of
+    /// both: correct for an unstyled document and wrong for a styled one.
+    fn refresh_caret_pen(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Option<u32> {
+        let caret = self.editor.caret();
+        let start = self.line_start(caret as usize) as u32;
+        let span = caret.checked_sub(start)?;
+        if span == 0 {
+            self.state.caret_pen_x = Some(0);
+            return Some(0);
+        }
+        // **`SpanMap::spans()` and not `runs_in`, and that is forced.** `runs_in` returns a `Vec`, and
+        // `refresh_caret_pen` is called from `reconcile_caret` — **which is the edit path**, where
+        // `tests/session_no_alloc.rs` asserts that nothing allocates. The first version called
+        // `runs_in` and `typing_through_a_session_allocates_nothing` failed on the first run.
+        //
+        // **The slice is the same information and costs nothing to walk.** An unstyled document's map
+        // is one span over the whole text, and the walk below degenerates to a straight sum of Regular
+        // advances without a special case.
+        //
+        // **The index, not the slice.** The walk reads the line through `&mut self.editor` and cannot
+        // hold a borrow of it, so the slice is re-indexed per scalar and each span is taken as an owned
+        // `(end_byte, atlas_style)` pair. **A bounds check per scalar on a slice that is already in
+        // cache is cheaper than the `Vec` that holding it would have needed**, and the alternative --
+        // `SpanMap::style_at` by value -- is O(spans) *per glyph*, which is quadratic on a styled
+        // document and O(n) on an unstyled one.
+        let span_count = self.editor.spans().spans().len();
+        let mut si = self
+            .editor
+            .spans()
+            .spans()
+            .iter()
+            .position(|s| s.end_byte > start)
+            .unwrap_or(span_count);
+        /// Bytes per rope call, and the same chunk `refresh_caret_column` uses.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut pen = 0u32;
+        let mut at = start;
+        // **Which span the walk is inside, advanced as the walk passes span boundaries.** The spans
+        // are ascending and gap-free, so one cursor answers "what face is this byte in" without a
+        // search, and `SpanMap`'s own invariant is what makes that true.
+        let mut run_end = self
+            .editor
+            .spans()
+            .spans()
+            .get(si)
+            .map_or(caret, |s| s.end_byte);
+        while at < caret {
+            let n = CHUNK.min((caret - at) as usize);
+            let got = match source.as_deref_mut() {
+                Some(src) => self
+                    .editor
+                    .read_into_faulting(src, at as usize, &mut buf[..n])
+                    .ok()?,
+                None => self.editor.read_into(at as usize, &mut buf[..n]).ok()?,
+            };
+            // **A short read means the rest is not there**, and a pen summed over a prefix of a line
+            // is a number that is wrong by an unknown amount. Same fallback as the column scan.
+            if got < n {
+                return None;
+            }
+            let mut from = 0usize;
+            while from < n {
+                while (at + from as u32) >= run_end && si < span_count {
+                    si += 1;
+                    run_end = self
+                        .editor
+                        .spans()
+                        .spans()
+                        .get(si)
+                        .map_or(caret, |s| s.end_byte);
+                }
+                let style = self
+                    .editor
+                    .spans()
+                    .spans()
+                    .get(si)
+                    .filter(|_| (at + from as u32) < run_end)
+                    .map_or(holonomy_render::Style::REGULAR, |sp| {
+                        holonomy_render::Style(sp.atlas_style())
+                    });
+                // **To the end of this run, or to the end of the chunk, whichever comes first.**
+                let to = n.min((run_end - at) as usize).max(from + 1);
+                pen = pen.saturating_add(pen_of(&self.painter, &buf[from..to], style));
+                from = to;
+            }
+            at += n as u32;
+        }
+        self.state.caret_pen_x = Some(pen);
+        Some(pen)
     }
 
     /// Add `r` to the pending damage.
@@ -3026,6 +3279,13 @@ impl<'a> Session<'a> {
     /// and the two halves are the same in both callers, which is the point of taking them apart.
     fn reconcile_caret(&mut self) -> Result<(), SessionError> {
         let _ = self.refresh_caret_column(None);
+        // **The pen here as well as in `paint_with`, and that is the point of part 33.** The column
+        // is refreshed on every caret move so that the state a gate reads after `caret_to` is the
+        // state the frame would be drawn from -- part 22's argument. **The pen is a second field of
+        // exactly that kind, so it is refreshed in exactly the same places**; leaving it to the paint
+        // path alone made `Caret::locate` answer from a stale pen, which is the shape of part 22's
+        // defect wearing a new hat: two fields, one refreshed and one not.
+        let _ = self.refresh_caret_pen(None);
         self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
         let cell = self.caret_cell();
@@ -3089,6 +3349,13 @@ impl<'a> Session<'a> {
         // `refresh_caret_column` for why there is one function and two capabilities rather than two
         // implementations.
         let _ = self.refresh_caret_column(None);
+        // **The pen here as well as in `paint_with`, and that is the point of part 33.** The column
+        // is refreshed on every caret move so that the state a gate reads after `caret_to` is the
+        // state the frame would be drawn from -- part 22's argument. **The pen is a second field of
+        // exactly that kind, so it is refreshed in exactly the same places**; leaving it to the paint
+        // path alone made `Caret::locate` answer from a stale pen, which is the shape of part 22's
+        // defect wearing a new hat: two fields, one refreshed and one not.
+        let _ = self.refresh_caret_pen(None);
         self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
         // **And the page follows the caret.** Part 28: `scroll_line_into_view` used to live inside
@@ -3368,6 +3635,13 @@ impl<'a> Session<'a> {
         // **A read error here does not fail the paint.** `None` leaves the previous value, which is
         // the byte count — a status bar number, not a reason to lose a frame over.
         let _ = self.refresh_caret_column(Some(&mut *source));
+        // **The pen, in the same place and immediately after, because `chrome.tree` below reads it.**
+        //
+        // **`Caret::locate` runs inside `chrome.tree`**, so whatever this leaves is what gets drawn —
+        // the same argument `refresh_caret_column` is called there for, and the reason neither is
+        // hoisted out of this function. `None` leaves the previous value, and `Caret::locate` falls
+        // back to the grid, so a failed read costs a caret 10 px out rather than a frame.
+        let _ = self.refresh_caret_pen(Some(&mut *source));
         self.sync_selection();
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
@@ -3730,21 +4004,42 @@ impl<'a> Session<'a> {
             // line's bytes.
             if let Some(sel) = selection {
                 if let Some((lo, hi)) = sel.clip_to(at, at + len) {
+                    // **The line's offset in the document, which `pen_at` needs** because `runs` is
+                    // keyed on document offsets and `text` is a slice of the page buffer.
+                    let doc_start = self.lines.line_begin(line as usize) as u32;
                     let lo = (lo - at) as usize;
                     let hi = (hi - at) as usize;
-                    let col0 = codepoint_count(&text[..lo]);
-                    let col1 = col0 + codepoint_count(&text[lo..hi]);
+                    // **Two pens, not two column counts.** Part 33. `col0 * cell_w` was the grid and
+                    // the caret is now at the pen, so a highlight placed on the grid would start up to
+                    // a cell right of the caret at its left edge -- **the caret outside its own
+                    // highlight**, which is the defect the caret fix would otherwise have made worse
+                    // rather than better.
+                    let pen0 = pen_at(&self.painter, text, doc_start, lo, &page_runs);
+                    let pen1 = pen_at(&self.painter, text, doc_start, hi, &page_runs);
                     // **`shown` is the measure, and the highlight stops there too.** A line longer
                     // than the page is clipped by `codepoints_upto`, and a highlight running past the
                     // edge of the text would be a blue band over the page margin — which is not a
                     // cosmetic difference, it is a highlight on nothing.
-                    let col1 = col1.min(cells_per_row as u32);
-                    if col1 > col0 {
+                    // **`shown` is still the measure, and the highlight still stops there.** A line
+                    // longer than the page is clipped by `codepoints_upto`, and a highlight running
+                    // past the edge of the text would be a blue band over the page margin -- which is
+                    // not a cosmetic difference, it is a highlight on nothing. **The clip is on bytes
+                    // rather than on columns**, because the pen has no column to clip: the last glyph
+                    // the page shows is the last one inside `shown`, and its advance is where the pen
+                    // is.
+                    let pen1 = pen1.min(pen_at(
+                        &self.painter,
+                        &text[..shown],
+                        doc_start,
+                        shown,
+                        &page_runs,
+                    ));
+                    if pen1 > pen0 {
                         push_rect(
                             tree,
-                            l.x + col0 * m.cell_w,
+                            l.x + pen0,
                             y,
-                            (col1 - col0) * m.cell_w,
+                            pen1 - pen0,
                             m.cell_h,
                             holonomy_render::chrome::colour::SELECTION,
                         );
@@ -4935,6 +5230,35 @@ impl TextSource for PageText<'_> {
 ///
 /// **`O(len)`, no decode and no allocation**, so calling it per run is a scan of the line rather than of
 /// the document: a line is at most `cells_per_row` codepoints wide, and the runs tile it.
+/// **The length in bytes of the UTF-8 scalar at the front of `bytes`, at least 1.** Part 33.
+///
+/// **A continuation byte at the front cannot start a scalar**, and a truncated tail cannot be decoded,
+/// so the answer is clamped to one byte rather than refused: the walk in
+/// [`Session::column_at_pen`] is over a chunk boundary it cannot see, and stopping there would put
+/// every later glyph of a 64-byte-boundary line one column short.
+///
+/// **This is not the same as `std::str::from_utf8`, deliberately.** That answers "is this whole slice
+/// valid UTF-8", which is the wrong question mid-chunk and costs a scan of the rest of the slice.
+fn scalar_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.chars().next().map_or(1, char::len_utf8),
+        Err(e) => {
+            let valid = e.valid_up_to();
+            if valid > 0 {
+                std::str::from_utf8(&bytes[..valid])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                    .map_or(1, char::len_utf8)
+            } else {
+                // **An invalid byte is one scalar's worth of movement**, matching `pen_of`, which
+                // charges one `.notdef` cell for it. Two functions disagreeing here would put the caret
+                // a column from the glyph it points at, on a document that is not valid UTF-8.
+                e.error_len().unwrap_or(1)
+            }
+        }
+    }
+}
+
 fn codepoint_count(bytes: &[u8]) -> u32 {
     bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32
 }
@@ -5054,6 +5378,79 @@ fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) ->
         };
         pen = pen.saturating_add(painter.advance_of(cp, style));
         at += used;
+    }
+    pen
+}
+
+/// **The pen position `at` bytes into a line, using each styled run's own face.** Part 33.
+///
+/// ## Why this exists, and why it is not `pen_of`
+///
+/// **`pen_of` measures a whole run in one face.** A line with three runs needs three calls with three
+/// faces, and getting the boundaries right by hand at each call site is how the run positions and the
+/// caret came to disagree in the first place — so the boundary walk lives here once, and the caret,
+/// the selection highlight and the text itself all get their positions from the same arithmetic.
+///
+/// ## `at` is bytes into `text`; `line_start` is the line's offset in the document
+///
+/// **Both, and the distinction is load-bearing.** `runs` is keyed on document offsets because that is
+/// what `SpanMap` speaks, and `text` is a slice of the page buffer because that is what the emitter
+/// already has. Conflating them would put a highlight on the wrong line, and the two differ by
+/// everything above the page.
+///
+/// ## No allocation
+///
+/// **`runs` is the page's one query, already in hand** — this walks a handful of entries over at most
+/// one line's bytes. The paint path's allocation invariant is asserted by `tests/session_no_alloc.rs`
+/// for the edit path and is explicitly out of scope for paint, but a function on this path has no
+/// business allocating when a walk answers it.
+fn pen_at(
+    painter: &Painter<'_>,
+    text: &[u8],
+    line_start: u32,
+    at: usize,
+    runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
+) -> u32 {
+    let at = at.min(text.len());
+    let mut pen = 0u32;
+    // **The cursor is a byte index into `text`, and every run boundary it lands on is converted from a
+    // document offset before use.** The `- line_start` is `saturating_sub` because a run can start
+    // before this line -- a styled run begun on the previous line and continuing here -- and a
+    // subtraction that wrapped would put the highlight a page to the left.
+    let mut cursor = 0usize;
+    for (span, lo, hi) in runs {
+        let lo = (*lo).saturating_sub(line_start) as usize;
+        let hi = (*hi).saturating_sub(line_start) as usize;
+        if lo >= at {
+            break;
+        }
+        if hi <= cursor {
+            continue;
+        }
+        if lo > cursor {
+            pen = pen.saturating_add(pen_of(
+                painter,
+                &text[cursor..lo],
+                holonomy_render::Style::REGULAR,
+            ));
+        }
+        let end = hi.min(at);
+        pen = pen.saturating_add(pen_of(
+            painter,
+            &text[lo..end],
+            holonomy_render::Style(span.atlas_style()),
+        ));
+        cursor = end;
+        if cursor >= at {
+            return pen;
+        }
+    }
+    if cursor < at {
+        pen = pen.saturating_add(pen_of(
+            painter,
+            &text[cursor..at],
+            holonomy_render::Style::REGULAR,
+        ));
     }
     pen
 }

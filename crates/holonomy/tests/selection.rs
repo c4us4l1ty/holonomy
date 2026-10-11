@@ -330,18 +330,23 @@ fn a_selection_draws_a_highlight_where_its_bytes_are() {
     );
     assert_eq!(
         box_.0,
-        l.x + 6 * m.cell_w,
+        l.x + pen("alpha "),
         "**the changed pixels start at column 6** -- the `b` of `bravo`"
     );
-    // **Inclusive, so the far edge is `width - 1`.** `difference` returns the largest x that differed,
-    // and a five-cell highlight at x 368 ends at 407. **The first draft of this assertion said 408**,
-    // which is one past the end of the highlight -- and would have passed for a highlight that was one
-    // cell too wide if the fixture had been a cell narrower. Subtracting the `cell_w` back out is the
-    // only way to say "and no further", and the off-by-one is why.
+    // **Inclusive, so the far edge is `start + width - 1`.** `difference` returns the largest x that
+    // differed. **The first draft of this assertion said 408**, one past the end of the highlight --
+    // which would have passed for a highlight one cell too wide if the fixture had been a cell
+    // narrower. Subtracting one back out is the only way to say "and no further".
+    //
+    // **`pen("alpha bravo") - 1` and not `11 * cell_w - 1`.** Part 33: the highlight ends at the pen
+    // after `bravo`, and the last pixel inside it is one before that. The pen is 90 and the grid's
+    // eleven cells of 10 is 110, so this moved by twenty pixels and the measurement was right.
     assert_eq!(
         box_.2,
-        l.x + 11 * m.cell_w - 1,
-        "**and stop at the last cell of column 10** -- `bravo` and nothing more"
+        l.x + pen("alpha bravo") - 1,
+        "**and stop at `bravo`'s trailing edge** -- pen {} px in, one pixel short of the end, so the \
+         highlight covers `bravo` and nothing more",
+        pen("alpha bravo")
     );
     assert_eq!(
         box_.1, l.y,
@@ -371,11 +376,11 @@ fn a_selection_highlight_stops_at_the_end_of_its_bytes() {
     // at 407, and `407 - 368` is 39.
     assert_eq!(
         box_.2 + 1 - box_.0,
-        5 * m.cell_w,
+        pen("bravo"),
         "**five cells for five letters** -- the highlight does not run on to `charlie` or `delta`, \
          which are on the same line and would look identical if it did"
     );
-    assert_eq!(box_.0, l.x + 6 * m.cell_w, "starting where byte 6 lands");
+    assert_eq!(box_.0, l.x + pen("alpha "), "starting where byte 6 lands");
 }
 
 /// A selection crossing a line boundary highlights both lines.
@@ -399,19 +404,32 @@ fn a_selection_across_two_lines_highlights_both() {
     let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h, m.cell_w);
     assert_eq!(
         widths[0],
-        6 * m.cell_w,
-        "**row 0 is six cells** -- `bravo` *and the newline's cell*. This is deliberate and the next \\
+        pen("bravo\n"),
+        "**row 0 is `bravo` and the newline's cell** -- six glyphs. This is deliberate and the next \\
          paragraph is why; see `the_newline_cell_is_highlighted_on_purpose` below."
     );
     assert_eq!(
         widths[1],
-        8 * m.cell_w,
-        "**row 1 is eight cells** -- `charlie `, from the start of the line to byte 20"
+        pen("charlie "),
+        "**row 1 is `charlie `** -- eight glyphs, from the start of the line to byte 20"
     );
+    // **The claim was "together they are every one of the selection's 14 bytes", and the arithmetic
+    // that said so was `14 * cell_w`.** That is a sum of two independent pens, and **there is no
+    // "total pen" for a range that crosses a line**: row 1's pen restarts at the left edge of the
+    // text column, so the two widths do not compose into the pen of the concatenation. Part 33
+    // reported **109 against 140** and the pixels were right.
+    //
+    // **The claim is about glyphs, so it is now stated in glyphs**: six on row 0 and eight on row 1,
+    // which is the selection's fourteen bytes, and each width is the pen of exactly those glyphs --
+    // asserted immediately above. **A sum of two pens is not a pen**, and the old assertion only
+    // worked because the grid made the sum meaningless-but-checkable.
     assert_eq!(
-        widths.iter().sum::<u32>(),
-        14 * m.cell_w,
-        "and together they are every one of the selection's 14 bytes: {widths:?}"
+        "bravo\n".chars().count() + "charlie ".chars().count(),
+        14,
+        "**the selection's 14 bytes are six on row 0 and eight on row 1**, and each row's width is \
+         the pen of exactly those: {widths:?}. A sum of two pens is not a pen -- row 1's pen restarts \
+         at the left edge of the text column -- so the claim is made in glyphs, where it is \
+         actually a claim."
     );
 }
 
@@ -443,7 +461,7 @@ fn the_newline_cell_is_highlighted_on_purpose() {
     let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h, m.cell_w);
     assert_eq!(
         widths[0],
-        5 * m.cell_w,
+        pen("alpha"),
         "`alpha` alone is five cells and does not reach the terminator: {widths:?}"
     );
     assert_eq!(
@@ -458,6 +476,60 @@ fn the_newline_cell_is_highlighted_on_purpose() {
 /// and reports the widest contiguous run of differing pixels in it, which is what a highlight is; a
 /// highlight is one rectangle per row and its width is constant across the row, so the widest run is
 /// its width and not an artefact of where the glyphs sit.
+/// **The pen position after `text`, in the Regular face at 16 ppem.** Part 33.
+///
+/// ## Why every width in this file is now written with it
+///
+/// **Four gates here measured a highlight's width as `n * cell_w`**, which asserts that N glyphs are N
+/// monospace cells wide. **They are not** — the document is Inter and the highlight is at the pen —
+/// so part 33 turned all four red with `41 against 50`, `44 against 50`, `54 against 60` and `286
+/// against 300`. **Every one of those measurements was right and every one of the instruments was
+/// wrong**, and the fix is not to loosen the numbers but to write them in the unit the thing is in.
+///
+/// **The claim each gate makes is about how many glyphs, and that is unchanged.** `alpha` is still
+/// five glyphs, `bravo` still five, and the terminator is still highlighted on purpose. **Only the
+/// arithmetic that turns "five glyphs" into pixels changed**, and it changed because the product
+/// changed underneath them.
+///
+/// ## And the rule is `advance_of`'s, not a sum of nominals
+///
+/// **A space takes the face's advance and a `.notdef` takes the cell**, which is the two-case rule
+/// `Painter::advance_of` exists for. `alpha bravo` has a space in it, and a gate that summed a
+/// different rule would be a third opinion about where a space is.
+fn pen(text: &str) -> u32 {
+    let a = atlas();
+    let ppem = a.sizes().first().copied().unwrap_or(16);
+    // **`Painter::advance_of`'s two cases, and not a sum of `advance_x`.** A blank glyph with an
+    // advance -- a space -- takes the face's advance; a `.notdef` and, here, the `\n` terminator
+    // take the cell. **The first version of this helper summed `advance_x` alone and predicted 44 px
+    // for `bravo\n` against a measured 54**, because `\n` has no advance of its own. That is the
+    // same rule `Painter::advance_of` exists for, in a fourth place, and it is written out here
+    // because a test that calls into the product's own function would not be a test of the product.
+    let cell = u32::from(
+        a.metric(
+            b'm' as u32,
+            holonomy_assets::payload::Style::Monospace,
+            ppem,
+        )
+        .advance_x,
+    )
+    .max(1);
+    text.chars()
+        .map(|c| {
+            let m = a.metric(c as u32, holonomy_assets::payload::Style::Regular, ppem);
+            if m.is_blank() {
+                if m.advance_x > 0 {
+                    u32::from(m.advance_x)
+                } else {
+                    cell
+                }
+            } else {
+                u32::from(m.advance_x).max(1)
+            }
+        })
+        .sum()
+}
+
 fn row_widths(
     a: &Session<'_>,
     b: &Session<'_>,

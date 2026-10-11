@@ -41,8 +41,6 @@ pub enum Tool {
     Undo,
     /// Redo.
     Redo,
-    /// Print.
-    Print,
     /// Spellcheck.
     Spellcheck,
     /// Format painter.
@@ -92,7 +90,6 @@ impl Tool {
         match self {
             Tool::Undo => Some(IconId::Undo),
             Tool::Redo => Some(IconId::Redo),
-            Tool::Print => Some(IconId::Print),
             Tool::Spellcheck => Some(IconId::Spellcheck),
             Tool::PaintFormat => Some(IconId::PaintFormat),
             Tool::SizeDown => Some(IconId::Minus),
@@ -146,7 +143,6 @@ impl Tool {
         match self {
             Tool::Undo => "undo",
             Tool::Redo => "redo",
-            Tool::Print => "print",
             Tool::Spellcheck => "spellcheck",
             Tool::PaintFormat => "paint-format",
             Tool::Zoom => "zoom",
@@ -222,7 +218,6 @@ impl Tool {
 pub const TOOLBAR: &[Tool] = &[
     Tool::Undo,
     Tool::Redo,
-    Tool::Print,
     Tool::Spellcheck,
     Tool::PaintFormat,
     Tool::Zoom,

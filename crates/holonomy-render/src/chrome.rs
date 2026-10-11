@@ -1072,6 +1072,31 @@ pub struct ChromeState {
     pub caret_line: u32,
     /// Caret column, 0-based.
     pub caret_column: u32,
+
+    /// **Where the caret's pen is on its line, in pixels from the text column's left edge.** Part 33.
+    ///
+    /// ## Why this exists, and why it is `Option`
+    ///
+    /// **`caret_column` counts scalars and `Caret::locate` multiplied it by `cell_w`**, which is the
+    /// chrome's monospace grid. **The document is Inter, which is proportional**: at 16 ppem `'a'`
+    /// advances 9 and `'W'` advances 16 in the same cell of 10, so the caret was 10, 20 and 40 px
+    /// *ahead* of the glyph it pointed at at columns 10, 20 and 40 — **part 30's standing decision,
+    /// unmeasurable by any gate until now and wrong in every direction the letters can make it
+    /// wrong.** `grid_vs_glyphs.rs` holds the measurement.
+    ///
+    /// **`None` is "not known on this frame"**, and it is different from `Some(0)`: a pen of zero is
+    /// the answer at the start of a line and the answer a fresh session has not computed yet is not.
+    /// [`Caret::locate`] falls back to the grid when it is `None`, which is the old behaviour and is
+    /// the right thing to do rather than refuse to draw a caret.
+    ///
+    /// ## Why the session writes it and the chrome reads it
+    ///
+    /// **Part 22, and the same rule as `selection`.** The chrome does not know where the lines are,
+    /// does not know the fonts' advances, and must not be able to invent either. The session owns the
+    /// document and the atlas; it walks the caret's line in the same pass that places the runs and
+    /// records where the pen actually reached. **So the caret cannot disagree with the text by
+    /// construction** — the failure this field removes is precisely a disagreement.
+    pub caret_pen_x: Option<u32>,
     /// Whether the document-tabs sidebar is open.
     ///
     /// **A flag rather than a width, and the width is always [`ChromeMetrics::sidebar_w`].** A sidebar
@@ -1210,6 +1235,7 @@ impl Default for ChromeState {
             zoom_percent: 100,
             caret_line: 0,
             caret_column: 0,
+            caret_pen_x: None,
             words: 0,
             bytes: 0,
             dirty: false,
@@ -1256,10 +1282,17 @@ impl Caret {
         if row >= layout.rows || state.caret_column >= m.columns {
             return None;
         }
-        let x = layout
-            .text
-            .x
-            .checked_add(state.caret_column.checked_mul(m.cell_w)?)?;
+        // **The pen if the session gave one, the grid if it did not.** Part 33.
+        //
+        // **Both are read here and neither is computed here.** The grid arm is the old expression and
+        // is kept deliberately: a session that has not walked the caret's line -- no atlas, a caret
+        // on a line another emitter owns, a read that failed -- still draws a caret, and a caret on
+        // the grid is 10 px out rather than absent.
+        let dx = match state.caret_pen_x {
+            Some(pen) => pen,
+            None => state.caret_column.checked_mul(m.cell_w)?,
+        };
+        let x = layout.text.x.checked_add(dx)?;
         Some(Self {
             cell: DamageRect::new(x, y, m.cell_w, m.cell_h),
             line: state.caret_line,

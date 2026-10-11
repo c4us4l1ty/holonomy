@@ -39,6 +39,23 @@ use holonomy_display::HeadlessScanout;
 use holonomy_render::chrome::{Caret, ChromeMetrics};
 use holonomy_text::{Editor, SpanPolicy};
 
+/// **The advance of one character in the Regular face at 16 ppem.** Part 33.
+///
+/// **The unit the caret is in.** Every pixel expectation in this file used to be `column * cell_w`,
+/// which is part 30's defect written down as a test; they are all now the glyph's own advance.
+fn pen(ch: &str) -> u32 {
+    let a = atlas();
+    let ppem = a.sizes().first().copied().unwrap_or(16);
+    ch.chars()
+        .map(|c| {
+            u32::from(
+                a.metric(c as u32, holonomy_assets::payload::Style::Regular, ppem)
+                    .advance_x,
+            )
+        })
+        .sum()
+}
+
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
         std::sync::OnceLock::new();
@@ -102,12 +119,19 @@ fn the_column_counts_characters_not_bytes() {
     assert_eq!(s.caret_column(), 0);
 }
 
-/// **The caret is drawn at the cell the character ends at.**
+/// **The caret is drawn at the pen the character ends at.**
 ///
-/// **This is the half that was visible.** `Caret::locate` places the cell at
+/// **This is the half that was visible.** `Caret::locate` used to place the cell at
 /// `text.x + caret_column * cell_w`, so a byte column drew the caret one cell past the glyph it belongs
 /// to — and the symptom is "the caret is slightly too far right", which reads as a metrics problem and
 /// is an arithmetic one.
+///
+/// ## CORRECTION, part 33: "the cell" is now "the pen"
+///
+/// **The expectation was `text.x + cell_w` and the measurement is `text.x + 9`, because `é` advances
+/// 9 and the cell is 10.** **The gate was the thing that was wrong**: it said "one cell in, under the
+/// `a`", which asserted that a proportional glyph is as wide as a monospace cell — part 30's defect,
+/// written down as a test. The pen is the unit the caret is in now.
 #[test]
 fn the_caret_is_drawn_under_the_character_that_ends_there() {
     let mut s = session("éa\n");
@@ -117,15 +141,20 @@ fn the_caret_is_drawn_under_the_character_that_ends_there() {
     s.caret_to(2).expect("after the é");
     assert_eq!(
         caret_x(&s),
-        l.text.x + cell_w,
-        "one cell in, under the a — the column and the pixels agree"
+        l.text.x + pen("\u{e9}"),
+        "**at `é`'s own advance, under the `a`** -- the column and the pixels agree"
+    );
+    assert_ne!(
+        pen("\u{e9}"),
+        cell_w,
+        "**and `é` really is narrower than the cell**, so the two are not the same assertion."
     );
 
     s.caret_to(3).expect("after the a");
     assert_eq!(
         caret_x(&s),
-        l.text.x + 2 * cell_w,
-        "and two cells in, which is byte 3 and character 2"
+        l.text.x + pen("\u{e9}a"),
+        "**and after `a` too** -- the pen of `éa`, which is byte 3 and character 2"
     );
 }
 
@@ -136,6 +165,20 @@ fn the_caret_is_drawn_under_the_character_that_ends_there() {
 /// 2 — and this adds the backward direction, which is the one that was missing: **having arrived at a
 /// byte offset, the column computed from it must be the column that got you there.** A pair that is
 /// each correct alone and disagree with each other puts the caret back where it started.
+///
+/// ## CORRECTION, part 33: "the drawn cell" is now "the drawn pen", and the click is in pixels
+///
+/// **The gate clicked at `text.x + column * cell_w` and expected the caret at the same place, which is
+/// only a round trip if the caret is *drawn on the grid* — which, until part 33, it was.** The caret is
+/// now at the pen, and the click is now resolved by the pen, so **the round trip is "click at a pixel,
+/// land on the column whose glyph covers it, and be drawn at that column's pen."** That is not the same
+/// identity and it is the right one: a click is made in pixels and a caret is drawn in pixels, and the
+/// only thing a test can honestly assert is that they meet.
+///
+/// **The fixture is `éa`, where the two answers differ by a whole pixel**: `é` advances **9** and the
+/// cell is **10**, so the first version reported **249 against 250** and was wrong — not the code.
+/// Asserting `text.x + cell_w` for the caret's x is asserting that a proportional glyph is as wide as
+/// a monospace cell, which is the defect part 30 recorded.
 #[test]
 fn a_click_and_the_drawn_cell_agree_in_both_directions() {
     use holonomy::store::NoSource;
@@ -146,6 +189,9 @@ fn a_click_and_the_drawn_cell_agree_in_both_directions() {
     let l = s.chrome_layout();
     let cell_w = s.chrome.metrics.cell_w;
 
+    // **A click in pixels, at the midpoint of the column's cell on the grid** — which is a *click
+    // position*, not a claim about where the caret lands. Part 33 resolved the click by the pen, so
+    // what has to hold is that a click at the middle of a glyph's cell selects that glyph.
     let mut click = |s: &mut Session<'static>, column: u32| {
         let x = (l.text.x + column * cell_w) as i32;
         let y = l.text.y as i32;
@@ -168,10 +214,29 @@ fn a_click_and_the_drawn_cell_agree_in_both_directions() {
     click(&mut s, 1);
     assert_eq!(s.caret(), 2, "the click's half, from part 20");
     assert_eq!(s.caret_column(), 1, "and the column reads back the same");
+    // **And the caret is drawn at the pen, which is 9 and not 10.** `é` is a Regular glyph and
+    // advances 9 at 16 ppem; the cell is the Monospace face's 10. **Asserting `text.x + cell_w` here
+    // is asserting that the glyph is as wide as the cell**, which is part 30's defect and the reason
+    // part 33 exists.
+    let pen_of_e = u32::from(
+        atlas()
+            .metric(
+                '\u{e9}' as u32,
+                holonomy_assets::payload::Style::Regular,
+                16,
+            )
+            .advance_x,
+    );
     assert_eq!(
         caret_x(&s),
-        l.text.x + cell_w,
-        "so the caret is drawn where the click put it"
+        l.text.x + pen_of_e,
+        "so the caret is drawn at `\u{e9}`'s own advance -- {} px, against a {cell_w} px cell",
+        pen_of_e
+    );
+    assert_ne!(
+        pen_of_e, cell_w,
+        "**and `\u{e9}` really is narrower than the cell**, which is the whole of part 30's decision: if \
+         this ever equals `cell_w` the fixture no longer tells the grid from the pen."
     );
 
     // And the round trip the other way: every column on the line round-trips.
@@ -521,10 +586,14 @@ fn a_session_opened_on_a_document_reconciles_its_caret() {
         (2, 7),
         "seven characters in, and seven cells"
     );
+    // **`pen("charlie")`, not `7 * cell_w`.** Part 33 reported `290 against 310` here: seven cells of
+    // 10 is 70 and `charlie`'s pen is 50. **The claim is "the caret is at the end of `charlie`", and
+    // the end of `charlie` is at the pen.** The column above it is still 7 -- a column is a count of
+    // glyphs and it has not changed.
     assert_eq!(
         caret_x(&t),
-        l.text.x + 7 * s.chrome.metrics.cell_w,
-        "which is what `charlie` is"
+        l.text.x + pen("charlie"),
+        "which is what `charlie` is: its pen, not seven cells"
     );
 
     // **An empty document still agrees with itself**, which is the case `Default` was right for.

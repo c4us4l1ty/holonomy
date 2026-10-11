@@ -245,7 +245,6 @@ const FILE: &[Item] = &[
     plain("Open"),
     sub("Import", IconId::Folder),
     plain("Export"),
-    plain("Print"),
     accel("Page setup", "Ctrl+P"),
     act("Close", Action::Close),
     sub("Extensions", IconId::Sparkle),

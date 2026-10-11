@@ -102,6 +102,47 @@ fn move_to(x: i32, y: i32) -> Vec<Event> {
     out
 }
 
+/// **The pen position after `text`, in the Regular face at 16 ppem.** Part 33.
+///
+/// **The two-case rule, not a sum of `advance_x`**: a blank with an advance takes it, a `.notdef`
+/// takes the cell. `Painter::advance_of` is the definition; this is the same rule written out, because
+/// a test that called the product's own function would not be a test of the product.
+fn pen(text: &str) -> u32 {
+    let atlas: &'static holonomy_assets::atlas::Atlas = {
+        static A: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
+            std::sync::OnceLock::new();
+        A.get_or_init(|| {
+            let (a, _) = holonomy_assets::build_atlas(&[16]).expect("build the atlas");
+            Box::leak(Box::new(a))
+        })
+    };
+    let ppem = atlas.sizes().first().copied().unwrap_or(16);
+    let cell = u32::from(
+        atlas
+            .metric(
+                b'm' as u32,
+                holonomy_assets::payload::Style::Monospace,
+                ppem,
+            )
+            .advance_x,
+    )
+    .max(1);
+    text.chars()
+        .map(|c| {
+            let m = atlas.metric(c as u32, holonomy_assets::payload::Style::Regular, ppem);
+            if m.is_blank() {
+                if m.advance_x > 0 {
+                    u32::from(m.advance_x)
+                } else {
+                    cell
+                }
+            } else {
+                u32::from(m.advance_x).max(1)
+            }
+        })
+        .sum()
+}
+
 /// Deliver events to `s`, as the run loop does.
 fn feed(s: &mut Session<'static>, events: &[Event]) {
     for e in events {
@@ -121,8 +162,18 @@ fn a_click_on_the_page_puts_the_caret_under_the_pointer() {
     let l = s.chrome_layout();
     let text_x = l.text.x;
     let text_y = l.text.y;
-    // Column 3 of row 1: a quarter of the way across the text column and one line down.
-    let x = text_x as i32 + 3 * l.cell_w as i32;
+    // **Column 3 of row 1: a quarter of the way across the text column and one line down.**
+    //
+    // **`pen("bra")` and not `3 * cell_w`. Part 33.** The click is resolved by the pen now — by the
+    // midpoint rule, which a division cannot express — and `3 * cell_w` is 30 px, which on `bravo`
+    // (`b` 10, `r` 6, `a` 9, `v` 9, `o` 10) is past the midpoint of `v` and lands on **column 4**.
+    //
+    // **The first version of this gate reported `(1, 4)` against `(1, 3)` and the pixels were right**:
+    // the pen after `bra` is 25, which is the left half of `v`, and a click there belongs before `v`.
+    // **A click expressed in the grid and resolved on the pen is a gate about one of the two and
+    // silent about the other**, which is the same trap as placing a caret by one and clicking by the
+    // other -- the failure part 33 had to fix in the product.
+    let x = text_x as i32 + pen("bra") as i32;
     let y = text_y as i32 + l.cell_h as i32;
     assert_eq!(
         widgets::hit(&l, &s.state, x, y),
@@ -302,13 +353,21 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
 fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     let mut s = session("x");
     let l = s.chrome_layout();
-    // **Print, and not Bold.** This gate used `Tool::Bold` and part 25 armed a style from it, so Bold is
-    // no longer an example of a button with nothing behind it. **Print is, and there is nothing behind
-    // it** — no print backend, and adding one is not something to invent to make a test pass.
+    // **Spellcheck, and neither Bold nor Print.** Three changes to this line across three parts, and
+    // each one is a fact about the product rather than about the test:
+    //
+    // * **it used `Tool::Bold`**, until part 25 armed a style from Bold and Bold became a button with
+    //   something behind it;
+    // * **it used `Tool::Print`**, which part 33 removed rather than wire up — **a button that does
+    //   nothing and never will is a lie about the product, and removing it is cheaper and more honest
+    //   than inventing a print backend to make a gate pass**;
+    // * **so it is `Tool::Spellcheck`**, which is inert for the same reason Print was and is still
+    //   there because a spellchecker is a real feature someone will want, unlike a printer in a
+    //   sandboxed text editor that cannot open a file dialog.
     let bold = widgets::place_toolbar(&l, 8)
         .into_iter()
-        .find(|p| p.tool == widgets::Tool::Print)
-        .expect("the toolbar has Print")
+        .find(|p| p.tool == widgets::Tool::Spellcheck)
+        .expect("the toolbar has Spellcheck")
         .rect;
     let inert_before = s.stats.pointer_inert;
     let commands_before = s.stats.pointer_commands;
@@ -400,11 +459,22 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     //
     // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
     // reason the comment above gives: opening a popup has applied nothing yet.
+    // **Ten, and it was eleven until part 33.** `Tool::Print` was removed rather than wired up -- a
+    // button that does nothing and never will is a lie about the product, and a print backend is not
+    // something to invent to keep a number unchanged. **The arithmetic follows: 20 tools now, so 20
+    // minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome changes.**
+    assert_eq!(
+        widgets::TOOLBAR.len(),
+        20,
+        "**twenty tools**, and it was twenty-one until part 33 removed Print. The count is asserted \
+         separately so that the inert arithmetic below cannot be quietly wrong on both sides."
+    );
     assert_eq!(
         inert.len(),
-        11,
-        "**eleven inert buttons**, which is 21 minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome \
-         changes. The list is {inert:?}"
+        10,
+        "**ten inert buttons**, which is 20 minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome \
+         changes. The list is {inert:?} and it no longer contains `print` -- that is the whole of what \
+         part 33 did to this gate."
     );
 }
 

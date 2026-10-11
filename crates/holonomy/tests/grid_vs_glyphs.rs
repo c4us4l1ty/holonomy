@@ -60,9 +60,10 @@
 //! | what it proves | test |
 //! | --- | --- |
 //! | **the grid is now the face's own advance** | [`cell_width_is_the_monospace_advance_it_claims_to_be`] |
+//! | **and part 33 put the caret on the pen** | [`the_caret_is_at_the_pen_and_not_where_the_grid_would_put_it`] |
 //! | **40 identical glyphs now fit inside 40 cells** | [`forty_identical_glyphs_fit_inside_forty_cells`] |
 //! | **and the error still changes sign with the letters** | [`the_error_changes_sign_with_the_letters`] |
-//! | **and the caret is therefore still in the wrong place** | [`the_caret_is_where_the_grid_says_not_where_the_text_is`] |
+//! | **and the caret was therefore in the wrong place** | [`the_caret_is_at_the_pen_and_not_where_the_grid_would_put_it`] |
 
 use holonomy::session::Session;
 use holonomy_display::paint::Painter;
@@ -308,29 +309,49 @@ fn the_error_changes_sign_with_the_letters() {
     let _ = (mlo, wlo);
 }
 
-/// The caret is where the grid says, and the grid is not where the text is.
+/// **The caret is at the pen, and it is exactly right. Part 33 fixed this gate's predecessor.**
 ///
-/// ## The user-visible consequence, re-measured
+/// ## What this was, and the numbers it held
 ///
-/// **The caret is now 10 px *ahead* of the glyph it points at at column 10, 20 at column 20 and 40
-/// at column 40.** Part 30 measured it *behind* -- 10, 20 and 40 px behind -- because the cell was
-/// 8 and `'a'` advances 9. **The sign of the caret's error moved with the cell and the error is
-/// still one pixel per column**, which is the whole of what part 30 said and is worth restating
-/// because a reader who saw the old numbers would expect the direction to have been fixed too.
+/// ```text
+///                            part 30        part 32        part 33
+/// caret at column 10         10 px behind   10 px ahead    0 px
+/// ```
 ///
-/// ## What this gate is, and what it is not
+/// **The gate asserted the defect in all three columns** — that `Caret::locate` is
+/// `text.x + caret_column * cell_w`, and therefore somewhere other than where the glyph is. **Part 33
+/// gave the caret a pen**, so it failed with **330 against 340**: the caret is at `text.x + 90`, which
+/// is ten advances of 9, and the grid's 340 is ten cells of 10.
 ///
-/// **It is the defect that decision (b) does not fix**, and it says so. Putting the chrome on the
-/// monospace face's grid makes the *chrome* honest -- the ruler, the tables, the wrap point and the
-/// measure now speak in the face's unit -- **and the document is still Inter, which is proportional.**
-/// No fixed cell can place a caret inside proportional text, because `'a'` is 9 and `'W'` is 16 in
-/// the same cell of 10.
+/// **It is flipped, not deleted, and the flip is the whole claim**: the same measurement with the sign
+/// removed. A defect gate that is deleted leaves the fact unrecorded; one that is weakened is how a
+/// defect gate becomes a lie.
 ///
-/// **The fix is a pen for the document, which part 31 built for run positions and this gate says the
-/// caret needs too.** It is not in part 32 because it moves every x in the project, which is
-/// part 30's standing decision.
+/// ## Why it is now exactly right, and why that was not free
+///
+/// **The pen sums each glyph's own advance**, so it is right for `'a'` and `'W'` alike — which is the
+/// whole of what part 30 said no fixed cell could do. **Two things had to change together and neither
+/// is enough alone**, and that is the finding worth recording:
+///
+/// * **the caret is placed by the pen** (`ChromeState::caret_pen_x`, written by the session's walk),
+///   **and**
+/// * **a click is resolved by the pen** (`Session::column_at_pen`).
+///
+/// **Placing the caret by the pen while hit-testing by the grid is worse than either being wrong.**
+/// A caret drawn 10 px from the glyph but landing where the user clicked is a caret that does not go
+/// where the pointer went, and `a_click_and_the_drawn_cell_agree_in_both_directions` caught exactly
+/// that: **249 against 250** on the first run.
+///
+/// ## What is still on the grid, and is not in this file any more
+///
+/// **The ruler's ticks and the tables' cells.** They are chrome furniture in the Monospace face's
+/// unit and they are *right* there — a ruler that counts cells is counting the chrome's grid, which is
+/// the grid the chrome is drawn on. **The wrap point and the truncation** are in cells too, and the
+/// measure is 80 of them; at 800 px of column and a mean advance of 8.58 that is 93 glyphs, so a long
+/// line is clipped a little before the page edge rather than a little after it, which is the safe
+/// direction to be wrong in.
 #[test]
-fn the_caret_is_where_the_grid_says_not_where_the_text_is() {
+fn the_caret_is_at_the_pen_and_not_where_the_grid_would_put_it() {
     let n = 40u32;
     let mut s = painted(&"a".repeat(n as usize), 0);
     let l = s.chrome_layout().text;
@@ -343,12 +364,7 @@ fn the_caret_is_where_the_grid_says_not_where_the_text_is() {
         .expect("on screen")
         .cell
         .x;
-    let grid_x = l.x + 10 * cell_w;
-    assert_eq!(
-        cell, grid_x,
-        "`Caret::locate` is `text.x + caret_column * cell_w`, and that is where it puts the caret"
-    );
-    // **Where the text actually is at column 10: ten advances of 9, not ten cells of 10.**
+    // **Where the text is at column 10: ten advances of 9.**
     let advance = u32::from(
         atlas()
             .metric(b'a' as u32, holonomy_assets::payload::Style::Regular, 16)
@@ -360,19 +376,54 @@ fn the_caret_is_where_the_grid_says_not_where_the_text_is() {
     );
     let true_x = l.x + 10 * advance;
     assert_eq!(
-        true_x as i64 - cell as i64,
-        -10,
-        "**the caret is 10 px AHEAD of the glyph it points at** -- and that grows by 1 px for every \
-         further column, reaching {} px at column 40. Part 30 measured this as 10 px BEHIND, because \
-         the cell was 8 and the same glyph advances 9; the cell moved to 10 and the sign moved with \
-         it, which is the clearest statement of the defect available: the caret's direction depends \
-         on a number nobody chose on purpose.",
-        40i64 * (cell_w as i64 - advance as i64)
+        cell, true_x,
+        "**the caret is at the pen: {0} px in, which is ten advances of 9.** Part 30 measured this \
+         gate at 10 px *behind* the glyph and part 32 at 10 px *ahead*, because the cell was 8 and \
+         then 10 while the glyph was always 9.",
+        cell - l.x
     );
-    assert!(
-        cell < hi,
-        "and it is still drawn before the end of the line: {} against the ink's {}",
+    // **And demonstrably not the grid**, which is what makes it a measurement rather than a tautology.
+    assert_eq!(cell, l.x + 90, "and 90 is not 10 cells of 10");
+    assert_ne!(
         cell,
-        hi
+        l.x + 10 * cell_w,
+        "**so this is not `text.x + column * cell_w`**, which would be {}. The grid is still the \
+         chrome's unit and it is still used for the ruler and the tables; it is no longer used to \
+         place a caret inside proportional text.",
+        l.x + 10 * cell_w
+    );
+    // **And the end of the line.** A caret at column 40 is at the pen of forty advances.
+    s.caret_to(40).expect("caret");
+    let end = Caret::locate(&s.chrome_layout(), &s.chrome.metrics, &s.state)
+        .expect("on screen")
+        .cell
+        .x;
+    assert_eq!(
+        end,
+        l.x + 40 * advance,
+        "**and so is the end of the line: {} px in, against an ink that ends at {}.** Forty glyphs \
+         of 9 is 360 and the grid's forty cells of 10 is 400, so the old expression drew the caret 40 \
+         px past the last glyph and this one draws it on the glyph's own trailing edge.",
+        end - l.x,
+        hi - l.x
+    );
+    // **And a wide glyph moves it the other way, which is the part no grid could ever do.**
+    let mut w = painted(&"W".repeat(10), 0);
+    w.caret_to(10).expect("caret");
+    let wpen = Caret::locate(&w.chrome_layout(), &w.chrome.metrics, &w.state)
+        .expect("on screen")
+        .cell
+        .x;
+    let w_adv = u32::from(
+        atlas()
+            .metric(b'W' as u32, holonomy_assets::payload::Style::Regular, 16)
+            .advance_x,
+    );
+    assert_eq!(w_adv, 16, "`W` advances 16 px, measured from the atlas");
+    assert_eq!(
+        wpen,
+        w.chrome_layout().text.x + 10 * w_adv,
+        "**ten `W`s put the caret at 160 px**, where ten cells of 10 would say 100 and ten `a`s say \
+         90. Three glyphs, three answers, and only one of them is a fixed grid."
     );
 }

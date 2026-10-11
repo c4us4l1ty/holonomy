@@ -144,26 +144,6 @@ pub mod mask {
         b"................",
     ]);
 
-    /// A printer: paper out the top, a body, a tray at the bottom.
-    pub static PRINT: [u64; 16] = pack(&[
-        b"................",
-        b".....######.....",
-        b".....#....#.....",
-        b".....#....#.....",
-        b"..############..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..############..",
-        b"..#..........#..",
-        b".....#....#.....",
-        b".....#....#.....",
-        b".....######.....",
-        b"................",
-        b"................",
-        b"................",
-    ]);
-
     /// A tick with a long tail: the spellcheck mark.
     pub static SPELLCHECK: [u64; 16] = pack(&[
         b"................",
@@ -780,8 +760,6 @@ pub enum IconId {
     Undo,
     /// Redo.
     Redo,
-    /// Print.
-    Print,
     /// Spellcheck.
     Spellcheck,
     /// Format painter.
@@ -850,7 +828,6 @@ impl IconId {
         IconId::Doc,
         IconId::Undo,
         IconId::Redo,
-        IconId::Print,
         IconId::Spellcheck,
         IconId::PaintFormat,
         IconId::ChevronDown,
@@ -894,7 +871,6 @@ impl IconId {
             IconId::Doc => &mask::DOC,
             IconId::Undo => &mask::UNDO,
             IconId::Redo => &mask::REDO,
-            IconId::Print => &mask::PRINT,
             IconId::Spellcheck => &mask::SPELLCHECK,
             IconId::PaintFormat => &mask::PAINT_FORMAT,
             IconId::ChevronDown => &mask::CHEVRON_DOWN,
