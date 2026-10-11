@@ -652,3 +652,94 @@ fn a_repaint_is_not_idempotent() {
         l.toolbar
     );
 }
+
+/// # Part 35: typing reaches the pixels, and this is the gate that asks
+///
+/// **The symptom, reported on the running window:** *"when I try to write in the document, the text
+/// doesn't display, nothing displays, only the cursor moves."*
+///
+/// **Every gate above paints a session that was seeded through `Editor::insert_at`, and every
+/// keystroke gate in the project stops at the dispatch.** Nothing in the suite crossed the two, so a
+/// defect anywhere between "a keystroke was dispatched" and "ink is on the page" passes all of it.
+///
+/// **Counting ink against the page's own colour rather than comparing frames**, for the reason the
+/// other gates in this file spell out: a frame comparison can be satisfied by a caret that moved,
+/// and the symptom is precisely a caret that moves.
+fn body_ink(s: &Session<'_>) -> (u32, u32) {
+    let l = s.chrome_layout().text;
+    // The page's own colour is the *modal* pixel of the text rectangle, so the probe does not have to
+    // know the palette and does not land on the caret.
+    let mut hist: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for y in l.y..l.y + l.height {
+        for x in l.x..l.x + l.width {
+            *hist.entry(s.frame().pixel(x, y) & 0x00FF_FFFF).or_default() += 1;
+        }
+    }
+    let page = hist.iter().max_by_key(|(_, n)| **n).map(|(c, _)| *c).unwrap_or(0);
+    let mut ink = 0;
+    for y in l.y..l.y + l.height {
+        for x in l.x..l.x + l.width {
+            let p = s.frame().pixel(x, y) & 0x00FF_FFFF;
+            if (p >> 16).abs_diff(page >> 16) > 0x20
+                || ((p >> 8) & 0xFF).abs_diff((page >> 8) & 0xFF) > 0x20
+                || (p & 0xFF).abs_diff(page & 0xFF) > 0x20
+            {
+                ink += 1;
+            }
+        }
+    }
+    (ink, page)
+}
+
+/// A painted session over an empty document, typed into with `hi` **through the real keymap and the
+/// real [`Session::handle_event`]**, and repainted.
+///
+/// **`ppem` is a parameter because the window and the headless gate are not the same configuration.**
+/// The window builds its atlas at `args.ppem` (24 by default) while every gate in this file builds it
+/// at 16, and the type scale is applied from the atlas's own line pitch. **A defect that only exists
+/// at 24 ppem is invisible to every other gate in the project.**
+fn typed(ppem: u16) -> (u32, u32) {
+    use holonomy_input::{InputEvent, Keymap, ModifierState};
+
+    let (atlas, _) = holonomy_assets::build_atlas(&[ppem]).expect("build the atlas");
+    let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(atlas));
+    // `Session::new` applies the type scale itself, from the atlas's own line pitch.
+    let m = ChromeMetrics::DESKTOP;
+    let mut s = Session::new(
+        Editor::new(),
+        Painter::new(atlas, 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
+    // **The first paint is the whole of the defect.** It is the thing that used to leave the scratch
+    // truncated to zero bytes, and without it the second paint reads a 2-byte document through a
+    // zero-length buffer and emits nothing -- which is the symptom, exactly.
+    s.repaint_all().expect("first paint");
+    let (empty, _) = body_ink(&s);
+
+    let km = Keymap::us();
+    let mods = ModifierState::new();
+    for key in [holonomy_input::KEY_H, holonomy_input::KEY_I] {
+        s.handle_event(InputEvent::press(key)).expect("handle");
+        assert!(km.dispatch(InputEvent::press(key), &mods).is_some(), "a letter");
+    }
+    assert_eq!(s.text().expect("text"), b"hi", "the keystrokes are in the document");
+    s.repaint_all().expect("repaint");
+    let (ink, page) = body_ink(&s);
+    (ink, empty)
+}
+
+#[test]
+fn typing_into_an_empty_document_puts_ink_on_the_page() {
+    // **Both sizes, and neither is special.** The window builds its atlas at `args.ppem` (24 by
+    // default) and every other gate in the project builds it at 16, and the defect was in neither --
+    // it was in the *second* paint, which no gate had ever asked for.
+    for ppem in [16u16, 24] {
+        let (ink, empty) = typed(ppem);
+        assert!(
+            ink > empty,
+            "**two characters are in the document and not one pixel of them is on the page.** \
+             empty: {empty} ink pixels; after typing `hi` at {ppem} ppem: {ink}"
+        );
+    }
+}

@@ -2585,6 +2585,125 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+# Part 35 — "I type and nothing appears", and the suite had never painted twice
+
+The symptom, reported on the running window: **"when I try to write in the document, the text doesn't
+display, nothing displays, only the cursor moves."**
+
+**One line of code, and the whole suite had been structurally unable to see it** — not one gate in the
+project asked a session to paint, then change, then paint again.
+
+---
+
+## What it was
+
+`emit_body_text` reads the visible page into `line_scratch` and then, at the end of the read:
+
+```rust
+self.line_scratch.truncate(used);   // the defect
+```
+
+**`truncate` is correct about capacity and wrong about length.** It shrinks the buffer to what *this*
+paint read, so the next paint's guard
+
+```rust
+if used + len > self.line_scratch.len() { break; }
+```
+
+was comparing a fresh line against **the previous page's byte count**. One byte more and it breaks out
+of the read loop on its **first line**, having read nothing:
+
+```text
+paint 1: empty document            -> used = 0   -> line_scratch.len() = 0
+type "hi"
+paint 2: document is 2 bytes       -> 0 + 2 > 0   -> break, immediately
+        page_used = 0, spans empty, no DocRun, no glyphs
+```
+
+**Every keystroke makes the document longer than the last paint read**, so the body goes quiet on the
+first character typed and stays quiet for the life of the window. **The caret keeps moving because it
+is a different emitter** — which is exactly the reported symptom, and exactly why it read as a missing
+feature rather than as a broken read.
+
+## Measured, not inferred
+
+An empty session, painted; `hi` typed through the real keymap and the real
+[`Session::handle_event`]; painted again; the page's own modal colour counted and everything else in
+the text column called ink:
+
+```text
+ppem=24   before typing: 518 ink pixels   (the caret)
+ppem=24   after  typing: 518 ink pixels   (still the caret)
+         675 once fixed                    (the caret and "hi")
+```
+
+**518 is the caret, twice.** The two glyphs were never on the page at any ppem.
+
+## The gate, and what it is really about
+
+`tests/text_colour.rs` gains **`typing_into_an_empty_document_puts_ink_on_the_page`**, run at 16 and at
+24 ppem.
+
+It is three lines of setup and the whole defect is in the third:
+
+1. paint an **empty** session — this is the part no other gate does;
+2. type `hi` through the real keymap and the real `handle_event`;
+3. paint again, and count ink.
+
+**Ink is counted against the page's modal colour rather than by comparing frames**, for the reason the
+rest of that file spells out at length: a frame comparison can be satisfied by a caret that moved, and
+the symptom is precisely a caret that moves. **The first version of this gate got that wrong** — it
+sampled the page colour at the text rect's top-left corner, which at column 0 row 0 *is the caret*, and
+reported 449,350 ink pixels for an empty document.
+
+**The suite's blind spot, stated plainly:** every paint gate in the project seeds its document through
+`Editor::insert_at` *before* `Session::new` and paints once. Every keystroke gate stops at the
+dispatch. **Nothing crossed the two**, so the defect sat in the one region no gate occupied — between
+a paint and the next one.
+
+## The bite check, and which half of the change carries the fix
+
+The fix is two edits: stop truncating, and guard on the buffer's invariant instead of its live length.
+**Reverting only the guard leaves the gate green.** With the `truncate` still there, a truncated buffer
+compared against `LINE_SCRATCH_BYTES` passes the guard and panics one line later on a range past the
+end. Restoring the `truncate` with the guard correct fails the gate.
+
+**So the `truncate` was the defect and the guard was a symptom of it.** That ordering is the useful
+half of the result: the line that looks like the bug is not the line that is.
+
+## The invariant was already written down, forty lines away
+
+`delete_selected`'s comment, unchanged by this part:
+
+> the scratch is a `Vec<u8>` whose **capacity is the invariant** and whose **length is meaningless
+> between uses**, exactly as `line_scratch` is.
+
+**It says "exactly as `line_scratch` is" and `line_scratch` had been doing the opposite since phase
+12.** The rule was correct, it was applied to one buffer and not the other, and the comment next to it
+is what made it findable.
+
+**A comment that names its own exception is a comment that has already lost that argument once.**
+
+## What else was standing on it
+
+`delete_selected` reads into `&mut self.line_scratch[..len]` — **which panics whenever `len()` is below
+the selection length**, i.e. whenever a paint had truncated the buffer. A one-character delete after a
+paint of an empty page was a panic, not a wrong answer. **Removing the `truncate` fixes that too**, and
+no gate was covering it either.
+
+## Not done, and not claimed
+
+- **`armed_style.rs`'s `disarming_stops_the_next_character_being_bold` failed while the fix was half
+  applied** and passes now. It is recorded here because it is the kind of failure that gets explained
+  away; the explanation is above and it is boring: a truncated scratch cannot satisfy a read.
+- **The gate is in `text_colour.rs`**, which is about span colour, because it is the file that already
+  had a painted session, a pixel-reading helper, and the argument about why frame comparison is the
+  wrong instrument. **A `typing.rs` would be the tidier home and is not created**, for the same reason
+  part 34 folded its two new files away.
+- **The full workspace suite is reported below as measured**, and the numbers are this part's, not
+  part 34's.
+---
+
 # Part 34 — the pointer reported `-21301` and the window could not be resized
 
 Both symptoms were reported as one: *"when I drag and try to resize the core app does not resize, only

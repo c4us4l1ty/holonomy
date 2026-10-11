@@ -530,10 +530,14 @@ pub struct Session<'a> {
     line_scratch: Vec<u8>,
     /// How much of [`Session::line_scratch`] the last body-text emit filled. Phase 12.
     ///
-    /// **A separate field rather than `line_scratch.len()`**, because `emit_body_text` truncates the
-    /// buffer to what it read and the *capacity* has to stay at [`LINE_SCRATCH_BYTES`] for the buffer to
-    /// be reusable. Slicing by `len()` would be right once and wrong after the next append, and the two
-    /// are indistinguishable at the call site.
+    /// **A separate field rather than `line_scratch.len()`, and part 35 is why it matters twice.**
+    /// Phase 12 added it because `emit_body_text` truncated the buffer to what it read, so `len()` was
+    /// the last page's size and the two were indistinguishable at the call site. Part 35 removed the
+    /// `truncate`, so `len()` is now the buffer's invariant again -- **and the bug was the `truncate`:
+    /// the next paint compared a fresh line against the previous page's length and emitted nothing.**
+    ///
+    /// **This field is now the only way to ask how much of the buffer is live**, which is the same
+    /// relation phase 12 was reaching for.
     page_used: usize,
     /// What the last [`Session::paint`] did, kept whole. Phase 12.
     ///
@@ -3869,7 +3873,22 @@ impl<'a> Session<'a> {
             // The buffer's ceiling is the reason a line can be truncated: a document with one enormous
             // line would otherwise try to read the whole thing. 48 KiB of text is far more than the page
             // can show, so the cull below is what normally stops this, and this is the backstop.
-            if used + len > self.line_scratch.len() {
+            //
+            // **`LINE_SCRATCH_BYTES` and not `self.line_scratch.len()`**, and this one comparison is the
+            // whole of part 35's defect. `line_scratch` was truncated to what the previous paint read, so
+            // `len()` was the *last page's* size, and a document one byte longer than the page before it
+            // **broke out of this loop on its first line and emitted nothing at all**. Measured: an
+            // empty session painted, then two characters typed, then painted again -- the second paint
+            // read 0 bytes of a 2-byte document.
+            //
+            // **And every keystroke makes the document longer than the last page read**, which is why
+            // the symptom was *"I type and nothing appears"* rather than *"text appears until the page
+            // fills"*: the caret moves (a different emitter) and the body goes quiet, permanently.
+            //
+            // `LINE_SCRATCH_BYTES` is the buffer's invariant, which `delete_selected`'s own comment
+            // already states: *"the scratch is a `Vec<u8>` whose capacity is the invariant and whose
+            // length is meaningless between uses, exactly as `line_scratch` is."* It was right there.
+            if used + len > LINE_SCRATCH_BYTES {
                 break;
             }
             // **Faulting, and that is the change.** `read_into` takes `&self` and cannot fetch, so a line
@@ -3890,7 +3909,17 @@ impl<'a> Session<'a> {
             spans.push((used as u32, len as u32));
             used += len;
         }
-        self.line_scratch.truncate(used);
+        // **No `truncate`, and it is the fix rather than a tidiness change.** `page_used` is how much of
+        // the buffer is live; the buffer itself stays `LINE_SCRATCH_BYTES` long so that the next paint,
+        // and `delete_selected`, both find a full-size scratch. `truncate` here was load-bearing for
+        // nothing -- every read below is bounded by `used` or by a run's own `(at, len)` -- and it cost
+        // every paint after the first.
+        //
+        // **The bite check says which half of the change carries the fix.** Guarding on
+        // `LINE_SCRATCH_BYTES` with this line still present leaves the gate green, because a truncated
+        // buffer compared against the constant passes the guard and then panics one line later on a
+        // range that is past the end. Restoring the `truncate` with the guard correct fails. **The
+        // `truncate` was the defect and the guard was the symptom of it.**
         self.page_used = used;
 
         // --- Pass 2: which lines another emitter already draws.

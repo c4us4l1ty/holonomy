@@ -296,6 +296,17 @@ product, and this is a sandboxed text editor that cannot open a file dialog, so 
 Export and Import is a claim about a capability it does not have. **Ten toolbar buttons remain inert**
 and are counted as such.
 
+**Typing did nothing, and the whole suite had never painted twice.** `emit_body_text` read the visible
+page into `line_scratch` and then called `truncate(used)` on it, so the next paint's guard compared a
+fresh line against the *previous page's* byte count. One byte more and it broke out of the read loop
+on its first line, having read nothing — and **every keystroke makes the document longer than the last
+paint read**, so the body went quiet on the first character and stayed quiet. The caret kept moving
+because it is a different emitter, which is why it read as a missing feature rather than a broken read.
+`delete_selected`'s own comment already stated the rule — *"capacity is the invariant and the length is
+meaningless between uses, exactly as `line_scratch` is"* — and `line_scratch` had been doing the
+opposite since phase 12. Fixed in part 35; the gate is in `text_colour.rs` and paints, types, and
+paints again.
+
 **The mouse did not work, and the reason was eight bytes.** Every X11 event decoder read every field
 after `detail` eight bytes early — the Xlib struct's field order, where the wire has eight bytes of
 `send_event` and padding. **A pointer's coordinates came out as the low half of the child window id:
