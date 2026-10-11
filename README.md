@@ -182,6 +182,18 @@ button is filled, and un-arming means *explicitly plain* rather than "go back to
 `SpanPolicy::GrowIntoInsert` would otherwise keep typing bold after you turned bold off. Twelve of the
 twenty-one toolbar buttons remain inert and are counted as such.
 
+**Selection exists, and it is a model rather than a highlight.** `Editor` holds `Option<u32>` — the
+anchor — and the focus *is* the caret, so there is no second copy of the caret anywhere; every caret
+movement collapses the selection through one funnel (`Editor::park`). You can drag with press, move and
+release; shift-click grows a selection; shift-arrow extends it one character or one line at a time; and
+typing, Backspace and Delete replace it as one undo record. **Bold and Italic style the selected range**,
+which is what selection was for: `SpanMap::style_range` has taken `(start, end, flags, colour)` since
+phase 6 and until part 28 nothing in the product had a range to hand it.
+**Not included: drag auto-scroll at the page edge, double-click word select, triple-click line select,
+and `Up`/`Down` land on the start of the target line rather than preserving the column** — preserving it
+needs the target line's length, `Session::apply` takes no `LeafSource`, and clamping against a line that
+may not be resident would be a guess.
+
 **Most of the toolbar does nothing yet, and the build says so rather than hiding it.** The chrome, the
 menus, the sidebar and the hit testing are real and gated; the *commands* behind the buttons are
 mostly not. Undo, Redo, Image and the sidebar's collapse are wired, and **the Zoom, Style and Font
@@ -190,13 +202,28 @@ underline, print, spellcheck and 48 of the 54 menu items are drawn, hovered and 
 nothing — because the document model has no representation for any of them.
 **`SessionStats::pointer_inert` counts every one of those presses**, so the number is visible rather
 than inferred: if it were ever zero it would mean either that every button works or that nothing is
-being hit-tested, and those two need to be distinguishable. Also not built: submenus, drag, and a
+being hit-tested, and those two need to be distinguishable. Also not built: submenus, and a
 multi-document model behind the sidebar (`state.docs` is a list of *titles*; `adopt_document` is still
 the only way a document gets in).
 
 **Choosing a font changes the toolbar's label and nothing else.** The atlas is built from one body
 face, so `Action::SetFont` records the choice without changing a pixel of the page. That is stated in
 the session's handler rather than left to be discovered.
+
+**The window now changes the measure, up to a ceiling.** The page used to be a fixed 736 px at every
+panel size, so dragging the window edge gave more desk and no more text. `ChromeMetrics::measure_for`
+anchors at the design width — **1,280 px still shows exactly the 80 columns every measurement in this
+project was taken against** — and grows the measure above it, to `max_columns: 100`. Past the ceiling
+the extra width is desk again, so a wide window still looks like a page on a desk. One field to change.
+
+**Two caret facts that are recorded rather than fixed.** `Command::Home` and `Command::End` are
+documented as "the start/end of the line" and their arms go to the start/end of the *document*;
+`SelectHome` and `SelectEnd` agree with the behaviour rather than compounding it. And **a fresh
+session's caret is at the end of the document**, so typing into a newly opened document appends rather
+than inserting where the user is looking. The obvious fix was implemented and reverted: it changed what
+every fixture exercises and `tests/session_no_alloc.rs` then reported **2 allocations** for a
+1,000-keystroke burst at offset 0 against 0 at the end of the document. **One 131,040-byte realloc,
+measured by size and not identified.**
 
 **The zoom control does not zoom, and that is measured rather than asserted.** `--zoom 200`, F11 and the
 zoom dropdown all set `zoom_percent`, and **every pixel that changes when it changes is inside the zoom

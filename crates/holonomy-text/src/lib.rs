@@ -21,6 +21,7 @@ pub mod edit_record;
 pub mod payload;
 mod rope;
 mod span;
+mod selection;
 pub mod table;
 pub mod tables;
 pub mod undo;
@@ -33,6 +34,7 @@ pub use math_span::{for_each_math_span, math_span_at, math_span_count, MathSpan,
 pub use payload::{
     decode, encode, image_offsets, Decoded, PayloadError, FORMAT, HEADER_LEN, MAGIC,
 };
+pub use selection::SelectionRange;
 pub use span::{
     SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER,
     STYLE_ITALIC,

@@ -157,6 +157,21 @@ pub struct Editor {
     rope: Rope,
     spans: SpanMap,
     undo: UndoStack,
+    /// **Where the current selection was anchored, in document bytes, or `None` if there is not one.**
+    ///
+    /// **One field rather than an `(anchor, focus)` pair, and this is the whole design of part 28.**
+    /// The focus *is* the caret — `Editor::caret()` already stores it in the rope's cursor, and
+    /// storing it a second time is how part 22's `ChromeState::caret_line` came to disagree with
+    /// `editor.caret()`: two fields, one meaning, nothing to keep them in step.
+    ///
+    /// So the selection is **`Option<anchor>` plus the caret**, and [`selection`](Self::selection)
+    /// derives the [`SelectionRange`] from the two on demand. **The three states are: no anchor (no
+    /// selection), an anchor equal to the caret (a collapsed selection, which is what a drag returns
+    /// to and what shift-arrow collapses to), and an anchor away from the caret (a real selection).**
+    ///
+    /// **Which every movement clears**, via [`park`](Self::park). An arrow key, a click and an edit
+    /// all collapse a selection, and the one place that says so is the one place the caret moves.
+    selection_anchor: Option<u32>,
     /// Removed spans for undoing a deletion, newest last. Bounded to [`STYLE_UNDO_DEPTH`].
     ///
     /// Phase 6 made this a *lossy* side-channel -- pushed only when a delete removed styled content,
@@ -421,6 +436,7 @@ impl Editor {
             undo_tables: None,
             undo_assets: Vec::new(),
             undo: UndoStack::new(),
+            selection_anchor: None,
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
             anchor_scan_scratch: vec![0u8; DELETE_SCRATCH],
@@ -814,7 +830,9 @@ impl Editor {
             removed.contains(&b'\n')
         };
 
-        self.rope.set_cursor(offset_u + len as usize)?;
+        // **Through `park`, and not `rope.set_cursor`.** Part 28: an edit collapses the selection,
+        // and this is the one funnel that says so for every edit in the file.
+        self.park(offset_u + len as usize)?;
         self.delete_range_in_rope(offset_u, len as usize)?;
 
         // Record the styling the delete removed, **always**, so that `undo`'s pop pairs one-to-one
@@ -965,8 +983,7 @@ impl Editor {
                 self.undo_assets = self
                     .assets
                     .remove_n(first, AssetCatalog::count_in(&action.bytes));
-                self.rope
-                    .set_cursor(action.offset as usize + action.bytes.len())?;
+                self.park(action.offset as usize + action.bytes.len())?;
                 self.delete_range_in_rope(action.offset as usize, action.bytes.len())?;
                 EditOutcome {
                     offset: action.offset,
@@ -985,7 +1002,7 @@ impl Editor {
                 let removed = self.style_undo.pop();
                 let start = action.offset;
                 let end = action.offset + action.bytes.len() as u32;
-                self.rope.set_cursor(action.offset as usize)?;
+                self.park(action.offset as usize)?;
                 self.rope.insert_at(action.offset as usize, &action.bytes)?;
                 // `GrowIntoInsert` so the restored bytes take the preceding run's style as a starting
                 // point, then the recorded spans overwrite it exactly.
@@ -1180,13 +1197,121 @@ impl Editor {
     /// only reading where the character at `offset` is still reachable with a Right. Both are
     /// defensible and only one is reversible.
     pub fn caret_to(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.park(offset)
+    }
+
+    // ---------------------------------------------------------------- selection, part 28
+
+    /// **The selection, or `None`.**
+    ///
+    /// **Derived from the anchor and the caret every call, and not stored**, for the reason
+    /// [`selection_anchor`](Self) gives: the caret already lives in the rope's cursor, and a second copy
+    /// of it is a second thing that can disagree with the first. `Some((10, 10))` cannot be returned
+    /// — [`SelectionRange::between`] refuses a degenerate range — so a collapsed selection is `None`
+    /// and callers never see one.
+    pub fn selection(&self) -> Option<crate::SelectionRange> {
+        crate::SelectionRange::between(self.selection_anchor?, self.caret())
+    }
+
+    /// Whether anything is selected. Cheaper than [`selection`](Self).is_some() to read and it is what
+    /// the paint path asks every frame.
+    #[inline]
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some_and(|a| a != self.caret())
+    }
+
+    /// **Select from `anchor` to `focus`, collapsing anything already selected.**
+    ///
+    /// ## Why this and not only `extend_to`
+    ///
+    /// **A plain click is a selection of zero bytes that happens not to exist.** Clicking without
+    /// dragging should leave no selection, and *clicking with shift* should grow or shrink the one
+    /// already there — two different operations on the anchor, and one function cannot do both.
+    /// `select` replaces the anchor; `extend_to` keeps it and moves only the caret.
+    ///
+    /// ## Why the anchor is snapped
+    ///
+    /// **Because `focus` is snapped and an unsnapped anchor would put the selection's edge inside a
+    /// multi-byte character.** [`move_only`](Self::move_only) snaps `focus` backwards; doing the same
+    /// to `anchor` costs one call to the same function, and the alternative is a selection that starts
+    /// mid-character and that `delete_at` would then be asked to remove.
+    pub fn select(&mut self, anchor: u32, focus: u32) -> Result<u32, EditorError> {
+        let anchor = self.snap(anchor as usize) as u32;
+        let landed = self.move_only(focus as usize)?;
+        // **An anchor equal to the caret is no selection at all**, so this is the collapse: a click
+        // that did not move sets the anchor and then takes it away, in one line, with no separate
+        // "clear on click" rule for every caller to remember.
+        self.selection_anchor = crate::SelectionRange::between(anchor, landed).map(|_| anchor);
+        Ok(landed)
+    }
+
+    /// **Move the caret to `focus`, keeping whatever anchor is there** — or planting one at the caret
+    /// if there is none, which is what shift-arrow on an unselected document has to do.
+    ///
+    /// ## Why planting an anchor is not `select(caret, focus)`
+    ///
+    /// **Because the two are different keystrokes.** Shift-Right with no selection extends from where
+    /// the caret is. Shift-Right with a selection grows it. A second shift-arrow that reversed the
+    /// selection would be a different command with a different key, and this build does not have it.
+    pub fn extend_to(&mut self, focus: u32) -> Result<u32, EditorError> {
+        let anchor = self.selection_anchor.unwrap_or_else(|| self.caret());
+        let landed = self.move_only(focus as usize)?;
+        self.selection_anchor = crate::SelectionRange::between(anchor, landed).map(|_| anchor);
+        Ok(landed)
+    }
+
+    /// Move the caret without touching the anchor. **Private because leaving it public is the bug.**
+    ///
+    /// Every public caret mover goes through [`park`](Self::park), which clears the selection; this is
+    /// the two exceptions — `select` and `extend_to` — that mean to keep it. Exposing it would put
+    /// three callers to the rule instead of one, and a fourth would get it wrong.
+    fn move_only(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.rope.set_cursor(self.snap(offset))?;
+        Ok(self.rope.cursor() as u32)
+    }
+
+    /// **The single place the caret moves without an anchor, and therefore the single place a
+    /// selection is collapsed.**
+    ///
+    /// `caret_to`, `caret_left`, `caret_right`, `insert_at`, `delete_at`, `undo` and `redo` all end
+    /// here, which is why "an arrow key drops the selection" is a fact about the code rather than a
+    /// rule six callers have to remember. **Part 28's first version had no such funnel** and each of
+    /// those call sites cleared its own anchor, which is the shape that produced part 22's
+    /// `ChromeState`/`Editor` disagreement.
+    fn park(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.selection_anchor = None;
+        self.move_only(offset)
+    }
+
+    /// Snap `offset` into the document and onto a character boundary, backwards.
+    fn snap(&self, offset: usize) -> usize {
         let target = offset.min(self.text_len());
         let mut snapped = target;
         while snapped > 0 && !self.is_char_boundary(snapped) {
             snapped -= 1;
         }
-        self.rope.set_cursor(snapped)?;
-        Ok(snapped as u32)
+        snapped
+    }
+
+    /// **Delete the selection and report what went, or `None` if there was nothing selected.**
+    ///
+    /// ## Why `delete_at` rather than a loop of `delete_forward`
+    ///
+    /// **Because deleting a selection is one undo record.** A drag across a paragraph followed by
+    /// Backspace is *one* thing the user did, and undo must bring back the whole paragraph in one
+    /// step — which means one `ActionKind::Delete` carrying all the bytes, and that is
+    /// [`delete_at`](Self::delete_at)'s argument, not `delete_forward`'s.
+    ///
+    /// ## Why the caller must handle `None`
+    ///
+    /// **Because "nothing was selected" is a different answer from "the selection was empty",** and
+    /// collapsing them would make Backspace with no selection a silent no-op instead of deleting a
+    /// character. The caller checks `selection()` first and falls through to its own behaviour.
+    pub fn delete_selection(&mut self) -> Result<Option<EditOutcome>, EditorError> {
+        let Some(sel) = self.selection() else {
+            return Ok(None);
+        };
+        Ok(Some(self.delete_at(sel.start, sel.len())?))
     }
 
     /// Move the caret left one character.
@@ -1202,8 +1327,8 @@ impl Editor {
         while target > 0 && !self.is_char_boundary(target) {
             target -= 1;
         }
-        self.rope.set_cursor(target)?;
-        Ok(target as u32)
+        // **`park`, so an arrow key drops the selection.** See `Editor::park`.
+        self.park(target)
     }
 
     /// Move the caret right one character.
@@ -1217,8 +1342,8 @@ impl Editor {
         while target < end && !self.is_char_boundary(target) {
             target += 1;
         }
-        self.rope.set_cursor(target)?;
-        Ok(target as u32)
+        // **`park`, so an arrow key drops the selection.** See `Editor::park`.
+        self.park(target)
     }
 
     /// Delete the character *after* the caret. The Delete key, as opposed to

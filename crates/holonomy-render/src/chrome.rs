@@ -89,6 +89,20 @@ pub mod colour {
     pub const PILL_HOVER: u32 = 0xFF38_3845;
     /// A held or selected widget, one step above [`PILL_HOVER`].
     pub const PILL_ACTIVE: u32 = 0xFF42_4252;
+    /// **The document's selected bytes, behind the text.** Part 28.
+    ///
+    /// **A light blue and not a darker grey, and that is the one deliberate departure from this
+    /// module's palette.** Every other surface here is a step on a single grey ramp — `PILL`,
+    /// `PILL_HOVER`, `PILL_ACTIVE`, `POPUP` — because they are all chrome, and chrome on one ramp is
+    /// what makes the document read as a different kind of thing from the window around it. **A
+    /// selection is about the *document*, not the chrome**, and putting it on the ramp made it look
+    /// like another button.
+    ///
+    /// **Light rather than dark so the ink stays ink.** A dark selection behind dark text is a
+    /// contrast problem the moment the document's own colour changes, and the page background is
+    /// white. At 0xFFC8_D9F0 the worst case is a document in near-black on near-white, which is
+    /// legible at every selection the user can make.
+    pub const SELECTION: u32 = 0xFFC8_D9F0;
     /// An open menu's panel, **lighter than everything it can be drawn over**.
     ///
     /// **This is the third surface and it needed its own value**, which the first version did not
@@ -1023,6 +1037,35 @@ pub struct ChromeState {
     pub styles: StyleFlags,
     /// Whether the caret is currently drawn. Driven by [`Blink`].
     pub caret_visible: bool,
+    /// **The selected byte range, or `None`.** Part 28.
+    ///
+    /// ## Why a range of document offsets and not a list of rectangles
+    ///
+    /// **Because the chrome does not know where the lines are.** `caret_line`/`caret_column` are
+    /// already a pair the session computes because `Caret::locate` needs a row and a column; a
+    /// selection spans lines, and expressing it as one rectangle per line would put the line model
+    /// into this struct — where `Scrollbar::thumb` would then have to move every highlight on every
+    /// scroll.
+    ///
+    /// **So the state carries the *fact* and the emitter does the geometry.** The fact is two numbers
+    /// that are true of the document regardless of the window: the session writes them once per
+    /// paint and the body-text emitter clips them to each visible line it is already reading.
+    ///
+    /// ## Why `Option`, and why `SelectionRange` rather than two `u32`s
+    ///
+    /// **`None` is "nothing selected", and it is a different answer from "selected nothing".** The
+    /// type is [`holonomy_text::SelectionRange`], shared with the editor rather than redeclared, so
+    /// the range the chrome highlights and the range the editor will delete are the same value from
+    /// one constructor — and `SelectionRange` cannot hold a zero-length range, so a state carrying
+    /// one is not constructible.
+    ///
+    /// ## Why the chrome cannot invent one
+    ///
+    /// **Because part 22.** `ChromeState` once carried a `caret_line` that `Session::new` never
+    /// reconciled with `editor.caret()`, and it stayed wrong for twelve phases because both halves of
+    /// the arithmetic it fed happened to be zero. A renderer able to author its own selection is the
+    /// same bug waiting to happen; this one is a read-only field for that reason.
+    pub selection: Option<holonomy_text::SelectionRange>,
     /// Per-line vertical geometry, so a table pushes the lines below it down.
     ///
     /// Owned by the chrome rather than passed alongside it because the *caret* needs it: `Caret::locate`
@@ -1065,6 +1108,7 @@ impl Default for ChromeState {
             total_lines: 1,
             styles: StyleFlags::default(),
             caret_visible: true,
+            selection: None,
             line_heights: LineHeights::uniform(0),
         }
     }

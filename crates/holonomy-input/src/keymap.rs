@@ -219,6 +219,18 @@ pub enum Command {
     PageUp,
     /// Move down one screen of text.
     PageDown,
+    /// **Shift+Left: extend the selection one character to the left.** Part 28.
+    SelectLeft,
+    /// **Shift+Right: extend the selection one character to the right.** Part 28.
+    SelectRight,
+    /// **Shift+Up: extend the selection up one line.** Part 28.
+    SelectUp,
+    /// **Shift+Down: extend the selection down one line.** Part 28.
+    SelectDown,
+    /// **Shift+Home: extend the selection to the start of the line.** Part 28.
+    SelectHome,
+    /// **Shift+End: extend the selection to the end of the line.** Part 28.
+    SelectEnd,
     /// A global binding.
     Hotkey(Hotkey),
     /// Zoom the page canvas in.
@@ -331,6 +343,18 @@ impl Keymap {
 
         // 2. Navigation and editing keys. Unshifted only where a shifted variant would be a character.
         let nav = match (code, mods.shift()) {
+            // **The `Select*` arms are why this match has a shift column at all.** Part 28. Before it,
+            // `(KEY_LEFT, _)` threw the modifier away and `Up`/`Down` had to spell out
+            // `(KEY_LEFTBRACE, false)` — the shape of a keymap that cannot express "the same movement,
+            // but extend". Six new variants rather than a flag on six existing ones, for
+            // `Command::ShiftTab`'s reason: *"every caller would otherwise have to destructure a
+            // boolean to find out which one it was handed."*
+            (KEY_LEFT, true) => Some(Command::SelectLeft),
+            (KEY_RIGHT, true) => Some(Command::SelectRight),
+            (KEY_UP, true) => Some(Command::SelectUp),
+            (KEY_DOWN, true) => Some(Command::SelectDown),
+            (KEY_HOME, true) => Some(Command::SelectHome),
+            (KEY_END, true) => Some(Command::SelectEnd),
             (KEY_LEFTBRACE, false) | (KEY_UP, false) => Some(Command::Up),
             (KEY_RIGHTBRACE, false) | (KEY_DOWN, false) => Some(Command::Down),
             (KEY_LEFT, _) => Some(Command::Left),

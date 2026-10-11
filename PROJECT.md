@@ -2573,6 +2573,142 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 28 — selection
+
+**The highest-leverage item on the list, and the first one that was a model rather than a button.**
+
+**What existed before it: nothing.** Two places in this project said so in their own docs rather than
+pretending otherwise, and both are now the rules they promised to become:
+
+* `Session::click_page` — *"A click places the caret and does not clear the selection, because there
+  is no selection yet. When one lands, the same line becomes the rule; a gate will be written then and
+  not now, because a gate written for a feature that does not exist tests nothing."*
+* `emit_body_text`'s style pass — *"Turning existing text bold needs a range, and there is no range to
+  apply it to."*
+
+## The model: one field and the caret
+
+**`Editor` holds `Option<u32>` — the anchor — and the focus is the caret.** No second copy of the
+caret anywhere.
+
+**That is the whole design, and it is the third time this question has been answered in this
+project.** Part 22 found `ChromeState::caret_line` and `editor.caret()` holding one fact in two fields
+and disagreeing for twelve phases; part 27 left `ChromeState::selection` a `Range<SelectionRange>` pair
+where a zero-length selection is representable; and `Editor::has_selection()` is a method for the same
+reason.
+
+| | states it can express | can disagree with the caret? |
+| --- | --- | --- |
+| `(anchor, focus)` | three, needing a `None` for the third | **yes** — and did, in part 22 |
+| `Option<u32>` + caret | three, needing nothing | **no** |
+
+**`SelectionRange::between` normalises and refuses a degenerate range**, so a backwards drag is the same
+value as a forwards one, and a click that did not move is `None` — **which is why a plain click
+collapses for free rather than by a rule some caller has to remember.**
+
+**Every caret movement collapses, and it says so in one place.** `Editor::park` is the funnel:
+`caret_to`, `caret_left`, `caret_right`, `insert_at`, `delete_at`, `undo` and `redo` all end there.
+**The first version had no funnel** and each cleared its own anchor — the shape that produced part 22.
+
+## What it made work
+
+- **Press, move, release** — `page_drag`, a flag rather than a drag state, because the anchor is
+  already in the editor and a second copy is a second thing that can disagree.
+- **Shift-click** — and this was **a capability that existed and was unused**: `Session` already held a
+  `ModifierState`, already updated it on every key event, and nothing had ever read it for a pointer.
+- **Shift-arrow, Shift-Home, Shift-End** — six `Command` variants rather than a flag on six others,
+  for `Command::ShiftTab`'s documented reason.
+- **Typing and Backspace and Delete replace the selection**, as one undo record each.
+- **Bold and Italic style the selection.** This is the payoff: `SpanMap::style_range` has taken
+  `(start, end, flags, colour)` since phase 6 and **nothing in the product had a range to hand it.**
+
+**The highlight is one rect per visible row, pushed into `tree.before` so it paints under the glyphs,
+and the bytes are already in `line_scratch`** — so a selection on a forty-line page costs two scans of a
+buffer that was read anyway and **zero** rope reads.
+
+## Four corrections, and three of them were mine
+
+**1. `Command::Up` and `Command::Down` moved nothing.** `Session::move_line` was four assignments to
+chrome state and no movement of `editor.caret()`, so the caret was **drawn** on a line it did not occupy
+and typing after either key inserted at the old offset. It went unnoticed because every gate that used
+Up or Down asserted on `state.caret_line` — **the field the bug writes and the document does not have.**
+`tests/caret_line_moves.rs` is the reproduction, and the first version of its second test **passed with
+the bug still in**: it exercised the early-return branch the defect did not remove, while its name
+claimed to test the movement. The bite check is what found that, and it is why that test now makes a
+round trip.
+
+**2. A caret move did not scroll the page.** The scroll arithmetic lived inside `move_line`, whose only
+other effect was to *not* move the caret, so Right past the bottom of the window scrolled nothing and
+only typing scrolled, because `after_edit` happened to. Extracted to `scroll_line_into_view` and given
+to every caret move.
+
+**3. `after_edit` refreshed the caret by *moving* it.** `self.caret_to(self.editor.caret())` is a move to
+where the caret already is — a refresh wearing a movement's clothes — and the moment `park` made moving
+collapse the selection, **every edit collapsed it too**, including restyling. `style_selection` bolded a
+range and then lost the selection, so a second Bold press armed bold for the next keystroke instead of
+un-bolding. Split into [`reconcile_caret`](Self) (re-read the column, the line, the damage) and
+`editor.caret_to` (the move).
+
+**4. A new session opened scrolled to its last line.** Caused by (2): `Session::new` reconciles with
+`caret_to`, and `insert_at` leaves the caret at the end of the document, so the page followed it.
+`scrolling_moves_the_ink_to_the_row_the_geometry_says` caught it as **63 glyphs against 66** — the
+first page had quietly become the last. **A gate written to measure scrolling found a session that
+opened at the bottom**, which is the third time a fixture written for one thing has found another.
+
+## Two fixture lessons, both the same one again
+
+**`RecordDecoder` carries the pointer position, so a drag fixture needs one decoder for the whole
+gesture.** A decoder per frame starts at the origin every time, and the frame lands in the wrong place
+*silently*. The first draft of `tests/selection.rs` did that and its drag assertions failed with "the
+motion selected a range" — **the panic of a fixture that never sent the gesture.**
+
+**A comparison in which two things differ at once measures their sum.** The paint gates compared a
+selected frame against an unselected one with the *caret in different places*, and measured a box of
+`(97, 162, 415, 792)` where the highlight is only `(368, 162, 407, 186)` — the extra pixels being the
+caret and the status bar's `Col 1` against `Col 12`. **Part 22's lesson, third recording.**
+
+## Measured, and it is what part 24 already said
+
+**A selection's highlight on a two-line range is 6 cells on row 0 and 8 on row 1**, measured per row
+rather than from a bounding box, because a box cannot tell "clipped at each line's own end" from
+"clipped at the selection's end". **Row 0 is six because the newline's cell is highlighted**, and that is
+a decision with its own gate — a browser selection running through a line break paints to the end of that
+row, and a later reader would otherwise "fix" it.
+
+## Found, recorded, not changed
+
+**`Command::Home` is documented as "Move to the start of the line" and its arm is `self.caret_to(0)`,
+which is the start of the document. `End` likewise.** `SelectHome` and `SelectEnd` therefore extend to
+the document bounds too, **agreeing with the defect rather than compounding it** — a Shift+Home that
+went somewhere different from Home would be the second wrong thing. Fixing both is a behaviour change
+with no bearing on selection and is left for a part of its own.
+
+**A fresh session's caret is at the end of the document**, so typing into a newly opened document
+appends rather than inserting where the user is looking. Found because part 28's `scroll_line_into_view`
+made it visible. **The obvious fix — move the caret to 0 in `Session::new` — was implemented and then
+reverted**, because it changed what every fixture exercises and `tests/session_no_alloc.rs` reported
+**2 allocations** where there had been 0: typing a 1,000-character burst into a 64 KiB document
+allocates nothing when it starts at the end and twice when it starts at offset 0. **One 131,040-byte
+realloc, measured by allocation size, not identified.** That is a real finding about the edit path at
+low offsets and it is not part 28's business; `Session::new` reconciles without scrolling instead.
+
+**Up and Down land on the start of the target line rather than preserving the column.** Preserving it
+needs the target line's length, `Session::apply` takes no `LeafSource` — 43 gate sites depend on that —
+and clamping a column against a line that may not be resident would be a guess. **This gate's first
+draft asserted byte 2, then byte 8, then byte 2 again, all written from what a word processor does;
+this build lands on line starts**, and a gate asserting the word processor's answer would have sent the
+fix in the wrong direction.
+
+**The shift example's `extra` argument was `args().nth(2)`, so `shot out.ppm --size=1280x800` inserted
+the literal text `--size=1280x800` at the top of the document.** Found by looking at a screenshot that
+showed the selection working perfectly *and* a line of gibberish above it. **It was correct when the only
+other arguments were flags, and part 27 added a second flag** — the same shape as part 22's `caret_line`
+and part 28's `move_line`: two ways to say one thing and nobody checking whether they agreed.
+
+**A drag is not clipped to the page and does not auto-scroll.** `Layout::caret_at` answers for a point
+above the first visible row, so dragging off the top selects to the top of what is *visible* and no
+further. That is the honest behaviour and auto-scroll is where it would go.
+
 #### Phase 14, part 26 — the forty allocations per frame that part 24 introduced
 
 **Part 24's own review item, found by reading what part 24 wrote rather than what it claimed.**

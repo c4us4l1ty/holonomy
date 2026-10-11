@@ -417,6 +417,22 @@ pub struct Session<'a> {
     keymap: Keymap,
     /// Modifiers currently held.
     mods: ModifierState,
+    /// **Whether a page drag is in progress.** Part 28.
+    ///
+    /// ## Why a flag and not a drag *state*
+    ///
+    /// **Because the anchor is already in the editor.** A drag needs to know two things — where it
+    /// started, and whether it is still going — and `Editor::selection_anchor` is the first. **A second
+    /// copy of the anchor here would be a second thing that can disagree with the first**, which is the
+    /// defect part 22 found in `ChromeState` and part 24 nearly found again.
+    ///
+    /// ## Why the flag is a field and not `pressed.is_some()`
+    ///
+    /// **Because `pressed` is about the chrome and this is about the document.** They happen to both
+    /// start on a left press, and coupling them would mean a press on a toolbar button that the user
+    /// then dragged back over the page would start selecting text. **The flag is set only by a press
+    /// that landed on the page**, and nothing else touches it.
+    page_drag: bool,
     /// The caret blink.
     blink: Blink,
     /// Counters.
@@ -756,6 +772,7 @@ impl<'a> Session<'a> {
             painter,
             keymap: Keymap::us(),
             mods: ModifierState::new(),
+            page_drag: false,
             blink: Blink::new(Blink::DEFAULT_PERIOD),
             stats: SessionStats::default(),
             damage: DamageRect::EMPTY,
@@ -802,10 +819,19 @@ impl<'a> Session<'a> {
         // against `"aa"` — **the caret ink at the end of one line and not the other.** That gate was
         // measuring ink extent and found a caret it had never been able to see.
         //
-        // `caret_to` rather than a direct assignment, so this goes through the same code that keeps the
-        // two in step from here on, and the full damage it queues is what a first frame wants anyway.
-        s.caret_to(s.editor.caret() as usize)
-            .expect("a caret at the editor's own position is inside the document");
+        // **Reconcile, and do not move.** Part 28.
+        //
+        // **It used to be `caret_to(s.editor.caret())`,** which is the same reconciliation *plus* a
+        // caret move -- and a move, as of part 28, scrolls the page to follow the caret. Since
+        // `insert_at` leaves the caret at the end of the document, **a new session opened scrolled to
+        // its last line.** `scrolling_moves_the_ink_to_the_row_the_geometry_says` caught it as a first
+        // page of 63 glyphs against 66: the first page had quietly become the last.
+        //
+        // **`reconcile_caret`, which is the tail of `caret_to` without the move.** The editor's caret is
+        // where it is and the chrome now agrees with it -- part 22's property, unchanged -- while the
+        // page stays at the top, which is what opening a document means.
+        s.reconcile_caret()
+            .expect("reconciling at the editor's own position cannot fail");
         s
     }
 
@@ -1370,6 +1396,24 @@ impl<'a> Session<'a> {
 
         match event {
             P::Motion { .. } => {
+                // **A drag in progress extends the selection, before anything else here.** Part 28.
+                //
+                // **First, and outside the "nothing changed" early return below**, because that return
+                // is about hover and cursor position and a drag moves the pointer without changing
+                // either: dragging along one row of text keeps `hover` at `Page` and — after the
+                // first event — `cursor` at the new x, so the early return is false; but the *first*
+                // motion of a drag can land on the pixel the press was on, and then both are equal and
+                // the return fires. **A selection that does not grow on the event where the pointer has
+                // not yet moved is not a selection that can be dragged at all.**
+                //
+                // **And it returns, because hover is not what this event is for.** The pointer is
+                // captured by the drag: highlighting a toolbar button the user is dragging past would
+                // be a lie about what is being pressed. `tick_with` below still runs.
+                if self.page_drag {
+                    self.drag_to(x, y, bytes)?;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
                 let before = self.state.hover;
                 // **`hover_at` returns `Hit`, and `Hit::None` becomes `None` here rather than being
                 // stored as a `Some(Hit::None)`.** The `Option` answers "is the pointer over
@@ -1425,6 +1469,11 @@ impl<'a> Session<'a> {
                 self.stats.pointer_presses += 1;
                 let hit = self.hover_at(x, y);
                 self.state.pressed = (hit != widgets::Hit::None).then_some(hit);
+                // **Arm the drag before `press` runs**, because `press` is what plants the anchor and
+                // the flag has to be set by the time the pointer starts moving. Only a press that
+                // landed *on the page* arms it: a press on a toolbar button that the user then drags
+                // back over the page must not start selecting text.
+                self.page_drag = hit == widgets::Hit::Page;
                 self.press(hit, x, y, bytes)?;
             }
             P::Button {
@@ -1439,6 +1488,11 @@ impl<'a> Session<'a> {
                 // release-driven model would need a drag threshold**, and a threshold is a guess about
                 // how far is far enough; deciding on the press needs no guess.
                 self.state.pressed = None;
+                // **The drag ends here and the selection is kept.** Part 28. No threshold, for the
+                // reason the press decision has none: a drag that never moved planted an anchor equal
+                // to the caret, which the model already reports as no selection, so "did the user
+                // select anything" is answered by the selection rather than by a distance.
+                self.page_drag = false;
                 self.damage = self.chrome.full_damage();
             }
             // **Right and middle buttons are not bound, and are counted as nothing.**
@@ -1450,6 +1504,41 @@ impl<'a> Session<'a> {
         }
         self.tick_with(bytes)?;
         Ok(())
+    }
+
+    /// **Extend the selection to wherever the pointer is now.** Part 28.
+    ///
+    /// ## Why this reuses `click_page` rather than duplicating it
+    ///
+    /// **Because a drag's far end is a click with shift held**, and the only difference between them
+    /// is the `extend` flag and the fact that a drag must not close a menu or touch `pressed`. The
+    /// hit test, `caret_at`, the column arithmetic and `offset_of` are all the same, and **a second
+    /// copy of that chain would be four more lines that have to agree with the first.**
+    ///
+    /// ## Why a drag is not clipped to the page
+    ///
+    /// **Because `caret_at` already answers for any point**, including one above the first visible row
+    /// — `Layout::caret_at` takes `scroll_line` into account — so dragging past the top or the bottom
+    /// of the window selects to the top or the bottom of what is *visible* and no further. **That is
+    /// the honest behaviour and it is recorded rather than fixed**: auto-scroll at the edge is a
+    /// feature, and this is where it would go.
+    ///
+    /// ## Why the release does not clear the selection
+    ///
+    /// **Because the user chose it.** Everywhere else in this file a pointer event ends a gesture and
+    /// leaves no trace — the release of a button applies it and forgets. A selection is the opposite:
+    /// it outlives the gesture, because the next thing the user does is *type over it*. `page_drag`
+    /// going false on the release is the end of the gesture; the selection is not part of it.
+    fn drag_to(
+        &mut self,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        // **`click_page(.., true)` — and `extend` unconditionally rather than reading shift.** A drag
+        // extends whether or not shift is down, because that is what a drag *is*. Reading the
+        // modifier here would mean shift-free drags silently select nothing.
+        self.click_page(bytes, x, y, true)
     }
 
     /// What is under `(x, y)`, with the open menu's grab applied.
@@ -1608,7 +1697,12 @@ impl<'a> Session<'a> {
             }
             Hit::Page => {
                 self.state.open = None;
-                self.click_page(bytes, x, y)?;
+                // **`self.mods.shift()`, which this method has never read.** Part 28's finding: the
+                // session already held a `ModifierState` and updated it on every key event, and
+                // nothing looked at it for a pointer. Shift-click was therefore *available* the
+                // whole time — the capability existed and was unused, which is the other kind of
+                // thing this project goes looking for.
+                self.click_page(bytes, x, y, self.mods.shift())?;
             }
             Hit::None => {
                 // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
@@ -1625,26 +1719,90 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// Place the caret from a click on the page.
+    /// **Place the caret from a click on the page, or extend the selection if shift is held.** Part 28.
     ///
-    /// **A click places the caret and does not clear the selection**, because there is no selection
-    /// yet. When one lands, the same line becomes the rule; a gate will be written then and not now,
-    /// because a gate written for a feature that does not exist tests nothing.
+    /// ## CORRECTION — this doc used to say there is no selection
+    ///
+    /// It read:
+    ///
+    /// > A click places the caret and does not clear the selection, because there is no selection yet.
+    /// > When one lands, the same line becomes the rule; a gate will be written then and not now,
+    /// > because a gate written for a feature that does not exist tests nothing.
+    ///
+    /// **That was the right call at the time and it is now the thing being corrected.** The reasoning
+    /// was honest — it named the absence rather than papering over it — and the promise was kept: no
+    /// gate was written for a feature that did not exist. **The rule it promised is the one above.**
+    ///
+    /// ## Why the page is damaged and not the caret's two cells
+    ///
+    /// **Because a selection is not two cells.** A click with no shift moves the caret, and
+    /// `caret_to`'s two-cell damage is exactly right — which is why that note is still here. **A click
+    /// with shift, or a drag, changes a rectangle somewhere on the page**, and damaging only the caret
+    /// would leave the old highlight drawn until something else happened to repaint over it. So the
+    /// page is the damage unit for anything that moves the selection.
+    ///
+    /// ## Why `extend` is a parameter and not read here
+    ///
+    /// **Because the press and the drag need the same function with different arguments**, and the
+    /// press already knows: it branches on `self.mods.shift()`. Reading it again inside would be the
+    /// same fact read in two places, and the two would agree only until one of them changed.
     fn click_page(
         &mut self,
         bytes: &mut dyn holonomy_text::LeafSource,
         x: i32,
         y: i32,
+        extend: bool,
     ) -> Result<(), SessionError> {
         let Some((line, column)) = self.chrome.layout.caret_at(&self.state, x, y) else {
             return Ok(());
         };
-        let at = self.offset_of(line, column, bytes)?;
-        self.caret_to(at)?;
-        // **`caret_to` damages both caret cells**, so the repaint this needs is already queued. Adding
-        // `full_damage` on top of it would have been the reflex, and it would have cost a million
-        // pixels per click for no reason: the caret's two cells are the only pixels that changed.
+        let at = self.offset_of(line, column, bytes)? as u32;
+        if extend {
+            self.extend_to(at)?;
+        } else {
+            // **`select(at, at)` and not `caret_to(at)`.** Both end up with the caret in the same
+            // place, and only one of them *says* that a plain click drops a selection. `select` plants
+            // an anchor at the click and then finds the anchor and the caret equal, which
+            // `SelectionRange::between` reports as "no selection" — so the rule is a consequence of
+            // the model rather than a line of code that has to be kept in step with it.
+            self.select_at(at, at)?;
+        }
         Ok(())
+    }
+
+    /// Select `[anchor, focus)`, collapsing anything already selected. Part 28.
+    ///
+    /// **The session twin of [`Editor::select`](holonomy_text::Editor::select), and it exists because
+    /// `caret_to` is where the state and the damage are reconciled** — the same reason a `Session` has
+    /// `caret_to` at all rather than calling the editor from four places.
+    pub fn select_at(&mut self, anchor: u32, focus: u32) -> Result<(), SessionError> {
+        self.editor.select(anchor, focus)?;
+        self.after_selection_moves();
+        Ok(())
+    }
+
+    /// Move the caret's far end of the selection, keeping its anchor. Part 28.
+    pub fn extend_to(&mut self, focus: u32) -> Result<(), SessionError> {
+        self.editor.extend_to(focus)?;
+        self.after_selection_moves();
+        Ok(())
+    }
+
+    /// **Reconcile the state and the damage after anything that moves the caret or the selection.**
+    ///
+    /// **The selection's own line is not tracked, and the page is damaged instead.** A selection can
+    /// be forty rows tall and the state has no field for that — the highlight is computed per line by
+    /// the emitter, from two byte offsets. **Damage would need the same arithmetic in reverse** (which
+    /// rows the *previous* selection covered), and doing it approximately is worse than doing it
+    /// simply: the page is 640 px by ~660, it is repainted on every scroll anyway, and one extra
+    /// full-page rect costs a rectangle of work rather than a scan.
+    fn after_selection_moves(&mut self) {
+        self.sync_selection();
+        self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        let _ = self.refresh_caret_column(None);
+        // **Scroll too, because a shift-arrow to a line off the page needs it as much as a plain one.**
+        self.scroll_line_into_view(self.state.caret_line);
+        self.damage = self.chrome.full_damage();
     }
 
     /// Recompute [`ChromeState::caret_column`] as a count of UTF-8 scalars, and return it if complete.
@@ -1896,7 +2054,19 @@ impl<'a> Session<'a> {
     /// **Three of the arms change chrome state rather than the document** -- zoom, style, font -- and
     /// routing them through here too is the point: there is exactly one function that says what every
     /// action in the product means, and a dropdown value is an action like any other.
-    fn apply_action(&mut self, action: holonomy_render::menus::Action) -> Result<(), SessionError> {
+    ///
+    /// ## Public as of part 28
+    ///
+    /// **For the same reason [`Session::apply`] is public**: a driver -- or a gate -- needs to act on
+    /// a menu row without inventing a pointer event that happens to land on the right row.
+    /// `tests/selection.rs` needs it for the gate that says a selected range can be bolded, and the
+    /// alternative was to reach into the chrome, work out the Bold button's rectangle and press it --
+    /// **which would have tested the hit test as well as the styling, and failed for reasons that
+    /// have nothing to do with what it claims.** A gate should fail for one reason.
+    pub fn apply_action(
+        &mut self,
+        action: holonomy_render::menus::Action,
+    ) -> Result<(), SessionError> {
         use holonomy_render::menus::Action;
         match action {
             Action::SetZoom(pct) => {
@@ -1907,14 +2077,18 @@ impl<'a> Session<'a> {
                 self.stats.pointer_chrome += 1;
             }
             Action::ToggleBold => {
-                let (bold, italic) = self.armed_style();
-                self.set_armed_style(!bold, italic);
+                // **A selection means "style this range", and that takes precedence over arming.**
+                // Part 28 — the thing part 24's own note said selection would unlock.
+                if !self.style_selection(!self.armed_style().0, self.armed_style().1)? {
+                    self.set_armed_style(!self.armed_style().0, self.armed_style().1);
+                }
                 self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
             Action::ToggleItalic => {
-                let (bold, italic) = self.armed_style();
-                self.set_armed_style(bold, !italic);
+                if !self.style_selection(self.armed_style().0, !self.armed_style().1)? {
+                    self.set_armed_style(self.armed_style().0, !self.armed_style().1);
+                }
                 self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
@@ -2143,6 +2317,27 @@ impl<'a> Session<'a> {
             Command::Down => self.move_line(1)?,
             Command::Home => self.caret_to(0)?,
             Command::End => self.caret_to(self.editor.text_len())?,
+            // --- Selection. Part 28.
+            //
+            // **Each one is the plain command with `extend` set, and none of them is a new kind of
+            // movement.** That is the claim to hold: shift-arrow does what arrow does and then grows
+            // the range, and the six arms above this line are the proof that they stay in step —
+            // `SelectUp` is `move_line(-1, true)`, not a second implementation of "up one line".
+            Command::SelectLeft => self.extend_caret(-1)?,
+            Command::SelectRight => self.extend_caret(1)?,
+            Command::SelectUp => self.move_by_line(-1, true)?,
+            Command::SelectDown => self.move_by_line(1, true)?,
+            // **`0` and `text_len()`, matching `Command::Home` and `Command::End` above — and not
+            // the line's own start and end.**
+            //
+            // **That is deliberate, and it is agreeing with a defect.** `Command::Home`'s doc says
+            // *"Move to the start of the line"* and its arm is `self.caret_to(0)`, which is the start
+            // of the *document*; `End` likewise goes to the end of the document. **So Shift+Home
+            // going somewhere different from Home would be the second wrong thing**, and the honest fix
+            // is to change both in one part with their own gate. Recorded in PROJECT.md, not fixed
+            // here, because it is a behaviour change with no bearing on selection.
+            Command::SelectHome => self.extend_to(0)?,
+            Command::SelectEnd => self.extend_to(self.editor.text_len() as u32)?,
             Command::PageUp
             | Command::PageDown
             | Command::Escape
@@ -2179,6 +2374,26 @@ impl<'a> Session<'a> {
     // ---------------------------------------------------------------- edits
 
     fn insert(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
+        // **A selected range is replaced, not typed into.** Part 28.
+        //
+        // **This is the first thing typing does with a selection and the only reason a selection is
+        // more than a highlight.** The delete goes through [`delete_selection`](Editor::delete_selection)
+        // — one undo record carrying every deleted byte — and then the insert lands at the range's
+        // start, which `delete_at` has already parked the caret on.
+        //
+        // **Two undo records, and that is the honest cost.** A selection followed by one keystroke is
+        // *one* thing the user did, and a user pressing Ctrl+Z once would expect the whole paragraph
+        // back rather than the paragraph with one letter still deleted. **A single record would mean a
+        // composite action in `UndoStack`, which is a new kind of thing in that file for a case this
+        // part cannot test.** Recorded, not pretended away — and `undo_restores_a_typed_over_selection`
+        // asserts the behaviour that *is* delivered: two undos, not one.
+        //
+        // **Skipped for an empty `bytes`,** because `Command::Insert` is only called with a non-empty
+        // character, and a zero-length insert with a delete in front of it would be a selection
+        // deleted by nothing.
+        if !bytes.is_empty() {
+            self.delete_selected()?;
+        }
         let at = self.editor.caret() as usize;
         // `GrowIntoInsert` so typing at the end of a bold word keeps it bold, which is what a word
         // processor does and what `SpanPolicy`'s own docs argue for.
@@ -2405,7 +2620,72 @@ impl<'a> Session<'a> {
         self.after_edit(INDENT.len() as u32)
     }
 
+    /// **Delete the selection, tell the counters about it, and report what went.** Part 28.
+    ///
+    /// ## Why this exists rather than three lines at each call site
+    ///
+    /// **`TextCounts::after_delete` needs the deleted bytes**, because FR-1.2 zeroes them and after the
+    /// delete there is nothing left to count word starts from. Three call sites — Backspace, Delete,
+    /// and typing over a selection — each needed the same capture-then-delete-then-report sequence,
+    /// and **the capture is the part with a decision in it**, so three copies is three chances to make
+    /// it differently.
+    ///
+    /// ## The decision: scratch when it fits, heap when it does not
+    ///
+    /// **Exactly the split [`Editor::anchors_in_range`](holonomy_text::Editor) already documents:**
+    ///
+    /// > A range longer than the scratch is not a keystroke — it is a multi-kilobyte selection — so it
+    /// > takes one heap buffer, which is the honest cost and is documented rather than pretended away.
+    ///
+    /// **A selection can be a whole document**, so a fixed buffer would either panic or silently
+    /// truncate the bytes and mis-count every word after the truncation point. One `Vec` on the
+    /// selection path is the right cost, and the keystroke path — no selection, `sel.len() == 1` —
+    /// **never allocates**, which is what `tests/session_no_alloc.rs` gates.
+    fn delete_selected(&mut self) -> Result<Option<u32>, SessionError> {
+        let Some(sel) = self.editor.selection() else {
+            return Ok(None);
+        };
+        let start = sel.start as usize;
+        let len = sel.len();
+        // **`LINE_SCRATCH_BYTES` is this file's scratch and the selection can be longer than it.** The
+        // branch is on the selection's own length, so a one-character selection — which is what the
+        // no-alloc gate exercises — takes the stack-free path and a whole-document selection takes one
+        // buffer that is freed when this returns.
+        let big = len as usize > LINE_SCRATCH_BYTES;
+        let mut heap: Vec<u8> = Vec::new();
+        let n = if !big {
+            // **`read_into` into the scratch, and then truncate it**: the scratch is a `Vec<u8>` whose
+            // *capacity* is the invariant and whose *length* is meaningless between uses, exactly as
+            // `line_scratch` is. `set_len` on uninitialised capacity would hand `after_delete` bytes
+            // that were never written, so the read is what makes the first `n` bytes real.
+            let got = self
+                .editor
+                .read_into(start, &mut self.line_scratch[..len as usize])
+                .unwrap_or(0);
+            got
+        } else {
+            heap = vec![0u8; len as usize];
+            self.editor.read_into(start, &mut heap).unwrap_or(0)
+        };
+        self.editor.delete_selection()?;
+        let removed: &[u8] = if big {
+            &heap[..n]
+        } else {
+            &self.line_scratch[..n]
+        };
+        self.counts.after_delete(&self.editor, start, removed);
+        self.after_edit(len)?;
+        Ok(Some(len))
+    }
+
     fn backspace(&mut self) -> Result<(), SessionError> {
+        // **A selection is deleted whole, before the "is there a byte before the caret" question.**
+        // Part 28. The check below is about *one character*; with a selection the answer is the range,
+        // and asking it first would mean Backspace with a selection anchored at byte 0 doing nothing at
+        // all because the caret happens to be at 0.
+        if self.delete_selected()?.is_some() {
+            return Ok(());
+        }
         if self.editor.caret() == 0 {
             return Ok(());
         }
@@ -2426,6 +2706,12 @@ impl<'a> Session<'a> {
     }
 
     fn delete_forward(&mut self) -> Result<(), SessionError> {
+        // **The same rule as `backspace`, and the same reason.** A Delete with a selection deletes
+        // the selection, which is what every editor does and is the only behaviour that makes
+        // "select, then press Delete" work without holding a different key.
+        if self.delete_selected()?.is_some() {
+            return Ok(());
+        }
         if self.editor.caret() as usize >= self.editor.text_len() {
             return Ok(());
         }
@@ -2483,22 +2769,215 @@ impl<'a> Session<'a> {
     }
 
     /// Move the caret by lines, using the page's own row count to decide scrolling.
+    ///
+    /// ## CORRECTION, part 28 — this moved nothing
+    ///
+    /// It was four assignments to chrome state and no movement of `editor.caret()`:
+    ///
+    /// ```text
+    /// let line = (self.state.caret_line as i64 + delta).max(0) as u32;
+    /// self.state.scroll_line = scroll.min(line);
+    /// self.state.caret_line = line;
+    /// self.damage = self.chrome.full_damage();
+    /// ```
+    ///
+    /// **So `Up` and `Down` drew the caret on a line it did not occupy, and typing after either one
+    /// inserted at the old offset.** `tests/caret_line_moves.rs` is the reproduction.
+    ///
+    /// ## Why it went unnoticed
+    ///
+    /// **Because every gate that used Up or Down asserted on `state.caret_line`** — the field the bug
+    /// wrote and the document did not have. **The fixture and the defect were the same number**, which
+    /// is part 22's lesson restated: *"a fixture whose two quantities coincide cannot tell a correct
+    /// answer from a wrong one."*
+    ///
+    /// ## Why the column is not preserved
+    ///
+    /// **Preserving it needs the target line's length, which needs its bytes, and this path has no
+    /// source.** `apply` takes no `&mut dyn LeafSource` — 43 gate sites depend on that — so clamping a
+    /// column to a line that may not be resident would be a guess. **Down lands at the start of the
+    /// line, which is correct and is not what every editor does.** Real editors keep the column; that
+    /// is recorded as not done rather than done badly.
     fn move_line(&mut self, delta: i64) -> Result<(), SessionError> {
-        let line = (self.state.caret_line as i64 + delta).max(0) as u32;
-        // Keep the caret on screen, scrolling the page if it would leave.
+        self.move_by_line(delta, false)
+    }
+
+    /// `Up`/`Down`, or the shift variants. Part 28.
+    ///
+    /// **One function and a flag, where the keymap has six variants.** The flag is a parameter here
+    /// rather than a variant because there is exactly one caller of each and they are three lines
+    /// apart; `Command`'s own docs argue for variants at the *dispatch* boundary, where a caller has to
+    /// destructure them, and not for duplicating a body.
+    fn move_by_line(&mut self, delta: i64, extend: bool) -> Result<(), SessionError> {
+        let line = self.line_index(self.editor.caret() as usize);
+        // **From the document, not from `state.caret_line`.** The state is a view of this; reading the
+        // view to decide where to move the thing it is a view of is the inversion that let the old
+        // version drift. `saturating_sub(1)` because `total_lines` is a count and at least one line
+        // always exists, so `last` cannot underflow.
+        let last = self.state.total_lines.saturating_sub(1);
+        let want = (line as i64 + delta).clamp(0, i64::from(last)) as u32;
+        if want == line {
+            // **A movement that cannot happen still collapses a plain selection.** Down on the last
+            // line is a caret move like any other, and the model says caret moves collapse — leaving
+            // it would make it the one arrow key that keeps a selection.
+            if !extend {
+                let at = self.editor.caret() as usize;
+                self.caret_to(at)?;
+            }
+            return Ok(());
+        }
+        let at = self.lines.line_begin(want as usize) as u32;
+        if extend {
+            self.extend_to(at)?;
+        } else {
+            self.caret_to(at as usize)?;
+        }
+        Ok(())
+    }
+
+    /// **Extend the selection's far end by one character.** Part 28.
+    ///
+    /// **Separate from [`move_caret`](Self::move_caret) rather than a flag on it**, because the two
+    /// differ in what happens at a document end: a plain move stops, and an extend stops too, but a
+    /// plain move also *drops the selection* on the way — and `Editor::park` is what does that, so a
+    /// shared body would have to clear the selection it is about to extend.
+    fn extend_caret(&mut self, delta: i64) -> Result<(), SessionError> {
+        let at = self.editor.caret() as i64;
+        let want = at + delta;
+        if !(0..=self.editor.text_len() as i64).contains(&want) {
+            return Ok(());
+        }
+        self.extend_to(want as u32)
+    }
+
+    /// **Scroll the page so `line` is on it, if it is not already.** Part 28.
+    ///
+    /// **Extracted from `move_line`, and given to `caret_to` as well.** The old code had this
+    /// arithmetic in one place and only one caller reached it, so **Right past the bottom of the
+    /// window scrolled nothing** — the caret walked off the page and typing there scrolled only
+    /// because `after_edit` happens to scroll. **That is the same defect as the one above**: a caret
+    /// move that updates one thing and not the other.
+    ///
+    /// **`rows == 0` returns rather than subtracting**, because `rows - 1` would be the underflow the
+    /// project's `for_size` docs describe, and a window with no text rows is reachable by dragging.
+    fn scroll_line_into_view(&mut self, line: u32) {
+        let rows = self.chrome.layout.rows;
+        if rows == 0 {
+            return;
+        }
         let first = self.state.scroll_line;
-        let last = first + self.chrome.layout.rows;
+        let last = first.saturating_add(rows);
         let scroll = if line < first {
             line
         } else if line >= last {
-            line.saturating_sub(self.chrome.layout.rows.saturating_sub(1))
+            line.saturating_sub(rows - 1)
         } else {
             first
         };
-        self.state.scroll_line = scroll.min(line);
-        self.state.caret_line = line;
-        self.damage = self.chrome.full_damage();
+        self.state.scroll_line = scroll;
+    }
+
+    /// **Style the selected range, or return `false` if there is nothing selected.** Part 28.
+    ///
+    /// ## Why this is what part 24 said selection would unlock
+    ///
+    /// `emit_body_text`'s own comment records the debt:
+    ///
+    /// > `Session::pending_style` is the same fact in the model and the toolbar, and it is a *pending*
+    /// > style — it is what the next character will be. Turning existing text bold needs a range, and
+    /// > there is no range to apply it to.
+    ///
+    /// **And `Editor::style_range` has taken `(start, end, flags, colour)` since phase 6.** The
+    /// function was there and correct; the model had nothing to hand it. This is the whole of what
+    /// selection buys, and it is why it was worth building rather than a highlight.
+    ///
+    /// ## Why it returns `bool` rather than acting or not
+    ///
+    /// **Because "there was nothing to style" and "styled it" are two answers to one question**, and
+    /// the caller needs to pick between arming and styling. A `()` return would force the caller to
+    /// ask `editor.selection()` again, which is the same fact read twice and could differ if anything
+    /// moved in between.
+    ///
+    /// ## Why the selection *stays* selected afterwards
+    ///
+    /// **Because restyling does not consume a selection.** Typing does; this does not. A user who
+    /// selects a paragraph, bolds it and then selects the next one has not lost anything by the first
+    /// selection being still there — and clearing it would make a second Bold press (to un-bold) do
+    /// nothing, because there would be no range left to un-bold.
+    fn style_selection(&mut self, bold: bool, italic: bool) -> Result<bool, SessionError> {
+        let Some(sel) = self.editor.selection() else {
+            return Ok(false);
+        };
+        let mut flags = 0u16;
+        if bold {
+            flags |= STYLE_BOLD;
+        }
+        if italic {
+            flags |= STYLE_ITALIC;
+        }
+        // **Over the selected range only, never the arming flag.** `pending_style` stays where it was:
+        // a user who has Bold armed and then selects a word and presses Bold has made the *next*
+        // character bold too, which is what every editor does and is not a decision this should make
+        // silently in either direction.
+        self.editor.style_range(sel.start, sel.end, flags, 0)?;
+        self.after_edit(0)?;
+        Ok(true)
+    }
+
+    /// **Re-read everything about the caret that is derived from where it is.** Part 28.
+    ///
+    /// ## The tail of [`caret_to`](Self::caret_to), without the move
+    ///
+    /// A caret that has *moved* needs the state rebuilt. **A caret some other code has already
+    /// moved -- an edit, say -- needs exactly the same rebuild, and must not be moved again**,
+    /// because moving is what collapses a selection.
+    ///
+    /// **This exists because `after_edit` called `caret_to(self.editor.caret())`,** which was correct
+    /// for as long as moving the caret had no side effect beyond moving it. It now does. See
+    /// [`after_edit`](Self::after_edit) for the whole correction.
+    ///
+    /// **No scroll here, and the absence is the point.** `Session::new` calls this to make the chrome
+    /// agree with an editor whose caret is already at the end of the document, and a new session must
+    /// show the *top*. Every caller that moves the caret scrolls afterwards, explicitly, because
+    /// "where is the caret" and "where should the page be" are different questions and only the second
+    /// one has an exception.
+    ///
+    /// **`caret_to` is this function plus `editor.caret_to`, in that order** -- move, then rebuild --
+    /// and the two halves are the same in both callers, which is the point of taking them apart.
+    fn reconcile_caret(&mut self) -> Result<(), SessionError> {
+        let _ = self.refresh_caret_column(None);
+        self.sync_selection();
+        self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        let cell = self.caret_cell();
+        if let Some(rect) = cell {
+            self.damage = self.damage.union(&rect);
+        }
         Ok(())
+    }
+
+    /// **Copy the editor's selection into the state the chrome paints.** Part 28.
+    ///
+    /// ## Why a one-line sync and not a stored selection
+    ///
+    /// **Because `ChromeState.selection` is a *view* and `Editor` owns the fact**, and the two must not
+    /// be allowed to disagree. Part 22 is the precedent: `ChromeState::caret_line` was built once by
+    /// `Session::new` and then left alone for twelve phases, and the reason nothing noticed is the
+    /// kind of thing that hides bugs — both halves of the arithmetic it fed were zero.
+    ///
+    /// **This is called from `caret_to` and from `paint_with`, and those are the only two places the
+    /// caret moves or the frame is built.** Anything else that moved the caret and forgot this would
+    /// be a third site, and the way to make that impossible is to have no way to move the caret that
+    /// does not go through `Session::caret_to` — which is true today and is the property worth
+    /// preserving.
+    ///
+    /// ## Why it is `Option<SelectionRange>` and the editor's own value
+    ///
+    /// **Because the chrome cannot author a selection**, and re-deriving the range here from an anchor
+    /// and a focus would be authoring one. The editor's `SelectionRange` already normalises the
+    /// direction and refuses a degenerate range, so `state.selection` is right or `None` and there is
+    /// no third case to handle.
+    fn sync_selection(&mut self) {
+        self.state.selection = self.editor.selection();
     }
 
     /// Put the caret at `at`, clamped back to a codepoint boundary.
@@ -2530,7 +3009,12 @@ impl<'a> Session<'a> {
         // `refresh_caret_column` for why there is one function and two capabilities rather than two
         // implementations.
         let _ = self.refresh_caret_column(None);
+        self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        // **And the page follows the caret.** Part 28: `scroll_line_into_view` used to live inside
+        // `move_line`, whose only other effect was to *not* move the caret -- so Right past the bottom
+        // of the window scrolled nothing, and only typing scrolled, because `after_edit` happens to.
+        self.scroll_line_into_view(self.state.caret_line);
         // **A caret move is a repaint, and this used not to be one.**
         //
         // `caret_to` set no damage, and `tick` only paints when damage is non-empty, so pressing an
@@ -2585,9 +3069,31 @@ impl<'a> Session<'a> {
     /// `Session::insert`, `backspace`, `delete_forward` and `outdent` each call `TextCounts` with the
     /// bytes they moved, and `undo`/`redo` rescan. This function therefore does the two things that are
     /// position-independent: move the caret, and reconcile the line geometry.
+    ///
+    /// ## CORRECTION, part 28 -- `caret_to` here was a refresh written as a move
+    ///
+    /// It read:
+    ///
+    /// ```text
+    /// self.caret_to(self.editor.caret() as usize)?;
+    /// ```
+    ///
+    /// **Which is a caret move to where the caret already is**, and that is a refresh wearing a
+    /// movement's clothes. The moment [`Editor::park`] made every real caret move collapse the
+    /// selection, **every edit collapsed it too** -- including the ones that had no business touching
+    /// it. `style_selection` bolded the selected range and then lost the selection, so a second Bold
+    /// press could not un-bold: it armed bold for the next keystroke instead.
+    ///
+    /// **The caret is already where it should be when this runs** -- `insert`, `backspace` and
+    /// `delete_selection` have all parked it. What is wanted is the *tail* of `caret_to`: re-read the
+    /// column, re-read the line, scroll, damage. That is [`reconcile_caret`](Self::reconcile_caret),
+    /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
     fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
-        self.caret_to(self.editor.caret() as usize)?;
+        self.reconcile_caret()?;
+        // **Scroll after reconciling, not inside it.** `Session::new` also reconciles and must not
+        // scroll; an edit moves the caret like a keystroke does and must. See `reconcile_caret`.
+        self.scroll_line_into_view(self.state.caret_line);
         // The line geometry must agree with the document before anything reads it, and `caret_to` has
         // already used it above — so the order here is not free. **This is the fix for a latent bug,
         // not only an optimisation**: `line_index` used to count newlines, so it was correct whatever
@@ -2782,6 +3288,7 @@ impl<'a> Session<'a> {
         // **A read error here does not fail the paint.** `None` leaves the previous value, which is
         // the byte count — a status bar number, not a reason to lose a frame over.
         let _ = self.refresh_caret_column(Some(&mut *source));
+        self.sync_selection();
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
         // they have to be painted in the page's coordinate space and clipped by the same damage the
@@ -2978,6 +3485,12 @@ impl<'a> Session<'a> {
         // themselves out on cells.
         let cells_per_row = (l.width / m.cell_w.max(1)).max(1) as usize;
         let ink = holonomy_render::chrome::colour::INK;
+        // **The selection, read once.** Part 28.
+        //
+        // **Read from `state`, not from `self.editor`,** because this runs *after* `paint_with` synced
+        // it and the state is what the rest of the frame agrees with. Reading the editor here would be
+        // a second, independent source of truth for the same fact — the exact shape of part 22.
+        let selection = self.state.selection;
 
         // --- Pass 1: read every visible line into one page-sized buffer.
         //
@@ -3116,6 +3629,49 @@ impl<'a> Session<'a> {
 
             let text = &self.line_scratch[at as usize..(at + len) as usize];
             let shown = codepoints_upto(text, 0, cells_per_row);
+
+            // --- The selection highlight, behind the text. Part 28.
+            //
+            // **Pushed into `tree.before`, and that is what puts it behind the glyphs.** `SurfaceTree`
+            // paints `before`, then `node`, then `after`, so a rect pushed here is under every `DocRun`
+            // this loop emits — including the styled ones, which are pushed later. Drawn after, the
+            // highlight would be a blue box *over* the words it is supposed to be marking.
+            //
+            // **The geometry is `clip_to` plus a cell count, and the cell count is the same scalar
+            // count the caret uses.** `refresh_caret_column` counts scalars from a line start to a
+            // caret; this counts scalars from a line start to a selection edge. Both are "how many
+            // glyphs are between two offsets on this line", and **both answer from bytes the line
+            // already has in `line_scratch`** — so a selection on a 40-line page costs two scans of a
+            // buffer that was read anyway and **zero** rope reads.
+            //
+            // **Two scans and not one, because they are to different places.** `col_of(lo)` and
+            // `col_of(hi)` each walk from the line start. Walking once and remembering the distance
+            // between would need a mid-line restart anyway, and the second scan is over at most one
+            // line's bytes.
+            if let Some(sel) = selection {
+                if let Some((lo, hi)) = sel.clip_to(at, at + len) {
+                    let lo = (lo - at) as usize;
+                    let hi = (hi - at) as usize;
+                    let col0 = codepoint_count(&text[..lo]);
+                    let col1 = col0 + codepoint_count(&text[lo..hi]);
+                    // **`shown` is the measure, and the highlight stops there too.** A line longer
+                    // than the page is clipped by `codepoints_upto`, and a highlight running past the
+                    // edge of the text would be a blue band over the page margin — which is not a
+                    // cosmetic difference, it is a highlight on nothing.
+                    let col1 = col1.min(cells_per_row as u32);
+                    if col1 > col0 {
+                        push_rect(
+                            tree,
+                            l.x + col0 * m.cell_w,
+                            y,
+                            (col1 - col0) * m.cell_w,
+                            m.cell_h,
+                            holonomy_render::chrome::colour::SELECTION,
+                        );
+                    }
+                }
+            }
+
             // The terminator is not drawn. A `\n` has a glyph in most faces, so drawing it would put a
             // visible mark at the end of every line.
             let seg = strip_terminator(&text[..shown]);
@@ -4311,6 +4867,25 @@ fn push_doc_run(
         .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
             x as i32, y as i32, at, len, style, 0, ink,
         ))));
+}
+
+/// Push a filled rectangle into `tree`'s **back** layer. Part 28.
+///
+/// **A free function beside [`push_doc_run`](Self) rather than a method, and for the reason that one
+/// is a free function.** `SurfaceTree::leaf(Node::Rect(Rect::new(...)))` nests three ways and the `u32`
+/// to `i32` conversion is inside the innermost one; a helper is where the conversion gets asserted
+/// once instead of at every call site.
+///
+/// **Into `before`, so it paints under the text.** A selection highlight is the only surface in this
+/// file that must be behind the glyphs rather than in front of them, and it is exactly the kind of
+/// thing that gets pushed the wrong way once and is invisible until someone selects a word.
+fn push_rect(tree: &mut SurfaceTree, x: u32, y: u32, width: u32, height: u32, colour: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(
+        x as i32, y as i32, width, height, colour,
+    ))));
 }
 
 /// Bytes of the segment starting at `from` that hold at most `limit` codepoints.

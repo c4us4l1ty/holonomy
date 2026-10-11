@@ -9,7 +9,20 @@ fn main() {
     let out = std::env::args()
         .nth(1)
         .expect("usage: shot <out.ppm> [extra]");
-    let extra = std::env::args().nth(2).unwrap_or_default();
+    // **The first argument that is not a flag**, and not simply `nth(2)`.
+    //
+    // **`nth(2)` was right when the only other arguments were flags, and part 27 added `--size`** --
+    // so `shot out.ppm --size=1280x800` put the literal text `--size=1280x800` at the top of the
+    // document. The picture showed the selection working perfectly *and a line of gibberish above
+    // it*, and a reader would have had no way to tell which was the fixture and which was the bug.
+    //
+    // **It is a fixture defect rather than a rendering one, and it was invisible until a second flag
+    // existed** -- the same shape as part 22's `caret_line` and part 28's `move_line`: two ways to say
+    // one thing, and nobody checking whether they agreed.
+    let extra = std::env::args()
+        .skip(1)
+        .find(|a| !a.starts_with("--"))
+        .unwrap_or_default();
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
         holonomy_assets::build_atlas(&[16]).expect("atlas").0,
     ));
@@ -60,6 +73,17 @@ fn main() {
         if let Some(v) = arg.strip_prefix("--popup=") {
             if let Ok(i) = v.parse::<usize>() {
                 s.state.open = Some(holonomy_render::widgets::Open::Menu(i));
+            }
+        }
+        // `--select=START..END` selects a byte range, so a screenshot can show the highlight. Part 28
+        // added the selection and every other flag here drives a piece of chrome state; this drives a
+        // piece of *document* state, which is why it is the one that goes through the editor rather
+        // than assigning to `s.state`.
+        if let Some(v) = arg.strip_prefix("--select=") {
+            if let Some((a, b)) = v.split_once("..") {
+                if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    s.select_at(a, b).expect("select");
+                }
             }
         }
         if let Some(v) = arg.strip_prefix("--dropdown=") {
