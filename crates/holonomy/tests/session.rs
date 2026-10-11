@@ -533,6 +533,64 @@ fn a_resize_to_the_same_size_does_nothing() {
     assert_eq!(s.damage(), damage_before, "and nothing was marked stale");
 }
 
+/// # Part 36: a resize kept the chrome's cell, and the gate that says so
+///
+/// **The three gates above it all build their session from `ChromeMetrics::DESKTOP`** -- the 16 ppem
+/// design constants -- and `Session::new` scales them from the atlas's own line pitch. **So every one
+/// of them passed with `clamp_to` discarding that scale**, because at 16 ppem the scaled metrics and
+/// `DESKTOP` agree closely enough for a width and a caret position.
+///
+/// **This one asks the question the other three did not**: does the cell the painter advances in
+/// survive a `Session::resize`?
+#[test]
+fn a_resize_keeps_the_cell_the_painter_is_advancing_in() {
+    let (mut s, atlas) = session(Editor::new(), ChromeMetrics::DESKTOP);
+    s.repaint_all().expect("the first paint");
+
+    // **What `Session::new` derived from the atlas.** At 16 ppem the Monospace face's advance is 10,
+    // and `DESKTOP`'s constant is 8 -- so this is already a scaled value and not a design constant,
+    // which is the whole point.
+    let cell_before = s.chrome_layout().cell_w;
+    let pitch_before = s.chrome_layout().cell_h;
+    let bands_before = (
+        s.chrome_layout().title.height,
+        s.chrome_layout().menubar.height,
+        s.chrome_layout().toolbar.height,
+    );
+    assert_eq!(
+        cell_before,
+        u32::from(
+            atlas
+                .metric(
+                    u32::from(b'm'),
+                    holonomy_assets::payload::Style::Monospace,
+                    16,
+                )
+                .advance_x,
+        ),
+        "**the chrome's cell is the face's own advance**, which is what part 32 changed it to"
+    );
+
+    for (w, h) in [(1600u32, 1000u32), (900, 500), (1920, 1080)] {
+        s.resize(w, h).expect("resize");
+        let l = s.chrome_layout();
+        assert_eq!(
+            (l.cell_w, l.cell_h),
+            (cell_before, pitch_before),
+            "**a resize to {w}x{h} changed the cell from {cell_before}x{pitch_before} to {}x{}** -- \
+             the bands and the page are laid out in it and the painter advances in it, so a resize \
+             that changes it is a resize that moves every glyph",
+            l.cell_w, l.cell_h
+        );
+        assert_eq!(
+            (l.title.height, l.menubar.height, l.toolbar.height),
+            bands_before,
+            "and changed the band heights, which is how the toolbar icons ended up on top of each \
+             other: 24 ppem's glyphs in 16 ppem's bands"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Phase 9A: tables. The gate below is the one the directive names -- insert a table with Ctrl+T,
 // type into cell (0, 0), Tab through the cells, append a row at the bottom-right -- plus the claims

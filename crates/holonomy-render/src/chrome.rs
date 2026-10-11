@@ -482,19 +482,35 @@ impl ChromeMetrics {
         // panel *wider* than that earns more text. That keeps `ChromeMetrics::DESKTOP` meaning what it
         // has always meant, and makes a wider window — the thing the user actually asked for — the
         // thing that helps.
-        if width <= self.anchor_width {
-            return if self.columns == 0 { 1 } else { self.columns };
+        //
+        // **CORRECTION, part 36: the floor holds only while the page actually fits.** Part 27's rule
+        // was unconditional, and it was written when 80 columns was 736 px — a 1,024-wide window had
+        // room. **Part 32 raised the type to 24 ppem, which made 80 columns 1,216 px, and the floor
+        // then held a measure the panel could not show: the text ran off the right edge of a
+        // 1,024-wide window and was simply gone.**
+        //
+        // **The anchor scaled with the type (1,280 -> 1,894), so the rule still looked
+        // self-consistent.** What changed underneath it was the width of the page the floor was
+        // promising: the anchor tracks the panel that holds the design measure, and nothing tracked the
+        // panel that holds the design *page*.
+        //
+        // **Nothing above the design width changes**: `measure_beyond` keeps applying the floor there,
+        // where the extra width is desk by construction.
+        let cols = if self.columns == 0 { 1 } else { self.columns };
+        if width <= self.anchor_width && room_columns(self, width) >= cols {
+            return cols;
         }
-        measure_beyond(self, width)
+        measure_beyond(self, width, if width <= self.anchor_width { 1 } else { cols })
     }
 }
 
-/// **The arithmetic [`measure_for`](ChromeMetrics::measure_for) reaches only above the design width.**
+/// **The columns the panel's room actually holds, with neither floor nor ceiling applied.**
 ///
-/// **A free function and not a second method**, because it is one computation reached by two doors: the
-/// anchor at the design width belongs to `measure_for` and the room arithmetic belongs to both, and
-/// splitting them means neither half has to re-read the other's reasoning.
-const fn measure_beyond(m: &ChromeMetrics, width: u32) -> u32 {
+/// **Split out of [`measure_beyond`] because [`measure_for`](ChromeMetrics::measure_for) needs the raw
+/// room twice**: once to ask *"does the design measure still fit?"* — a question about the room and not
+/// about the clamped answer — and once to get the clamped answer. **One arithmetic, so the question and
+/// the answer cannot be built from two different subtractions.**
+const fn room_columns(m: &ChromeMetrics, width: u32) -> u32 {
     /// Desk either side of the page, in cells. Two would do; four is a margin that reads as a page.
     const DESK_CELLS: u32 = 4;
     // **`u32::max` is not a `const fn` on this toolchain** — `Ord::max` is not yet stable as a const
@@ -507,15 +523,28 @@ const fn measure_beyond(m: &ChromeMetrics, width: u32) -> u32 {
         .saturating_add(m.scrollbar_w)
         .saturating_add(DESK_CELLS * 2 * cell);
     let room = width.saturating_sub(chrome).saturating_sub(m.page_pad * 2) / cell;
+    // **One column even when the room is zero**, so this cannot return zero and a caller dividing by
+    // it cannot trap. A metrics with `columns: 0` is a caller's mistake and the floor turns it into
+    // one column rather than into a panic three functions away.
+    if room == 0 { 1 } else { room }
+}
+
+/// **The arithmetic [`measure_for`](ChromeMetrics::measure_for) reaches above the design width, clamped
+/// to `[floor, ceiling]`.**
+///
+/// **A free function and not a second method**, because it is one computation reached by two doors: the
+/// anchor at the design width belongs to `measure_for` and the room arithmetic belongs to both, and
+/// splitting them means neither half has to re-read the other's reasoning.
+/// **`floor` is a parameter because it is not always the same number.** Above the design width it is
+/// [`ChromeMetrics::columns`]. Below it, where the design measure no longer fits, it is **1** — a floor
+/// of 80 there would be the defect part 36 fixes, restated.
+const fn measure_beyond(m: &ChromeMetrics, width: u32, floor: u32) -> u32 {
+    let room = room_columns(m, width);
     let ceiling = if m.max_columns == 0 {
         m.columns
     } else {
         m.max_columns
     };
-    // **The floor is one column even if `columns` is 0,** so this cannot return zero and a caller
-    // dividing by it cannot trap. A metrics with `columns: 0` is a caller's mistake and the floor turns
-    // it into one column rather than into a panic three functions away.
-    let floor = if m.columns == 0 { 1 } else { m.columns };
     let ceil = if ceiling < floor { floor } else { ceiling };
     if room < floor {
         floor
@@ -594,7 +623,38 @@ impl ChromeMetrics {
     /// only the panel changes. This exists so that "what a resize does and does not change" is written
     /// down once, and so a resize is one call at the call site rather than a struct literal.
     pub const fn clamp_to(&self, width: u32, height: u32) -> Self {
-        Self::for_size(width, height)
+        // **CORRECTION, part 36: this was `Self::for_size(width, height)`, and `for_size` is
+        // `Self { width, height, ..Self::DESKTOP }`.**
+        //
+        // **So every resize rebuilt the whole struct from the 16 ppem design constants**, discarding
+        // the three things [`Session::new`](../../holonomy/session/struct.Session.html) derives from
+        // the atlas: the measured `cell_w`, the raised band heights, and the scaled `anchor_width`.
+        // `Chrome::new` then laid the chrome out in an 8 px cell while the painter advanced 14 px ones,
+        // and 24 ppem's glyphs overflowed 16 ppem's bands: **the toolbar icons overlapped**, and the
+        // page took its measure and its gutters from a cell nothing else was using.
+        //
+        // **The doc comment below already said what this does** -- *"The cell size, the padding, the
+        // measure and the four band heights are all the same as `self`'s; only the panel changes"* --
+        // **and the body did the opposite.** The gate that would have caught it could not have been
+        // written: every `clamp_to` assertion in this file builds its metrics from `for_size`, which is
+        // the one constructor whose output `clamp_to` got right. See
+        // `a_resize_keeps_the_type_scale_and_not_just_the_panel`.
+        //
+        // **`for_size` stays `..Self::DESKTOP`** and is still right: it is the constructor that *is*
+        // the design defaults, at a size.
+        Self {
+            width: if width < Self::MIN_WIDTH {
+                Self::MIN_WIDTH
+            } else {
+                width
+            },
+            height: if height < Self::MIN_HEIGHT {
+                Self::MIN_HEIGHT
+            } else {
+                height
+            },
+            ..*self
+        }
     }
 }
 

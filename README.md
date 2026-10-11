@@ -296,6 +296,31 @@ product, and this is a sandboxed text editor that cannot open a file dialog, so 
 Export and Import is a claim about a capability it does not have. **Ten toolbar buttons remain inert**
 and are counted as such.
 
+**Every resize threw the whole layout away.** `ChromeMetrics::clamp_to` — which `Session::resize` calls
+on *every* `ConfigureNotify`, i.e. every intermediate size of every drag — was `Self::for_size(w, h)`,
+and `for_size` is `Self { width, height, ..Self::DESKTOP }`. So a resize rebuilt the struct from the 16
+ppem design constants, discarding the three things `Session::new` derives from the atlas: the measured
+`cell_w` (14 → 8), the line pitch (37 → 25) and the scaled `anchor_width` (1,894 → 1,280). The chrome
+was then laid out in an 8 px cell while the painter advanced 14 px ones, and 24 ppem's glyphs were drawn
+into 16 ppem's bands — **that is the overlapping icons.** The doc comment above the function already said
+*"only the panel changes"*; the body did the opposite. **No gate could have caught it**: every
+`clamp_to` assertion builds its metrics from `for_size`, which is the one state `clamp_to` ever
+returned.
+
+**The viewport was half the size it should be, because the type size was chosen against the wrong
+measurement.** Part 32 raised `--ppem` to 24 and measured the *atlas ceiling* (26, where `build_atlas`
+returns `AtlasFull`). It never measured the viewport. `with_type_scale` multiplies every band that holds
+type and a 37 px line pitch against a 25 px one costs a third of the rows whatever the height. At the
+default 1,600×1,000 window: **16 ppem → 30 rows, 20 ppem → 24, 24 ppem → 18.** The default is now 20;
+`--ppem 24` remains.
+
+**And the line was clipped off the right edge.** `measure_for` held 80 columns for every panel at or
+below the anchor. That was written when 80 columns was 736 px and a 1,024-wide window had room; at 24
+ppem it is 1,216 px, so the floor held a measure the panel could not show. The anchor scaled with the
+type (1,280 → 1,894) so the rule still looked self-consistent — what changed underneath it was the
+width of the page the floor was promising. **The floor now holds only while the page fits**, and part
+27's gate — which asserted "clipped rather than reflowed" at three widths — is corrected.
+
 **Typing did nothing, and the whole suite had never painted twice.** `emit_body_text` read the visible
 page into `line_scratch` and then called `truncate(used)` on it, so the next paint's guard compared a
 fresh line against the *previous page's* byte count. One byte more and it broke out of the read loop

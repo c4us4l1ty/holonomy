@@ -138,13 +138,45 @@ fn the_measure_is_eighty_columns_at_the_design_width_and_grows_above_it() {
         "and the page is that measure plus its padding"
     );
 
-    // **Below the design width nothing changes at all** — the pre-existing behaviour, kept.
-    for w in [ChromeMetrics::MIN_WIDTH, 1024, 1280] {
+    // **CORRECTION, part 36: below the design width the measure holds only while the page fits.**
+    //
+    // **This loop used to assert the opposite at three widths, including `MIN_WIDTH`** — and it was
+    // asserting a *clip*. At 16 ppem, 80 columns is 896 px of page, and `MIN_WIDTH` is 768: **the
+    // minimum window this file defines has never been able to show the design measure.** Part 27's
+    // rule was written as "nothing changes below the design width", and what it preserved was text
+    // running off the edge of the panel.
+    //
+    // **Part 32 made it much worse and that is what it took to notice:** 80 columns became 1,216 px, so
+    // every panel under about 1,200 px clipped, which is most of them. The reported symptom was *"I
+    // cannot properly use the app"*.
+    //
+    // **So the floor is now conditional, and this loop asserts the new rule:** 1,280 px has room for
+    // the 80-column page and still shows it — **the design width keeps its meaning** — while a narrower
+    // panel gets a shorter line instead of a cut one.
+    assert_eq!(
+        Layout::new(&m.clamp_to(1280, 800)).text.width,
+        m.columns * m.cell_w,
+        "1,280 px still shows the 80-column measure, because the design page fits there"
+    );
+    //
+    // **And the property that replaces the old loop is the one that actually matters, and it is a
+    // sweep rather than three widths: the page never overflows the panel, at any width.** It is
+    // asserted over a range because a single width is a coincidence and a range is the rule, and it
+    // is asserted against `page` rather than against `text` because the page is what is clipped.
+    //
+    // **My first version of this asserted that 1,024 px cannot show an 896 px page. It can** — 896
+    // plus a gutter each side is under 1,024 — and the gate was wrong about arithmetic it could have
+    // run. **The widths that genuinely cannot are the small ones**, and `MIN_WIDTH` is one of them: a
+    // 768 px panel has never held an 896 px page, before or after part 32.
+    for w in (ChromeMetrics::MIN_WIDTH..=2560).step_by(8) {
         let n = Layout::new(&m.clamp_to(w, 800));
-        assert_eq!(
-            n.text.width,
-            m.columns * m.cell_w,
-            "{w} px shows the 80-column measure, clipped rather than reflowed"
+        assert!(
+            n.page.x + n.page.width <= w,
+            "**a {w} px panel shows a page running off its right edge**: {}..={}. The measure is \
+             clamped to the room, so this cannot happen -- and before part 36 it did, at every width \
+             below about 1,200 px once the type was 24 ppem",
+            n.page.x,
+            n.page.x + n.page.width
         );
     }
 
@@ -929,4 +961,122 @@ fn a_panel_too_small_is_clamped_to_the_minimum() {
     // `clamp_to` is the same thing under a different name, and it must stay so -- the session calls it
     // on every resize.
     assert_eq!(m.clamp_to(1, 1), m, "clamp_to agrees with for_size");
+}
+
+/// # Part 36: a resize threw the type scale away
+///
+/// **The report, on the running window:** *"the view port -- its way too small and I cannot properly
+/// use the app and can't even resize it"*, and then *"things like the icons etc overlap on each
+/// other"*. **Two symptoms and one cause.**
+///
+/// ## The cause
+///
+/// [`ChromeMetrics::clamp_to`] -- which [`Session::resize`](../../holonomy/session/struct.Session.html)
+/// calls on every single `ConfigureNotify` -- was:
+///
+/// ```ignore
+/// pub const fn clamp_to(&self, width: u32, height: u32) -> Self {
+///     Self::for_size(width, height)   // <- `..Self::DESKTOP`
+/// }
+/// ```
+///
+/// **and `for_size` is `Self { width, height, ..Self::DESKTOP }`.** So a resize rebuilt the whole
+/// struct from the **16 ppem design constants**, discarding the three things [`Session::new`] had just
+/// derived from the atlas: the measured `cell_w`, the raised band heights, and the scaled
+/// `anchor_width`.
+///
+/// **And the gate that is the one-line summary of this file's blind spot is right above.** Every
+/// `clamp_to` gate here builds its metrics from `for_size` or `DESKTOP` — from the design constants,
+/// which is the only state `clamp_to` ever returned — and so **could not have failed however it was
+/// written.** `Chrome::new(metrics)` then laid the chrome out at 24 ppem's cell inside 16 ppem's
+/// bands, and 24 ppem's glyphs overflowed 16 ppem's bands: **the icons overlap**, and the page gets
+/// its gutters and its measure from a cell that is no longer the one the painter is using.
+///
+/// ## The gate
+///
+/// **A scaled struct, resized.** Not a designed one — that distinction is the whole test, and it is why
+/// no gate in this file had caught it.
+#[test]
+fn a_resize_keeps_the_type_scale_and_not_just_the_panel() {
+    /// What `Session::new` builds from a 24 ppem atlas: pitch 37, the face's own advance of 14, and the
+    /// bands scaled by 37/25. Spelled out rather than built from an atlas so this file keeps no
+    /// dependency on one, and so the numbers are the ones actually measured.
+    fn at_24_ppem() -> ChromeMetrics {
+        ChromeMetrics::DESKTOP
+            .with_line_pitch(37)
+            .with_cell_width(14)
+            .with_type_scale(37)
+    }
+
+    let before = at_24_ppem();
+    let after = before.clamp_to(1600, 900);
+
+    // **The cell first, because everything else is measured in it.**
+    assert_eq!(
+        after.cell_w, before.cell_w,
+        "**a resize changed the cell the painter's advances are in.** `cell_w` is read off the \
+         Monospace face by `Session::new`; a resize cannot know it, so it must keep it"
+    );
+    assert_eq!(after.cell_h, before.cell_h, "and the line pitch");
+
+    // **The bands, which is where the overlap came from: 24 ppem's glyphs in 16 ppem's bands.**
+    for (name, got, want) in [
+        ("title_h", after.title_h, before.title_h),
+        ("menu_h", after.menu_h, before.menu_h),
+        ("toolbar_h", after.toolbar_h, before.toolbar_h),
+        ("ruler_h", after.ruler_h, before.ruler_h),
+        ("status_h", after.status_h, before.status_h),
+    ] {
+        assert_eq!(got, want, "a resize changed {name}");
+    }
+
+    // **The anchor, which decides the measure.** At 24 ppem it is 1,894; from `DESKTOP` it is 1,280,
+    // so the resize also moved the width at which the line stops growing -- by 600 px, silently.
+    assert_eq!(
+        after.anchor_width, before.anchor_width,
+        "**a resize moved the design width the measure is anchored at, from {} to {}**",
+        before.anchor_width, after.anchor_width
+    );
+
+    // **And only the panel changed**, which is what the doc has always said:
+    // *"The cell size, the padding, the measure and the four band heights are all the same as `self`'s;
+    // only the panel changes."*
+    assert_eq!(after.width, 1600);
+    assert_eq!(after.height, 900);
+    assert_eq!(after.columns, before.columns);
+    assert_eq!(after.page_pad, before.page_pad);
+    assert_eq!(after.max_columns, before.max_columns);
+}
+
+/// **The overlap itself, as the arithmetic that produces it.** **Every band that holds text has to be
+/// able to hold one line**, and 16 ppem's toolbar cannot hold 24 ppem's glyphs.
+///
+/// **`tabs` is deliberately not in the list:** [`ChromeMetrics::tab_h`] has been `0` since part 19, and
+/// a band that is gone cannot overflow.
+#[test]
+fn the_toolbar_bands_are_tall_enough_for_the_type_they_hold() {
+    fn at_24_ppem() -> ChromeMetrics {
+        ChromeMetrics::DESKTOP
+            .with_line_pitch(37)
+            .with_cell_width(14)
+            .with_type_scale(37)
+    }
+    let m = at_24_ppem();
+    let after = m.clamp_to(1600, 900);
+    let l = Layout::new(&after);
+    for (name, band) in [
+        ("title", l.title),
+        ("menubar", l.menubar),
+        ("toolbar", l.toolbar),
+        ("ruler", l.ruler),
+        ("status", l.status),
+    ] {
+        assert!(
+            band.height >= after.cell_h,
+            "**the {name} band is {} px tall and the line pitch is {}**: a band that cannot hold one \
+             line cannot hold one line of anything, and the text in it lands on the band below",
+            band.height,
+            after.cell_h
+        );
+    }
 }

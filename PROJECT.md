@@ -2585,6 +2585,170 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+# Part 36 — the viewport is too small, and the icons are on top of each other
+
+Three reports, one afternoon:
+
+> *"what happened to the view port - its way too small and i cannot properly use the app and cant even
+> resize it"*
+>
+> *"btw things like the icons etc overlap on each other"*
+
+**Three defects, in three files, and not one of them is the type size.** They are: a resize that threw
+the layout away, a default chosen against the wrong measurement, and a floor that no longer had room
+under it.
+
+---
+
+## 1. The overlapping icons — `ChromeMetrics::clamp_to` was `for_size`
+
+[`ChromeMetrics::clamp_to`] — which `Session::resize` calls on **every `ConfigureNotify`, i.e. every
+intermediate size of every drag** — was:
+
+```ignore
+pub const fn clamp_to(&self, width: u32, height: u32) -> Self {
+    Self::for_size(width, height)     // <- `..Self::DESKTOP`
+}
+```
+
+**and `for_size` is `Self { width, height, ..Self::DESKTOP }`.** So a resize rebuilt the entire struct
+from the **16 ppem design constants**, discarding all three things `Session::new` had just derived from
+the atlas:
+
+| what | what `Session::new` set at 24 ppem | what a resize replaced it with |
+| --- | --- | --- |
+| `cell_w` — the Monospace face's own advance | **14** | **8** |
+| `cell_h` — the atlas's line pitch | **37** | **25** |
+| `title_h`/`menu_h`/`toolbar_h`/`ruler_h`/`status_h` | 44/37/50/37/37 | 30/22/34/20/20 |
+| `anchor_width` | 1,894 | 1,280 |
+
+**The chrome was then laid out in an 8 px cell while the painter advanced 14 px ones, and 24 ppem's
+glyphs were drawn into 16 ppem's bands.** That is the overlap: not two icons misplaced, but an entire
+chrome drawn at one scale inside furniture measured for another.
+
+### The doc comment already said what it did
+
+`clamp_to`'s own documentation, unchanged by this part:
+
+> The cell size, the padding, the measure and the four band heights are **all the same as `self`'s**;
+> only the panel changes.
+
+**The body did the exact opposite of the sentence above it, forty lines away.** `for_size` is still
+`..Self::DESKTOP` and is still right — it is the constructor that *is* the design defaults.
+
+### Why no gate caught it, and the gate that could not have been written
+
+Every `clamp_to` assertion in `tests/chrome.rs` builds its metrics from `for_size` or `DESKTOP`:
+
+```rust
+let n = Layout::new(&m.clamp_to(w, 800));
+```
+
+**That is the one state `clamp_to` ever returned.** A gate built from the design constants is asserting
+that `clamp_to` preserves the design constants, which is true whether it rebuilds from `DESKTOP` or
+carries `self` across. **It could not have failed however it was written.**
+
+`a_resize_keeps_the_type_scale_and_not_just_the_panel` builds a **scaled** struct instead — `with_line_pitch(37).with_cell_width(14).with_type_scale(37)`, spelled out rather than taken from an atlas so the file keeps no dependency on one — and resizes *that*.
+
+### The bite check
+
+Reverting `..*self` to `..Self::DESKTOP` fails the gate with `left: 8, right: 14`. The session-level gate
+(`a_resize_keeps_the_cell_the_painter_is_advancing_in`, in `tests/session.rs`) fails with
+**`left: (8, 18), right: (10, 25)`** — the cell *and* the pitch, both design constants, exactly as
+diagnosed.
+
+---
+
+## 2. "The viewport is way too small" — the default was chosen against the wrong measurement
+
+Part 32 raised `--ppem` from 16 to 24 and measured **the atlas's ceiling** (26, where `build_atlas`
+returns `AtlasFull`). **It never measured the viewport.**
+
+`with_type_scale` multiplies **every band that holds type**, and a 37 px line pitch against a 25 px one
+costs a third of the rows whatever the height. **Measured at the default 1,600×1,000 window, with
+`Session::new`'s own setter order:**
+
+```text
+ ppem   bands   text height   rows   columns
+  16      139         762      30       100
+  20      166         735      24        98
+  24      205         696      18        80
+```
+
+**24 ppem bought bigger letters with twelve fewer lines and twenty fewer columns.** The bands alone
+went from 139 px to 205 px of a 1,000 px window.
+
+*Measured in the order `Session::new` uses — `with_type_scale` then `with_line_pitch`. The other order
+reports 270 where the application uses 205, because `with_line_pitch` has already raised each band to
+37 and `with_type_scale` then multiplies that by 37/25. **I made that measurement wrong first** and the
+wrong one said 270.*
+
+**The default is now 20.** It keeps part 32's complaint addressed — a pitch of 30 against 25, a cell of
+12 against 10 — and costs 20 px of chrome against 16 ppem rather than 66 px against 24. `--ppem 24`
+remains, and is what part 32 measured everything against.
+
+---
+
+## 3. The clipped line — a floor with no room under it
+
+`measure_for` held `columns` (80) for every panel at or below `anchor_width`, on the reasoning that a
+narrower window should gain margins rather than text.
+
+**Part 32 broke the premise without breaking the rule.** 80 columns was 736 px when the rule was
+written and a 1,024-wide window had room; **at 24 ppem it is 1,216 px**, so the floor held a measure
+the panel could not show and the text ran off the right edge.
+
+**The anchor scaled with the type — 1,280 → 1,894 — so the rule still looked self-consistent.** What
+changed underneath it was the width of the page the floor was *promising*: the anchor tracks the panel
+that holds the design measure, and nothing tracked the panel that holds the design page.
+
+**The floor now holds only while the page fits.** Above the design width nothing changes: the extra
+width is desk by construction.
+
+### A correction inside the correction
+
+Part 27's own gate asserted the opposite, at three widths:
+
+```rust
+"{w} px shows the 80-column measure, clipped rather than reflowed"
+```
+
+**It was asserting a clip.** At 16 ppem, `MIN_WIDTH` (768) has never held an 896 px page — not before
+part 32, not after. **My first replacement asserted that 1,024 px cannot show an 896 px page. It can**,
+and the gate was wrong about arithmetic it could have run.
+
+**The gate that replaces it is a sweep, because one width is a coincidence and a range is the rule:**
+
+```rust
+for w in (ChromeMetrics::MIN_WIDTH..=2560).step_by(8) {
+    assert!(n.page.x + n.page.width <= w, "a {w} px panel shows a page running off its right edge");
+}
+```
+
+---
+
+## What all three have in common
+
+**A measurement that was never taken.** Part 32 raised the type and measured the *atlas*. Part 27 set a
+floor and measured the *measure*. `clamp_to` had a doc comment and no behaviour.
+
+**And a gate written against the design constants**, which is the state the renderer is never in: every
+session that runs calls `Session::new`, which rescales them. **Three gates, three files, one blind
+spot** — the same shape as part 35's, and the same reason it was findable only by running the
+application.
+
+## Not done, and not claimed
+
+- **`--ppem 24` still clips a narrow window** at the minimum size: 80 columns is 1,216 px and
+  `MIN_WIDTH` is 768. It now *shortens the line* rather than clipping it, which is the fix, but it means
+  the design measure needs a panel of about 1,200 px at that size. Lowering `MIN_WIDTH`'s companion
+  claim — that 768 is "the narrowest panel this chrome is drawn into without clipping" — is not done.
+- **The 20 ppem default is a judgement, not a measurement of taste.** The table above is measured; that
+  24 rows is the right number is not, and it is the user's call, which is why it was asked rather than
+  assumed.
+- **`text_colour.rs`, `session.rs`, `chrome.rs` and `args.rs` each gained a gate; no new files.**
+---
+
 # Part 35 — "I type and nothing appears", and the suite had never painted twice
 
 The symptom, reported on the running window: **"when I try to write in the document, the text doesn't

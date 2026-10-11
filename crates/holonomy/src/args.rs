@@ -72,7 +72,34 @@ impl Default for Args {
             width: 1600,
             height: 1000,
             zoom: 100,
-            ppem: 24,
+            // **CORRECTION, part 36: 20, not 24.**
+            //
+            // Part 32 raised this from 16 to 24 because the type was too small, and it measured the
+            // *atlas* ceiling (26, where `build_atlas` returns `AtlasFull`) rather than the **viewport**.
+            // **Measured, at the default 1,600x1,000 window, with `Session::new`'s own setter order:**
+            //
+            // ```text
+            //   ppem   bands   text height   rows   columns
+            //    16     139         762        30      100
+            //    20     166         735        24       98
+            //    24     205         696        18       80
+            // ```
+            //
+            // **Measured at the default 1,600x1,000 window**, with `Session::new`'s own setter order
+            // (`with_type_scale` then `with_line_pitch`; the other order double-scales the bands and
+            // reports 270 where the application uses 205).
+            //
+            // **24 ppem bought bigger letters with six fewer lines of document, and the measure it
+            // implied was 80 columns where 100 fit** — the user reported it as *"the view port is way
+            // too small and I cannot properly use the app"*. `with_type_scale` multiplies **every band
+            // that holds type**, so the chrome grew from 139 px to 205 px of a 1,000 px window, and a
+            // 37 px line pitch against a 25 px one costs a third of the rows whatever the height.
+            //
+            // **20 keeps part 32's complaint addressed** — a pitch of 30 against 25, and a cell of 12
+            // against 10 — **without the viewport shrinking**, and it costs 20 px of chrome against
+            // 16 ppem rather than 66 px against 24. `--ppem 24` remains, and is what part 32 measured
+            // everything against.
+            ppem: 20,
             headless: false,
             window: false,
             display: None,
@@ -173,10 +200,11 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --height N           Panel height in pixels (default 1000).
                          Wider than 1280 grows the text column up to 100 columns
                          and then stops; past that the extra width is desk. Part 27.
-  --ppem N             Pixels per em for the faces (default 24; 28 and above
+  --ppem N             Pixels per em for the faces (default 20; 28 and above
                          do not fit the atlas). This is the type size: it
-                         enlarges the glyphs and every band that holds them.
-                         Part 32.
+                         enlarges the glyphs and every band that holds them,
+                         so it costs rows as well as pixels. Part 32 chose
+                         24; part 36 measured the viewport and chose 20.
   --zoom N             Zoom percentage, 25..=400 (default 100).
                          CORRECTION, part 23: this does not zoom. It sets the
                          number the toolbar prints; the page does not change.
