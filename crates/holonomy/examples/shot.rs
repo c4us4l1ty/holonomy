@@ -13,7 +13,16 @@ fn main() {
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
         holonomy_assets::build_atlas(&[16]).expect("atlas").0,
     ));
-    let m = ChromeMetrics::DESKTOP;
+    // `--size=WxH`, so a screenshot can show a panel other than the design width. Part 27 made the
+    // measure follow the panel above 1,280 px, and a picture of only the design width would not show it.
+    let mut m = ChromeMetrics::DESKTOP;
+    if let Some(arg) = std::env::args().find(|a| a.starts_with("--size=")) {
+        if let Some((w, h)) = arg.trim_start_matches("--size=").split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                m = m.clamp_to(w, h);
+            }
+        }
+    }
     let mut ed = Editor::new();
     let mut i = 1;
     while ed.text_len() < 900 {

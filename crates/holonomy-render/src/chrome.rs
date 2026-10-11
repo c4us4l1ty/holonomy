@@ -192,8 +192,36 @@ pub struct ChromeMetrics {
     pub scrollbar_w: u32,
     /// Depth of the page's drop shadow.
     pub shadow: u32,
-    /// The measure: columns of text per line.
+    /// **The measure the page would have if the panel is at least this wide**, in columns of text.
+    ///
+    /// **This was the whole measure, and that made the window size nearly meaningless.** `page_w` was
+    /// `columns * cell_w + 2 * page_pad` — a constant — so a 2,560 px window and a 1,280 px window drew
+    /// the same 736 px page and differed only in how much empty desk surrounded it. **"Make it bigger"
+    /// did nothing to the text**, which is the most direct way a UI can fail to respond to its user.
+    ///
+    /// So it is now the *floor* of the measure rather than its value: the page grows with the panel and
+    /// this is what it measures at [`DESKTOP`](Self::DESKTOP). **At 1,280 px wide nothing changes** —
+    /// 80 columns is exactly what the room allows — so every gate written against the old constant
+    /// still holds, and the behaviour is new only where the panel is wider than it has ever been.
+    ///
+    /// **A narrow panel still gets this many columns**, overflow and clipping included, because the
+    /// alternative — a two-column measure on a small window — is worse than a clipped full one.
     pub columns: u32,
+    /// **The most columns the page will ever be**, however wide the panel.
+    ///
+    /// **A typographic cap, not a layout one, and it is the reason the measure is not
+    /// `available_width / cell_w`.** A 2,560 px panel has room for ~300 monospace columns and a line
+    /// that long is unreadable: the eye loses the start of the next line on the return sweep. 80 is the
+    /// classic measure and 100 is the usual upper end of it, so that is where this stops and the
+    /// remaining width becomes desk.
+    ///
+    /// **Beyond the cap the page is still centred and the gutters still grow**, so a very wide window
+    /// looks like a page on a desk rather than a stretched sheet — which is the reference's look and
+    /// the reason this is a cap and not "fill the panel".
+    ///
+    /// **Change this number to change the answer.** It is a judgement about reading, not about pixels,
+    /// and it is one field rather than a constant buried in the layout arithmetic.
+    pub max_columns: u32,
 }
 
 impl ChromeMetrics {
@@ -201,6 +229,10 @@ impl ChromeMetrics {
     ///
     /// Chosen so the page is 640 px of text: 80 columns x 8 px. A 4:3 panel showing a portrait page
     /// at a readable size, which is the whole design constraint.
+    ///
+    /// **And 80 is what this panel *allows*, not what it *fixes*.** `max_columns: 100` means a wider
+    /// window gets a wider page, up to 800 px of text; at 1,280 the allowance is exactly 80 and nothing
+    /// about this constant's meaning changed. See [`columns`](Self::columns).
     pub const DESKTOP: ChromeMetrics = ChromeMetrics {
         width: 1280,
         height: 800,
@@ -218,6 +250,7 @@ impl ChromeMetrics {
         scrollbar_w: 12,
         shadow: 3,
         columns: 80,
+        max_columns: 100,
     };
 
     /// Adapt these metrics to a line pitch read from the fonts.
@@ -292,11 +325,104 @@ impl ChromeMetrics {
             .saturating_sub(self.status_h)
     }
 
-    /// The page's width, text plus padding.
+    /// The page's width, text plus padding, **at this metrics' own measure**.
+    ///
+    /// **Kept as a method because `MIN_WIDTH`'s arithmetic and several gates quote it**, and changing
+    /// its meaning would silently change those. The panel-aware answer is
+    /// [`measure_for`](Self::measure_for) followed by [`page_w_for`](Self::page_w_for), and
+    /// [`Layout`](Self) uses those.
     pub const fn page_w(&self) -> u32 {
-        self.columns * self.cell_w + self.page_pad * 2
+        self.page_w_for(self.columns)
     }
 
+    /// The page's width for a measure of `cols` columns.
+    pub const fn page_w_for(&self, cols: u32) -> u32 {
+        cols * self.cell_w + self.page_pad * 2
+    }
+
+    /// **The measure this panel can actually show**, in columns.
+    ///
+    /// # This is the fix for "make the window bigger and nothing happens"
+    ///
+    /// **The room is what the panel has left after the sidebar, the shadow, the scrollbar rail and a
+    /// minimum desk on each side**, divided into cells, less the page's own padding.
+    ///
+    /// **The desk is four cells — 32 px on each side.** Not zero, because a page flush to the panel edge
+    /// is not a page on a desk and the reference is not that; not much more, because the whole point is
+    /// that a wider window yields more text and a generous margin gives that back.
+    ///
+    /// **And it is clamped into `[columns, max_columns]`.** Below the floor the measure is unchanged and
+    /// the page overflows and clips, which is what a narrow window has always done; above the ceiling
+    /// the extra width becomes desk rather than a 300-column line nobody can read. See
+    /// [`max_columns`](Self::max_columns).
+    ///
+    /// **`cell_w.max(1)`, because a zero cell width would divide by zero** — and
+    /// `ChromeMetrics` is a public struct a caller can build, which is the only reason that is possible.
+    pub const fn measure_for(&self, width: u32) -> u32 {
+        // **At the design width, the measure is exactly `columns` — and this one line is what keeps
+        // every measured number in this project valid.**
+        //
+        // §2.9.3 measured the image cache against a **640 px page column**: the 8.0 MiB decoded-image
+        // budget, the resample thresholds, the "≤ 8.0 MiB at every point of a page-1→50 scroll" row in
+        // §6. The room-minus-chrome arithmetic on its own gives **112 columns at 1,280 px**, which would
+        // have silently made the page 896 px wide and every one of those measurements wrong by 40 %.
+        //
+        // So the measure is anchored: **1,280 px is the width `columns: 80` was chosen for**, and only a
+        // panel *wider* than that earns more text. That keeps `ChromeMetrics::DESKTOP` meaning what it
+        // has always meant, and makes a wider window — the thing the user actually asked for — the
+        // thing that helps.
+        if width <= Self::DESKTOP.width {
+            return if self.columns == 0 { 1 } else { self.columns };
+        }
+        measure_beyond(self, width)
+    }
+}
+
+/// **The arithmetic [`measure_for`](ChromeMetrics::measure_for) reaches only above the design width.**
+///
+/// **A free function and not a second method**, because it is one computation reached by two doors: the
+/// anchor at the design width belongs to `measure_for` and the room arithmetic belongs to both, and
+/// splitting them means neither half has to re-read the other's reasoning.
+const fn measure_beyond(m: &ChromeMetrics, width: u32) -> u32 {
+    /// Desk either side of the page, in cells. Two would do; four is a margin that reads as a page.
+    const DESK_CELLS: u32 = 4;
+    // **`u32::max` is not a `const fn` on this toolchain** — `Ord::max` is not yet stable as a const
+    // trait — and neither is `Ord::clamp`. The clamps below are the comparisons written out: three more
+    // lines than `clamp`, and the same reasoning twice.
+    let cell = if m.cell_w == 0 { 1 } else { m.cell_w };
+    let chrome = m
+        .sidebar_w
+        .saturating_add(m.shadow)
+        .saturating_add(m.scrollbar_w)
+        .saturating_add(DESK_CELLS * 2 * cell);
+    let room = width.saturating_sub(chrome).saturating_sub(m.page_pad * 2) / cell;
+    let ceiling = if m.max_columns == 0 {
+        m.columns
+    } else {
+        m.max_columns
+    };
+    // **The floor is one column even if `columns` is 0,** so this cannot return zero and a caller
+    // dividing by it cannot trap. A metrics with `columns: 0` is a caller's mistake and the floor turns
+    // it into one column rather than into a panic three functions away.
+    let floor = if m.columns == 0 { 1 } else { m.columns };
+    let ceil = if ceiling < floor { floor } else { ceiling };
+    if room < floor {
+        floor
+    } else if room > ceil {
+        ceil
+    } else {
+        room
+    }
+}
+
+/// The rest of [`ChromeMetrics`]'s associated items, in a second `impl` because
+/// [`measure_beyond`](measure_beyond) sits between them as a free function.
+///
+/// **A second `impl` block is legal Rust and slightly unusual**, and it is here rather than at the foot
+/// of the file because the function it interrupts is the one that explains the measure. Moving either
+/// half away from the other would put the reasoning and the arithmetic in different parts of the file,
+/// which is how the two get out of step.
+impl ChromeMetrics {
     /// The narrowest and shortest panel this chrome is drawn into without clipping.
     ///
     /// The width is the page, plus its shadow and the scrollbar rail, plus one text cell of gutter on
@@ -313,16 +439,25 @@ impl ChromeMetrics {
 
     /// Metrics for a panel of `width` x `height`.
     ///
-    /// **The measure does not change with the window.** This holds 80 columns and centres the page, so a
-    /// wider window grows the margins rather than the line length -- which is what a word processor
-    /// does, and what the reference screenshots in `Plan/` show. The alternative, fitting the measure to
-    /// the window, means dragging an edge re-wraps every paragraph under the caret, and a word processor
-    /// that did that would be unusable.
+    /// **The measure holds below [`DESKTOP`](Self::DESKTOP)'s width and grows above it.** Part 27.
     ///
-    /// So a resize is arithmetic on the gutters: the bands are the same, the page is the same, and
-    /// [`Layout::new`] recomputes where everything sits. Nothing about the *document* depends on the panel
-    /// size, which is also why [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize)
-    /// touches neither the text nor the caret.
+    /// **At or under 1,280 px this is 80 columns with the page centred**, so a narrow window grows the
+    /// margins rather than the line length — which is what a word processor does, and what the reference
+    /// screenshots in `Plan/` show. **Wider than 1,280 px the measure grows** up to
+    /// [`max_columns`](Self::max_columns), after which the extra width is desk again.
+    ///
+    /// **Both halves exist because each was wrong alone.** Holding the measure fixed is right
+    /// typographically and wrong as an answer to "make the window bigger", which bought desk and no text.
+    /// Letting the measure follow the room is right responsively and wrong past about 100 columns, and the
+    /// arithmetic on its own gives 112 columns at 1,280 — which would have silently made every number
+    /// §2.9.3 measured against a **640 px page column** wrong by 40 %. **The design width is the anchor and
+    /// the ceiling is the limit.**
+    ///
+    /// So a resize is arithmetic on the page and the gutters: the bands never change, and below the design
+    /// width neither does the page. [`Layout::new`] recomputes where everything sits, and nothing about the
+    /// *document* depends on the panel size — which is also why
+    /// [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize) touches neither the
+    /// text nor the caret.
     ///
     /// The size is clamped to [`MIN_WIDTH`](Self::MIN_WIDTH) and
     /// [`MIN_HEIGHT`](Self::MIN_HEIGHT), so this is also the clamp and there is one code path.
@@ -439,7 +574,13 @@ impl Layout {
 
         // The page is centred in the canvas. The remainder goes right, so the page is consistently
         // one pixel left of true centre on odd widths rather than jumping about.
-        let page_w = m.page_w();
+        //
+        // **The measure is what this panel allows, not what `columns` says — part 27.** At 1280 px that
+        // is exactly 80 columns and nothing changes; at 1,600 it is 100, the cap; beyond that the
+        // gutters take the rest. `page_w` alone would have been a constant and the window size would
+        // have been decoration.
+        let measure = m.measure_for(m.width);
+        let page_w = m.page_w_for(measure);
         let (gutter_left, gutter_right) = if page_w >= m.width {
             // A page wider than the panel: no gutters, and the text column is clipped rather than
             // wrapped. `text` below still reports the full measure; `caller_draw` clips.
@@ -461,7 +602,7 @@ impl Layout {
         let text = DamageRect::new(
             page_x.saturating_add(m.page_pad),
             page_y.saturating_add(m.page_pad),
-            m.columns * m.cell_w,
+            measure * m.cell_w,
             page_h.saturating_sub(m.page_pad * 2),
         );
         let scrollbar = DamageRect::new(

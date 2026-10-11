@@ -2502,6 +2502,77 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 27 — the window was decoration: the measure was a constant
+
+**Asked for directly: _"the viewport is way too tiny."_ The window was already resizable and the page was
+not.**
+
+**`ChromeMetrics::page_w()` was `columns * cell_w + 2 * page_pad` — a constant.** 80 columns, 736 px, at
+every panel size. `--width`, `--height` and `ConfigureNotify` all worked, so dragging the window edge
+relaid the whole chrome and **gave more desk and no more text.** A window's size is how a user asks for
+more room, and here it bought desk.
+
+**Measured after the change** (`Layout::new` at each size, `measure_for` as it now stands):
+
+```text
+   W      H |  cols  rows |  page_x  page_w text_w    gut
+  768    600 |    80    20 |      16     736    640     16     16
+ 1280    800 |    80    31 |     272     736    640    272    272
+ 1600   1000 |   100    43 |     352     896    800    352    352
+ 1920   1080 |   100    47 |     512     896    800    512    512
+ 2560   1440 |   100    67 |     832     896    800    832    832
+ 3840   2160 |   100   107 |    1472     896    800   1472   1472
+```
+
+## Two corrections, because the first two answers were both wrong
+
+**1. Letting the measure follow the room gives 112 columns at 1,280 px** — which would have made the
+default page 896 px wide and **silently invalidated every number §2.9.3 measured against a 640 px page
+column.** That is the 8.0 MiB decoded-image budget, the resample thresholds, and the "≤ 8.0 MiB at every
+point of a page-1→50 scroll" row in §6: all of them wrong by 40 %, with nothing failing. Two gates in
+`tests/session_image.rs` caught it — `a_paint_decodes_the_image_to_page_column_width_and_not_to_native`
+asserting 640 and `the_raster_is_a_resample_and_not_a_decimation` asserting 640 × 360 — **and that is
+them doing the job they were written for, two phases after the measurement.**
+
+**2. So the design width is the anchor.** `measure_for` returns `columns` at or below
+[`DESKTOP`](ChromeMetrics::DESKTOP)'s 1,280 px, and only a *wider* panel earns more text. **Every
+measured number in this project keeps its meaning, and the thing the user asked for — a bigger window —
+is the thing that now helps.**
+
+**`ChromeMetrics::DESKTOP` therefore still shows 640 px of text at 1,280 px, and every gate written
+against the old constant still holds.** What changed is that 1,600 px shows 800 px of text.
+
+**`max_columns: 100` is the ceiling and it is a judgement about reading, not about pixels.** A 2,560 px
+panel has room for ~250 monospace columns and a line that long loses its start on the return sweep. Past
+the ceiling the extra width is desk again, so a wide window still looks like a page on a desk rather than
+a stretched sheet — which is the reference's look. **It is one field**, so raising it is a one-word
+change and this paragraph is what the next reader needs.
+
+**The default window is now 1,600 × 1,000** (`args.rs`), which reaches the ceiling immediately. The
+`--help` text says what a wider panel does, because it did not before and silence there would have been
+the same sin as `set_zoom`'s image-cache thresholds.
+
+**`--size=WxH` on the `shot` example**, because a screenshot of only the design width would not have shown
+any of this.
+
+## Found, recorded, and not changed: the desk is lopsided
+
+**The page is centred in the *panel*, not in what is left after the sidebar**, so with the sidebar open
+the desk is much wider on the right than on the left — 272 px against 16 px at 1,600 × 1,000 in the
+screenshot. **And the comment above the arithmetic says the opposite:**
+
+> The sidebar is inside the canvas, so the page is centred in what is left of it rather than in the panel.
+
+**It is centred in the panel.** `left = (m.width - page_w) / 2` uses the full width, and `sidebar_w` never
+enters it. **The comment is false and has been since part 19.**
+
+**Not changed here**, and that is a decision rather than an oversight: it is pre-existing, cosmetic, and
+independent of the request; `gutter_left` and `gutter_right` are asserted by
+`the_page_is_centred_and_the_gutters_sum_to_the_panel`, which encodes the *current* behaviour, so fixing
+it means correcting that gate as well; and doing an unrequested geometry change in the same part as a
+requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
+is the obvious next thing and it is about four lines.**
+
 #### Phase 14, part 26 — the forty allocations per frame that part 24 introduced
 
 **Part 24's own review item, found by reading what part 24 wrote rather than what it claimed.**

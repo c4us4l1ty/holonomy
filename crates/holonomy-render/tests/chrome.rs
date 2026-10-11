@@ -102,13 +102,65 @@ fn the_page_is_centred_and_the_gutters_sum_to_the_panel() {
     }
 }
 
+/// **The measure is `columns` at the design width and grows above it, up to `max_columns`.**
+///
+/// **CORRECTION, part 27 — twice, and the second correction is the interesting one.** This test was
+/// first written asserting `text.width == 80 * 8` — the measure was a constant, so a bigger window gave
+/// more desk and no more text, and "make it bigger" did nothing to the thing the window is for. It was
+/// then rewritten to assert the 100-column ceiling at [`DESKTOP`], because the room-minus-chrome
+/// arithmetic gives 112 columns there.
+///
+/// **Both were wrong, because both broke something real.** The first made the window meaningless. **The
+/// second silently invalidated every number §2.9.3 measured against a 640 px page column** — the 8.0 MiB
+/// decoded-image budget, the resample thresholds, the "≤ 8.0 MiB at every point of a page-1→50 scroll"
+/// row in §6 — all of which would have become wrong by 40 %.
+///
+/// **The design width is the anchor: 1,280 px is the width `columns: 80` was chosen for**, and only a
+/// panel wider than that earns more text. `ChromeMetrics::DESKTOP` means what it has always meant, and
+/// the thing the user asked for — a bigger window — is the thing that now helps.
 #[test]
-fn the_measure_is_eighty_columns_of_the_cell_width() {
+fn the_measure_is_eighty_columns_at_the_design_width_and_grows_above_it() {
     let m = ChromeMetrics::DESKTOP;
     let l = Layout::new(&m);
     assert_eq!(m.columns, 80);
-    assert_eq!(l.text.width, 80 * 8);
-    assert_eq!(l.page.width, m.columns * m.cell_w + m.page_pad * 2);
+    assert_eq!(
+        m.max_columns, 100,
+        "and the typographic ceiling is one field away"
+    );
+    assert_eq!(
+        l.text.width,
+        m.columns * m.cell_w,
+        "**the design width still shows the measured 640 px of text**, so §2.9.3's numbers hold"
+    );
+    assert_eq!(
+        l.page.width,
+        m.page_w(),
+        "and the page is that measure plus its padding"
+    );
+
+    // **Below the design width nothing changes at all** — the pre-existing behaviour, kept.
+    for w in [ChromeMetrics::MIN_WIDTH, 1024, 1280] {
+        let n = Layout::new(&m.clamp_to(w, 800));
+        assert_eq!(
+            n.text.width,
+            m.columns * m.cell_w,
+            "{w} px shows the 80-column measure, clipped rather than reflowed"
+        );
+    }
+
+    // **Above it, the measure grows and then stops.**
+    let wide = Layout::new(&m.clamp_to(1600, 1000));
+    assert_eq!(
+        wide.text.width,
+        m.max_columns * m.cell_w,
+        "1,600 px reaches the ceiling: {} px of text",
+        wide.text.width
+    );
+    assert_eq!(
+        Layout::new(&m.clamp_to(2560, 1440)).text.width,
+        wide.text.width,
+        "and 2,560 px shows the same measure -- the ceiling, not the room"
+    );
 }
 
 #[test]
@@ -710,50 +762,76 @@ fn the_scroll_thumb_moves_down_as_the_view_scrolls() {
     }
 }
 
-/// A resize moves the gutters and nothing else.
+/// **A resize widens the measure, and past the ceiling it moves the gutters again.**
 ///
-/// The claim is that a wider window shows the same 80-column measure with more margin, the way a word
-/// processor does -- *not* a longer line. If this fails, dragging a window edge re-wraps every
-/// paragraph under the caret, which is the one thing a resizable window must not do.
+/// **CORRECTION, part 27 — this test asserted the opposite and was right to.** It said *"a wider window
+/// shows the same 80-column measure with more margin, the way a word processor does — _not_ a longer
+/// line"*.
+///
+/// **That reasoning was sound and the conclusion was the wrong way round.** A fixed measure is a
+/// *typographic* decision, and it is the right one; making the *window* size irrelevant is not, because
+/// a window's size is how a user asks for more room. The two are reconciled by a **ceiling**: the
+/// measure grows with the panel up to [`max_columns`](ChromeMetrics::max_columns), and only past that
+/// does the extra width become desk.
+///
+/// **So a resize now does three things, and all three are asserted below:** the measure grows with the
+/// panel, it *stops* at the ceiling, and the text column's distance inside the page does not move — the
+/// last being the property that actually matters, because that offset is the origin the caret is located
+/// against.
 #[test]
-fn a_resize_moves_the_gutters_and_nothing_else() {
+fn a_resize_widens_the_measure_up_to_the_ceiling() {
     let small = ChromeMetrics::for_size(1024, 600);
     let large = ChromeMetrics::for_size(1600, 1000);
+    // **`columns` and `cell_w` still do not move with the window** — the *floor* and the grid are
+    // constants, and only the derived measure is not.
     assert_eq!(
         small.columns, large.columns,
-        "the measure does not move with the window"
+        "the measure's floor does not move with the window"
     );
     assert_eq!(small.cell_w, large.cell_w, "nor does the cell size");
-    assert_eq!(small.page_w(), large.page_w(), "nor the page's width");
 
     let a = Layout::new(&small);
     let b = Layout::new(&large);
-    assert_eq!(
-        a.text.width, b.text.width,
-        "the text column is the same width in both"
+    assert!(
+        b.text.width > a.text.width,
+        "**a wider panel shows a longer line**: {} then {} px of text",
+        a.text.width,
+        b.text.width
     );
-    // Its *height* does not survive: a taller panel fits more rows, and rows are what a page grows
-    // by. Its width does, because the measure is fixed.
+    assert!(
+        b.text.width <= large.max_columns * large.cell_w,
+        "and never past the ceiling: {} px against a {} px limit",
+        b.text.width,
+        large.max_columns * large.cell_w
+    );
+    // Its *height* survives the resize too: a taller panel fits more rows, and rows are what a page
+    // grows by.
     assert!(
         b.text.height > a.text.height,
         "a taller panel fits more rows: {} then {}",
         a.rows,
         b.rows
     );
-    // Its *x* does move, by exactly the left gutter's growth, because the page is centred rather than
-    // left-aligned. What must not change is where the caret is inside it -- that is the `(0, 0)` origin
-    // the session's caret maths uses, and it is the same in both.
-    // Its `x` does move, because the page is centred rather than left-aligned. What must not change
-    // is the text column's distance from the *page's* left edge -- that is the origin the caret is
-    // located against, and it is the same in both.
+    // **What must not change is where the caret is inside the page** — the text column's distance from
+    // the page's left edge is the origin the caret is located against, and it is the same in both.
     assert_eq!(
         a.text.x - a.gutter_left,
         b.text.x - b.gutter_left,
         "the text column sits the same distance inside the page in both"
     );
+
+    // **And past the ceiling the gutters take over**, which is the half that keeps this from being
+    // "fill the panel". A 2,560 px panel has room for ~250 columns and shows 100.
+    let huge = Layout::new(&ChromeMetrics::for_size(2560, 1440));
     assert_eq!(
-        a.page.width, b.page.width,
-        "the page is the same width in both"
+        huge.text.width, b.text.width,
+        "1,600 px and 2,560 px show the same measure -- the ceiling, not the room"
+    );
+    assert!(
+        huge.gutter_left > b.gutter_left,
+        "and the extra width is desk: left gutter {} then {}",
+        b.gutter_left,
+        huge.gutter_left
     );
     assert!(
         b.gutter_left > a.gutter_left,

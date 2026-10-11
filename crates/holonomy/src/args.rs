@@ -66,8 +66,8 @@ impl Default for Args {
             container: None,
             screenshot: None,
             exports: Vec::new(),
-            width: 1280,
-            height: 800,
+            width: 1600,
+            height: 1000,
             zoom: 100,
             headless: false,
             window: false,
@@ -165,8 +165,10 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --export-html <path> Write the document as HTML on exit.
   --export-pdf <path>  Write the document as a PDF on exit.
   --script <path>      Replay a scripted input_event stream instead of a keyboard.
-  --width N            Panel width in pixels (default 1280).
-  --height N           Panel height in pixels (default 800).
+  --width N            Panel width in pixels (default 1600).
+  --height N           Panel height in pixels (default 1000).
+                         Wider than 1280 grows the text column up to 100 columns
+                         and then stops; past that the extra width is desk. Part 27.
   --zoom N             Zoom percentage, 25..=400 (default 100).
                          CORRECTION, part 23: this does not zoom. It sets the
                          number the toolbar prints; the page does not change.
