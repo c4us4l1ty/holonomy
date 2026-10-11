@@ -23,8 +23,16 @@ fn main() {
         .skip(1)
         .find(|a| !a.starts_with("--"))
         .unwrap_or_default();
+    // **`--ppem=N`, and the same default as the product.** Part 32 made the type size the thing that
+    // makes the application bigger, and a screenshot example pinned at 16 ppem would have gone on
+    // producing pictures of a design the product no longer ships. The 26 ppem ceiling is measured:
+    // `build_atlas(&[28])` returns `AtlasFull { need: 406_068, have: 458_752 }`.
+    let ppem = std::env::args()
+        .find(|a| a.starts_with("--ppem="))
+        .and_then(|a| a.trim_start_matches("--ppem=").parse::<u16>().ok())
+        .unwrap_or(24);
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
-        holonomy_assets::build_atlas(&[16]).expect("atlas").0,
+        holonomy_assets::build_atlas(&[ppem]).expect("atlas").0,
     ));
     // `--size=WxH`, so a screenshot can show a panel other than the design width. Part 27 made the
     // measure follow the panel above 1,280 px, and a picture of only the design width would not show it.

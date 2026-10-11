@@ -765,11 +765,48 @@ impl<'a> Painter<'a> {
             .unwrap_or(16)
     }
 
-    /// The cell width. Half the ppem, which is a monospace advance for the packed faces.
-    fn cell_width(&self) -> u32 {
-        self.atlas
-            .and_then(|a| a.sizes().first().copied())
-            .map_or(8, |ppem| u32::from(ppem) / 2)
+    /// **The chrome's cell width: the monospace face's advance at the atlas size.**
+    ///
+    /// ## The false document, and part 32
+    ///
+    /// This was `ppem / 2`, described as *"half the ppem, which is a monospace advance for the packed
+    /// faces."* **Both halves of that were wrong and the error was measurable.** Measured across the
+    /// packed faces at 16 ppem:
+    ///
+    /// ```text
+    /// cell_width() = ppem/2 =  8      Monospace advance = 10      Regular mean =  8.58
+    /// ```
+    ///
+    /// **20 % narrow.** The claim was that `ppem/2` *is* a monospace advance; it is a number that
+    /// happens to be near one. **The advance is a property of the face and this function had the atlas
+    /// in hand the whole time** — it was reading `sizes()` and throwing away everything else about it.
+    ///
+    /// ## Why `'m'`
+    ///
+    /// **Because the measurement is the definition, not the division.** Every glyph in a monospace face
+    /// has the same advance, so `'m'` is as good as any other and it is the one the face is widest on —
+    /// which makes it the one least likely to be silently wrong for a face with a defect.
+    ///
+    /// ## And `with no atlas`, 8
+    ///
+    /// **The constant stays as the no-atlas fallback, for the same reason `cell_h`'s 18 does**: a
+    /// chrome-only frame draws procedural box-drawing glyphs sized to the cell, and it needs the
+    /// fallback to be *self-consistent*, not typographically correct. **It is also now the same 8 the
+    /// design was drawn at**, so a frame with no atlas is the 16 ppem design and not a third thing.
+    pub fn cell_width(&self) -> u32 {
+        self.atlas.map_or(8, |atlas| {
+            let size = self.atlas_size();
+            u32::from(
+                atlas
+                    .metric(
+                        b'm' as u32,
+                        atlas_style(holonomy_render::Style::MONOSPACE),
+                        size,
+                    )
+                    .advance_x,
+            )
+            .max(1)
+        })
     }
 
     /// `(ascent_px, descent_px)` for a run's style and size, or `(0, 0)` with no atlas.

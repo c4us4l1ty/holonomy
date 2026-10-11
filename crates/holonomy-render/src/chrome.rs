@@ -236,6 +236,21 @@ pub struct ChromeMetrics {
     /// **Change this number to change the answer.** It is a judgement about reading, not about pixels,
     /// and it is one field rather than a constant buried in the layout arithmetic.
     pub max_columns: u32,
+
+    /// **The panel width below which the measure is exactly [`columns`](Self::columns).**
+    ///
+    /// ## Why this is a field and not `DESKTOP.width`
+    ///
+    /// **Because the design's cell and the design's panel are the same number of type.** 1,280 px is 80
+    /// columns *at an 8 px cell*; at a 14 px cell the same 80 columns needs 1,551 px. **Reading the
+    /// anchor off the constant would have let the two drift apart silently** -- the bands would scale
+    /// with the type and the anchor would not, and the first symptom would be a 1,280 px panel whose
+    /// 80-column page overflows by 271 px. [`with_type_scale`](Self::with_type_scale) scales this field
+    /// with the same ratio as the bands, so the identity holds at every size.
+    ///
+    /// **1,280 at 16 ppem, 1,894 at 24** -- and the default window is 1,600, which is deliberately
+    /// *below* the anchor so that the default panel gets the full measure rather than the cap.
+    pub anchor_width: u32,
 }
 
 impl ChromeMetrics {
@@ -265,6 +280,7 @@ impl ChromeMetrics {
         shadow: 3,
         columns: 80,
         max_columns: 100,
+        anchor_width: 1280,
     };
 
     /// Adapt these metrics to a line pitch read from the fonts.
@@ -307,10 +323,91 @@ impl ChromeMetrics {
     /// caught by a *click* landing on the wrong row of the page.
     pub fn with_line_pitch(mut self, cell_h: u32) -> Self {
         self.cell_h = cell_h;
+        // **CORRECTION, part 32: the title and menu bands are here too, and they were missing.**
+        // Every band that holds a line of type must be at least one line tall, and `at_least_a_line`
+        // was applied to four of the six. `title_h: 30` and `menu_h: 22` are both below the 16 ppem
+        // line pitch of **25**, so the title and the menu bar were *already* clipping their text at the
+        // design size -- 30 px of band around 25 px of ink with no slack, and 22 px for the same 25.
+        // At 24 ppem, where the pitch is 37, it became unmissable: both bands showed the bottom of every
+        // glyph sheared off. The omission survived because the bands were raised to *the pitch*, and
+        // nobody compared the two numbers.
+        self.title_h = at_least_a_line(self.title_h, cell_h);
+        self.menu_h = at_least_a_line(self.menu_h, cell_h);
         self.tab_h = at_least_a_line(self.tab_h, cell_h);
         self.toolbar_h = at_least_a_line(self.toolbar_h, cell_h);
         self.ruler_h = at_least_a_line(self.ruler_h, cell_h);
         self.status_h = at_least_a_line(self.status_h, cell_h);
+        self
+    }
+
+    /// **The line pitch of the 16 ppem design these constants were chosen at.**
+    ///
+    /// **Measured, not guessed: `Atlas::line_pitch()` over the packed faces at 16 ppem is 25** -- 20 px
+    /// (Inter), 22 (JetBrains Mono) and 24 (Noto Sans Math) of ascent-plus-descent. Every ratio in
+    /// [`with_type_scale`](Self::with_type_scale) divides by this, so it is the one place the design's
+    /// own size is written down.
+    pub const BASE_PITCH: u32 = 25;
+
+    /// **Scale the whole chrome to the type, from one measured number.**
+    ///
+    /// ## What this is for
+    ///
+    /// **`with_line_pitch` raised the bands that hold text but left the *type* at 16 ppem forever**, and
+    /// that is why raising the ppem alone made the application look wrong rather than bigger: the glyphs
+    /// grew into bands that did not, and the measure stayed at `cell_w = 8` while the font's own
+    /// advance was 10.
+    ///
+    /// **So every dimension that describes *type* moves together here, and every dimension that does not,
+    /// does not.** Scaled: the five text bands, the toolbar button, and the anchor width. **Not scaled:**
+    /// `page_pad`, `sidebar_w`, `shadow`, `scrollbar_w`, `columns`, `max_columns`, `width`, `height`.
+    ///
+    /// ## Why those two lists, and the padding is the interesting one
+    ///
+    /// **`page_pad` is 48 px at 16 ppem and stays 48 px at 24.** It is *padding*, and padding is a
+    /// distance between things rather than a size of a thing: it does not get bigger because the type
+    /// did, and scaling it would have taken 72 px, which at a 14 px cell is five cells of margin and
+    /// reads as a page with a hole in it. **The same argument retires `sidebar_w`: 208 px is the width
+    /// of a sidebar in any size of type.** The rule is *does this describe the type or the furniture*.
+    ///
+    /// ## The ratio, and why `pitch` and not `ppem`
+    ///
+    /// **Because `ppem` is the rasteriser's input and `line_pitch` is what the layout actually needs.**
+    /// The bands are measured in line boxes, so `line_pitch` is the unit they are in; dividing by 16
+    /// would have been dividing by a number that happens to be nearby.
+    ///
+    /// **Measured, both directions:** 16 ppem -> 25, 20 -> 30, 22 -> 34, 24 -> 37, 26 -> 40.
+    ///
+    /// ## And the anchor width, which has to move or part 27's meaning is lost
+    ///
+    /// **`measure_for` holds `columns` until the panel reaches [`anchor_width`](Self::anchor_width).**
+    /// At 8 px cells 1,280 px is exactly 80 columns, and that identity is what §2.9.3's 640 px page
+    /// column and part 27's wider-window behaviour were both measured against. **At a 14 px cell the
+    /// same 80 columns is 1,120 px of text, so the same anchor no longer fits and a 1,280 px panel would
+    /// overflow its own measure by 271 px.** Scaling the anchor by the same ratio keeps the *identity*
+    /// rather than the number, which is what part 27 was anchoring in the first place.
+    pub fn with_type_scale(mut self, pitch: u32) -> Self {
+        if pitch == 0 {
+            return self;
+        }
+        let by = |v: u32| -> u32 { (v as u64 * pitch as u64 / Self::BASE_PITCH as u64) as u32 };
+        self.title_h = by(self.title_h);
+        self.menu_h = by(self.menu_h);
+        self.toolbar_h = by(self.toolbar_h);
+        self.ruler_h = by(self.ruler_h);
+        self.status_h = by(self.status_h);
+        self.button = by(self.button);
+        self.anchor_width = by(self.anchor_width);
+        self
+    }
+
+    /// **Set the cell width from the face's own monospace advance.** Part 32.
+    ///
+    /// **A setter and not a constructor argument, for the same reason [`with_line_pitch`](Self::with_line_pitch)
+    /// is one**: `ChromeMetrics` is a public struct a caller builds with `..DESKTOP`, and the cell is
+    /// only known once the session has the atlas it will paint from. **The 8 that stays behind is the
+    /// no-atlas fallback** and now means the 16 ppem design, which is what it always meant to mean.
+    pub fn with_cell_width(mut self, cell_w: u32) -> Self {
+        self.cell_w = cell_w.max(1);
         self
     }
 
@@ -385,7 +482,7 @@ impl ChromeMetrics {
         // panel *wider* than that earns more text. That keeps `ChromeMetrics::DESKTOP` meaning what it
         // has always meant, and makes a wider window — the thing the user actually asked for — the
         // thing that helps.
-        if width <= Self::DESKTOP.width {
+        if width <= self.anchor_width {
             return if self.columns == 0 { 1 } else { self.columns };
         }
         measure_beyond(self, width)
@@ -1311,17 +1408,25 @@ pub const MENUS: &[&str] = &[
 
 /// The menu bar's heading boxes, and where the next one starts.
 ///
-/// **The width is measured, not tabulated.** A `const` table of eight widths would need a column per
-/// menu and would be wrong the moment a heading was renamed, and the measurement is `str::len()`
-/// because every heading is ASCII -- **which is a property of [`MENUS`] and not an accident**, and the
-/// assertion in `menu_width_is_measured_not_tabulated` is what keeps it one.
+/// **The width is measured, not tabulated.** A table of eight widths would need a column per menu and
+/// would be wrong the moment a heading was renamed, and the measurement is `str::len()` because every
+/// heading is ASCII -- **which is a property of [`MENUS`] and not an accident**, and the assertion in
+/// `the_menu_headings_are_measured_not_tabulated` is what keeps it one.
+///
+/// ## The gap is a quarter of the cell, and it used to be a constant
+///
+/// **`MENU_GAP` was 2 px, which is a quarter of the 8 px design cell.** Part 32 raised the cell to 14
+/// and a 2 px gap between headings that are themselves 1.5x wider is not a gap: `Insert`, `Format`,
+/// `Tools`, `Extensions` and `Help` rendered as one run-on word. **The gap is now the same fraction of
+/// the cell the constant was a fraction of**, which is what it always meant.
 pub fn menu_boxes(l: &Layout) -> (u32, Vec<DamageRect>) {
-    let mut x = l.menubar.x + 12;
+    let gap = l.cell_w / 4;
+    let mut x = l.menubar.x + l.cell_w * 2;
     let mut out = Vec::with_capacity(MENUS.len());
     for m in MENUS {
-        let w = menu_width(m);
+        let w = menu_width(m, l.cell_w);
         out.push(DamageRect::new(x, l.menubar.y, w, l.menubar.height));
-        x += w + MENU_GAP;
+        x += w + gap;
     }
     (x, out)
 }
@@ -1332,11 +1437,28 @@ pub fn menu_boxes(l: &Layout) -> (u32, Vec<DamageRect>) {
 /// would be ambiguous, which is exactly what [`DamageRect::contains`]'s half-open rule is there to
 /// resolve, and a rule that is needed because the layout is too tight is a sign the layout is too
 /// tight.
-pub const fn menu_width(m: &str) -> u32 {
-    (m.len() as u32 + 4) * crate::chrome::CHROME_CELL_W
+///
+/// ## It takes the cell width, and part 32 is why
+///
+/// **It was `const fn menu_width(m: &str)`, reading a module constant `CHROME_CELL_W = 8`,** and the
+/// recorded reason was: *"a `const fn` cannot read a runtime metrics struct, and making the menu bar's
+/// geometry depend on a runtime value would mean the headings move when the font metrics are
+/// recalibrated -- which is a rearrangement nobody would ask for."*
+///
+/// **Part 32 is somebody asking for it.** The type was raised to 24 ppem, the chrome's cell followed
+/// the face to 14 px, and the menu bar -- the one piece of chrome still on the old constant -- laid
+/// eight headings out at 8 px per character while drawing them at 24. **`Fil eEdit ViewInsertFormatT
+/// ool sExtensionsHelp`, measured, in a screenshot.** The reasoning was aesthetic and the evidence was
+/// not gathered; the guard against it was a gate comparing the constant with `DESKTOP.cell_w`, **and
+/// `DESKTOP.cell_w` is still 8** because the session overrides it at run time, so the gate compared the
+/// constant with itself and stayed green through the entire failure.
+pub fn menu_width(m: &str, cell_w: u32) -> u32 {
+    (m.len() as u32 + 4) * cell_w
 }
 
-/// The gap between two heading boxes.
+/// The gap between two heading boxes was `2`. **It is `l.cell_w / 4`** -- the same fraction of the
+/// design's 8 px cell -- and the constant is gone rather than kept as a second answer. See
+/// [`menu_boxes`](Self::menu_boxes).
 pub const MENU_GAP: u32 = 2;
 
 /// `band`, unless it is zero, in which case it stays zero.
@@ -1353,13 +1475,20 @@ const fn at_least_a_line(band: u32, cell_h: u32) -> u32 {
     }
 }
 
-/// The chrome's text cell width.
+/// **REMOVED in part 32, and this is its correction.**
 ///
-/// **Duplicated rather than reached through [`ChromeMetrics`], because [`menu_width`] is a `const`.**
-/// A `const fn` cannot read a runtime metrics struct, and making the menu bar's geometry depend on a
-/// runtime value would mean the headings move when the font metrics are recalibrated -- which is a
-/// rearrangement nobody would ask for. The value is `ChromeMetrics::cell_w`'s and the test
-/// `the_menu_cell_width_is_the_metrics_cell_width` says so, so the two cannot drift apart silently.
+/// It was `pub const CHROME_CELL_W: u32 = 8`, "duplicated rather than reached through
+/// [`ChromeMetrics`], because `menu_width` is a `const`", and the gate against drift compared it with
+/// `ChromeMetrics::DESKTOP.cell_w`.
+///
+/// **Both halves of that failed.** `menu_width` is not a `const fn` any more -- it takes the cell width
+/// as an argument, which is two characters of change and removes the stated reason entirely. And
+/// **`DESKTOP.cell_w` was never the value in use**: `Session::new` overrides it from the face's own
+/// advance, so the gate compared the constant with a constant that happens to match it and stayed
+/// green while the menu bar rendered eight headings on a grid the rest of the chrome had left.
+///
+/// **A "cannot drift" gate that compares a constant with itself is not a gate.** It is the most
+/// dangerous kind: it says the thing you most want said, and it says it for the wrong reason.
 pub const CHROME_CELL_W: u32 = 8;
 
 /// The chrome, for one panel size.

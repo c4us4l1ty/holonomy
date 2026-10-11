@@ -318,6 +318,46 @@ fn add_span(acc: &mut [u16], row: usize, width: usize, xa: f32, xb: f32, per_sam
 /// output bitmap's origin is given by the offset. An earlier version called `translate()` and
 /// allocated a fresh `Vec<Vec<Pt>>` — one allocation per contour, per glyph — to achieve the
 /// same thing.
+///
+/// # CORRECTION, part 32: `dy` was accepted and never used
+///
+/// **The vertical offset was discarded and the horizontal one was applied, so every glyph in the
+/// application has been drawn with the top of its ink missing -- at every size, since the atlas was
+/// written.** Measured, by blitting one glyph to a black frame:
+///
+/// ```text
+/// 16 ppem  'p'  metric height 15   atlas cell rows carrying ink   6..14   (6 rows lost)
+/// 24 ppem  'p'  metric height 22   atlas cell rows carrying ink  10..21   (10 rows lost)
+/// ```
+///
+/// **`dx` was subtracted from the span fill and `dy` from nothing.** The row bucketing and the
+/// sub-scanline sample both read `y` in *ascender-line* space while the tile was indexed in
+/// *ink-box* space, so a glyph landed in its own cell shifted down by exactly its `y0` -- how far its
+/// ink starts below the ascender. Caps and lowercase lost 4-10 px of their tops, and the amount lost
+/// varied per glyph, which is what made it read as a rendering style rather than as a bug.
+///
+/// ## How it stayed invisible
+///
+/// **The discard was written down, as a warning suppression, inside the final copy loop**:
+///
+/// ```text
+/// for (i, &a) in scratch.acc.iter().enumerate() {
+///     let _ = dy;
+///     out[i] = a.min(255) as u8;
+/// }
+/// ```
+///
+/// `let _ = dy;` **once per byte.** The compiler was therefore never able to say the word "unused",
+/// and every gate in the project measured the result in a way that could not see it: ink extent **in
+/// x** (`'a'` advance 9, ink 9 -- correct, and unaffected by a vertical shift), pixel counts, colour
+/// hues. **Not one gate compared a glyph's rendered height with its own metric's `height`,** which is
+/// the one comparison that would have caught it in the first hour.
+///
+/// ## The fix, and why it is at the edge rather than at each use
+///
+/// **Translate once, where the edges are built.** `row_span`, the sub-scanline sample and the span
+/// fill then all read coordinates in the tile's own space and cannot disagree about which space they
+/// are in -- and that disagreement is exactly what produced the defect.
 fn rasterize(
     contours: &[Vec<Pt>],
     width: usize,
@@ -339,7 +379,22 @@ fn rasterize(
             continue;
         }
         for i in 0..contour.len() {
-            if let Some(e) = Edge::new(contour[i], contour[(i + 1) % contour.len()]) {
+            // **Translated here, and not at each use.** Part 32: `dy` used to be dropped on the floor
+            // while `dx` was subtracted from the span fill alone, and the row bucketing and the
+            // sub-scanline sample both read the untranslated `y`. Moving the translation to the one
+            // place the edges are built means there is no second place that has to remember it.
+            let a = contour[i];
+            let b = contour[(i + 1) % contour.len()];
+            if let Some(e) = Edge::new(
+                Pt {
+                    x: a.x + dx,
+                    y: a.y + dy,
+                },
+                Pt {
+                    x: b.x + dx,
+                    y: b.y + dy,
+                },
+            ) {
                 scratch.edges.push(e);
             }
         }
@@ -422,8 +477,10 @@ fn rasterize(
             // Even-odd fill: spans between consecutive pairs.
             let mut i = 0;
             while i + 1 < scratch.xs.len() {
-                let xa = (scratch.xs[i] - dx).max(0.0);
-                let xb = (scratch.xs[i + 1] - dx).min(width as f32);
+                // **Already translated** by the `dx` in `Edge::new` below, which is why there is no
+                // `- dx` here any more. Part 32 removed it.
+                let xa = scratch.xs[i].max(0.0);
+                let xb = scratch.xs[i + 1].min(width as f32);
                 if xb > xa {
                     add_span(&mut scratch.acc, row, width, xa, xb, per_sample);
                 }
@@ -433,7 +490,6 @@ fn rasterize(
     }
 
     for (i, &a) in scratch.acc.iter().enumerate() {
-        let _ = dy;
         out[i] = a.min(255) as u8;
     }
 }

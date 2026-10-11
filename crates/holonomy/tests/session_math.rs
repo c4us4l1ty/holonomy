@@ -364,7 +364,10 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
         &holonomy_render::parse_math(src.as_bytes()).expect("parses"),
         &mm,
     );
-    assert_eq!(fixed.width, 24, "3 letters x 8 px on the page's grid");
+    // **3 x 10, not 3 x 8, and the gate is the same one.** `cell_w` is the Monospace face's advance,
+    // which part 31 moved off `ppem / 2`; the claim being made is that the *fixed grid* is the width
+    // a formula gets without the shim, and that is still exactly what is being measured.
+    assert_eq!(fixed.width, 30, "3 letters x 10 px on the page's grid (was 3 x 8)");
 
     // Now with the shim. The session does this internally, so the comparison is against the painted
     // ink: three glyphs at a 10 px advance leave the last one's right edge beyond the fixed grid's.

@@ -310,9 +310,19 @@ fn the_bands_themselves_are_not_widgets() {
 
 /// **The menu widths are measured, not tabulated, and the cell width is the metrics'.**
 ///
-/// **`menu_width` is a `const fn`, so it cannot read a `ChromeMetrics`** -- it uses
-/// [`CHROME_CELL_W`](holonomy_render::chrome::CHROME_CELL_W) instead. That is the one thing in the
-/// chrome's geometry that can drift from the font metrics, so it is asserted rather than assumed.
+/// ## CORRECTION, part 32: the guard was comparing a constant with itself
+///
+/// This began as *"`CHROME_CELL_W` equals `ChromeMetrics::DESKTOP.cell_w`, so the menu bar's geometry
+/// cannot drift from the font metrics."* **`CHROME_CELL_W` was 8 and `DESKTOP.cell_w` was 8, so it
+/// passed -- while the value actually in use was neither**, because `Session::new` overrides `cell_w`
+/// from the face's own monospace advance. It went on passing straight through the whole failure: at
+/// 24 ppem the menu bar laid eight headings out on an 8 px grid while drawing them at 24, and
+/// rendered `Fil eEdit ViewInsertFormatTool sExtensionsHelp`.
+///
+/// **The constant is gone.** `menu_width` takes the cell width as an argument, so there is nothing
+/// left to drift, and the assertion is now on the *property* rather than on the equality of two
+/// literals. The old gate compared the *constant* to `DESKTOP`, and `DESKTOP` is a design constant,
+/// not the running value -- which is the whole reason it could pass while the product was wrong.
 /// **A popup is a lighter plane than anything it can be drawn over.**
 ///
 /// **The first version painted popups in `PILL`, which is also the toolbar's pill.** A menu hangs
@@ -346,31 +356,35 @@ fn a_popup_is_a_lighter_plane_than_anything_it_covers() {
 
 #[test]
 fn the_menu_headings_are_measured_not_tabulated() {
+    use holonomy_render::chrome::menu_width;
+    const CELL: u32 = ChromeMetrics::DESKTOP.cell_w;
     assert_eq!(
-        holonomy_render::chrome::CHROME_CELL_W,
-        ChromeMetrics::DESKTOP.cell_w,
-        "the menu bar's cell width has drifted from the metrics'. The headings would then be laid \\
-         out on a grid the rest of the chrome does not use."
+        menu_width("File", 8) * 2,
+        menu_width("File", 16),
+        "a heading's width scales with the cell, not with a constant: a 16 px cell is twice an \
+         8 px one. Part 32 removed `CHROME_CELL_W` because this identity could not be stated \
+         about it -- the constant is 8 whatever the face says, and the face stopped saying 8 in \
+         part 31."
     );
     // **Width is a function of the text's *length*, not its glyphs**, and this is a real property of
     // the chrome rather than a shortcut. The UI face is monospaced, so one cell per character is
     // exact; on a proportional face it would pad `File` to the width of `Extensions` and the menu bar
     // would have holes in it.
-    let file = holonomy_render::chrome::menu_width("File");
-    let help = holonomy_render::chrome::menu_width("Help");
-    let edit = holonomy_render::chrome::menu_width("Edit");
+    let file = menu_width("File", CELL);
+    let help = menu_width("Help", CELL);
+    let edit = menu_width("Edit", CELL);
     assert_eq!(file, help, "File and Help are both four characters");
     assert_eq!(
         edit, file,
         "and so is Edit, so all three are the same width"
     );
     assert_eq!(
-        holonomy_render::chrome::menu_width("Format"),
-        holonomy_render::chrome::menu_width("Insert"),
+        menu_width("Format", CELL),
+        menu_width("Insert", CELL),
         "Format and Insert are both six characters"
     );
     assert!(
-        holonomy_render::chrome::menu_width("View") < holonomy_render::chrome::menu_width("Format"),
+        menu_width("View", CELL) < menu_width("Format", CELL),
         "and a four-letter heading is narrower than a six-letter one"
     );
     // **And the longest heading really is the one that sets the menu bar's width.** `Extensions` is
@@ -378,10 +392,10 @@ fn the_menu_headings_are_measured_not_tabulated() {
     // off screen -- which `every_widget_has_a_rect_inside_the_panel` cannot see, because that test is
     // about the toolbar and the title bar.
     assert_eq!(
-        holonomy_render::chrome::menu_width("Extensions"),
+        menu_width("Extensions", CELL),
         MENUS
             .iter()
-            .map(|m| holonomy_render::chrome::menu_width(m))
+            .map(|m| menu_width(m, CELL))
             .max()
             .expect("there are menus"),
         "Extensions is the longest heading, so it is the widest box"

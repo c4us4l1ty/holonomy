@@ -45,6 +45,9 @@ pub struct Args {
     pub height: u32,
     /// Zoom, as a percentage.
     pub zoom: u32,
+    /// **Pixels per em the faces are rasterised at.** This is the type size, and it is the one that
+    /// actually makes the application bigger.
+    pub ppem: u16,
     /// Run headless: no DRM, no evdev, no jail. The integration gate's mode.
     pub headless: bool,
     /// Open a window on a desktop display, instead of the jail's panel. Requires the `desktop` feature.
@@ -69,6 +72,7 @@ impl Default for Args {
             width: 1600,
             height: 1000,
             zoom: 100,
+            ppem: 24,
             headless: false,
             window: false,
             display: None,
@@ -169,6 +173,10 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --height N           Panel height in pixels (default 1000).
                          Wider than 1280 grows the text column up to 100 columns
                          and then stops; past that the extra width is desk. Part 27.
+  --ppem N             Pixels per em for the faces (default 24; 28 and above
+                         do not fit the atlas). This is the type size: it
+                         enlarges the glyphs and every band that holds them.
+                         Part 32.
   --zoom N             Zoom percentage, 25..=400 (default 100).
                          CORRECTION, part 23: this does not zoom. It sets the
                          number the toolbar prints; the page does not change.
@@ -210,6 +218,7 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 "--export-pdf" => out.push_export(Format::Pdf, PathBuf::from(value()?))?,
                 "--width" => out.width = parse_u32(&flag, &value()?)?,
                 "--height" => out.height = parse_u32(&flag, &value()?)?,
+                "--ppem" => out.ppem = parse_u32(&flag, &value()?)? as u16,
                 "--zoom" => out.zoom = parse_u32(&flag, &value()?)?,
                 "--headless" => out.headless = true,
                 "--window" => out.window = true,
@@ -239,6 +248,18 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 },
                 min: 1,
                 max: 7680,
+            });
+        }
+        // **The atlas's own ceiling, measured.** At 28 ppem `build_atlas` returns `AtlasFull`:
+        // `need: 406,068, have: 458,752`. 26 is the largest size that fits, and the range is clamped
+        // here rather than at the build so that `--ppem 9999` says *why* rather than aborting on an
+        // allocator error sixteen frames later.
+        if !(10..=26).contains(&out.ppem) {
+            return Err(ParseError::OutOfRange {
+                flag: "ppem".into(),
+                value: u32::from(out.ppem),
+                min: 10,
+                max: 26,
             });
         }
         if !(25..=400).contains(&out.zoom) {

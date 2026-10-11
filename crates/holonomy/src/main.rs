@@ -177,7 +177,7 @@ fn run() -> Result<(), Fail> {
     // The atlas is the largest allocation the session makes, and it is made *before* the jail so
     // that nothing after `seccomp` has to touch the allocator.
     let atlas = ATLAS.get_or_init(|| {
-        holonomy_assets::build_atlas(&[16])
+        holonomy_assets::build_atlas(&[args.ppem])
             .expect("the packed faces must rasterise")
             .0
     });

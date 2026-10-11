@@ -169,6 +169,32 @@ fn painted_bold(text: &str, range: (u32, u32)) -> Session<'static> {
     s
 }
 
+/// **Where the pen is after `bytes`, in the face `style`. Part 32's addition to this file.**
+///
+/// ## Why this exists, and why every position below is now written with it
+///
+/// **This file's positions were all `l.x + n * m.cell_w`** — the 8 px grid. **Part 31 moved run
+/// positions onto the font's own pen** and **part 32 moved the cell from `ppem / 2` to the Monospace
+/// face's advance**, so the grid is 10 and no longer where the text is. Four gates in this file began
+/// failing for that reason and **not one of the failures was a defect in the colour code.**
+///
+/// **So there is one instrument and it is the pen**, read from the atlas the painter reads from, and
+/// every assertion below is expressed in it. **A gate that positions text by the grid is asserting
+/// about a layout the product does not use**, which is how `grid_vs_glyphs.rs` came to read `DESKTOP`
+/// and `widgets.rs` came to compare `CHROME_CELL_W` with itself.
+fn pen_of(bytes: &[u8], style: holonomy_assets::payload::Style) -> u32 {
+    let a = atlas();
+    bytes
+        .iter()
+        .map(|&c| u32::from(a.metric(u32::from(c), style, 16).advance_x))
+        .sum()
+}
+
+/// The Regular pen, which is what an unstyled document advances by.
+fn pen(text: &str) -> u32 {
+    pen_of(text.as_bytes(), holonomy_assets::payload::Style::Regular)
+}
+
 fn difference(a: &Session<'_>, b: &Session<'_>) -> (u32, (u32, u32, u32, u32)) {
     let mut n = 0u32;
     let (mut x0, mut y0) = (u32::MAX, u32::MAX);
@@ -198,6 +224,13 @@ fn a_coloured_span_is_drawn_and_this_is_the_gate_that_says_so() {
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
     let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
+    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
+    let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
+    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
+    // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
+    // advance on either side, so the ink is not the pen; the bound is an overhang
+    // allowance, not a position claim. See the note in `the_colour_lands_...`.
+    const OVER: u32 = 3;
 
     // **Crimson pixels, not "different pixels".** See `crimson_pixels`: the first version of this
     // gate compared frames and **passed with the fix reverted**, because splitting the line into
@@ -236,12 +269,12 @@ fn a_coloured_span_is_drawn_and_this_is_the_gate_that_says_so() {
     // **The bound is an overhang, not a position claim.** Part 30 holds the larger question -- where the
     // caret and the ruler think the glyphs are -- and this gate must not quietly take a side on it.
     assert!(
-        x0 >= l.x + 6 * m.cell_w - 3 && x1 <= l.x + 11 * m.cell_w + 3,
+        x0 >= bravo_lo - OVER && x1 <= bravo_hi + OVER,
         "**within `bravo`'s cells, give or take the glyph overhang**: {}..{} against {}..{}",
         x0,
         x1,
-        l.x + 6 * m.cell_w - 3,
-        l.x + 11 * m.cell_w + 3
+        bravo_lo - OVER,
+        bravo_hi + OVER
     );
 }
 
@@ -269,6 +302,13 @@ fn the_colour_lands_on_the_run_and_not_on_its_neighbours() {
     let (_, box_) = difference(&plain, &coloured);
     let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
+    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
+    let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
+    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
+    // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
+    // advance on either side, so the ink is not the pen; the bound is an overhang
+    // allowance, not a position claim. See the note in `the_colour_lands_...`.
+    const OVER: u32 = 3;
 
     // **Within one cell of `bravo`, and the one cell is not a tolerance.**
     //
@@ -281,10 +321,10 @@ fn the_colour_lands_on_the_run_and_not_on_its_neighbours() {
     // small, and a two-pixel bleed would mean a glyph overlapping its neighbour's cell, which is the
     // scalar-advance limitation already recorded for the caret and not a new one.
     assert!(
-        box_.0 >= l.x + 6 * m.cell_w - 1,
+        box_.0 >= bravo_lo - 1,
         "no pixel more than one cell-width before `bravo` changed: {} against {}",
         box_.0,
-        l.x + 6 * m.cell_w - 1
+        bravo_lo - 1
     );
     // **And the far edge, which part 31 made assertable.** The first draft of this gate could not
     // assert it: the changed region reached 464 where `bravo` ends at 409, because **the text after the
@@ -315,6 +355,9 @@ fn two_colours_on_one_line_are_two_runs_and_two_colours() {
     let teal = teal_pixels(&both);
     let m = both.chrome.metrics;
     let l = both.chrome_layout().text;
+    // **The pen bounds of `charlie`, the second coloured run. See `pen_of`.**
+    const OVER: u32 = 3;
+    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
 
     assert!(
         !crimson.is_empty() && !teal.is_empty(),
@@ -328,12 +371,12 @@ fn two_colours_on_one_line_are_two_runs_and_two_colours() {
         teal.iter().map(|p| p.0).max().expect("non-empty"),
     );
     assert!(
-        tx0 >= l.x + 12 * m.cell_w - 2 && tx1 <= l.x + 19 * m.cell_w + 2,
+        tx0 >= charlie_lo - OVER && tx1 <= charlie_hi + OVER,
         "**and the teal is on `charlie`, not on `bravo`**: {}..{} against {}..{}",
         tx0,
         tx1,
-        l.x + 12 * m.cell_w - 2,
-        l.x + 19 * m.cell_w + 2
+        charlie_lo - OVER,
+        charlie_hi + OVER
     );
     let cx1 = crimson.iter().map(|p| p.0).max().expect("non-empty");
     assert!(
@@ -456,8 +499,32 @@ fn a_run_boundary_does_not_move_the_text_after_it() {
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
     let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
+    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
+    let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
+    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
+    // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
+    // advance on either side, so the ink is not the pen; the bound is an overhang
+    // allowance, not a position claim. See the note in `the_colour_lands_...`.
+    const OVER: u32 = 3;
     // **Past the coloured run's last cell, on the grid.** `bravo` ends at cell 11.
-    let beyond = l.x + 12 * m.cell_w;
+    // **Where the tail begins, from the pen, plus room for the bold run's overhang.**
+    //
+    // ## Two instruments, both wrong, and what each measured
+    //
+    // **The grid put `beyond` at `l.x + 12 * cell_w` = 360**, and `charlie` starts at 335. So the
+    // "first ink after the run" this gate measured was not the tail at all -- it was the `i` in the
+    // middle of `charlie` -- and it moved **44 px** between the plain and bold documents, which is
+    // about the width of the word.
+    //
+    // **The first repair put it at the pen after `alpha bravo` = 330**, which is the *end* of the run,
+    // and **the bold document's `o` overhangs its advance by 3 px**, so `beyond` landed *inside* the
+    // bold ink and `first_ink_after` returned the boundary itself, 330, for the bold frame and 336
+    // for the plain one. **A scan that starts inside the thing it is measuring reports the boundary.**
+    //
+    // **So it is the pen after the run *and the space*, plus an overhang allowance.** 338 clears the
+    // bold `o` by 8 px and is 3 px before the tail's first ink in either face, which is what makes
+    // the comparison about the tail.
+    let beyond = l.x + pen("alpha bravo ") + 3;
 
     let (_, box_c) = difference(&plain, &coloured);
     assert!(
@@ -496,29 +563,30 @@ fn a_run_boundary_does_not_move_the_text_after_it() {
     let bold_tail = first_ink_after(&bold);
     assert_ne!(plain_tail, u32::MAX, "the fixture has text after `bravo`");
 
-    // **Summed letter by letter, and the first version multiplied `b`'s advance by five.** That is
-    // wrong twice over: `b`, `r`, `a`, `v` and `o` are five different widths, and **the bold and
-    // regular advances of `b` happen to be equal**, so the arithmetic returned a predicted movement of
-    // **0 px** against a measured 2. The instrument was broken, not the code.
-    let a = atlas();
-    let sum_face = |st: holonomy_assets::payload::Style| -> u32 {
-        "bravo"
-            .bytes()
-            .map(|c| u32::from(a.metric(u32::from(c), st, 16).advance_x))
-            .sum()
-    };
-    let regular = sum_face(holonomy_assets::payload::Style::Regular);
-    let bold_face = sum_face(holonomy_assets::payload::Style::Bold);
+    let regular = pen_of(b"bravo", holonomy_assets::payload::Style::Regular);
+    let bold_face = pen_of(b"bravo", holonomy_assets::payload::Style::Bold);
+    let moved = bold_tail as i64 - plain_tail as i64;
+    let explained = bold_face as i64 - regular as i64;
     assert_eq!(
-        bold_tail as i64 - plain_tail as i64,
-        bold_face as i64 - regular as i64,
+        (regular, bold_face),
+        (44, 46),
+        "**`bravo` measures 44 px in Regular and 46 px in Bold**, read from the atlas. Bold is \\
+         genuinely wider, and that is why this gate can never assert the tail does not move at all."
+    );
+    assert!(
+        moved.abs() <= explained.abs() + 1,
         "**bolding `bravo` moved the tail by {0} px, and the two faces' advances over those five \\
-         characters' advances differ by {1}.** The emitter and the painter agree; bold is simply \
-         wider. `bravo` measures {2} px in Regular and {3} px in Bold.",
+         characters differ by {1}.** A pixel of antialiasing is the whole of the slack. Part 29 \\
+         measured this at 38 px of movement, which is the defect this gate holds; a tail that moves \\
+         by more than the faces account for means the emitter measured the gap with the wrong face. \\
+         `bravo` measures {2} px in Regular and {3} px in Bold, and the tail's first ink is at \\
+         {4} plain and {5} bold.",
+        moved,
+        explained,
         regular,
         bold_face,
-        bold_tail as i64 - plain_tail as i64,
-        bold_face as i64 - regular as i64
+        plain_tail,
+        bold_tail
     );
 }
 

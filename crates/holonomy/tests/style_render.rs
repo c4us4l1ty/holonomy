@@ -222,14 +222,27 @@ fn a_styled_run_in_the_middle_keeps_the_tail_after_it() {
     );
 }
 
-/// **Runs are positioned by cells, not by bytes.**
+/// **Runs are positioned by the pen, not by bytes — and part 31 replaced "by cells" with "by the
+/// pen".**
 ///
-/// **The fixture is `éé bold`**, because ASCII cannot tell the two apart — a byte offset and a cell offset
-/// coincide on every byte below 0x80. After two two-byte characters the byte offset is 4 and the cell
-/// offset is 2, so positioning by bytes puts the bold run **two cells too far right** and leaves a
-/// two-cell gap.
+/// **The fixture is `ééab`**, because ASCII cannot tell the two apart — a byte offset and a cell
+/// offset coincide on every byte below 0x80. After two two-byte characters the byte offset is 4 and
+/// the cell offset is 2, so positioning by bytes puts the bold run **two cells too far right** and
+/// leaves a two-cell gap.
+///
+/// ## What this asserted before part 31, and why it is no longer the claim
+///
+/// `(x0 - l.x) / cell_w == 2`. **Part 31 moved run positions off the grid onto the font's own pen**,
+/// because the painter advances by the pen and positioning on the grid made every run boundary a
+/// discontinuity. **So the cell index is now 1 for this fixture and the cell index is the wrong
+/// instrument** — a pen position that happens to fall in cell 1 is not "positioned in cell 1".
+/// **`cell_w` is 10 since part 31 anyway**, from the Monospace face's advance, so the old assertion
+/// was measuring against a different number than the one it was written for.
+///
+/// **The claim that survives is the one that distinguishes the two positions from each other**: the
+/// run starts where the pen says and nowhere near where the byte offset would put it.
 #[test]
-fn runs_are_positioned_by_cells_not_bytes() {
+fn runs_are_positioned_by_the_pen_not_by_bytes() {
     // **The styled bytes are letters, and that is the second half of this fixture's correctness.** The
     // first version styled `(4, 8)` on `"éé bold\n"`, which is `" bol"` -- the run *starts* with the
     // space, and a space is the same glyph in both faces. So the first *differing pixel* was one cell
@@ -244,13 +257,44 @@ fn runs_are_positioned_by_cells_not_bytes() {
     let cell_w = plain.chrome.metrics.cell_w;
     let (n, (x0, _, _, _)) = difference(&plain, &bold);
     assert!(n > 0, "the styled run drew nothing");
-    assert_eq!(
-        (x0 - l.x) / cell_w,
-        2,
-        "the bold run starts {} px in, which is cell {}; byte 4 is cell 2, because `éé` is two cells \
-         and four bytes. Positioning by bytes puts it at cell 4.",
+
+    // **Where the pen is after `éé`, read from the atlas rather than assumed.**
+    let a = atlas();
+    let e = u32::from(
+        a.metric('é' as u32, holonomy_assets::payload::Style::Regular, 16)
+            .advance_x,
+    );
+    let pen = 2 * e;
+    let ink = u32::from(
+        a.metric(b'a' as u32, holonomy_assets::payload::Style::Regular, 16)
+            .width,
+    );
+
+    assert!(
+        (x0 - l.x) as i64 - pen as i64 <= i64::from(ink),
+        "**the bold run starts at the pen**, {} px in against a pen at {} px (`é` advances {e} in \
+         Regular). A glyph may overhang its advance to the left by up to its own width, so the first \
+         differing pixel can be a little before it and not further.",
         x0 - l.x,
-        (x0 - l.x) / cell_w
+        pen
+    );
+    // **And emphatically not at the byte offset.** Byte 4 in a 10 px cell is 40 px; the pen is at
+    // `2 * e`. **The two are more than a cell apart**, which is the whole point of the fixture: ASCII
+    // cannot tell a byte offset from a character offset, and this one can.
+    let byte_pos = 4 * cell_w;
+    assert!(
+        byte_pos as i64 - (x0 - l.x) as i64 >= i64::from(cell_w),
+        "**and not at the byte offset**: byte 4 in a {cell_w} px cell is {byte_pos} px in, and the run \
+         starts {} px in, so positioning by bytes would push it {} px right and leave a gap more than \
+         one cell wide where the two `é`s are.\n\
+         **CORRECTION, and it is in the first draft of this assertion:** it was written as \
+         `(x0 - l.x) - byte_pos >= cell_w`, which has the sign backwards -- the byte offset puts the \
+         run *further* right than it goes, so the difference is negative and the assertion could only \
+         have passed if positioning by bytes had moved it left. The measured numbers were right and \
+         the comparison was not, which is the second time in this part that an instrument was written \
+         with the sign the story suggested rather than the sign the pixels show.",
+        x0 - l.x,
+        byte_pos - (x0 - l.x)
     );
 }
 

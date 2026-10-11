@@ -116,9 +116,14 @@ allowlist has no `openat` on a user path — everything either side of that boun
 **Cost.** 1,439,288 B against the 2,097,152 B ceiling: **657,864 B of room**. The decoder is **51.6 KiB**
 of it, measured by symbol size out of an unstripped build.
 
-**1005 tests pass in release.** 125 files / 67,294 lines under `crates/*/src` and `crates/*/tests`
-(`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`) — the previous "109 files,
-58,214 lines" was measured before Phase 9C and is superseded by this line rather than by a claim.
+**1335 tests pass in release, 0 failed, across 102 test binaries** — the whole workspace, measured,
+not the subset a fast run happens to cover. 175 files / 97,684 lines under `crates/*/src` and
+`crates/*/tests` (`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`). The
+previous "1005 tests / 125 files / 67,294 lines" is superseded by this line rather than by a claim.
+
+**The type is 24 ppem by default and `--ppem` goes to 26, which is the measured ceiling.** `AtlasFull {
+need: 406,068, have: 458,752 }` at 28. The chrome scales from the atlas's own line pitch, so the type
+size is one number rather than a set of constants that have to be kept in agreement with each other.
 
 ## Things that are true and non-obvious
 
@@ -126,6 +131,18 @@ of it, measured by symbol size out of an unstripped build.
 method on `Opened` that skips `lock_all_pages`, and no way to reach `Sealed` except through
 `PrivilegesDropped::seal`. Reaching for a path after sealing is not a slow failure — it is `SIGSYS`
 and exit 137, which reads like a crash rather than like a design rule.
+
+**Every glyph was missing the top of its ink, at every size, since the atlas was written.**
+`rasterize` takes a `dy` and discarded it — not by accident of omission but as `let _ = dy;` *inside
+the per-byte copy loop*, so the compiler was never allowed to say the word "unused". `dx` was
+applied to the span fill and `dy` to nothing, so the row bucketing and the sub-scanline sample read
+`y` in ascender-line space while the tile was indexed in ink-box space: a glyph landed in its own
+cell shifted down by exactly its `y0`. Measured, `'p'` in Regular carried ink in rows 6..14 of a
+15-row cell at 16 ppem and 10..21 of 22 at 24. **135 tests passed against it**, because every raster
+measurement in the project was in a direction the defect does not move — ink extent *in x*, pixel
+counts, colour hues, `PaintStats::missing` (the glyphs *were* drawn). **Not one gate compared a
+glyph's rendered height with its own metric's `height`.** `tests/glyph_pad.rs` is that comparison,
+over 1,512 glyphs.
 
 **The glyphs used to be drawn 17–21 px above the line box meant to hold them, and nothing noticed.**
 `raster.rs` stored `bearing_y` as the distance from the *ascender line* down to the ink's bottom rather
@@ -183,12 +200,29 @@ button is filled, and un-arming means *explicitly plain* rather than "go back to
 twenty-one toolbar buttons remain inert and are counted as such — text colour was the twelfth to stop
 being one, in part 29.
 
+**The type is 24 ppem and the chrome scales with it, and the cell is the font's own advance.** `--ppem`
+sets it; 26 ppem is the largest size the atlas holds, measured (`AtlasFull { need: 406_068, have: 458_752 }`
+at 28). `ChromeMetrics::with_type_scale` scales every dimension that describes *type* from the atlas's
+measured line pitch, and deliberately leaves `page_pad` and `sidebar_w` alone — padding is a distance
+between things, not a size of a thing. `Painter::cell_width` was `ppem / 2` documented as "a monospace
+advance"; it was **20% narrow**, and it now reads `'m'` out of the Monospace face like everything else.
+
 **A run boundary no longer moves the text after it.** Part 29 measured that bolding or colouring a word
-shifts the rest of the line, because `emit_body_text` placed runs on the 8 px grid while
+shifts the rest of the line, because `emit_body_text` placed runs on the grid while
 `Painter::doc_text` advanced by the font's own metrics. **Both now call `Painter::advance_of`**, one
 definition of how far the pen moves, with the space-advance and `.notdef` cases that a re-implementation
 gets silently wrong. Bolding still moves the text after it, and that is typography: bold advances differ
-from regular, and the movement is exactly the difference between the two faces' advances.
+from regular, and the movement is bounded by the difference between the two faces' advances.
+
+**The caret is still in the wrong place, and part 30's decision is what is being waited on.** The body is
+Inter, which is proportional, so no fixed cell can place a caret inside it: `'a'` advances 9 and `'W'` 16
+in the same cell of 10. Measured at 16 ppem, the caret is **10, 20 and 40 px *ahead*** of the glyph it
+points at at columns 10, 20 and 40 — part 30 measured it *behind*, because the cell was 8. **The sign
+moved with the cell and the error is still one pixel a column.** `tests/grid_vs_glyphs.rs` holds it.
+
+**§2.9.3's image budget was measured against a 640 px page column** — 80 cells of 8. **It is now
+1,120 px**, 80 cells of 14. **The budget has not been re-measured and the number in §2.9.3 is no longer
+the number it was.** Recorded rather than quietly restated.
 
 **Selection exists, and it is a model rather than a highlight.** `Editor` holds `Option<u32>` — the
 anchor — and the focus *is* the caret, so there is no second copy of the caret anywhere; every caret

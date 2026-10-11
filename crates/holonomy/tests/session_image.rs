@@ -225,23 +225,33 @@ fn a_paint_decodes_the_image_to_page_column_width_and_not_to_native() {
     // once, and a second image anywhere in the document would breach the budget.
     let column = column_width(&s);
     let (rw, rh) = s.chrome_rect_for_image(0);
+    // **800, not 640, and the budget was re-measured with it.** §2.9.3's table is corrected in
+    // PROJECT.md: the page column is 80 cells of `cell_w`, `cell_w` is the Monospace face's advance
+    // (10 at 16 ppem, and 8 as the old `ppem / 2`), so 80 columns is 800 px. 1080 at 16:9 into 800 is
+    // 450, and 800 x 450 x 4 is 1,440,000 bytes = 1.373 MiB -- **five** rasters inside 8.0 MiB,
+    // where 640 x 360 held nine.
     assert_eq!(
-        column, 640,
-        "§2.9.3's page column at DESKTOP metrics is 640 px"
+        column, 800,
+        "§2.9.3's page column at DESKTOP metrics is 800 px (640 before part 31 moved `cell_w` off \
+         `ppem / 2`)"
     );
     assert_eq!(rw, column.min(1920), "the raster is the column width");
     assert_eq!(
-        rh, 360,
-        "1080 scaled to 640 wide is 360, keeping the 16:9 aspect"
+        rh, 450,
+        "1080 scaled to 800 wide is 450, keeping the 16:9 aspect"
     );
     assert_eq!(
         s.image_cache_bytes(),
         (rw * rh * 4) as usize,
         "the cache holds exactly one raster's bytes"
     );
+    // **1.5 MiB, not 1 MiB, and the bound is a round number rather than the old tight one.** The old
+    // figure was `921,600 < 1_000_000` -- a 78 KiB margin over a number that did not need it. At the
+    // 800 px column the raster is 1,440,000 bytes, so the bound has to move; **1.5 MiB leaves 132 KiB
+    // and is still tight enough that a second decode would fail it** (`two images at 2.88 MiB`).
     assert!(
-        s.image_cache_bytes() < 1_000_000,
-        "a page-column raster is 0.879 MiB, got {}",
+        s.image_cache_bytes() < 1_500_000,
+        "a page-column raster is 1.373 MiB at 800 px (0.879 MiB at the old 640 px), got {}",
         s.image_cache_bytes()
     );
     assert!(s.image_cache_bytes() < s.image_cache_budget());
@@ -290,7 +300,7 @@ fn the_raster_is_a_resample_and_not_a_decimation() {
     s.paint(None).expect("paint");
     let pixels = s.image_cache_pixels(0).expect("resident").to_vec();
     let (rw, rh) = s.chrome_rect_for_image(0);
-    assert_eq!((rw, rh), (640, 360));
+    assert_eq!((rw, rh), (800, 450), "800 x 450 is the page column at 16 ppem; see §2.9.3's corrected table");
     let at = |x: u32, y: u32| -> u8 { pixels[(y as usize * rw as usize + x as usize) * 4] };
 
     let band_top = 480 * rh / 1080 + 2;
@@ -543,7 +553,8 @@ fn an_image_outside_the_window_is_evicted_and_the_budget_holds() {
 
 #[test]
 fn three_images_at_the_column_width_all_fit_in_the_budget() {
-    // §2.9.3's arithmetic as a test: nine page-column rasters fit in 8.0 MiB. Three is well inside
+    // §2.9.3's arithmetic as a test: five page-column rasters fit in 8.0 MiB at the 800 px column
+    // (nine, at the old 640 px one). Three is inside either, and well inside this
     // that, and it is the case the arithmetic was written for -- several images on facing pages.
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
         holonomy_assets::build_atlas(&[16]).expect("atlas").0,

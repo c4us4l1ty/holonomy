@@ -706,8 +706,19 @@ impl<'a> Session<'a> {
         // `Painter::cell_height` falls back to. A chrome-only frame draws procedural box-drawing
         // glyphs sized to the cell, so it needs the fallback to be self-consistent, not
         // typographically correct -- and the two agreeing is the point.
+        //
+        // Part 32 adds the second half. `with_line_pitch` only *raised* bands to fit the type; it left
+        // the type at 16 ppem and the measure at `cell_w = 8`, so rasterising at a larger ppem grew the
+        // glyphs into bands that did not grow with them. `with_type_scale` scales every dimension that
+        // describes type, from the same measured pitch, and leaves the furniture alone.
         let metrics = match painter.atlas().map(|a| a.line_pitch()).filter(|&p| p > 0) {
-            Some(pitch) => metrics.with_line_pitch(u32::from(pitch)),
+            Some(pitch) => metrics
+                // **The cell from the face, and not the 8 the constant carries.** `cell_width()` reads
+                // the Monospace face's own advance out of the atlas -- 10 at 16 ppem, 14 at 24 -- which
+                // is the measure's true unit and was 20 % narrow before part 32.
+                .with_cell_width(painter.cell_width())
+                .with_type_scale(u32::from(pitch))
+                .with_line_pitch(u32::from(pitch)),
             None => metrics,
         };
         let chrome = Chrome::new(metrics);

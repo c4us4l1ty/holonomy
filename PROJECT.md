@@ -324,7 +324,18 @@ arithmetic is exact and it is tighter than it looks:
 |---|---|---|---|
 | 1920×1080 RGBA (native) | 8,294,400 | **7.910** | exactly **one** |
 | 1280×720 RGBA | 3,686,400 | 3.516 | two |
-| 640×360 RGBA (page column width) | 921,600 | **0.879** | **nine** |
+| 800×450 RGBA (page column width, **part 32**) | 1,440,000 | **1.373** | **five** |
+| ~~640×360 RGBA (page column width, before part 32)~~ | ~~921,600~~ | ~~0.879~~ | ~~nine~~ |
+>
+> **CORRECTION, part 32: the page column is 800 px, not 640, and the budget is re-measured here
+> rather than left to be discovered.** `cell_w` is the Monospace face's advance, which is **10 at
+> 16 ppem** and was **8** as `ppem / 2`; 80 columns of 10 is 800 px. 1080 scaled to 800 wide is
+> **450**, and 800 × 450 × 4 is **1,440,000 bytes = 1.373 MiB**.
+>
+> **So the ±1-page policy holds five images inside 8.0 MiB, where it held nine.** That is the honest
+> price of a larger type, and it is stated rather than left for the next person to measure: the
+> decision below is unchanged and still correct, and its justification is now a five-to-one margin
+> over native rather than a nine-to-one.
 
 So a ±1-page policy with native-resolution decoding can hold **one** 1080p image. A document with two
 photos on facing pages breaches the budget at the moment the second decodes, which is the OOM the
@@ -333,9 +344,10 @@ breach happen at a viewport boundary instead of at open time.
 
 **Decision: the Iceberg cache stores page-column-width rasters, not native rasters.** The container
 holds the original bytes, encrypted and on disk; the cache holds only what the viewport can show. For
-the 80-column page of §5's chrome that is 640 px wide. Consequences, all intended:
+the 80-column page of §5's chrome that is **800 px wide** (640 before part 32). Consequences, all intended:
 
-* the ±1-page policy now holds ~9 images inside 8.0 MiB, so it is a policy rather than a formality;
+* the ±1-page policy holds ~5 images inside 8.0 MiB (**~9 before part 32**), so it is a
+  policy rather than a formality;
 * the SSE2 scaler is exercised on *every* image, because a 1080p source is always downscaled — which
   is the only honest way to test a scaler;
 * `PaintStats::missing` gains a sibling, `resampled`, so a frame records how much work the scaler did
@@ -2573,6 +2585,234 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 32 — the type size, and the rasteriser that had been discarding a parameter
+
+**"The app is way too tiny." Part 27 raised the window. The type had stayed at 16 ppem through
+every part since.**
+
+## What was actually tiny, and why "make it bigger" kept doing nothing
+
+**Part 27 made the window 1,600 px wide and grew the measure with it. It did not touch the type.**
+The atlas was built at `build_atlas(&[16])` in `main.rs` and `shot.rs`, `cell_w` was a hardcoded
+`8`, and the *text* was 16 ppem glyphs on a 1,600 px panel. **A user asking for a bigger app twice
+was right twice, and the first answer moved the furniture.**
+
+## The measurement, and the ceiling
+
+**`Atlas::line_pitch()` and the Monospace advance across the sizes:**
+
+```text
+  ppem  mono  line_pitch  Reg a-z mean  Reg max  atlas KiB
+    16     10          25          8.58       14        149
+    18     11          28          9.69       16        182
+    20     12          30         10.73       18        219
+    22     13          34         11.62       19        257
+    24     14          37         12.88       21        301
+    26     16          40         13.96       23        345
+    28  AtlasFull { need: 406_068, have: 458_752 }
+```
+
+**26 ppem is the largest size the atlas holds, measured rather than estimated**, and `--ppem` is
+clamped to `10..=26` so that `--ppem 9999` says why instead of aborting on an allocator error
+sixteen frames later.
+
+**24 ppem ships**: **1.5x the type**, and it is not the ceiling, so there is headroom.
+
+## One measured number drives the whole chrome
+
+**`with_type_scale(pitch)`**, and it scales the five text bands, the toolbar button and the
+anchor width by `pitch / BASE_PITCH`, where **`BASE_PITCH = 25` is `Atlas::line_pitch()` at 16 ppem**
+— measured, and written down in one `const`.
+
+**Why `line_pitch` and not `ppem`:** because `ppem` is the rasteriser's input and the bands are
+measured in line boxes. Dividing by 16 would have been dividing by a number that happens to be
+nearby.
+
+**What is scaled and what is not is the whole design, and `page_pad` is the interesting one.**
+`page_pad` is 48 px at 16 ppem and **stays 48 px at 24**. It is padding, and padding is a distance
+between things rather than a size of a thing: scaling it to 72 would be five cells of margin at a
+14 px cell and reads as a page with a hole in it. **Same argument retires `sidebar_w`.** The rule is
+*does this describe the type or the furniture*.
+
+## `cell_width` was a false document, and part 30 had already measured it
+
+**It was `ppem / 2`, documented as *"half the ppem, which is a monospace advance for the packed
+faces"*.** Both halves were wrong and the error was measurable: at 16 ppem `ppem/2` is **8** and the
+Monospace advance is **10**. **20 % narrow.** The function had the atlas in hand and read `sizes()`,
+throwing away everything else about it.
+
+**It now reads `'m'` out of the Monospace face.** **Because the measurement is the definition, not
+the division** — every glyph in a monospace face has the same advance, and `'m'` is the one the face
+is widest on, which makes it the one least likely to be silently wrong for a face with a defect.
+**So a running session's `cell_w` is 10 at 16 ppem and 14 at 24.**
+
+## Part 30's decision (b), taken — and what it did not take
+
+**The cell is now the face's own advance, so the doc the function always carried is true of the code
+as well as of the doc.** `tests/grid_vs_glyphs.rs` had four gates asserting the old disagreement.
+**Two failed, which is what they were written to do:**
+
+```text
+                        part 30 (cell 8)        part 32 (cell 10)
+alpha bravo charlie    143 px, grid 160  -17    143 px, grid 190  -47
+40 x 'a'               358 px, grid 320  +38    358 px, grid 400  -42
+40 x 'W'               --                          638 px, grid 400  +238
+caret at column 10     10 px BEHIND the glyph    10 px AHEAD of it
+```
+
+**The caret is still wrong and the sign moved.** The body is Inter, which is proportional, and no
+fixed cell can place a caret inside proportional text: `'a'` is 9 and `'W'` is 16 in the same cell
+of 10. **That is the residual `grid_vs_glyphs.rs` holds, unchanged in kind and changed in direction.**
+
+## The lesson from the two gates that kept passing
+
+**Every gate in `grid_vs_glyphs.rs` read `ChromeMetrics::DESKTOP.cell_w`, and `DESKTOP` is a design
+constant no running session uses.** `Session::new` overrides it, so `DESKTOP.cell_w` stayed 8 while
+the running value became 10 — and `cell_width_is_not_the_monospace_advance_it_claims_to_be` went on
+asserting that the cell was 8 **through the entire change that made it 10**.
+
+**That is the same failure, in the same part, in a different file, as `CHROME_CELL_W` comparing
+itself to `DESKTOP.cell_w`.** Two "cannot drift" gates, two constants, both green through a real
+break. **A gate that reads a design constant cannot see the running value.** Every gate in both
+files now reads `session.chrome.metrics`.
+
+## Two more falsified records, both found by looking at a picture
+
+### `menu_width` used a constant, and the headings ran together
+
+**`CHROME_CELL_W = 8`**, with the recorded reason: *"a `const fn` cannot read a runtime metrics
+struct, and making the menu bar's geometry depend on a runtime value would mean the headings move
+when the font metrics are recalibrated — which is a rearrangement nobody would ask for."*
+
+**Part 32 is somebody asking for it.** The cell went to 14 and the menu bar laid eight headings out
+at 8 px per character while drawing them at 24:
+
+```text
+Fil eEdit ViewInsertFormatTool sExtensionsHelp
+```
+
+**`menu_width` takes the cell width now** — two characters of change — and `CHROME_CELL_W` is gone
+rather than kept as a second answer. **The reasoning was aesthetic and the evidence was not
+gathered.**
+
+### The title and menu bands were never raised to the line pitch
+
+**`with_line_pitch` applied `at_least_a_line` to four of the six bands.** With `title_h: 30` and
+`menu_h: 22` against a 16 ppem line pitch of **25**, **both bands were already clipping at the design
+size** — 22 px of band around 25 px of ink. At 24 ppem it became unmissable.
+
+**The omission survived because the bands were raised to *the pitch* and nobody compared the two
+numbers.**
+
+---
+
+# THE BIGGER FINDING: `rasterize` was handed a `dy` and threw it away
+
+**Every glyph in this application has been drawn with the top of its ink missing, at every size,
+since the atlas was written.** Part 32 found it by looking at a picture and refusing to believe it,
+and it is worth more than everything above it.
+
+## The measurement
+
+Blitting one glyph to a black frame and scanning the rows that carry coverage:
+
+```text
+16 ppem  'p'  metric height 15   atlas cell rows carrying ink  6..14   (6 rows lost)
+24 ppem  'p'  metric height 22   atlas cell rows carrying ink 10..21  (10 rows lost)
+```
+
+**The ink's bottom was right and the top was missing, by exactly `y0` — how far the glyph's ink
+starts below the ascender.** Caps lost 4, lowercase 6, descenders 10.
+
+## The cause
+
+```text
+let xa = (scratch.xs[i] - dx).max(0.0);      // dx applied
+let xb = (scratch.xs[i + 1] - dx).min(...); // dx applied
+```
+
+…and `dy` applied to nothing. **The row bucketing (`row_span`) and the sub-scanline sample (`sy`) both
+read `y` in ascender-line space while the tile was indexed in ink-box space.** The horizontal crop
+was right and the vertical one was absent.
+
+## How it stayed invisible
+
+**The discard was written down, as a warning suppression, inside the final copy loop:**
+
+```text
+for (i, &a) in scratch.acc.iter().enumerate() {
+    let _ = dy;
+    out[i] = a.min(255) as u8;
+}
+```
+
+**`let _ = dy;` once per byte.** So the compiler was never allowed to say the word "unused".
+
+**And not one gate could see it**, because every raster measurement in the project was in a direction
+the defect does not move:
+
+| measured | affected? |
+| --- | --- |
+| ink extent **in x** (`'a'` advance 9, ink 9) | no — the defect is vertical |
+| pixel counts, colour hues, missing-glyph tallies | no |
+| `PaintStats::missing` | no — the glyphs *were* drawn |
+| **rendered ink height vs the metric's own `height`** | **yes — and nothing measured it** |
+
+**135 tests passed against it.** The fix is three lines: translate once where the edges are built,
+and delete the `- dx` from the span fill, so `row_span`, the sample and the fill cannot disagree
+about which space they are in.
+
+## Two gates, and one correction in the first draft
+
+`tests/glyph_pad.rs`, over **1,512 rasterised glyphs** (756 codepoints × 5 styles, at each size).
+
+**The first draft asserted a blank row at *both* ends of every cell**, from `rasterize_face`'s
+documented 1 px pad. It failed on `'|'`: ink in rows 0..19 of a 21-row cell, **no top pad at all**.
+
+**That is correct behaviour, not a defect.** The pad is `y0 = min_y.floor() - 1`, which is not
+guaranteed to be a row — an outline whose top lands exactly on a pixel boundary gives
+`min_y.floor()` as that boundary and the subtraction lands below it. **"At least one blank row on
+each side" was a guess from the source that the pixels contradicted.**
+
+Measured, instead:
+
+```text
+min top pad    =  0     <- so the top cannot be the assertion
+min bottom pad =  1     <- always, at both sizes
+max |ink centre - cell centre| = 0.167, at both sizes
+```
+
+**So the gate asserts the bottom**, which is the half the defect violates — a glyph pushed down has
+a *full* bottom row and an *empty* top row, so **a top-only assertion would have passed the defect.**
+Both gates were bite-checked by reverting the fix: they fail with `'!'` at row 14 of 15 and `'+'`
+centred at 0.800.
+
+## Four instrument corrections, recorded because the numbers were wrong each time
+
+1. **`beyond = l.x + 12 * cell_w` measured the `i` in `charlie`,** not the tail — it moved 44 px.
+2. **The repair, the pen after `alpha bravo`, landed inside the bold `o`**, and a scan that starts
+   inside the thing it is measuring returns the boundary.
+3. **The second repair measures 0 px**, because which pixel the tail starts on depends on a left
+   side bearing and a coverage threshold. **So it is a bound, not an equality**: the tail may move by
+   the difference in the faces' advances and one pixel of antialiasing. **Part 29's defect moved it
+   by 38 px, so the bound is wide enough to be honest and narrow enough to bite.**
+4. **`(x0 - l.x) - byte_pos >= cell_w` had the sign backwards** — byte positioning pushes the run
+   *further right*, so the difference is negative and the assertion could only have passed if it had
+   moved left. **The measured numbers were right and the comparison was not.**
+
+## What this part does NOT fix, and says so
+
+- **The caret and the selection highlight are still on a fixed grid and are still wrong** for a
+  proportional body. Part 30's standing decision.
+- **`repaint_all` is still not idempotent** (970 px, the toolbar). Part 31's finding, gated.
+- **§2.9.3's image budget was measured against a 640 px page column** — 80 cells of 8. **It is now
+  1,120 px**, 80 cells of 14. **The budget has not been re-measured and the number in §2.9.3 is no
+  longer the number it was.** Recorded rather than quietly restated.
+
+## Verified
+
+`--ppem` is clamped to the measured ceiling, `probe_linebox` and the 135 asset/display tests pass,
+and the two new gates bite. **The rest of the workspace suite is reported in the commit.**
 #### Phase 14, part 31 — one pen, so a run boundary is a join and not a jump
 
 **Part 29's recorded defect, fixed. Part 30's decision, left standing.**
