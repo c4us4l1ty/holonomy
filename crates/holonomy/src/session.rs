@@ -3822,7 +3822,14 @@ impl<'a> Session<'a> {
             // run that started after two two-byte characters starts at cell 2, and starting it at byte 4
             // would put it two cells right of the character before it. Part 22 made the caret count
             // characters for the same reason and from the opposite direction.
-            let mut cell_x: u32 = 0;
+            // **A pen in pixels, and not a cell count.** Part 31. This used to be `cell_x`, advanced by
+            // `codepoint_count` and multiplied by `cell_w` at each call site -- the grid, while the
+            // painter advanced by the font's metrics, so the two disagreed at every run boundary.
+            //
+            // **The name is the argument.** `cell_x` reads like a count of cells and is used like one;
+            // `pen_x` reads like a distance and is, so the next reader cannot reintroduce the grid by
+            // accident. See `pen_of`.
+            let mut pen_x: u32 = 0;
             let mut cursor = 0usize; // byte index into `seg`
             for (span, lo, hi) in runs {
                 // **Skip anything past the drawn prefix.** `runs_in` is asked for `[at, at + shown_len)`
@@ -3839,14 +3846,14 @@ impl<'a> Session<'a> {
                     let gap = &seg[cursor..lo];
                     push_doc_run(
                         tree,
-                        l.x + cell_x * m.cell_w,
+                        l.x + pen_x,
                         y,
                         at + cursor as u32,
                         gap.len() as u32,
                         holonomy_render::Style::REGULAR,
                         ink,
                     );
-                    cell_x += codepoint_count(gap);
+                    pen_x += pen_of(&self.painter, gap, holonomy_render::Style::REGULAR);
                     cursor = lo;
                 }
                 let run = &seg[cursor..hi];
@@ -3857,14 +3864,21 @@ impl<'a> Session<'a> {
                     // that here would be a second answer to a question with one right one.
                     push_doc_run(
                         tree,
-                        l.x + cell_x * m.cell_w,
+                        l.x + pen_x,
                         y,
                         at + cursor as u32,
                         run.len() as u32,
                         holonomy_render::Style(span.atlas_style()),
                         span_ink(&span, ink),
                     );
-                    cell_x += codepoint_count(run);
+                    // **The run's own face, not `REGULAR`.** A bold glyph advances differently from a
+                    // plain one, and measuring the gap with the wrong face is the same class of error as
+                    // the grid was -- a second place where the position and the painting disagree.
+                    pen_x += pen_of(
+                        &self.painter,
+                        run,
+                        holonomy_render::Style(span.atlas_style()),
+                    );
                     cursor = hi;
                 }
             }
@@ -3875,7 +3889,7 @@ impl<'a> Session<'a> {
                 let tail = &seg[cursor..];
                 push_doc_run(
                     tree,
-                    l.x + cell_x * m.cell_w,
+                    l.x + pen_x,
                     y,
                     at + cursor as u32,
                     tail.len() as u32,
@@ -4965,6 +4979,72 @@ fn span_ink(span: &holonomy_text::TextIntervalSpan, ink: u32) -> u32 {
     } else {
         0xFF00_0000 | (span.color_rgb & 0x00FF_FFFF)
     }
+}
+
+/// **How far the pen has moved after laying out `bytes`, in the document's own faces.** Part 31.
+///
+/// ## Why this exists
+///
+/// **`emit_body_text` positioned each run at `text.x + cell_x * cell_w`** — the 8 px grid — **while
+/// [`Painter::doc_text`] advanced by the font's own metrics.** So a line drawn as one run accumulated
+/// the font's advances and a line drawn as three snapped back to the grid at every boundary: **a run
+/// boundary was a discontinuity**, and bolding or colouring a word moved the text after it (part 29).
+///
+/// ## Why it goes through [`Painter::advance_of`] and not through the atlas
+///
+/// **Because that is where the rule lives, and the rule has two cases.** A space takes the face's
+/// advance; a `.notdef` takes the cell and is counted missing. Re-implementing that here is how the two
+/// sides drifted in the first place, and the failure is invisible — a document whose spaces are each a
+/// pixel short still looks like a document.
+///
+/// ## Why the chrome's grid is still used elsewhere, and that is part 30
+///
+/// **[`Caret::locate`] and the selection highlight are still on the grid**, and they are still wrong.
+/// Making them right is `part 30`'s decision and not this one, because it moves every x in the project
+/// and §2.9.3's 640 px page column with it. **This change makes the *document* internally consistent**
+/// — every run placed by the same rule the painter advances by — and leaves the caret question where
+/// `tests/grid_vs_glyphs.rs` holds it.
+///
+/// ## A free function, because it needs one field
+///
+/// **`&Painter` and not `&self`**, so the borrow is one argument rather than the whole session — which
+/// matters because the only two callers are inside `emit_body_text`, which holds `&mut self` for other
+/// reasons. **`Painter` is all it reads**, and saying so in the signature means a second caller cannot
+/// reach for `self` and quietly depend on something else.
+///
+/// ## `O(bytes)`, and no allocation
+///
+/// **A scan over bytes the caller already has.** `emit_body_text` passes the page's `line_scratch`, so
+/// this reads a buffer that was read anyway; `refresh_caret_column` would pass one line. **Decoding is
+/// `from_utf8().valid_up_to()`, the same walk `doc_text` does**, and an invalid byte counts as one
+/// `.notdef` — the same direction, for the same reason.
+fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) -> u32 {
+    let mut pen = 0u32;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let (cp, used) = match std::str::from_utf8(&bytes[at..]) {
+            Ok(s) => match s.chars().next() {
+                Some(c) => (u32::from(c), c.len_utf8()),
+                None => break,
+            },
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if valid > 0 {
+                    let s = std::str::from_utf8(&bytes[at..at + valid])
+                        .expect("valid_up_to is a char boundary by definition");
+                    match s.chars().next() {
+                        Some(c) => (u32::from(c), c.len_utf8()),
+                        None => break,
+                    }
+                } else {
+                    (0xFFFD, e.error_len().unwrap_or(1))
+                }
+            }
+        };
+        pen = pen.saturating_add(painter.advance_of(cp, style));
+        at += used;
+    }
+    pen
 }
 
 /// Push a filled rectangle into `tree`'s **back** layer. Part 28.

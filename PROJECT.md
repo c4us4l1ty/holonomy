@@ -2573,6 +2573,96 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 31 — one pen, so a run boundary is a join and not a jump
+
+**Part 29's recorded defect, fixed. Part 30's decision, left standing.**
+
+## The change
+
+**`Painter::advance_of(codepoint, style) -> u32` is now the single definition of how far the pen moves**,
+and `doc_text` calls it for its own advance rather than repeating the expression.
+
+**`Session::pen_of(&Painter, bytes, style)` sums it**, and `emit_body_text` places each run at
+`l.x + pen_x` instead of `l.x + cell_x * m.cell_w`.
+
+**So a run is placed exactly where the painter's pen would have reached, and the boundary is a join.**
+
+## Why a function and not a table lookup
+
+**Because the rule has two cases and the second one is invisible.** A blank glyph with an advance — a
+space — takes the face's advance; a `.notdef` takes the cell and is counted missing. **A caller that
+wrote `advance_x.max(1)` for both would place every space one pixel on**, and a document whose spaces
+are each a pixel short still looks like a document. **That is how the two sides drifted the first time
+and it is why the rule now lives in one place and both sides call it.**
+
+## The gate told me what to do, which is what defect gates are for
+
+**`a_run_boundary_moves_the_text_after_it` asserted the defect**, and its own failure message said what
+its passing would mean:
+
+> If this gate fails, the two positioners now agree and `the_colour_lands_on_the_run_and_not_on_its_
+> neighbours` can assert the far edge again — and the note in PROJECT.md should be deleted with it.
+
+**It failed with `408 against 416`.** So it was flipped, not deleted — *the same measurement with the
+sign reversed* — and the note it pointed at is deleted here. **A defect gate that is deleted rather
+than flipped leaves the fact behind it unrecorded**, and one that is weakened is how a defect gate
+becomes a lie.
+
+## TWO corrections, and the second is the one to read
+
+**1. A bounding box is the wrong instrument for bold.** The flipped gate asserted the tail's first ink
+was at the same x for bold and found it **2 px further right**, and the first draft called that a
+residual. **It is typography.** A bold glyph advances by the bold face's metric; `bravo` in bold is
+genuinely wider, and the emitter placing the tail after the bold run's real advances is the *correct*
+behaviour. **A gate that called it a defect would have been asking for bold to be the same width as
+regular.**
+
+**2. The instrument was then broken too.** To predict the movement, the gate multiplied `b`'s advance by
+five. **Wrong twice over**: `b`, `r`, `a`, `v` and `o` are five different widths, **and the bold and
+regular advances of `b` are equal**, so it predicted a movement of **0 px against a measured 2**.
+
+**The arithmetic predicted 0 and the pixels said 2, and the arithmetic was the broken one.** Summed
+letter by letter the difference is exactly the 2 px observed, and the gate now asserts *that* — which
+is the claim that is true, and which would catch a real error: a tail displaced by anything other than
+the faces' advances would mean the emitter measured the gap with the wrong face.
+
+**For a colour — the same face on both sides — the tail does not move at all**, and *that* is the
+decisive evidence that the emitter and the painter now agree.
+
+## Part 29's 1,898-pixel residual, isolated
+
+**It was not two sessions. It was one session painted twice.**
+
+`repaint_all()` twice, with **no edit and no state change**, differs from once by **970 pixels**,
+deterministically and in the same place every time:
+
+```text
+y=51 n=229 x=0..904      y=52 n=229 x=0..904
+y=53 n=229 x=1..905      y=54 n=229 x=1..905
+y=55 n=3   x=1..6        … 24 rows in all
+```
+
+Rows 51–54 are the bottom of the menu band and the top of the toolbar, and the x positions step
+irregularly — **1, 4, 6, 9, 12, 14, 17, 22, 25, 30, 33, 38** — which is glyphs, not a rule. **At (1, 53)
+the first frame has `0x2a2a30`, `colour::BAND`, and the second `0x5a5a66`, `colour::RULE`.** **Every
+toolbar icon is among the differing pixels.**
+
+**Part 29 said "recorded rather than asserted either way", and that was right** — but the reason it was
+hard to isolate is that the gate compared **two sessions** rather than **one session with itself**, and
+everything after the first paint in it (the edit, the undo, the second `caret_to`) was a red herring.
+
+**Not fixed here.** It is in the chrome's paint path, not the document's: fixing it means finding which
+chrome emitter draws something conditionally on whether it has drawn before.
+`a_repaint_is_not_idempotent` holds it.
+
+## What this does NOT fix, and says so
+
+**The caret and the selection highlight are still on the 8 px grid and are still wrong.** Part 30 holds
+that decision: moving the chrome onto the font's grid makes every x in the project move and turns
+§2.9.3's 640 px page column into 800. **This change made the *document* internally consistent** — every
+run placed by the rule the painter advances by — **and deliberately did not touch the third thing**,
+because a fix that moved the caret alone would have made it disagree with the highlight it sits inside.
+
 #### Phase 14, part 30 — the chrome is a grid and the document is not
 
 **No product code changed in this part. It is the measurement that decides the next one, and it is

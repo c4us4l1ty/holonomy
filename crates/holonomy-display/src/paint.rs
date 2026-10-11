@@ -183,6 +183,45 @@ impl<'a> Painter<'a> {
         self.size_index
     }
 
+    /// **How far the pen moves for one codepoint, in the face [`doc_text`](Self::doc_text) uses.**
+    ///
+    /// ## Why this exists, and why it is a method rather than a table lookup
+    ///
+    /// **Part 29 found that a line's runs were positioned by `Session::emit_body_text` on the 8 px cell
+    /// grid while `doc_text` advanced the pen by the font's own metrics**, so a run boundary was a
+    /// discontinuity and styling a word moved the text after it.
+    ///
+    /// **The fix is for the two to call one function**, and this is it. A caller that re-implements
+    /// the rule gets it subtly wrong, and the two are wrong in the *same place* when it happens: the
+    /// blank case. **A space takes the face's advance and a `.notdef` takes the cell** — two different
+    /// rules for two kinds of nothing — and a caller that wrote `advance_x.max(1)` for both would place
+    /// a space 1 px on and every space in the document would be wrong by a few pixels.
+    ///
+    /// ## The rule, verbatim from `doc_text`
+    ///
+    /// ```text
+    /// blank   : advance_x if it is > 0, else cell_width() and count it missing
+    /// inked   : advance_x.max(1)
+    /// ```
+    ///
+    /// **No atlas and not the cell: `cell_width()`.** The chrome is a fixed grid and that is right for
+    /// it; this is about the one place the grid is the fallback rather than the rule.
+    pub fn advance_of(&self, cp: u32, style: holonomy_render::Style) -> u32 {
+        let Some(atlas) = self.atlas else {
+            return self.cell_width();
+        };
+        let m = atlas.metric(cp, atlas_style(style), self.atlas_size());
+        if m.is_blank() {
+            if m.advance_x > 0 {
+                u32::from(m.advance_x)
+            } else {
+                self.cell_width()
+            }
+        } else {
+            u32::from(m.advance_x).max(1)
+        }
+    }
+
     /// The last [`PaintStats`].
     pub fn stats(&self) -> PaintStats {
         self.scratch.stats
@@ -345,7 +384,12 @@ impl<'a> Painter<'a> {
     /// **Clipped to the damage** like every other node, and the clip is applied to the *mask* rather
     /// than to the destination, so a partially damaged icon does the pixels that are damaged and
     /// leaves the rest for the next frame.
-    fn icon(&mut self, frame: &mut Frame, icon: &holonomy_render::Icon, damage: Option<DamageRect>) {
+    fn icon(
+        &mut self,
+        frame: &mut Frame,
+        icon: &holonomy_render::Icon,
+        damage: Option<DamageRect>,
+    ) {
         let Some(bounds) = icon.bounds() else {
             return;
         };
@@ -656,6 +700,9 @@ impl<'a> Painter<'a> {
                 // makes word spacing proportional. `.notdef` has zero for both, and taking `cell_w` for
                 // it would make a page of missing glyphs read as evenly spaced, which looks like a
                 // document rather than like a font that lacks them.
+                // **`advance_of`, so this arm and the caller cannot disagree.** The two rules for two
+                // kinds of nothing -- a space takes the face's advance, `.notdef` takes the cell -- are
+                // the whole of part 29's bug, and they are one call site now instead of two.
                 if m.advance_x > 0 {
                     pen += i32::from(m.advance_x);
                 } else {
@@ -682,7 +729,9 @@ impl<'a> Painter<'a> {
                 },
             );
             self.scratch.stats.doc_glyphs += 1;
-            pen += i32::from(m.advance_x).max(1);
+            // **`advance_of`, and not the expression.** See the blank arm above: the rule has two
+            // cases and this is one of them, and `Painter::advance_of` is the single definition.
+            pen += self.advance_of(u32::from(c), run.style) as i32;
         }
     }
 

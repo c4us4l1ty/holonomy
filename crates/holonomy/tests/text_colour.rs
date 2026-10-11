@@ -24,10 +24,11 @@
 //! | --- | --- |
 //! | **a coloured span changes pixels** — the bug | [`a_coloured_span_is_drawn_and_this_is_the_gate_that_says_so`] |
 //! | **and nothing else does** | [`an_uncoloured_document_is_unchanged_by_a_colour_nobody_asked_for`] |
-//! | the colour lands on the right cells | [`the_colour_lands_on_the_run_and_not_on_its_neighbours`] |
+//! | **the colour lands on the right cells and no further** | [`the_colour_lands_on_the_run_and_not_on_its_neighbours`] |
 //! | **and two colours on one line are two runs** | [`two_colours_on_one_line_are_two_runs_and_two_colours`] |
 //! | **and one undo takes it back, pixels and all** | [`a_colour_is_taken_back_by_one_undo`] |
-//! | **and a run boundary moves the text after it** — a second defect | [`a_run_boundary_moves_the_text_after_it`] |
+//! | **and a run boundary no longer moves the text after it** | [`a_run_boundary_does_not_move_the_text_after_it`] |
+//! | **and a second repaint is not the same frame** — a defect, gated as one | [`a_repaint_is_not_idempotent`] |
 
 use holonomy::session::Session;
 use holonomy_display::paint::Painter;
@@ -135,6 +136,39 @@ fn teal_pixels(s: &Session<'_>) -> Vec<(u32, u32)> {
     out
 }
 
+/// A painted session with `STYLE_BOLD` over `[a, b)`, applied before the session exists.
+///
+/// **Separate from [`painted`] and not a flag on it**, because the two differ in *when* the style is
+/// applied and the difference is visible: styling after `Session::new` costs a second full repaint, and
+/// **the second full repaint is not the same frame as the first** — see
+/// `a_repaint_is_not_idempotent`.
+fn painted_bold(text: &str, range: (u32, u32)) -> Session<'static> {
+    let m = ChromeMetrics::DESKTOP;
+    let mut ed = Editor::new();
+    for line in text.split_inclusive('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        ed.insert_at(
+            ed.text_len() as u32,
+            line.as_bytes(),
+            SpanPolicy::GrowIntoInsert,
+        )
+        .expect("seed");
+    }
+    ed.caret_to(0).expect("park");
+    ed.style_range(range.0, range.1, holonomy_text::STYLE_BOLD, 0)
+        .expect("bold");
+    let mut s = Session::new(
+        ed,
+        Painter::new(atlas(), 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
+    s.repaint_all().expect("paint");
+    s
+}
+
 fn difference(a: &Session<'_>, b: &Session<'_>) -> (u32, (u32, u32, u32, u32)) {
     let mut n = 0u32;
     let (mut x0, mut y0) = (u32::MAX, u32::MAX);
@@ -194,18 +228,20 @@ fn a_coloured_span_is_drawn_and_this_is_the_gate_that_says_so() {
         l.y + m.cell_h
     );
     // **Within two pixels of `bravo`, and the two is measured rather than assumed.** See below.
-    // **Two pixels, not one, and the first draft said one.** The painter blits at `run.x + bearing_x`
-    // and draws `m.width` wide, so a glyph can overhang *either* side of its cell. Measured on
-    // `bravo`: the left edge reaches 369 against a cell starting at 368 (one pixel), and the right
-    // reaches 410 against a cell ending at 408 (**two** pixels). **One would have been a guess from
-    // `bearing_x` being signed; two is what the pixels say.**
+    // **Three pixels, measured, and it was two before part 31.** The painter blits at
+    // `run.x + bearing_x` and draws `m.width` wide, so a glyph can overhang *either* side of its cell.
+    // **And since part 31 the glyphs sit where the font's pen puts them, not on the 8 px grid**, so the
+    // overhang is measured against the pen rather than against the cell and it grew by a pixel.
+    //
+    // **The bound is an overhang, not a position claim.** Part 30 holds the larger question -- where the
+    // caret and the ruler think the glyphs are -- and this gate must not quietly take a side on it.
     assert!(
-        x0 >= l.x + 6 * m.cell_w - 2 && x1 <= l.x + 11 * m.cell_w + 2,
-        "**within `bravo`'s five cells, give or take the glyph overhang**: {}..{} against {}..{}",
+        x0 >= l.x + 6 * m.cell_w - 3 && x1 <= l.x + 11 * m.cell_w + 3,
+        "**within `bravo`'s cells, give or take the glyph overhang**: {}..{} against {}..{}",
         x0,
         x1,
-        l.x + 6 * m.cell_w - 2,
-        l.x + 11 * m.cell_w + 2
+        l.x + 6 * m.cell_w - 3,
+        l.x + 11 * m.cell_w + 3
     );
 }
 
@@ -250,13 +286,10 @@ fn the_colour_lands_on_the_run_and_not_on_its_neighbours() {
         box_.0,
         l.x + 6 * m.cell_w - 1
     );
-    // **And the far edge is deliberately NOT asserted here.** The first draft did, and it failed with
-    // `464 against 409` -- which is not a bleed and not a tolerance problem: **the text *after* the
-    // coloured run moves.** See `a_run_boundary_moves_the_text_after_it` below, which is that
-    // defect's gate, and which asserts it as a *known* behaviour rather than pretending it is right.
-    //
-    // **Two gates, one assertion each**, because "the colour is on these five cells" and "the rest of
-    // the line did not move" are different claims and only the first is true today.
+    // **And the far edge, which part 31 made assertable.** The first draft of this gate could not
+    // assert it: the changed region reached 464 where `bravo` ends at 409, because **the text after the
+    // run moved**. Part 31 put run positions and the painter on the same pen, and the region now stops
+    // where it should. See `a_run_boundary_does_not_move_the_text_after_it`.
 }
 
 /// Two colours on one line are two runs and two colours.
@@ -386,12 +419,11 @@ fn a_colour_is_taken_back_by_one_undo() {
     // is a property of the document, not of a framebuffer.
 }
 
-/// **A run boundary moves the text after it. This gate records a defect, not a wish.**
+/// **A run boundary does not move the text after it. Part 31.**
 ///
-/// ## The measurement
+/// ## What this gate was, and why it now asserts the opposite
 ///
-/// Bolding or colouring `bravo` in `alpha bravo charlie` and comparing the row against the plain
-/// document gives:
+/// It was `a_run_boundary_moves_the_text_after_it`, and it asserted **the defect**:
 ///
 /// ```text
 /// plain        :   0 columns differ
@@ -399,46 +431,156 @@ fn a_colour_is_taken_back_by_one_undo() {
 /// colour 6..11 :   5 columns differ, first at x=47
 /// ```
 ///
-/// and the row's ink ends at **143 px** plain and **141 px** with `bravo` bold. **Five columns
-/// differing for a colour change is far too many for five letters**, and the extras are all to the
-/// *right* of the coloured run.
+/// **Its own failure message said what to do when the defect stopped**: *"If this gate fails, the two
+/// positioners now agree and `the_colour_lands_on_the_run_and_not_on_its_neighbours` can assert the
+/// far edge again — and the note in PROJECT.md should be deleted with it."* **Part 31 did that, and the
+/// gate failed with `408 against 416`** — the changed region no longer reaches past `bravo`'s last
+/// cell.
 ///
-/// ## The cause, to the two functions
+/// **So this is the same measurement with the sign flipped**, and that is the only honest way to retire
+/// a gate like this: not deleted, because then the fact is gone, and not weakened, because that is how
+/// a defect gate becomes a lie.
 ///
-/// **`Session::emit_body_text` positions each run at `text.x + cell_x * cell_w`** -- the fixed 8 px
-/// grid, which is what the caret, the ruler, the tables and the wrap point all use.
-/// **`Painter::doc_text` advances its pen by `m.advance_x.max(1)` -- the font's own metric.** Those two
-/// disagree, so **a run boundary is a discontinuity**: the text after it lands where the grid says
-/// rather than where the accumulated advances left it.
+/// ## The cause, and the fix in one line each
 ///
-/// **It is not part 29's bug and it is older than part 28.** Part 24 made multi-run lines reachable
-/// through the document model and its gates passed anyway, because they asserted ink *extent* on the
-/// styled row and never the position of the row's tail.
+/// * **Was:** `emit_body_text` positioned each run at `text.x + cell_x * cell_w` — the 8 px grid —
+///   while `Painter::doc_text` advanced by the font's own metrics. **A boundary was a discontinuity.**
+/// * **Now:** both call [`Painter::advance_of`], so a run is placed where the painter would have
+///   reached, and the boundary is a join rather than a jump.
 ///
-/// ## Why this asserts the current behaviour rather than the right one
-///
-/// **Because the right one has not been measured.** The two positioners disagree and this says they
-/// do; **it does not say by how much**, and a fix that moved the painter onto `cell_w` would move
-/// every measured number in this project. **A gate written for behaviour the project does not have
-/// tests a wish.** This one fails loudly when the defect is fixed, which is the useful direction: it
-/// says "this changed", and whoever fixed it has to say why.
+/// **The caret and the selection highlight are still on the grid and are still wrong** — that is part
+/// 30's decision, held by `tests/grid_vs_glyphs.rs`, and nothing here claims otherwise.
 #[test]
-fn a_run_boundary_moves_the_text_after_it() {
+fn a_run_boundary_does_not_move_the_text_after_it() {
     let plain = painted("alpha bravo charlie\n", None);
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
     let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
-
-    // **Right of the coloured run's last cell.**
+    // **Past the coloured run's last cell, on the grid.** `bravo` ends at cell 11.
     let beyond = l.x + 12 * m.cell_w;
-    let (_, box_) = difference(&plain, &coloured);
+
+    let (_, box_c) = difference(&plain, &coloured);
     assert!(
-        box_.2 > beyond,
-        "**text past the coloured run moved**: the changed region reaches {} and the run's grid cell \
-         ends at {}. If this gate fails, the two positioners now agree and \
-         `the_colour_lands_on_the_run_and_not_on_its_neighbours` can assert the far edge again -- \
-         and the note in PROJECT.md should be deleted with it.",
-        box_.2,
+        box_c.2 <= beyond,
+        "**colouring a word moved the text after it**: the changed region reaches {} and `bravo`'s \
+         grid cell ends at {}. Part 29 measured this at 415.",
+        box_c.2,
         beyond
+    );
+
+    // **And the same for bold — with a different instrument, because bold legitimately moves it.**
+    //
+    // **CORRECTION. The first draft asserted the tail's first ink was at the same x for bold, and it is
+    // 2 px further right. That is not a residual shift; it is typography.** A bold glyph advances by
+    // the bold face's metric and a plain one by the regular's, and `bravo` in bold is genuinely wider.
+    // **The emitter placing the tail after the bold run's real advances is the correct behaviour**, and
+    // a gate that called it a defect would have been asking for bold to be the same width as regular.
+    //
+    // **So this asserts the movement is exactly the difference in the faces' advances**, which is the
+    // claim that is actually true and would catch a real error: a tail displaced by anything else would
+    // mean the emitter measured the gap with the wrong face.
+    let bold = painted_bold("alpha bravo charlie\n", (6, 11));
+    let first_ink_after = |s: &Session<'_>| -> u32 {
+        let l = s.chrome_layout().text;
+        let mut x = u32::MAX;
+        for xx in beyond..l.x + l.width {
+            for y in l.y..l.y + s.chrome.metrics.cell_h {
+                if s.frame().pixel(xx, y) & 0x00FF_FFFF < 0x0060_0000 {
+                    x = x.min(xx);
+                }
+            }
+        }
+        x
+    };
+    let plain_tail = first_ink_after(&plain);
+    let bold_tail = first_ink_after(&bold);
+    assert_ne!(plain_tail, u32::MAX, "the fixture has text after `bravo`");
+
+    // **Summed letter by letter, and the first version multiplied `b`'s advance by five.** That is
+    // wrong twice over: `b`, `r`, `a`, `v` and `o` are five different widths, and **the bold and
+    // regular advances of `b` happen to be equal**, so the arithmetic returned a predicted movement of
+    // **0 px** against a measured 2. The instrument was broken, not the code.
+    let a = atlas();
+    let sum_face = |st: holonomy_assets::payload::Style| -> u32 {
+        "bravo"
+            .bytes()
+            .map(|c| u32::from(a.metric(u32::from(c), st, 16).advance_x))
+            .sum()
+    };
+    let regular = sum_face(holonomy_assets::payload::Style::Regular);
+    let bold_face = sum_face(holonomy_assets::payload::Style::Bold);
+    assert_eq!(
+        bold_tail as i64 - plain_tail as i64,
+        bold_face as i64 - regular as i64,
+        "**bolding `bravo` moved the tail by {0} px, and the two faces' advances over those five \\
+         characters' advances differ by {1}.** The emitter and the painter agree; bold is simply \
+         wider. `bravo` measures {2} px in Regular and {3} px in Bold.",
+        regular,
+        bold_face,
+        bold_tail as i64 - plain_tail as i64,
+        bold_face as i64 - regular as i64
+    );
+}
+
+/// **A second full repaint of an unchanged session is not the same frame as the first.** Part 31.
+///
+/// ## What this is
+///
+/// `repaint_all()` **twice**, with no edit and no state change in between, differs from **once** by
+/// **970 pixels**, deterministically and in the same place every time:
+///
+/// ```text
+/// y=51 n=229 x=0..904     y=52 n=229 x=0..904
+/// y=53 n=229 x=1..905     y=54 n=229 x=1..905
+/// y=55 n=3   x=1..6       ... 24 rows in all
+/// ```
+///
+/// Rows 51–54 are the bottom of the menu band and the top of the toolbar, and the x positions step
+/// irregularly — **1, 4, 6, 9, 12, 14, 17, 22, 25, 30, 33, 38** — which is glyphs, not a rule. **At
+/// (1, 53) the first frame has `0x2a2a30`, `colour::BAND`, and the second has `0x5a5a66`,
+/// `colour::RULE`.** **Every toolbar icon is among the differing pixels.**
+///
+/// ## It is part 29's residual, isolated
+///
+/// Part 29 recorded *"two separately built sessions differ in the toolbar after one of them has been
+/// through an edit and an undo — **1,898 pixels in a box of (0, 51, 905, 792)** — recorded rather than
+/// asserted either way"*.
+///
+/// **That was not two sessions. It was one session painted twice.** Everything after the first paint
+/// in that fixture — the edit, the undo, the second `caret_to` — was a red herring, and the whole of
+/// the difference is `repaint_all` not being idempotent. **Part 29's instruction to record it rather
+/// than assert it was right, and the reason it was hard to isolate is that the gate was written to
+/// compare two sessions rather than one session with itself.**
+///
+/// ## Why this gate asserts the defect
+///
+/// **Because it is not part 31's.** Part 31 made `emit_body_text` and `Painter::doc_text` agree on
+/// where a run goes, and this is in the chrome's paint path — the menu band and the toolbar, not the
+/// document. **Fixing it means finding which chrome emitter draws something conditionally on whether
+/// it has drawn before**, which is a different piece of work in a different file.
+///
+/// **It goes green the day that happens.**
+#[test]
+fn a_repaint_is_not_idempotent() {
+    let once = painted("alpha bravo charlie\n", None);
+    let mut twice = painted("alpha bravo charlie\n", None);
+    // **Nothing but the repaint.** No edit, no caret move, no state change — which is what took part 29
+    // three gates and a page-sized correction to establish.
+    twice.repaint_all().expect("second repaint");
+
+    let (n, box_) = difference(&once, &twice);
+    assert!(
+        n > 0,
+        "**painting the same unchanged session twice gave the same frame.** Part 31 expected 970 \\
+         differing pixels here; if the chrome's emitters have been made idempotent, the 970 in \\
+         PROJECT.md and the 1,898 in part 29 can both be deleted."
+    );
+    let l = once.chrome_layout();
+    assert!(
+        box_.1 >= l.toolbar.y - 8 && box_.1 < l.toolbar.y + 8,
+        "**and the difference is at the top of the toolbar, not in the document**: first differing row \
+         {} against a toolbar at {:?}",
+        box_.1,
+        l.toolbar
     );
 }

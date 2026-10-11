@@ -183,6 +183,13 @@ button is filled, and un-arming means *explicitly plain* rather than "go back to
 twenty-one toolbar buttons remain inert and are counted as such — text colour was the twelfth to stop
 being one, in part 29.
 
+**A run boundary no longer moves the text after it.** Part 29 measured that bolding or colouring a word
+shifts the rest of the line, because `emit_body_text` placed runs on the 8 px grid while
+`Painter::doc_text` advanced by the font's own metrics. **Both now call `Painter::advance_of`**, one
+definition of how far the pen moves, with the space-advance and `.notdef` cases that a re-implementation
+gets silently wrong. Bolding still moves the text after it, and that is typography: bold advances differ
+from regular, and the movement is exactly the difference between the two faces' advances.
+
 **Selection exists, and it is a model rather than a highlight.** `Editor` holds `Option<u32>` — the
 anchor — and the focus *is* the caret, so there is no second copy of the caret anywhere; every caret
 movement collapses the selection through one funnel (`Editor::park`). You can drag with press, move and
@@ -245,14 +252,13 @@ the chrome onto the font's would make 80 columns 800 px instead of 640 px and in
 §2.9.3 measured. **Not decided here** — `tests/grid_vs_glyphs.rs` asserts the whole of it, so each fact
 fails the day it is fixed.
 
-**Bolding or colouring a word moves the text after it.** `emit_body_text` places each run on the
-fixed 8 px cell grid — what the caret, the ruler, the tables and the wrap point all use — and
-`Painter::doc_text` advances its pen by the font's own advance metric. **They disagree, so a run
-boundary is a discontinuity**: measured, bolding `bravo` in `alpha bravo charlie` changes 7 columns
-against the plain document, all of them to the right. It predates part 28 and part 29 — part 24 made
-multi-run lines reachable and its gates missed it because they asserted ink extent rather than the
-position of the row's tail. **Not fixed**, because neither answer (move the painter onto the grid, or
-make `cell_w` the font's advance) has been measured against the rest of the project.
+**A full repaint is not idempotent.** `repaint_all()` twice on an unchanged session differs from once
+by **970 pixels**, deterministically and in the same place: rows 51–54, the bottom of the menu band and
+the top of the toolbar, across its whole width, with every toolbar icon among them. At (1, 53) the
+first frame has `colour::BAND` and the second `colour::RULE`. This is the 1,898-pixel residual part 29
+recorded and could not isolate — **it was never two sessions, it was one session painted twice**, and
+the fixture was comparing two sessions rather than one with itself. `a_repaint_is_not_idempotent` holds
+it. It is in the chrome's paint path, not the document's.
 
 **The zoom control does not zoom, and that is measured rather than asserted.** `--zoom 200`, F11 and the
 zoom dropdown all set `zoom_percent`, and **every pixel that changes when it changes is inside the zoom
