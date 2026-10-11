@@ -233,6 +233,18 @@ every fixture exercises and `tests/session_no_alloc.rs` then reported **2 alloca
 1,000-keystroke burst at offset 0 against 0 at the end of the document. **One 131,040-byte realloc,
 measured by size and not identified.**
 
+**The document's text and the chrome's grid disagree, and it is the project's largest known defect.**
+`Painter::cell_width()` is `ppem / 2` = **8** at 16 ppem, and its own doc calls that "a monospace
+advance for the packed faces" — **the Monospace face's measured advance is 10, and Regular's is 4–16
+with a mean of 9.69**. `doc_text` advances by the font's metric; the caret, the ruler, the tables, the
+selection highlight and the wrap point all advance by the grid. Measured: **forty `a`s occupy 358 px
+where the grid allows 320, and `alpha bravo charlie` occupies 143 where the grid allows 160 — so the
+error's sign depends on the letters.** The caret is drawn 10 px behind the glyph it points at at column
+10 and 30 px behind at column 40. Moving the document onto the grid would overlap every glyph; moving
+the chrome onto the font's would make 80 columns 800 px instead of 640 px and invalidate every number
+§2.9.3 measured. **Not decided here** — `tests/grid_vs_glyphs.rs` asserts the whole of it, so each fact
+fails the day it is fixed.
+
 **Bolding or colouring a word moves the text after it.** `emit_body_text` places each run on the
 fixed 8 px cell grid — what the caret, the ruler, the tables and the wrap point all use — and
 `Painter::doc_text` advances its pen by the font's own advance metric. **They disagree, so a run

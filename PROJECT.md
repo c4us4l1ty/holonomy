@@ -2573,6 +2573,93 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+#### Phase 14, part 30 — the chrome is a grid and the document is not
+
+**No product code changed in this part. It is the measurement that decides the next one, and it is
+larger than a part.**
+
+## The numbers, at 16 ppem
+
+| | |
+| --- | --- |
+| `Painter::cell_width()` | **`ppem / 2` = 8** |
+| `ChromeMetrics::DESKTOP.cell_w` | **8** |
+| Monospace face, every glyph in `a-z A-Z 0-9` | **advance 10**, ink 9–11 |
+| Regular face, the same glyphs | **advance 4–16, mean 9.69**, ink mean **10.24** |
+| `'a'`, Regular | **advance 9**, ink **9** |
+| **40 × `'a'`, rendered** | **ink 358 px** where the grid allows **320 px** |
+| **`alpha bravo charlie`, rendered** | **ink 143 px** where the grid allows **160 px** |
+
+## The error has no sign
+
+**One line is 38 px too wide and the other is 17 px too narrow.** A constant offset can be lived with;
+an offset whose sign depends on the letters cannot, because the user has no rule to learn.
+
+**So the caret is past the end of one line and inside the text of the next.** A caret at column 10 of a
+line of forty `a`s is drawn 10 px behind the glyph it points at, and that error grows by a pixel every
+column, reaching **30 px at column 40**.
+
+## Where the two are mixed, which is why this is one decision and not five
+
+| place | uses |
+| --- | --- |
+| `Painter::doc_text` | **`m.advance_x`** — the font's metric |
+| `Painter::text` — every chrome label | `cell_width()` — the grid |
+| `Caret::locate` | `text.x + caret_column * cell_w` — the grid |
+| `Session::emit_body_text`'s run positions | `text.x + cell_x * cell_w` — the grid |
+| **the selection highlight (part 28)** | `col * cell_w` — the grid |
+| the ruler, the tables, the wrap point | `cell_w` — the grid |
+
+**Six places, two answers.** Part 29's run-boundary shift is this file's cause and part 28's selection
+highlight is placed by the third of them — **so a fix that moves only the caret makes the caret and the
+highlight disagree**, which is worse than both being consistently wrong.
+
+## CORRECTION — this part's first draft claimed a coincidence, and was wrong
+
+The first version of `the_error_changes_sign_with_the_letters`'s predecessor asserted that
+`alpha bravo charlie` lands within a few pixels of the grid, and told the story *"the fixture and the
+defect are the same number, which is why it survived"* — part 22's lesson, applied confidently.
+
+**It was not a coincidence. It was the caret being counted as ink.** The fixture painted with the caret
+at the end of the line; the caret is drawn at the *grid* position, which is precisely the thing under
+question, so the measurement read 159 px against a grid of 160 and confirmed whatever it was asked to
+confirm. **The text's ink is 143 px, and the line is 17 px short.**
+
+**This is the strongest form of part 22's lesson in the project**: the fixture did not merely fail to
+distinguish right from wrong, **it actively agreed with whatever was asserted**, because the thing
+under test was in the measurement.
+
+## `cell_width`'s own doc is false
+
+> The cell width. Half the ppem, **which is a monospace advance for the packed faces**.
+
+**Measured: the Monospace face's advance at 16 ppem is 10 for every Latin letter and digit, and half
+the ppem is 8.** The claim is false, the code is a two-pixels-per-glyph guess wearing a measurement's
+clothes, and **the grid is 20% narrower than the face it says it is measuring.**
+
+## Not changed here, and this is the part that needs a decision
+
+**Two fixes, and they cost different things.**
+
+**(a) Put the document on the chrome's grid.** `doc_text` advances by `cell_width()` like `Painter::text`
+already does, so a run boundary stops being a discontinuity. **The cost is the page**: `'a'` is 9 px of
+ink in an 8 px cell, so every glyph overlaps its neighbour by a pixel, on every line, forever. **It
+trades one visible defect for a worse one.**
+
+**(b) Put the chrome on the font's grid.** `cell_width()` becomes the Monospace face's real advance —
+**10, and its own doc says so** — and `ChromeMetrics.cell_w` follows it, exactly as `cell_h` already
+follows `Atlas::line_pitch`. The ruler, the tables, the caret, the selection and the wrap point are all
+already written against `cell_w` and **all become correct at once.**
+
+**The cost of (b) is every measured number that depends on the page's width.** 80 columns of 10 px is
+**800 px of text against the 640 px** that §2.9.3's 8.0 MiB decoded-image budget, the resample thresholds
+and the §6 scroll row were measured against — **the same 40% problem part 27 walked into and solved by
+anchoring the design width**, and the same anchor is available here. It is a decision with a cost, not
+a refactor, and it is not one to make inside a part that was supposed to be a measurement.
+
+`crates/holonomy/tests/grid_vs_glyphs.rs` asserts **all of the above**, including the false `cell_width`
+claim, so **each of these gates fails the day it is fixed** and whoever fixes it has to say why.
+
 #### Phase 14, part 29 — text colour, and the half of the span record nobody read
 
 **`TextIntervalSpan` has carried `color_rgb` since phase 4 and nothing in the product ever read it.**
