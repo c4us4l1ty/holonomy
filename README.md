@@ -296,6 +296,23 @@ product, and this is a sandboxed text editor that cannot open a file dialog, so 
 Export and Import is a claim about a capability it does not have. **Ten toolbar buttons remain inert**
 and are counted as such.
 
+**The mouse did not work, and the reason was eight bytes.** Every X11 event decoder read every field
+after `detail` eight bytes early — the Xlib struct's field order, where the wire has eight bytes of
+`send_event` and padding. **A pointer's coordinates came out as the low half of the child window id:
+`event_x: -21301` in a 1024×700 window.** The keyboard worked and hid it, because a key is identified
+by byte 1 and byte 1 was right. **Two existing gates encoded the wrong layout and passed against it**,
+one building a 24-byte fixture for a 32-byte event. Fixed in part 34; `proto.rs` now has five decoders
+tested against a packet with a distinguishable value in every field, and `live.rs` has two gates that
+compare a parsed `ConfigureNotify` against `GetGeometry`.
+
+**The window could not be resized, and two bugs hid behind a discarded error.** `WM_NORMAL_HINTS` was
+never set: `set_size_hints` wrote every field twelve bytes early into the obsolete `x, y, width,
+height` block, *and* built its `ChangeProperty` request two bytes too long — so the server answered
+`BadLength` and created no property at all, which `xprop -id <window> WM_NORMAL_HINTS` reports as
+`not found`. **`Desktop::open` discarded the error with `let _ =`**, which is the only reason it went
+unnoticed. The same `.u32(32).u16(0)` mistake appears in `set_title`, whose own comment records that
+bug being found and fixed there — forty lines away.
+
 **A full repaint is not idempotent.** `repaint_all()` twice on an unchanged session differs from once
 by **970 pixels**, deterministically and in the same place: rows 51–54, the bottom of the menu band and
 the top of the toolbar, across its whole width, with every toolbar icon among them. At (1, 53) the

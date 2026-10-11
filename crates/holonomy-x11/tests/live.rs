@@ -774,3 +774,156 @@ fn a_configure_window_request_is_three_words_plus_one_per_value() {
         );
     }
 }
+
+/// The first `ConfigureNotify` naming a size other than `from`, or `None` within `TIMEOUT`.
+///
+/// **And it skips the ones that repeat `from`.** A resize produces a burst, and a window manager may
+/// send several `ConfigureNotify`s for one drag — including ones at the old size. **Returning the
+/// first event of the burst unconditionally would make this test a race**, which is the third way a
+/// timing test can be wrong and the least excusable.
+/// The first `ConfigureNotify` naming a size other than `from`, or `None` within `TIMEOUT`.
+fn first_resize(conn: &mut holonomy_x11::Conn, from: (u16, u16)) -> Option<(u16, u16)> {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        match conn.next_event(Some(
+            TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        )) {
+            Ok(Some(ev)) => {
+                if let holonomy_x11::Event::ConfigureNotify { width, height } = ev {
+                    if (width, height) != from {
+                        return Some((width, height));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// **A resize arrives as a `ConfigureNotify` carrying the size the server committed.**
+///
+/// ## The instrument, and why it is comparative as well as absolute
+///
+/// **`GetGeometry` is the server's own answer**, read over a request/reply round trip that shares no
+/// code with the event decoder. **Comparing the two is the strongest statement available without a
+/// second opinion on the wire format** — if the decoder read the width from the wrong four bytes, the
+/// two would disagree, and the difference names the bug.
+///
+/// **The absolute assertion is here too**, because two things can be wrong the same way: a parser
+/// that read `width` out of the `window` field would agree with nothing, but one that read it out of
+/// the *height* field would agree with a geometry read only when the two sizes happen to differ by the
+/// right amount. **The fixture deliberately uses sizes that are not related to each other** —
+/// 1000x760 and 1137x511 — so a swap, a shift and a misread are all distinguishable.
+#[test]
+fn a_resize_arrives_as_a_configure_notify_carrying_the_new_size() {
+    require!();
+    let mut conn = holonomy_x11::Conn::connect(None).expect("connect to $DISPLAY");
+    // **1024x700 and 1600x1000, because they are the sizes the existing live gate already creates
+    // and resizes to on this host** -- and an unrelated `RowTooWide` in `create_override_redirect`
+    // rejected the first sizes tried here. **A protocol test that fails for a reason it is not about
+    // is still a test that measures nothing.**
+    //
+    // **And the two sizes share no digits in the same places**: a decoder that read `width` out of
+    // `height`, or out of a four-byte field one slot along, gives a different answer from this pair
+    // and not from some other pair.
+    let start = (1024u16, 700u16);
+    let want = (1600u16, 1000u16);
+    // **Override-redirect, because this window has no window manager to interpret a user drag.** The
+    // point is the *event*, not the user's gesture, and a managed window would add a reparenting step
+    // this test would then be measuring instead.
+    let win = holonomy_x11::Window::create_override_redirect(
+        &mut conn,
+        u32::from(start.0),
+        u32::from(start.1),
+        "live resize",
+    )
+    .expect("create the window");
+    win.map(&mut conn).expect("map");
+
+    let (w0, h0, _) = win.geometry(&mut conn).expect("the starting geometry");
+    assert_eq!(
+        (w0, h0),
+        start,
+        "the window is the size it was created at, or the rest of this test is measuring nothing"
+    );
+
+    win.configure_size(&mut conn, want.0, want.1)
+        .expect("resize the window");
+    let (w1, h1, _) = win.geometry(&mut conn).expect("the server's new geometry");
+    assert_eq!(
+        (w1, h1),
+        want,
+        "**and the server committed it.** On an override-redirect window a `ConfigureWindow` is \
+         honoured directly; a managed one may be overridden by the window manager, which is why this \
+         fixture is not managed."
+    );
+
+    let got = first_resize(&mut conn, start).expect("a ConfigureNotify naming the new size");
+    assert_eq!(
+        got, want,
+        "**the parsed `ConfigureNotify` carries the size the server committed.** If this fails with a \
+         width that is a multiple of four, or one that looks like a window id, the decoder is reading \
+         width and height out of the wrong fields — which is exactly what `Event::decode` was doing, \
+         and exactly what leaves an application painting at its old size into a resized window with a \
+         black band along the right and bottom edges."
+    );
+}
+
+/// **The size hints reach the server, and the server reads back what was sent.**
+///
+/// ## What this is for
+///
+/// **`WM_NORMAL_HINTS` was never set, and nothing found out.** `set_size_hints` wrote every field
+/// twelve bytes early — `min_width` into the obsolete `width` field — *and* built its `ChangeProperty`
+/// request two bytes too long, so the server answered `BadLength` and created no property at all.
+/// **The caller discarded the error with `let _ =`.**
+///
+/// **The symptom was a window the window manager would not resize.** A window with no
+/// `WM_NORMAL_HINTS` is a fixed-size island in a resizable desktop: `xprop -id <window>
+/// WM_NORMAL_HINTS` answers `not found`, and the driver handled a `ConfigureNotify` that could never
+/// arrive.
+///
+/// ## Reading it back, which is the only honest check
+///
+/// **The test asserts what the *server* stored, not what the client sent.** `GetProperty` is the one
+/// request that answers "what did you actually record", and a builder that puts its fields in the
+/// wrong offsets produces a property of exactly the right length that reads back as nonsense.
+#[test]
+fn the_size_hints_reach_the_server_and_read_back() {
+    require!();
+    let mut conn = holonomy_x11::Conn::connect(None).expect("connect to $DISPLAY");
+    let win = holonomy_x11::Window::create_override_redirect(&mut conn, 1024, 700, "hints")
+        .expect("create the window");
+
+    // **The same call `Desktop::open` makes**, with the same numbers the chrome clamps to.
+    win.set_size_hints(&mut conn, (768, 320), None).expect(
+        "**set the hints without a protocol error.** This is the assertion that would have \
+                caught the `BadLength`: the request was two bytes too long and the server rejected \
+                it, and the caller threw that error away.",
+    );
+
+    let h = win
+        .size_hints(&mut conn)
+        .expect("`GetProperty` answered, so the property exists");
+    assert_eq!(
+        (h.min_width, h.min_height),
+        (768, 320),
+        "**the minimum size the server recorded is the minimum size that was sent.** Every field was \
+         being written twelve bytes early into the obsolete `x, y, width, height` block, so a \
+         window manager reading the structure would have seen a minimum of zero and a maximum of zero \
+         — which means *no minimum*, which is the one value that lets a drag to nothing happen."
+    );
+    // **`PMinSize` is the flag that matters**, and it is the flag that was being read as something else.
+    assert_ne!(
+        h.flags & (1 << 4),
+        0,
+        "**`PMinSize` is set**, or the minimum is stored but no window manager will read it"
+    );
+    assert_ne!(
+        h.flags & 1,
+        0,
+        "**`PSize` is set**, so the current size is part of the structure"
+    );
+}

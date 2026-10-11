@@ -33,6 +33,28 @@ use crate::conn::{Conn, ConnError, Setup};
 use crate::proto::{self, cw, gc, image, mask, op, value, Rdr, Req};
 
 /// Why a window operation failed.
+/// **`WM_NORMAL_HINTS` as the server recorded it.** Part 34.
+///
+/// **A reader's view of the structure, and it exists so that a test can say what the server *stored*
+/// rather than what the client *meant*.** See [`Window::size_hints`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeHints {
+    /// The flags word: `PSize`, `PMinSize`, `PMaxSize`, …
+    pub flags: u32,
+    /// Minimum width, in pixels.
+    pub min_width: i32,
+    /// Minimum height, in pixels.
+    pub min_height: i32,
+    /// Maximum width. Zero means "no maximum".
+    pub max_width: i32,
+    /// Maximum height. Zero means "no maximum".
+    pub max_height: i32,
+    /// Width increment. One means "any width".
+    pub width_inc: i32,
+    /// Height increment. One means "any height".
+    pub height_inc: i32,
+}
+
 #[derive(Debug)]
 pub enum WindowError {
     /// The connection failed.
@@ -521,36 +543,65 @@ impl Window {
         min: (u16, u16),
         max: Option<(u16, u16)>,
     ) -> Result<(), WindowError> {
-        // WM_NORMAL_HINTS: flags, then the obsolete fields, then min, max, width-inc, height-inc.
+        // # The structure, field by field, because this is where it was wrong twice
+        //
+        // `XSizeHints` is **18 longs: 72 bytes**, and every field below is named rather than counted.
+        // The obsolete block is **`int x, y, width, height` -- four ints, SIXTEEN bytes at 4..20** --
+        // and the previous version of this comment said "the first eight bytes", which is how every
+        // field below ended up written **12 bytes early**: `min_width` landed in `width`, `max_width`
+        // landed in `min_height`, and a window manager reading the structure would have seen a minimum
+        // size of zero and a maximum of zero. **The size was right and the offsets were not**, which is
+        // the worst of the two -- a property of the wrong length is rejected outright, and a property
+        // of the right length with wrong offsets is accepted and read as nonsense.
+        //
+        // ```text
+        //   0  long   flags          PSize|PMinSize|PMaxSize
+        //   4  int    x, y          obsolete, zero
+        //   8  int    width, height obsolete, zero
+        //  20  int    min_width, min_height
+        //  28  int    max_width, max_height      0 means "no maximum"
+        //  36  int    width_inc, height_inc      1 pixel: no step
+        //  44  int    min_aspect.x, .y           zero: no aspect
+        //  52  int    max_aspect.x, .y           zero: no aspect
+        //  60  int    base_width, base_height    zero
+        //  68  int    win_gravity                zero
+        // ```
         let mut data = vec![0u8; 18 * 4];
         // Flags: PSize(1) | PMinSize(1<<4) | PMaxSize(1<<5).
         data[0..4].copy_from_slice(&((1u32 | (1 << 4) | (1 << 5)).to_le_bytes()));
-        // 4..12 are min-width, min-height, max-width, max-height. The first eight bytes are where the
-        // obsolete four CARD16s live and are zero here.
-        data[8..12].copy_from_slice(&u32::from(min.0).to_le_bytes());
-        data[12..16].copy_from_slice(&u32::from(min.1).to_le_bytes());
+        data[20..24].copy_from_slice(&u32::from(min.0).to_le_bytes());
+        data[24..28].copy_from_slice(&u32::from(min.1).to_le_bytes());
         match max {
             Some((w, h)) => {
-                data[16..20].copy_from_slice(&u32::from(w).to_le_bytes());
-                data[20..24].copy_from_slice(&u32::from(h).to_le_bytes());
+                data[28..32].copy_from_slice(&u32::from(w).to_le_bytes());
+                data[32..36].copy_from_slice(&u32::from(h).to_le_bytes());
             }
             None => {
                 // 0 means "no maximum", which is how the protocol spells unlimited.
-                data[16..24].copy_from_slice(&[0u8; 8]);
+                data[28..36].copy_from_slice(&[0u8; 8]);
             }
         }
-        // width-inc, height-inc = 1 pixel; the counts are the whole field.
-        data[24..28].copy_from_slice(&1u32.to_le_bytes());
-        data[28..32].copy_from_slice(&1u32.to_le_bytes());
-        data[32..36].copy_from_slice(&0u32.to_le_bytes());
-        data[36..40].copy_from_slice(&0u32.to_le_bytes());
+        // width-inc, height-inc = 1 pixel; there is no step.
+        data[36..40].copy_from_slice(&1u32.to_le_bytes());
+        data[40..44].copy_from_slice(&1u32.to_le_bytes());
         conn.request(
             Req::new(op::CHANGE_PROPERTY)
                 .second_byte(0) // Replace
                 .u32(self.id)
                 .u32(proto::atom::WM_NORMAL_HINTS)
                 .u32(proto::atom::WM_SIZE_HINTS)
-                .u32(32) // format
+                // # `format` is ONE byte and the next three are padding, and this wrote six
+                //
+                // `.u32(32).u16(0)` is six bytes where the protocol has four, so the data length and
+                // the 72 bytes of data both sat two bytes late and **the server answered
+                // `BadLength`** -- and the property was never created at all.
+                //
+                // **`set_title` above has this correct, as `.u8(8).u8(0).u16(0)`,** and its comment
+                // records that a spare `u16` there once shifted the whole request and earned a
+                // `BadValue`. **The same bug, in the same file, forty lines apart, in the one request
+                // that decides whether the window can be resized.**
+                .u8(32) // format
+                .u8(0)
                 .u16(0)
                 .u32(18) // 18 CARD32s
                 .bytes(&data),
@@ -664,6 +715,73 @@ impl Window {
         let width = r.u16();
         let height = r.u16();
         Ok((width, height, root as u16))
+    }
+
+    /// **Read `WM_NORMAL_HINTS` back off the server.** Part 34.
+    ///
+    /// ## Why a reader exists when the writer is a builder that already knows its own bytes
+    ///
+    /// **Because the writer is exactly what was wrong.** [`set_size_hints`] wrote every field twelve
+    /// bytes early *and* built a request two bytes too long, and **the caller discarded the error**, so
+    /// the window opened with no `WM_NORMAL_HINTS` at all and a window manager would not resize it.
+    /// **A writer cannot check a writer** — it can only be sure it wrote what it meant to.
+    ///
+    /// **`GetProperty` answers "what did you actually record"**, over a request that shares no code
+    /// with the builder. **This is the same comparative instrument the live resize gate uses** for
+    /// `ConfigureNotify`: two paths to the same fact that can only agree if both are right.
+    ///
+    /// ## `None` for a property the server does not have
+    ///
+    /// **And not a zeroed struct.** `GetProperty` answers `type = None` for an absent property, and a
+    /// `SizeHints` of zeros is a *valid* answer to "what is the minimum size" — it says *none*. **The
+    /// two are different facts and the caller has to be able to tell them apart**, because the whole of
+    /// this function is about a property that was missing.
+    pub fn size_hints(&self, conn: &mut Conn) -> Option<SizeHints> {
+        // GetProperty: opcode(20), delete(BOOL), window, property, type(AnyPropertyType=0),
+        // long-offset(0), long-length(16). The reply's 32 bytes of header are followed by the value.
+        let seq = conn
+            .request(
+                Req::new(op::GET_PROPERTY)
+                    .second_byte(0) // delete = False: never delete a property we are reading
+                    .u32(self.id)
+                    .u32(proto::atom::WM_NORMAL_HINTS)
+                    .u32(0) // AnyPropertyType
+                    .u32(0) // long offset
+                    .u32(16), // long length: 16 longs is the whole structure
+            )
+            .ok()?;
+        conn.flush().ok()?;
+        let body = conn.reply(seq).ok()?;
+        // Reply: 1 reply, 1 format, 2 sequence, 4 length, 4 type, 4 bytes-after, 4 bytes-per-unit,
+        // 8 unused, then the value. **Type is at offset 8**, and it is zero when the property is
+        // absent -- `None` for a `CARD32` property is the *type atom*, which is never zero.
+        if body.len() < 32 {
+            return None;
+        }
+        let type_atom = u32::from_le_bytes([body[8], body[9], body[10], body[11]]);
+        if type_atom == 0 {
+            return None;
+        }
+        let value = body.get(32..)?;
+        let word = |i: usize| -> i32 {
+            let o = i * 4;
+            match value.get(o..o + 4) {
+                Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                None => 0,
+            }
+        };
+        Some(SizeHints {
+            flags: word(0) as u32,
+            // **The obsolete block is four ints at 4..20 and skipping it is the whole point.** This
+            // function and `set_size_hints` name the same offsets for the same reason: the bug was
+            // that neither of them did.
+            min_width: word(5),
+            min_height: word(6),
+            max_width: word(7),
+            max_height: word(8),
+            width_inc: word(9),
+            height_inc: word(10),
+        })
     }
 
     /// Destroy the window and free its graphics context.

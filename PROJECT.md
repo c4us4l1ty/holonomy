@@ -2585,6 +2585,198 @@ it means correcting that gate as well; and doing an unrequested geometry change 
 requested one, on a machine that has been struggling, is how an unrelated regression gets shipped. **It
 is the obvious next thing and it is about four lines.**
 
+# Part 34 — the pointer reported `-21301` and the window could not be resized
+
+Both symptoms were reported as one: *"when I drag and try to resize the core app does not resize, only
+the viewport gets resized and rest gets filled by black color"*, and *"it takes touchpad/mouse input
+instead of just keyboard"*.
+
+**They were two defects in two files, neither of which was findable by reading the source, and both of
+which were found by running the real application against the real display and dumping the bytes.**
+
+---
+
+## The mouse: every event decoder was eight bytes out
+
+### What it looked like from outside
+
+With `HOLONOMY_WINDOW_TRACE=1`, the running application reported:
+
+```text
+event MotionNotify { event_x: -21309, event_y: 2790 }
+event MotionNotify { event_x: -21301, event_y: 2790 }
+```
+
+**In a 1024×700 window.** A pointer at `x = -21301` hits nothing, so every click missed everything and
+the application looked keyboard-only.
+
+### The raw packet, and the one line that settled it
+
+```text
+06 00 38 00 cb ac e6 0a ed 04 00 00 01 00 e0 00 00 00 00 00 85 02 c3 01 85 02 39 01 00 00 01 00
+                    ^^^^^^^^ time          root            event       0        ^^^^^^^^ x=645 y=451
+```
+
+`2790` is `0x0AE6` — **the low half of the timestamp at offset 4.** The decoder was reading the
+pointer's position out of the clock.
+
+### The cause
+
+```text
+ offset  size  field
+      0     1  code
+      1     1  detail -- keycode, or button
+      2     2  sequence
+      4     4  time
+      8     4  root
+     12     4  event window
+     16     4  child window
+     20     2  root-x      (INT16)
+     22     2  root-y      (INT16)
+     24     2  event-x     (INT16)
+     26     2  event-y     (INT16)
+     28     2  state       (modifier mask)
+     30     2  same-screen
+```
+
+**The decoders implemented the Xlib struct's field list** — `detail, sequence, time, root, event, x, y,
+state` — **which drops the eight bytes of `send_event` and padding that the wire puts between `detail`
+and `sequence`.** So `detail` was right and every field after it was eight bytes early: `event_x` was
+the low half of the child window id, which is **zero** over the root window and another client's window
+id over anything else.
+
+**`KeyPress`, `ButtonPress`, `ButtonRelease` and `MotionNotify` were all affected. `Expose` was too**,
+eight bytes out, so a window move repainted the wrong rectangle — invisible on a first frame and a
+band of stale pixels on every one after it.
+
+### Why the keyboard worked, and why that is the worst kind of luck
+
+**A key is identified by byte 1 and nothing else.** The keycode survived the eight-byte error intact,
+so typing was unaffected, the live keystroke gate passed, and **the only visible symptom was a
+pointer that could not click anything** — which reads as a missing feature rather than as a broken
+decoder.
+
+**One decoder was accidentally right**: `ConfigureNotify` is on a different layout and was correct
+throughout. See the correction below.
+
+### TWO EXISTING GATES ENCODED THE BUG
+
+**`a_key_press_decodes_to_its_keycode_and_state` built a 24-byte packet** for a 32-byte event, in the
+Xlib order, and passed — because the decoder read the same order. **`assert_eq!(p.len(), 24)` was the
+assertion that kept it honest and it was honest about the wrong thing.** Both are corrected, and the
+length assertion is now 32.
+
+**A gate can assert a fixture is well-formed and be right about it being malformed.**
+
+---
+
+## The resize: `WM_NORMAL_HINTS` was never set, and a `let _ =` hid it
+
+### What it looked like from outside
+
+```console
+$ DISPLAY=:0 xprop -id 0xc00001 WM_NORMAL_HINTS WM_STATE
+WM_NORMAL_HINTS:  not found.
+WM_STATE(WM_STATE):
+                window state: Normal
+```
+
+**A window the window manager manages, with no size hints.** `set_size_hints`'s own comment says what
+that is: *"a window with no size in its `WM_NORMAL_HINTS` and none set by a `ConfigureWindow` is a
+fixed-size island in a resizable desktop."* **The driver handled a `ConfigureNotify` that could never
+arrive.**
+
+### Two bugs in one function, and a third in the caller
+
+**1. Every field written twelve bytes early.** The obsolete block of `XSizeHints` is
+`int x, y, width, height` — **four ints, sixteen bytes at 4..20**. The comment said "the first eight
+bytes". So `min_width` landed in `width`, `max_width` in `min_height`, and a window manager reading the
+structure would have seen a minimum of **zero** — *no minimum*, which is the one value that lets a
+drag to nothing happen.
+
+**2. The request two bytes too long.** `.u32(32).u16(0)` is six bytes where the protocol has four
+(`format` is **one** byte and three are padding), so the data length and the payload both sat late and
+the server answered **`BadLength`** — no property at all.
+
+**`set_title`, forty lines above, has the identical bug, fixed**, as `.u8(8).u8(0).u16(0)`, with a
+comment recording that a spare `u16` once shifted the whole request and earned a `BadValue`. **The same
+mistake, in the same file, in the one request that decides whether the window can be resized.**
+
+**3. `Desktop::open` discarded the error.** `let _ = window.set_size_hints(...)`. **That is why 1 and 2
+were invisible** — a `BadLength` was thrown away and the window mapped anyway. It is now propagated.
+
+---
+
+## The correction worth keeping: I read `ConfigureNotify`, decided it was wrong, and was wrong
+
+Its offsets — width at 20, height at 22 — looked four bytes out against my model of the layout, and I
+was about to move them.
+
+**The live gate said otherwise**: an override-redirect window resized to 1600×1000 on this very server
+decodes to `ConfigureNotify { width: 1600, height: 1000 }`, and `GetGeometry` independently reports
+1600×1000. **So the decoder was right and my model was wrong**, and moving it would have broken the
+one thing in this file that was working.
+
+**That is why the first thing this part did was run a gate rather than reason.** `live.rs`'s header
+already says it — *a protocol implementation with no live peer is a protocol implementation that is
+wrong* — **and it is equally true that one changed on theory is one that is now wrong in a new way.**
+
+**The gate now exists and asserts both.** `a_resize_arrives_as_a_configure_notify_carrying_the_new_size`
+compares the decoded event against `GetGeometry`, which shares no code with the decoder.
+
+---
+
+## The gates, and they are folds rather than new files
+
+**`proto.rs`'s existing test module gained five**: every decoder tested against a **hand-built 32-byte
+packet with a distinguishable value in every field**, so `0x1111` at offset 2 cannot be mistaken for
+`0x2222` at offset 4. **A decoder reading the right field from the wrong offset cannot pass.**
+
+**`live.rs` gained two**: the resize above, and `the_size_hints_reach_the_server_and_read_back`, which
+**reads the property back with `GetProperty`** — over a request that shares no code with the builder.
+**A writer cannot check a writer**; it can only be sure it wrote what it meant to. `Window::size_hints`
+exists for that reason.
+
+**Two existing gates were corrected, because they asserted the bug.**
+
+---
+
+## Two diagnostics, both off by default, and they are what made this findable
+
+- **`HOLONOMY_X11_TRACE_PACKETS=1`** — one hex line per event. **It settled "wrong field" against "the
+  server reports root-relative coordinates" in one line of output**, and both were live theories until
+  then. Off by default because a pointer produces a packet per motion event.
+- **`HOLONOMY_WINDOW_TRACE=1`** — the decoded event in `windowed.rs`. It already existed for keys and
+  now covers every event, **which is what showed the nonsense reaching the session in the first place.**
+
+**Neither is a test and neither pretends to be.** They are the instruments that answered a question no
+amount of source reading could.
+
+---
+
+## Verified on the running application, not only in tests
+
+```text
+before   event MotionNotify { event_x: -21301, event_y: 2790 }
+after    event MotionNotify { event_x: 333,  event_y: 307 }
+
+before   WM_NORMAL_HINTS:  not found.
+after    WM_NORMAL_HINTS(WM_SIZE_HINTS):
+                 program specified minimum size: 768 by 320
+```
+
+## Not done, and not claimed
+
+- **`ConfigureNotify`'s offsets were left alone on the strength of a live measurement**, which is one
+  host and one server. The general claim is comparative — decoded event against `GetGeometry` — and
+  that is what the gate asserts.
+- **The jail path still opens `/dev/input/event0`**, which on a real machine is whichever device the
+  kernel enumerated first and is frequently not the keyboard and rarely the touchpad. **That is the
+  other half of "takes touchpad input" and it is not this part.**
+- **The full workspace suite has not been re-run for this part**; `holonomy-x11` (32 unit + 11 live) and
+  `holonomy-display` are green and the workspace builds.
+---
+
 #### Phase 14, part 33 — the caret gets a pen, and the print button is gone
 
 **Part 30's standing decision, taken. And the largest remaining item on the backlog, closed.**

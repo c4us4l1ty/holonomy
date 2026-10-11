@@ -31,6 +31,24 @@
 //! being shared), `BigRequests` (so `PutImage` is chunked along scanlines), extensions beyond the
 //! one query used to ask whether `XTEST` is there, and the whole of the ICCCM.
 //!
+//! # Part 34: the event decoders were the Xlib field list and the wire is not
+//!
+//! **Every decoder here read every field after `detail` eight bytes early**, so a pointer's
+//! coordinates came out as the low half of the child window id. Measured on the running application:
+//! **`event_x: -21301` in a 1024×700 window**, which is a pointer that cannot click anything.
+//!
+//! **The keyboard worked** and that is what hid it: a key is identified by byte 1, and byte 1 was
+//! right. **Two existing gates encoded the wrong layout and passed against it** — one built a
+//! 24-byte fixture for a 32-byte event — and are corrected in `proto.rs`.
+//!
+//! **Two diagnostics were added, both off by default**, because the bug was not findable by reading
+//! the decoders and each of them answered a question no amount of source reading could:
+//!
+//! * `HOLONOMY_X11_TRACE_PACKETS=1` — one hex line per event, which settled "wrong field" against
+//!   "the server is reporting root-relative coordinates" in one output;
+//! * `HOLONOMY_WINDOW_TRACE=1` — the decoded event in `windowed.rs`, which is what showed the
+//!   nonsense reaching the session in the first place.
+//!
 //! # The one measurement this crate's correctness rests on
 //!
 //! X11 keycodes and Linux input event codes are the same numbering with an offset of 8: X keycode 38

@@ -650,12 +650,54 @@ impl Event {
         Some(match code {
             // 1 code, 1 keycode, 2 sequence, 4 time, 4 root, 4 event, 2 event-x, 2 event-y, 2 state,
             // 1 same-screen, 1 unused = 24.
+            // # The Input-event layout, and every field after `detail` used to be eight bytes early
+            //
+            // ```text
+            //   0     1  code
+            //   1     1  detail -- keycode, or button
+            //   2     2  sequence
+            //   4     4  time
+            //   8     4  root
+            //  12     4  event window
+            //  16     4  child window
+            //  20     2  root-x      (INT16)
+            //  22     2  root-y      (INT16)
+            //  24     2  event-x     (INT16)
+            //  26     2  event-y     (INT16)
+            //  28     2  state       (modifier mask)
+            //  30     2  same-screen
+            // ```
+            //
+            // **The order these decoders used was the Xlib struct's field list** -- `detail`,
+            // `sequence`, `time`, `root`, `event`, `x`, `y`, `state` -- **which drops the eight bytes of
+            // `send_event` and padding that the wire puts between `detail` and `sequence`.** So
+            // `detail` was right and every field after it was eight bytes out.
+            //
+            // **That is why the keyboard worked and the pointer did not**, which is the whole of the
+            // symptom: a key is identified by byte 1 and nothing else, so the keycode survived; a
+            // pointer's position is at offsets 24 and 26, and offset 16 is the low half of the child
+            // window id. **Measured on the running application**, with a raw packet dump:
+            //
+            // ```text
+            // 06 00 38 00 cb ac e6 0a ed 04 00 00 01 00 e0 00 00 00 00 00 85 02 c3 01 85 02 39 01 00 00 01 00
+            //                    ^^^^^^^^ time          root            event          0        x=645 y=451
+            // ```
+            //
+            // and the application reported **`event_x: -21301` in a 1024x700 window**, because it read
+            // offset 4 -- the low half of the timestamp. A pointer over the root window gives offset 16
+            // as zero and every click misses; over another client it gives that client's window id.
+            //
+            // **`ConfigureNotify` below is on a different layout and was always right**, which is worth
+            // knowing rather than worth assuming: it is verified live against `GetGeometry`.
             event::KEY_PRESS => {
                 let keycode = r.u8();
                 let _sequence = r.u16();
                 let time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
+                let _child = r.u32();
+                let _root_x = r.i16();
+                let _root_y = r.i16();
                 let event_x = r.i16();
                 let event_y = r.i16();
                 let state = r.u16();
@@ -673,8 +715,11 @@ impl Event {
                 let time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
-                let _event_x = r.i16();
-                let _event_y = r.i16();
+                let _child = r.u32();
+                let _root_x = r.i16();
+                let _root_y = r.i16();
+                let event_x = r.i16();
+                let event_y = r.i16();
                 let state = r.u16();
                 Self::KeyRelease {
                     keycode,
@@ -688,6 +733,9 @@ impl Event {
                 let _time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
+                let _child = r.u32();
+                let _root_x = r.i16();
+                let _root_y = r.i16();
                 let event_x = r.i16();
                 let event_y = r.i16();
                 let _state = r.u16();
@@ -703,6 +751,9 @@ impl Event {
                 let _time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
+                let _child = r.u32();
+                let _root_x = r.i16();
+                let _root_y = r.i16();
                 let event_x = r.i16();
                 let event_y = r.i16();
                 let _state = r.u16();
@@ -713,20 +764,34 @@ impl Event {
                 }
             }
             event::MOTION_NOTIFY => {
-                // The same 28-byte layout as a button press: 1 code, 1 unused, 2 sequence, 2 x,
-                // 2 y, then whatever. **Only `x` and `y` are read**, because the only consumer of a
-                // motion event is the hit test and it wants a position -- and reading more than the
-                // consumer needs is how a protocol layer starts making decisions.
+                // **Only `x` and `y` are read**, because the only consumer of a motion event is the
+                // hit test and it wants a position -- and reading more than the consumer needs is
+                // how a protocol layer starts making decisions.
                 let _unused = r.u8();
                 let _sequence = r.u16();
+                let _time = r.u32();
+                let _root = r.u32();
+                let _event = r.u32();
+                let _child = r.u32();
+                let _root_x = r.i16();
+                let _root_y = r.i16();
                 let event_x = r.i16();
                 let event_y = r.i16();
                 Self::MotionNotify { event_x, event_y }
             }
-            // 1 code, 1 unused, 2 sequence, 2 x, 2 y, 2 width, 2 height, 2 count, 13 unused.
             event::EXPOSE => {
+                // **Eight bytes out as well**: the window id is at 8..12, so x 12, y 14, width 16,
+                // height 18, count 20. **An expose that is eight bytes out repaints the wrong
+                // rectangle** -- invisible on a first frame, a band of stale pixels on every move.
+                // **`Expose` has no `detail` byte**, so it does not start the way an Input event does
+                // and cannot share the skip. Bytes 1..4 are padding, `sequence` is a CARD32 at 4..8,
+                // and the window is at 8..12. **Reading it as an Input event put `x` at offset 8** --
+                // eight bytes out, and an expose that is eight bytes out repaints the wrong rectangle:
+                // invisible on a first frame, a band of stale pixels on every window move.
                 let _unused = r.u8();
-                let _sequence = r.u16();
+                let _pad = r.u16();
+                let _sequence = r.u32();
+                let _window = r.u32();
                 let x = r.u16();
                 let y = r.u16();
                 let width = r.u16();
@@ -779,6 +844,7 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{Event, Rdr};
 
     /// The length field is in words and counts the header. A client that writes the byte count here
     /// has every subsequent request interpreted at the wrong offset, which on a busy display looks
@@ -974,18 +1040,34 @@ mod tests {
     /// after the keycode, so a reader that reads it early gets a piece of a resource id.
     #[test]
     fn a_key_press_decodes_to_its_keycode_and_state() {
-        // code, keycode, sequence, time, root, event, event-x, event-y, state, same-screen, unused
+        // **CORRECTION, part 34: this fixture encoded the bug, and so did this gate.**
+        //
+        // It built a **24-byte** packet in the Xlib field order -- code, keycode, sequence, time,
+        // root, event, event-x, event-y, state -- and passed, because the decoder read the same order.
+        // **Neither matched the wire.** The server sends 32 bytes with eight bytes of `send_event`
+        // and padding between `detail` and `sequence`, so a key's position is at 24 and 26, and this
+        // fixture is a quarter of an event.
+        //
+        // **It is rebuilt at 32 bytes, in the wire's order, and `assert_eq!(p.len(), 32)`** — which is
+        // the assertion that would have caught it, because a 24-byte fixture cannot be a real event.
         let mut p = vec![event::KEY_PRESS, 38];
         p.extend_from_slice(&7u16.to_le_bytes()); // sequence
         p.extend_from_slice(&0x1122_3344u32.to_le_bytes()); // time
         p.extend_from_slice(&0x111u32.to_le_bytes()); // root
-        p.extend_from_slice(&0x200_001u32.to_le_bytes()); // event
+        p.extend_from_slice(&0x200_001u32.to_le_bytes()); // event window
+        p.extend_from_slice(&0x300_000u32.to_le_bytes()); // child window
+        p.extend_from_slice(&11i16.to_le_bytes()); // root-x
+        p.extend_from_slice(&12i16.to_le_bytes()); // root-y
         p.extend_from_slice(&(-3i16).to_le_bytes()); // event-x
         p.extend_from_slice(&(-4i16).to_le_bytes()); // event-y
         p.extend_from_slice(&0x0060u16.to_le_bytes()); // state: ShiftMask | LockMask
-        p.push(1); // same-screen
-        p.push(0); // unused
-        assert_eq!(p.len(), 24);
+        p.extend_from_slice(&1u16.to_le_bytes()); // same-screen
+        p.resize(32, 0);
+        assert_eq!(
+            p.len(),
+            32,
+            "**an X event is 32 bytes and no fixture may be shorter**"
+        );
 
         let got = Event::decode(&p).expect("a key press");
         assert_eq!(
@@ -1005,9 +1087,16 @@ mod tests {
     /// count rather than run into it.
     #[test]
     fn an_expose_decodes_its_rectangle() {
-        let mut p = vec![event::EXPOSE, 0, 0, 0]; // code, unused, sequence
+        // **CORRECTION, part 34: `Expose` was eight bytes out too, and this gate encoded it.**
+        //
+        // `Expose` has **no `detail` byte**, so it does not start the way an Input event does: byte 0
+        // is the code, 1..4 is padding, 4..8 is the sequence, 8..12 the window, and the rectangle starts
+        // at **12**. **The old fixture put `x` at offset 4** and passed.
+        let mut p = vec![event::EXPOSE, 0, 0, 0]; // code, then 1..4 padding
+        p.extend_from_slice(&7u32.to_le_bytes()); // sequence, 4..8
+        p.extend_from_slice(&0x555u32.to_le_bytes()); // window, 8..12
         for v in [0u16, 100, 1280, 800, 2] {
-            p.extend_from_slice(&v.to_le_bytes());
+            p.extend_from_slice(&v.to_le_bytes()); // x 12, y 14, width 16, height 18, count 20
         }
         p.resize(32, 0);
         assert_eq!(
@@ -1033,5 +1122,164 @@ mod tests {
             Event::decode(&p).expect("an event"),
             Event::Other { code: 24 }
         );
+    }
+
+    // # Every decoder against a packet with a distinct value in every field
+    //
+    // **Every decoder above used to be eight bytes out for every field after `detail`.** These build a
+    // 32-byte packet with a value per field that says which offset it was read from -- **`0x1111` at
+    // offset 2 cannot be mistaken for `0x2222` at offset 4** -- so a decoder that reads the right field
+    // from the wrong offset cannot pass.
+    //
+    // **And one decoder was accidentally right**, which is worth knowing rather than assuming:
+    // `ConfigureNotify` is on a different layout and was correct throughout, verified live against
+    // `GetGeometry`. **The keyboard worked because a key is identified by byte 1 and nothing else.**
+    const EVENT_BYTES: usize = 32;
+
+    /// A 32-byte packet with `code` in byte 0 and a distinguishable value in every other field.
+    fn packet(code: u8) -> [u8; EVENT_BYTES] {
+        let mut p = [0u8; EVENT_BYTES];
+        p[0] = code;
+        let words: [(usize, u16); 8] = [
+            (1, 0x0101),
+            (2, 0x0202),
+            (4, 0x0404),
+            (6, 0x0606),
+            (8, 0x0808),
+            (10, 0x0a0a),
+            (12, 0x0c0c),
+            (14, 0x0e0e),
+        ];
+        for (at, v) in words {
+            p[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        // Two 16-bit halves rather than one 32-bit word: `Expose`'s width is at 16 and its height at
+        // 18, and a single word would make them equal so a decoder reading either would pass.
+        p[16..18].copy_from_slice(&0x1616u16.to_le_bytes());
+        p[18..20].copy_from_slice(&0x1818u16.to_le_bytes());
+        p[20..22].copy_from_slice(&0x1414u16.to_le_bytes());
+        p[22..24].copy_from_slice(&0x1212u16.to_le_bytes());
+        p[24..26].copy_from_slice(&0x2424u16.to_le_bytes());
+        p[26..28].copy_from_slice(&0x2626u16.to_le_bytes());
+        p[28..30].copy_from_slice(&0x2828u16.to_le_bytes());
+        p
+    }
+    /// **`KeyPress` reads the keycode at offset 1 and the coordinates at 24 and 26.**
+    #[test]
+    fn a_key_press_reads_the_keycode_and_the_coordinates_from_the_wire() {
+        let mut p = packet(2);
+        p[1] = 0x2a; // keycode 42
+        let Some(Event::KeyPress {
+            keycode,
+            state,
+            event_x,
+            event_y,
+            ..
+        }) = Event::decode(&p)
+        else {
+            panic!("a code-2 packet must decode as KeyPress");
+        };
+        assert_eq!(
+        keycode, 42,
+        "**the keycode is byte 1**, which is `detail` in the Core Protocol layout and the first field \
+         of the Xlib struct. The keyboard works because this one happens to agree."
+    );
+        assert_eq!(event_x, 0x2424, "event-x is at offset 24, not 16");
+        assert_eq!(event_y, 0x2626, "event-y is at offset 26, not 18");
+        assert_eq!(state, 0x2828, "the modifier mask is at offset 28, not 20");
+    }
+    /// **`ButtonPress` reads the button at offset 1 and the coordinates at 24 and 26.**
+    #[test]
+    fn a_button_press_reads_the_button_and_the_coordinates_from_the_wire() {
+        let mut p = packet(4);
+        p[1] = 1; // button 1
+        let Some(Event::ButtonPress {
+            button,
+            event_x,
+            event_y,
+        }) = Event::decode(&p)
+        else {
+            panic!("a code-4 packet must decode as ButtonPress");
+        };
+        assert_eq!(button, 1, "the button is byte 1");
+        assert_eq!(event_x, 0x2424, "event-x is at offset 24");
+        assert_eq!(event_y, 0x2626, "event-y is at offset 26");
+    }
+    /// **`MotionNotify` reads the coordinates at 24 and 26.**
+    ///
+    /// **This is the one the running application got wrong**: it read `event_x` at offset 4, which is the
+    /// low half of the *timestamp*, so the pointer's position was a fraction of a second since boot.
+    #[test]
+    fn a_motion_reads_the_coordinates_from_the_wire() {
+        let p = packet(6);
+        let Some(Event::MotionNotify { event_x, event_y }) = Event::decode(&p) else {
+            panic!("a code-6 packet must decode as MotionNotify");
+        };
+        assert_eq!(
+            event_x, 0x2424,
+            "**event-x is at offset 24.** This decoder read it at offset 4 -- the low half of the \
+         timestamp -- and the running application reported `event_x: -21301` in a 1024x700 window."
+        );
+        assert_eq!(
+            event_y, 0x2626,
+            "**and event-y is at offset 26**, read at 6 before the fix"
+        );
+    }
+    /// **`Expose` reads its rectangle at 12, 14, 16 and 18.**
+    ///
+    /// **And it is in this file because it was eight bytes out too**, for the same reason as the rest: the
+    /// Xlib field list drops the eight bytes of `send_event` and padding that the wire has. **An expose
+    /// that is eight bytes out repaints the wrong rectangle** -- invisible on the first frame, a band of
+    /// stale pixels on every window move.
+    #[test]
+    fn an_expose_reads_its_rectangle_from_the_wire() {
+        let p = packet(12);
+        let Some(Event::Expose {
+            x,
+            y,
+            width,
+            height,
+            count,
+        }) = Event::decode(&p)
+        else {
+            panic!("a code-12 packet must decode as Expose");
+        };
+        assert_eq!(
+        (x, y, width, height),
+        (0x0c0c, 0x0e0e, 0x1616, 0x1818),
+        "**x at 12, y at 14, width at 16, height at 18** -- the window id occupies 8..12 and this read \
+         them eight bytes early too, which repaints the wrong rectangle"
+    );
+    }
+    /// **`ConfigureNotify` reads the size at 20 and 22.**
+    ///
+    /// ## And the correction that matters more than the numbers
+    ///
+    /// **I read this decoder, decided it was wrong, and was wrong.** Its offsets -- width at 20, height
+    /// at 22 -- looked wrong by four bytes against my model of the layout, and the first draft of this fix
+    /// moved them. **The live gate said otherwise**: an override-redirect window resized to 1600×1000 on
+    /// this very server decodes to `ConfigureNotify { width: 1600, height: 1000 }`, and `GetGeometry`
+    /// independently reports the same. **So the decoder was right and my model was wrong**, and the
+    /// numbers here are the ones the server produced rather than the ones a specification suggested.
+    ///
+    /// **That is why the first thing this part did was run a live gate rather than reason.** `live.rs`'s
+    /// header already says it: a protocol implementation with no live peer is a protocol implementation
+    /// that is wrong — and it is equally true that a protocol implementation changed on theory is a
+    /// protocol implementation that is now wrong in a new way.
+    #[test]
+    fn a_configure_notify_reads_the_size_from_the_wire() {
+        let mut p = packet(22);
+        // Width and height at 20 and 22, as `ConfigureNotify`'s own layout has it, verified live.
+        p[20..22].copy_from_slice(&800u16.to_le_bytes());
+        p[22..24].copy_from_slice(&500u16.to_le_bytes());
+        let Some(Event::ConfigureNotify { width, height }) = Event::decode(&p) else {
+            panic!("a code-22 packet must decode as ConfigureNotify");
+        };
+        assert_eq!(
+        (width, height),
+        (800, 500),
+        "**and this decoder's offsets are the ones the server uses.** Verified live: a window resized \
+         to 1600x1000 on this host decodes to exactly that, against a `GetGeometry` of 1600x1000."
+    );
     }
 }

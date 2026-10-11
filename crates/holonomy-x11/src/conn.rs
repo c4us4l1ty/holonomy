@@ -969,7 +969,31 @@ impl Conn {
                 Packet::Reply { sequence, body }
             }
             _ => Packet::Event(
-                Event::decode(&self.rbuf[self.rstart - want..self.rstart]).expect("an event code"),
+                Event::decode(&self.rbuf[self.rstart - want..self.rstart])
+                    .map(|ev| {
+                        // **The raw packet, on demand, and it settled a question three readings of the
+                        // source could not.** Part 34: the window's pointer was reporting
+                        // `event_x: -27541` in a 1024x700 window, and the candidates were "the parser
+                        // reads the wrong field" and "the server is reporting root-relative
+                        // coordinates". **A hex dump answers it in one line and both of them are
+                        // theories until then.**
+                        //
+                        // **`HOLONOMY_X11_TRACE_PACKETS=1`, and it is off by default** because a
+                        // pointer produces a packet per motion event and a hex dump per packet turns a
+                        // readable log into a wall.
+                        if std::env::var_os("HOLONOMY_X11_TRACE_PACKETS").is_some() {
+                            let b = &self.rbuf[self.rstart - want..self.rstart];
+                            let hex: Vec<String> = b
+                                .chunks(4)
+                                .map(|c| {
+                                    format!("{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+                                })
+                                .collect();
+                            eprintln!("x11 pkt {ev:?}\n     {}", hex.join(" "));
+                        }
+                        ev
+                    })
+                    .expect("an event code"),
             ),
         }))
     }

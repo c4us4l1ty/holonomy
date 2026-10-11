@@ -147,6 +147,19 @@ pub fn run(
                 session.tick().map_err(WindowedError::Session)?;
             }
             Some(ev) => {
+                // **Every event's code, under the trace flag, and this is a diagnosis tool.**
+                //
+                // **Added in part 34 because the resize defect could not be located by reading the
+                // code**: `Session::resize`, `Layout::for_size`, `Desktop::resize` and
+                // `Event::decode` were each correct in isolation and the application still did not
+                // resize. **The only question that settled it was "does a `ConfigureNotify` arrive at
+                // all",** and answering that needs the event stream, not another reading of the source.
+                //
+                // **`{:?}` on the whole event rather than a code number**, because a bare `22` is a
+                // claim and `ConfigureNotify { width: 1600, height: 1000 }` is the measurement.
+                if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
+                    eprintln!("event {ev:?}");
+                }
                 match ev {
                     // A key. The whole point.
                     ev @ (holonomy_x11::Event::KeyPress { .. }

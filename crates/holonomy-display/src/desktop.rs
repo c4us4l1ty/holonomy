@@ -142,14 +142,28 @@ impl Desktop {
         // Tell the window manager what this client can draw into *before* mapping, so the first frame
         // is never asked for at a size the chrome cannot use. `ChromeMetrics::for_size` clamps anyway,
         // so this is the floor for the user's drag and the clamp is the floor for the code's arithmetic.
-        let _ = window.set_size_hints(
-            &mut conn,
-            (
-                holonomy_render::chrome::ChromeMetrics::MIN_WIDTH as u16,
-                holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT as u16,
-            ),
-            None,
-        );
+        //
+        // **And it is propagated, because `let _ =` is how the window stayed un-resizable.**
+        //
+        // This call's error was discarded for the whole life of the feature. A `BadLength` from it --
+        // which is exactly what it returned, because of the two bugs in `set_size_hints` -- was thrown
+        // away, the window mapped with no `WM_NORMAL_HINTS` at all, and `xprop -id <window>
+        // WM_NORMAL_HINTS` answered **`not found`** on a running window. **A window with no size hints
+        // is a fixed-size island in a resizable desktop**, so the driver handled `ConfigureNotify` for
+        // a resize that could never arrive.
+        //
+        // **It is not best-effort.** A window manager that will not take the hints is a window the
+        // user cannot resize, and that is worth refusing to open over.
+        window
+            .set_size_hints(
+                &mut conn,
+                (
+                    holonomy_render::chrome::ChromeMetrics::MIN_WIDTH as u16,
+                    holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT as u16,
+                ),
+                None,
+            )
+            .map_err(DesktopError::Window)?;
         window.map(&mut conn).map_err(DesktopError::Window)?;
         // Best effort: a window manager that will not activate us is not a reason to refuse to open.
         let _ = window.activate(&mut conn);
