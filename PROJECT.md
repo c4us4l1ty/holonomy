@@ -2502,6 +2502,61 @@ icons (independent)
 
 **Starting the sidebar or the menus first would build a state machine with nothing to drive it.**
 
+#### Phase 14, part 26 — the forty allocations per frame that part 24 introduced
+
+**Part 24's own review item, found by reading what part 24 wrote rather than what it claimed.**
+
+`emit_body_text` called `SpanMap::runs_in` **once per line**. A forty-line page paid for that forty
+times, and each call cost:
+
+* **one heap allocation**, on the path whose invariant is zero. `tests/session_no_alloc.rs` asserts zero
+  on the *edit* path and is explicit that the paint path was out of scope — **part 24 moved the paint
+  path from out of scope to forty allocations per frame**, and part 24's own note said "the feature must
+  cost nothing for the documents that do not use it", which was true of documents with no styling and
+  false of every other one.
+* **a linear scan of the span list**, because `runs_in` walks from the start of the list and breaks only
+  past the end of the range. On a document scrolled deep into a styled file, that is every span before
+  the page, forty times over.
+
+**Measured before deciding it mattered.** A styled document scrolled to its end, 1 / 400 / 10,000 spans:
+**3,359 / 3,312 / 3,669 µs per repaint — about 9 % across a ten-thousand-fold increase in spans.**
+**The scan is real and small**: a full repaint of 1.88 M pixels dominates it by an order of magnitude.
+That is the honest size of the finding, and it is why the argument for the fix is the **allocations**
+rather than the scans.
+
+**The fix is one `runs_in` over the page's byte range, hoisted out of the loop**, with the per-line
+partition as a `skip_while`/`take_while` pair over the *page's* runs and a `peek` for the "is this line
+unstyled?" question — so the partition allocates nothing either.
+
+**`SessionStats::span_queries` counts the queries**, because "once per paint" is a shape and a shape is
+not visible from the outside. The fixture is **a one-line page and a forty-line page**, because **a
+one-line document satisfies both the old code and the new one** — the fifth time this project has made
+that mistake.
+
+### Two defects in the fix itself, and the failure was the informative kind
+
+**1. The page range came from the wrong two fields.** `spans` holds `(used, len)` pairs — offsets into
+`line_scratch` — and the range was built as _the first line's start plus the last line's length_ rather
+than _the last line's end_. A range built from the wrong two fields of a list is worse than no hoist,
+because it looks correct.
+
+**2. `take_while` alone stops at the wrong end.** `SpanMap::style_range` rebuilds its list in ascending
+offset order, so a line's runs are a contiguous run of it — and `take_while(|(_, _, hi)| *hi > at)`
+**stops at the first span that ends at or before this line's start**, which for the line after a styled
+one is the first span in the list. **Every line after the first styled run drew plain.**
+
+**And the symptom was the best one this project has produced: four of part 24's gates went red at once,
+every one reporting "no differing pixels at all."** Not a wrong position, not a wrong colour — *nothing*.
+**The style was still in the map; it was simply never looked at.** A wrong-pixel failure would have sent
+me looking at arithmetic; a missing-pixel failure sends me looking at what is being asked for.
+
+**And a fifth fixture error, from the new gate.** `a_styled_line_past_the_first_still_draws_bold` styled
+line 30 of forty and the two frames came back identical: **the window is 800 px with a 25 px line pitch,
+so about twenty-eight rows fit and line 30 was never on the page.** A styled line below the viewport is
+not a rendering bug, it is a fixture that does not test rendering. Line 10 it is now.
+
+Bite-checked: putting the per-line query back fails 3 of the 4.
+
 #### Phase 14, part 25 — the dead toolbar toggles, and the three states a toggle needs
 
 **`ChromeState::styles` was a `StyleFlags` with four slots and no reader.** No caller in the workspace

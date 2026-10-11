@@ -316,6 +316,17 @@ pub struct SessionStats {
     /// control's label, and choosing a zoom changes the zoom label — and **part 23 measured that last one
     /// and found it is the *only* pixel that moves.** `tests/zoom.rs` is the measurement.
     pub pointer_chrome: u32,
+    /// Paints that asked the span map for the visible page's styled runs.
+    ///
+    /// **Part 26, and it exists because "once per paint" was a comment and not a number.** Part 24
+    /// called `SpanMap::runs_in` once per *line*, so a forty-line page paid forty heap allocations and
+    /// forty walks of the span list per frame. The call is hoisted out of the loop now, and this counts
+    /// it, so `one_span_query_serves_the_whole_page` can assert the shape rather than trust it.
+    ///
+    /// **A paint increments this by one**, whatever the page holds and however deep in the document it
+    /// is. A gate that watched it climb with the line count would pass on a one-line page, which is
+    /// exactly the fixture mistake this project has now made four times.
+    pub span_queries: u32,
     /// Caret moves whose column was computed by walking text rather than by subtracting offsets.
     ///
     /// **A measurement, not a warning.** Part 22 added a scan over the caret's line prefix to count
@@ -3060,6 +3071,29 @@ impl<'a> Session<'a> {
         let line_heights = self.state.line_heights.clone();
         let mut lines = 0u32;
         let mut glyphs = 0u32;
+        // --- Part 26: the page's styled runs, fetched once.
+        //
+        // **`spans` is the visible page's `(at, len)` pairs**, so its first and last entries bound the
+        // byte range the page covers, and one `runs_in` over that range answers every line's question.
+        // Before this the call sat inside the loop and a forty-line page paid for it forty times --
+        // forty allocations and forty walks of the span list.
+        //
+        // **`take_while(...).filter(...)` per line is the partition, and it is over the *page's* runs
+        // rather than the document's**, so it is a handful of comparisons per line with no allocation.
+        // `take_while` rather than `filter` because both lists ascend: once a run starts past this
+        // line, no later run can belong to it.
+        self.stats.span_queries += 1;
+        let page_runs = match (spans.first(), spans.last()) {
+            // **The *last* line's end, and not the first line's start plus the last line's length.**
+            // That was the first version, and it asked for a range barely past the first line — so no
+            // styled run on any other line was found and four of part 24's gates went red at once with
+            // "no differing pixels at all". A range built from the wrong two fields of a list is worse
+            // than no hoist, because it looks correct.
+            (Some(&(lo, _)), Some(&(hi_at, hi_len))) => {
+                self.editor.spans().runs_in(lo, hi_at + hi_len)
+            }
+            _ => Vec::new(),
+        };
         for (row, &(at, len)) in spans.iter().enumerate() {
             let line = first + row as u32;
             let y = l.y + line_heights.y(line - first);
@@ -3107,14 +3141,42 @@ impl<'a> Session<'a> {
             // visible line, the runs it must draw, each with a colour and an atlas style". It existed,
             // it was correct, and nothing called it.
             //
-            // **The empty case is the whole of the performance argument.** A document with no styling at
-            // all has an empty span map, `runs_in` returns nothing, and this loop does not execute: the
-            // line is emitted as the single `REGULAR` run it always was. **This is the paint path, with a
-            // latency budget and a gate that measures it, so the feature must cost nothing for the
-            // documents that do not use it** -- and `runs_in` returns an empty `Vec` for exactly that
-            // case, before it looks at a single span.
-            let runs = self.editor.spans().runs_in(at, at + shown_len);
-            if runs.is_empty() {
+            // **The runs come from one query for the whole page, hoisted out of this loop. Part 26.**
+            // The first version called `runs_in` per line, and that had two costs that a page of forty
+            // lines pays forty times:
+            //
+            // * **One heap allocation per line**, on the path whose invariant is zero — see
+            //   `tests/session_no_alloc.rs`, which asserts it for the *edit* path and is explicit that
+            //   the paint path was out of scope. Part 24 moved it from out of scope to forty-per-frame.
+            // * **A linear scan of the span list per line**, because `runs_in` walks from the start of
+            //   the list and breaks only past the end of the range. On a document scrolled deep into a
+            //   styled file, that is every span before the page, forty times over.
+            //
+            // **One query over the page's byte range is O(spans before the page) instead of
+            // O(lines x spans before the page), and allocates once.** The per-line partition below is
+            // over the *page's* runs -- a handful -- with an early break, so it is cheap and does not
+            // allocate.
+            //
+            // **`SessionStats::span_queries` counts the queries**, so "one per paint" is a measured
+            // claim and not a comment. `one_span_query_serves_the_whole_page` is the gate.
+            // **A peeking iterator and not a collected `Vec`.** Collecting would be one allocation per
+            // line again, which is the thing being removed; `peek` answers the "is this line
+            // unstyled?" question without materialising anything.
+            // **Skip, then take — and the order is the whole of it.** `SpanMap::style_range`
+            // rebuilds its list in ascending offset order, so a line's runs are a contiguous run of it.
+            // The first version used `take_while(|(_, _, hi)| *hi > at)` alone, which **stops at the
+            // first span that ends at or before this line** — and for the line after a styled one that
+            // is the first span in the list, so every line after the first styled run drew plain.
+            // **Four of part 24's gates went red at once, all reporting "no differing pixels at all",**
+            // which is the most informative failure in this project: the style was still in the map, it
+            // was simply never looked at.
+            let mut runs = page_runs
+                .iter()
+                .skip_while(|(_, _, hi)| *hi <= at)
+                .take_while(|(_, lo, _)| *lo < at + shown_len)
+                .map(|(s, lo, hi)| (*s, *lo, *hi))
+                .peekable();
+            if runs.peek().is_none() {
                 tree.before
                     .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
                         l.x as i32,
