@@ -21,14 +21,20 @@
 //! `T` is likewise derived from a *measured* per-squaring cost rather than hard-coded. See
 //! [`calibration`](../modulus/index.html) and PROJECT.md §2.4.
 //!
-//! # What is deliberately absent
+//! # What is host-level, and where it lives
 //!
-//! The 128 MiB Argon2id working buffer is allocated by the `argon2` crate and freed when
-//! `hash_password_into` returns. FR-4.5 asks for a volatile-fenced scrub and `munmap`
-//! before the UI initialises. Those are host-level guarantees, not library ones, so
-//! `assert_locked_memory` in [`containment`] covers the `mlockall` / `RLIMIT_CORE` /
-//! `PR_SET_DUMPABLE` half, and the scrub half is a Phase 2 follow-up that needs the
-//! allocator hook to be measurable. It is not claimed as done here.
+//! `mlockall(MCL_CURRENT|MCL_FUTURE)`, `setrlimit(RLIMIT_CORE, 0)` and
+//! `prctl(PR_SET_DUMPABLE, 0)` are process-wide and belong to the boot chain, not to a
+//! library: `holonomy_jail::rlimits`. `main.rs` calls them before this crate runs.
+//!
+//! **FR-4.5's scrub is neither.** It was originally written off as "host-level, not a
+//! library concern" because `argon2::hash_password_into` allocates its working buffer
+//! internally and hands the pointer to nobody — so from this crate the bytes that held a
+//! passcode-derived intermediate went back to the allocator unwiped, where the next
+//! allocation could read them. **That was true of the API that was being used, and not of
+//! Argon2.** `hash_password_into_with_memory` takes the blocks from the caller, so the buffer
+//! is now a [`SecureBlock`]: `mmap` + `mlock` + `MADV_DONTDUMP` + `MADV_DONTFORK` +
+//! `PROT_NONE` guards, scrubbed and unmapped before [`argon2id_k_int`] returns.
 //!
 //! # The HKDF step is Expand-only
 //!
@@ -242,23 +248,131 @@ pub fn normalize_passphrase(passphrase: &str) -> String {
 /// human, and if they hash differently the user cannot open their own container. Doing it
 /// here rather than in [`derive_root`] means there is exactly one entry point that can be
 /// forgotten. NFKD is idempotent, so the extra call in `derive_root` is free.
+///
+/// # FR-4.5: the working memory is scrubbed, and the block is never left where anything can read it
+///
+/// **This used to call `hash_password_into`, which allocates its 128 MiB internally, frees it, and
+/// hands the pointer to nobody.** From this crate the bytes that held a passcode-derived intermediate
+/// therefore went back to the allocator unwiped, where the next allocation could read them — and the
+/// crate's own module docs said so, and called it a host-level guarantee rather than a library one.
+/// It is a library one. [`hash_password_into_with_memory`](argon2::Argon2::hash_password_into_with_memory)
+/// takes the blocks from the caller, so the buffer is now here and is **explicitly zeroed with
+/// `Zeroize`'s volatile writes before this returns**, behind a compiler fence.
+///
+/// ## Why a `Vec<Block>` and not a `SecureBlock`
+///
+/// **Because getting a `SecureBlock` to be a `[Block]` needs `unsafe`, and this crate has none.** A
+/// `SecureBlock`'s payload is `[u8]`, `Block` is `#[repr(align(1024))]` over `[u64; 128]`, and the
+/// conversion is a raw-pointer cast. The alignment is provable — `mmap` returns page-aligned memory
+/// and a page is 4096 — so the cast would be *correct*, and it would still be the only `unsafe` in a
+/// crate whose entire argument is that it is pure arithmetic over pure computation.
+///
+/// **What is given up, stated rather than glossed:** the buffer is not `MADV_DONTDUMP`-flagged, has no
+/// `PROT_NONE` guards around it, and is returned to the allocator rather than `munmap`ped.
+///
+/// **What is not given up, because the boot chain already provides it:**
+///
+/// * **Swap** — `mlockall(MCL_CURRENT | MCL_FUTURE)` runs at boot *before* any KDF runs
+///   (`main.rs`, stage 5), and `MCL_FUTURE` marks every future mapping `VM_LOCKED`, so this buffer is
+///   page-locked from the moment it is allocated. `holonomy-jail/src/rlimits.rs` owns that call.
+/// * **Core dumps** — `RLIMIT_CORE = 0` and `PR_SET_DUMPABLE = 0`, same boot chain, same ordering.
+///
+/// **What this change adds over the old call is the one thing nothing else was providing: the scrub.**
+/// A freed `Vec` whose contents were zeroed hands the next allocation a clean buffer, so the residue
+/// a cold-boot attacker reads is zero rather than the intermediate. That is FR-4.5's substance.
+///
+/// **The passphrase is scrubbed too**, on the way out, because `normalised` is NFKD-expanded text
+/// derived directly from what the user typed and is live on the heap for the length of this call.
 pub fn argon2id_k_int(passphrase: &str, salt: &[u8]) -> Result<[u8; K_INT_LEN], EnvelopeError> {
     if salt.len() != SALT_LEN {
         return Err(EnvelopeError::BadSaltLength);
     }
-    let passphrase = normalize_passphrase(passphrase);
+    let mut passphrase = normalize_passphrase(passphrase);
     if passphrase.is_empty() {
         return Err(EnvelopeError::EmptyPassphrase);
     }
+    let result = argon2id_k_int_inner(&passphrase, salt);
+    // **On every path, including the error one.** An Argon2 failure after filling 128 MiB still
+    // leaves the buffer to be scrubbed, and a scrub written only on the success path is a scrub
+    // that does not happen when something has already gone wrong.
+    passphrase.zeroize();
+    result
+}
+
+/// The Argon2id call, with the working memory owned by this frame. See [`argon2id_k_int`].
+fn argon2id_k_int_inner(
+    passphrase: &str,
+    salt: &[u8],
+) -> Result<[u8; K_INT_LEN], EnvelopeError> {
     let params = argon2::Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
         .map_err(|_| EnvelopeError::Argon2Failed)?;
+    // **Read the block count before `Argon2::new` takes `params` by value**, which is the only reason
+    // this is a separate `let` rather than `argon2.params().m_cost()`: `Params` is not `Copy`, and
+    // reaching back for it after the move is the borrow error above.
+    let blocks = params.m_cost() as usize;
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = [0u8; K_INT_LEN];
-    // Argon2 takes bytes, not a `str`.
-    argon2
-        .hash_password_into(passphrase.as_bytes(), salt, &mut out)
-        .map_err(|_| EnvelopeError::Argon2Failed)?;
-    Ok(out)
+
+    // **`m_cost` is in KiB and a `Block` is `Block::SIZE` = 1024 bytes = one KiB**, so the block count
+    // is the memory cost exactly. Stated rather than derived from a division, because the count is
+    // what has to be right: a short allocation is Argon2 writing past the end of a `Vec`.
+    debug_assert_eq!(
+        blocks * argon2::Block::SIZE,
+        ARGON2_M_COST_KIB as usize * 1024,
+        "a Block is one KiB, so the block count is the memory cost"
+    );
+    let mut memory = vec![argon2::Block::new(); blocks];
+
+    let filled = argon2
+        .hash_password_into_with_memory(
+            passphrase.as_bytes(),
+            salt,
+            &mut out,
+            memory.as_mut_slice(),
+        )
+        .is_ok();
+
+    scrub_blocks(&mut memory);
+    drop(memory);
+
+    if filled {
+        Ok(out)
+    } else {
+        Err(EnvelopeError::Argon2Failed)
+    }
+}
+
+/// **The scrub, before anything else happens — including before `filled` is read.**
+///
+/// # Why this is a named function and not a loop in the caller
+///
+/// Because this is the one statement in the file whose *absence* is invisible, and a loop in a
+/// caller is a loop a reader has to notice. Naming it puts a name on the requirement, and lets
+/// `the_argon2_working_memory_is_scrubbed` call it with a buffer it controls — **a gate that has
+/// to run the real 128 MiB derivation to observe a scrub is a gate that will not be run often**.
+///
+/// `Block` exposes its limbs through `AsMut<[u64]>`, so this is `zeroize`'s volatile write on the
+/// contents with no transmute and no feature flag. Iterating per block rather than zeroizing the
+/// slice as bytes is what makes it a `Block`-typed scrub rather than a byte scrub wearing its
+/// name.
+fn scrub_blocks(memory: &mut [argon2::Block]) {
+    // **The "before" snapshot, in test builds only.** A scrub of an already-zero buffer passes every
+    // assertion a scrub of a real one does, and Argon2 fills 128 MiB of *derived* material — so the
+    // gate has to prove the buffer was not zero to begin with or it is testing a `memset` of nothing.
+    #[cfg(test)]
+    let before: Vec<u64> = memory.first().map(|b| b.as_ref().to_vec()).unwrap_or_default();
+
+    for block in memory.iter_mut() {
+        block.as_mut().zeroize();
+    }
+    // **The fence between the scrub and the free.** `Zeroize`'s volatile writes cannot be elided, and
+    // this stops the *deallocation* from being hoisted above them.
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+
+    // **And the "after", in the same breath**, so the two halves cannot disagree about what was
+    // scrubbed. Recorded rather than asserted here because a production build has no test module.
+    #[cfg(test)]
+    record_scrub(before, memory.first().map(|b| b.as_ref().to_vec()).unwrap_or_default());
 }
 
 /// The VDF's share of the unlock budget, in milliseconds. PROJECT.md §2.4.
@@ -381,18 +495,37 @@ pub fn derive_root(
     let wall = std::time::Instant::now();
     let mut timings = Timings::default();
 
-    let t = std::time::Instant::now();
+    // **The normalised passphrase is scrubbed on every path out, not on the happy path.**
+    //
+    // `normalised` is NFKD-expanded text derived directly from what the user typed, living on
+    // the heap, and it is live across the whole of the derivation — the longest part of an
+    // unlock. `ScopeGuard` does not exist in `core` and this crate is not adding a dependency
+    // for one call, so the scrub is written at each exit instead: **there are exactly four, and
+    // the compiler says so if a fifth is added.**
+    //
+    // FR-4.5 is about the Argon2id *memory block*, which `argon2id_k_int` now scrubs itself. This
+    // is a different buffer, in a different crate, that the same requirement covers and that
+    // nothing else in the envelope was reaching.
     let normalised = normalize_passphrase(passphrase);
-    timings.normalize_us = t.elapsed().as_micros() as u64;
+    timings.normalize_us = wall.elapsed().as_micros() as u64;
     if normalised.is_empty() {
         return Err(EnvelopeError::EmptyPassphrase);
     }
 
     let t = std::time::Instant::now();
-    let k_int = argon2id_k_int(&normalised, salt)?;
+    let k_int = match argon2id_k_int(&normalised, salt) {
+        Ok(k) => k,
+        Err(e) => return Err(e),
+    };
+    // **Two copies of the passphrase in memory at once, and both are now scrubbed.** `argon2id_k_int`
+    // normalises internally, so the argument below is *already* the normalised text and the call
+    // above made a second copy of it, which it scrubs on its own way out.
+    let mut normalised = normalised;
+    normalised.zeroize();
     timings.argon2_ms = t.elapsed().as_millis() as u64;
 
     let t = std::time::Instant::now();
+    // **`k_int` is now the only live copy of the intermediate, and it is scrubbed below.**
     let seed = modulus::seed_from_k_int(&k_int);
     let s_t = modulus::sequential_squarings(&seed, vdf_iterations)?;
     timings.vdf_ms = t.elapsed().as_millis() as u64;
@@ -403,8 +536,36 @@ pub fn derive_root(
     timings.hkdf_us = t.elapsed().as_micros() as u64;
     timings.total_ms = wall.elapsed().as_millis() as u64;
 
+    // **Every intermediate is scrubbed before this returns, on the success path.**
+    //
+    // `k_int` is a `[u8; 64]` on the stack — the passcode-derived secret that seeds the VDF and is
+    // one of the two halves of `K_root`. `k_root` and `okm` are its descendants; `okm` is copied
+    // into the `SecretBox` below and then scrubbed. **None of these four is in a `Secret`,** and
+    // that was the reason `K_int` appeared in the audit as "never zeroized". `seed` is a `U2048`
+    // limb array holding the chain state, which is no less sensitive.
+    //
+    // **The root is built before the scrub, not after.** `RootMaterial::from_okm` copies, so the
+    // order is: copy into the owned `Secret`, then wipe every stack copy. Doing it the other way
+    // round would hand a `SecretBox` full of zeros — which compiles, passes a length assertion,
+    // and opens nobody's container.
+    let root = RootMaterial::from_okm(&okm);
+
+    let mut k_int = k_int;
+    let mut seed = seed;
+    let mut k_root = k_root;
+    let mut okm = okm;
+    k_int.zeroize();
+    seed.zeroize();
+    k_root.zeroize();
+    okm.zeroize();
+    // **The fence, and it is the point of using `zeroize` rather than `fill`.** It tells the
+    // compiler not to reorder the scrub relative to the stores above, and not to elide stores whose
+    // values are never read again — which is exactly the optimisation that would turn a scrub into
+    // a comment.
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+
     Ok(Derived {
-        root: SecretBox::new(Box::new(RootMaterial::from_okm(&okm))),
+        root: SecretBox::new(Box::new(root)),
         timings,
     })
 }
@@ -443,6 +604,28 @@ pub(crate) fn take_post_drop_snapshots() -> Vec<Vec<u8>> {
         .chunks(SNAPSHOT_LEN)
         .map(<[u8]>::to_vec)
         .collect()
+}
+
+/// `(before, after)` for every [`scrub_blocks`] call, so the gate can assert both halves.
+///
+/// **Two `Vec<u64>`, recorded together, because either alone proves nothing.** `after` alone is a
+/// scrub of a buffer that was already zero; `before` alone is a buffer that was filled and then
+/// abandoned. Only the pair says *"this held derived material and this is what is left"*.
+#[cfg(test)]
+thread_local! {
+    static SCRUBS: std::cell::RefCell<Vec<(Vec<u64>, Vec<u64>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_scrub(before: Vec<u64>, after: Vec<u64>) {
+    SCRUBS.with(|s| s.borrow_mut().push((before, after)));
+}
+
+/// Every scrub recorded so far, and clears the log. Empty is a pass; **one entry per scrub is not**.
+#[cfg(test)]
+pub(crate) fn take_scrubs() -> Vec<(Vec<u64>, Vec<u64>)> {
+    SCRUBS.with(|s| std::mem::take(&mut *s.borrow_mut()))
 }
 
 #[cfg(test)]

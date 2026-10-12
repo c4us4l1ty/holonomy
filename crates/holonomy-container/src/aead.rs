@@ -137,7 +137,24 @@ pub fn seal_in_place(
         CHUNK_SLOT as usize,
         "slot must be exactly CHUNK_SLOT bytes"
     );
-    getrandom::fill(&mut slot[len..TAG_OFFSET]).map_err(|_| AeadError::AuthenticationFailed)?;
+    // **Skip the `getrandom` call when there is nothing to fill.**
+    //
+    // `len` is `CHUNK_PLAINTEXT` for every full chunk and `TAG_OFFSET` is exactly
+    // `CHUNK_PLAINTEXT`, so the gap is **empty** for all but the last chunk of a document.
+    // Asking the kernel for zero bytes is not free, and the condition is one comparison.
+    //
+    // **This was not the cause of the 28 ms seal that sent me here**, which is the useful thing to
+    // say out loud: the first version of this comment claimed it was, and the measurement said
+    // otherwise — 29,455 us after the skip against 28,503 us before, on the same host and build.
+    // The real cause was that the cipher's constant belongs to an optimised build and the gate ran
+    // in a debug one; see `write_through_cost.rs`.
+    //
+    // **The randomness requirement is unchanged** — a *short* chunk still gets a random gap, which
+    // is what keeps a run of zeroes out of the middle of a file that is supposed to be
+    // indistinguishable from noise. This only skips work that had nothing to do.
+    if len < TAG_OFFSET {
+        getrandom::fill(&mut slot[len..TAG_OFFSET]).map_err(|_| AeadError::AuthenticationFailed)?;
+    }
 
     let cipher = XChaCha20Poly1305::new(&Key::from(*k_enc));
     let tag = cipher

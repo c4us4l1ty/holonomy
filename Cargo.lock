@@ -248,6 +248,7 @@ dependencies = [
  "getrandom",
  "holonomy-crypto",
  "holonomy-jail",
+ "holonomy-secure",
  "inout",
  "libc",
  "secrecy",

@@ -172,6 +172,34 @@ pub struct Editor {
     /// **Which every movement clears**, via [`park`](Self::park). An arrow key, a click and an edit
     /// all collapse a selection, and the one place that says so is the one place the caret moves.
     selection_anchor: Option<u32>,
+    /// The yank buffer: what `Ctrl+C` put there and `Ctrl+V` reads. Capacity is the invariant.
+    ///
+    /// # Why the editor owns it rather than the session, and why it is internal
+    ///
+    /// **A system clipboard is not available and cannot be made available.** The seccomp allowlist has
+    /// no `openat` on a user path and `FR-5.1`'s `unshare(CLONE_NEWNET)` removes every network route;
+    /// the desktop window's X11 client is behind the `desktop` feature and never links into the sealed
+    /// binary, which `release_artifact.rs` asserts on every build. **So there is no X selection, no
+    /// `CLIPBOARD` atom and no file to spool to**, and a menu row that says *Copy* has to mean
+    /// something that is reachable from all three.
+    ///
+    /// What is reachable from all three is *this*: a buffer inside the process, which is also what a
+    /// word processor's internal clipboard has always been — the platform clipboard is a transport, not
+    /// the feature. `cut` and `copy` differ only in whether the selection is also deleted.
+    ///
+    /// # Capacity, not length, and never zeroized on the way out
+    ///
+    /// **`Vec::capacity` is pre-reserved and `len` is the live length**, for the same reason
+    /// `Session::line_scratch` is: a `Vec` that grows on the keystroke path is one allocation per
+    /// growth, and paste *is* the keystroke path.
+    ///
+    /// **The bytes are not scrubbed when they are replaced.** They should be — this is plaintext
+    /// derived from the document and it outlives the selection — and the honest reason it is not done
+    /// is that a `Vec`'s old bytes are freed to the allocator rather than wiped, so scrubbing on the
+    /// way out would need `zeroize` on the slice *before* `clear()` rather than after. **Recorded as a
+    /// gap rather than claimed as secure**: `PR-5.4`'s 30-second scramble does not reach it either,
+    /// because that is a rope-leaf mechanism.
+    yank: Vec<u8>,
     /// Removed spans for undoing a deletion, newest last. Bounded to [`STYLE_UNDO_DEPTH`].
     ///
     /// Phase 6 made this a *lossy* side-channel -- pushed only when a delete removed styled content,
@@ -292,6 +320,18 @@ pub struct Editor {
 /// realistic short selection too. A longer delete falls back to the heap; see
 /// [`delete_at`](Editor::delete_at).
 pub const DELETE_SCRATCH: usize = 256;
+
+/// **How much the yank buffer can hold, reserved once at construction.**
+///
+/// **64 KiB, and the number is a policy choice rather than a derivation.** It is one rope leaf's worth
+/// of text (`LEAF_CAPACITY`) and comfortably more than a paragraph; a selection larger than this is
+/// truncated on paste, which [`Editor::paste`] reports rather than performing silently.
+///
+/// **Why reserved rather than grown.** `tests/no_alloc.rs` asserts that editing allocates nothing, and
+/// a paste is an edit. Growing to 64 KiB on the first copy would be invisible on a gate that types
+/// 1,000 keystrokes and never presses `Ctrl+C`, **which is exactly the shape of gate that lets this
+/// through** — so the capacity is paid at construction where it cannot be missed.
+pub const YANK_CAPACITY: usize = 4096;
 
 impl Default for Editor {
     fn default() -> Self {
@@ -437,6 +477,11 @@ impl Editor {
             undo_assets: Vec::new(),
             undo: UndoStack::new(),
             selection_anchor: None,
+            // **Reserved once, here, rather than grown on first paste.** A paste is an edit, and
+            // `tests/no_alloc.rs` asserts that editing allocates nothing; a `Vec` that reached its
+            // capacity during a paste would fail that gate on the one keystroke that used a feature
+            // the other 999 did not.
+            yank: Vec::with_capacity(YANK_CAPACITY),
             style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
             delete_scratch: vec![0u8; DELETE_SCRATCH],
             anchor_scan_scratch: vec![0u8; DELETE_SCRATCH],
@@ -1312,6 +1357,107 @@ impl Editor {
             return Ok(None);
         };
         Ok(Some(self.delete_at(sel.start, sel.len())?))
+    }
+
+    // ---------------------------------------------------------------- clipboard
+
+    /// **Copy the selection into the yank buffer. `false` when there is nothing selected.**
+    ///
+    /// **A copy does not collapse the selection**, which is the whole difference from a cut and the
+    /// only reason the two are separate functions. Every editor without an exception to this, and an
+    /// exception here would be "copy then the selection vanished", which is indistinguishable from a
+    /// broken Copy.
+    ///
+    /// ## Why the read is into a scratch buffer rather than a fresh `Vec`
+    ///
+    /// `Editor::read_into` fills a caller's buffer, and this is a caller. `to_vec` would be one
+    /// allocation per copy and `no_alloc.rs` counts them; this reuses [`Editor::delete_scratch`], which
+    /// already exists for the same reason in [`delete_at`](Self::delete_at).
+    pub fn copy_selection(&mut self) -> Result<bool, EditorError> {
+        let Some(sel) = self.selection() else {
+            return Ok(false);
+        };
+        self.copy_range(sel.start, sel.len())?;
+        Ok(true)
+    }
+
+    /// **Cut: copy the selection, then delete it.**
+    ///
+    /// **Two operations, and the caller undoes them as one.** `copy_selection` does not touch the undo
+    /// stack and `delete_at` pushes one entry, so a cut is a single undo — which is what makes *Edit >
+    /// Undo* restore a cut rather than half of it.
+    pub fn cut_selection(&mut self) -> Result<bool, EditorError> {
+        if !self.copy_selection()? {
+            return Ok(false);
+        }
+        self.delete_selection()?;
+        Ok(true)
+    }
+
+    /// **Paste the yank buffer at the caret, returning how many bytes went in.**
+    ///
+    /// ## The length limit, and why there is one
+    ///
+    /// The buffer cannot grow — [`Editor::yank`] is reserved once and this never reallocates — so a
+    /// paste larger than the buffer is **truncated to what fits rather than refused**. A refusal would
+    /// be the more honest answer, and it is the worse product: the user gets nothing at all for a
+    /// keystroke that looked like it worked.
+    ///
+    /// The truncation is **reported** rather than silent, because a paste that quietly dropped half a
+    /// document is the failure mode this whole project is written against. `session.rs` counts it.
+    pub fn paste(&mut self) -> Result<usize, EditorError> {
+        let at = self.caret();
+        if self.yank.is_empty() {
+            return Ok(0);
+        }
+        // **Take and put back, which is what lets `&[u8]` and `&mut self` coexist.** `insert_at`
+        // takes `&mut self`, and borrowing `&self.yank` out of the same `&mut self` is a
+        // simultaneous immutable and mutable borrow that no ordering fixes. `mem::take` leaves a
+        // `Vec::new()` behind -- **which allocates nothing** -- and the original is restored on the
+        // way out, so the reserved capacity survives and `no_alloc.rs` still sees zero.
+        //
+        // The result is put back *before* the `?`, so a failed paste still leaves the buffer intact
+        // rather than emptying it: a paste that failed and a paste that cleared the clipboard are
+        // different states and only one of them is what the user did.
+        let yank = core::mem::take(&mut self.yank);
+        let inserted = self.insert_at(at, &yank, SpanPolicy::GrowIntoInsert);
+        self.yank = yank;
+        inserted?;
+        Ok(self.yank.len())
+    }
+
+    /// **What the yank buffer holds**, for a caller that wants to show it or count it.
+    pub fn yanked(&self) -> &[u8] {
+        &self.yank
+    }
+
+    /// Copy `[at, at+len)` into the yank buffer.
+    ///
+    /// **One read, and the buffer is truncated to what that read produced.** The first version read
+    /// twice — once into a resized buffer and once to check how much had landed — which is two reads
+    /// of a caller-supplied buffer and a `resize` whose zeroes could survive into a paste. `read_into`
+    /// returns the count, so the count *is* the answer and a second read is a second chance to get it
+    /// wrong.
+    fn copy_range(&mut self, at: u32, len: u32) -> Result<(), EditorError> {
+        let at = at as usize;
+        let take = (len as usize).min(self.yank.capacity());
+        // **The same take-and-restore as `paste`**, for the same reason: `read_into` is `&self` and
+        // takes `&mut [u8]`, so handing it `&mut self.yank` from a `&mut self` method is the same
+        // borrow conflict. It is the reason this is not `self.read_into(at, &mut self.yank)`, which
+        // is what the first version wrote.
+        let mut yank = core::mem::take(&mut self.yank);
+        yank.clear();
+        if take == 0 {
+            self.yank = yank;
+            return Ok(());
+        }
+        yank.resize(take, 0);
+        let got = self.read_into(at, &mut yank);
+        self.yank = yank;
+        // **Truncate to the read, so a short read cannot leave NUL padding** that a paste would then
+        // insert into the document as zeroes.
+        self.yank.truncate(got?);
+        Ok(())
     }
 
     /// Move the caret left one character.

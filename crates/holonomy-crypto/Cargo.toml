@@ -18,3 +18,10 @@ secrecy = "0.10"
 sha2 = "0.11"
 unicode-normalization = "0.1.25"
 zeroize = "1.9"
+
+# The tool Plan/Plan.md 2.4 names `vdf-calibrate`. Cargo would derive `vdf_calibrate` from the
+# filename; the plan spells it with a hyphen, and a name a person has to guess is a tool they will
+# not run. Declared explicitly so the command in the docs is the command that works.
+[[bin]]
+name = "vdf-calibrate"
+path = "src/bin/vdf_calibrate.rs"

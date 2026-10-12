@@ -186,6 +186,22 @@ impl Desktop {
     }
 
     /// The window's id, for logs and for a caller that wants to raise it itself.
+    /// The X screen's own size, for sizing a window to it.
+    ///
+    /// **A second connection, and only ever on the window path at startup.** `open` has to be handed a
+    /// size to create the window with, and the size it wants is a fraction of the screen it has not
+    /// connected to yet. **One extra connection at startup is cheaper than threading a size the caller
+    /// cannot know, and it is not on the frame path.**
+    ///
+    /// **`None` rather than an error.** A server that will not say how big it is gets the default size,
+    /// which is what happened before this existed and is a better answer than refusing to open.
+    pub fn screen_size(display: Option<&str>) -> Option<(u32, u32)> {
+        use holonomy_x11::Conn;
+        let conn = Conn::connect(display).ok()?;
+        let (w, h) = (conn.setup().root_width, conn.setup().root_height);
+        Some((u32::from(w), u32::from(h)))
+    }
+
     pub fn window_id(&self) -> u32 {
         self.window.id()
     }

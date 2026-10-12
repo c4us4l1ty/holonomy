@@ -70,6 +70,12 @@ pub enum Action {
     InsertMath,
     /// Close the document.
     Close,
+    /// **Write the document to every sink opened at boot.**
+    ///
+    /// **To the sinks, and not to a path the user names.** The jail's measured seccomp allowlist has no
+    /// `openat` on a user path, so there is no file dialog; `--export-html out.html` at boot is what
+    /// chooses a destination, and this says *now* rather than *at exit*.
+    Export,
     /// **Set the zoom to a percentage the row names.**
     ///
     /// **A payload on an otherwise empty enum**, because "zoom to 125%" and "zoom to 150%" are the
@@ -88,6 +94,12 @@ pub enum Action {
     SetColour(u8),
     /// **Choose a font by index**, into [`FONTS`].
     SetFont(u8),
+    /// **Cut: copy the selection, then delete it.**
+    Cut,
+    /// **Copy the selection into the editor's yank buffer.**
+    Copy,
+    /// **Paste the yank buffer at the caret.**
+    Paste,
     /// **Arm or disarm bold for the next character typed.**
     ToggleBold,
     /// **Arm or disarm italic for the next character typed.**
@@ -108,6 +120,10 @@ impl Action {
             Action::InsertImage => "insert-image",
             Action::InsertMath => "insert-math",
             Action::Close => "close",
+            Action::Export => "export",
+            Action::Cut => "cut",
+            Action::Copy => "copy",
+            Action::Paste => "paste",
             Action::SetZoom(_) => "set-zoom",
             Action::SetStyle(_) => "set-style",
             Action::SetFont(_) => "set-font",
@@ -244,7 +260,31 @@ const FILE: &[Item] = &[
     plain("New"),
     plain("Open"),
     sub("Import", IconId::Folder),
-    plain("Export"),
+    // **The save, and it was the one row the File menu was missing.**
+    //
+    // `Action::Save` has existed since the `Action` enum replaced a label match (part 21) and
+    // `action_command` has always known what it means — but **no row carried it**, so the variant was
+    // reachable from nowhere. `Ctrl+S` reached the commit through the keymap and the title bar's Cloud
+    // button reached it through `title_command`, and a keyboard-less user had no route at all.
+    //
+    // `item_count_matches_the_file_menu` asserts this list's length, so the row is counted rather than
+    // merely present.
+    Item {
+        accelerator: Some("Ctrl+S"),
+        ..act("Save", Action::Save)
+    },
+    // **Export, and the row that was drawn and did nothing.**
+    //
+    // `Session::export` has been implemented and gated since Phase 8 and the only routes to it were
+    // the `--export-html` / `--export-pdf` command-line flags and the end of the session — so a user
+    // clicking **File > Export** got a menu that opened and a row that closed it again. Unlike
+    // **Print**, which part 33 removed because *no* backend existed, **the backend is here**: this is
+    // the row failing to reach it, which is a wiring defect rather than a missing feature.
+    //
+    // **It writes to the sinks opened at boot, not to a path the user picks.** The jail's measured
+    // seccomp allowlist has no `openat` on a user path, so an interactive file dialog is not
+    // available; `--export-html out.html` at boot is what chooses the destination.
+    act("Export", Action::Export),
     accel("Page setup", "Ctrl+P"),
     act("Close", Action::Close),
     sub("Extensions", IconId::Sparkle),
@@ -259,9 +299,25 @@ const EDIT: &[Item] = &[
         accelerator: Some("Ctrl+Y"),
         ..act("Redo", Action::Redo)
     },
-    plain("Cut"),
-    plain("Copy"),
-    accel("Paste", "Ctrl+V"),
+    // **Cut, Copy and Paste, which were three rows that opened a menu and closed it again.**
+    //
+    // The backend is `Editor`'s yank buffer and it is *internal*: there is no X selection on the
+    // sealed path, no `openat` to spool to a file and no network for a remote clipboard, so this is
+    // the only meaning `Copy` can have that is reachable from every build. `release_artifact.rs`
+    // asserts the sealed binary contains no X11 client, which is what makes that a fact rather than
+    // a preference.
+    Item {
+        accelerator: Some("Ctrl+X"),
+        ..act("Cut", Action::Cut)
+    },
+    Item {
+        accelerator: Some("Ctrl+C"),
+        ..act("Copy", Action::Copy)
+    },
+    Item {
+        accelerator: Some("Ctrl+V"),
+        ..act("Paste", Action::Paste)
+    },
     act("Select all", Action::SelectAll),
     accel("Find", "Ctrl+F"),
     accel("Spelling and grammar", "Ctrl+X"),

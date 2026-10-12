@@ -61,7 +61,8 @@ pub use pointer::{
     BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
 };
 pub use source::{
-    errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, RECORDS_PER_READ,
+    errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, Wait,
+    RECORDS_PER_READ,
 };
 
 // The `KEY_*` constants are the crate's vocabulary. Re-exported in one glob because a caller writing a

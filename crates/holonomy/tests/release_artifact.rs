@@ -116,11 +116,52 @@ fn the_default_release_binary_carries_no_x11_client() {
     );
 }
 
+/// **This file's byte ceiling is a release-profile number, so it declines to run in a debug one.**
+///
+/// Returns `true` — with an explanation, never silently — when the caller should skip.
+///
+/// # Why this gate was red in a debug run, and why the fix is not a bigger ceiling
+///
+/// [`binary`] finds the binary by walking two levels up from `current_exe`, which is
+/// `target/<profile>/deps/<test>-<hash>`. **So a debug run measures the debug binary** and then fails
+/// with a message that *names it the release binary*:
+///
+/// ```text
+/// target/x86_64-unknown-linux-musl/debug/holonomy is 28561776 bytes; the ceiling is 2097152
+/// ```
+///
+/// That is not a near-miss, it is **a false report**: it asserts that the shipping artifact is
+/// twenty-eight megabytes when the shipping artifact is under two. A gate that can say that about
+/// the thing it is supposed to vouch for is worse than no gate, because the next time it is quoted
+/// it will be quoted as a fact.
+///
+/// Raising the ceiling to the debug number is the wrong repair for the same reason it was wrong in
+/// `write_through_cost.rs`: it would be a gate that passes against a binary nobody ships.
+///
+/// ```text
+/// cargo test -p holonomy --release --test release_artifact
+/// ```
+fn skip_without_an_optimised_build(what: &str) -> bool {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "skipping {what}: `binary()` resolves to target/debug/holonomy in this profile, and the \
+             ceiling is a release-profile number. A debug build measures 28,561,776 bytes and the \
+             gate reports that as 'the release binary', which is a false statement rather than a \
+             near-miss. Re-run with `cargo test -p holonomy --release --test release_artifact`."
+        );
+        return true;
+    }
+    false
+}
+
 /// The default release binary is under the ceiling.
 ///
 /// Measured: 1,032,472 bytes against a 2,097,152-byte ceiling, so there is 1,064,680 bytes of room.
 #[test]
 fn the_default_release_binary_is_under_the_ceiling() {
+    if skip_without_an_optimised_build("the binary size ceiling") {
+        return;
+    }
     let path = binary();
     if !path.exists() {
         eprintln!("skipping: {} does not exist", path.display());

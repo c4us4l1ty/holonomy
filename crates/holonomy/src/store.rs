@@ -689,6 +689,33 @@ impl holonomy_text::LeafSource for SectionStore<'_> {
             .map_err(|_| holonomy_text::RopeError::SourceUnavailable)
     }
 
+    /// Write the editor's whole current document into the container.
+    ///
+    /// **This is the `Ctrl+S` path, and it was unreachable from the product until the trait grew a hook
+    /// for it.** The function it calls — [`commit_document`] — has been built and gated since Phase 13
+    /// part 15 (`tests/commit_path.rs`), and `main.rs` had no call to it: a session opened a container,
+    /// let the user edit it, and discarded every keystroke on exit.
+    ///
+    /// **The ordering inside [`commit_document`] is load-bearing and is that function's argument, not
+    /// this one's**: grow the container, read the whole document, and only then write — because writing
+    /// chunk 0 makes the rope's edit record wrong about chunk 0's offsets. Re-deriving it here would be
+    /// the second copy of a rule that cost a measurement to find.
+    ///
+    /// ### Why this lives on `SectionStore` and not on `Session`
+    ///
+    /// A commit needs the container and the editor mutably at once. The container is in
+    /// `SessionContext`, beside the session; the editor is inside it. Holding both would be a
+    /// self-referential struct, and the session is built **before** the passphrase exists (it must be —
+    /// the container is opened before `seccomp`) and adopts its document afterwards, so the store cannot
+    /// be created earlier either. Routing it through the `&mut dyn LeafSource` the edit path already
+    /// carries is **one borrow at the point of use**, and it is the only place the two live together.
+    fn commit_document(
+        &mut self,
+        editor: &mut holonomy_text::Editor,
+    ) -> Result<usize, holonomy_text::RopeError> {
+        commit_document(self, editor).map_err(|_| holonomy_text::RopeError::SourceUnavailable)
+    }
+
     /// Fill `out` with the `out.len()` document bytes starting at `offset`.
     ///
     /// # The two-section case, which is the whole difficulty

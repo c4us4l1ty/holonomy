@@ -183,17 +183,49 @@ impl Tool {
         )
     }
 
+    /// How many cells this tool's **label** needs, or `0` for an icon.
+    ///
+    /// **CORRECTION, part 36: these were 44, 76 and 64 pixels, and a pixel is not a length here.**
+    ///
+    /// **Measured against the labels themselves:** `Zoom` shows `zoom_label()`, whose widest value is
+    /// `"400%"` at 4 codepoints; `Style` shows [`ChromeState::style_name`], whose longest entry in
+    /// [`STYLES`](crate::menus::STYLES) is `"Normal text"` at 11; `Font` shows `font_label()`, whose
+    /// longest entry in [`FONTS`](crate::menus::FONTS) is `"IBM Plex Mono"` at 13.
+    ///
+    /// **The old numbers did not fit at 16 ppem either** — 76 px is 7.6 cells of an 11-character label
+    /// — and part 32's 24 ppem made it a visible overlap: two toolbar items drawn on top of each other,
+    /// visible in a dump of the running window as `tēnter" 🗌`.
+    ///
+    /// **In cells, and therefore measured against the same face the painter uses**, which is part 30's
+    /// decision applied to the one place it had been left out.
+    pub const fn label_cells(self) -> u32 {
+        match self {
+            Tool::Zoom => 4,
+            Tool::Style => 11,
+            Tool::Font => 13,
+            _ => 0,
+        }
+    }
+
     /// The width this tool occupies, in pixels.
     ///
-    /// **`Zoom`, `Style` and `Font` are wider than a button** because they carry a label. Everything
-    /// else is [`BUTTON`](super::ChromeMetrics::button) square. **The widths are a function of the tool,
-    /// not of the layout pass**, so the paint and hit paths cannot disagree about how wide `Font` is.
-    pub const fn width(self, button: u32) -> u32 {
-        match self {
-            Tool::Zoom => button + 44,
-            Tool::Style => button + 76,
-            Tool::Font => button + 64,
-            _ => button,
+    /// **`Zoom`, `Style` and `Font` are wider than a button** because they carry a label: the button,
+    /// plus the label in [`label_cells`](Self::label_cells) cells of `cell_w`, plus four pixels of
+    /// inner padding. Everything else is [`BUTTON`](super::ChromeMetrics::button) square.
+    ///
+    /// **The widths are a function of the tool and the cell, not of the layout pass**, so the paint and
+    /// hit paths cannot disagree about how wide `Font` is.
+    ///
+    /// **The four pixels are chosen so that `Zoom` is unchanged at the 16 ppem design** — 4 cells of 10
+    /// plus 4 is 44, which is what it always was — so the one control that fitted is not resized by the
+    /// correction.
+    pub const fn width(self, button: u32, cell_w: u32) -> u32 {
+        match self.label_cells() {
+            0 => button,
+            // **`Ord::max` is not yet stable as a `const` trait**, the same reason `measure_beyond`
+            // writes its clamp out. A zero cell would make a labelled control zero wide, which is a
+            // different way of not fitting.
+            n => button + n * (if cell_w == 0 { 1 } else { cell_w }) + 4,
         }
     }
 
@@ -277,10 +309,10 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         p.rect = DamageRect::new(
             x,
             m.toolbar.y + m.toolbar.height / 2 - button / 2,
-            p.tool.width(button),
+            p.tool.width(button, m.cell_w),
             button,
         );
-        x += p.tool.width(button);
+        x += p.tool.width(button, m.cell_w);
     }
 
     // Right group, from the right edge inwards.
@@ -289,7 +321,7 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         if !matches!(p.tool, Tool::Mode | Tool::Collapse) {
             continue;
         }
-        let w = p.tool.width(button);
+        let w = p.tool.width(button, m.cell_w);
         r = r.saturating_sub(w);
         p.rect = DamageRect::new(
             r,

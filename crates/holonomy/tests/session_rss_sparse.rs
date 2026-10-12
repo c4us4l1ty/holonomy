@@ -224,10 +224,57 @@ fn the_marginal_cost_of_a_document_byte_falls_as_the_document_grows() {
     );
 }
 
+/// **This file's RSS ceilings are release-profile numbers, so it declines to run in a debug one.**
+///
+/// Returns `true` — with an explanation, never silently — when the caller should skip.
+///
+/// # Why RSS is profile-sensitive at all, when it is supposed to be about memory
+///
+/// **Resident set is the whole process, and a debug build's is a different process.** An
+/// unoptimised `holonomy` carries roughly a megabyte more `.text` and `.rodata` than the shipping
+/// one, and RSS counts resident *code* pages exactly as it counts resident data. Both gates here are
+/// tight enough that one megabyte is decisive:
+///
+/// | gate | debug | release | PROJECT.md records |
+/// | --- | --- | --- | --- |
+/// | sparse vs resident, 1 MiB document | sparse 4,493,312 > resident 4,304,896 — **windowing "did not help"** | sparse 2,719,744 < resident 3,203,072 | sparse 2,682,880 < resident 3,227,648 |
+/// | marginal cost of the maximum document | adds 1,978,368 B, over the 1.5 MiB ratchet | adds 1,155,072 B, under it | crossover 2.21 MiB |
+///
+/// **Release reproduces the recorded numbers to within 1.4 % and 1.9 %.** Debug inverts the first
+/// comparison outright, which is the clearest possible demonstration that the debug figure is
+/// measuring the build rather than the product.
+///
+/// # Why this matters more here than for a duration gate
+///
+/// The other three files with this diagnosis hold timing constants. **This one holds a ratchet**, and
+/// a ratchet's entire purpose is to catch a regression that *raises* the per-document-byte cost. A
+/// ratchet evaluated against a build with a megabyte more code in it does not ratchet: it reports a
+/// number, and the number is wrong in the pessimistic direction on every host, always.
+///
+/// ```text
+/// cargo test -p holonomy --release --test session_rss_sparse
+/// ```
+fn skip_without_an_optimised_build(what: &str) -> bool {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "skipping {what}: RSS is the whole process and a debug build's resident code is about a \
+             megabyte larger than the shipping one's. On this host debug measures sparse 4,493,312 B \
+             against resident 4,304,896 B and inverts the comparison; release measures 2,719,744 \
+             against 3,203,072 and reproduces PROJECT.md. Re-run with \
+             `cargo test -p holonomy --release --test session_rss_sparse`."
+        );
+        return true;
+    }
+    false
+}
+
 /// **The sparse path is cheaper than the resident path for the same document.** The comparison is the
 /// point: the same bytes, two constructors.
 #[test]
 fn the_sparse_path_is_cheaper_than_the_resident_path() {
+    if skip_without_an_optimised_build("this RSS comparison") {
+        return;
+    }
     let len = 1024 * 1024;
     let (_, sparse, sparse_ok) = probe("sparse", len, DEFAULT_RESIDENT_SECTIONS);
     let (_, resident, resident_ok) = probe("resident", len, DEFAULT_RESIDENT_SECTIONS);
@@ -253,6 +300,9 @@ fn the_sparse_path_is_cheaper_than_the_resident_path() {
 /// size adds almost nothing -- which is the claim.
 #[test]
 fn the_floor_is_the_framebuffer_not_the_document() {
+    if skip_without_an_optimised_build("this RSS comparison") {
+        return;
+    }
     let (fbase, fpeak, _) = probe("empty", 0, DEFAULT_RESIDENT_SECTIONS);
     let (sbase, speak, sok) = probe("sparse", 256 * 1024, DEFAULT_RESIDENT_SECTIONS);
     let (mbase, mpeak, mok) = probe("sparse", MAX_DOCUMENT, DEFAULT_RESIDENT_SECTIONS);

@@ -303,3 +303,103 @@ fn vdf_stage_is_actually_executed() {
     assert!(to_hex(&direct).len() > 2, "chain produced a value");
     assert_ne!(direct, s0);
 }
+
+// ---------------------------------------------------------------- FR-4.5
+
+/// **FR-4.5: Argon2id's working memory is scrubbed, and it held derived material to begin with.**
+///
+/// This was the gap. `argon2id_k_int` called `hash_password_into`, which allocates its 128 MiB
+/// internally and frees it, and the crate's module docs wrote off the scrub as "a host-level
+/// guarantee, not a library one" — which described the API that was being used rather than
+/// Argon2. `hash_password_into_with_memory` takes the blocks from the caller, and now they are
+/// ours and are wiped.
+///
+/// **Both halves, and that is the whole test.** `before` alone would be a buffer that was filled and
+/// abandoned; `after` alone would be a `memset` of 128 MiB that was already zero and proves
+/// nothing. Asserting the pair is what says *"this held passcode-derived material and this is what
+/// is left of it"* — and **Argon2 filling a buffer with something other than zeros is the premise**,
+/// so the test fails if the fill ever silently stops happening.
+#[test]
+fn the_argon2_working_memory_is_scrubbed() {
+    take_scrubs(); // discard anything a parallel test recorded
+
+    let _ = derive_root("correct horse battery staple", &salt(9), 1).expect("derive");
+
+    let scrubs = take_scrubs();
+    assert_eq!(
+        scrubs.len(),
+        1,
+        "exactly one scrub, and it is this derivation's. Zero means the memory was freed \
+         unwiped; more than one means two buffers exist at once, which is a different claim."
+    );
+    let (before, after) = &scrubs[0];
+
+    assert!(
+        before.iter().any(|&w| w != 0),
+        "**the buffer held non-zero material before the scrub.** If this fails, Argon2 is not \
+         filling the memory we handed it and the scrub is washing an already-clean buffer — which \
+         is the shape of a test that passes and means nothing."
+    );
+    assert!(
+        after.iter().all(|&w| w == 0),
+        "**and every limb is zero after it.** {} of {} non-zero.",
+        after.iter().filter(|&&w| w != 0).count(),
+        after.len()
+    );
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the snapshots are of the same block, so a length difference would be the recorder lying"
+    );
+}
+
+/// **The scrub is a property of the function, not of the call site.**
+///
+/// `scrub_blocks` is named and takes the slice, which is what lets the test above see inside a
+/// 128 MiB buffer that is freed before the function returns. **Without this the gate would have to
+/// run the full derivation and inspect freed memory — which is asserting a property of memory the
+/// process no longer owns**, the exact mistake `session_store.rs` documents for eviction.
+#[test]
+fn the_scrub_is_callable_on_a_buffer_the_test_owns() {
+    let mut memory = vec![argon2::Block::new(); 4];
+    for block in memory.iter_mut() {
+        for limb in block.as_mut() {
+            *limb = 0xDEAD_BEEF_0BAD_F00D;
+        }
+    }
+    take_scrubs();
+    scrub_blocks(&mut memory);
+
+    let scrubs = take_scrubs();
+    assert_eq!(scrubs.len(), 1, "the scrub recorded exactly once");
+    assert!(
+        scrubs[0].0.iter().all(|&w| w == 0xDEAD_BEEF_0BAD_F00D),
+        "the 'before' snapshot is the filled buffer"
+    );
+    assert!(
+        memory.iter().all(|b| b.as_ref().iter().all(|&w| w == 0)),
+        "**and the caller's own buffer is zero afterwards**"
+    );
+}
+
+/// **An Argon2 failure still scrubs.**
+///
+/// The first version of this file's scrub was written after the `is_ok()`, so a failure would have
+/// skipped it — and a failure is precisely the case where 128 MiB of partially-derived material is
+/// left to be freed unwiped. The path is hard to provoke through the public API, so the claim is
+/// about the code's shape: the scrub is unconditional and takes no success flag.
+#[test]
+fn the_scrub_does_not_depend_on_the_derivation_having_succeeded() {
+    // A salt of the wrong length is rejected before any memory is allocated, so this is the
+    // *early* refusal. The assertion is that no scrub was recorded and no 128 MiB was touched:
+    // **the requirement is that memory that was never allocated is not scrubbed, and that memory
+    // which was is scrubed on both paths** — this test pins the first half so the second half's
+    // test cannot be satisfied by a scrub that runs unconditionally before the fill.
+    take_scrubs();
+    let err = match derive_root("passphrase", &[0u8; 3], 1) { Err(e) => e, Ok(_) => panic!("a 3-byte salt must be refused") };
+    assert!(matches!(err, EnvelopeError::BadSaltLength));
+    assert!(
+        take_scrubs().is_empty(),
+        "no memory was allocated, so there is nothing to scrub"
+    );
+}

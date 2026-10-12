@@ -17,6 +17,14 @@ chacha20poly1305 = "0.11"
 getrandom = "0.4"
 holonomy-crypto = { version = "3.0.0-singularity", path = "../holonomy-crypto" }
 holonomy-jail = { path = "../holonomy-jail" }
+# FR-4.8: the ring's three 64 KiB slots hold document plaintext, so they are SecureBlocks --
+# mmap, mlock, MADV_DONTDUMP, MADV_DONTFORK, PROT_NONE guards -- rather than `alloc_zeroed`.
+#
+# **The edge runs container -> secure -> jail and no further**, so there is no cycle:
+# `holonomy-secure` depends on the jail for its scrub registry and on nothing else. A page-aligned
+# `SecureBlock` also satisfies `O_DIRECT`'s buffer-alignment requirement, which is what lets a locked
+# slot be used as a direct-I/O buffer at all.
+holonomy-secure = { path = "../holonomy-secure" }
 inout = "0.2"
 libc = "0.2"
 secrecy = "0.10"

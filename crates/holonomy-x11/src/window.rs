@@ -73,6 +73,19 @@ pub enum WindowError {
         /// The server's ceiling.
         limit: usize,
     },
+    /// A scanline is not a whole number of the server's pad units, so the server would insert padding
+    /// this crate does not undo.
+    ///
+    /// **Its own variant, part 36.** This was reported as [`RowTooWide`](Self::RowTooWide) with
+    /// `limit: usize::MAX`, which is a request-size complaint about a row that was never too wide --
+    /// it was padded wrongly. The two have nothing to do with each other, and a reader of the old
+    /// message had no way to know that.
+    RowNotPadded {
+        /// The scanline, in bits.
+        row_bits: usize,
+        /// The server's `bitmap-format-scanline-pad`, in bits.
+        pad: u8,
+    },
     /// The server rejected a request. Named rather than swallowed.
     Protocol(proto::ProtocolError),
     /// A reply was short.
@@ -103,6 +116,11 @@ impl fmt::Display for WindowError {
                 "the server's root depth is {depth} and it offers no 32-bits-per-pixel format for it \
                  (it has {available:?}); a Frame is 0x00RRGGBB in a u32 and cannot be sent to this \
                  server without a conversion this crate does not have"
+            ),
+            Self::RowNotPadded { row_bits, pad } => write!(
+                f,
+                "a scanline is {row_bits} bits and the server pads rows to {pad}; the client would \
+                 have to undo the padding it does not insert"
             ),
             Self::RowTooWide { row, limit } => write!(
                 f,
@@ -197,15 +215,24 @@ impl Window {
                     .map(|f| (f.depth, f.bits_per_pixel))
                     .collect(),
             })?;
-        // `scanline_pad` is why a 1280-pixel row is safe: 1280 * 4 bytes is already a multiple of
-        // 32, the widest pad any 32-bpp server offers. A width that were not a multiple of
-        // `scanline_pad / bpp` pixels would be padded by the server and `put_image` would have to
-        // undo it, which it does not do -- so it is checked here rather than mis-rendered.
+        // **`scanline_pad` is in BITS, and this check was in pixels. Part 36.**
+        //
+        // The Core Protocol's `bitmap-format-scanline-pad` is a bit count -- 32 on a 32-bpp server,
+        // which is **four pixels**. This expression multiplied both sides by 8, so the factor cancelled
+        // and the test came out `width % scanline_pad == 0`: **a window had to be a multiple of 32
+        // pixels.** Eight times stricter than the protocol, and it refused ordinary widths -- a window
+        // at nine tenths of a 3,072 px screen is 2,764 px, `2764 % 32 == 12`, and the application
+        // refused to start, with an error about the request size rather than about padding.
+        //
+        // **This exact block appeared twice in this file** and the first edit fixed one of them, so the
+        // symptom survived the fix. **Two copies of a check is one copy too many**, and a reader who
+        // had edited the first would have had no reason to look for the second.
         let row_px = width as usize;
-        if !(row_px * 8).is_multiple_of(format.scanline_pad as usize * 8) {
-            return Err(WindowError::RowTooWide {
-                row: row_px * 4,
-                limit: usize::MAX,
+        let row_bits = row_px * usize::from(format.bits_per_pixel);
+        if !row_bits.is_multiple_of(format.scanline_pad.max(1) as usize) {
+            return Err(WindowError::RowNotPadded {
+                row_bits,
+                pad: format.scanline_pad,
             });
         }
         let id = conn.alloc_id();
@@ -825,12 +852,26 @@ fn put_image(
     if row > limit {
         return Err(WindowError::RowTooWide { row, limit });
     }
-    let want = row
-        .checked_mul(height as usize)
-        .ok_or(WindowError::RowTooWide {
-            row,
-            limit: usize::MAX,
-        })?;
+    // **CORRECTION, part 36: `saturating_mul`, and this is what made a window larger than 262 KB of
+    // pixels un-openable.**
+    //
+    // **`want` is the whole frame and `limit` is the size of ONE request**, so this compared a frame
+    // against a request and refused anything over 262,140 bytes -- a 512x128 window. The refusal came
+    // back as:
+    //
+    // ```text
+    // one scanline is 9828 bytes and the server accepts 18446744073709551615 bytes per request
+    // ```
+    //
+    // **and both numbers in that sentence are wrong.** `18446744073709551615` is `usize::MAX`, which is
+    // the `limit` this very line invented; the real limit is 262,140 and is printed two lines below.
+    // And the scanline was never the problem -- 9,828 bytes is well inside one request.
+    //
+    // **The check below says it in the file's own words**: *"A `PutImage` cannot split a scanline, so
+    // the chunk count is a whole number of rows"*. The frame is banded across many requests, so the
+    // frame's size is not a constraint on anything. **What `want` is really for is the buffer-length
+    // check underneath it**, and for that a saturating product is correct and an error is not.
+    let want = row.saturating_mul(height as usize);
     if pixels.len() < want {
         return Err(WindowError::ShortBuffer {
             have: pixels.len(),

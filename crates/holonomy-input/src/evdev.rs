@@ -22,7 +22,7 @@
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use crate::pointer::Event;
-use crate::source::{InputError, InputSource, RecordDecoder, RECORDS_PER_READ};
+use crate::source::{InputError, InputSource, RecordDecoder, Wait, RECORDS_PER_READ};
 
 /// A [`InputSource`] over an already-open evdev descriptor.
 ///
@@ -35,6 +35,29 @@ pub struct EvdevSource {
     file: std::fs::File,
     decoder: RecordDecoder,
     label: &'static str,
+    /// **The one epoll instance this source waits on.** `None` only when `epoll_create1` refused.
+    ///
+    /// **A private instance, and the allowlist's rationale describes a shared one.** The seccomp
+    /// table says `epoll_create1` exists because *"the session loop's single epoll instance; three
+    /// `epoll_wait` entries would otherwise need three instances"*, and `epoll_ctl` because it is for
+    /// *"registering the container fd, the DRM fd and the evdev fd with the loop"*. **This is the
+    /// evdev fd on its own instance**, and the single shared loop the rationale describes does not
+    /// exist yet — the session has no way to hand its container and DRM descriptors to an input
+    /// crate, and inventing that plumbing before there is a second waiter to share it with would be
+    /// the speculative generality this project does not build.
+    ///
+    /// **What is built is the part that was broken**: the loop waits instead of spinning, and an
+    /// idle keyboard does not end the session. One instance for one waiter costs one descriptor.
+    ///
+    /// ## Why `None` degrades rather than failing
+    ///
+    /// `from_raw_fd` is `unsafe fn -> Self` and cannot report a failure, and a panic inside a sealed
+    /// session is worse than a busy loop. **The sealed path cannot reach this**: `epoll_create1` is
+    /// allowlisted at stage 11, and [`open`](Self::open) — which *is* the sealed path, and *can*
+    /// report a failure — propagates it rather than storing `None`. So the fallback exists only for
+    /// an adopted descriptor on a host where epoll is unavailable, and it degrades to today's
+    /// behaviour, which is a defect but not a crash.
+    epoll: Option<Epoll>,
 }
 
 impl EvdevSource {
@@ -50,10 +73,17 @@ impl EvdevSource {
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
             .map_err(|e| InputError::Read(raw_os_error(&e)))?;
+        // **This is the sealed path, so the failure is propagated rather than absorbed.** `open` can
+        // return an error and this one would mean "no epoll, so the session will spin", which is
+        // exactly the defect `InputSource::wait` was added to remove — better said at start-up than
+        // discovered as a hot laptop.
+        let epoll = Epoll::create().map_err(io_err)?;
+        epoll.register(file.as_raw_fd()).map_err(io_err)?;
         Ok(Self {
             file,
             decoder: RecordDecoder::new(),
             label: "evdev",
+            epoll: Some(epoll),
         })
     }
 
@@ -87,12 +117,25 @@ impl EvdevSource {
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
+        // SAFETY: the caller's contract says `fd` is valid, open and readable, and ownership
+        // transfers here.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        // **Best effort, and `None` is a real answer here.** See the field's docs: `open` — the
+        // sealed path — propagates, and this constructor cannot.
+        let epoll = match Epoll::create() {
+            Ok(ep) => match ep.register(file.as_raw_fd()) {
+                Ok(()) => Some(ep),
+                // The instance exists but the registration did not. Keeping it would be a wait on
+                // an empty set, which times out forever and looks exactly like a dead keyboard.
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
         Self {
-            // SAFETY: the caller's contract says `fd` is valid, open and readable, and ownership
-            // transfers here.
-            file: unsafe { std::fs::File::from_raw_fd(fd) },
+            file,
             decoder: RecordDecoder::new(),
             label: "evdev",
+            epoll,
         }
     }
 
@@ -152,9 +195,116 @@ impl InputSource for EvdevSource {
         }
     }
 
+    /// **Wait on the device instead of spinning.** FR-3.5, NFR-1.2.
+    ///
+    /// # `epoll_wait` and why not `read` with a timeout
+    ///
+    /// The descriptor is `O_NONBLOCK` — see [`EvdevSource::open`] — so a read cannot wait, and the
+    /// only other options were a `sleep` (the same spin, slower) or a blocking read (a hang, and the
+    /// session has a caret blink and a teardown path that must not wait on a keypress). `epoll_wait`
+    /// on a level-triggered `EPOLLIN` registration is the one that blocks in the kernel, wakes on the
+    /// device, and returns on a timeout so the loop can tick.
+    ///
+    /// **It is also the call the seccomp allowlist has been reserving for the session loop since
+    /// Phase 2**, along with `epoll_create1`, `epoll_ctl` and `epoll_pwait`.
+    ///
+    /// # A timeout is `Ready`, not `Ended`
+    ///
+    /// The session's caret blinks on a 500 ms period and nothing else in the loop is time-driven. A
+    /// timeout is therefore a reason to tick, and returning `Ended` on one would reintroduce the
+    /// original defect under a new name: the session exits 125 ms after the last keystroke.
+    fn wait(&mut self, timeout_ms: i32) -> Result<Wait, InputError> {
+        // Records already decoded from a previous partial read need no syscall: they are already
+        // in the buffer, and going to sleep on them would add a blink period of latency to the last
+        // keypress of a burst.
+        if self.decoder.has_record() {
+            return Ok(Wait::Ready);
+        }
+        let Some(epoll) = self.epoll.as_ref() else {
+            // No epoll instance (see the field's docs): degrade to the old behaviour rather than
+            // pretend to have waited. The loop spins; it does not hang and it does not exit.
+            return Ok(Wait::Ready);
+        };
+        let mut events = [libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: 0,
+        }; 1];
+        // SAFETY: `epoll` is a live epoll descriptor owned by this value; `events` is a one-element
+        // array whose length is passed; a negative timeout blocks indefinitely, which is not what
+        // any caller passes.
+        let n = unsafe { libc::epoll_wait(epoll.as_raw_fd(), events.as_mut_ptr(), 1, timeout_ms) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            // **A signal is not a failure.** `EINTR` means a handler ran, and the right answer is to
+            // report readiness so the loop retries; returning an error would turn every `SIGWINCH`
+            // into a dead session.
+            if e.raw_os_error() == Some(libc::EINTR) {
+                return Ok(Wait::Ready);
+            }
+            return Err(InputError::Read(raw_os_error(&e)));
+        }
+        // `n == 0` is the timeout and `n > 0` is the device. Both are `Ready`.
+        let _ = events;
+        Ok(Wait::Ready)
+    }
+
     fn describe(&self) -> &'static str {
         self.label
     }
+}
+
+/// **One epoll instance, wrapping the three syscalls the allowlist reserves for the session loop.**
+///
+/// `epoll_create1(EPOLL_CLOEXEC)` — **the close-on-exec flag is not optional.** The boot chain
+/// installs tripwires and a seccomp filter and then runs the session in the same process; a
+/// descriptor that survives an `exec` anywhere in that chain is a descriptor the filter was not
+/// written for.
+#[derive(Debug)]
+struct Epoll(std::os::fd::OwnedFd);
+
+impl AsRawFd for Epoll {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl Epoll {
+    fn create() -> std::io::Result<Self> {
+        // SAFETY: `epoll_create1` takes only flags; there are no pointers to get wrong.
+        let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `epoll_create1` returned a fresh descriptor, and ownership passes to the
+        // `OwnedFd` which closes it on drop.
+        Ok(Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
+    }
+
+    /// Add `fd` at level-triggered `EPOLLIN`, with `u64` data 0.
+    fn register(&self, fd: RawFd) -> std::io::Result<()> {
+        let mut event = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: 0,
+        };
+        // SAFETY: `self.0` is a live epoll descriptor, `fd` is open and owned elsewhere, and
+        // `event` outlives the call. `EPOLL_CTL_ADD` fails with `EEXIST` if called twice, which is
+        // why each source registers exactly once, at construction.
+        let r = unsafe { libc::epoll_ctl(self.0.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, &mut event) };
+        if r < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// A `std::io::Error` as this crate's [`InputError::Read`], carrying the `errno`.
+///
+/// **One function rather than `.map_err(InputError::Read)` at each site**, because `InputError::Read`
+/// takes an `i32` and `std::io::Error` is not one. Writing `map_err(InputError::Read)` is a type
+/// error the compiler catches, which is the right way to learn this; writing `map_err(io_err)` is
+/// what it should have been.
+fn io_err(e: std::io::Error) -> InputError {
+    InputError::Read(raw_os_error(&e))
 }
 
 /// `errno` out of a `std::io::Error`, defaulting to `EIO`.

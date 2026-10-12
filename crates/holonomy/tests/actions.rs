@@ -28,6 +28,7 @@
 //! | and two dropdowns cannot be open at once | [`only_one_popup_is_open_at_a_time`] |
 //! | the toolbar labels are borrowed, not allocated | [`the_toolbar_labels_are_borrows_not_allocations`] |
 //! | and the two dropdown lists agree | [`the_two_dropdown_lists_agree`] |
+//! | **a row carrying an action reaches it** | [`the_file_menu_rows_reach_their_actions`] |
 
 use holonomy::session::action_command;
 use holonomy::store::NoSource;
@@ -163,26 +164,32 @@ fn renaming_a_label_does_not_change_what_a_row_does() {
     );
 }
 
-/// **Every action is either routed to a command or is one of the three the session handles itself.**
+/// **Every action is either routed to a command, handled by the session, or named as unwired.**
 ///
-/// **The two lists must add up to the whole enum, and `Action` is `#[non_exhaustive]`-shaped by being
-/// matched exhaustively twice.** A new variant that reaches `action_command` and hits its `_ => None`
-/// — there is no `_ =>` arm — does not compile. So this test is about the *documented* split: the
-/// ones that change chrome state are handled in `apply_action`, and the rest must produce a command.
+/// **The three lists must add up to the whole enum, and `Action` is matched exhaustively twice.** A new
+/// variant that reaches `action_command` and hits its `_ => None` — there is no `_ =>` arm — does not
+/// compile. So this test is about the *documented* split: the ones that change chrome state, and now
+/// the one that writes files, are handled in `apply_action`; the rest must produce a command.
 #[test]
 fn every_action_is_routed_or_accounted_for() {
     // The chrome-state actions never reach `action_command`, and saying so here is what keeps the two
     // lists honest: a fourth one added to `apply_action` and not to this list fails.
+    //
+    // `Export` is here rather than in the `routed` list because it is **not chrome state and not a
+    // document edit either** — it writes files to descriptors this process was handed at boot. It is
+    // grouped with the others for the same reason they are: `apply_action` is the function that handles
+    // a thing rather than issuing a command.
     let handled_by_session = [
         Action::SetZoom(100),
         Action::SetStyle(0),
         Action::SetFont(0),
+        Action::Export,
     ];
     for a in handled_by_session {
         assert_eq!(
             action_command(a),
             None,
-            "{} changes chrome state and must be handled by apply_action, not routed to a command",
+            "{} is handled by apply_action, not routed to a command",
             a.name()
         );
     }
@@ -197,12 +204,24 @@ fn every_action_is_routed_or_accounted_for() {
         Action::InsertTable,
         Action::InsertImage,
         Action::InsertMath,
+        // **Routed by the commit, and `File > Save` is the row that reaches it.** This was `None` here
+        // and the variant was carried by no row at all, so it was reachable only from the keymap.
+        Action::Save,
+        // **The clipboard.** Three rows that had drawn since Phase 8 and done nothing, beside a
+        // keymap whose own test asserted `Ctrl+C` was *swallowed*. Both halves were correct about
+        // what they measured and neither was a specification of what the product should do.
+        Action::Cut,
+        Action::Copy,
+        Action::Paste,
     ];
     for a in routed {
         assert!(action_command(a).is_some(), "{} should route", a.name());
     }
-    // **The two that are deliberately not wired**, named so they are not mistaken for an oversight.
-    for a in [Action::Save, Action::Close] {
+    // **The one that is deliberately not wired**, named so it is not mistaken for an oversight.
+    //
+    // `Close` has no meaning without a document list and a multi-document model, neither of which
+    // exists — `store::open_document` opens one container and `ChromeState` has one `title`.
+    for a in [Action::Close] {
         assert_eq!(
             action_command(a),
             None,
@@ -230,9 +249,13 @@ fn every_action_has_a_name() {
         Action::InsertImage,
         Action::InsertMath,
         Action::Close,
+        Action::Export,
         Action::SetZoom(100),
         Action::SetStyle(0),
         Action::SetFont(0),
+        Action::SetColour(0),
+        Action::ToggleBold,
+        Action::ToggleItalic,
     ];
     let mut seen = std::collections::BTreeSet::new();
     for a in all {
@@ -270,34 +293,50 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 8,
-        "the eight rows that mean something: Undo, Redo, Select all, Close, Insert > Image, \
-         Insert > Table, and Format > Bold and Format > Italic. Adding one changes this number."
+        with_action, 13,
+        "the thirteen rows that mean something: Undo, Redo, **Cut**, **Copy**, **Paste**, \
+         Select all, Save, Export, Close, Insert > Image, Insert > Table, and Format > Bold and \
+         Format > Italic. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
     // is stable and visible.
-    // **47 of 55, and it was 48 of 56 until part 33 removed the File menu's `Print` item.**
+    // **46 of 56, and it was 47 of 55 before the save gained a row.**
     //
-    // **This gate has now been through two different edits and both were subtractions that were
-    // *not* subtractions from both sides**, which is worth stating plainly:
+    // **This gate has now been through five edits and they are not all the same shape**, which is worth
+    // stating plainly — because two of them moved the same number for opposite reasons:
     //
     // * **Part 25 added two wired rows** (Bold and Italic in Format) rather than converting two
     //   unwired ones, so the unwired count did not move and the *total* went 54 -> 56. **The first
     //   draft of that edit subtracted from both and was wrong.**
     // * **Part 33 removed a row outright.** An unwired one, so the unwired count moved down by one
     //   *and* the total did. **48/56 -> 47/55.**
+    // * **Wiring the save moved one unwired row into the wired set without adding a row**, because
+    //   `action_command` routed `Action::Save` to `None` — the variant existed but no row carried it.
+    //   **47/55 -> 46/55, the unwired count alone.**
+    // * **`File > Save` was then added as a row**, because a variant no row carries is a capability no
+    //   pointer-only user can reach. **46/55 -> 47/56: the total alone.**
+    // * **Export was wired on the row that was already there.** `plain("Export")` became
+    //   `act("Export", Action::Export)`, so the backend that has existed since Phase 8 — and was
+    //   reachable only from a command-line flag — is now reachable from the menu. **47/56 -> 46/56, the
+    //   unwired count alone again**, and for the opposite reason from the save.
     //
-    // **A gate that prints the list is what made the second edit safe to get right.** The list is
-    // printed because "everything is wired" is not true here and pretending otherwise would be the
-    // worse answer: what matters is that the count is stable and the rows are named. Got: {without:?}
+    // **Those last two are the point.** Both changed the total by zero, one moved the unwired count up
+    // and the other moved it down, and an edit that shows up as `47 -> 46` in a diff is a different
+    // event from one that shows as `47 -> 46` because a row was added. Asserting the *pair* is what
+    // keeps them distinguishable.
+    //
+    // **A gate that prints the list is what made these safe to get right.** The list is printed because
+    // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
+    // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (47, 55),
-        "**47 unwired of 55 menu items** in the eight headings. Part 33 removed File > Print, which \
-         was unwired, so both counts moved. The list is printed because \"everything is wired\" is \
-         not true here: what matters is that the count is stable and the rows are named. Got: \
-         {without:?}"
+        (43, 56),
+        "**43 unwired of 56 menu items** in the eight headings. Three of the rows that had always \
+         drawn and done nothing -- Edit > Cut, Copy and Paste -- now carry an action; nothing was \
+         added or removed, so the unwired count alone moved, by three. The list is printed because \
+         \"everything is wired\" is not true here: what matters is that the count is stable and the \
+         rows are named. Got: {without:?}"
     );
 }
 
@@ -477,4 +516,109 @@ fn tool_by_name(name: &str) -> widgets::Tool {
         .copied()
         .find(|t| t.name() == name)
         .unwrap_or_else(|| panic!("the toolbar has no tool named {name}"))
+}
+
+// ---------------------------------------------------------------- Save and Export reach something
+
+/// A scratch sink, opened the way the boot opens one.
+///
+/// **A real `File`, not a buffer.** The jail has no `openat` on a user path, so an export sink is a
+/// descriptor the process was handed before sealing — and a test that used an in-memory writer would be
+/// testing a different thing from the one the product writes.
+fn sink(format: holonomy_export::Format, path: &std::path::Path) -> holonomy::ExportSink {
+    holonomy::ExportSink {
+        format,
+        file: std::fs::File::create(path).expect("open the sink"),
+        path: path.display().to_string(),
+    }
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let d = std::env::current_exe()
+        .expect("test exe")
+        .ancestors()
+        .nth(3)
+        .expect("layout")
+        .join("holonomy-export-tests")
+        .join("actions");
+    std::fs::create_dir_all(&d).expect("scratch");
+    d.join(name)
+}
+
+/// **The two File rows that used to open a menu and close it again.**
+///
+/// `every_wired_menu_item_carries_an_action` counts rows by asking whether `Item::action` is `Some`,
+/// which is a statement about the **table**. This is a statement about the **product**: a row can carry
+/// an action, be counted as wired, and still reach nothing — which is exactly what **Save** and
+/// **Export** both did for their whole lives.
+///
+/// `Save` had no row at all and routed to `None`; `Export` had a row with no action and a backend that
+/// has existed since Phase 8. **Both are counted as wired by the other gate now**, and neither of them
+/// would have been caught by it.
+#[test]
+fn the_file_menu_rows_reach_their_actions() {
+    let file = menus::MENUS[0];
+    let row = |label: &str| {
+        file.iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("File has no {label} row"))
+            .action
+    };
+
+    // The two rows, named, and what each one reaches.
+    assert_eq!(
+        row("Save"),
+        Some(Action::Save),
+        "File > Save carries the action -- it did not have a row until the commit was wired"
+    );
+    assert!(
+        action_command(row("Save").expect("carries")).is_some(),
+        "**and the save routes to a command**, which is the half the count gate cannot see"
+    );
+    assert_eq!(
+        row("Export"),
+        Some(Action::Export),
+        "File > Export carries the action -- it was `plain(\"Export\")` beside a working backend"
+    );
+
+    // **And through the session, with the bytes on disk.** `apply_action` is what actually runs when
+    // the row is clicked, and it sets a request rather than exporting inline, because the sinks live
+    // in `SessionContext` where `&mut self` cannot reach them.
+    let html = scratch("export-from-menu.html");
+    let mut s = session();
+    let mut sinks = [sink(holonomy_export::Format::Html, &html)];
+    let before = s.stats.exports;
+
+    s.apply_action(Action::Export).expect("the row's action");
+    assert!(
+        s.export_requested(),
+        "**the row set a request**, so `run_with_io` performs it against the boot-opened sinks"
+    );
+    assert_eq!(
+        s.export_all(&mut sinks),
+        1,
+        "and the request performs: one sink, one export"
+    );
+    assert_eq!(s.stats.exports, before + 1, "counted as an export");
+
+    let wrote = std::fs::read_to_string(&html).expect("read the exported file");
+    assert!(
+        wrote.contains("alpha") && wrote.contains("bravo"),
+        "**and the file holds the session's document** -- this row wrote nothing at all before, and \
+         counted as wired while doing it. Got {} bytes",
+        wrote.len()
+    );
+    let _ = std::fs::remove_file(&html);
+}
+
+/// **No sinks is a no-op, not a failure.** It is what every gate in this file drives, and a menu row
+/// that returns an error when there is nowhere to write would make the default configuration look
+/// broken.
+#[test]
+fn exporting_with_no_sinks_writes_nothing_and_is_not_an_error() {
+    let mut s = session();
+    s.apply_action(Action::Export).expect("the row's action");
+    assert_eq!(s.export_all(&mut []), 0, "nothing to write to");
+    assert_eq!(s.stats.exports, 0, "and nothing was exported");
+    assert_eq!(s.stats.export_failures, 0, "and nothing failed: there was nowhere to fail");
 }

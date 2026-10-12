@@ -4734,3 +4734,202 @@ the 50-entry allowlist.
   interpreter is needed, §2.9.2.
 - **SVG, JPEG, WebP** — one decoder, §2.9.5.
 - **Variable-length tables** — eight columns, a compile-time constant, §2.9 9A.
+---
+
+# Part 41 — making the PRD match the app, 2026-10-12
+
+## What this part is
+
+The brief was *"work until the PRD matches the real app"*, which has two halves that pull against
+each other: **build what the PRD names and the app lacks**, and **amend the PRD where the app is right
+and the document is stale**. Everything below is one or the other, and each entry says which.
+
+## A. Requirements that had no code at all
+
+| requirement | what it was | what it is now | gate |
+| --- | --- | --- | --- |
+| **P0.1 save** | `state.dirty` **had no writer anywhere in the workspace** — the status bar said *saved*, always | `after_edit` sets it; `drive()` commits before repaint and export | `crates/holonomy/tests/session_save.rs`, 7 tests |
+| **P0.2 export from the UI** | `Session::export` implemented and gated; the only routes were two CLI flags and end-of-session | `File > Export` and `File > Save` rows, both wired through `run_with_io` | `tests/actions.rs`, 11 tests |
+| **FR-4.5 KDF scrub** | `argon2id_k_int` and the passphrase survived the derivation | `hash_password_into_with_memory` over a named scrub buffer; `k_int`, `seed`, `k_root` and `okm` zeroized into `RootMaterial` behind a `compiler_fence` | `envelope/tests.rs`, 3 tests |
+| **FR-4.8 page-locked ring** | `Ring::new` did `alloc_zeroed` — 16-byte aligned, swap-eligible, dump-eligible | three `SecureBlock`s: `mmap`, `mlock`, `MADV_DONTDUMP`, guard pages. **Refuses to open rather than degrading** | `the_ring_buffer_is_page_locked` |
+| **FR-5 teardown** | `main.rs` called `teardown_and_exit(-1)` with an **empty plan** | `fsync` then `close` for every descriptor the boot opened; SSE2 and caller-saved registers zeroed after the report | 41 + 15 jail gates green |
+| **FR-3.5 the wait** | `run_with_io` was `while let Some(e) = source.next_event()` over an `O_NONBLOCK` device — **so an idle keyboard ended the session** | `InputSource::wait`, `epoll_wait` on the evdev fd, indefinite timeout | `tests/event_wait.rs`, 5 tests |
+| **FR-4.9 duress** | `P_B` resolved a slot of chaff and the open failed — **correct, and useless under duress** | `create_with_duress` writes a second framed payload at `Ω_B`; overlap refused | `gate::duress`, 5 tests |
+
+### FR-3.5 was worse than a spin, and the allowlist said so
+
+The sealed loop did not burn a core waiting for input — **it refused to wait at all**.
+`InputSource::next_event` documents `None` as *a closed stream*, and `ScriptedInputSource` honours
+that; `EvdevSource` could not express "quiet right now", so it returned `None`, and the loop read that
+as end-of-stream. **The sealed editor ran until the user stopped typing and then quit**, with its work
+committed and nothing to say why.
+
+Every scripted gate missed it, because a script *does* end, which is what `None` means. And the seccomp
+allowlist has reserved `epoll_create1`, `epoll_ctl`, `epoll_wait` and `epoll_pwait` since Phase 2, with
+rationale naming *"the session loop"* and *"the container fd, the DRM fd and the evdev fd"* — **and no
+code called any of them.**
+
+`InputSource::wait` defaults to `Wait::Ended`, so every existing source is unchanged and a scripted
+driver still exits when its script runs out. A default of `Ready` would have turned forty-odd gates into
+infinite loops.
+
+### NFR-1.2 wins over the caret blink, and that was a choice
+
+NFR-1.2 is *"≤ 0.001 %, process blocked in `epoll_wait`"*. `Blink` counts **frames**, and
+`DEFAULT_PERIOD = 30` is documented as *half a second at 60 fps* — so a blink that stays on schedule
+needs the loop to iterate 60 times a second, which is ~0.12 %, 120× the budget. **The two cannot both
+hold.** The budget won; `EVENT_WAIT_MS = -1`. The sealed caret therefore holds its last phase while the
+session is idle and advances on every keystroke.
+
+The fix is to drive `Blink` from `CLOCK_MONOTONIC` — already allowlisted, no new syscall — and it is
+not in this part because `Blink`'s frame counter is the most-defended invariant in
+`holonomy-render` and has a gate asserting which frame flips.
+
+### FR-4.9 is implemented two-thirds, and the third is named
+
+`Ω` derivation and the refusal of the wrong passphrase have been gated since Phase 3. What was missing
+was a decoy *to find*. Three clauses:
+
+1. `P_A` mounts the primary, `P_B` mounts the decoy, neither reads the other — **implemented.**
+2. "Without altering bits at Ω_A" — **implemented and gated as a round trip.** Overlapping placements
+   are refused at write time with `ContainerError::DuressOverlap` carrying both ranges, because writing
+   anyway would destroy the document duress exists to protect and the operator would find out when the
+   real file no longer opens.
+3. **"Realistic dummy modification timestamps" is not implemented.** `MasterFrame` carries no timestamp
+   field and the container is written through `O_DIRECT`, so the only timestamp that exists is the
+   file's own `mtime` — a property of the single file, identical whichever payload is open. Adding a
+   frame field would be a format change to close a requirement the format does not otherwise present.
+
+The cache wipe belongs to the session, not the container, and is **a no-op on a cold boot by
+construction**: the primary was never resident in this process.
+
+## B. Commands that decoded and did nothing
+
+| key | was | now | gate |
+| --- | --- | --- | --- |
+| `Home` | `caret_to(0)` — the **document** start | start of the caret's line | `tests/live_keys.rs` |
+| `End` | `caret_to(text_len)` — the document end | after the last character of the line, newline-aware | 9 tests |
+| `Shift+Home`/`End` | agreed with the defect on purpose | agree with the fix | |
+| `PageUp`/`PageDown` | a bare `{}` | one screenful, `rows − 1`, caret and scroll together | |
+| `Escape` | a bare `{}` | dismisses the open popup | |
+| `Ctrl+C/X/V` | **asserted to be swallowed** by the keymap's own test | `Editor`'s internal yank buffer; three menu rows wired | `tests/clipboard.rs`, 8 tests |
+| `File > Save` | **no menu row carried `Action::Save`** | row added | `tests/actions.rs` |
+
+`Home` was invisibly right on line 0, which is where every gate that ever pressed it put the caret, so
+`tests/live_keys.rs` has a test for the accident itself.
+
+The clipboard is **internal** because no platform clipboard is reachable: `unshare(CLONE_NEWNET)`,
+no `openat` on a user path, and `release_artifact.rs` fails the build if any X11 client reaches a
+default-features binary. It is reserved once at construction (`YANK_CAPACITY = 4096`) because
+`session_no_alloc.rs` types 1,000 letters and never presses a clipboard key.
+
+## C. Four gates that were red on an unmodified tree
+
+Not one of them was a code defect. **Each compared against a constant that belongs to an optimised
+build and was run in a debug one by `cargo test`**, which does not know the difference. Verified
+against a pristine tree before any of this work began.
+
+| gate | debug | release | recorded |
+| --- | --- | --- | --- |
+| `write_through_cost.rs` — 64 KiB XChaCha20-Poly1305 seal | 28,503 µs | 106 µs | ~120–180 µs |
+| `latency.rs` — single-leaf insert | 1,106 ns | single-digit ns | — |
+| `session_latency.rs` — keystroke at 3.1 MiB | 2,495 µs | 207 µs | 176–419 µs |
+| `release_artifact.rs` / `session_rss_sparse.rs` | 28,561,776 B; RSS inverted | 1,576,248 B; sparse 2,719,744 < resident 3,203,072 | 1,441,912 B; sparse 2,682,880 < resident 3,227,648 |
+
+**The fix in every case is a skip that prints why it declined, not a raised ceiling.** A ceiling set to
+the debug number is a gate that passes against a cipher 270× slower than the one that ships, or a
+binary nobody ships — a report that the cost is bounded, sent from a build where nothing about it is.
+
+Two of them had a second defect underneath:
+
+* `release_artifact.rs`'s `binary()` walks up from `current_exe`, so **a debug run measured the debug
+  binary and printed "the release binary is 28,561,776 bytes."** That is not a near-miss; it is a false
+  statement about the artefact the gate exists to vouch for.
+* `session_rss_sparse.rs` holds a **ratchet**, and a ratchet evaluated against a build with a megabyte
+  more resident code reports a number that is wrong in the pessimistic direction on every host, always.
+
+`latency.rs` also had its structural claim **restated rather than loosened**: `insert_byte` was proved
+O(1) by a rate proxy (`per × 1000 < 500 µs`), which is a property of this build. It is now proved by
+comparing per-keystroke cost at 200 KB against 400 KB — **ratio 0.87 in release, 0.95 in debug** — which
+is both profile-independent and strictly harder to pass accidentally: a structure that became linear
+would show a ratio near 2 across a doubling.
+
+`holonomy-container`'s `write_through_cost` run also produced one real (small) finding: `seal_in_place`
+called `getrandom` for a gap that is **empty for every full chunk**. The optimisation is kept, and its
+comment says plainly that **it was not the cause of the 28 ms** — the measurement said otherwise, and
+the comment that claimed otherwise was wrong.
+
+## D. What is still not built
+
+Named so the PRD can be amended rather than left aspirational:
+
+* **FR-5.4** — the 30-second ephemeral XOR scramble. Nothing drives `Rope::leaf_buffers`,
+  `CagrLeaf::scrub` or the `getrandom` allowlist entry. **The design tension is not solved and should be
+  recorded in the PRD:** a masked leaf needs the key to be read, so a lost key is a lost document. That
+  is a data-loss risk introduced by a security feature, and it is the reason this is last and not next.
+* ~~**VDF calibration**~~ — **built 2026-10-12.** `vdf-calibrate` exists; see §F. The constants were
+  deliberately *not* re-pasted, and the reason is measured rather than assumed.
+* **Faulting mutators** — `set_len` happens at eviction rather than at edit, so a sparse document is
+  still read-only past its window.
+* **Editor features** — search, word wrap (truncated, not wrapped), clipboard-free cut/copy are now
+  done; underline, real zoom (needs an atlas rebuild and a budget decision), fonts and headings remain
+  inert menu rows; multi-document tabs absent.
+* **`windowed.rs` `EVENT_WAIT`** — computes `Blink::DEFAULT_PERIOD / 4` = `30 / 4` = **7 ms** while its
+  own comment says *"a blink period of 500 ms divided by four"* = 125 ms. **A factor of eighteen**, from
+  treating a frame count as a millisecond count. Not fixed here: it is behind the `desktop` feature and
+  FR-3.5 is about the sealed path.
+* **Three pre-existing warnings** left alone: `holonomy-x11/src/proto.rs:721-722` (unused `event_x`/`event_y`),
+  `holonomy-container/src/sp800_22.rs:371` (`unused mut`), and `codepoint_count` at
+  `crates/holonomy/src/session.rs:5798`, which has had no caller since it was written.
+
+## F. `vdf-calibrate`: the tool §2.4 names, and why the constants were not pasted
+
+§2.4 has said *"NS_PER_SQUARING is measured by `vdf-calibrate` and re-derived on the target; T is a
+compile-time constant computed from it"* for a phase. **The measurement existed and the tool did
+not** — `modulus::tests::calibrate_ns_per_squaring` does the work and is `#[ignore]`d, inside a test
+module, printing to `stderr` with no value a person can paste.
+
+```text
+cargo run --release -p holonomy-crypto --bin vdf-calibrate
+```
+
+5 samples of 20,000 squarings, median and spread, and the two constants to paste. It **refuses to
+print a paste-ready constant from an unoptimised build and exits non-zero** — at `opt-level = 0` the
+chain measures ~10× slower, and a `T` derived from it is a time-lock costing a tenth of its budget
+with nothing downstream saying so. That is the fifth instance of the profile trap in this tree, and
+the first one where a `build.rs` would have made it *automatic on every build*.
+
+**Not a `build.rs`, and that is the whole reason:** build scripts are compiled unoptimised.
+
+### The constants were left alone, on purpose
+
+| | ns/squaring | note |
+| --- | --- | --- |
+| committed | 2,664 | from the test's documented ~2,657 median on an idle host |
+| measured, run 1 (load 2.4) | 2,981 | **spread 24.4 % — the tool's own warning fired** |
+| measured, run 2 (load 1.1) | 3,168 | spread 8.0 % |
+| **actual cost of `T = 93,843` here** | **282–297 ms** | against a 250 ms budget: **1.13–1.19× over** |
+
+`MEASURED_NS_PER_SQUARING` is deliberately rounded *down*, so a host slower than the one it was taken
+on buys **more** time than the budget — safe, just slower to unlock. It is.
+
+**Pasting today's 3,168 would have cut `T` to 78,914 — a 16 % weaker time-lock**, on the strength of a
+measurement taken on a machine that is not the deployment target. *"Re-derived on the target" means on
+the target.* This host is not it.
+
+### The gate that makes it self-checking
+
+Five existing tests in `vdf_budget.rs` compare `VDF_ITERATIONS` against `MEASURED_NS_PER_SQUARING`, and
+one multiplies one constant by the other — **all self-consistent by construction**, so a committed cost
+that stopped describing any real host would pass all of them. `the_committed_cost_still_describes_this_host`
+measures the chain (release-only, and the fifth profile skip) and asserts the real cost lands in
+**[0.5×, 2.0×]** of the budget. **The 0.5× floor is the one that earns the gate**: underspending by
+more than 2× means `T` is too small, and that is the direction that weakens the time-lock.
+
+## E. Measured, 2026-10-12
+
+* Release binary: **1,578,168 B** against the 2,097,152 B ceiling — 518,984 B of room, static-pie, no
+  X11 markers. PROJECT.md's 1,441,912 B was stale before this part and is superseded by this.
+  The whole of this part — save, export, clipboard, epoll wait, page-locked ring, duress — cost
+  **1,920 bytes**, which is the number worth knowing if the next few parts are larger.
+* Whole workspace: **green**, `cargo test --workspace --no-fail-fast`.

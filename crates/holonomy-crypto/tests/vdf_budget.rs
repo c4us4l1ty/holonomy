@@ -1,4 +1,4 @@
-//! **The VDF iteration count is derived from a measurement, not chosen.** 6 tests.
+//! **The VDF iteration count is derived from a measurement, not chosen.** 7 tests.
 //!
 //! # Why this gate exists
 //!
@@ -19,6 +19,7 @@
 //! | a faster host gets more squarings | [`a_faster_host_gets_strictly_more_squarings`] |
 //! | degenerate inputs are refused, not clamped | [`degenerate_inputs_are_refused_rather_than_clamped`] |
 //! | and the SDK's own arithmetic is consistent | [`the_modulus_agrees_about_what_zero_iterations_means`] |
+//! | **and the constant still describes this host** | [`the_committed_cost_still_describes_this_host`] |
 
 use holonomy_crypto::envelope::{
     vdf_iterations_for, EnvelopeError, TARGET_VDF_MS, VDF_ITERATIONS, MEASURED_NS_PER_SQUARING,
@@ -139,5 +140,97 @@ fn the_modulus_agrees_about_what_zero_iterations_means() {
     assert!(
         holonomy_crypto::modulus::sequential_squarings(&seed, 0).is_err(),
         "the chain itself refuses zero iterations, so a zero T cannot reach it"
+    );
+}
+/// **The constant still describes this host, measured rather than assumed.** 7 tests.
+///
+/// # What the five above could not see
+///
+/// Every one of them compares `VDF_ITERATIONS` against `MEASURED_NS_PER_SQUARING`, and
+/// `the_derived_count_costs_about_the_budget_and_not_more` multiplies one constant by the other.
+/// **Both are self-consistent by construction**, so a committed cost that stopped describing any real
+/// host — a machine three times faster, a CI runner, an ARM target — would pass all five and make
+/// `T` wrong by the same factor.
+///
+/// # Why the band is asymmetric
+///
+/// The security direction is **not spending less than the budget**. `MEASURED_NS_PER_SQUARING` is
+/// deliberately rounded *down*, so on a host slower than the one it was taken on, `T` buys *more*
+/// time than intended — which is safe, just slower to unlock.
+///
+/// Measured on this host on 2026-10-12 with the `vdf-calibrate` tool:
+///
+/// ```text
+/// run 1 (load 2.4): median 2,981 ns, spread 24.4%  -- the tool's own spread warning fired
+/// run 2 (load 1.1): median 3,168 ns, spread  8.0%
+/// committed:         2,664 ns  ->  T = 93,843
+/// actual at 3,168:   297 ms against a 250 ms budget, 1.19x over
+/// ```
+///
+/// **Which is why the committed constants were left alone.** `T` is sized for a host faster than this
+/// one, so the time-lock runs *longer* than its budget here — the safe direction. Pasting 3,168 would
+/// have cut `T` to 78,914, **weakening the time-lock by 16 % on the strength of a measurement taken
+/// on a machine that is not the deployment target.** §2.4 says "re-derived on the target"; this host
+/// is not the target.
+///
+/// **The floor at 0.5× is the one that earns the gate.** Underspending by more than 2× means `T` is
+/// too small and the time-lock is weaker than its budget claims; that is the failure worth catching,
+/// and no constant-only test can catch it.
+#[test]
+fn the_committed_cost_still_describes_this_host() {
+    // **The measurement is release-profile.** A debug build measures this chain roughly ten times
+    // slower, which would put the real cost at ~3,000 ms -- twelve times the budget -- and the gate
+    // would fail for the same reason four others in this tree carried for a phase. Measured on an
+    // unmodified tree before the diagnosis, so it predates any of this.
+    //
+    // cargo test -p holonomy-crypto --release --test vdf_budget
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "skipping: the cost per squaring is a release-profile number (opt-level=0 measures it \
+             ~10x slower, which would report a 12x overspend). Re-run with \
+             `cargo test -p holonomy-crypto --release --test vdf_budget`. `vdf-calibrate` is the \
+             tool that produces this figure for a real build."
+        );
+        return;
+    }
+
+    use holonomy_crypto::bignum::ZERO;
+    use holonomy_crypto::modulus::sequential_squarings;
+    use std::time::Instant;
+
+    let mut seed = ZERO;
+    seed[0] = 0xDEAD_BEEF;
+    // Warm up, for the reason the tool does: the first chain faults pages in and misses icache.
+    sequential_squarings(&seed, 2_000).expect("warm-up");
+
+    // **A short chain relative to `VDF_ITERATIONS`**, because this gate runs in a suite and 93,843
+    // squarings at ~3 us is 300 ms per sample. 20,000 is 64 ms and is the tool's own choice.
+    const ITERS: u64 = 20_000;
+    let t0 = Instant::now();
+    sequential_squarings(&seed, ITERS).expect("chain");
+    let ns = (t0.elapsed().as_nanos() as f64 / ITERS as f64).round() as u64;
+
+    let actual_ms = VDF_ITERATIONS as f64 * ns as f64 / 1e6;
+    let ratio = actual_ms / TARGET_VDF_MS as f64;
+    println!(
+        "VDF_ITERATIONS {VDF_ITERATIONS} at {ns} ns/squaring costs {actual_ms:.0} ms \
+         against a {TARGET_VDF_MS} ms budget ({ratio:.2}x); the constant says \
+         {MEASURED_NS_PER_SQUARING} ns"
+    );
+
+    assert!(
+        ratio >= 0.5,
+        "**{VDF_ITERATIONS} squarings cost {actual_ms:.0} ms here, under half the {TARGET_VDF_MS} ms \
+         budget.** The committed {MEASURED_NS_PER_SQUARING} ns is far below the {ns} ns measured, so \
+         `T` is sized for a host several times faster than this one and the time-lock is weaker than \
+         its budget claims. Re-derive with `vdf-calibrate` on the deployment target."
+    );
+    assert!(
+        ratio <= 2.0,
+        "**{VDF_ITERATIONS} squarings cost {actual_ms:.0} ms here, more than twice the \
+         {TARGET_VDF_MS} ms budget.** The committed {MEASURED_NS_PER_SQUARING} ns is well above the \
+         {ns} ns measured. Overspending is the safe direction -- a slower unlock is not a weaker \
+         time-lock -- but 2x means unlock latency is now a usability problem and the constant is \
+         stale."
     );
 }

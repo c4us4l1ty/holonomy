@@ -43,6 +43,12 @@ pub struct Args {
     pub width: u32,
     /// Panel height.
     pub height: u32,
+    /// **Whether `--width` and `--height` were given, part 36.**
+    ///
+    /// **Recorded because a default is not a request.** The window driver sizes itself to the screen
+    /// when the user has not asked for a size, and the only way to tell "did not ask" from "asked for
+    /// the default" is to remember whether the flag appeared.
+    pub sized: bool,
     /// Zoom, as a percentage.
     pub zoom: u32,
     /// **Pixels per em the faces are rasterised at.** This is the type size, and it is the one that
@@ -71,6 +77,7 @@ impl Default for Args {
             exports: Vec::new(),
             width: 1600,
             height: 1000,
+            sized: false,
             zoom: 100,
             // **CORRECTION, part 36: 20, not 24.**
             //
@@ -196,7 +203,9 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --export-html <path> Write the document as HTML on exit.
   --export-pdf <path>  Write the document as a PDF on exit.
   --script <path>      Replay a scripted input_event stream instead of a keyboard.
-  --width N            Panel width in pixels (default 1600).
+  --width N            Panel width in pixels. Unset, the window is sized
+                         to four fifths of the screen; the default 1600 is
+                         what the headless paths use.
   --height N           Panel height in pixels (default 1000).
                          Wider than 1280 grows the text column up to 100 columns
                          and then stops; past that the extra width is desk. Part 27.
@@ -244,8 +253,14 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 "--script" => out.script = Some(PathBuf::from(value()?)),
                 "--export-html" => out.push_export(Format::Html, PathBuf::from(value()?))?,
                 "--export-pdf" => out.push_export(Format::Pdf, PathBuf::from(value()?))?,
-                "--width" => out.width = parse_u32(&flag, &value()?)?,
-                "--height" => out.height = parse_u32(&flag, &value()?)?,
+                "--width" => {
+                    out.width = parse_u32(&flag, &value()?)?;
+                    out.sized = true;
+                }
+                "--height" => {
+                    out.height = parse_u32(&flag, &value()?)?;
+                    out.sized = true;
+                }
                 "--ppem" => out.ppem = parse_u32(&flag, &value()?)? as u16,
                 "--zoom" => out.zoom = parse_u32(&flag, &value()?)?,
                 "--headless" => out.headless = true,

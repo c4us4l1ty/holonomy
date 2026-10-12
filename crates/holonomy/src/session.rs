@@ -186,8 +186,43 @@ pub struct SessionStats {
     pub pixels: u64,
     /// Exports performed.
     pub exports: u32,
+    /// **Copies that put something in the yank buffer.**
+    ///
+    /// `copies + cuts` is every time the buffer changed; `clipboard_noops` is every time a clipboard
+    /// key was pressed with nothing to act on. **The second number is the interesting one** — a
+    /// product where most `Ctrl+C` presses are no-ops has a selection problem, and without the counter
+    /// that is invisible.
+    pub copies: u32,
+    /// Cuts that removed a selection and put it in the yank buffer.
+    pub cuts: u32,
+    /// Pastes that inserted at least one byte.
+    pub pastes: u32,
+    /// Clipboard keystrokes that had nothing to do — no selection, or an empty yank buffer.
+    pub clipboard_noops: u32,
+    /// Export attempts that failed.
+    ///
+    /// Kept apart from `exports` because the two are otherwise indistinguishable from outside: a menu
+    /// row that reported nothing either way is indistinguishable from one that works.
+    pub export_failures: u32,
     /// `Ctrl+S` presses seen.
+    ///
+    /// **Requests, not saves.** `saves` counts the key; `committed` counts the attempts that finished
+    /// and `commit_failures` the ones that did not. Before the save was wired they were the same number
+    /// by construction, because nothing else could happen.
     pub saves: u32,
+    /// Commits that completed. Phase 15.
+    ///
+    /// `committed >= saves` is **not** an invariant and `saves > committed` is not a bug: a `Ctrl+S` on
+    /// a session with no container behind it reports `committed` too, with `bytes_committed` of zero.
+    pub committed: u32,
+    /// Commit attempts that failed.
+    ///
+    /// Kept apart from `committed` because the difference is invisible from outside — both leave the
+    /// same pixels on screen — and a disk that is briefly full is exactly the case a number should make
+    /// visible.
+    pub commit_failures: u32,
+    /// Bytes handed to the container across all commits.
+    pub bytes_committed: u64,
     /// Commands the keymap produced that the session had no action for.
     ///
     /// Counted rather than ignored: a keymap that starts producing commands the session does not
@@ -470,6 +505,24 @@ pub struct Session<'a> {
     /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
     /// discover what one `set` already knows.
     tables_shape_dirty: bool,
+    /// A commit was asked for and has not been performed yet.
+    ///
+    /// **Why a flag and not a direct call.** `apply` is `pub` and 40-odd gates call it directly, and it
+    /// takes no `LeafSource` — giving it one would touch every one of them to wire a save that only the
+    /// loop can perform, since a commit needs the container and the editor mutably at once and the
+    /// container is not reachable from `&mut self`. So `apply` records the *request* and [`run_with`] —
+    /// which holds both — performs it. The flag is cleared by `mem::take` before the work, so a commit
+    /// that fails leaves no request queued behind it: the document stays dirty and the next `Ctrl+S` is
+    /// a fresh attempt rather than a retry of one that already failed.
+    save_requested: bool,
+    /// An export was asked for and has not been performed yet.
+    ///
+    /// **The same shape as [`save_requested`](Self::save_requested), and for the same reason**, but
+    /// with one difference that is worth naming: a commit needs only the editor and a byte source,
+    /// which `handle_event_with` is already given, while **an export needs the sinks**, and those are
+    /// opened at boot by `main.rs` and live in `SessionContext`. So the request is drained by
+    /// [`run_with_io`](Self::run_with_io), which is handed them.
+    export_requested: bool,
     /// Line geometry in document byte coordinates, for `O(log n)` line lookup. Phase 11.
     ///
     /// Replaces the newline-counting scans in [`Session::line_start`] and [`Session::line_index`], which
@@ -806,6 +859,8 @@ impl<'a> Session<'a> {
             damage: DamageRect::EMPTY,
             active_cell: None,
             tables_shape_dirty: false,
+            save_requested: false,
+            export_requested: false,
             // Built from the document; see the comment at the `DocLines::build` call above.
             lines,
             manifest,
@@ -1118,6 +1173,33 @@ impl<'a> Session<'a> {
         self.editor.text_len() as u32
     }
 
+    /// Select `[from, to)`, which is what a drag does.
+    ///
+    /// **A named accessor rather than `editor_mut().select(..)` at each call site**, because the
+    /// clipboard gates need to set up a selection the way a user would and `editor_mut` is documented
+    /// as an escape hatch. `Editor::select` alone is *not* enough either: a selection made through it
+    /// never reaches `reconcile_caret`, so the paint path would draw no highlight for a selection the
+    /// model holds — **which is the same "two places state is written" defect part 22 found in
+    /// `caret_line`, in a different field.**
+    pub fn select_range(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
+        self.editor.select(from, to)?;
+        self.reconcile_caret()
+    }
+
+    /// Whether a selection exists, for the clipboard gates and the paint path.
+    pub fn has_selection(&self) -> bool {
+        self.editor.has_selection()
+    }
+
+    /// **How much is in the yank buffer.**
+    ///
+    /// Read-only and public because a copy is otherwise invisible from outside: `Ctrl+C` changes no
+    /// pixels, no document and no status-bar number, so without this there is no way to ask whether
+    /// it did anything.
+    pub fn clipboard_len(&self) -> usize {
+        self.editor.yanked().len()
+    }
+
     /// The editor, mutably — for a gate that needs to drive the document directly.
     ///
     /// # This is an escape hatch, and it is narrow on purpose
@@ -1368,13 +1450,46 @@ impl<'a> Session<'a> {
         bytes: &mut dyn holonomy_text::LeafSource,
         source: &mut dyn InputSource,
     ) -> Result<Exit, SessionError> {
+        self.run_with_io(bytes, source, &mut [])
+    }
+
+    /// [`run_with`](Self::run_with) with the boot-opened export sinks, so **File > Export does
+    /// something**.
+    ///
+    /// # Why a separate method rather than a third parameter
+    ///
+    /// `run_with` has 40-odd gate call sites and `run` delegates to it. **Adding a parameter would put
+    /// an `&mut []` at every one of them** to describe a capability most of them have no use for — and
+    /// a gate that silently exports to nothing because it passed an empty slice is a gate that is
+    /// testing something other than what it says.
+    ///
+    /// The name says what is added rather than what it is: `_io` for the pre-opened **i/o** the session
+    /// does not own. **The jail has no `openat` on a user path**, so these files were opened before
+    /// sealing and there is no way for the session to create one; this is the shape that constraint
+    /// forces, not a design preference.
+    ///
+    /// # What the sinks are
+    ///
+    /// `--export-html out.html` and `--export-pdf out.pdf` at boot. An empty slice — the default, and
+    /// what every gate passes — means **Export is a no-op rather than an error**, which is the same
+    /// rule `LeafSource::commit_document`'s default follows and for the same reason: "there is nowhere
+    /// to write" is a fact about the configuration, not a failure.
+    pub fn run_with_io(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        source: &mut dyn InputSource,
+        sinks: &mut [ExportSink],
+    ) -> Result<Exit, SessionError> {
         // **The loop branches on the event's kind, and that is the whole of what part 20 changed
         // here.** A key goes to `handle_event_with`, which folds the modifier state and dispatches
         // through the keymap. A pointer event goes to `handle_pointer`, which hit-tests against the
         // chrome. **They share the `tick_with` afterwards**, because a hover highlight and a keystroke
         // both need the frame's damage drained and both need the blink advanced -- which is the
         // existing reason that call is outside the branch and not inside each arm.
-        while let Some(event) = source.next_event().map_err(session_io)? {
+        loop {
+            let Some(event) = self.next_or_wait(source, bytes)? else {
+                break;
+            };
             match event {
                 holonomy_input::Event::Key(k) => {
                     if let Some(exit) = self.handle_event_with(bytes, k)? {
@@ -1387,8 +1502,209 @@ impl<'a> Session<'a> {
             }
             // The blink may want a repaint even with no input.
             self.tick_with(bytes)?;
+            // **The export is drained here rather than in `apply` for the reason the commit is:**
+            // the sinks live in `SessionContext` and are not reachable from `&mut self`. And it is
+            // drained *after* the commit above rather than instead of it — **a user who hits Export
+            // with unsaved work gets both**, and gets the file to match what is on screen.
+            if std::mem::take(&mut self.export_requested) {
+                self.export_all(sinks);
+            }
         }
         Ok(Exit::StreamEnded)
+    }
+
+    /// **How long [`run_with_io`](Self::run_with_io) waits for input.** FR-3.5, NFR-1.2.
+    ///
+    /// # `-1` is indefinite, and that is what NFR-1.2 asks for
+    ///
+    /// ```text
+    /// | idle CPU | NFR-1.2 | <= 0.001%, process blocked in `epoll_wait` |
+    /// ```
+    ///
+    /// **Half of that sentence is a measurement and half is a mechanism, and the mechanism is this
+    /// constant.** `epoll_wait`'s negative timeout blocks in the kernel until a descriptor is ready,
+    /// which is the only way a process reaches 0.001 % of a core: any periodic wake-up at all is a
+    /// floor, and a 100 ms tick is already ~0.02 %, twenty times the budget.
+    ///
+    /// `clock_nanosleep` is allowlisted for a "frame pacer", so a timer was available. **It is not
+    /// used**, and the reason is the number above rather than a preference for sleeping.
+    ///
+    /// # What it costs: the caret does not blink at idle, and that is not free
+    ///
+    /// [`holonomy_render::chrome::Blink`] counts **frames**, and its `DEFAULT_PERIOD` of 30 is
+    /// documented as *"half a second at 60 fps"*. **A frame is a loop iteration here**, so a caret
+    /// that blinks on schedule needs the loop to iterate 60 times a second — which is 0.12 % of a
+    /// core, a hundred and twenty times the budget, and the spin NFR-1.2 exists to forbid.
+    ///
+    /// **The two requirements cannot both be met by this loop as it is written, and picking the
+    /// budget is picking the requirement.** The budget wins, because a caret that stops blinking when
+    /// nobody is typing is invisible to everyone and a laptop that spins is not.
+    ///
+    /// **The consequence is recorded rather than discovered later:** the sealed session's caret holds
+    /// its last phase while the session is idle, and it advances normally on every keystroke, because
+    /// each event is followed by a `tick_with`.
+    ///
+    /// ### The fix, and why it is not in this change
+    ///
+    /// `Blink` should be driven by `CLOCK_MONOTONIC` rather than by iteration count — and the allowlist
+    /// already permits `clock_gettime`, so no new syscall is needed. That is a change to
+    /// `holonomy-render`'s most-defended invariant (its docs argue for the frame counter at length,
+    /// and a gate asserts which frame flips), so it wants its own change with its own gate rather than
+    /// arriving inside a loop fix.
+    ///
+    /// ### And the driver this one does not match
+    ///
+    /// `windowed.rs` waits [`EVENT_WAIT`](crate::windowed::EVENT_WAIT) instead, and its caret does blink
+    /// at idle. **That driver computes `Blink::DEFAULT_PERIOD / 4` = `30 / 4` = 7 ms**, treating a
+    /// frame count as a millisecond count, while its own comment says *"a blink period of 500 ms
+    /// divided by four"* — which would be 125 ms. **The comment describes the design and the code does
+    /// something else by a factor of eighteen.** Not fixed here; it is in
+    /// `crates/holonomy/src/windowed.rs` behind the `desktop` feature, and the sealed path is the one
+    /// FR-3.5 is about.
+    pub const EVENT_WAIT_MS: i32 = -1;
+
+    /// **The next event, or `None` when the stream really has ended.**
+    ///
+    /// # Why this is not `source.next_event()` in the loop condition
+    ///
+    /// It was, and it is the defect this whole method exists for.
+    ///
+    /// [`InputSource::next_event`] documents `None` as *a closed stream*, and `ScriptedInputSource`
+    /// honours that. **`EvdevSource` could not express "quiet right now"**, because the device is
+    /// `O_NONBLOCK` and a read on a quiet node returns `EAGAIN`, which it mapped to `None`. The loop
+    /// read `None` as end-of-stream and **returned `Exit::StreamEnded`** — so the sealed editor ran
+    /// until the user stopped typing, and then quit, silently, with its unsaved work committed and
+    /// nothing to say why.
+    ///
+    /// That is NFR-1.2's idle-CPU requirement failing in the *other* direction from how it reads: the
+    /// loop did not burn a core waiting for input, it refused to wait at all.
+    ///
+    /// # The three cases
+    ///
+    /// * an event — returned;
+    /// * nothing, and the source **can wait** — `wait` blocks up to [`EVENT_WAIT_MS`], and the loop
+    ///   ticks (the blink may be due) and comes back;
+    /// * nothing, and the source says it is over — `None`.
+    fn next_or_wait(
+        &mut self,
+        source: &mut dyn InputSource,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<Option<holonomy_input::Event>, SessionError> {
+        if let Some(event) = source.next_event().map_err(session_io)? {
+            return Ok(Some(event));
+        }
+        match source.wait(Self::EVENT_WAIT_MS).map_err(session_io)? {
+            holonomy_input::Wait::Ended => Ok(None),
+            holonomy_input::Wait::Ready => {
+                // **A spurious wake-up, or a signal.** `wait` only returns without a descriptor
+                // being ready on `EINTR` or a timeout, and with [`EVENT_WAIT_MS`] negative there is
+                // no timeout — so this is a signal, and the tick is the right answer to one: the
+                // signal may have invalidated damage the last paint recorded.
+                self.tick_with(bytes)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Write the document to every sink in `sinks`, reporting how many were written.
+    ///
+    /// **An empty slice is a no-op, not a failure.** It is the default for every gate, and a gate
+    /// driving a session with no export configured must not see an error from a menu row.
+    ///
+    /// **A failing sink does not stop the others.** A read-only filesystem on one path says nothing
+    /// about a second destination, and the alternative — abort on the first — turns two independent
+    /// exports into one that succeeds or one that does not exist.
+    ///
+    /// # The export happens after a commit, and never before
+    ///
+    /// An exported file is a copy of what is in memory, whether or not it is on disk. **Exporting
+    /// first and committing second would produce a file that is one revision behind the container**, and
+    /// nothing in either artefact would say so.
+    pub fn export_all(&mut self, sinks: &mut [ExportSink]) -> usize {
+        let mut written = 0usize;
+        for sink in sinks.iter_mut() {
+            match self.export(sink, "holonomy") {
+                Ok(report) => {
+                    written += 1;
+                    eprintln!(
+                        "holonomy: exported {} bytes of {} to {}",
+                        report.bytes,
+                        holonomy_export::Format::extension(sink.format),
+                        sink.path
+                    );
+                }
+                Err(e) => {
+                    eprintln!("holonomy: export to {} failed: {e}", sink.path);
+                    self.stats.export_failures += 1;
+                }
+            }
+        }
+        written
+    }
+
+    /// Whether a commit has been asked for and not yet performed.
+    ///
+    /// **A reader, not a writer, and that is the point.** `apply` sets the request and
+    /// [`handle_event_with`](Self::handle_event_with) clears it; nothing else may. A gate can therefore
+    /// ask "did the menu row reach the same place the key does" **without performing a commit**, which
+    /// is what makes that question answerable at all — a test that had to save to observe the save
+    /// could not tell a routed request from a routed-and-completed one.
+    pub fn save_requested(&self) -> bool {
+        self.save_requested
+    }
+
+    /// Whether an export has been asked for and not yet performed.
+    ///
+    /// **The export twin of [`save_requested`](Self::save_requested)**, and a reader for the same
+    /// reason: the sinks are outside the session, so the row can only set a request, and a gate that
+    /// has to perform an export to observe that a row asked for one is testing the wrong half.
+    pub fn export_requested(&self) -> bool {
+        self.export_requested
+    }
+
+    /// Write the document to `source` and report the outcome.
+    ///
+    /// # What `0` means, and why it is not a failure
+    ///
+    /// A source that does not own the document returns `Ok(0)` — a `NoSource` session, or an editor
+    /// with no container behind it. **Comparing against `editor.text_len()` is how a caller tells a
+    /// save from a no-op**, which is exactly what the empty-document case needs: pressing `Ctrl+S` on
+    /// a session with nothing behind it must not be an error.
+    ///
+    /// # The dirty flag is cleared only on a real write
+    ///
+    /// A failed commit leaves `state.dirty` set, so the status bar keeps showing unsaved work — which is
+    /// the whole value of the flag. **Clearing it unconditionally would make a failed save look like a
+    /// successful one**, and this is the only place that distinction is visible: the bytes are gone from
+    /// the screen either way.
+    ///
+    /// # It reports rather than returns
+    ///
+    /// A commit failure is not a `SessionError`. `Ctrl+S` is a background action with no caller waiting
+    /// on a value, and propagating it would abort a session over a disk that is briefly full. The
+    /// message goes to stderr — the channel every other boot-time diagnostic uses — and the counts land
+    /// in [`SessionStats`] where a gate can read them.
+    pub fn commit_to(&mut self, source: &mut dyn holonomy_text::LeafSource) -> usize {
+        let want = self.editor.text_len() as usize;
+        match source.commit_document(&mut self.editor) {
+            Ok(written) => {
+                if written > 0 {
+                    self.state.dirty = false;
+                }
+                self.stats.committed += 1;
+                self.stats.bytes_committed += written as u64;
+                written
+            }
+            Err(_) => {
+                // **Reported, not counted as a save.** `stats.saves` counts requests; this counts
+                // attempts that failed, which is a different number and the one worth trending.
+                self.stats.commit_failures += 1;
+                eprintln!(
+                    "holonomy: the document could not be written ({want} bytes); it is still unsaved"
+                );
+                0
+            }
+        }
     }
 
     /// Fold one pointer event into the chrome and act on it.
@@ -2360,6 +2676,15 @@ impl<'a> Session<'a> {
     ) -> Result<(), SessionError> {
         use holonomy_render::menus::Action;
         match action {
+            Action::Export => {
+                // **A request, like the save, and for the same structural reason**: the sinks are in
+                // `SessionContext` and are not reachable from `&mut self`. `run_with_io` holds both.
+                self.export_requested = true;
+                // **`pointer_chrome`, because nothing on screen changed.** An export writes files and
+                // moves no pixel — and counting it as a command would claim the document changed, which
+                // is the same mistake part 23 corrected for `SetZoom`.
+                self.stats.pointer_chrome += 1;
+            }
             Action::SetZoom(pct) => {
                 self.set_zoom(pct);
                 // **`pointer_chrome`, not `pointer_commands`.** Part 21 put it here, and this is the
@@ -2557,6 +2882,20 @@ impl<'a> Session<'a> {
         }
         self.apply(command)?;
         self.tick_with(bytes)?;
+        // **The commit is drained here and not inside `apply`.**
+        //
+        // `apply` is the dispatcher and is `pub`, and 40-odd gates call it with no byte source. A commit
+        // needs `&mut dyn LeafSource` *and* `&mut self.editor` at the same time, and the container is
+        // not reachable from `&mut self` at all. Here both exist — and **this is the only function both
+        // product drivers share**, `run_with` for the sealed evdev loop and `windowed.rs` for the live
+        // X11 window, so draining here rather than in either loop is what makes `Ctrl+S` work in both.
+        //
+        // `mem::take` before the work, so a commit that fails leaves the document dirty and the next
+        // `Ctrl+S` a fresh attempt rather than a retry of one that has already failed.
+        if self.save_requested {
+            self.save_requested = false;
+            self.commit_to(bytes);
+        }
         Ok(None)
     }
 
@@ -2633,8 +2972,21 @@ impl<'a> Session<'a> {
             Command::Right => self.move_caret(1)?,
             Command::Up => self.move_line(-1)?,
             Command::Down => self.move_line(1)?,
-            Command::Home => self.caret_to(0)?,
-            Command::End => self.caret_to(self.editor.text_len())?,
+            // **Home and End are line bounds.** They were `caret_to(0)` and `caret_to(text_len)` -- the
+            // *document* bounds -- for the whole of the file's life, and `SelectHome`/`SelectEnd`
+            // agreed with them on purpose so that a Shift+Home would not land somewhere else.
+            //
+            // `Home` was already right by accident, because `caret_to(0)` and "the start of the
+            // caret's line" coincide **on line 0**, which is where every gate that ever pressed it
+            // put the caret. `End` had no such accident.
+            Command::Home => {
+                let at = self.line_start(self.editor.caret() as usize) as u32;
+                self.caret_to(at as usize)?;
+            }
+            Command::End => {
+                let at = self.line_end_offset(self.editor.caret() as usize) as u32;
+                self.caret_to(at as usize)?;
+            }
             // --- Selection. Part 28.
             //
             // **Each one is the plain command with `extend` set, and none of them is a new kind of
@@ -2654,20 +3006,51 @@ impl<'a> Session<'a> {
             // going somewhere different from Home would be the second wrong thing**, and the honest fix
             // is to change both in one part with their own gate. Recorded in PROJECT.md, not fixed
             // here, because it is a behaviour change with no bearing on selection.
-            Command::SelectHome => self.extend_to(0)?,
-            Command::SelectEnd => self.extend_to(self.editor.text_len() as u32)?,
-            Command::PageUp
-            | Command::PageDown
-            | Command::Escape
-            | Command::ZoomIn
+            // **And the shift variants now agree with them because both sides moved.** They were left
+            // "agreeing with the defect rather than compounding it" -- a decision part 28 recorded
+            // as *"left for a part of its own."* This is that part, and it is the only reason the fix
+            // is two lines rather than four: a Shift+Home that went somewhere different from Home
+            // would be the second wrong thing.
+            Command::SelectHome => {
+                let at = self.line_start(self.editor.caret() as usize) as u32;
+                self.extend_to(at)?;
+            }
+            Command::SelectEnd => {
+                let at = self.line_end_offset(self.editor.caret() as usize) as u32;
+                self.extend_to(at)?;
+            }
+            // **PageUp and PageDown now move.** They decoded from the keymap and landed in a bare
+            // `{}` for the whole of the file's life -- a key that decodes and then vanishes is the
+            // hardest kind of nothing to notice, because the keymap test passes, the command exists,
+            // and the window ignores you.
+            Command::PageUp => self.page_by_lines(-1)?,
+            Command::PageDown => self.page_by_lines(1)?,
+            // **Escape dismisses the open popup, and otherwise does nothing.** It is a keyboard
+            // user's only route to the same thing a click outside the menu does, and the grab means
+            // every subsequent click is swallowed by the popup it should have dismissed.
+            //
+            // **It does not clear the selection.** A selection is not a transient mode and Escape is
+            // not its conventional dismissal key in every editor; making it do both would be a
+            // behaviour change that no menu item announces. One meaning per key is the rule this
+            // file keeps.
+            Command::Escape => {
+                if self.state.open.is_some() {
+                    self.state.open = None;
+                    self.state.hover = None;
+                    self.damage = self.chrome.full_damage();
+                }
+            }
+            Command::ZoomIn
             | Command::ZoomOut
             | Command::ZoomReset => {}
             Command::Hotkey(Hotkey::Undo) => self.undo()?,
             Command::Hotkey(Hotkey::Redo) => self.redo()?,
             Command::Hotkey(Hotkey::Save) => {
-                // Ctrl+S is a *request*: committing is the container's business, and the session has
-                // no container. Counted so the caller can see it happened.
+                // Ctrl+S is a *request*. Performing it needs the container and the editor mutably at
+                // once, and the container is not reachable from `&mut self` — so this records the
+                // request and `run_with`, which holds both, does the work. See `save_requested`.
                 self.stats.saves += 1;
+                self.save_requested = true;
             }
             Command::Hotkey(Hotkey::InsertMath) => {
                 self.insert_math()?;
@@ -2679,6 +3062,62 @@ impl<'a> Session<'a> {
                 // 3 by 3: the directive's default, and the shape that divides an 80-column measure
                 // into three readable columns of 23 with the borders and padding accounted for.
                 self.insert_table(3, 3)?;
+            }
+            // **The clipboard.** `Copy` and `Cut` differ only in whether the selection is also
+            // deleted, which is why they are one `Editor` method each rather than a flag here: the
+            // question "does this also remove it" is about the document, not about the keystroke.
+            //
+            // **A copy with no selection is not an error and not an edit.** `copy_selection` returns
+            // `Ok(false)`, counted as a no-op, and the selection is untouched — which is what makes
+            // `Ctrl+C` harmless to press with nothing selected, as every editor treats it.
+            Command::Hotkey(Hotkey::Copy) => {
+                if self.editor.copy_selection()? {
+                    self.stats.copies += 1;
+                } else {
+                    self.stats.clipboard_noops += 1;
+                }
+            }
+            Command::Hotkey(Hotkey::Cut) => {
+                    // **The bytes are taken before the delete**, because after it the selection is
+                    // gone and there is nothing to ask. They are borrowed from the yank buffer, which
+                    // is where `cut_selection` put them -- **not copied**, because a `to_vec` here
+                    // would be an allocation on the edit path and `tests/session_no_alloc.rs` asserts
+                    // there are none.
+                    let cut_at = self.editor.selection().map(|s| s.start);
+                    let cut_len = self.editor.selection().map(|s| s.end - s.start);
+                    if self.editor.cut_selection()? {
+                        if let (Some(at), Some(len)) = (cut_at, cut_len) {
+                            let bytes = self.editor.yanked();
+                            let n = (len as usize).min(bytes.len());
+                            self.counts.after_delete(&self.editor, at as usize, &bytes[..n]);
+                        }
+                        self.after_edit(0)?;
+                        self.stats.cuts += 1;
+                    } else {
+                        self.stats.clipboard_noops += 1;
+                    }
+                }
+            Command::Hotkey(Hotkey::Paste) => {
+                let at = self.editor.caret() as usize;
+                let n = self.editor.paste()?;
+                if n > 0 {
+                    // **An edit, and it goes through `after_edit`** so it is in the undo stack, the
+                    // geometry syncs and the line is damaged. A paste that skipped any of those would
+                    // leave the status bar reporting the pre-paste word count.
+                    //
+                    // **And the counts are folded here, not left to `after_edit`.** `publish_counts`
+                    // *publishes* what `TextCounts` holds and does not recompute it, so a mutation
+                    // that does not fold leaves the status bar wrong while the document is right.
+                    // This is the same omission part 11 found in `insert_math` and the three table
+                    // helpers, and it is recorded in `recount_words_and_lines`'s doc comment.
+                    let inserted = self.editor.yanked();
+                    self.counts
+                        .after_insert(&self.editor, at, &inserted[..n]);
+                    self.after_edit(n as u32)?;
+                    self.stats.pastes += 1;
+                } else {
+                    self.stats.clipboard_noops += 1;
+                }
             }
             Command::Hotkey(Hotkey::DocumentStart) => self.caret_to(0)?,
             Command::Hotkey(Hotkey::DocumentEnd) => self.caret_to(self.editor.text_len())?,
@@ -3052,7 +3491,7 @@ impl<'a> Session<'a> {
         self.after_edit(1)
     }
 
-    fn undo(&mut self) -> Result<(), SessionError> {
+    pub fn undo(&mut self) -> Result<(), SessionError> {
         // `NothingToUndo` is a *keymap* condition, not a document failure: pressing undo with
         // nothing to undo should be swallowed, not reported. Same for redo.
         //
@@ -3414,6 +3853,64 @@ impl<'a> Session<'a> {
         self.lines.line_of(at)
     }
 
+    /// **Where `End` belongs: after the last character of the line containing `at`.**
+    ///
+    /// # The newline is why this is not `line_end`
+    ///
+    /// [`DocLines::line_end`] **includes the terminator** — its own docs say so deliberately, because
+    /// geometry says where a line is and the text says what is in it. So `line_end` of `"abc\n"` is 4,
+    /// and a caret at 4 is on the *next* line. `End` must therefore subtract the terminator, but only
+    /// when there is one: the last line of a document has no `\n`, and `line_end - 1` there would put
+    /// the caret one character short — **which is the kind of bug that is invisible on every document
+    /// except the one with no trailing newline**, i.e. a document being typed.
+    ///
+    /// **One byte is read to find out.** The geometry stores lengths, not terminators, and asking it
+    /// "does this line end in a newline" is the question its docs say it has no business answering.
+    /// A failed read falls back to `line_end` — the no-terminator answer — which is the conservative
+    /// direction: a caret one byte further right is recoverable, and a caret on the wrong line is not.
+    fn line_end_offset(&self, at: usize) -> usize {
+        let line = self.line_index(at) as usize;
+        let end = self.lines.line_end(line);
+        if end == 0 || end > self.editor.text_len() as usize {
+            return end;
+        }
+        let mut last = [0u8; 1];
+        match self.editor.read_into(end - 1, &mut last) {
+            Ok(1) if last[0] == b'\n' => end - 1,
+            // Not a newline, or the byte is not resident: no terminator, so the line ends at `end`.
+            _ => end,
+        }
+    }
+
+    /// **`PageUp` / `PageDown`: move the caret and the scroll by one screenful.**
+    ///
+    /// # A screenful, and why it is `rows - 1`
+    ///
+    /// Moving by exactly `rows` would put the line the caret started on at the row just off the top,
+    /// so consecutive presses would skip one line each time — **the classic off-by-one that makes
+    /// PageDown feel like it is losing lines.** `rows - 1` leaves the first row as shared context, so
+    /// pressing `PageDown` six times on a 31-row page shows every line and no gaps.
+    ///
+    /// **At least one row, whatever the panel is.** A window one row tall would otherwise divide by
+    /// zero, and `.max(1)` makes PageDown on it a no-op rather than a panic — which is the honest
+    /// answer for a panel with no room to page through.
+    ///
+    /// **The caret moves too.** Scrolling without moving the caret leaves the two disagreeing, and
+    /// `scroll_line_into_view` — which every caret move goes through — would immediately undo the
+    /// scroll on the next keystroke. A `PageDown` that scrolls back on the next character is not a
+    /// page-down.
+    fn page_by_lines(&mut self, direction: i64) -> Result<(), SessionError> {
+        let rows = self.chrome.layout.rows.max(1) as i64;
+        let step = (rows - 1).max(1);
+        let line = self.line_index(self.editor.caret() as usize);
+        let last = self.state.total_lines.saturating_sub(1);
+        let want = (line as i64 + direction * step).clamp(0, i64::from(last)) as u32;
+        let at = self.lines.line_begin(want as usize) as u32;
+        self.caret_to(at as usize)?;
+        self.scroll_line_into_view(want);
+        Ok(())
+    }
+
     /// Record an edit's consequences: counts, status bar, and the damaged line.
     ///
     /// **The counts are *not* refreshed here.** They are folded forward by the caller --
@@ -3441,6 +3938,16 @@ impl<'a> Session<'a> {
     /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
     fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
+        // **The document now differs from what is on disk**, and that is the only thing this flag means.
+        //
+        // `ChromeState::dirty` has existed since Phase 8 and had **no writer anywhere in the workspace**
+        // — the status bar's unsaved marker was drawn from a field nothing ever set, so it showed
+        // "saved" for the life of every session including one mid-edit. This is that writer.
+        //
+        // Set on *every* edit including undo and redo, because undoing back to the saved state should
+        // clear the marker rather than leave it lit; the flag is cleared by a successful commit, not
+        // recomputed, which is the honest direction to be wrong in.
+        self.state.dirty = true;
         self.reconcile_caret()?;
         // **Scroll after reconciling, not inside it.** `Session::new` also reconciles and must not
         // scroll; an edit moves the caret like a keystroke does and must. See `reconcile_caret`.
@@ -5714,7 +6221,7 @@ fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_
 /// the row came from. A private function could only be reached by clicking, and every click would
 /// carry a `label` with it, which is the coupling being removed.
 ///
-/// **The `None`s are the honest remainder.** `Save` and `Close` have no action in this build, and
+/// **The `None`s are the honest remainder.** `Close` has no action in this build, and
 /// `SelectAll` maps to `DocumentEnd` because there is no selection to make. `SetZoom`, `SetStyle`
 /// and `SetFont` never reach here — `Session::apply_action` handles those first, because they change
 /// chrome state rather than issuing a document command.
@@ -5729,9 +6236,28 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         Action::InsertTable => Command::Hotkey(Hotkey::InsertTable),
         Action::InsertImage => Command::Hotkey(Hotkey::InsertImage),
         Action::InsertMath => Command::Hotkey(Hotkey::InsertMath),
-        // **The two with no action in this build**, listed so the compiler says so when they are
-        // added rather than leaving them to be discovered as a dead row.
-        Action::Save | Action::Close => return None,
+        // **Same route as the key.** A menu row and a keystroke are two ways of asking for one thing,
+        // and giving them separate implementations is how they drift — which is the failure part 20
+        // fixed by replacing a label match with this function, so reaching the keymap's own `Save`
+        // rather than a private commit is the same decision applied once more.
+        Action::Save => Command::Hotkey(Hotkey::Save),
+        // **The same three routes the keymap uses**, for the same reason: a row and a keystroke are
+        // two ways of asking for one thing, and separate implementations are how they drift. The
+        // clipboard rows existed and drew for thirteen phases doing nothing; these are the arms that
+        // make them mean something.
+        Action::Cut => Command::Hotkey(Hotkey::Cut),
+        Action::Copy => Command::Hotkey(Hotkey::Copy),
+        Action::Paste => Command::Hotkey(Hotkey::Paste),
+        // **No `Command` for this one, and that is deliberate.** Export is not a document edit and not a
+        // keybinding — it writes files to descriptors this process was handed at boot and the jail has
+        // no way to acquire. `apply_action` handles it, the same shape as the chrome-state actions
+        // below. **There is no `Ctrl+E`**, because a binding that rewrites two files on disk belongs to
+        // a keystroke a user can decline, and this build does not have one.
+        Action::Export => return None,
+        // **The one row with no action in this build**, listed so the compiler says so when it is added
+        // rather than leaving it to be discovered as a dead row. It has no meaning without a document
+        // list and a multi-document model, neither of which exists.
+        Action::Close => return None,
         Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) | Action::SetColour(_) => {
             return None
         }

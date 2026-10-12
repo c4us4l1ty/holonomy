@@ -98,8 +98,54 @@ pub trait InputSource {
     /// `ENODEV`.
     fn next_event(&mut self) -> Result<Option<Event>, InputError>;
 
+    /// **Block until an event may be available, or `timeout_ms` elapse.** FR-3.5, NFR-1.2.
+    ///
+    /// # The defect this exists to fix
+    ///
+    /// [`next_event`](Self::next_event) cannot express "nothing right now". Its contract — both in
+    /// the signature and in this file — says `None` means *a closed stream*, and
+    /// `ScriptedInputSource` honours that. **A live evdev node does not have a closed stream; it has
+    /// quiet moments**, and the only way it could say so through `next_event` was to return `None`.
+    ///
+    /// Which it did. So an idle keyboard produced `None`, `Session::run_with_io` read it as
+    /// end-of-stream, and the session **exited**. Not slowly, and not with a message: the editor ran
+    /// until the user stopped typing and then quit. The seccomp allowlist has reserved
+    /// `epoll_create1`, `epoll_ctl`, `epoll_wait` and `epoll_pwait` since Phase 2 — with rationale
+    /// text naming "the session loop" — and the loop did not call any of them.
+    ///
+    /// # The three answers, and why `Ready` also means "timed out"
+    ///
+    /// * [`Wait::Ready`] — call `next_event` again. **Also returned on timeout**, because the
+    ///   session's caret blinks and the loop has to tick on time; a timeout is a reason to tick, not
+    ///   a reason to stop.
+    /// * [`Wait::Ended`] — the stream is over and `next_event` will never produce again.
+    /// * `Err` — the device went away (`ENODEV`), which the session reports rather than treating as
+    ///   a quiet keyboard.
+    ///
+    /// # Why the default is `Ended`, not `Ready`
+    ///
+    /// **A defaulted method that returned `Ready` would turn every existing source into a busy loop**
+    /// — the defect, relocated. `Ended` is what a source that cannot block already means: the next
+    /// `next_event` is the last one. A source that has somewhere to wait overrides this; a source
+    /// that does not is exactly as it was, and the scripted driver keeps exiting when its script runs
+    /// out without a single gate noticing.
+    fn wait(&mut self, timeout_ms: i32) -> Result<Wait, InputError> {
+        let _ = timeout_ms;
+        Ok(Wait::Ended)
+    }
+
     /// A name for the status bar and for logs.
     fn describe(&self) -> &'static str;
+}
+
+/// What a call to [`InputSource::wait`] found. See that method for why the three cases are these
+/// three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// An event may be waiting, **or the timeout expired**. Either way: call `next_event`.
+    Ready,
+    /// The stream is closed. `next_event` will keep returning `None` and the loop should stop.
+    Ended,
 }
 
 /// Accumulates bytes and hands back whole `EV_KEY` records.

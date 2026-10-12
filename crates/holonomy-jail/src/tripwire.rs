@@ -448,12 +448,19 @@ unsafe fn zero_signal_frame(ctx: *mut libc::c_void) {
 
 /// Zero this handler's own caller-saved register state, and clear `DF`.
 ///
+/// **Now `pub(crate)` rather than private, because the teardown path needs it too.** PRD §9.2 lists
+/// it as a shutdown step — *"SSE2 registers and CPU registers are zeroed using inline assembly
+/// (`xorps %xmm0, %xmm0`)"* — and the assembly was written here for the tripwire, which is why it
+/// existed while the orderly shutdown had none. **One implementation, two callers**: a second copy
+/// would be two lists of registers, and the gap between them would be a register holding a
+/// passphrase-derived value at `_exit(0)`.
+///
 /// # Safety
 ///
 /// Safe to call anywhere. Declares every register it writes as clobbered, so the compiler
 /// cannot have kept a live value there across this point.
 #[cfg(target_arch = "x86_64")]
-unsafe fn zero_caller_saved_state() {
+pub(crate) unsafe fn zero_caller_saved_state() {
     // `xorps` zeroes the low 128 bits of an XMM register, which is the whole of it without
     // AVX. The ymm upper halves are untouched, and that is not an oversight to fix: the
     // Phase 9 target is a Core 2 Duo, which has no AVX, so there is no upper state to zero.
@@ -527,7 +534,7 @@ unsafe fn zero_caller_saved_state() {
 /// The register state of a foreign ABI is not this crate's business, and the guard pages and
 /// the registry scrub -- the parts that matter -- are architecture-independent.
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn zero_caller_saved_state() {}
+pub(crate) unsafe fn zero_caller_saved_state() {}
 
 /// A fixed-size, allocation-free line builder for the handler's report.
 ///

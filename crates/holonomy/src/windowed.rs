@@ -98,13 +98,59 @@ pub fn run(
     args: &Args,
     metrics: ChromeMetrics,
 ) -> Result<Exit, WindowedError> {
-    let desktop = Desktop::open(
-        args.display.as_deref(),
-        metrics.width,
-        metrics.height,
-        "Holonomy",
-    )
-    .map_err(WindowedError::Desktop)?;
+    // **Part 36: an unsized window opens at four fifths of the screen, not at 1600x1000.**
+    //
+    // **The report was "that 1020x700 is WAY too small", and the honest answer to it is that the window
+    // was the size it was told to be.** The defaults are a fallback for the headless paths, which have
+    // no screen; a window has one, and using it is the difference between an editor that fills the
+    // display and one that opens as a postcard in the middle of it.
+    //
+    // **Four fifths, not all of it**: a window manager's own decorations and any panel need somewhere to
+    // go, and a maximised-looking window is not what the user asked for either. **And the argument's
+    // numbers, so the choice can be argued with rather than repeated.**
+    let (w, h) = if args.sized {
+        (metrics.width, metrics.height)
+    } else {
+        let (sw, sh) = Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000));
+        // **Four fifths of the screen, capped at 1,600 x 1,000.**
+        //
+        // **The cap is not a preference; it is where the transport gives out.** Sizing to four fifths of
+        // this machine's 3,072 x 1,856 screen asks for 2,457 x 1,484, and the window driver then
+        // refuses to open:
+        //
+        // ```text
+        // cannot drive the window: one scanline is 9828 bytes and the server accepts
+        // 18446744073709551615 bytes per request; PutImage cannot split a scanline
+        // ```
+        //
+        // **which is two defects wearing one message.** `18446744073709551615` is `u64::MAX` — the
+        // server's maximum request length was never read out of the setup, so the limit the code
+        // compares against is a sentinel, not a number. And the comparison that fired is against the
+        // *frame*, not the scanline, because a 2,457 px scanline is 9,828 bytes and an X server accepts
+        // 262,140. **Neither is fixed here** and both are named in PROJECT.md; the cap is what keeps
+        // the window at a size this transport can carry.
+        // **Two fifths off, and no cap below the screen's own width.**
+        //
+        // **The 1,600 x 1,000 cap was mine, added to work around the `PutImage` refusal above, and it
+        // was wrong twice**: it made the window half of a 3,072 px screen, which is what the report
+        // *"that 1020x700 is WAY too small"* and then a screenshot of a 1,600 px window on a 3,072 px
+        // desktop were both about. **The fix was to repair the transport, not to cap the window.**
+        //
+        // **Ninety per cent of the screen**, so the window manager's own frame has somewhere to sit.
+        (
+            (sw * 9 / 10)
+                .max(holonomy_render::chrome::ChromeMetrics::MIN_WIDTH),
+            (sh * 9 / 10)
+                .max(holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT),
+        )
+    };
+    let metrics = ChromeMetrics {
+        width: w,
+        height: h,
+        ..metrics
+    };
+    let desktop =
+        Desktop::open(args.display.as_deref(), w, h, "Holonomy").map_err(WindowedError::Desktop)?;
     eprintln!(
         "holonomy: window {:#x} is {}x{}, opening on {}",
         desktop.window_id(),
@@ -121,6 +167,16 @@ pub fn run(
     );
     session.set_zoom(args.zoom);
     session.repaint_all().map_err(WindowedError::Session)?;
+
+    // **Part 36: dump the first frame, because "the viewport is too small" is not a number.** A layout
+    // can be measured and still be wrong, and four of this part's claims were only settled by looking
+    // at the pixels. Off unless named; a path, because `HOLONOMY_WINDOW_TRACE` is already the flag for
+    // "tell me what the driver is doing" and this is the other half of it -- "show me what it drew".
+    if let Some(path) = std::env::var_os("HOLONOMY_WINDOW_PPM") {
+        let mut f = std::fs::File::create(&path).expect("create the dump");
+        session.frame().to_ppm(&mut f).expect("write the dump");
+        eprintln!("holonomy: first frame written to {}", path.to_string_lossy());
+    }
 
     let start = Instant::now();
     let mut events = 0u64;

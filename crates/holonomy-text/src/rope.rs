@@ -1747,6 +1747,51 @@ pub trait LeafSource {
         // not optional for anything that can grow.
         Ok(())
     }
+
+    /// Write `editor`'s **current** document back through this source, returning bytes that reached
+    /// durable storage.
+    ///
+    /// # Why this is on the source and not a free function the caller finds
+    ///
+    /// Committing needs two `&mut`s — the source and the editor — and in the product they are two
+    /// fields of two *different* objects held by two different frames, with the container behind the
+    /// source borrowed from the frame above. `main.rs` builds a [`Session`](crate::Session) before the
+    /// passphrase exists (it must: the container is opened before `seccomp`), and drops the document in
+    /// afterwards through `adopt_document`, so the store **cannot** live inside the session without a
+    /// self-referential struct.
+    ///
+    /// So the capability is a method on the thing that already holds the storage, reached through the
+    /// `&mut dyn LeafSource` the session's edit path is *already* given. **One borrow, at the point of
+    /// use** — `source.commit_document(&mut editor)` — where the alternative is holding a second
+    /// `&mut SectionStore` alongside the `&mut dyn LeafSource` that aliases it, which no amount of
+    /// sequencing makes legal.
+    ///
+    /// # The default writes nothing, and reports zero
+    ///
+    /// A source that does not own the document has nowhere to write it, and **zero is the honest
+    /// report rather than an error**: `Ok(0)` means "nothing was durable", which a caller compares
+    /// against [`crate::Editor::text_len`] to tell a no-op from a save. An `Err` here would mean "this
+    /// source cannot be saved to", which is a statement about the source and not about the document.
+    /// [`NoSource`](crate::store::NoSource) — an editor with no container behind it — is exactly that
+    /// case, and a session editing an empty buffer must still be able to hold a `Ctrl+S`.
+    ///
+    /// # Why it takes `&mut Editor` and not the rope
+    ///
+    /// A commit has to clear the rope's edit record, which lives on the rope and is reached only
+    /// through the editor's accessors. Passing the rope instead would be a second way to reach the same
+    /// state, and the rule this file is written by — *"build it once and have the other side read it"* —
+    /// says the editor is the one seam.
+    ///
+    /// # Failure is deliberately opaque
+    ///
+    /// [`RopeError::SourceUnavailable`] carries no detail, for the reason its own doc gives: this trait
+    /// sits on the seam between the rope and whatever stores the document, so an unreadable chunk, a
+    /// failed authentication, a full page-lock ceiling and a failed `pwrite` all arrive here as one
+    /// variant. **A commit path that reported which of those failed is a decryption oracle with a nicer
+    /// interface.** The source counts and logs what it needs on its own side.
+    fn commit_document(&mut self, _editor: &mut crate::Editor) -> Result<usize, RopeError> {
+        Ok(0)
+    }
 }
 
 #[cfg(test)]

@@ -80,6 +80,43 @@ struct SessionContext {
     container_file: Option<holonomy_container::Wavefunction>,
 }
 
+impl SessionContext {
+    /// **Every descriptor this process opened at boot, for the teardown plan.**
+    ///
+    /// # Why this is not optional
+    ///
+    /// The plan used to be empty, which meant `teardown_and_exit` did its `registry::scrub_all()` and
+    /// nothing else. **After `seccomp` there is no `openat`, so a descriptor not closed here is not
+    /// closed at all** — the kernel closes it when the process dies, but the *data* in it is whatever
+    /// the page cache has not yet written. A commit that landed in the last few hundred milliseconds
+    /// before `Ctrl+Q` was therefore a commit that was not on the platter.
+    ///
+    /// `fsync` is the half that matters and it is allowlisted (`seccomp/table.rs:73`), so it is
+    /// available after sealing — which is the only reason this is possible at all.
+    ///
+    /// **The container is named once, whichever of the two fields holds it.** The descriptor is
+    /// *moved* from `container` into `container_file` by `Wavefunction::adopt`, so a context that got
+    /// as far as opening a document has it in the second field and one that did not has it in the
+    /// first. Returning both would `close` the same fd twice, and a double close in a shutdown path
+    /// closes whatever the number now refers to.
+    fn boot_descriptors(&self) -> Vec<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        let mut fds = Vec::new();
+        if let Some(file) = &self.container_file {
+            fds.push(file.raw_fd());
+        } else if let Some(file) = &self.container {
+            fds.push(file.as_raw_fd());
+        }
+        for sink in &self.sinks {
+            fds.push(sink.file.as_raw_fd());
+        }
+        if let Some(f) = &self.screenshot {
+            fds.push(f.as_raw_fd());
+        }
+        fds
+    }
+}
+
 /// The atlas, built once. Leaked so the session's lifetime is not tied to a local.
 static ATLAS: std::sync::OnceLock<holonomy_assets::atlas::Atlas> = std::sync::OnceLock::new();
 
@@ -323,6 +360,36 @@ fn run() -> Result<(), Fail> {
     let phrase = passphrase()?;
 
     sealed.run_session(|sealed| {
+        // **FR-5 / PRD §9.2: the teardown plan, built here rather than left empty.**
+        //
+        // `teardown_and_exit(-1)` used to be called with a plan containing nothing, so the shutdown
+        // did its `registry::scrub_all()` and stopped. **Every mechanism PRD §9.2 lists already
+        // existed and was gated** — ring noise, `DRM_IOCTL_MODE_DESTROY_DUMB`, `fsync`, `close` — and
+        // none of it was reachable from the product, which is the failure mode
+        // `crates/holonomy-jail/tests/census.rs` proves against on every other subsystem.
+        //
+        // **Sync before close, per descriptor, and the order is the point.** `close` does not flush;
+        // it drops the reference and the kernel writes back whenever it likes. A commit that landed
+        // 200 ms before `Ctrl+Q` and a container that was never `fsync`ed is a document that was not
+        // on the platter when the lights went out.
+        //
+        // **The ring buffer needs no explicit step any more, and that is a consequence rather than an
+        // omission.** FR-4.8 moved the three 64 KiB slots from `alloc_zeroed` to `SecureBlock`, which
+        // registers them with the jail's scrub registry — so `scrub_all()`, which has always run at
+        // teardown, now covers them. PRD §9.2 asks for the ring to be overwritten with noise; zeroing
+        // is the stronger of the two for cold-boot purposes and the file's own indistinguishability
+        // is a property of what is *written*, never of what was in the buffer.
+        //
+        // **The descriptor list is taken first and the plan built second**, because `context_mut` and
+        // `teardown` are two `&mut` into the same `Sealed` and only one of them is live at a time.
+        let boot_fds = sealed.context().boot_descriptors();
+        for fd in &boot_fds {
+            let _ = sealed.teardown().sync(*fd);
+        }
+        for fd in &boot_fds {
+            let _ = sealed.teardown().close(*fd);
+        }
+
         let ctx = sealed.context_mut();
         ctx.session.state.sealed = true;
         ctx.session.set_zoom(args.zoom);
@@ -487,18 +554,42 @@ fn drive(
         Some(path) => {
             let script = std::fs::read(path).map_err(io)?;
             let mut src = ScriptedInputSource::new(&script);
-            s.run_with(bytes, &mut src).map_err(Fail::Session)?
+            // **`run_with_io`, not `run_with`,** so **File > Export has somewhere to write.** The sinks
+            // were opened at boot because the jail has no `openat` on a user path; handing them to the
+            // loop is what turns a row that used to open and close a menu into an export.
+            s.run_with_io(bytes, &mut src, sinks)
+                .map_err(Fail::Session)?
         }
         None => {
             let mut src =
                 EvdevSource::open(Path::new(EVDEV_NODE)).map_err(|e| Fail::Session(e.into()))?;
-            s.run_with(bytes, &mut src).map_err(Fail::Session)?
+            s.run_with_io(bytes, &mut src, sinks)
+                .map_err(Fail::Session)?
         }
     };
     eprintln!(
         "holonomy: {exit:?} after {} commands, {} edits, {} frames",
         s.stats.commands, s.stats.edits, s.stats.frames
     );
+
+    // **Commit unsaved work before anything else reads the document.** This is the save a user relies
+    // on without pressing a key, and it is the one that was missing: `Ctrl+S` existed as a counter and
+    // a commit existed as a gated function, and nothing joined them, so every keystroke since the last
+    // explicit save was discarded on exit. A document that exits dirty is the whole failure mode of a
+    // sealed editor with no undo history on disk.
+    //
+    // **Before the repaint and before the exports**, for a reason that is about honesty rather than
+    // order: an export of a document that is not on disk is still a valid export, but a *silent* one is
+    // not. If the commit fails the message above says so, and the exports that follow describe the text
+    // that is actually in memory.
+    if s.state.dirty {
+        let written = s.commit_to(bytes);
+        eprintln!(
+            "holonomy: wrote {} bytes to the container on exit ({})",
+            written,
+            if written > 0 { "committed" } else { "nothing to commit" }
+        );
+    }
 
     s.repaint_all_with(bytes).map_err(Fail::Session)?;
 

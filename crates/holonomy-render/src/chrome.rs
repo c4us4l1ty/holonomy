@@ -2314,11 +2314,19 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             colour::INK_CHROME,
         ),
     )));
+    // **CORRECTION, part 36: this is the one that was visible.** `"Document tabs"` is 13 characters
+    // and the space from the arrow to the page's edge is about 11 cells, so at 20 ppem the word `tabs`
+    // was **drawn underneath the page**, which is emitted after the sidebar. At 16 ppem it just fitted,
+    // which is the whole of why this survived part 32.
     push_text(
         into,
         m,
         l.sidebar_back.y,
-        "Document tabs",
+        &fit_to_width(
+            "Document tabs",
+            m.cell_w,
+            cells_left_of(l.page.x, l.sidebar_back.right() as i32 + 8, m.cell_w),
+        ),
         Style::MONOSPACE,
         colour::INK_DIM,
         l.sidebar_back.right() as i32 + 8,
@@ -2358,14 +2366,26 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             ),
         )));
         let ty = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
+        let tx = r.x as i32 + 8 + crate::icons::SIZE as i32 + 8;
+        // **CORRECTION, part 36: the title is cut to the sidebar, and it was not.**
+        //
+        // **`with_type_scale` deliberately does not scale [`sidebar_w`]** -- 208 px is a distance, not a
+        // type size, and part 32's argument for leaving it is the right one. **The consequence was not
+        // accounted for**: the label is drawn at the scaled cell while the rail it lives in is still
+        // 208 px, so at 20 ppem "Document title" ran past the sidebar and **underneath the page**, which
+        // is drawn after it.
+        //
+        // **Visible in a dump of the running window** as `← Document t|` with the page over the rest.
+        // Nothing clips the chrome's own text -- `Painter::doc_text` clips the *document*, and the
+        // sidebar row is a `TextRun` -- so the only fix is to not emit the part that does not fit.
         push_text(
             into,
             m,
             ty,
-            title,
+            &fit_to_width(title, m.cell_w, cells_left_of(r.right(), tx, m.cell_w)),
             Style::MONOSPACE,
             colour::INK_CHROME,
-            r.x as i32 + 8 + crate::icons::SIZE as i32 + 8,
+            tx,
         );
         if active {
             into.push(SurfaceTree::leaf(crate::Node::Icon(
@@ -2377,6 +2397,38 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             )));
         }
     }
+}
+
+/// The longest prefix of `s` that fits in `width` pixels from `x`, with an ellipsis when it is cut.
+///
+/// **In codepoints, against [`ChromeMetrics::cell_w`]**, because that is the one measure the sidebar
+/// row and the painter both already use -- `push_text` advances by the cell, so a prefix longer than
+/// the cell count would be drawn past the edge however carefully it was counted.
+///
+/// **One cell is always kept for the ellipsis**, so a cut name is visibly cut rather than silently
+/// ending at a word boundary the reader cannot see.
+fn fit_to_width(s: &str, cell_w: u32, max_cells: u32) -> String {
+    if max_cells == 0 {
+        return String::new();
+    }
+    if s.chars().count() as u32 <= max_cells {
+        return s.to_string();
+    }
+    // **One cell is always kept for the ellipsis**, so a cut name is visibly cut rather than silently
+    // ending where the eye cannot tell that it ended.
+    let keep = if max_cells > 1 { max_cells - 1 } else { max_cells };
+    let mut out: String = s.chars().take(keep as usize).collect();
+    out.push('\u{2026}');
+    let _ = cell_w;
+    out
+}
+
+/// How many whole cells fit between `from` and `to`, leaving `INSET` for the active row's overflow icon.
+fn cells_left_of(to: u32, from: i32, cell_w: u32) -> u32 {
+    /// Right-hand inset, so a name does not touch the rail.
+    const INSET: u32 = 20;
+    let cell = if cell_w == 0 { 1 } else { cell_w };
+    to.saturating_sub(INSET).saturating_sub(from.max(0) as u32) / cell
 }
 
 fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {

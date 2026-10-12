@@ -22,20 +22,53 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
+use holonomy_secure::{LockPolicy, SecureBlock, SecureBlockError};
+
 use crate::layout::{self, IO_ALIGN};
 
+/// Where an [`AlignedBuf`]'s bytes live.
+///
+/// **Two backings, and the choice is about what the bytes are rather than about speed.**
+///
+/// * [`Heap`](Backing::Heap) — `alloc_zeroed` with an explicit alignment. Plain, unremappable,
+///   unscrubbed by anything but [`AlignedBuf::wipe`], and eligible for the core dump.
+/// * [`Secure`](Backing::Secure) — a [`SecureBlock`]: `mmap`, page-locked, `MADV_DONTDUMP`,
+///   `MADV_DONTFORK`, and a `PROT_NONE` guard page above and below.
+///
+/// **FR-4.8 asks for the second one for the ring**, and the ring is the only structure in this
+/// crate that holds document plaintext for longer than a single call. The scratch buffers in this
+/// same module hold it for a `pread` and a decrypt, and paying a page-lock and two guard pages per
+/// scratch buffer to protect bytes that are zeroed within the same function would be cost without
+/// a claim behind it — which is why [`AlignedBuf::zeroed`] exists beside [`AlignedBuf::page_locked`]
+/// rather than there being one constructor that always locks.
+enum Backing {
+    Heap {
+        ptr: std::ptr::NonNull<u8>,
+        layout: Layout,
+    },
+    Secure(SecureBlock),
+}
+
 /// A buffer whose address is a multiple of [`IO_ALIGN`], as `O_DIRECT` requires.
+///
+/// **A `SecureBlock`'s payload is page-aligned, so both backings satisfy `O_DIRECT` by
+/// construction** — which is what lets a page-locked slot be used as a direct-I/O buffer at all.
+/// `mmap` returns memory aligned to the system page size and `IO_ALIGN` is that size.
 pub struct AlignedBuf {
-    ptr: std::ptr::NonNull<u8>,
+    backing: Backing,
     len: usize,
-    layout: Layout,
 }
 
 impl AlignedBuf {
-    /// Allocate `len` zeroed bytes, 4096-aligned.
+    /// Allocate `len` zeroed bytes, 4096-aligned, on the heap.
     ///
     /// Panics if `len` is 0 or the allocation fails, because every caller wants a real
     /// buffer and a zero-length `O_DIRECT` transfer is never what was meant.
+    ///
+    /// **The default, not the safe one.** A buffer on the heap is swap-eligible and
+    /// dump-eligible, and this crate has no say over either — see [`LockPolicy`] for the trade and
+    /// for why `MADV_DONTDUMP` does not imply `mlock`. Use [`AlignedBuf::page_locked`] for anything
+    /// that holds plaintext.
     pub fn zeroed(len: usize) -> Self {
         assert!(len > 0, "AlignedBuf must not be empty");
         let layout = Layout::from_size_align(len, IO_ALIGN as usize)
@@ -44,20 +77,46 @@ impl AlignedBuf {
         // block of `len` bytes aligned to IO_ALIGN.
         let raw = unsafe { alloc_zeroed(layout) };
         let ptr = std::ptr::NonNull::new(raw).expect("allocation of a fixed small size failed");
-        Self { ptr, len, layout }
+        Self {
+            backing: Backing::Heap { ptr, layout },
+            len,
+        }
+    }
+
+    /// Allocate `len` zeroed bytes, 4096-aligned, **page-locked and guard-bounded**. FR-4.8.
+    ///
+    /// Falls over rather than silently degrading when the lock cannot be taken. **That is the
+    /// whole difference from [`AlignedBuf::zeroed`] and the reason both exist**: a caller that asked
+    /// for a page-locked buffer and received an unlocked one would be running the weaker of the two
+    /// protections while believing it was running the stronger, which is worse than either on its
+    /// own. The usual cause is `RLIMIT_MEMLOCK`, which `main.rs` prints at boot.
+    pub fn page_locked(len: usize) -> Result<Self, SecureBlockError> {
+        assert!(len > 0, "AlignedBuf must not be empty");
+        Ok(Self {
+            backing: Backing::Secure(SecureBlock::allocate_with(len, LockPolicy::PageLocked)?),
+            len,
+        })
+    }
+
+    /// The address, for the one caller that needs it: `ioctl` offsets and alignment checks.
+    pub fn as_ptr(&self) -> *const u8 {
+        match &self.backing {
+            Backing::Heap { ptr, .. } => ptr.as_ptr(),
+            Backing::Secure(b) => b.as_ptr(),
+        }
     }
 
     /// The buffer as a slice.
     pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: `ptr` came from an allocation of exactly `len` bytes and is only
-        // borrowed for the duration of this borrow.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+        // SAFETY: both backings hold exactly `len` bytes, and the borrow is tied to `&self`.
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
     }
 
     /// The buffer as a mutable slice.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: as above, plus we hold `&mut self`, so the borrow is exclusive.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+        let ptr = self.as_ptr() as *mut u8;
+        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
     }
 
     /// Length in bytes.
@@ -70,13 +129,25 @@ impl AlignedBuf {
         false
     }
 
+    /// **Whether this buffer is page-locked**, guard-bounded and dump-suppressed.
+    ///
+    /// Exists so the requirement can be **asserted rather than asserted-about**: `FR-4.8` says
+    /// "3-stage *page-locked* ring buffer", and a buffer whose backing this answers `false` for is
+    /// a buffer that does not meet it.
+    pub fn is_page_locked(&self) -> bool {
+        matches!(self.backing, Backing::Secure(_))
+    }
+
     /// Confirm the address really is aligned, which is the invariant `O_DIRECT` needs and
     /// the one thing worth asserting rather than trusting.
     pub fn is_aligned(&self) -> bool {
-        (self.ptr.as_ptr() as usize).is_multiple_of(IO_ALIGN as usize)
+        (self.as_ptr() as usize).is_multiple_of(IO_ALIGN as usize)
     }
 
     /// Zero the whole buffer. Used for plaintext and for decrypted material.
+    ///
+    /// **A `SecureBlock` is scrubbed again on release**, so this is about the window between the
+    /// last use and the free rather than about the free itself.
     pub fn wipe(&mut self) {
         self.as_mut_slice().fill(0);
     }
@@ -85,8 +156,11 @@ impl AlignedBuf {
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
         // SAFETY: `ptr`/`layout` are the pair returned by `alloc_zeroed` via
-        // `from_size_align`, so this is the matching `dealloc`.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
+        // `from_size_align`, so this is the matching `dealloc`. The `Secure` arm needs none:
+        // `SecureBlock::drop` scrubs and then `munmap`s, in that order.
+        if let Backing::Heap { ptr, layout } = &self.backing {
+            unsafe { dealloc(ptr.as_ptr(), *layout) };
+        }
     }
 }
 
@@ -95,6 +169,7 @@ impl core::fmt::Debug for AlignedBuf {
         f.debug_struct("AlignedBuf")
             .field("len", &self.len)
             .field("aligned", &self.is_aligned())
+            .field("page_locked", &self.is_page_locked())
             .finish()
     }
 }

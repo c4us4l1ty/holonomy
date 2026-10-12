@@ -220,6 +220,17 @@ DRM/KMS DUMB SCANOUT BUFFER (Direct memory bus write, zero Bézier math)
     FR-3.3: The display engine must support the target panel's native resolution (e.g., 1280×800 at 32 bpp, stride = 5120 bytes, total scanout footprint = 4.09 MiB).
     FR-3.4: The rendering loop must operate on a Damage-Bounded Dirty-Row Model. Typing a character invalidates and redraws only the scanout rows intersecting the active text line (a bounding box of approximately 600×16 pixels ≈≈ 37.5 KiB). Full-screen redraws during typing are strictly prohibited.
     FR-3.5: Keystroke input must be read directly from /dev/input/event* devices using standard Linux input_event structures monitored via non-blocking epoll_wait. The process must sleep at 0.0% CPU when idle.
+        (IMPLEMENTED 2026-10-12, and the app had been doing the opposite. Session::run_with_io was
+         `while let Some(e) = source.next_event()` over an O_NONBLOCK device, and next_event's `None`
+         means "closed stream" -- so an idle keyboard ended the session, silently, after committing.
+         InputSource::wait now blocks in epoll_wait on the evdev fd with an indefinite timeout, which
+         is the 0.0% this clause and NFR-2 both ask for.
+
+         One consequence is recorded rather than smoothed over: Blink counts FRAMES and DEFAULT_PERIOD
+         is documented as "half a second at 60 fps", so a blink that stays on schedule needs the loop to
+         iterate 60 times a second, which is ~0.12% -- incompatible with 0.001%. The budget won; the
+         sealed caret holds its last phase while the session is idle and advances on every keystroke.
+         The fix is to drive Blink from CLOCK_MONOTONIC, which is already allowlisted.)
 
 2.4 FR-4: Cryptographic Engine & Streaming .wavefunction Storage
 
@@ -256,10 +267,37 @@ text
     Si = (Si−1)² (mod Npub) for i = 1, 2, …, T, where T = floor(target_vdf_ms × 1e6 / NS_PER_SQUARING).
         AMENDED 2026-10-03. Measured: 2,077 ns per 2048-bit Montgomery squaring (32 u64 limbs, opt-level=3 + lto + codegen-units=1 + target-cpu=native) on the build host. T = 1,500,000 therefore costs 3,115 ms, not the PRD's 450 ms — the 300 ns/squaring figure is 7x optimistic.
         NS_PER_SQUARING is measured by `vdf-calibrate` and re-derived on the target; T is a compile-time constant computed from it. Npub is a committed 2048-bit safe prime, Pocklington-proved from its committed factors by `verify-modulus` on every build.
+        (TOOL BUILT 2026-10-12. `cargo run --release -p holonomy-crypto --bin vdf-calibrate` measures
+         the host, reports median and spread across 5 samples of 20,000 squarings, and prints the two
+         constants to paste. It REFUSES to print a paste-ready constant from an unoptimised build and
+         exits non-zero: at opt-level=0 the chain measures ~10x slower, and a T derived from it is a
+         time-lock costing a tenth of its budget with nothing downstream saying so. --allow-unoptimised
+         overrides it for calibrating a debug build deliberately.
+
+         NOT a build.rs, and the reason is the same one: build scripts are compiled unoptimised, so a
+         build.rs that measured this would bake in a wrong constant automatically on every build.
+
+         The constants were NOT re-pasted. Measured twice on 2026-10-12: median 2,981 ns (spread 24.4%,
+         the tool's own warning fired) and 3,168 ns (spread 8.0%). The committed 2,664 ns is below both,
+         so T = 93,843 is sized for a host FASTER than this one and the time-lock runs 1.13-1.19x its
+         budget here -- the safe direction. Pasting 3,168 would have cut T to 78,914, weakening the
+         time-lock by 16% on the strength of a measurement taken on a machine that is not the
+         deployment target. "Re-derived on the target" means on the target; this host is not it.
+
+         Gate: the_committed_cost_still_describes_this_host, release-only, asserts the real chain cost
+         lands within [0.5x, 2.0x] of the budget. The 0.5x floor is the one that earns it: no
+         constant-only test can catch T being too small, which is the direction that weakens.
     The final value STST​ is combined with the intermediate key to produce the Root Key:
     Kroot=Blake2b-512(ST∥Kint)Kroot​=Blake2b-512(ST​∥Kint​)
     Security Guarantee: This squaring sequence is strictly non-parallelizable. High-end GPU clusters or ASICs cannot evaluate the sequence faster than an x86 execution core running sequential multiplications, neutralizing offline dictionary attacks against short passcodes.
     FR-4.5: Immediately after derivation, the 384 MiB Argon2id buffer must be scrubbed using volatile compiler fences and unmapped via munmap.
+        (IMPLEMENTED 2026-10-12. The clause named 384 MiB; the cost parameter is 128 MiB and PROJECT.md
+         2.4 restates it. argon2id_k_int now runs hash_password_into_with_memory over a named, volatile-
+         fenced scrub buffer, the passphrase is zeroized on every path, and derive_root zeroizes k_int,
+         seed, k_root and okm after copying them into RootMaterial. Three gates in
+         holonomy-crypto/src/envelope/tests.rs. Note for whoever builds FR-5.4: the [u8] -> [Block]
+         conversion that SecureBlock would need requires unsafe, and holonomy-crypto deliberately has
+         none, so the scrub is a Vec<argon2::Block> rather than a SecureBlock.)
     FR-4.6 (HKDF Expansion): KrootKroot​ is expanded using HKDF-Expand-SHA512 with the context info string "HOLONOMY_V3_BARE_SILICON" into:
         KencKenc​ (32 bytes): Content cipher key (XChaCha20-Poly1305).
         KchaffKchaff​ (32 bytes): Stream key for uniform noise generation.
@@ -267,14 +305,41 @@ text
         NrootNroot​ (24 bytes): Extended AEAD base nonce.
     FR-4.7 (Streaming Block I/O): The 128 MiB container must never be loaded into RAM in its entirety. File access must use raw POSIX open() configured with O_DIRECT | O_SYNC, bypassing the kernel page cache.
     FR-4.8 (Locked Chunk Ring Buffer): Payload processing must use a 3-stage page-locked ring buffer (3×64 KiB=192 KiB3×64 KiB=192 KiB total):
+        (IMPLEMENTED 2026-10-12. The three 64 KiB slots were alloc_zeroed -- 16-byte aligned, swap-
+         eligible, dump-eligible -- and the existing gate, the_ring_is_192_kib, was green throughout,
+         because it measured HOW MUCH and read as a claim about WHAT. They are SecureBlocks now: mmap,
+         mlock, MADV_DONTDUMP, MADV_DONTFORK, PROT_NONE guards, and page-aligned, which is also what
+         satisfies O_DIRECT's buffer rule. Ring::new returns Result and refuses to open rather than
+         degrading to unlocked slots. Gate: the_ring_buffer_is_page_locked.
+         A consequence, recorded because it is a change in behaviour rather than in code: the slots now
+         register with the jail's scrub registry, so teardown's existing scrub_all() covers the ring,
+         and the separate noise step PRD 9.2 asks for is no longer needed for RAM.)
         Chunk[0]: Backward page-cache window (N−1N−1).
         Chunk[1]: Active editing page (NN).
         Chunk[2]: Forward page-cache window (N+1N+1).
         Individual 64 KiB blocks must be authenticated and decrypted on demand using XChaCha20-Poly1305.
-    FR-4.9 (Deniable Duress Routing):
-        Entry of Primary Passcode PAPA​ resolves offset ΩAΩA​, accessing the real document payload.
-        Entry of Duress Passcode PBPB​ resolves decoy offset ΩBΩB​ (ΩB≠ΩAΩB​=ΩA​), mounting an alternate, non-sensitive document.
-        Mounting the decoy payload must securely wipe local ephemeral cache files and emit realistic dummy modification timestamps without altering bits at ΩAΩA​.
+    FR-4.9 (Deniable Duress Routing) (PARTIALLY IMPLEMENTED 2026-10-12):
+        Entry of Primary Passcode P_A resolves offset Ω_A, accessing the real document payload.
+        Entry of Duress Passcode P_B resolves decoy offset Ω_B (Ω_B ≠ Ω_A), mounting an alternate, non-sensitive document.
+        Mounting the decoy payload must not alter bits at Ω_A.
+            IMPLEMENTED. create_with_duress writes a second framed payload at Ω_B and refuses any
+            placement whose byte range intersects the primary's -- an overlap would destroy the document
+            duress exists to protect, and the operator would find out when the real file no longer opens.
+            Five gates: holonomy-container/src/gate.rs, mod duress.
+        Mounting the decoy payload must securely wipe local ephemeral cache files.
+            SATISFIED BY CONSTRUCTION rather than by action: the session process is cold when the
+            passphrase is typed, so the primary was never resident in it. There is no persistent cache.
+        Mounting the decoy payload must emit realistic dummy modification timestamps.
+            NOT IMPLEMENTED, and the format does not present one. MasterFrame carries no timestamp field
+            and the container is written through O_DIRECT, so the only timestamp that exists is the
+            file's own mtime -- a property of the single file, identical whichever payload is open.
+            Adding a frame field would be a format change to satisfy a requirement the format does not
+            otherwise raise, and that is a decision to take deliberately rather than smuggle in here.
+        Before 2026-10-12 the whole clause read "must securely wipe local ephemeral cache files and emit
+        realistic dummy modification timestamps without altering bits at Ω_A", and none of it was
+        implemented: P_B resolved a slot of chaff and the open failed. An error under duress tells the
+        person holding the rubber hose that P_B is not the interesting one, which is the worst answer
+        available.
 
 2.5 FR-5: Process Isolation, Sandboxing & Anti-Forensics
 
@@ -300,9 +365,41 @@ text
         A test runs the complete session under the final filter and fails if any syscall is refused.
 
     FR-5.4: Plaintext memory outside the immediate editing line must be scrambled every 30 seconds via ephemeral XOR masks:
-    Pstored=Pdata⊕KephPstored​=Pdata​⊕Keph​
-    where KephKeph​ is a 256-bit rotating hardware entropy vector.
+        Pstored = Pdata ⊕ Keph
+        where Keph is a 256-bit rotating hardware entropy vector.
+        (NOT IMPLEMENTED 2026-10-12, and the clause is incomplete as written. Nothing drives
+         Rope::leaf_buffers, CagrLeaf::scrub or the getrandom allowlist entry, and the mechanism has a
+         defect the clause does not address:
+
+         A masked leaf must be unmasked to be read, so Keph has to be resident for the document to be
+         readable at all. If Keph is lost -- a crash, a power cut, a tripwire fault -- the document is
+         unreadable, which is a data-loss failure introduced by a security feature. And an XOR scramble
+         whose key is itself in the same DRAM it defends against raises the bar only against an adversary
+         who samples the buffer and not the key.
+
+         Three things the clause needs before it can be built: where Keph is held (a page-locked
+         SecureBlock is the obvious answer, and it does not fix the key-loss case), what happens on
+         teardown (a crash must leave the leaves unmasked or the commit is lost), and what happens when
+         the 30-second tick lands mid-edit on the leaf holding the caret.
+
+         The reading that is safe to build without solving any of that is to scramble the buffers the
+         process can reconstruct -- the container ring and SectionStore's resident sections -- and not the
+         rope's leaves, which are the document itself. That is not what the clause says, so it is
+         recorded here rather than implemented quietly under a different name.)
     FR-5.5: Every allocated memory page must be bordered above and below by tripwire guard pages configured via mprotect(..., PROT_NONE). Any memory access violations immediately invoke a dedicated handler that zeros all CPU registers and terminates execution via libc::_exit(137).
+        (PARTIALLY IMPLEMENTED 2026-10-12. The guard pages and the tripwire existed and were gated
+         since Phase 7. Two gaps:
+           - An ORDERLY shutdown did not zero the registers. The assembly was written for the tripwire
+             and only the tripwire used it, so a clean Ctrl+Q left every vector and caller-saved
+             register holding whatever the last paint put there -- and, at the moment of unlock, the
+             VDF's chain state. teardown::run_and_exit now calls the same zero_caller_saved_state,
+             after the report line and before _exit, because the order is load-bearing: report_line
+             formats integers into a stack buffer through registers.
+           - teardown_and_exit was called with an EMPTY plan. Every mechanism PRD 9.2 lists existed and
+             was gated -- ring noise, DRM_IOCTL_MODE_DESTROY_DUMB, fsync, close -- and none of it was
+             reachable from the product. The plan now fsyncs then closes every descriptor the boot
+             opened. Sync before close is the point: close does not flush, and after seccomp there is
+             no openat, so a descriptor not closed here is not closed at all.)
 
 3. Low-Level Implementation Contracts
 3.1 Cacheline-Aligned Gap-Rope (CAGR) Node Structure

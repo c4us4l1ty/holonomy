@@ -283,6 +283,30 @@ impl TeardownPlan {
             // SAFETY: a stack buffer and a valid fd; `write` is async-signal-safe.
             unsafe { libc::write(report_fd, line.as_ptr().cast(), len) };
         }
+
+        // **Step 3, and the one PRD §9.2 names that nothing here implemented: the registers.**
+        //
+        // ```text
+        // SSE2 registers and CPU registers are zeroed using inline assembly (xorps %xmm0, %xmm0)
+        // ```
+        //
+        // **The assembly already existed and only the tripwire used it.** A guard-page fault zeroes
+        // registers on its way to `_exit(137)`; an *orderly* shutdown did not, so a clean `Ctrl+Q`
+        // left every vector and caller-saved register holding whatever the last paint put there —
+        // and, at the moment of unlock, the VDF's chain state and the HKDF output. The scrub above
+        // reaches memory; **nothing reached the register file.**
+        //
+        // **After the report, before `_exit`, and the order is load-bearing.** It clears `DF` and
+        // writes `%rax..%r11` and `%xmm0..%xmm15`, so a report line built afterwards would be
+        // assembled from clobbered state — and `report_line` formats integers into a stack buffer
+        // through registers. This is the same constraint the tripwire documents at
+        // `scrub_own_stack_and_exit` ("the next thing reads `%rsp` and two operand registers"), and
+        // the reason both put it in the same place.
+        //
+        // SAFETY: every register written is declared clobbered, and the only thing between this and
+        // `_exit` is a syscall whose arguments are immediates (`exit_group`, 231).
+        unsafe { crate::tripwire::zero_caller_saved_state() };
+
         // SAFETY: `exit_group`, deliberately instead of `exit` -- no atexit handlers, no stdio
         // flush, no unwinding. See the module comment.
         unsafe { libc::_exit(TEARDOWN_EXIT) }

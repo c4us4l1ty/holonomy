@@ -31,6 +31,17 @@
 use crate::aead::{self, AeadError};
 use crate::io::{AlignedBuf, DirectFile};
 use crate::layout::{self, CHUNK_PLAINTEXT, CHUNK_SLOT, RING_STAGES};
+use crate::ContainerError;
+
+/// **`SecureBlock`'s allocation failure, as this crate's error type.**
+///
+/// **Deliberately opaque, and the same reason [`AeadError`] is one.** `SecureBlockError` distinguishes
+/// "the page lock was refused" from "the mapping failed" from "the registry is full", and every one
+/// of those has the same remedy here — the container does not open — so forwarding the detail would
+/// give a caller three ways to learn something about the host's limits for no benefit.
+fn map_secure(_e: holonomy_secure::SecureBlockError) -> ContainerError {
+    ContainerError::SecureBlock
+}
 
 /// Why a ring operation failed.
 #[derive(Debug)]
@@ -103,20 +114,55 @@ pub struct Ring {
 
 impl Ring {
     /// Allocate the three slots. This is the only allocation the ring ever does.
-    pub fn new(chunks: u64) -> Self {
+    ///
+    /// # FR-4.8: the slots are page-locked, and that is the reason this returns a `Result`
+    ///
+    /// The three 64 KiB slots are the only structure in this crate that holds document plaintext
+    /// for longer than one call, and FR-4.8 names them: *"3-stage **page-locked** ring buffer"*.
+    /// Before this they were `alloc_zeroed` — 16-byte aligned, on the heap, swap-eligible,
+    /// dump-eligible, and bounded by nothing.
+    ///
+    /// **It falls over rather than degrading.** The obvious alternative is to page-lock what can be
+    /// locked and leave the rest, which is what `mlock` failing under a small `RLIMIT_MEMLOCK`
+    /// looks like. That would be a caller running the weaker of two protections while believing it
+    /// ran the stronger — **so the error is `ContainerError::SecureBlock` and the container does
+    /// not open.** The usual cause is `RLIMIT_MEMLOCK`, which `main.rs` prints at boot and
+    /// `the_reported_memlock_ceiling_is_the_real_one` pins against a live `getrlimit`.
+    pub fn new(chunks: u64) -> Result<Self, ContainerError> {
         let slots = [
-            AlignedBuf::zeroed(CHUNK_SLOT as usize),
-            AlignedBuf::zeroed(CHUNK_SLOT as usize),
-            AlignedBuf::zeroed(CHUNK_SLOT as usize),
+            AlignedBuf::page_locked(CHUNK_SLOT as usize).map_err(map_secure)?,
+            AlignedBuf::page_locked(CHUNK_SLOT as usize).map_err(map_secure)?,
+            AlignedBuf::page_locked(CHUNK_SLOT as usize).map_err(map_secure)?,
         ];
-        Self {
+        Ok(Self {
             slots,
             resident: [None; RING_STAGES],
             center_slot: 1,
             center: 0,
             chunks,
             dirty: [false; RING_STAGES],
-        }
+        })
+    }
+
+    /// **Whether all three slots are page-locked.** FR-4.8, assertable rather than assumed.
+    ///
+    /// The gate `the_ring_buffer_is_page_locked` reads this. **It is a method rather than a
+    /// structural fact** because the backing is a runtime choice, and a requirement that cannot be
+    /// asked about is a requirement nobody can check.
+    pub fn slots_are_page_locked(&self) -> bool {
+        self.slots.iter().all(AlignedBuf::is_page_locked)
+    }
+
+    /// **Whether every slot's address satisfies `O_DIRECT`'s buffer-alignment rule.**
+    ///
+    /// **The companion to [`Self::slots_are_page_locked`] and the cost of changing the backing.**
+    /// `alloc_zeroed` with an explicit 4096 alignment and an `mmap`ed `SecureBlock` both produce
+    /// page-aligned memory, so the two are interchangeable in this respect — but they are reachable
+    /// by different routes, and `O_DIRECT` answers `EINVAL` with a message that says nothing about
+    /// alignment. `DirectFile` re-checks the *offset* on every call for the same reason; this is the
+    /// buffer half.
+    pub fn slots_are_direct_io_aligned(&self) -> bool {
+        self.slots.iter().all(AlignedBuf::is_aligned)
     }
 
     /// Steady-state resident bytes: exactly 192 KiB.

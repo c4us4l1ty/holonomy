@@ -145,6 +145,26 @@ pub enum Hotkey {
     /// and the pattern is that inserting a block is an *action*, while inserting a character is
     /// *typing*.
     InsertImage,
+    /// **Ctrl+C.** Copy the selection into the editor's yank buffer.
+    ///
+    /// **A hotkey, and there is nothing else it could be.** The clipboard is *internal* — there is no
+    /// `CLIPBOARD` atom on the sealed path, no `openat` to spool to a file, and no network for a
+    /// remote selection — so this is "put it in this process's buffer", which is what `Copy` has to
+    /// mean for the row to be honest.
+    ///
+    /// **Ctrl+C was previously swallowed.** Every unbound Ctrl combo falls through to `return None`
+    /// at the end of the hotkey block, so the key existed, was swallowed, and typed nothing — and
+    /// `menus.rs` drew a *Copy* row beside it. `keymap.rs`'s own test asserted that swallowing as
+    /// correct, which is the shape of a gate that makes a missing feature look implemented.
+    Copy,
+    /// **Ctrl+X.** Cut: copy the selection, then delete it.
+    ///
+    /// **One undo entry, not two.** `Editor::cut_selection` copies (which touches no undo stack) and
+    /// then calls `delete_at` (which pushes one), so *Edit > Undo* restores a whole cut rather than
+    /// half of one.
+    Cut,
+    /// **Ctrl+V.** Paste the yank buffer at the caret.
+    Paste,
     /// Ctrl+T. Insert a table at the caret.
     ///
     /// A hotkey rather than a [`Command`] because it carries no payload: the dimensions come from the
@@ -332,6 +352,9 @@ impl Keymap {
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
                 KEY_M if !mods.shift() && !mods.alt() => Some(Hotkey::InsertMath),
                 KEY_I if !mods.shift() && !mods.alt() => Some(Hotkey::InsertImage),
+                KEY_C if !mods.shift() && !mods.alt() => Some(Hotkey::Copy),
+                KEY_X if !mods.shift() && !mods.alt() => Some(Hotkey::Cut),
+                KEY_V if !mods.shift() && !mods.alt() => Some(Hotkey::Paste),
                 _ => None,
             };
             if let Some(hotkey) = binding {
@@ -669,12 +692,53 @@ mod tests {
     fn an_unbound_ctrl_combo_is_swallowed_not_typed() {
         let km = Keymap::us();
         let c = ctrl();
-        // Ctrl+C must not type a 'c'. And must not become anything else either.
-        for code in [KEY_C, KEY_A, KEY_V, KEY_X, KEY_1, KEY_SPACE, KEY_ESC] {
+        // **These three were in this list until the clipboard was built.** `Ctrl+C`, `Ctrl+V` and
+        // `Ctrl+X` were asserted to produce *no command at all*, which was the gate working correctly
+        // about a keymap that had not bound them — and `menus.rs` was drawing a **Copy** row beside
+        // it the whole time. **A gate that asserts a feature is absent is indistinguishable from a
+        // gate that asserts it is missing**, and this one read as documentation of a deliberate
+        // decision rather than as a record of an unfinished one.
+        //
+        // The property the test still asserts is the one it was written for: **an unbound combo
+        // produces nothing, and in particular does not type the letter.** That is why `KEY_A` is still
+        // here and `KEY_C` is not.
+        for code in [KEY_A, KEY_1, KEY_SPACE, KEY_ESC] {
             assert_eq!(
                 km.dispatch(InputEvent::press(code), &c),
                 None,
                 "Ctrl+{code} should produce no command at all"
+            );
+        }
+    }
+
+    /// **The clipboard is bound, and `Copy` is no longer one of the swallowed combos.**
+    ///
+    /// The counterpart to the removal above: a key that used to be asserted inert and now has to be
+    /// asserted live, because **nothing else in the suite would notice it going back to `None`** —
+    /// `an_unbound_ctrl_combo_is_swallowed_not_typed` would simply gain three entries and stay green.
+    #[test]
+    fn the_clipboard_chords_produce_commands_not_characters() {
+        let km = Keymap::us();
+        let c = ctrl();
+        for (code, want) in [
+            (KEY_C, Hotkey::Copy),
+            (KEY_X, Hotkey::Cut),
+            (KEY_V, Hotkey::Paste),
+        ] {
+            let got = km.dispatch(InputEvent::press(code), &c);
+            assert_eq!(
+                got,
+                Some(Command::Hotkey(want)),
+                "Ctrl+{code} must reach the session as {want:?}"
+            );
+            // **And not as a character.** `text_for` is the *character table*, which answers "what
+            // letter does this key type" and does not consult the modifier state at all -- asking it
+            // with Ctrl held returns `Some('c')` for a perfectly correct keymap, because the question
+            // was the wrong one. The property that matters is that the hotkey arm is reached *before*
+            // the character table, which shows up as the command not being an `Insert`.
+            assert!(
+                !matches!(got, Some(Command::Insert(_))),
+                "Ctrl+{code} must not type a character on the way"
             );
         }
     }

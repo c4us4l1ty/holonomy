@@ -29,7 +29,7 @@ pub mod undo;
 pub use asset::{
     scan_anchors, Asset, AssetCatalog, AssetError, AssetId, ANCHOR, ANCHOR_BYTES, ID_LEN,
 };
-pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH};
+pub use editor::{EditOutcome, Editor, EditorError, YANK_CAPACITY, STYLE_UNDO_DEPTH};
 pub use math_span::{for_each_math_span, math_span_at, math_span_count, MathSpan, DELIM, MIN_SPAN};
 pub use payload::{
     decode, encode, image_offsets, Decoded, PayloadError, FORMAT, HEADER_LEN, MAGIC,

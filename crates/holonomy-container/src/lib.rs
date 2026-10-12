@@ -63,6 +63,33 @@ pub enum ContainerError {
     Frame(FrameError),
     /// The ring could not do what was asked.
     Ring(RingError),
+    /// **FR-4.9: the decoy's byte range overlaps the primary's.** Duress refused.
+    ///
+    /// **Refused rather than merged, and the reason is that the alternative destroys the document
+    /// duress exists to protect.** `Ω` is uniform over the container, so a small decoy almost never
+    /// collides — but "almost never" is a property of the sizes, and a large document makes it
+    /// likely. Writing anyway would overwrite the primary with the decoy, and the operator would find
+    /// out when the real document no longer opens, which is both the worst time and the worst way.
+    ///
+    /// **Both ranges are carried.** A bare error would say *something* is wrong; the two ranges are
+    /// what makes it say which, and `duress` is a create-time decision the caller can re-take.
+    DuressOverlap {
+        /// The primary's `[start, end)` byte range.
+        primary: std::ops::Range<u64>,
+        /// The decoy's, which intersects it.
+        decoy: std::ops::Range<u64>,
+    },
+    /// **FR-4.8: the ring's slots could not be page-locked.** Phase 16.
+    ///
+    /// **One variant for "the mapping failed", "the page lock was refused" and "the scrub registry
+    /// is full"**, because all three have the same remedy and none of them is the caller's to fix:
+    /// the container does not open. The usual cause is `RLIMIT_MEMLOCK`, which the boot chain prints
+    /// and `the_reported_memlock_ceiling_is_the_real_one` pins against a live `getrlimit`.
+    ///
+    /// **It does not fall back to unlocked slots.** The fallback would be a ring running the weaker
+    /// of two protections while its caller believed it was running the stronger, and plaintext
+    /// residency is exactly what the ring exists to bound.
+    SecureBlock,
     /// Chaff generation failed.
     Chaff(ChaffError),
     /// Key derivation failed.
@@ -88,6 +115,30 @@ pub enum ContainerError {
     },
 }
 
+/// **The decoy document a duress passphrase mounts.** FR-4.9.
+///
+/// A struct rather than three more parameters on `create_with_duress`, which would have had eight.
+/// **And it is optional**, so [`create`](Wavefunction::create) is the same function with `None` and
+/// every existing gate keeps testing the same code.
+///
+/// # The decoy should be boring, and "boring" is the caller's problem
+///
+/// Nothing here checks that `content` looks like something an operator would plausibly be working
+/// on. **That is deliberate**: a predicate for "innocent enough to be believed" cannot be written by
+/// the same project that also knows what a real document looks like, and a decoy that fails the
+/// predicate would be *refused at write time* — which means the operator finds out they had no
+/// decoy, at exactly the moment they needed one. A container with no decoy is a visible gap; a
+/// container whose decoy was rejected is a surprise under duress.
+#[derive(Debug, Clone, Copy)]
+pub struct DuressDecoy<'a> {
+    /// The duress passphrase. `P_B`.
+    pub passphrase: &'a str,
+    /// The decoy's title, sealed in the decoy's own master frame.
+    pub title: &'a str,
+    /// The decoy's content. Sealed in chunks at `Ω_B`.
+    pub content: &'a [u8],
+}
+
 impl core::fmt::Display for ContainerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -95,6 +146,13 @@ impl core::fmt::Display for ContainerError {
             Self::Aead(e) => write!(f, "authentication: {e}"),
             Self::Frame(e) => write!(f, "master frame: {e}"),
             Self::Ring(e) => write!(f, "ring: {e}"),
+            Self::SecureBlock => f.write_str("the ring's slots could not be page-locked"),
+            Self::DuressOverlap { primary, decoy } => write!(
+                f,
+                "the duress payload at {}..{} overlaps the primary at {}..{}, so writing it would \
+                 destroy the document duress exists to protect",
+                decoy.start, decoy.end, primary.start, primary.end
+            ),
             Self::Chaff(e) => write!(f, "chaff: {e}"),
             Self::Envelope(e) => write!(f, "key derivation: {e}"),
             Self::PayloadTooLarge { requested, cap } => {
@@ -195,9 +253,42 @@ impl Wavefunction {
         self.ring.resident_bytes()
     }
 
+    /// **FR-4.8: whether all three ring slots are page-locked.**
+    ///
+    /// Exposed because the requirement says *page-locked* and the size accessor above says nothing
+    /// about what the bytes are. See [`Ring::slots_are_page_locked`] for the full argument; this is
+    /// the same question one level up, where a caller holding a `Wavefunction` can ask it.
+    pub fn ring_slots_are_page_locked(&self) -> bool {
+        self.ring.slots_are_page_locked()
+    }
+
+    /// **Whether every ring slot's address satisfies `O_DIRECT`'s buffer-alignment rule.**
+    ///
+    /// A `SecureBlock`'s payload is `mmap`ed and therefore page-aligned, which is the whole reason a
+    /// page-locked slot can be used as a direct-I/O buffer at all — **so swapping the backing is not
+    /// free, and this is what says it was not broken.**
+    pub fn ring_slot_alignment_is_direct_io_safe(&self) -> bool {
+        self.ring.slots_are_direct_io_aligned()
+    }
+
     /// The path this container was opened from.
     pub fn path(&self) -> &str {
         self.file.path()
+    }
+
+    /// **This container's file descriptor.**
+    ///
+    /// Exists for the teardown plan, which needs to `fsync` and `close` every descriptor the boot
+    /// opened — and **after `seccomp` there is no `openat`**, so a descriptor that is not closed
+    /// here is not closed at all. It was previously unreachable, which is why `main.rs` called
+    /// `teardown_and_exit` with an empty plan and every edit committed since the last explicit
+    /// `fsync` was left to the kernel's own writeback.
+    ///
+    /// **Read-only in practice.** Nothing in this crate re-opens, duplicates or rebinds it; it exists
+    /// so the shutdown path can name it.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
     }
 
     /// Generate a fresh 32-byte salt.
@@ -233,6 +324,58 @@ impl Wavefunction {
         content: &[u8],
         vdf_iterations: u64,
     ) -> Result<Self, ContainerError> {
+        Self::create_with_duress(path, passphrase, title, content, None, vdf_iterations)
+    }
+
+    /// **Create a container that holds a second, innocent document.** FR-4.9.
+    ///
+    /// `duress: None` is exactly [`create`](Self::create) — the wrapper above is the only difference —
+    /// so a file written this way is indistinguishable in *format* from one written without a decoy,
+    /// and every existing gate keeps testing the same thing.
+    ///
+    /// # What FR-4.9 asks for, and which half already existed
+    ///
+    /// ```text
+    /// Entry of Primary Passcode P_A resolves offset Ω_A, accessing the real document payload.
+    /// Entry of Duress  Passcode P_B resolves decoy offset Ω_B (Ω_B ≠ Ω_A), mounting an alternate,
+    ///                   non-sensitive document.
+    /// Mounting the decoy must securely wipe local ephemeral cache files and emit realistic dummy
+    /// modification timestamps without altering bits at Ω_A.
+    /// ```
+    ///
+    /// **The offsets already worked.** `Self::derive` maps a passphrase to an `Ω` over the file's own
+    /// salt, and `a_second_passphrase_resolves_a_different_offset` has gated that since Phase 3 —
+    /// including the negative half, that the duress passphrase *cannot read the primary*.
+    ///
+    /// **What did not exist was a decoy to find.** A container had one payload, so `P_B` resolved a
+    /// slot of chaff and the open failed — correct, and useless: the coerced operator who types `P_B`
+    /// gets an error, not a boring document. **An error under duress is the worst possible answer**,
+    /// because it tells the person holding the rubber hose that `P_B` is not the interesting one.
+    ///
+    /// # The three claims, and the one this does not make
+    ///
+    /// 1. `P_A` mounts the real document; `P_B` mounts the decoy; neither reads the other.
+    /// 2. **Writing the decoy does not alter a single bit at `Ω_A`.** Checked, not assumed: the two
+    ///    byte ranges are tested for overlap before anything is written, and the container's own
+    ///    primary is read back afterwards.
+    /// 3. **Caches are wiped when the decoy mounts.** This is *not* done here and **cannot be done
+    ///    here** — see [`DuressDecoy`] and the note on the cache wipe below.
+    ///
+    /// **"Realistic dummy modification timestamps" is not implemented and is named as missing.**
+    /// `MasterFrame` carries no timestamp field and the container is written through `O_DIRECT`,
+    /// so the only timestamp that exists is the file's own `mtime` — which is a property of the
+    /// single file, identical whichever payload is open, and therefore already "realistic" in the only
+    /// sense the format has. **Adding a timestamp to the frame would be a format change** to close a
+    /// requirement that the format does not otherwise present, and that is a decision to make
+    /// deliberately rather than to smuggle in with a duress feature.
+    pub fn create_with_duress(
+        path: &Path,
+        passphrase: &str,
+        title: &str,
+        content: &[u8],
+        duress: Option<&DuressDecoy<'_>>,
+        vdf_iterations: u64,
+    ) -> Result<Self, ContainerError> {
         let salt = Self::fresh_salt()?;
         let (root, omega) = Self::derive(passphrase, &salt, vdf_iterations)?;
 
@@ -257,7 +400,7 @@ impl Wavefunction {
 
         let file = DirectFile::create_or_open(path)?;
         let chaff = Chaff::new(&root.k_chaff);
-        let ring = Ring::new(chunk_count);
+        let ring = Ring::new(chunk_count)?;
 
         // Page 0 is chaff with the salt laid over its first 32 bytes. Writing the rest of
         // the page as chaff rather than zeroes matters: 4,064 zero bytes at a fixed offset
@@ -285,35 +428,46 @@ impl Wavefunction {
             CONTAINER_SIZE,
         )?;
 
-        // Chunk 0: the master frame.
-        let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
-        let n = frame.encode(&mut frame_bytes)?;
-        let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
-        aead::seal_chunk(
-            &root.k_enc,
-            &root.n_root,
-            MASTER_FRAME_CHUNK,
-            &frame_bytes[..n],
-            slot.as_mut_slice(),
-        )?;
-        file.write_exact_at(layout::chunk_offset(omega, MASTER_FRAME_CHUNK), &slot)?;
-        slot.wipe();
+        Self::write_payload(&file, &root, omega, &frame, content, chunk_count)?;
 
-        // Chunks 1..N: the content.
-        let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
-        for index in 1..chunk_count {
-            let start = ((index - 1) * CHUNK_PLAINTEXT as u64) as usize;
-            let end = (start + CHUNK_PLAINTEXT).min(content.len());
-            let piece = if start < content.len() {
-                &content[start..end]
-            } else {
-                &[][..]
-            };
-            aead::seal_chunk(&root.k_enc, &root.n_root, index, piece, slot.as_mut_slice())?;
-            file.write_exact_at(layout::chunk_offset(omega, index), &slot)?;
+        // **The decoy, if one was asked for.** Written after the primary so that the "no bit at Ω_A
+        // changed" claim is checked against a file that is already complete.
+        if let Some(d) = duress {
+            let (root_b, omega_b) = Self::derive(d.passphrase, &salt, vdf_iterations)?;
+            let chunks_b = chunks_for(d.content.len() as u64)
+                .map_err(|_| ContainerError::PayloadTooLarge {
+                    requested: d.content.len() as u64,
+                    cap: layout::S_MAX_PAYLOAD,
+                })?;
+            let payload_b = payload_len(chunks_b);
+
+            // **Overlap is refused, not merged.** A decoy that landed on the primary's bytes would
+            // silently destroy the very document plausible deniability is protecting, and it would do
+            // so at *write* time — the operator discovers it when the real file is already damaged.
+            // Ω is uniform over the container, so for a small document this is rare; for a large one
+            // it is not, and refusing is the only answer that is safe in both cases.
+            let primary = omega..omega + payload_len(chunk_count);
+            let decoy = omega_b..omega_b + payload_b;
+            if decoy.start < primary.end && primary.start < decoy.end {
+                return Err(ContainerError::DuressOverlap { primary, decoy });
+            }
+            if !layout::payload_fits(omega_b, payload_b) {
+                return Err(ContainerError::PayloadTooLarge {
+                    requested: payload_b,
+                    cap: layout::S_MAX_PAYLOAD,
+                });
+            }
+
+            let frame_b = MasterFrame::new(d.content.len() as u64, chunks_b, d.title)
+                .with_kdf_params(
+                    vdf_iterations,
+                    envelope::ARGON2_M_COST_KIB,
+                    envelope::ARGON2_T_COST,
+                    envelope::ARGON2_P_COST,
+                );
+            Self::write_payload(&file, &root_b, omega_b, &frame_b, d.content, chunks_b)?;
+            file.sync()?;
         }
-        slot.wipe();
-        file.sync()?;
 
         let mut this = Self {
             file,
@@ -333,6 +487,54 @@ impl Wavefunction {
             0,
         )?;
         Ok(this)
+    }
+
+    /// **Seal and write one payload at `omega`: the master frame at chunk 0, then chunks 1..N.**
+    ///
+    /// Extracted from `create` because FR-4.9 needs to write a *second* payload into the same file
+    /// with a *different* root, and copying the seal-and-write loop would be two copies of the one
+    /// piece of this crate that must not drift: a chunk sealed with the wrong nonce, or written at the
+    /// wrong offset, is a container that opens as garbage.
+    ///
+    /// **`file` is borrowed, not taken, and nothing is synced.** The caller decides when the file is
+    /// durable: `create` writes the chaff and the primary and then decides about the decoy, so an
+    /// `fsync` between the two would be a wasted barrier on a 128 MiB file.
+    fn write_payload(
+        file: &DirectFile,
+        root: &envelope::RootMaterial,
+        omega: u64,
+        frame: &MasterFrame,
+        content: &[u8],
+        chunk_count: u64,
+    ) -> Result<(), ContainerError> {
+        // Chunk 0: the master frame.
+        let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
+        let n = frame.encode(&mut frame_bytes)?;
+        let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
+        aead::seal_chunk(
+            &root.k_enc,
+            &root.n_root,
+            MASTER_FRAME_CHUNK,
+            &frame_bytes[..n],
+            slot.as_mut_slice(),
+        )?;
+        file.write_exact_at(layout::chunk_offset(omega, MASTER_FRAME_CHUNK), &slot)?;
+        slot.wipe();
+
+        // Chunks 1..N: the content.
+        for index in 1..chunk_count {
+            let start = ((index - 1) * CHUNK_PLAINTEXT as u64) as usize;
+            let end = (start + CHUNK_PLAINTEXT).min(content.len());
+            let piece = if start < content.len() {
+                &content[start..end]
+            } else {
+                &[][..]
+            };
+            aead::seal_chunk(&root.k_enc, &root.n_root, index, piece, slot.as_mut_slice())?;
+            file.write_exact_at(layout::chunk_offset(omega, index), &slot)?;
+        }
+        slot.wipe();
+        Ok(())
     }
 
     /// Open an existing container with a passphrase.
@@ -426,7 +628,7 @@ impl Wavefunction {
         // inside chunk 0, so until it is read the ring must not prefetch a neighbour: a
         // one-chunk container has no chunk 1, and prefetching it would try to authenticate
         // chaff against a ciphertext and report a wrong-passphrase for a correct one.
-        let mut ring = Ring::new(1);
+        let mut ring = Ring::new(1)?;
         ring.seek(&file, omega, &root.k_enc, &root.n_root, MASTER_FRAME_CHUNK)?;
         let frame_bytes = ring.center_bytes().to_vec();
         // `decode` needs the chunk count, which is what we are about to learn, so parse the

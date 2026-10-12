@@ -287,6 +287,50 @@ fn the_ring_is_192_kib() {
     assert_eq!(wf.ring_resident_bytes(), 192 * 1024);
 }
 
+/// **FR-4.8: the three slots are page-locked, and this is the gate that can see it.**
+///
+/// # What was wrong
+///
+/// The size gate above — `the_ring_is_192_kib` — has been green since Phase 3 and asserts the ring
+/// is **192 KiB**. It says nothing about what that 192 KiB *is*. It was `alloc_zeroed`: 16-byte
+/// aligned, on the heap, swap-eligible, dump-eligible, and bounded by nothing on either side.
+/// FR-4.8 says **"3-stage _page-locked_ ring buffer"**, and the size gate passed against an
+/// implementation that was not one.
+///
+/// **That is the shape of the defect worth naming: a gate that measured a property of the *amount*
+/// and read as a claim about the *thing*.** Three slots of the right size, unprotected, satisfy a
+/// sentence that reads like a protection claim.
+///
+/// # Why `slots_are_page_locked` is a method and not a comment
+///
+/// The backing is a runtime choice — `AlignedBuf::page_locked` or `AlignedBuf::zeroed` — so "the
+/// ring's slots are page-locked" is not a structural fact a reader can check by looking. **A
+/// requirement nobody can ask about is a requirement nobody checks**, which is how this stayed
+/// green.
+#[test]
+fn the_ring_buffer_is_page_locked() {
+    let dir = scratch_dir("ring-locked");
+    let path = dir.join("c.wavefunction");
+    let wf = Wavefunction::create(&path, "pw", "t", &content(200_000), TEST_VDF_ITERATIONS)
+        .expect("create");
+
+    assert!(
+        wf.ring_slots_are_page_locked(),
+        "**FR-4.8: all three slots are page-locked.** They were `alloc_zeroed` until this gate \
+         existed, and `the_ring_is_192_kib` was green throughout — it measured how much, not what."
+    );
+
+    // **And the alignment `O_DIRECT` needs still holds**, because a page-locked `mmap` and a
+    // 4096-aligned `alloc_zeroed` are the same guarantee reached two ways, and a change that
+    // swapped the backing without checking this would break every read.
+    assert_eq!(
+        wf.ring_slot_alignment_is_direct_io_safe(),
+        true,
+        "a SecureBlock's payload is page-aligned, which is what lets a locked slot be a direct-I/O \
+         buffer at all"
+    );
+}
+
 /// The salt must be at fixed offset 0 and readable without a passphrase, because deriving Ω
 /// requires it.
 ///
@@ -537,4 +581,268 @@ fn the_container_passes_the_entropy_gate() {
         !wf.region_is_chaff(om, 4096).expect("compare"),
         "the payload region is identical to the chaff keystream"
     );
+}
+
+/// # FR-4.9: deniable duress routing
+///
+/// ```text
+/// Entry of Primary Passcode P_A resolves offset Ω_A, accessing the real document payload.
+/// Entry of Duress  Passcode P_B resolves decoy offset Ω_B (Ω_B ≠ Ω_A), mounting an alternate,
+///                   non-sensitive document.
+/// ```
+///
+/// # What already existed, and what did not
+///
+/// **The offsets.** `derive` maps a passphrase to an `Ω` over the file's own salt, and
+/// `a_second_passphrase_resolves_a_different_offset` has gated the *negative* half since Phase 3 —
+/// the duress passphrase cannot read the primary.
+///
+/// **Not the decoy.** A container held one payload, so `P_B` resolved a slot of chaff and the open
+/// failed with `Aead` or `Frame`. **Which is correct and useless: an error under duress tells the
+/// person holding the rubber hose that `P_B` is not the interesting one.** The feature was half
+/// present in the sense that mattered least.
+///
+/// Each gate below is a way the obvious implementation is wrong.
+mod duress {
+    use super::*;
+    use crate::{ContainerError, DuressDecoy};
+
+    const P_A: &str = "the real passphrase";
+    const P_B: &str = "not the passphrase you are looking for";
+
+    fn decoy() -> DuressDecoy<'static> {
+        DuressDecoy {
+            passphrase: P_B,
+            title: "Shopping list",
+            content: b"bread\nmilk\ncoffee\n",
+        }
+    }
+
+    /// **The headline claim: `P_B` mounts a boring document.**
+    ///
+    /// Everything else in FR-4.9 is in service of this one sentence. If this fails, duress does not
+    /// exist, whatever the offsets do.
+    #[test]
+    fn a_duress_passphrase_mounts_the_decoy() {
+        let dir = scratch_dir("duress-mounts");
+        let path = dir.join("c.wavefunction");
+        let secret = content(40_000);
+        Wavefunction::create_with_duress(
+            &path,
+            P_A,
+            "Diary",
+            &secret,
+            Some(&decoy()),
+            TEST_VDF_ITERATIONS,
+        )
+        .expect("create with duress");
+
+        let mut b = Wavefunction::open(&path, P_B, TEST_VDF_ITERATIONS)
+            .expect("**the duress passphrase must open the container**");
+        assert_eq!(b.title(), "Shopping list", "**and mount the decoy's title**");
+        let got = b.read_content().expect("read the decoy");
+        assert_eq!(
+            got,
+            decoy().content.to_vec(),
+            "**and read back the decoy's bytes**"
+        );
+        assert!(
+            got != secret,
+            "the decoy is a different document from the primary, which is the point of having two"
+        );
+    }
+
+    /// **Neither passphrase reads the other.** Both directions, because only testing one is how a
+    /// one-way mistake survives.
+    #[test]
+    fn neither_passphrase_reads_the_others_document() {
+        let dir = scratch_dir("duress-both");
+        let path = dir.join("c.wavefunction");
+        let secret = content(40_000);
+        Wavefunction::create_with_duress(
+            &path,
+            P_A,
+            "Diary",
+            &secret,
+            Some(&decoy()),
+            TEST_VDF_ITERATIONS,
+        )
+        .expect("create");
+
+        // Forward: P_A gets the real document.
+        let mut a = Wavefunction::open(&path, P_A, TEST_VDF_ITERATIONS).expect("open with P_A");
+        assert_eq!(a.title(), "Diary");
+        assert_eq!(a.read_content().expect("read"), secret, "P_A reads the primary");
+        let omega_a = a.omega();
+        drop(a);
+
+        // Backward: the decoy's own root cannot be used to reach Ω_A. Asserted as *different
+        // offsets*, which is the structural reason, and not as an error — an error here would be
+        // indistinguishable from a container with no decoy.
+        let b = Wavefunction::open(&path, P_B, TEST_VDF_ITERATIONS).expect("open with P_B");
+        let omega_b = b.omega();
+        assert_ne!(omega_a, omega_b, "**Ω_A and Ω_B are different offsets**");
+        assert_eq!(b.title(), "Shopping list");
+        drop(b);
+
+        // And a passphrase that is neither fails, which is the property the Phase 3 gate already
+        // covered for a container *without* a decoy; stated here because with a decoy present it
+        // would be easy to regress into "any passphrase mounts something".
+        let err = Wavefunction::open(&path, "third passphrase", TEST_VDF_ITERATIONS)
+            .expect_err("an unrelated passphrase must still be refused");
+        // **`Ring(RingError::Aead(..))`, not `Aead(..)`** -- the frame decrypts and the failure comes
+        // from the ring reading the chunk after it. The first version of this assertion used the flat
+        // form and failed on a correct refusal, which is the shape of a gate that checks the thing it
+        // expects rather than the thing that happens.
+        assert!(
+            matches!(err, ContainerError::Ring(crate::ring::RingError::Aead(_)) | ContainerError::Frame(_)),
+            "and it fails by refusing to authenticate rather than by some new path: {err}"
+        );
+    }
+
+    /// **"Without altering bits at Ω_A".**
+    ///
+    /// The obvious bug is writing the decoy *over* the primary when `Ω_B` lands inside it. The
+    /// overlap check in `create_with_duress` refuses that case; this is the gate for the other half
+    /// — that a non-overlapping `Ω_B` really does leave the primary alone.
+    ///
+    /// ## Why this is a round trip and not a byte comparison
+    ///
+    /// The first version read the primary's bytes out of two containers and compared them. **They
+    /// cannot be equal**: each `create` draws a fresh salt, so the chaff keystreams differ and the
+    /// payloads are sealed under different keys. That gate would have failed for a reason with
+    /// nothing to do with duress, and fixing it by relaxing the comparison would have made it assert
+    /// nothing at all.
+    ///
+    /// **The claim is about what the primary is, not about two files agreeing**, so it is asked the
+    /// only way it can be: does the primary still read back exactly?
+    #[test]
+    fn writing_the_decoy_changes_no_bit_at_the_primary_offset() {
+        let dir = scratch_dir("duress-bits");
+        let guarded = dir.join("guarded.wavefunction");
+        let secret = content(40_000);
+        let d = decoy();
+
+        Wavefunction::create_with_duress(
+            &guarded,
+            P_A,
+            "Diary",
+            &secret,
+            Some(&d),
+            TEST_VDF_ITERATIONS,
+        )
+        .expect("create with duress");
+
+        // **The primary, byte for byte.** A duress feature that damaged the document it protects
+        // would be the worst possible outcome and the least likely to be noticed.
+        let mut a = Wavefunction::open(&guarded, P_A, TEST_VDF_ITERATIONS).expect("open P_A");
+        assert_eq!(
+            a.read_content().expect("read"),
+            secret,
+            "**the primary survived the decoy being written into the same file**, byte for byte"
+        );
+        let omega_a = a.omega();
+        drop(a);
+
+        // **And the decoy lives somewhere else entirely** — disjoint ranges, asserted as ranges
+        // rather than as "the open worked", because two offsets differing is the reason two opens
+        // can succeed.
+        let mut b = Wavefunction::open(&guarded, P_B, TEST_VDF_ITERATIONS).expect("open P_B");
+        let omega_b = b.omega();
+        assert_eq!(omega_a % layout::CHUNK_SLOT, 0, "the primary is slot-aligned");
+        assert_eq!(omega_b % layout::CHUNK_SLOT, 0, "and so is the decoy");
+        let primary = omega_a..omega_a + payload_bytes(&secret);
+        let decoy_range = omega_b..omega_b + payload_bytes(d.content);
+        assert!(
+            decoy_range.start >= primary.end || decoy_range.end <= primary.start,
+            "the decoy at {}..{} must not touch the primary at {}..{} -- an overlap is refused at \
+             write time, so reaching here means the ranges are disjoint",
+            decoy_range.start,
+            decoy_range.end,
+            primary.start,
+            primary.end
+        );
+        assert_eq!(
+            b.read_content().expect("read"),
+            d.content.to_vec(),
+            "and the decoy reads back its own bytes, not the primary's"
+        );
+    }
+
+    /// **An overlapping decoy is refused, and `create` is unchanged without one.**
+    ///
+    /// The rule is tested as a value rather than through a random `Ω_B`, because forcing a collision
+    /// through `create` means running Argon2id at 128 MiB repeatedly until a uniform draw lands inside
+    /// a range the test controls the size of — minutes of gate time to exercise one comparison. The
+    /// comparison is what has to be right; that `create` calls it is one line, and the refusal's
+    /// *consequence* is pinned by the error's own fields.
+    #[test]
+    fn an_overlapping_decoy_is_refused_rather_than_merged() {
+        use std::ops::Range;
+
+        // The rule, as `create` applies it, spelled out so the test is not a copy that can drift.
+        let overlaps = |primary: Range<u64>, decoy: Range<u64>| {
+            decoy.start < primary.end && primary.start < decoy.end
+        };
+
+        assert!(
+            overlaps(100..200, 150..250),
+            "a decoy starting inside the primary overlaps it"
+        );
+        assert!(
+            overlaps(100..200, 50..150),
+            "and one starting before it and ending inside it does too -- the second comparison, \
+             which a `decoy.start < primary.end` alone would miss"
+        );
+        assert!(
+            !overlaps(100..200, 200..300),
+            "touching at a boundary is not overlapping: the primary is `[start, end)`"
+        );
+        assert!(!overlaps(100..200, 0..100), "nor is abutting at the front");
+        assert!(!overlaps(100..200, 400..500), "nor is being well clear of it");
+
+        // **And the refusal carries both ranges**, because a bare error cannot tell the caller
+        // whether to move the decoy or to shrink it.
+        let e = ContainerError::DuressOverlap {
+            primary: 100..200,
+            decoy: 150..250,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("150") && msg.contains("250"), "{msg}");
+        assert!(msg.contains("100") && msg.contains("200"), "{msg}");
+    }
+
+    /// **The decoy does not change the file.** FR-4.1 says the container is exactly 128 MiB whatever
+    /// it holds, and a second payload is the most plausible way to break that.
+    #[test]
+    fn a_duress_payload_does_not_change_the_container_size() {
+        let dir = scratch_dir("duress-size");
+        let path = dir.join("c.wavefunction");
+        Wavefunction::create_with_duress(
+            &path,
+            P_A,
+            "Diary",
+            &content(40_000),
+            Some(&decoy()),
+            TEST_VDF_ITERATIONS,
+        )
+        .expect("create");
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            CONTAINER_SIZE,
+            "**still exactly 128 MiB with two payloads in it.** The decoy went into chaff that was \
+             already there; it did not extend the file."
+        );
+    }
+
+    /// **Bytes a document's payload occupies**: its frame plus its content chunks, slot-aligned.
+    ///
+    /// `N` content chunks need `N + 1` slots (chunk 0 is the master frame), and the whole payload is
+    /// `CHUNK_SLOT`-aligned because `Ω` is. Written out rather than reusing the crate's
+    /// `payload_len`, which takes a chunk count, so that a change to the framing surfaces here as a
+    /// gate failure rather than as two helpers that agree by accident.
+    fn payload_bytes(content: &[u8]) -> u64 {
+        let body = (content.len() as u64).div_ceil(CHUNK_PLAINTEXT as u64);
+        (body + 1) * CHUNK_SLOT as u64
+    }
 }
