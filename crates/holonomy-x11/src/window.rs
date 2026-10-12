@@ -41,6 +41,16 @@ use crate::proto::{self, cw, gc, image, mask, op, value, Rdr, Req};
 pub struct SizeHints {
     /// The flags word: `PSize`, `PMinSize`, `PMaxSize`, …
     pub flags: u32,
+    /// The width `PSize` names. **Only meaningful when `PSize` is set in [`flags`](Self::flags).**
+    ///
+    /// **Added 2026-10-12, and it is the field the whole defect was in.** `PSize` says "the `width`
+    /// and `height` below the flags are the size this window wants to be", and nothing read them
+    /// back — so a hint set that said `PSize` with a width of zero was indistinguishable from a hint
+    /// set that was merely wrong somewhere nobody checked. **A reader that cannot see the field a
+    /// writer wrote cannot check it.**
+    pub width: i32,
+    /// The height `PSize` names. See [`width`](Self::width).
+    pub height: i32,
     /// Minimum width, in pixels.
     pub min_width: i32,
     /// Minimum height, in pixels.
@@ -159,6 +169,130 @@ pub struct Window {
     width: u32,
     height: u32,
     depth: u8,
+}
+
+impl SizeHints {
+    /// Parse the 72 bytes of an `XSizeHints`.
+    ///
+    /// **A free-standing parser because the writer is one**, and because the defect this crate spent
+    /// a whole part failing to find was in the pair of them: the writer set `PSize` and wrote two
+    /// zeros where the size goes, and the reader skipped those two words as "obsolete" and so had no
+    /// way to disagree with it. **`from_bytes` and `size_hints_bytes_for` are each other's check**,
+    /// and `tests/window_size.rs` is what runs them against each other.
+    ///
+    /// **Missing words read as zero, not as an error.** A short buffer is a truncated property, and
+    /// zero is what the protocol says an absent field means; refusing would turn "the server sent
+    /// less than we asked for" into a panic on a path whose whole job is to report what the server
+    /// said.
+    pub fn from_bytes(value: &[u8]) -> Self {
+        let word = |i: usize| -> i32 {
+            let o = i * 4;
+            match value.get(o..o + 4) {
+                Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                None => 0,
+            }
+        };
+        Self {
+            flags: word(0) as u32,
+            width: word(3),
+            height: word(4),
+            min_width: word(5),
+            min_height: word(6),
+            max_width: word(7),
+            max_height: word(8),
+            width_inc: word(9),
+            height_inc: word(10),
+        }
+    }
+}
+
+/// Build the 72 bytes of an `XSizeHints`.
+///
+/// **Extracted from [`Window::set_size_hints`] so a gate can reach it.** The structure was built
+/// inline, which means the only way to ask "what bytes does this send" was to send them to a server
+/// and read the property back — **so the one field that was wrong could not be checked without an X
+/// display, and the two tests that would have caught it were the ones that needed one.** The
+/// arithmetic is now a pure function and `tests/window_size.rs` checks it on every machine.
+///
+/// # The layout, and why this comment is not the authority
+///
+/// ```text
+///   0  long   flags          PSize|PMinSize|PMaxSize
+///   4  int    x              obsolete, zero
+///   8  int    y              obsolete, zero
+///  12  int    width, height  PSize: the size the window was created at
+///  20  int    min_width, min_height
+///  28  int    max_width, max_height      0 means "no maximum"
+///  36  int    width_inc, height_inc      1 pixel: no step
+///  44  int    min_aspect.x, .y           zero: no aspect
+///  52  int    max_aspect.x, .y           zero: no aspect
+///  60  int    base_width, base_height    zero
+///  68  int    win_gravity                zero
+/// ```
+///
+/// **Four obsolete ints, not three.** An earlier version of this comment listed them as `4 int x, y`
+/// and `8 int width, height`, which put `width` at 8 and `height` at 12 — and **every offset below
+/// was correct anyway**, so the minimum and maximum worked and only `PSize` pointed at two zeros.
+/// **That is the argument for testing the bytes rather than reading the comment:** the comment was
+/// wrong in the one row nobody needed and right in all the rows everybody checked, so reading it
+/// confirmed the parts that were fine.
+pub fn size_hints_bytes_for(size: (u16, u16), min: (u16, u16), max: Option<(u16, u16)>) -> Vec<u8> {
+    let mut data = vec![0u8; 18 * 4];
+    // # CORRECTION 2026-10-12: a flag is set only when the field it names is written
+    //
+    // **This function set `PMaxSize` unconditionally and then wrote zeroes into the maximum when
+    // `max` was `None`.** The old comment said *"0 means 'no maximum', which is how the protocol
+    // spells unlimited"* — **and that is only true when `PMaxSize` is _not_ set.** `PMaxSize` does not
+    // mean "there is a maximum field"; it means **"the two words at offset 28 are the maximum"**. So
+    // the flag plus two zeroes is not *no maximum*, it is *a maximum of 0 x 0*, and a window manager
+    // that believes it will size the window to `min(min_width, 0) x min(min_height, 0)` — which is
+    // the minimum, because the minimum is the only thing left.
+    //
+    // ## Measured, one hint at a time, so no part of it is theory
+    //
+    // Four windows created at 800 x 600 on this machine, differing only in what was published:
+    //
+    // ```text
+    // no hints at all          -> GetGeometry 800x600
+    // PSize only               -> GetGeometry 800x600
+    // PSize + min 768x320      -> GetGeometry 768x320   <-- the defect
+    // PSize + min + max 4096   -> GetGeometry 800x600
+    // ```
+    //
+    // **The third row is this bug and the fourth is the fix**, and the first two say the problem is
+    // not `PSize` and not the minimum: it is the flag with nothing behind it. That is also the whole
+    // of *"I cannot drag it"* — a window whose maximum the window manager believes is 0 x 0 cannot be
+    // grown by a drag, or by anything else.
+    //
+    // ## The rule, stated so it can be checked
+    //
+    // **`PSize` names `width`/`height` and they are always written. `PMinSize` names `min_width`/
+    // `min_height` and they are always written. `PMaxSize` names `max_width`/`max_height` and they
+    // are written only when there is a maximum — so the flag is set only then.** `PResizeInc` is
+    // never set, so the increments below are ignored, and one is a harmless value for an ignored
+    // field. `a_flag_is_set_only_when_the_field_it_names_is_written` is the gate for this paragraph.
+    let mut flags = 1u32 | (1 << 4); // PSize | PMinSize
+    data[12..16].copy_from_slice(&u32::from(size.0).to_le_bytes());
+    data[16..20].copy_from_slice(&u32::from(size.1).to_le_bytes());
+    data[20..24].copy_from_slice(&u32::from(min.0).to_le_bytes());
+    data[24..28].copy_from_slice(&u32::from(min.1).to_le_bytes());
+    match max {
+        Some((w, h)) => {
+            flags |= 1 << 5; // PMaxSize, and only now is the field behind it written
+            data[28..32].copy_from_slice(&u32::from(w).to_le_bytes());
+            data[32..36].copy_from_slice(&u32::from(h).to_le_bytes());
+        }
+        None => {
+            // **Left at zero and, crucially, `PMaxSize` is not set** — so the words are ignored
+            // rather than read as a maximum of nothing.
+            data[28..36].copy_from_slice(&[0u8; 8]);
+        }
+    }
+    data[0..4].copy_from_slice(&flags.to_le_bytes());
+    // width-inc, height-inc = 1 pixel; there is no step.
+    data[36..40].copy_from_slice(&1u32.to_le_bytes());
+    data[40..44].copy_from_slice(&1u32.to_le_bytes());
+    data
 }
 
 impl Window {
@@ -555,18 +689,71 @@ impl Window {
         Ok(())
     }
 
-    /// Tell the window manager the smallest and largest sizes this client can draw into.
+    /// Tell the window manager this window's current size and the smallest and largest it can draw
+    /// into.
     ///
     /// `WM_NORMAL_HINTS`, with a `WM_NORMAL_HINTS` structure of flags, the old and new sizes, the
-    /// increments and the counts. Only `min-size` and `max-size` are set: this is a window with no
-    /// fixed aspect ratio and no step, so the increments are one pixel and the counts are the whole
-    /// field. Sending *no* hints would work too -- most window managers resize an unhinted window
-    /// freely -- but "works on the window manager in front of me" is not a property to build a
-    /// resizable window on, and the minimum is the part that matters: without one, a drag to zero
-    /// produces a window this client cannot present into.
+    /// increments and the counts. `size` and `min-size` and `max-size` are all set: this is a window
+    /// with no fixed aspect ratio and no step, so the increments are one pixel and the counts are the
+    /// whole field.
+    ///
+    /// # CORRECTION 2026-10-12: `PSize` was set and the size it names was **zero**
+    ///
+    /// This is what made the window un-resizable and tiny, and it is the whole of the *"it's way too
+    /// small and I can't drag it"* report. `flags` said
+    ///
+    /// ```text
+    /// PSize | PMinSize | PMaxSize = 1 | 16 | 32 = 49
+    /// ```
+    ///
+    /// **and `width` and `height` were never written, so both were zero.** `PSize` is not a
+    /// declaration that *this client has a size*; it is a declaration that **the `width` and `height`
+    /// fields below it are meaningful**. A window manager reading `PSize` with a zero size is being
+    /// told *this window wants to be 0 x 0*, and clamps it up to `min_width x min_height`.
+    ///
+    /// ## The measurement, from the server and not from the app
+    ///
+    /// The app asked for 1600 x 1000 and printed that it had. `GetGeometry` on the same window,
+    /// decoded from the wire, answered:
+    ///
+    /// ```text
+    /// [ 8] ed 04 00 00  32 00 7c 00    root = 1261,  x = 50,  y = 124
+    /// [16] 00 03 40 01                 width = 0x0300 = 768,  height = 0x0140 = 320
+    /// ```
+    ///
+    /// **768 x 320 is exactly `MIN_WIDTH x MIN_HEIGHT`** — the clamp floor, not a size anything asked
+    /// for. The app and the server disagreed by 1092 px and only one of them was wrong.
+    ///
+    /// ## Why part 34's fix did not catch this
+    ///
+    /// Part 34 corrected two real bugs here: the fields were written twelve bytes early, and the
+    /// request was two bytes too long so the server answered `BadLength` and the caller discarded the
+    /// error. **Both were fixed and the property was still wrong**, because they were checked by
+    /// whether a `GetProperty` answered at all — **not by what it said**. `read_size_hints` is the
+    /// instrument that answers the second question, and `the_size_hints_name_a_real_size` is the gate
+    /// that now uses it.
+    ///
+    /// ## And the comment's offset table was wrong too
+    ///
+    /// It read `4 int x, y` and `8 int width, height`, which puts `width` at 8 and `height` at 12.
+    /// The Core Protocol's `XSizeHints` has **four** obsolete ints, not three:
+    ///
+    /// ```text
+    ///   0  long   flags
+    ///   4  int    x                 obsolete
+    ///   8  int    y                 obsolete
+    ///  12  int    width             PSize
+    ///  16  int    height            PSize
+    ///  20  int    min_width, min_height
+    /// ```
+    ///
+    /// **The offsets below `width` were right and the two above it were not**, which is why the
+    /// minimum worked all along and only `PSize` was nonsense: a table that is wrong in the part
+    /// nobody needed still reads as authoritative in the part somebody does.
     pub fn set_size_hints(
         &self,
         conn: &mut Conn,
+        size: (u16, u16),
         min: (u16, u16),
         max: Option<(u16, u16)>,
     ) -> Result<(), WindowError> {
@@ -583,8 +770,9 @@ impl Window {
         //
         // ```text
         //   0  long   flags          PSize|PMinSize|PMaxSize
-        //   4  int    x, y          obsolete, zero
-        //   8  int    width, height obsolete, zero
+        //   4  int    x              obsolete, zero
+        //   8  int    y              obsolete, zero
+        //  12  int    width, height  PSize: the size this window was created at
         //  20  int    min_width, min_height
         //  28  int    max_width, max_height      0 means "no maximum"
         //  36  int    width_inc, height_inc      1 pixel: no step
@@ -593,24 +781,14 @@ impl Window {
         //  60  int    base_width, base_height    zero
         //  68  int    win_gravity                zero
         // ```
-        let mut data = vec![0u8; 18 * 4];
-        // Flags: PSize(1) | PMinSize(1<<4) | PMaxSize(1<<5).
-        data[0..4].copy_from_slice(&((1u32 | (1 << 4) | (1 << 5)).to_le_bytes()));
-        data[20..24].copy_from_slice(&u32::from(min.0).to_le_bytes());
-        data[24..28].copy_from_slice(&u32::from(min.1).to_le_bytes());
-        match max {
-            Some((w, h)) => {
-                data[28..32].copy_from_slice(&u32::from(w).to_le_bytes());
-                data[32..36].copy_from_slice(&u32::from(h).to_le_bytes());
-            }
-            None => {
-                // 0 means "no maximum", which is how the protocol spells unlimited.
-                data[28..36].copy_from_slice(&[0u8; 8]);
-            }
-        }
-        // width-inc, height-inc = 1 pixel; there is no step.
-        data[36..40].copy_from_slice(&1u32.to_le_bytes());
-        data[40..44].copy_from_slice(&1u32.to_le_bytes());
+        //
+        // **CORRECTION 2026-10-12: the two obsolete ints are named separately, and `width, height`
+        // moved to 12.** This table used to read `4 int x, y` and `8 int width, height` — three ints
+        // where the protocol has four, so it put `width` at 8 and `height` at 12. **Every offset below
+        // was right anyway, which is why the minimum worked all along and only `PSize` was nonsense.**
+        // A table that is wrong only in the part nobody needs still reads as authoritative in the part
+        // somebody does, and that is the half that shipped.
+        let data = size_hints_bytes_for(size, min, max);
         conn.request(
             Req::new(op::CHANGE_PROPERTY)
                 .second_byte(0) // Replace
@@ -790,25 +968,9 @@ impl Window {
             return None;
         }
         let value = body.get(32..)?;
-        let word = |i: usize| -> i32 {
-            let o = i * 4;
-            match value.get(o..o + 4) {
-                Some(b) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                None => 0,
-            }
-        };
-        Some(SizeHints {
-            flags: word(0) as u32,
-            // **The obsolete block is four ints at 4..20 and skipping it is the whole point.** This
-            // function and `set_size_hints` name the same offsets for the same reason: the bug was
-            // that neither of them did.
-            min_width: word(5),
-            min_height: word(6),
-            max_width: word(7),
-            max_height: word(8),
-            width_inc: word(9),
-            height_inc: word(10),
-        })
+        // **The same parser the gate uses on the builder's output**, so the two can only disagree if
+        // the *bytes* disagree and not because two hand-written offsets drifted apart.
+        Some(SizeHints::from_bytes(value))
     }
 
     /// Destroy the window and free its graphics context.

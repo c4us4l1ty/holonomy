@@ -5795,9 +5795,6 @@ fn scalar_len(bytes: &[u8]) -> usize {
     }
 }
 
-fn codepoint_count(bytes: &[u8]) -> u32 {
-    bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32
-}
 
 /// Push one body-text run at `x`, `y`, in `style`.
 ///

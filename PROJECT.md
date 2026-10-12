@@ -4933,3 +4933,205 @@ more than 2× means `T` is too small, and that is the direction that weakens the
   The whole of this part — save, export, clipboard, epoll wait, page-locked ring, duress — cost
   **1,920 bytes**, which is the number worth knowing if the next few parts are larger.
 * Whole workspace: **green**, `cargo test --workspace --no-fail-fast`.
+
+# Part 42 — the window was pinned at its own minimum, 2026-10-12
+
+Three reports in a row said the window was *"way too small"*, and part 36 answered it twice — once by
+capping the window at 1,600 x 1,000 and once by taking ninety per cent of the screen. **Both answered
+the wrong question**, and the measurements below are what settled it.
+
+## A. What was actually wrong: two flags with nothing behind them
+
+`WM_NORMAL_HINTS` is a structure of a flags word and a set of fields. **A flag does not mean "this
+client has such a field"; it means "the words at that offset are a real value."** `set_size_hints` set
+two flags whose fields were never written:
+
+| flag | field it names | what was there | what the window manager concluded |
+|---|---|---|---|
+| `PSize` (1) | `width`, `height` at byte 12 | **zero** | *this window wants to be 0 x 0* |
+| `PMaxSize` (1<<5) | `max_width`, `max_height` at byte 28 | **zero** (`max` was `None`) | *this window may never exceed 0 x 0* |
+
+The second is the one that pinned the window. **The comment in the code said `0 means "no maximum",
+which is how the protocol spells unlimited`** — and that is true only when `PMaxSize` is *not* set.
+Set, it is a maximum of nothing, and the window manager clamps the window to
+`min(min_width, 0) x min(min_height, 0)`, which is the minimum.
+
+### The measurement
+
+The app asked for **1600 x 1000**, printed that it had, and `GetGeometry` on the same window — decoded
+from the wire, not from the app — answered:
+
+```text
+[ 8] ed 04 00 00  32 00 7c 00    root = 1261, x = 50, y = 124
+[16] 00 03 40 01                 width = 0x0300 = 768, height = 0x0140 = 320
+```
+
+**768 x 320 is `MIN_WIDTH x MIN_HEIGHT` exactly.** The app and the server disagreed by 832 px and only
+one of them was wrong. (This server is **LSB-first**; the crate's little-endian reader is correct for
+it, and a first reading of these bytes as network byte order gives 3 x 16385.)
+
+Four windows created at 800 x 600, differing **only** in what was published:
+
+```text
+no hints at all          -> GetGeometry 800x600
+PSize only               -> GetGeometry 800x600
+PSize + min 768x320      -> GetGeometry 768x320   <-- PMaxSize with zeroes behind it
+PSize + min + max 4096   -> GetGeometry 800x600
+```
+
+**The third row is the defect and the fourth is the fix.** Rows one and two say it is neither `PSize`
+nor the minimum. Before the fix, the live app answered **1566 x 986**; after, **1566 x 986 for a
+1600 x 1000 request** — the WM trims its own decoration, and that is the whole difference between
+"a postcard" and "the window the code asked for".
+
+### Why part 34's fix did not find this
+
+Part 34 corrected two real bugs here: the fields were written twelve bytes early, and the request was
+two bytes too long so the server answered `BadLength` and the caller discarded the error. **Both were
+fixed and the property was still nonsense**, because the check was *"did a `GetProperty` answer at
+all"*, not *"what did it say"*. `the_size_hints_reach_the_server_and_read_back` asserted `PMinSize` is
+set and `PSize` is set — **and passed on the broken row above.** Asking whether a flag is set is not
+asking what the field says.
+
+## B. The offset table in the comment was wrong too
+
+```text
+  4  int    x, y          obsolete, zero     <-- the protocol has FOUR ints here, not three
+  8  int    width, height obsolete, zero     <-- so width is at 12 and height at 16
+ 20  int    min_width, min_height            <-- and this one was right all along
+```
+
+**Every offset below `height` was correct anyway**, so the minimum and maximum worked and only the two
+fields nobody wrote were wrong. That is the argument for testing the bytes instead of reading the
+comment: the comment was wrong in the one row nobody needed and right in every row everybody checked,
+so reading it confirmed the parts that were fine.
+
+## C. The window manager's minimum can now contradict the window
+
+`opening_size` (D) clamps a window into the screen, so on a screen narrower than `MIN_WIDTH` the window
+is created **below** the nominal minimum — 336 px on a 400 px screen. Publishing `PMinSize = 768` there
+asks the window manager to grow it back past the edge of the display. **The same defect as the layout
+clamp fixed in part 38, one layer up**, and found by the new gate rather than by a user report:
+`a_psize_flag_never_names_a_zero_size` asserts the minimum never exceeds the size.
+
+## D. The opening size, and why it is the design size and not the screen
+
+The rule was four lines of arithmetic **inside `windowed::run`**, which is why two parts could change it
+and no gate could see it. It is now `windowed::opening_size(screen, floor)` — pure, and gated by
+`crates/holonomy/tests/window_size.rs`.
+
+With the window at ninety per cent of a 3,072 x 1,920 screen the app correctly opened at **2764 x 1728**
+and was still reported as "way too small". The window was never the problem:
+
+| panel | measure | text | page | page as % of panel |
+|---|---|---|---|---|
+| 1,280 | 80 cols | 640 px | 736 px | **58%** |
+| 1,600 | 100 cols | 800 px | 896 px | **56%** |
+| 2,764 | 100 cols | 800 px | 896 px | **32%** |
+| 3,072 | 100 cols | 800 px | 896 px | **26%** |
+
+**The page is 896 px at every one of them.** `max_columns: 100` caps the measure and at 16 ppem a column
+is 8 px, so the page is 896 px *however wide the window is*. **That is the whole of "I can resize it and
+it is way too small": making the window wider grows the empty desk, not the content.**
+
+**The window now opens at 1,600 x 1,000** — 56%, the design ratio — clamped into the screen with a
+64 px margin, and never above the screen.
+
+### The alternative, and why it was not taken
+
+The other way to fill a 3072 px screen is a larger type, and **it does not fit**: the atlas is budgeted
+at `ATLAS_BYTES = 458,752` and is built once, before the jail.
+
+| ppem | atlas bytes | of 458,752 |
+|---|---|---|
+| 16 | 153,571 | 33% |
+| 20 | 225,279 | 49% |
+| 24 | 308,864 | 67% |
+| 28 | 406,068 | 89% |
+| **32** | **panics** | `AtlasFull` |
+
+**ppem 28 is the ceiling** — 1.75x the type, which takes the page to 1,216 px and 44% of the window.
+A real improvement, not enough, and it spends every byte of headroom the sealed profile has.
+
+## E. Gates
+
+* `crates/holonomy-x11/tests/window_size.rs` — **a flag is set only when the field it names is written**
+  (the generalisable rule; would have caught both), **the offsets are the protocol's**, **`PSize` never
+  names a zero size**, and a live round trip that creates a window, reads the hints **off the server**,
+  checks `GetGeometry` against the requested size, and resizes it with the same `ConfigureWindow` a
+  window manager sends on an edge drag.
+* `crates/holonomy/tests/window_size.rs` — the opening size: the design ratio holds on a big screen,
+  **the window never exceeds the screen**, the minimum is honoured only where the screen allows it, the
+  margin is a fixed 64 px, and an unreadable screen opens at the design size rather than 1 x 1.
+
+**`size_hints_bytes_for` and `SizeHints::from_bytes` were extracted as pure functions so the first two
+run on every machine.** The structure used to be built inline, which meant the only way to ask "what
+does this send" was to send it to a server and read it back — **so the one field that was wrong could
+not be checked without an X display, and the tests that would have caught it were the ones that needed
+one.**
+
+## F. The black band: the driver was resizing the window in answer to being told its size
+
+**The user, after part 42's first half landed: *"I drag and it still retains the 1600x800 resolution and
+fills other space with black."*** The drag itself now works — the window frame follows the mouse. What
+did not follow was the content.
+
+`Desktop::resize` ended with:
+
+```text
+self.window.configure_size(&mut self.conn, w as u16, h as u16)
+```
+
+on the reasoning that *"the window is resized as well as recorded, so that a caller which sized the
+frame first gets the same answer here."* **Every size `Desktop::resize` is ever called with came from
+the window manager** — it is the payload of the `ConfigureNotify` the WM sent when the user dragged an
+edge — **so the request was telling the window manager the size it had just told us.** The comment's
+premise is the defect: there is no caller that sizes the frame first, because the *window* is what
+sizes the frame, not the other way round.
+
+**Black is `Frame::black`**, which `Session::resize` allocates for the enlarged frame. So the frame
+*was* bigger and *never painted*: the WM resized the window back, leaving a frame larger than the
+window it is presented into, and the region with no frame under it showing the server's initial
+contents. The two peers trade `ConfigureWindow` and `ConfigureNotify` until they agree on something
+that is neither.
+
+**Measured with the bug deliberately reintroduced**, four sizes as a drag would deliver them:
+
+```text
+a drag through four sizes produced 8 requests. Each one is a ConfigureWindow sent back
+to the window manager that just chose that size.
+```
+
+Two requests per size. The fix is one line — **no `ConfigureWindow` here, and that sentence is the
+fix** — and the rule is *a size that arrived from outside is recorded, not re-requested*.
+
+### The gate, and the first version of it that was worthless
+
+`Conn` now counts every request in `Conn::request` and exposes `requests_sent`; `Desktop` passes it
+through. `resize_is_recorded_not_requested` compares it across a resize, in both directions.
+
+**The first version of that gate counted a field in `Desktop`, and fixing the bug deleted the only
+writer of it — so the gate passed vacuously.** A gate that can only pass is worse than no gate,
+because it reads as coverage. That is why the counter sits at the lowest level, where a
+reintroduction of the request must move it. The verification above — reintroduce, watch it fail, count
+**8 requests for 4 sizes** — is what makes the gate mean anything.
+
+## G. `EVENT_WAIT` is 7 ms where its own comment says 125 ms
+
+Not part of any report, found while reading `windowed.rs` for F.
+
+```text
+pub const EVENT_WAIT: Duration = Duration::from_millis(Blink::DEFAULT_PERIOD as u64 / 4);
+```
+
+`Blink::DEFAULT_PERIOD` is **30** and is documented *"frames per half-period"* — **half a second at
+60 fps**. It is a frame count, and this divides it as if it were milliseconds: **7 ms, not 125 ms**, so
+the idle loop wakes **143 times a second** instead of 8. The comment above the constant says *"A blink
+period of 500 ms divided by four… this is also the loop's frame rate when nothing is happening: 4
+wake-ups a second, no pixels, which is why the window costs nothing between keystrokes."*
+
+**Every clause of that sentence is wrong by a factor of 18.** Left in place and recorded here rather
+than fixed in passing, because it changes how often the loop wakes and that is a decision about idle
+cost rather than a correction to a fact. `ConfigureNotify` is event-driven and unaffected — `next_event`
+returns the moment an event arrives, so this is not the resizing defect; it is the window manager
+finding the app never sleeps.

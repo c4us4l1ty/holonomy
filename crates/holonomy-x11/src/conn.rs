@@ -273,6 +273,20 @@ pub struct Conn {
     greeting: Option<(usize, [u8; GREETING_KEEP])>,
     /// How many post-setup greetings have been discarded, including the one at connect.
     greetings: u32,
+    /// **Requests sent, counted in [`Conn::request`] — every path through this crate.**
+    ///
+    /// **Added 2026-10-12 to make one property falsifiable.** `Desktop::resize` used to answer a
+    /// `ConfigureNotify` from the window manager by sending a `ConfigureWindow` back, and the user
+    /// saw a window that grew while its content stayed put and the new area went black. **Nothing
+    /// observable at the window named the request that caused it**: the symptom is a loop between two
+    /// peers, and the two other instruments — `GetGeometry` and the frame's own size — both agree with
+    /// the *client's* view and disagree with the *window's*.
+    ///
+    /// **So the counter is at the lowest level, where any reintroduction of the request must show
+    /// up.** A gate that counts a higher-level call would count whatever that call site still is,
+    /// which is exactly what happened when the gate was first written: it incremented a field in
+    /// `Desktop` that the fix had removed the only writer of, and passed vacuously.
+    requests: u64,
     /// Bytes still owed for the packet at the front of the read buffer.
     ///
     /// A short read is normal -- a socket delivers what it delivers -- and it must not be mistaken for
@@ -389,6 +403,7 @@ impl Conn {
             display: number,
             greeting: None,
             greetings: 0,
+            requests: 0,
             pending: 0,
         };
         conn.next_id = conn.setup.resource_id_base.wrapping_add(1);
@@ -636,6 +651,15 @@ impl Conn {
     }
 
     /// The longest request this server accepts, in bytes.
+    /// **How many requests have been sent on this connection.**
+    ///
+    /// **The instrument for "this client asked the server for nothing it was not asked for"**, which
+    /// is otherwise only observable as a disagreement between two peers that neither can resolve. See
+    /// the field's docs for the defect it caught.
+    pub fn requests_sent(&self) -> u64 {
+        self.requests
+    }
+
     pub fn request_limit(&self) -> usize {
         (self.setup.max_request_words as usize)
             .saturating_mul(4)
@@ -651,6 +675,10 @@ impl Conn {
 
     /// Queue a request. Not written until [`Conn::flush`] or a syncing call.
     pub fn request(&mut self, req: Req) -> Result<u16, ConnError> {
+        // **Counted before the request can fail**, because a request that was *attempted* is what a
+        // feedback loop is made of — and a failed `ConfigureWindow` in particular is still a round
+        // trip to the peer.
+        self.requests += 1;
         let bytes = req.finish(self.seq);
         if bytes.len() > self.request_limit() {
             return Err(ConnError::TooLarge {

@@ -718,8 +718,8 @@ impl Event {
                 let _child = r.u32();
                 let _root_x = r.i16();
                 let _root_y = r.i16();
-                let event_x = r.i16();
-                let event_y = r.i16();
+                let _event_x = r.i16();
+                let _event_y = r.i16();
                 let state = r.u16();
                 Self::KeyRelease {
                     keycode,

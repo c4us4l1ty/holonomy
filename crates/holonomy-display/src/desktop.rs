@@ -154,12 +154,41 @@ impl Desktop {
         //
         // **It is not best-effort.** A window manager that will not take the hints is a window the
         // user cannot resize, and that is worth refusing to open over.
+        //
+        // **The size is narrowed once, here, and everything else is computed from it.** `XSizeHints`
+        // is a `CARD32` per field but X11 windows are `u16` in `CreateWindow` and `ConfigureWindow`,
+        // so a `u32` over 65,535 cannot be written into either without losing its top bits — and a
+        // size hint that silently disagrees with the window is the defect in the paragraph below.
+        let size = (
+            width.min(u32::from(u16::MAX)) as u16,
+            height.min(u32::from(u16::MAX)) as u16,
+        );
         window
             .set_size_hints(
                 &mut conn,
+                // **The size the window was created at, and it is the argument `PSize` names.**
+                //
+                // It used to be omitted, so `set_size_hints` left `width` and `height` at zero while
+                // still setting the `PSize` flag — and a window manager reading that is being told
+                // *this window wants to be 0 x 0*, which it clamps up to the minimum. Measured on this
+                // machine: the app asked for 1600 x 1000 and the server answered **768 x 320** on
+                // `GetGeometry`, which is `MIN_WIDTH x MIN_HEIGHT` exactly. That is the *"it's way too
+                // small and I cannot drag it"* report, in one request.
+                size,
                 (
-                    holonomy_render::chrome::ChromeMetrics::MIN_WIDTH as u16,
-                    holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT as u16,
+                    // **The minimum can never exceed the size this window was actually created at.**
+                    //
+                    // `opening_size` clamps the window into the screen, so on a screen narrower than
+                    // `MIN_WIDTH` the window is created *below* the nominal minimum — 336 px on a
+                    // 400 px screen. Publishing `PMinSize = 768` there tells the window manager to
+                    // grow it back past the edge of the display, **which is the same defect as the
+                    // layout clamp fixed in part 38, one layer up**: the app asking to be given more
+                    // room than it can be in.
+                    //
+                    // **`min`, not `max`.** The floor is what the window manager enforces upwards, and
+                    // the floor is the only one of the three that can contradict the geometry.
+                    (holonomy_render::chrome::ChromeMetrics::MIN_WIDTH as u16).min(size.0),
+                    (holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT as u16).min(size.1),
                 ),
                 None,
             )
@@ -230,24 +259,63 @@ impl Desktop {
     /// size, and painting at the old size would push the whole old frame into a smaller window --
     /// clipped, and with a band of stale pixels along the right and bottom edges.
     ///
-    /// The window is resized as well as recorded, so that a caller which sized the frame first gets
-    /// the same answer here.
+    /// # CORRECTION 2026-10-12: this **records** the size. It does not request one.
+    ///
+    /// It used to end with:
+    ///
+    /// ```text
+    /// self.window.configure_size(&mut self.conn, w as u16, h as u16)
+    /// ```
+    ///
+    /// **on the reasoning that "the window is resized as well as recorded, so that a caller which
+    /// sized the frame first gets the same answer here."** Every size this function is ever called with
+    /// came *from* the window manager — it is the payload of the `ConfigureNotify` the WM sent when the
+    /// user dragged an edge — **so the request was telling the window manager the size it had just
+    /// told us.** That is a no-op at best and a feedback loop at worst, and with Mutter it is the
+    /// second: the WM re-asserts its own size, a fresh `ConfigureNotify` arrives, and the two trade
+    /// requests until the window and the frame disagree.
+    ///
+    /// ## What the user saw
+    ///
+    /// *"I drag and it still retains the 1600x800 resolution and fills other space with black."*
+    ///
+    /// **Black is `Frame::black`,** which `Session::resize` allocates for the new size. So the frame
+    /// *was* enlarged and *never painted*: `Desktop::resize` reported a change, `repaint_all` ran, and
+    /// the window manager then resized the window back — leaving a frame larger than the window it is
+    /// presented into, and the part of the window with no frame under it showing the server's own
+    /// initial contents.
+    ///
+    /// ## The rule
+    ///
+    /// **A size that arrived from outside is recorded, not re-requested.** The only caller that may
+    /// *ask* for a size is a test or a caller that genuinely wants a specific one, and it has
+    /// [`Window::configure_size`] for that.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, DesktopError> {
         let (w, h) = (width.min(u16::MAX as u32), height.min(u16::MAX as u32));
         if (self.width, self.height) == (w, h) {
             return Ok(false);
         }
-        self.window
-            .configure_size(&mut self.conn, w as u16, h as u16)
-            .map_err(DesktopError::Window)?;
-        self.width = w as u32;
-        self.height = h as u32;
+        // **No `ConfigureWindow` here, and that sentence is the fix.**
+        self.width = w;
+        self.height = h;
         Ok(true)
     }
 
     /// How many frames have been pushed.
     pub fn present_count(&self) -> u64 {
         self.presented
+    }
+
+    /// **How many requests this connection has sent to the server.**
+    ///
+    /// **Counted at [`Conn::request`], not here, and that is the whole point.** A counter in this
+    /// struct would only see what this struct still does — so when [`Desktop::resize`] was fixed by
+    /// deleting its `ConfigureWindow`, the field lost its only writer and the gate beside it passed
+    /// **vacuously**. `resize_is_recorded_not_requested` compares this across a resize and asserts it
+    /// did not move; for that to mean anything the count has to come from the one place every
+    /// request in this crate passes through.
+    pub fn requests_sent(&self) -> u64 {
+        self.conn.requests_sent()
     }
 
     /// How many bytes have gone over the socket.

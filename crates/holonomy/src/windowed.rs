@@ -93,55 +93,137 @@ pub const EVENT_WAIT: Duration = Duration::from_millis(Blink::DEFAULT_PERIOD as 
 ///
 /// `atlas` is the already-built atlas: building one takes milliseconds and `include_bytes!` data, and
 /// this path is not a place to be clever about either.
+/// The size an unsized window opens at, on a screen of `screen`.
+///
+/// # This is the rule, and it is *the window asks for what the content uses*
+///
+/// **Not a fraction of the screen, and not the screen.** Both of those were tried and both are wrong
+/// for the same underlying reason, which is only visible once the numbers are laid side by side.
+///
+/// # The measurement this is built on
+///
+/// On this machine the screen is **3,072 x 1,920**, and `opening_size` was asked for the window's
+/// size while the app was running. The answer, from the app's own startup line:
+///
+/// ```text
+/// holonomy: window 0xc00001 is 2764x1728, opening on x11 window
+///           (asked 2764x1728, screen Some((3072, 1920)), 89% x 90% of the screen)
+/// ```
+///
+/// **So at 90% of the screen the window opened correctly and still looked "way too small"** — the
+/// report this replaces, and the third time it has been filed. The reason is not the window:
+///
+/// | panel | measure | text | page | page as % of panel |
+/// |---|---|---|---|---|
+/// | 1,280 | 80 cols | 640 px | 736 px | 58% |
+/// | 2,764 | 100 cols | 800 px | **896 px** | **32%** |
+/// | 3,072 | 100 cols | 800 px | 896 px | 26% |
+///
+/// **The page is 896 px at every one of those sizes.** `max_columns: 100` caps the measure, and at
+/// 16 ppem a column is 8 px, so 100 columns is 800 px and the page is 896 px **however wide the
+/// window is**. That is also the whole answer to *"I can resize it and it is way too small"*: making
+/// the window wider does not make the content bigger, it makes the **desk** bigger. At 90% of a
+/// 3,072 px screen, 68% of the window is empty grey.
+///
+/// # Why the window cannot simply be made bigger to compensate
+///
+/// The obvious alternative is a larger type, and **it does not fit.** The atlas is budgeted at
+/// `holonomy_assets::metric::ATLAS_BYTES` = 458,752 bytes and is built once, before the jail:
+///
+/// | ppem | atlas bytes | of 458,752 |
+/// |---|---|---|
+/// | 16 | 153,571 | 33% |
+/// | 20 | 225,279 | 49% |
+/// | 24 | 308,864 | 67% |
+/// | 28 | 406,068 | 89% |
+/// | **32** | **panics** | `AtlasFull` |
+///
+/// **ppem 28 is the ceiling**, 1.75x the type, which takes the page from 896 px to 1,216 px — 32% of
+/// the window to 44%. **That is a real improvement and it is not enough**, and it spends every byte
+/// of headroom the sealed profile has. **So the window is sized to the content instead, and the type
+/// stays at 16 ppem where the whole memory budget is comfortable.**
+///
+/// # Why 1,600 x 1,000 is the target, and why it is not just a constant
+///
+/// **1,600 x 1,000 is the size at which the design's own proportions hold.** At 1,600 px the measure
+/// is 100 columns and the page is 896 px, which is **56% of the window** — close to the 58% the design
+/// width of 1,280 px gives, rather than the 32% a 2,764 px window gives. **The ratio is the thing
+/// being held constant**, and 1,600 x 1,000 is simply where that ratio sits for a monitor-shaped
+/// window.
+///
+/// **It is not a constant, though, and that is the part that matters on a small screen.** A fixed
+/// 1,600 px window on an 800 px screen is a window bigger than the screen, which is the same class of
+/// defect as the layout clamp fixed in part 38 — the app drawing outside what it was given. **So the
+/// screen is the ceiling**: [`SCREEN_MARGIN`] is left around the window for a window manager's frame
+/// and any panel, and the target is clamped into what is left.
+///
+/// # And never below the minimum
+///
+/// [`ChromeMetrics::MIN_WIDTH`] is the floor, **clamped to the same room.** `MIN_WIDTH` is what the
+/// app asks the window manager for and it is advisory; asking for 768 px on a 400 px screen is a
+/// request the window manager will refuse, and the answer has to be the screen's.
+///
+/// # A free function, and why
+///
+/// **The rule is arithmetic over four numbers, and inline arithmetic is not testable.** Parts 36 and
+/// 37 both got this wrong in the same way: the rule was written inside `run`, so no gate could reach
+/// it, and the only way to find out what the app would open was to open it and look. This one is
+/// reachable, and `opening_size_matches_the_design_ratio_not_the_screen` in
+/// `tests/window_size.rs` is the gate.
+///
+/// **`floor` is a parameter rather than read from the metrics** so the gate can state the floor it is
+/// reasoning about instead of depending on the design constant moving underneath it.
+pub fn opening_size(screen: (u32, u32), floor: Option<(u32, u32)>) -> (u32, u32) {
+    let (fw, fh) = floor.unwrap_or((
+        holonomy_render::chrome::ChromeMetrics::MIN_WIDTH,
+        holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT,
+    ));
+    let fit = |want: u32, screen: u32, floor: u32| -> u32 {
+        // **A screen with no extent is a screen that was not read**, and the honest answer to "I do
+        // not know how big this is" is the size the app wants, not one pixel. `screen_size` answers
+        // `None` when the connection fails and `Some((0, 0))` when the setup carries nothing, and both
+        // land here — the window is about to be created blind, and a 1 x 1 window is the one size that
+        // is certainly wrong.
+        if screen == 0 {
+            return want;
+        }
+        let room = screen.saturating_sub(SCREEN_MARGIN);
+        // **`floor.min(room)`, not `floor`.** `max(floor)` on a screen smaller than the floor would
+        // hand back a window larger than the display, which is the defect `ChromeMetrics::for_size`
+        // stopped committing twenty minutes ago.
+        want.min(room).max(floor.min(room)).max(1)
+    };
+    (fit(DESIGN_W, screen.0, fw), fit(DESIGN_H, screen.1, fh))
+}
+
+/// The width an unsized window opens at, however wide the screen is.
+///
+/// **A target, not a constant**, because [`opening_size`] clamps it into the screen and a target that
+/// is applied without clamping is a window bigger than the display.
+pub const DESIGN_W: u32 = 1600;
+
+/// The height an unsized window opens at. See [`DESIGN_W`].
+pub const DESIGN_H: u32 = 1000;
+
+/// Left around the window on every side, for a window manager's frame and any panel.
+///
+/// **Sixty-four pixels, which is a multiple of the 8 px cell and of the 16 px ppem.** Not a fraction
+/// of the screen: a margin that scales with the screen is a bigger margin on a bigger screen, and the
+/// thing being protected here is a window manager's title bar, which is a fixed number of pixels
+/// everywhere.
+pub const SCREEN_MARGIN: u32 = 64;
+
 pub fn run(
     atlas: &'static Atlas,
     args: &Args,
     metrics: ChromeMetrics,
 ) -> Result<Exit, WindowedError> {
-    // **Part 36: an unsized window opens at four fifths of the screen, not at 1600x1000.**
-    //
-    // **The report was "that 1020x700 is WAY too small", and the honest answer to it is that the window
-    // was the size it was told to be.** The defaults are a fallback for the headless paths, which have
-    // no screen; a window has one, and using it is the difference between an editor that fills the
-    // display and one that opens as a postcard in the middle of it.
-    //
-    // **Four fifths, not all of it**: a window manager's own decorations and any panel need somewhere to
-    // go, and a maximised-looking window is not what the user asked for either. **And the argument's
-    // numbers, so the choice can be argued with rather than repeated.**
     let (w, h) = if args.sized {
         (metrics.width, metrics.height)
     } else {
-        let (sw, sh) = Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000));
-        // **Four fifths of the screen, capped at 1,600 x 1,000.**
-        //
-        // **The cap is not a preference; it is where the transport gives out.** Sizing to four fifths of
-        // this machine's 3,072 x 1,856 screen asks for 2,457 x 1,484, and the window driver then
-        // refuses to open:
-        //
-        // ```text
-        // cannot drive the window: one scanline is 9828 bytes and the server accepts
-        // 18446744073709551615 bytes per request; PutImage cannot split a scanline
-        // ```
-        //
-        // **which is two defects wearing one message.** `18446744073709551615` is `u64::MAX` — the
-        // server's maximum request length was never read out of the setup, so the limit the code
-        // compares against is a sentinel, not a number. And the comparison that fired is against the
-        // *frame*, not the scanline, because a 2,457 px scanline is 9,828 bytes and an X server accepts
-        // 262,140. **Neither is fixed here** and both are named in PROJECT.md; the cap is what keeps
-        // the window at a size this transport can carry.
-        // **Two fifths off, and no cap below the screen's own width.**
-        //
-        // **The 1,600 x 1,000 cap was mine, added to work around the `PutImage` refusal above, and it
-        // was wrong twice**: it made the window half of a 3,072 px screen, which is what the report
-        // *"that 1020x700 is WAY too small"* and then a screenshot of a 1,600 px window on a 3,072 px
-        // desktop were both about. **The fix was to repair the transport, not to cap the window.**
-        //
-        // **Ninety per cent of the screen**, so the window manager's own frame has somewhere to sit.
-        (
-            (sw * 9 / 10)
-                .max(holonomy_render::chrome::ChromeMetrics::MIN_WIDTH),
-            (sh * 9 / 10)
-                .max(holonomy_render::chrome::ChromeMetrics::MIN_HEIGHT),
+        opening_size(
+            Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000)),
+            None,
         )
     };
     let metrics = ChromeMetrics {

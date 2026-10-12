@@ -898,7 +898,12 @@ fn the_size_hints_reach_the_server_and_read_back() {
         .expect("create the window");
 
     // **The same call `Desktop::open` makes**, with the same numbers the chrome clamps to.
-    win.set_size_hints(&mut conn, (768, 320), None).expect(
+    //
+    // **The size is the first argument and it is new.** `PSize` names `width`/`height`, and this
+    // call used to leave both at zero while still setting the flag — so a window manager reading the
+    // property was being told *this window wants to be 0 x 0*. The gate for that is
+    // `tests/window_size.rs::a_flag_is_set_only_when_the_field_it_names_is_written`.
+    win.set_size_hints(&mut conn, (1024, 700), (768, 320), None).expect(
         "**set the hints without a protocol error.** This is the assertion that would have \
                 caught the `BadLength`: the request was two bytes too long and the server rejected \
                 it, and the caller threw that error away.",
@@ -925,5 +930,37 @@ fn the_size_hints_reach_the_server_and_read_back() {
         h.flags & 1,
         0,
         "**`PSize` is set**, so the current size is part of the structure"
+    );
+
+    // # CORRECTION 2026-10-12: the two flags this test was checking are set but were *nonsense*
+    //
+    // **`PSize` was set and the size it names was zero, and `PMaxSize` was set and the maximum it
+    // names was zero** — because `max` was `None` and the bytes were left as zeroes. Both say "the
+    // words at that offset are a real value", and both said 0 x 0.
+    //
+    // **Measured on this machine, four windows at 800 x 600 differing only in what was published:**
+    //
+    // ```text
+    // no hints at all          -> GetGeometry 800x600
+    // PSize only               -> GetGeometry 800x600
+    // PSize + min 768x320      -> GetGeometry 768x320   <-- PMaxSize with zeroes behind it
+    // PSize + min + max 4096   -> GetGeometry 800x600
+    // ```
+    //
+    // **The assertions above passed on the third row.** They ask whether the flags are set, and they
+    // were; nothing asked what the fields said. That is the whole lesson of this pair of tests, and
+    // why `tests/window_size.rs` asserts *flag set ⇒ field non-zero* rather than *flag set*.
+    assert_eq!(
+        (h.width, h.height),
+        (1024, 700),
+        "**`PSize` names the size the window was created at, not zero.** Set with a zero size, a \
+         window manager is being told this window wants to be 0 x 0."
+    );
+    assert_eq!(
+        h.flags & (1 << 5),
+        0,
+        "**`PMaxSize` is not set, because no maximum was given.** Set with zeroes behind it, it is \
+         not *no maximum* — it is *a maximum of 0 x 0*, and the window is pinned at the minimum and \
+         cannot be dragged bigger."
     );
 }

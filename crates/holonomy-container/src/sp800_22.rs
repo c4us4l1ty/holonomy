@@ -368,7 +368,7 @@ fn cusum_max_abs_dir(data: &[u8], reverse: bool) -> (f64, i64) {
     let mut best: i64 = 0;
     // Two loops rather than one iterator chain: the branch is the clearest expression of "walk this way"
     // and the body is identical in both, so the only difference between the directions is visible.
-    let mut step = |s: &mut i64, best: &mut i64, b: u8| {
+    let step = |s: &mut i64, best: &mut i64, b: u8| {
         let (u, d, n) = (up[b as usize] as i64, down[b as usize] as i64, net[b as usize] as i64);
         *s += n;
         // The excursion within this byte is measured from the value at its start.
