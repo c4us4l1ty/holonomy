@@ -297,6 +297,34 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         })
         .collect();
 
+    // # CORRECTION 2026-10-12: every rect this returns is clamped into the panel
+    //
+    // `Layout` clamps its own bands and the menu bar now elides (`chrome::menu_boxes`), **but the
+    // toolbar did neither** — and `bugs/1.png` is what it produced: a 480 px panel with toolbar icons
+    // running off the right edge, which is one of the two symptoms in the part-36 report that was
+    // attributed to the type scale.
+    //
+    // Two separate faults, both invisible while `ChromeMetrics::for_size` clamped the panel up to
+    // `MIN_WIDTH` x `MIN_HEIGHT`:
+    //
+    // * **The vertical placement was a bare subtraction.** `toolbar.y + toolbar.height / 2 - button / 2`
+    //   is `u32` arithmetic with no `saturating_` on it. At `opt-level=0` that is a panic and in
+    //   release it is a four-billion-pixel offset, both of which are a button drawn at the top-left of
+    //   the screen. It is `saturating_sub` now, which is what the four bands already did.
+    // * **The left group had no budget.** `x` started at `pad` and grew by every tool's width with
+    //   nothing stopping it, so in a narrow panel the row ran off the right edge and kept going.
+    //
+    // **Clamping rather than skipping is deliberate.** A rect clamped into the panel is still a rect
+    // the hit test can see, so the button stays clickable where the user can see it; skipping would
+    // leave a gap in the toolbar that looks like a missing feature.
+    let panel_w = m.width;
+    let panel_h = m.height;
+    let fit = |x: u32, y: u32, w: u32, h: u32| -> DamageRect {
+        let y = y.min(panel_h);
+        let x = x.min(panel_w);
+        DamageRect::new(x, y, w.min(panel_w - x), h.min(panel_h - y))
+    };
+
     // Left group.
     let mut x = pad;
     for p in out.iter_mut() {
@@ -306,9 +334,18 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         if p.tool.separated() {
             x += SEPARATOR;
         }
-        p.rect = DamageRect::new(
+        // **A tool with no room left gets a zero-width rect**, which `DamageRect::contains` answers
+        // `false` for at every point — so a hidden tool is also an unclickable one, and the row does
+        // not accumulate invisible targets past the edge.
+        if x >= panel_w {
+            p.rect = DamageRect::new(0, 0, 0, 0);
+            continue;
+        }
+        p.rect = fit(
             x,
-            m.toolbar.y + m.toolbar.height / 2 - button / 2,
+            m.toolbar.y
+                .saturating_add(m.toolbar.height / 2)
+                .saturating_sub(button / 2),
             p.tool.width(button, m.cell_w),
             button,
         );
@@ -323,9 +360,11 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         }
         let w = p.tool.width(button, m.cell_w);
         r = r.saturating_sub(w);
-        p.rect = DamageRect::new(
+        p.rect = fit(
             r,
-            m.toolbar.y + m.toolbar.height / 2 - button / 2,
+            m.toolbar.y
+                .saturating_add(m.toolbar.height / 2)
+                .saturating_sub(button / 2),
             w,
             button,
         );

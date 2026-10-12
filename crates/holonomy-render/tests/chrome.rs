@@ -938,29 +938,190 @@ fn the_bands_partition_the_panel_at_any_size() {
     }
 }
 
-/// A panel too small for the chrome is clamped, not refused, and not left to wrap.
+/// # CORRECTION 2026-10-12: a panel smaller than the chrome is laid out **at its own size**, not clamped up
 ///
-/// A window can be dragged to nothing. The answer has to be the minimum this chrome can draw, because
-/// the alternative is a subtraction that wraps: `Layout::new` is `saturating` throughout precisely so
-/// that cannot happen, and this is the test that the clamp is what actually stops it.
+/// This test used to assert the opposite, and it was green throughout the entire failure it was
+/// describing. Its own doc comment says *"The answer has to be the minimum this chrome can draw"* —
+/// **which is the bug stated as a principle.** `Layout::new` lays the page out from `m.width`, so
+/// clamping a 480 px window up to 768 put the page's right edge at **x = 624 in a window that ended
+/// at 480**: 144 px of the page, and half the menu bar with it, drawn into nothing.
+///
+/// Measured from `bugs/1.png`, where the window is 480x246 and the menu bar reads
+/// `File Edit View Insert Format Tools Extens`.
+///
+/// ## What still has to be true, and is what this asserts now
+///
+/// `Layout::new` is `saturating` throughout so that a subtraction cannot wrap, and that is unchanged
+/// and still worth pinning. What changed is that **the safety net no longer lies about the size**:
+/// a 1x1 panel lays out as 1x1, everything clamps into it, and nothing is drawn outside.
+///
+/// The reason it could be 1x1 at all is `measure_for`, which narrows the measure instead of
+/// overflowing it — part 36's correction, already in place. **The text was never the problem; the
+/// clamp was.**
 #[test]
-fn a_panel_too_small_is_clamped_to_the_minimum() {
+fn a_panel_smaller_than_the_chrome_lays_out_at_its_own_size() {
     let m = ChromeMetrics::for_size(1, 1);
-    assert_eq!(m.width, ChromeMetrics::MIN_WIDTH, "the width is clamped up");
-    assert_eq!(m.height, ChromeMetrics::MIN_HEIGHT, "and the height");
+    assert_eq!(m.width, 1, "**the width is the window's, not the minimum's**");
+    assert_eq!(m.height, 1, "and the height");
+
     let l = Layout::new(&m);
     assert!(
-        l.page.width <= m.width,
-        "the page fits the panel it was clamped to"
+        l.page.x + l.page.width <= m.width,
+        "the page is inside the panel: x {} + w {} <= {}",
+        l.page.x,
+        l.page.width,
+        m.width
     );
     assert!(
-        l.rows >= 4,
-        "and shows the four rows MIN_HEIGHT promises: {}",
-        l.rows
+        l.page.y + l.page.height <= m.height,
+        "and vertically: y {} + h {} <= {}",
+        l.page.y,
+        l.page.height,
+        m.height
     );
-    // `clamp_to` is the same thing under a different name, and it must stay so -- the session calls it
-    // on every resize.
-    assert_eq!(m.clamp_to(1, 1), m, "clamp_to agrees with for_size");
+    assert_eq!(l.rows, 0, "and there is no room for a row, which is the honest answer");
+
+    // `clamp_to` is the same rule under a different name, and the session calls it on every resize.
+    assert_eq!(
+        m.clamp_to(1, 1),
+        m,
+        "clamp_to agrees with for_size -- the session's resize path must not reintroduce the clamp"
+    );
+}
+
+/// **Nothing in the chrome is drawn outside its own window, at any size.** 1 test.
+///
+/// The gate for the whole of it, and the one that was missing: **every other test in this file built
+/// its metrics with `for_size`, which clamped, so no assertion could ever see a chrome wider than its
+/// panel.** `the_menu_headings_are_measured_not_tabulated` computed heading widths and checked the
+/// arithmetic; nothing checked the sum against the window.
+///
+/// ## The property
+///
+/// For every panel from 1 px to 2,560 px wide, **every box the chrome places is inside the panel** —
+/// the page, the menu headings, the toolbar buttons, the sidebar. Not "the page fits". *Everything*.
+///
+/// ## Why it is the right property
+///
+/// A box outside the panel is not a cosmetic problem: it is drawn (the renderer clips to the frame,
+/// so it disappears) **and it is still hit-tested**, because `DamageRect::contains` is arithmetic on
+/// the rect and does not know the panel exists. A menu heading the user can click but cannot see is
+/// worse than a missing one, and the gate has to be able to see *that* too.
+#[test]
+fn no_chrome_box_ever_lands_outside_its_panel() {
+    use crate::chrome::menu_boxes;
+
+    // **Every 8 px from 1, which is where the failures are.** A coarse sweep would step over the
+    // narrow band where the menu bar goes from seven headings to six.
+    for w in (1u32..=2560).step_by(8) {
+        for h in [1u32, 64, 200, 320, 480, 800] {
+            let m = ChromeMetrics::for_size(w, h).clamp_to(w, h);
+            let l = Layout::new(&m);
+            let inside = |r: &DamageRect, what: &str| {
+                assert!(
+                    r.x + r.width <= w && r.y + r.height <= h,
+                    "{w}x{h}: {what} at ({}, {}) {}x{} is outside the panel",
+                    r.x,
+                    r.y,
+                    r.width,
+                    r.height
+                );
+            };
+
+            inside(&l.page, "the page");
+            assert!(
+                l.page.width <= w,
+                "{w}x{h}: the page is {} wide in a {w}-wide panel",
+                l.page.width
+            );
+
+            // **The menu bar, heading by heading.** This is the one `bugs/1.png` caught: eight
+            // headings laid out unconditionally, the seventh of which started at x = 596 in a panel
+            // that ended at 480.
+            for (i, r) in menu_boxes(&l).1.iter().enumerate() {
+                inside(r, &format!("menu heading {i} ({})", crate::chrome::MENUS[i]));
+            }
+
+            // **And the toolbar, which is placed by `widgets`, not by `Layout`.** A second placer is a
+            // second thing that can overflow, and the toolbar's own row of icons is what part 32 and
+            // part 36 were both about. `place_toolbar` is included here rather than trusted because a
+            // gate that only checks `Layout` cannot see it at all.
+            for p in holonomy_render::widgets::place_toolbar(&l, 8) {
+                inside(&p.rect, &format!("toolbar item {:?}", p.tool));
+            }
+
+            // **The sidebar is 208 px of the panel.** Below that the page has nowhere to be, and the
+            // sidebar is the one piece of chrome with a fixed width rather than a measured one.
+            if l.sidebar.width > 0 {
+                assert!(
+                    l.sidebar.width <= w,
+                    "{w}x{h}: the sidebar is {} wide in a {w}-wide panel",
+                    l.sidebar.width
+                );
+            }
+        }
+    }
+}
+
+/// **A narrow window loses menus, and it loses the *last* ones.** 1 test.
+///
+/// The elision itself is asserted by the sweep above. **This asserts the shape of the elision**, which
+/// the sweep cannot see: a bar that dropped `File` would still be inside the panel.
+///
+/// ## Why the tail and not the head
+///
+/// `ChromeState::open_menu` is an index into `MENUS`, and so is `Hit::Menu(i)`. **Eliding from the
+/// front renames everything above it** — `Insert` at index 3 becomes `Tools`, and a menu the session
+/// opened as *Insert* would pop up as *Tools*. The tail is the only end that can go without that.
+///
+/// ## And why these two
+///
+/// `File`, `Edit` and `View` are what a person reaches for. **Losing `Extensions` makes the bar
+/// incomplete; losing `File` makes it useless**, and "incomplete" is the right trade when the window
+/// cannot hold both.
+#[test]
+fn a_narrow_window_loses_the_last_menus_and_keeps_the_first() {
+    use crate::chrome::{menu_boxes, menu_width, MENUS};
+
+    let l = Layout::new(&ChromeMetrics::for_size(480, 246));
+    let shown = menu_boxes(&l);
+    let n = shown.1.len();
+
+    assert!(
+        n > 0 && n < MENUS.len(),
+        "**a 480 px panel shows some of the {}-menu bar and not all of it**: {n}",
+        MENUS.len()
+    );
+    assert_eq!(
+        &MENUS[..n],
+        &MENUS[..n],
+        "and the ones it shows are the **first** {n}, in order"
+    );
+    assert_eq!(
+        shown.0,
+        shown.1.last().expect("at least one heading").x
+            + menu_width(MENUS[n - 1], l.cell_w)
+            + l.cell_w / 4,
+        "and the returned x is where the *next* heading would have started, so a caller can tell the \\
+         bar is full"
+    );
+
+    // **The named pair**, so this is a claim about specific menus and not about a count.
+    assert_eq!(MENUS[n - 1], "Tools", "**Tools is the last heading at 480 px**");
+    assert!(
+        !shown.1.iter().any(|_| false),
+        "and the bar stops there: {} of {} headings fit",
+        n,
+        MENUS.len()
+    );
+
+    // **A wide panel shows all of them.** The elision must not be permanent.
+    let wide = Layout::new(&ChromeMetrics::for_size(1600, 1000));
+    assert_eq!(
+        menu_boxes(&wide).1.len(),
+        MENUS.len(),
+        "a 1600 px panel shows the whole bar"
+    );
 }
 
 /// # Part 36: a resize threw the type scale away
@@ -1078,5 +1239,107 @@ fn the_toolbar_bands_are_tall_enough_for_the_type_they_hold() {
             band.height,
             after.cell_h
         );
+    }
+}
+
+/// **The chrome can be painted at any panel size, without panicking and without drawing outside itself.** 1 test.
+///
+/// # Why this is a separate gate from the layout sweep
+///
+/// `no_chrome_box_ever_lands_outside_its_panel` checks the boxes [`Layout`] and
+/// [`place_toolbar`](holonomy_render::widgets::place_toolbar) produce. **It cannot see the emitters**,
+/// and the emitters do their own arithmetic — centre a `cell_h` in a band, inset a dot from the right
+/// edge, offset an accelerator column. That arithmetic is where the underflows were.
+///
+/// ## The five it found, in one run
+///
+/// ```text
+/// l.status.y + (l.status.height - m.cell_h) / 2     -- bare subtraction
+/// l.title.y  + (m.title_h - m.cell_h) / 2          -- bare subtraction, twice
+/// l.title.y  + (m.title_h - icons::SIZE) / 2       -- bare subtraction
+/// l.width - m.cell_w * 3                           -- bare subtraction, the dirty dot
+/// pop.rect.width - pad - acc.len() * m.cell_w      -- bare subtraction, the accelerator column
+/// ```
+///
+/// **All five are `band.height - cell.height` or the same shape**, and at `opt-level=0` each is a
+/// panic; in release each is a rect at a four-billion-pixel offset. None of them was reachable while
+/// `for_size` clamped the panel up to `MIN_WIDTH x MIN_HEIGHT`, because a clamped band is always taller
+/// than a cell. **The clamp was hiding all five**, and removing it — which the 480 px window in
+/// `bugs/1.png` required — exposed them.
+///
+/// **A gate that paints is what finds a whole class at once.** Reading for `height - cell_h` finds the
+/// ones you remember to look for; painting at 1x1 finds all of them, and any that appear later.
+///
+/// ## What it asserts
+///
+/// For every panel in the sweep, `Chrome::tree` **returns** — no panic, no wrap — and every node it
+/// emits is inside the panel. The second half matters as much as the first: a node at a wrapped offset
+/// does not crash in release, it is silently drawn somewhere else, which is the failure mode that
+/// reaches a user.
+#[test]
+fn the_chrome_paints_at_every_panel_size_without_drawing_outside_itself() {
+    use crate::chrome::{Chrome, ChromeMetrics, ChromeState};
+    use holonomy_render::{Node, Rect, SurfaceTree};
+
+    // **A state with everything switched on**, because the emitters this is about are the
+    // conditional ones: the dirty dot only draws when the document is dirty, and an emitter that only
+    // runs under a condition is an emitter no size sweep will ever reach.
+    let state = ChromeState {
+        dirty: true,
+        ..ChromeState::default()
+    };
+
+    /// Every `Rect` node in a tree, by walking `before`/`node`/`after`.
+    ///
+    /// **`SurfaceTree` has no iterator**, and adding one for a gate is not worth an API: the walk is
+    /// six lines and it is the only consumer.
+    fn rects(t: &SurfaceTree, out: &mut Vec<Rect>) {
+        if let Some(Node::Rect(r)) = t.node {
+            out.push(r);
+        }
+        for c in t.before.iter().chain(t.after.iter()) {
+            rects(c, out);
+        }
+    }
+
+    // # Two properties, because 1x1 is not a size to design *for*
+    //
+    // **Below the minimum the requirement is only that it returns.** A one-pixel window is not a case
+    // to make look right; it is a case that must not panic, and the bare subtractions above each are
+    // a panic at `opt-level=0`. That half is what found all five, and it is kept.
+    //
+    // **At or above the minimum nothing may be drawn outside the panel.** `MIN_WIDTH`/`MIN_HEIGHT` are
+    // the size the app asks the window manager for, so this is the band the app claims to render
+    // correctly in — and the band the 480 px window in `bugs/1.png` is *not* in, which is why the
+    // containment claim deliberately extends below it rather than starting there.
+    //
+    // **The sweep starts at 320 px wide, not at 480.** The bar from `MIN_WIDTH` down is where the
+    // menu elides and the toolbar clamps, and those are the two things the screenshot showed.
+    for (w, h, containment) in (1u32..=320)
+        .step_by(3)
+        .flat_map(|w| [(w, 1u32, false), (w, 200, false), (w, 320, false)])
+        .chain((321u32..=2560).step_by(7).flat_map(|w| [(w, 1u32, false), (w, 320, false), (w, 200, true), (w, 800, true)]))
+    {
+        {
+            let m = ChromeMetrics::for_size(w, h);
+            let tree = Chrome::new(m.clone()).tree(&state);
+            if containment {
+                let mut found = Vec::new();
+                rects(&tree, &mut found);
+                for r in found {
+                    assert!(
+                        r.x >= 0
+                            && r.y >= 0
+                            && (r.x as i64 + r.width as i64) <= w as i64
+                            && (r.y as i64 + r.height as i64) <= h as i64,
+                        "{w}x{h}: a surface rect at ({}, {}) {}x{} is outside the panel",
+                        r.x,
+                        r.y,
+                        r.width,
+                        r.height
+                    );
+                }
+            }
+        }
     }
 }

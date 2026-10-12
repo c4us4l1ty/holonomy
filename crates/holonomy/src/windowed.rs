@@ -151,12 +151,34 @@ pub fn run(
     };
     let desktop =
         Desktop::open(args.display.as_deref(), w, h, "Holonomy").map_err(WindowedError::Desktop)?;
+    // **The screen size is printed too, and it is in this line for a reason.**
+    //
+    // A bug report of *"the window is way too small"* cannot be settled from the window's size alone.
+    // The window is what the app asked for *after* reading the screen, so a window smaller than
+    // `90%` of the screen means one of three things — `screen_size` reported wrong, the window
+    // manager constrained the request, or the screenshot was scaled — and **they have three different
+    // fixes**. The line below carries both numbers so that one run distinguishes them, which is the
+    // measurement that `bugs/1.png` could not supply: a screenshot has no absolute scale in it.
+    let asked = (w, h);
+    let screen = Desktop::screen_size(args.display.as_deref());
     eprintln!(
-        "holonomy: window {:#x} is {}x{}, opening on {}",
+        "holonomy: window {:#x} is {}x{}, opening on {} (asked {}x{}, screen {:?}, \
+         {} of the screen)",
         desktop.window_id(),
         desktop.width(),
         desktop.height(),
-        desktop.describe()
+        desktop.describe(),
+        asked.0,
+        asked.1,
+        screen,
+        match screen {
+            Some((sw, sh)) if sw > 0 && sh > 0 => format!(
+                "{}% x {}%",
+                100 * desktop.width() as u32 / sw,
+                100 * desktop.height() as u32 / sh
+            ),
+            _ => "unknown".to_string(),
+        }
     );
 
     let mut session = Session::new(

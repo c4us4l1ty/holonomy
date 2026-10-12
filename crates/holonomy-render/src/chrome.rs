@@ -574,6 +574,22 @@ impl ChromeMetrics {
     /// *something*. Below these the answer is still well-defined -- [`Layout::new`] clips the page and
     /// clamps every band into the panel, all `saturating`, and that is a safety net rather than a
     /// supported size.
+    ///
+    /// # What these are *for*, corrected 2026-10-12
+    ///
+    /// **They were also the layout's clamp, and that was wrong.** `for_size` and `clamp_to` both read
+    /// `if width < MIN_WIDTH { MIN_WIDTH }`, so a window narrower than the minimum was laid out *wider
+    /// than itself* and the overflow was drawn off-screen. The measurement from `bugs/1.png` is in
+    /// [`for_size`](Self::for_size).
+    ///
+    /// **So they now mean exactly one thing each: the smallest size this app asks the window manager
+    /// for.** That is a *request*, in `WM_NORMAL_HINTS`, and it is honoured or it is not — this
+    /// window manager did not, and the protocol does not say it must.
+    ///
+    /// **Below them the chrome elides rather than overflowing.** [`menu_boxes`] drops the headings
+    /// that do not fit, which is what turns "the menu bar is cut mid-word" into "the menu bar shows
+    /// the menus that fit". They are the width at which that elision starts doing something, which is
+    /// the only reason a number belongs here at all.
     pub const MIN_WIDTH: u32 = 768;
     pub const MIN_HEIGHT: u32 = 320;
 
@@ -599,20 +615,32 @@ impl ChromeMetrics {
     /// [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize) touches neither the
     /// text nor the caret.
     ///
-    /// The size is clamped to [`MIN_WIDTH`](Self::MIN_WIDTH) and
-    /// [`MIN_HEIGHT`](Self::MIN_HEIGHT), so this is also the clamp and there is one code path.
+    /// The size is **not** clamped up, and that is a correction (2026-10-12).
+    ///
+    /// It used to read `if width < MIN_WIDTH { MIN_WIDTH } else { width }` and `clamp_to` did the
+    /// same, **and that made the chrome draw outside its own window.** A 480 px window became a 768 px
+    /// layout, so 288 px of chrome had nowhere to go and was simply off-screen.
+    ///
+    /// **Measured from `bugs/1.png`**, the window is 480 px wide and the page's right edge lands at
+    /// **x = 624** — 144 px past the window edge — which is why the page runs flush to the edge with
+    /// no right gutter and the menu bar is cut mid-word to `Extens`.
+    ///
+    /// # Why the minimum could not be enforced here
+    ///
+    /// [`MIN_WIDTH`](Self::MIN_WIDTH) **is** sent to the window manager as a size hint, and that hint
+    /// is advisory — the protocol does not require the WM to honour it, and this one did not. So the
+    /// *window* is the only authority on how wide the chrome is. A minimum belongs in what the app
+    /// asks for, and not in what the layout pretends.
+    ///
+    /// [`measure_for`](Self::measure_for) already narrows the measure rather than overflowing it
+    /// (part 36), so the text was never the problem. **`MIN_WIDTH`/`MIN_HEIGHT` are now the point
+    /// below which the chrome *elides*** — see [`menu_boxes`] — and nothing else.
     pub const fn for_size(width: u32, height: u32) -> Self {
         Self {
-            width: if width < Self::MIN_WIDTH {
-                Self::MIN_WIDTH
-            } else {
-                width
-            },
-            height: if height < Self::MIN_HEIGHT {
-                Self::MIN_HEIGHT
-            } else {
-                height
-            },
+            // **`.max(1)`, not `.max(MIN_WIDTH)`.** A zero-sized panel is not a case to design for, but
+            // multiplying by it and dividing by it is, and `DamageRect::new` wants a positive extent.
+            width: if width == 0 { 1 } else { width },
+            height: if height == 0 { 1 } else { height },
             ..Self::DESKTOP
         }
     }
@@ -642,17 +670,25 @@ impl ChromeMetrics {
         //
         // **`for_size` stays `..Self::DESKTOP`** and is still right: it is the constructor that *is*
         // the design defaults, at a size.
+        //
+        // # CORRECTION 2026-10-12: this used to clamp the size **up**, and that was the bug
+        //
+        // `width: if width < MIN_WIDTH { MIN_WIDTH } else { width }` — the same line `for_size` had.
+        // A 480 px window therefore produced a 768 px layout, **and `Layout::new` lays the page out
+        // from `m.width`.** The page's right edge landed at x = 624 in a window that ended at 480, so
+        // 144 px of the page — and everything to its right, including half the menu bar — was drawn
+        // into nothing.
+        //
+        // **A resize to a smaller window is exactly what a user does when the window is too small,
+        // which is the report this came from.** Clamping up turned "make it bigger" into "make it
+        // worse", and the damage looked like a layout bug because the layout genuinely was wrong: it
+        // had been told it was 768 px wide.
+        //
+        // **The size is now the window's, exactly.** The window manager's `WM_NORMAL_HINTS` minimum
+        // is the request; this is the consequence, and the consequence wins.
         Self {
-            width: if width < Self::MIN_WIDTH {
-                Self::MIN_WIDTH
-            } else {
-                width
-            },
-            height: if height < Self::MIN_HEIGHT {
-                Self::MIN_HEIGHT
-            } else {
-                height
-            },
+            width: if width == 0 { 1 } else { width },
+            height: if height == 0 { 1 } else { height },
             ..*self
         }
     }
@@ -740,7 +776,19 @@ impl Layout {
         let tab_y = menu_y.saturating_add(m.menu_h);
         let toolbar_y = tab_y.saturating_add(m.tab_h);
         let ruler_y = toolbar_y.saturating_add(m.toolbar_h);
-        let canvas_y = ruler_y.saturating_add(m.ruler_h);
+        // **CORRECTION 2026-10-12: the canvas is clamped into the panel too, and the bands below were
+        // already.**
+        //
+        // The five bands are clamped by `band()` a few lines down, **but `canvas_y` was not**, so it
+        // kept the raw stack: at a panel shorter than the bands it was 106 regardless of the panel's
+        // height, and the page was placed at y = 106 in a 1 px panel.
+        //
+        // **This was invisible for the whole life of the minimum clamp**, because the clamp forced
+        // `height >= MIN_HEIGHT` (320) and 106 < 320 always. Removing the clamp — which had to happen,
+        // because it was drawing 144 px outside the window — exposed it immediately. **That is the
+        // argument for the gate rather than the fix:** the defect existed, and was hidden by the very
+        // thing that was causing the reported one.
+        let canvas_y = ruler_y.saturating_add(m.ruler_h).min(m.height);
         let canvas_h = m.canvas_h();
 
         // The page is centred in the canvas. The remainder goes right, so the page is consistently
@@ -1512,12 +1560,35 @@ pub const MENUS: &[&str] = &[
 /// and a 2 px gap between headings that are themselves 1.5x wider is not a gap: `Insert`, `Format`,
 /// `Tools`, `Extensions` and `Help` rendered as one run-on word. **The gap is now the same fraction of
 /// the cell the constant was a fraction of**, which is what it always meant.
+/// **`Extensions` and `Help` are the two that go.** A narrow window loses the least-used menus rather
+/// than the most-used ones: File, Edit and View are what a person reaches for, and losing those would
+/// make the bar useless rather than merely incomplete.
+///
+/// **Dropping from the tail, so every surviving index is unchanged.** `ChromeState::open_menu` is an
+/// index into [`MENUS`] and so is `Hit::Menu(i)`, and both are compared against the box list. If the
+/// bar elided from the *front* — which would keep Help and drop File — then a menu open at index 3
+/// would start meaning a different menu every time the window narrowed, and a popup would follow its
+/// heading sideways. **The tail is the only end that can be elided without renaming everything above
+/// it.**
 pub fn menu_boxes(l: &Layout) -> (u32, Vec<DamageRect>) {
     let gap = l.cell_w / 4;
-    let mut x = l.menubar.x + l.cell_w * 2;
+    let left = l.menubar.x + l.cell_w * 2;
+    // **The budget is the panel's right edge**, so this is the one line that makes the bar fit its
+    // window. Before it the loop ran to `MENUS.len()` unconditionally, which at 480 px and a 7.5 px
+    // cell put "Extensions" 92 px past the edge and drew it anyway — `bugs/1.png`, where the bar
+    // reads `File Edit View Insert Format Tools Extens`.
+    let budget = l.menubar.x.saturating_add(l.menubar.width);
+    let mut x = left;
     let mut out = Vec::with_capacity(MENUS.len());
     for m in MENUS {
         let w = menu_width(m, l.cell_w);
+        // **The heading stops at the panel edge, not past it.** `x + w > budget` is the whole rule.
+        // A heading that only *partly* fits is dropped whole: a half-drawn `Extens` is the thing this
+        // fixes, and truncating a heading to the cells that fit would reproduce it for every heading
+        // rather than for one.
+        if x.saturating_add(w) > budget {
+            break;
+        }
         out.push(DamageRect::new(x, l.menubar.y, w, l.menubar.height));
         x += w + gap;
     }
@@ -1751,7 +1822,7 @@ impl Chrome {
             push_text(
                 &mut chrome.before,
                 m,
-                l.title.y + (m.title_h - m.cell_h) / 2,
+                l.title.y + m.title_h.saturating_sub(m.cell_h) / 2,
                 "[SEALED]",
                 Style::MONOSPACE,
                 colour::SEALED,
@@ -1769,7 +1840,7 @@ impl Chrome {
         push_text(
             &mut chrome.before,
             m,
-            l.status.y + (l.status.height - m.cell_h) / 2,
+            l.status.y + l.status.height.saturating_sub(m.cell_h) / 2,
             &status,
             Style::MONOSPACE,
             colour::INK_DIM,
@@ -1777,7 +1848,12 @@ impl Chrome {
         );
         if state.dirty {
             chrome.before.push(fill(
-                (l.width - m.cell_w * 3) as i32,
+                // **`saturating_sub`, and it is the fourth bare subtraction in this file.**
+                // The dirty-dot sits three cells from the right edge, so a panel narrower than
+                // three cells underflows here -- and at `opt-level=0` that is a panic, in release a
+                // four-billion-pixel `i32`. The panel can be that narrow now that `for_size` takes
+                // the window's size rather than rounding up to `MIN_WIDTH`.
+                l.width.saturating_sub(m.cell_w * 3) as i32,
                 (l.status.y + 4) as i32,
                 m.cell_w,
                 m.cell_h.saturating_sub(8),
@@ -1788,19 +1864,31 @@ impl Chrome {
 
         // --- page: shadow, sheet, scrollbar.
         let mut page = SurfaceTree::group();
+        // # CORRECTION 2026-10-12: the shadow is bounded by the page it belongs to
+        //
+        // The page's fills are offset by `m.shadow` to draw a flat band down and to the right. **That
+        // offset was the page's width and height, with nothing stopping it** — so in a panel narrower
+        // than the shadow the band started past the panel's right edge. The paint sweep found it at
+        // 1x1: a rect at (3, 1) 1x3 in a 1x1 panel.
+        //
+        // **Bounded here rather than by adding a field to `Layout`**, because the bound is a property
+        // of *drawing the page*; `Layout` answers "where is everything", not "how do I paint one piece
+        // of it". A `Layout::shadow` would be a second source for a number `ChromeMetrics::shadow`
+        // already is.
+        let shadow = m.shadow.min(l.page.width).min(l.page.height);
         // Shadow: a flat band to the right and below. Not a gradient, because alpha is masked off
         // in the frame and a ramp would need `f32`.
         page.before.push(fill(
-            (l.page.x + m.shadow) as i32,
+            (l.page.x + shadow) as i32,
             l.page.y as i32,
             l.page.width,
-            m.shadow,
+            shadow,
             colour::SHADOW,
         ));
         page.before.push(fill(
             l.page.x as i32,
-            (l.page.y + m.shadow) as i32,
-            m.shadow,
+            (l.page.y + shadow) as i32,
+            shadow,
             l.page.height,
             colour::SHADOW,
         ));
@@ -1917,14 +2005,14 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::BAND));
 
     // The app mark: a document icon, at the left, at the band's own size rather than the toolbar's.
-    let icon_y = l.title.y + (m.title_h - crate::icons::SIZE) / 2;
+    let icon_y = l.title.y + m.title_h.saturating_sub(crate::icons::SIZE) / 2;
     into.push(SurfaceTree::leaf(crate::Node::Icon(
         crate::icons::IconId::Doc.at(14, icon_y as i32, colour::INK_CHROME),
     )));
     push_text(
         into,
         m,
-        l.title.y + (m.title_h - m.cell_h) / 2,
+        l.title.y + m.title_h.saturating_sub(m.cell_h) / 2,
         &state.title,
         Style::MONOSPACE,
         colour::INK_CHROME,
@@ -2138,7 +2226,15 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                     acc,
                     Style::MONOSPACE,
                     colour::INK_DIM,
-                    x + (pop.rect.width - pad - acc.len() as u32 * m.cell_w) as i32,
+                    // The same fault as the dirty-dot, in the popup's accelerator column: a popup
+                    // narrower than its own padding plus one character of text underflows. **Both are
+                    // `saturating_sub` now**, and both were found by a gate that paints at 1x1
+                    // rather than by reading the code.
+                    x + pop
+                        .rect
+                        .width
+                        .saturating_sub(pad)
+                        .saturating_sub(acc.len() as u32 * m.cell_w) as i32,
                 );
             }
         }
@@ -2188,11 +2284,27 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
     let mut prev_separated = false;
     for p in crate::widgets::place_toolbar(l, 8) {
+        // # CORRECTION 2026-10-12: a tool with no room is skipped, not drawn at zero
+        //
+        // `place_toolbar` now hands back a zero-extent rect for a tool that does not fit — the right
+        // answer, and it is what stops the row accumulating invisible click targets past the edge.
+        //
+        // **The emitter did not know that, and drew anyway.** The separator's `x` is
+        // `p.rect.x - SEPARATOR/2 - 1`, so a tool at `x = 0` put the separator at **x = -5** — a
+        // wrapped `u32` cast to `i32`, which is how `0u32 - 5u32` becomes a negative coordinate. The
+        // paint sweep caught it as a rect at (-5, 4) 1x0.
+        //
+        // **Zero extent means nothing to draw and nothing to separate from.** Skipping is also what
+        // keeps the hover and press fills below from painting a zero-area surface at the origin.
+        if p.rect.width == 0 || p.rect.height == 0 {
+            prev_separated = false;
+            continue;
+        }
         if p.tool.separated() && !prev_separated {
             // The separator is drawn on the tool's *left* edge, in the gap before it.
             let sx = p.rect.x as i32 - (crate::widgets::SEPARATOR / 2) as i32 - 1;
             into.push(fill(
-                sx,
+                sx.max(0),
                 p.rect.y as i32 + 4,
                 1,
                 p.rect.height.saturating_sub(8),

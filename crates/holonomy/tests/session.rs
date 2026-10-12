@@ -496,23 +496,59 @@ fn a_resize_changes_the_frame_and_not_the_text() {
     );
 }
 
-/// A panel below the chrome's minimum is clamped rather than refused.
+/// # CORRECTION 2026-10-12: a resize below the minimum is taken at face value, not clamped up
 ///
-/// A window can be dragged to nothing, and the answer has to be the smallest thing the chrome can draw.
-/// The alternative is a subtraction that wraps, which is what `Layout::new`'s saturating arithmetic
-/// exists to prevent -- this is the test that the clamp is what actually stops it.
+/// This test used to assert the opposite — `resize(1, 1)` and then expect the frame to be
+/// `768 x 320` — **and its own doc comment gave the reason as a principle**: *"the answer has to be the
+/// smallest thing the chrome can draw"*, with the alternative named as *"a subtraction that wraps"*.
+///
+/// **That is the bug stated as an argument.** `Layout::new` lays the page out from the metrics' width,
+/// so clamping a 480 px window up to 768 put the page's right edge at **x = 624 in a window ending at
+/// 480**: 144 px of the page and half the menu bar drawn into nothing. Measured from `bugs/1.png`,
+/// where the window is 480x246 and the bar reads `File Edit View Insert Format Tools Extens`.
+///
+/// ## What the comment got right, and where
+///
+/// **The wrap is real and the saturating arithmetic is what prevents it.** What was wrong was the
+/// conclusion that the way to prevent it is to lie about the size. **`Layout::new` now clamps the
+/// canvas into the panel and `menu_boxes` elides**, so the frame is the window's and the arithmetic
+/// still cannot wrap — the two are independent, and the old test made the second stand in for the
+/// first.
+///
+/// ## What a 1x1 window is now
+///
+/// A frame the size the window asked for, a paint that succeeds, and nothing drawn outside it. **Not
+/// a crash, not a clamped lie** — and `no_chrome_box_ever_lands_outside_its_panel` in
+/// `holonomy-render/tests/chrome.rs` is the gate for the "nothing outside it" half, at every width from
+/// 1 px to 2,560.
 #[test]
-fn a_resize_below_the_minimum_is_clamped() {
+fn a_resize_below_the_minimum_is_taken_at_face_value() {
     let m = ChromeMetrics::DESKTOP;
     let (mut s, _atlas) = session(Editor::new(), m);
     s.repaint_all().expect("the first paint");
+
     s.resize(1, 1).expect("a resize to nothing is not an error");
     assert_eq!(
         (s.frame().width(), s.frame().height()),
-        (ChromeMetrics::MIN_WIDTH, ChromeMetrics::MIN_HEIGHT),
-        "clamped up to the minimum the chrome can draw"
+        (1, 1),
+        "**the frame is the window's size.** Clamping it up to {}x{} is what drew 144 px of the \
+         page outside a 480 px window.",
+        ChromeMetrics::MIN_WIDTH,
+        ChromeMetrics::MIN_HEIGHT
     );
-    s.repaint_all().expect("painting at the minimum");
+    s.repaint_all().expect("painting at 1x1");
+
+    // **And the wrap the old comment was worried about really is prevented** — just not by the clamp.
+    // A resize that underflows every band is the case that used to be argued for, and it is the one
+    // that has to keep working.
+    s.resize(0, 0).expect("a resize to zero is not an error either");
+    assert_eq!(
+        (s.frame().width(), s.frame().height()),
+        (1, 1),
+        "**zero is clamped to one, because a zero-extent rect divides and multiplies** -- but one \
+         step, not a jump to the minimum"
+    );
+    s.repaint_all().expect("painting at 1x1 after a zero resize");
 }
 
 /// Resizing to the size a window already is does nothing at all.
