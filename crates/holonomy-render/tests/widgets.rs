@@ -444,7 +444,11 @@ fn a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window() {
             let Some(p) = popup(&l, &st, Some(open)) else {
                 // **A popup with no items is `None` on purpose** -- a caller could pass a bad index and
                 // the answer is "draw nothing" rather than a panic inside a paint.
-                assert_eq!(open.items(&st).len(), 0, "{open:?} at {w}x{h} has items but no popup");
+                assert_eq!(
+                    open.items(&st).len(),
+                    0,
+                    "{open:?} at {w}x{h} has items but no popup"
+                );
                 continue;
             };
             assert!(

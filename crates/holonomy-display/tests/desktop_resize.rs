@@ -132,10 +132,7 @@ fn scanout_resize_has_no_default_body() {
     let semi = after
         .find(';')
         .expect("the declaration ends in a semicolon");
-    let brace = after
-        .find('{')
-        .map(|i| i < semi)
-        .unwrap_or(false);
+    let brace = after.find('{').map(|i| i < semi).unwrap_or(false);
     assert!(
         !brace,
         "`Scanout::resize` must have no body: a default is a silent answer to a question every \

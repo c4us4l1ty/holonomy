@@ -142,10 +142,18 @@ fn tool_rect(s: &Session<'_>, name: &str) -> holonomy_render::DamageRect {
 fn a_hover_damages_one_widget_and_not_a_third_of_the_frame() {
     let mut s = session();
     let bold = tool_rect(&s, "bold");
-    hover(&mut s, (bold.x + bold.width / 2) as i32, (bold.y + bold.height / 2) as i32);
+    hover(
+        &mut s,
+        (bold.x + bold.width / 2) as i32,
+        (bold.y + bold.height / 2) as i32,
+    );
 
     let d = s.last_damage();
-    assert_ne!(d, holonomy_render::DamageRect::EMPTY, "a hover damaged nothing");
+    assert_ne!(
+        d,
+        holonomy_render::DamageRect::EMPTY,
+        "a hover damaged nothing"
+    );
     assert!(
         percent_of_frame(&s) <= 1,
         "a hover over Bold damaged {d:?} -- {}% of the {}-px frame. The bug this holds was 36%.",
@@ -311,7 +319,11 @@ fn a_selection_change_damages_the_page_and_no_band_above_the_canvas() {
             d.y
         );
     }
-}///
+}
+
+/// **`set_sidebar` puts the flag and the reservation back in step, in both directions and
+/// repeatedly.**
+///
 /// **Part 39's one-fact change, held.** The reservation used to be a constant that a `bool` on
 /// [`ChromeState`] had nothing to do with, so a closed sidebar still pushed the page 256 px to the
 /// right and no caller could put the two back together.
@@ -344,7 +356,11 @@ fn the_sidebar_flag_and_its_reservation_agree_after_every_change() {
             s.chrome_layout().sidebar
         );
     }
-    assert_eq!(full.sidebar_w, sidebar_reservation(true), "and the width is the design one");
+    assert_eq!(
+        full.sidebar_w,
+        sidebar_reservation(true),
+        "and the width is the design one"
+    );
 }
 
 /// **`set_document` sets the title and the one row together, because they are one fact.**
@@ -371,7 +387,11 @@ fn the_title_and_the_one_document_row_are_the_same_fact() {
     // focus event does not repaint the whole panel every time.
     let before = s.last_damage();
     s.set_document("field notes");
-    assert_eq!(s.last_damage(), before, "setting the same document again damaged the panel");
+    assert_eq!(
+        s.last_damage(),
+        before,
+        "setting the same document again damaged the panel"
+    );
 
     // **A different name moves both, in step.**
     s.set_document("chapter one");
@@ -411,7 +431,10 @@ fn every_toolbar_widget_is_small_next_to_the_frame() {
         worst = worst.max(10_000 * px / frame);
         n += 1;
     }
-    assert!(n > 0, "the toolbar placed no widgets, so the damage gates above measure nothing");
+    assert!(
+        n > 0,
+        "the toolbar placed no widgets, so the damage gates above measure nothing"
+    );
     assert!(
         worst <= 100,
         "the largest button is {worst} hundredths of a percent of the frame, so the 1% hover bound \
