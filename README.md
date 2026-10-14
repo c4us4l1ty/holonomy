@@ -224,9 +224,11 @@ placing the caret by the pen while hit-testing on the grid is worse than either 
 gate caught it at 249 against 250 on the first run. The selection highlight moved with the caret,
 because a grid-placed highlight would have put the caret outside its own highlight.
 
-**§2.9.3's image budget was measured against a 640 px page column** — 80 cells of 8. **It is now
-1,120 px**, 80 cells of 14. **The budget has not been re-measured and the number in §2.9.3 is no longer
-the number it was.** Recorded rather than quietly restated.
+**§2.9.3's image budget was measured against a 640 px page column** — 80 cells of 8. **It is now 720 px**,
+72 cells of 10 at 16 ppem. **The budget has not been re-measured and the number in §2.9.3 is no longer
+the number it was.** Recorded rather than quietly restated, and the derivation is now a gate —
+`the_design_page_column_is_576_px_and_says_so` in `holonomy-render/tests/chrome.rs` — because a document
+that quotes a derived number in six places quotes it wrongly the first time somebody changes the input.
 
 **Selection exists, and it is a model rather than a highlight.** `Editor` holds `Option<u32>` — the
 anchor — and the focus *is* the caret, so there is no second copy of the caret anywhere; every caret
@@ -263,11 +265,15 @@ the only way a document gets in).
 face, so `Action::SetFont` records the choice without changing a pixel of the page. That is stated in
 the session's handler rather than left to be discovered.
 
-**The window now changes the measure, up to a ceiling.** The page used to be a fixed 736 px at every
-panel size, so dragging the window edge gave more desk and no more text. `ChromeMetrics::measure_for`
-anchors at the design width — **1,280 px still shows exactly the 80 columns every measurement in this
-project was taken against** — and grows the measure above it, to `max_columns: 100`. Past the ceiling
-the extra width is desk again, so a wide window still looks like a page on a desk. One field to change.
+**The page is a fixed measure, and the window does not change how long the line is.** This reverses the
+rule that was here a moment ago, which grew the measure with the panel up to `max_columns: 100`. Measured
+against `Plan/Screenshot From 2026-10-01 00-17-42.png` — 1,778 px wide — **the reference's page is 813 px
+at every screenshot in the folder, with 310 px of desk on each side**: a page that grows with the window
+is a page that fills it, and at the 1,600 px default that was 88 columns and 1,152 px, 72 % of the window.
+**`columns` is 72 and `max_columns` is 72**, so "the ceiling" and "the design" are the same number and the
+growth is one field away. **A resize still does three visible things** — the page moves, the gutters grow,
+the ruler re-ticks — and it does them *because* the resize path works at all, which it did not until the
+`Desktop::resize` correction below. Below the design width the measure **shortens** rather than clips.
 
 **Two caret facts that are recorded rather than fixed.** `Command::Home` and `Command::End` are
 documented as "the start/end of the line" and their arms go to the start/end of the *document*;
@@ -321,6 +327,47 @@ type (1,280 → 1,894) so the rule still looked self-consistent — what changed
 width of the page the floor was promising. **The floor now holds only while the page fits**, and part
 27's gate — which asserted "clipped rather than reflowed" at three widths — is corrected.
 
+**Three reported defects, and each was a structural mistake rather than a missing feature.**
+
+* **Resizing the window resized nothing.** `Desktop::resize` was an **inherent** method, so it shadowed
+  the trait's `Scanout::resize`; `Session` holds `Box<dyn Scanout>` and so called the trait's default
+  body, which was `Ok(false)` — *unchanged* — on every `ConfigureNotify`. Measured before the fix:
+  `resize: server 900x700, changed false, frame 1600x1000`. `Scanout::resize` now has **no default body**,
+  so a backend that forgets it is a compile error rather than a silent `Ok(false)`, and the inherent
+  method is gone.
+* **Dropdowns opened one layer back.** The popup was emitted by the band that owns it — the menu band
+  drew the menu's popup into `chrome.before` — and every one of those bands is inside the chrome group,
+  which is the **first** entry of `root.before`. So a popup hanging down over the page was painted
+  *first*, and the page, the sidebar and the document's own glyphs went over it. `SurfaceTree::after` is
+  painted after `node` and after every entry in `before`, and it is the one list a caller cannot paint
+  into by accident, so **the popup is the only thing in `after`** — layer 4 of five, documented on
+  `Chrome::tree`.
+* **The buttons lagged.** A hover damaged **583,808 px, 36 % of a 1,600×1,000 frame**, and a menu
+  dismissal called `full_damage()`. **Shift-arrow did the same**: `after_selection_moves` ended
+  `self.damage = self.chrome.full_damage()` *while its own doc comment one line above said "the page is
+  the damage unit"* — **and shift-arrow is a gesture, sixty presses to select a paragraph, once per
+  motion event in a drag.** A hover is now one widget (2,880 px, 0.2 %), a dismissal is the two popup
+  rects, an armed toggle is its own button, and a selection change is `page ∪ scrollbar ∪ status`.
+
+**A popup's label and its accelerator used to be drawn on top of each other.** Measured in the live
+window at 20 ppem: `Save` ended at x = 144 and `Ctrl+S` started at x = 143. **Nothing overflowed and
+nothing was clipped** — each text fitted the panel on its own — so every "is this text inside the popup"
+gate was green while the two texts were inside each other. `widgets::popup` now sizes the panel over
+`leading + label + gap + accelerator`, where `leading` is a constant four cells whether or not the row
+has a tick and an icon, because the painter does not move the label left to fill a gap.
+
+**The sidebar lists one document, because the session has one.** The tempting alternative was to invent
+three more rows so the rail *looked* like the reference's, and **a sidebar that lies is worse than an
+absent row, because a person clicks it**. `Session::set_document` sets the title and the single row
+together, because they are one fact — as are "the sidebar is drawn" and "the sidebar's width is
+reserved", which were two: a closed sidebar still pushed the page 256 px right until
+`chrome::sidebar_reservation` made the second a function of the first.
+
+**The ruler had ticks and no numbers for its whole life**, so it read as a dotted line: 31 px of band
+carrying two rows of one-pixel marks and nothing a person could read. It is numbered `1 … n` across the
+measure now, every ten columns, centred over its tick — the number is what makes it a ruler rather than a
+line.
+
 **Typing did nothing, and the whole suite had never painted twice.** `emit_body_text` read the visible
 page into `line_scratch` and then called `truncate(used)` on it, so the next paint's guard compared a
 fresh line against the *previous page's* byte count. One byte more and it broke out of the read loop
@@ -349,13 +396,20 @@ height` block, *and* built its `ChangeProperty` request two bytes too long — s
 unnoticed. The same `.u32(32).u16(0)` mistake appears in `set_title`, whose own comment records that
 bug being found and fixed there — forty lines away.
 
-**A full repaint is not idempotent.** `repaint_all()` twice on an unchanged session differs from once
-by **970 pixels**, deterministically and in the same place: rows 51–54, the bottom of the menu band and
-the top of the toolbar, across its whole width, with every toolbar icon among them. At (1, 53) the
-first frame has `colour::BAND` and the second `colour::RULE`. This is the 1,898-pixel residual part 29
-recorded and could not isolate — **it was never two sessions, it was one session painted twice**, and
-the fixture was comparing two sessions rather than one with itself. `a_repaint_is_not_idempotent` holds
-it. It is in the chrome's paint path, not the document's.
+**A full repaint is now idempotent, and the 970 pixels are gone.** `repaint_all()` twice on an unchanged
+session used to differ from once by **970 pixels**, deterministically and in the same place: rows 51–54,
+the bottom of the menu band and the top of the toolbar, across its whole width, with every toolbar icon
+among them. That was the 1,898-pixel residual part 29 recorded and could not isolate — **it was never two
+sessions, it was one session painted twice**, and the fixture was comparing two sessions rather than one
+with itself. **The cause was `Chrome::hline` building a `TextRun` of `─` (U+2500)**: a `TextRun` is
+*consecutive codepoints*, so a 120-cell rule was `U+2500…U+2577`, the whole Box Drawing block, one glyph
+per cell — which is why every rule in the UI rendered as rows of crossed circles. `TextRun::MAX_LEN` is
+256, so a wider rule was cut at 256 and which part was cut depended on the cell the painter was using,
+which is what made the *band* around it land differently depending on what had been drawn before.
+**`Node::Repeat(RepeatRun)` is the node that means "the same glyph again"**, it carries no glyph stream at
+all, and the same correction was applied to table borders and to raw-LaTeX source. The gate now asserts
+**zero**, because a gate that says "fewer than 200 pixels" is one a new conditional emitter creeps up
+against until it is the 970 again.
 
 **The zoom control does not zoom, and that is measured rather than asserted.** `--zoom 200`, F11 and the
 zoom dropdown all set `zoom_percent`, and **every pixel that changes when it changes is inside the zoom

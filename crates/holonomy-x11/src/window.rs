@@ -331,6 +331,47 @@ impl Window {
         Self::create_inner(conn, width, height, title, true)
     }
 
+    /// A handle on a window **this connection did not create**, for a driver that has to reach into a
+    /// running application.
+    ///
+    /// # Why this is here
+    ///
+    /// **Because the interesting questions about a window cannot be asked from inside it.** "Does the
+    /// window resize?", "what does the server say its size is?", "what is actually on screen?" are all
+    /// answered by a second process talking to the server about a window id — and every one of those is
+    /// a method on this type, which is why the driver needs a way to *hold* the window rather than
+    /// only a way to make one.
+    ///
+    /// **It builds the same handle `create` does**, including a fresh graphics context, because the
+    /// methods a driver uses are the same requests: `PutImage`/`GetImage` name a GC and a depth, and a
+    /// handle that carried somebody else's GC id would be sending a request about another client's
+    /// object.
+    ///
+    /// **The size is the server's to fill in**: it is recorded from `GetGeometry` where it can be, and
+    /// the driver should not trust the `width`/`height` it passes for anything but a starting guess.
+    pub fn attach(conn: &mut Conn, id: u32, width: u32, height: u32) -> Self {
+        let depth = conn.setup().root_depth;
+        let gc_id = conn.alloc_id();
+        let gc = conn
+            .request(
+                Req::new(op::CREATE_GC)
+                    .second_byte(0)
+                    .u32(gc_id)
+                    .u32(id)
+                    .u32(gc::GRAPHICS_EXPOSURES)
+                    .u32(0),
+            )
+            .is_ok()
+            .then_some(gc_id);
+        Self {
+            id,
+            gc: gc.unwrap_or(gc_id),
+            width,
+            height,
+            depth,
+        }
+    }
+
     fn create_inner(
         conn: &mut Conn,
         width: u32,
@@ -902,6 +943,40 @@ impl Window {
         )
     }
 
+    /// `GetGeometry` in full: the window's **position as well as its size**, and the root it lives on.
+    ///
+    /// # Why this exists separately from [`geometry`](Self::geometry)
+    ///
+    /// **Because a pointer driver needs the window's `x, y`, and `geometry` threw them away.** They are
+    /// on the wire at the same place and cost nothing to read — the reply is already in hand — and a
+    /// caller that has to point the pointer *at* a widget in this window cannot compute a root-space
+    /// coordinate without them. The existing three-tuple also returned the root window **truncated to
+    /// a `u16`**, which is a value no caller could use.
+    ///
+    /// # `x, y` are relative to the parent
+    ///
+    /// **Which is the root for a top-level window**, so for the window this crate creates
+    /// `(x, y)` plus a widget's window-relative coordinate is the root-space coordinate XTEST wants.
+    pub fn geometry_full(
+        &self,
+        conn: &mut Conn,
+    ) -> Result<(i16, i16, u16, u16, u32), WindowError> {
+        let seq = conn.request(Req::new(op::GET_GEOMETRY).second_byte(0).u32(self.id))?;
+        conn.flush()?;
+        let body = conn.reply(seq)?;
+        if body.len() < 24 {
+            return Err(WindowError::ShortReply("GetGeometry"));
+        }
+        let mut r = Rdr::new(&body);
+        r.skip(8);
+        let root = r.u32();
+        let x = r.i16();
+        let y = r.i16();
+        let width = r.u16();
+        let height = r.u16();
+        Ok((x, y, width, height, root))
+    }
+
     /// `GetGeometry`, for a caller that wants the server's idea of the window's size.
     pub fn geometry(&self, conn: &mut Conn) -> Result<(u16, u16, u16), WindowError> {
         let seq = conn.request(Req::new(op::GET_GEOMETRY).second_byte(0).u32(self.id))?;
@@ -920,6 +995,46 @@ impl Window {
         let width = r.u16();
         let height = r.u16();
         Ok((width, height, root as u16))
+    }
+
+    /// Where the pointer is, in both coordinate systems: `(root_x, root_y, window_x, window_y)`.
+    ///
+    /// # Why this exists
+    ///
+    /// **Because "the click did nothing" has two possible causes and they are indistinguishable
+    /// without a measurement.** Either the pointer never moved, or it moved to the wrong place -- and
+    /// the two look identical from the outside: no menu opens either way. `geometry_full` says where
+    /// the window is; this says where the pointer ended up *and* where the server considers that to be
+    /// relative to the window, which is the number a click's `event_x`/`event_y` will carry.
+    ///
+    /// **The `window_x`/`window_y` half is the one that matters for a driver.** X reports a pointer
+    /// event's coordinates relative to the *reporting window*, not to the root, so those two are what
+    /// the application sees and what a caller aiming at a widget has to hit. Computing them as
+    /// `root - geometry` is a guess about a window manager's mind; this is the server's answer.
+    ///
+    /// `same_screen` is returned as the fourth element's shadow: `true` when the pointer is on the
+    /// same screen as this window, which is the `None` case for every other screen's pointer.
+    pub fn pointer_position(
+        &self,
+        conn: &mut Conn,
+    ) -> Result<((i16, i16, i16, i16), bool), WindowError> {
+        let seq = conn.request(Req::new(op::QUERY_POINTER).second_byte(0).u32(self.id))?;
+        conn.flush()?;
+        let body = conn.reply(seq)?;
+        // QueryPointer's reply is 32 bytes: reply(0), same_screen(1), sequence(2..4), length(4..8),
+        // root(8..12), child(12..16), root-x(16..18), root-y(18..20), win-x(20..22), win-y(22..24),
+        // mask(24..26), pad(26..32).
+        if body.len() < 32 {
+            return Err(WindowError::ShortReply("QueryPointer"));
+        }
+        let same_screen = body[1] != 0;
+        let mut r = Rdr::new(&body);
+        r.skip(16);
+        let root_x = r.i16();
+        let root_y = r.i16();
+        let win_x = r.i16();
+        let win_y = r.i16();
+        Ok(((root_x, root_y, win_x, win_y), same_screen))
     }
 
     /// **Read `WM_NORMAL_HINTS` back off the server.** Part 34.

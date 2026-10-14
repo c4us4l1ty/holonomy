@@ -1,4 +1,4 @@
-//! **One widget list, painted and hit-tested.** 7 tests.
+//! **One widget list, painted and hit-tested.** 9 tests.
 //!
 //! # The hazard this file is about
 //!
@@ -22,6 +22,8 @@
 //! | a point on nothing is nothing | [`a_point_on_no_widget_hits_nothing`] |
 //! | and the chrome's own bands are | [`the_bands_themselves_are_not_widgets`] |
 //! | the menu headings are measured, not tabulated | [`the_menu_headings_are_measured_not_tabulated`] |
+//! | **every popup row is inside its panel** | [`a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window`] |
+//! | **and the panel is as wide as its widest row** | [`a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs`] |
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{hit, place_title, place_toolbar, Hit, TitleButton, TOOLBAR};
@@ -406,4 +408,125 @@ fn the_menu_headings_are_measured_not_tabulated() {
     // characters. Deciding it -- one cell per character, because the face is monospaced -- is what
     // makes the other six assertions in this file meaningful.
     let _ = TOOLBAR;
+}
+
+/// **Every popup's rows are inside its own panel, and its panel is inside the window.**
+///
+/// **This is the invariant `Popup` exists to keep**, and `widgets.rs`'s header says why: hit testing
+/// and layout are written once here so that a row that is *drawn* is a row that can be *clicked*. A
+/// row that hangs off the bottom of the panel is drawn (the frame clips it) and cannot be clicked —
+/// so the pair diverges silently, and the symptom is a menu item that does nothing.
+///
+/// # The two defects it holds, both real, both invisible to a bounds check
+///
+/// **The height clamp.** `y` was `min(height - h).max(0)`, so a popup taller than the remaining panel
+/// had its *top* pushed to 0 and its rows — laid out from the clamped top — ran off the bottom. The
+/// window is 800 px tall and the Style menu is 19 items, so this happened on the first open.
+///
+/// **The right clamp.** `Extensions` is the longest heading and its popup is 336 px; anchored to the
+/// heading with no clamp, its last two items were drawn into the scrollbar and off the panel.
+///
+/// **Every menu and every dropdown, at both a 1,280x800 panel and a 900x700 one**, because a clamp
+/// that holds at one size and not another is the failure mode this whole file is about.
+#[test]
+fn a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window() {
+    use holonomy_render::widgets::{popup, Open, Tool, TOOLBAR};
+
+    for (w, h) in [(1280u32, 800u32), (1600, 1000), (900, 700), (1024, 600)] {
+        let m = ChromeMetrics::for_size(w, h);
+        let l = Layout::new(&m);
+        let st = state();
+        let opens: Vec<Open> = (0..MENUS.len())
+            .map(|i| Open::Menu(i))
+            .chain(TOOLBAR.iter().map(|t| Open::Tool(*t)))
+            .collect();
+        for open in opens {
+            let Some(p) = popup(&l, &st, Some(open)) else {
+                // **A popup with no items is `None` on purpose** -- a caller could pass a bad index and
+                // the answer is "draw nothing" rather than a panic inside a paint.
+                assert_eq!(open.items(&st).len(), 0, "{open:?} at {w}x{h} has items but no popup");
+                continue;
+            };
+            assert!(
+                p.rect.right() <= w && p.rect.bottom() <= h,
+                "{w}x{h} {open:?}: the panel at {:?} runs off the window, which is a clamp that is \
+                 not clamping",
+                p.rect
+            );
+            assert!(
+                p.rows.len() <= open.items(&st).len(),
+                "{w}x{h} {open:?}: {} rows for {} items",
+                p.rows.len(),
+                open.items(&st).len()
+            );
+            for (i, r) in p.rows.iter().enumerate() {
+                assert!(
+                    r.x >= p.rect.x && r.right() <= p.rect.right()
+                        && r.y >= p.rect.y && r.bottom() <= p.rect.bottom(),
+                    "{w}x{h} {open:?}: row {i} at {r:?} is not inside its panel at {:?}. A row that \
+                     hangs off the panel is drawn and cannot be clicked, which is the divergence this \
+                     file exists to prevent.",
+                    p.rect
+                );
+                // **And it is hit-testable at its own centre**, which is the same claim from the other
+                // side: not just "inside the panel" but "the pointer finds it there".
+                let cx = (r.x + r.width / 2) as i32;
+                let cy = (r.y + r.height / 2) as i32;
+                assert_eq!(
+                    p.row_at(cx, cy),
+                    Some(i),
+                    "{w}x{h} {open:?}: row {i}'s own centre ({cx}, {cy}) does not hit row {i}"
+                );
+            }
+        }
+    }
+    let _ = Tool::Zoom;
+}
+
+/// **A popup's panel is as wide as its widest row needs and no wider — measured, at every cell size.**
+///
+/// **CORRECTION, part 39, and this is the gate for it.** `widgets::popup` sized the panel over
+/// `leading + label` and left the accelerator to be drawn *on top of the label*: at 20 ppem `Save` ended
+/// at x = 144 and `Ctrl+S` started at x = 143. **Nothing overflowed and nothing was clipped**, so every
+/// "is this text inside the popup" gate was green while the two texts were inside each other.
+///
+/// **The property is a band, not a width.** A panel *narrower* than its widest row clips the row's
+/// accelerator — the defect. A panel *wider* is merely a wide menu. So the gate asserts the panel is at
+/// least as wide as every row needs, and that it is **no wider than the widest row plus the padding on
+/// both sides**, which is what stops `popup` growing a slack panel the first time a label gets long.
+#[test]
+fn a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs() {
+    use holonomy_render::widgets::{popup, row_cells, Open, TOOLBAR};
+
+    for cell_w in [8u32, 10, 12, 16, 20] {
+        let m = ChromeMetrics {
+            cell_w,
+            ..ChromeMetrics::DESKTOP
+        };
+        let l = Layout::new(&m);
+        let st = state();
+        for open in (0..MENUS.len())
+            .map(|i| Open::Menu(i))
+            .chain(TOOLBAR.iter().map(|t| Open::Tool(*t)))
+        {
+            let items = open.items(&st);
+            let Some(p) = popup(&l, &st, Some(open)) else {
+                continue;
+            };
+            let pad = 2 * cell_w;
+            let widest = items
+                .iter()
+                .map(|it| row_cells(it, cell_w))
+                .max()
+                .expect("a popup with rows has items")
+                .max(14 * cell_w);
+            assert_eq!(
+                p.rect.width,
+                widest + pad * 2,
+                "cell {cell_w}, {open:?}: the panel is {} px for a widest row of {widest} px plus \
+                 {pad} of padding on each side",
+                p.rect.width
+            );
+        }
+    }
 }

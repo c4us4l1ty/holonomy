@@ -212,6 +212,60 @@ impl Frame {
         }
     }
 
+    /// Append row `y`'s `rw` pixels from `rx` onwards to `out`, in **X11's byte order**.
+    ///
+    /// # Why this exists, and what it replaced
+    ///
+    /// `Desktop::push` built its `PutImage` buffer with
+    ///
+    /// ```text
+    /// for px in row { buf.extend_from_slice(&px.to_le_bytes()); }
+    /// ```
+    ///
+    /// **which is a four-byte `memcpy` through a function call, per pixel, on every frame pushed.** At
+    /// 1,600 x 1,000 that is 1.6 million of them for 6.4 MB, and it is the single largest term in
+    /// "the window feels slow" — a straight `memcpy` of the same 6.4 MB is roughly twenty times
+    /// cheaper. This method is that `memcpy`.
+    ///
+    /// # The byte order, and why it is the frame's own
+    ///
+    /// **A pixel is `0x00RRGGBB` in a `u32`, and on a little-endian target its four bytes in memory are
+    /// already `B, G, R, pad`** — which is exactly what a depth-24 TrueColor `ZPixmap` with
+    /// `LSBFirst` bit order wants. The frame is therefore handed over with no conversion at all, and
+    /// `desktop.rs`'s comment about "the server's depth-24 TrueColor format wants exactly those bytes"
+    /// is a statement about this function rather than about a loop somebody wrote once.
+    ///
+    /// **A big-endian target swaps per pixel**, and says so in the fallback rather than silently
+    /// sending a blue page to the server.
+    ///
+    /// # Why `rw` is clamped rather than asserted
+    ///
+    /// **Because this is on the frame path and a caller that asks for more than the frame has should
+    /// get the part that exists.** `Desktop::push` already bounds-checks the rectangle; this is the
+    /// belt to that braces, and a panic here would be a panic inside a present.
+    pub fn append_xrgb_row(&self, rx: u32, rw: u32, y: u32, out: &mut Vec<u8>) {
+        let row = self.row(y);
+        let start = (rx as usize).min(row.len());
+        let take = (rw as usize).min(row.len().saturating_sub(start));
+        let pixels = &row[start..start + take];
+        if pixels.is_empty() {
+            return;
+        }
+        out.reserve(pixels.len() * PIXEL_BYTES);
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: `u8` has alignment 1, so `align_to` yields no prefix or suffix; the bytes borrow
+            // `self` for the length of this call and are only read. The frame's own byte order is the
+            // server's — see this method's docs.
+            let bytes = bytemuck_bytes(pixels);
+            out.extend_from_slice(bytes);
+        }
+        #[cfg(not(target_endian = "little"))]
+        for px in pixels {
+            out.extend_from_slice(&px.to_le_bytes());
+        }
+    }
+
     /// Fill a rectangle, clipped to the frame.
     ///
     /// Returns how many pixels were written, which is `width * height` after clipping. A caller that

@@ -44,6 +44,20 @@ path = "src/lib.rs"
 name = "holonomy"
 path = "src/main.rs"
 
+# The live UI harness: it spawns the real window, drives it with XTEST and photographs it with
+# GetImage. **It is `#![cfg(feature = "desktop")]` at the top of the file**, so without this line
+# `cargo test --workspace` -- which builds every example target -- fails with "`main` function not
+# found", and the failure is about the harness rather than about the code being tested.
+#
+# **`required-features` is the declaration, and the attribute is the implementation**: Cargo skips the
+# target entirely, so there is no empty `main` to keep compiling and no cfg to keep in step between
+# two files. A harness that cannot be built without a display is a harness that cannot be built by
+# `cargo test`.
+[[example]]
+name = "uidrive"
+path = "examples/uidrive.rs"
+required-features = ["desktop"]
+
 [dependencies]
 # holonomy-assets re-exports from here because `include_bytes!` data is only visible
 # to the crate that declares it (PROJECT.md §4).

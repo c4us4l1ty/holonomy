@@ -270,6 +270,19 @@ pub fn run(
         metrics,
     );
     session.set_zoom(args.zoom);
+    // **The document's name, in the title bar and in the sidebar.**
+    //
+    // **Part 39: the window said `untitled` and the sidebar said nothing at all**, whatever the user
+    // passed. `--container notes.wavefunction` is a real path the app opens, and its name belongs on the
+    // screen; `file_stem` and not the whole path because a title bar is not a place for `/home/…`.
+    // The default is the same string `ChromeState::default` carries, so a window with no `--container`
+    // looks exactly as it did.
+    let name = args
+        .container
+        .as_deref()
+        .and_then(|p| p.file_stem())
+        .map_or_else(|| "untitled".to_string(), |s| s.to_string_lossy().into_owned());
+    session.set_document(&name);
     session.repaint_all().map_err(WindowedError::Session)?;
 
     // **Part 36: dump the first frame, because "the viewport is too small" is not a number.** A layout
@@ -349,10 +362,34 @@ pub fn run(
                         // One call, because the order -- backend first, then the frame -- is the
                         // session's business and not the driver's. A drag delivers one of these per
                         // intermediate size, so this is a per-frame cost while a window is moving.
-                        if session
+                        let changed = session
                             .resize(width as u32, height as u32)
-                            .map_err(WindowedError::Session)?
-                        {
+                            .map_err(WindowedError::Session)?;
+                        // **The four numbers that decide whether a resize happened, printed under the
+                        // same flag as the event stream.**
+                        //
+                        // **`ConfigureNotify { width: 900, height: 700 }` is a claim about the server.**
+                        // Whether the *session* believed it is a different question, and it was being
+                        // answered by looking at a screenshot: a window that is 900 px wide and still
+                        // showing the chrome for 1,600 is indistinguishable from one that resized and
+                        // repainted wrongly. `Session::resize` returning `false` is the whole difference
+                        // between those two, and nothing in the trace said so.
+                        if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
+                            let f = session.frame_size();
+                            let m = session.chrome_metrics();
+                            eprintln!(
+                                "resize: server {width}x{height}, changed {changed}, frame {}x{}, \
+                                 metrics {}x{}, cell {}x{}, sidebar {}",
+                                f.0,
+                                f.1,
+                                m.width,
+                                m.height,
+                                m.cell_w,
+                                m.cell_h,
+                                m.sidebar_w
+                            );
+                        }
+                        if changed {
                             session.repaint_all().map_err(WindowedError::Session)?;
                         }
                     }
@@ -380,9 +417,25 @@ pub fn run(
                         let Some(p) = x11key::pointer_event(&ev) else {
                             continue;
                         };
+                        // **The same measurement as a motion, and the one that matters most:** "the
+                        // buttons lag" is about a *click*, and a click's latency is this interval.
+                        let at = if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
                         session
                             .handle_pointer(&mut crate::store::NoSource, p)
                             .map_err(WindowedError::Session)?;
+                        if let Some(at) = at {
+                            eprintln!(
+                                "press: {:.1} ms, damage {:?}, {} px, {} glyphs",
+                                at.elapsed().as_secs_f64() * 1e3,
+                                session.last_damage(),
+                                session.paint_stats().pixels,
+                                session.paint_stats().glyphs,
+                            );
+                        }
                     }
                     // Motion, release and the wheel: routed, never focused on, never interpreted here.
                     //
@@ -395,9 +448,30 @@ pub fn run(
                         let Some(p) = x11key::pointer_event(&ev) else {
                             continue;
                         };
+                        // **The pointer's own latency, printed under the same flag as the events.**
+                        //
+                        // *"The buttons lag" is the report; a frame count cannot answer it, because a
+                        // slow frame and a fast frame paint the same number of times.** This is the
+                        // interval from "the server handed us the event" to "the frame went out on the
+                        // socket", which is the whole of what the user waits for — the session's
+                        // dispatch, the chrome tree, the raster, and the `PutImage`.
+                        let at = if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
                         session
                             .handle_pointer(&mut crate::store::NoSource, p)
                             .map_err(WindowedError::Session)?;
+                        if let Some(at) = at {
+                            eprintln!(
+                                "pointer: {:.1} ms, damage {:?}, {} px, {} glyphs",
+                                at.elapsed().as_secs_f64() * 1e3,
+                                session.last_damage(),
+                                session.paint_stats().pixels,
+                                session.paint_stats().glyphs,
+                            );
+                        }
                     }
                     // The title bar's close button, forwarded as `WM_DELETE_WINDOW`.
                     holonomy_x11::Event::ClientMessage { data1, .. }

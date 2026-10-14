@@ -600,6 +600,21 @@ pub struct Session<'a> {
     /// `runs_missing`, `runs_truncated` — because they say what is *on the page now* rather than what
     /// has been drawn over the session's life.
     last_paint: holonomy_display::paint::PaintStats,
+    /// The rectangle the last paint was given, kept after [`Self::damage`] has been cleared.
+    ///
+    /// **`Session::damage` is the *accumulated* damage and is empty the moment a paint consumes it**,
+    /// which is exactly when anybody wants to look at it. **This is the measurement of what the last
+    /// frame actually covered**, and it is the number that separates "the damage was scoped and the
+    /// frame is still expensive" from "the damage was the whole frame" — the two look identical in a
+    /// screenshot and in a frame count, and *"the buttons lag"* is a claim about only one of them.
+    ///
+    /// Measured on this host, part 39, at 1,600 x 1,000 with the popup changes scoped:
+    ///
+    /// ```text
+    /// press: 18.5 ms, damage 0,0,1600x1000, 3,201,150 px
+    /// press:  7.1 ms, damage 0,0,1600x1000, 1,170,123 px
+    /// ```
+    last_damage: DamageRect,
     /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
     ///
     /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
@@ -778,6 +793,15 @@ impl<'a> Session<'a> {
                 .with_line_pitch(u32::from(pitch)),
             None => metrics,
         };
+        // **The sidebar's reservation follows its flag, at construction as everywhere else.** Part 39:
+        // `Layout::new` centres the page in `width - sidebar_w`, so a caller that handed in the design
+        // metrics *and* turned the sidebar off would otherwise get a 208 px band of nothing down the
+        // left-hand side. One rule, applied here and in `set_sidebar`, and a gate asserts the two agree
+        // after every toggle.
+        let metrics = ChromeMetrics {
+            sidebar_w: holonomy_render::chrome::sidebar_reservation(ChromeState::default().sidebar_open),
+            ..metrics
+        };
         let chrome = Chrome::new(metrics);
         publish_atlas(painter.atlas(), painter.size_index());
         let frame = Frame::black(metrics.width, metrics.height);
@@ -874,6 +898,7 @@ impl<'a> Session<'a> {
             line_scratch: vec![0u8; LINE_SCRATCH_BYTES],
             page_used: 0,
             last_paint: holonomy_display::paint::PaintStats::default(),
+            last_damage: DamageRect::EMPTY,
             table_scratch: Vec::new(),
             caret_drawn_at: None,
             math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
@@ -1101,6 +1126,15 @@ impl<'a> Session<'a> {
         &self.last_paint
     }
 
+    /// The rectangle the last paint was given, as `DamageRect::EMPTY` when nothing has been painted.
+    ///
+    /// **The measurement behind "the buttons lag".** [`Self::damage`] is the accumulator and this is
+    /// the spend; a driver that prints both can say whether a slow click is slow because the damage is
+    /// a window or because the window is expensive, and those two need different fixes.
+    pub fn last_damage(&self) -> DamageRect {
+        self.last_damage
+    }
+
     /// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
     ///
     /// `Chrome::layout` is a public field on a public field, so this is a convenience rather than a necessity
@@ -1321,6 +1355,26 @@ impl<'a> Session<'a> {
         &self.frame
     }
 
+    /// The frame's size, as `(width, height)`.
+    ///
+    /// **A pair rather than the frame, because the driver that reports a resize is asking "did the
+    /// session's picture change size", not "give me four megabytes of pixels".** `windowed.rs` prints
+    /// it next to the server's own numbers under `HOLONOMY_WINDOW_TRACE`, which is the only place the
+    /// two can be compared.
+    pub fn frame_size(&self) -> (u32, u32) {
+        self.frame.size()
+    }
+
+    /// The chrome's metrics, for a driver that has to describe the layout it is presenting.
+    ///
+    /// **Read-only and by value, like [`chrome_layout`](Self::chrome_layout).** The window driver needs
+    /// the panel's width to decide whether a resize it has been told about is one the chrome has already
+    /// laid out for, and a `&ChromeMetrics` that outlived the session would be a borrow of a field the
+    /// resize replaces.
+    pub fn chrome_metrics(&self) -> holonomy_render::chrome::ChromeMetrics {
+        self.chrome.metrics
+    }
+
     /// The presentation target, for a caller that wants to describe it.
     pub fn scanout(&self) -> &dyn Scanout {
         self.scanout.as_ref()
@@ -1404,6 +1458,66 @@ impl<'a> Session<'a> {
         self.frame = Frame::black(w, h);
         self.damage = DamageRect::new(0, 0, w, h);
         Ok(true)
+    }
+
+    /// Name the document this session has open, and put it in the sidebar.
+    ///
+    /// # CORRECTION, part 39: the sidebar was drawn empty
+    ///
+    /// **`ChromeState::docs` starts empty and nothing ever filled it**, so the "Document tabs" rail was
+    /// 208 px of nothing down the left of the window with a header and no rows — which is what the
+    /// reference's sidebar is not, and which reads as a broken panel rather than as an empty one.
+    ///
+    /// **It is set here, from the one document the session actually has.** The tempting alternative is
+    /// to invent three more rows so the rail *looks* like the reference's: **that is a sidebar that
+    /// lies**, and a row that cannot be opened is worse than a row that is absent, because a person
+    /// clicks it. There is one document, so there is one row, and the rail says so.
+    ///
+    /// **The title and the row are set together**, for the same reason
+    /// [`set_sidebar`](Self::set_sidebar) sets a flag and a reservation: they are one fact — *what is
+    /// open* — and a title bar saying `untitled` above a tab saying `notes.wavefunction` is two answers
+    /// to one question.
+    pub fn set_document(&mut self, name: &str) {
+        if self.state.title == name && self.state.docs.len() == 1 {
+            return;
+        }
+        self.state.title = name.to_string();
+        self.state.docs = vec![name.to_string()];
+        self.state.active_doc = 0;
+        self.invalidate(self.chrome.full_damage());
+    }
+
+    /// Open or close the document-tabs sidebar, and re-lay the chrome for it.
+    ///
+    /// # Why this is one function and not a field write
+    ///
+    /// **Because "the sidebar is drawn" and "the sidebar's width is reserved" are one fact**, and
+    /// before part 39 they were two: `ChromeState::sidebar_open` said whether to draw it and
+    /// `ChromeMetrics::sidebar_w` said how much of the canvas to leave for it. A closed sidebar still
+    /// reserved 208 px, so the page sat 208 px to the right of a window with nothing down its left
+    /// edge — and the two could not be put back in step by a caller, because the reservation was
+    /// buried in the metrics a `Layout` was built from.
+    ///
+    /// # Why the layout is rebuilt rather than painted around
+    ///
+    /// **Because the page's position is a function of the reservation** — `Layout::new` centres the page
+    /// in `width - sidebar_w` — so the chrome has to be recomputed. It is one `Chrome::new` on a
+    /// toggle, and it is the whole reason the reference's page slides right when the sidebar opens
+    /// rather than being covered by it.
+    ///
+    /// **A no-op when nothing changed**, so a caller can pass the desired state rather than toggle it.
+    pub fn set_sidebar(&mut self, open: bool) {
+        let reservation = holonomy_render::chrome::sidebar_reservation(open);
+        if self.state.sidebar_open == open && self.chrome.metrics.sidebar_w == reservation {
+            return;
+        }
+        self.state.sidebar_open = open;
+        let metrics = ChromeMetrics {
+            sidebar_w: reservation,
+            ..self.chrome.metrics
+        };
+        self.chrome = Chrome::new(metrics);
+        self.invalidate(self.chrome.full_damage());
     }
 
     /// Paint everything and present. The first frame has no damage yet, so it is forced.
@@ -1812,7 +1926,14 @@ impl<'a> Session<'a> {
             } => {
                 self.stats.pointer_presses += 1;
                 let hit = self.hover_at(x, y);
+                let was = self.state.pressed;
                 self.state.pressed = (hit != widgets::Hit::None).then_some(hit);
+                // **The pressed fill is drawn on the widget, so the widget is what is damaged — the
+                // one that was held and the one that now is.** Nothing else in the chrome changes
+                // on a press, and this arm used to rely on `press`'s full repaint to catch it, which
+                // is the same full repaint that made every click cost a whole window of socket.
+                self.invalidate_hit(was);
+                self.invalidate_hit(self.state.pressed);
                 // **Arm the drag before `press` runs**, because `press` is what plants the anchor and
                 // the flag has to be set by the time the pointer starts moving. Only a press that
                 // landed *on the page* arms it: a press on a toolbar button that the user then drags
@@ -1831,13 +1952,18 @@ impl<'a> Session<'a> {
                 // release wherever it happened, and the command was already applied. **A
                 // release-driven model would need a drag threshold**, and a threshold is a guess about
                 // how far is far enough; deciding on the press needs no guess.
+                //
+                // **The widget that was held is damaged, so it stops looking held.** It was
+                // invalidated on the way down and this is the way back up; the full repaint that used
+                // to sit here painted a window to erase one 26 px square.
+                let was = self.state.pressed;
                 self.state.pressed = None;
+                self.invalidate_hit(was);
                 // **The drag ends here and the selection is kept.** Part 28. No threshold, for the
                 // reason the press decision has none: a drag that never moved planted an anchor equal
                 // to the caret, which the model already reports as no selection, so "did the user
                 // select anything" is answered by the selection rather than by a distance.
                 self.page_drag = false;
-                self.damage = self.chrome.full_damage();
             }
             // **Right and middle buttons are not bound, and are counted as nothing.**
             //
@@ -1915,6 +2041,51 @@ impl<'a> Session<'a> {
         widgets::hit(l, &self.state, x, y)
     }
 
+    /// Damage whatever rectangle `hit` is drawn at, if it is drawn at all.
+    ///
+    /// **One call site per event kind rather than a match at each one**, because
+    /// [`widgets::hit_rect`] already answers "where is this drawn" for every variant — including the
+    /// ones that are not drawn, which answer `None` and invalidate nothing. That is the whole reason
+    /// the inverse lookup exists: a pointer event has to be able to say what it changed without the
+    /// session keeping a second copy of the geometry.
+    #[inline]
+    fn invalidate_hit(&mut self, hit: Option<widgets::Hit>) {
+        if let Some(r) = hit.and_then(|h| widgets::hit_rect(&self.chrome.layout, &self.state, h)) {
+            self.invalidate(r);
+        }
+    }
+
+    /// **The rectangles a change to `state.open` can move pixels in.**
+    ///
+    /// # Why this is not `self.chrome.full_damage()`
+    ///
+    /// **Because a full repaint of a 1,600 x 1,000 window is 6.4 MB over a socket for a menu that is
+    /// 300 x 200.** Every press on the menu bar did exactly that — *"the buttons lag"* — and the fix is
+    /// not a faster full repaint, it is **not repainting what did not change**. A popup appears, moves
+    /// and disappears as a unit, so the damage is: the panel that was on screen, the panel that is, and
+    /// the opener's own box, which lights up while its menu is down and goes out again when it closes.
+    ///
+    /// # Why the *old* popup is included as well as the new one
+    ///
+    /// **Because the rect is computed from the state that is current now**, and a zoom row's tick or a
+    /// style row's label can make the panel a pixel narrower than it was. Invaldating only what is there
+    /// now leaves a one-pixel band of the old panel along its edge, which is exactly the kind of thing
+    /// that reads as "the menu left a smudge".
+    ///
+    /// **Both rects for `before` and for `self.state.open`**, so a caller passes what the popup was and
+    /// does not have to remember to invalidate the new one.
+    fn invalidate_popup_change(&mut self, before: Option<widgets::Open>) {
+        let l = self.chrome.layout;
+        let mut rect = DamageRect::EMPTY;
+        for open in [before, self.state.open].into_iter().flatten() {
+            if let Some(pop) = widgets::popup(&l, &self.state, Some(open)) {
+                rect = rect.union(&pop.rect);
+            }
+            rect = rect.union(&opener_rect(&l, open));
+        }
+        self.invalidate(rect);
+    }
+
     /// Act on a press.
     ///
     /// **The menu first, and it is the only branch that closes a menu.** Everything else either runs a
@@ -1944,8 +2115,10 @@ impl<'a> Session<'a> {
                 // action that changes what the popup would contain -- choosing a zoom level leaves
                 // the zoom control as the thing the user is holding -- would otherwise fight with the
                 // rows still on screen. Close, damage, act: three lines, in that order.
+                //
+                // **And the damage is the popup's, not the panel's.** See `invalidate_popup_change`.
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                self.damage = self.chrome.full_damage();
                 if let Some(action) = action {
                     self.apply_action(action)?;
                 } else {
@@ -1956,9 +2129,10 @@ impl<'a> Session<'a> {
                 // **A toggle, not "open".** Clicking the heading of the menu that is already down
                 // closes it, which is the one behaviour a menu has that is not obvious from having
                 // looked at a screenshot of it.
+                let before = self.state.open;
                 let open = widgets::Open::Menu(index);
                 self.state.open = (self.state.open != Some(open)).then_some(open);
-                self.damage = self.chrome.full_damage();
+                self.invalidate_popup_change(before);
             }
             Hit::Tool(tool) => {
                 // **An armed toggle, before the dropdown check and before `tool_command`.** Part 25.
@@ -1978,24 +2152,30 @@ impl<'a> Session<'a> {
                         holonomy_render::chrome::StyleFlagsSlot::Italic => (bold, !italic),
                     };
                     self.set_armed_style(bold, italic);
-                    self.damage = self.chrome.full_damage();
+                    // **The button's own box.** An armed toggle is drawn as a fill on the button
+                    // (`PILL_ACTIVE`), so the button is the only thing whose pixels changed.
+                    if let Some(r) =
+                        widgets::hit_rect(&self.chrome.layout, &self.state, widgets::Hit::Tool(tool))
+                    {
+                        self.invalidate(r);
+                    }
                     self.stats.pointer_chrome += 1;
                     return Ok(());
                 }
                 // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
                 // the same reason: the user needs a way to close it with the gesture that opened it.**
                 if tool.has_dropdown() {
+                    let before = self.state.open;
                     let open = widgets::Open::Tool(tool);
                     self.state.open = (self.state.open != Some(open)).then_some(open);
-                    self.damage = self.chrome.full_damage();
+                    self.invalidate_popup_change(before);
                     return Ok(());
                 }
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                self.damage = self.chrome.full_damage();
                 match tool {
                     Tool::Collapse => {
-                        self.state.sidebar_open = !self.state.sidebar_open;
-                        self.damage = self.chrome.full_damage();
+                        self.set_sidebar(!self.state.sidebar_open);
                     }
                     _ => {
                         if let Some(cmd) = tool_command(tool) {
@@ -2007,8 +2187,8 @@ impl<'a> Session<'a> {
                 }
             }
             Hit::Title(btn) => {
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                self.damage = self.chrome.full_damage();
                 if let Some(cmd) = title_command(btn) {
                     self.run_clicked(cmd)?;
                 } else {
@@ -2022,24 +2202,37 @@ impl<'a> Session<'a> {
                 // the active index moves, and `Session::adopt_document` is still the only way a
                 // document gets in. **A second click on the already-active row is not an error** and
                 // does nothing.
+                //
+                // **Two rows are damaged — the one that was active and the one that now is.** The
+                // fill is the only thing that moves, and a row that loses its fill and is not
+                // repainted is a row that stays selected.
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
+                let l = self.chrome.layout;
+                let mut rect = DamageRect::EMPTY;
+                for i in [self.state.active_doc, index] {
+                    if let Some(r) = l.sidebar_doc(i) {
+                        rect = rect.union(&r);
+                    }
+                }
                 self.state.active_doc = index;
-                self.damage = self.chrome.full_damage();
+                self.invalidate(rect);
             }
             Hit::NewDoc => {
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
                 // **Counted, not faked.** `state.docs` is a list of titles and there is nowhere to put
                 // a new one; inventing an "Untitled 2" row with no document behind it would make the
                 // sidebar lie about what is open.
                 self.stats.pointer_inert += 1;
-                self.damage = self.chrome.full_damage();
             }
             Hit::SidebarBack => {
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                self.state.sidebar_open = false;
-                self.damage = self.chrome.full_damage();
+                self.set_sidebar(false);
             }
             Hit::Page => {
+                self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
                 // **`self.mods.shift()`, which this method has never read.** Part 28's finding: the
                 // session already held a `ModifierState` and updated it on every key event, and
@@ -2052,9 +2245,17 @@ impl<'a> Session<'a> {
                 // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
                 // already turned "the pointer is not over the popup" into `Hit::None`, so reaching
                 // here with a menu open *is* the dismissal.
+                //
+                // **CORRECTION, part 39: this was `self.damage = self.chrome.full_damage()`.** Every
+                // other way a popup can close damages the popup and its opener, and this one damaged a
+                // **whole window** — measured at 20.8 ms and 3,201,150 pixels for a click that was only
+                // ever going to erase a 200 x 300 panel. **"Click away to close the menu" is the most
+                // common thing a person does with a menu**, so this was the single largest contributor
+                // to the report that the buttons lag.
                 if self.state.open.is_some() {
+                    let before = self.state.open;
                     self.state.open = None;
-                    self.damage = self.chrome.full_damage();
+                    self.invalidate_popup_change(before);
                 }
             }
             Hit::Dismiss => {}
@@ -2260,8 +2461,36 @@ impl<'a> Session<'a> {
     /// be forty rows tall and the state has no field for that — the highlight is computed per line by
     /// the emitter, from two byte offsets. **Damage would need the same arithmetic in reverse** (which
     /// rows the *previous* selection covered), and doing it approximately is worse than doing it
-    /// simply: the page is 640 px by ~660, it is repainted on every scroll anyway, and one extra
-    /// full-page rect costs a rectangle of work rather than a scan.
+    /// simply: the page is repainted on every scroll anyway, and one extra page rect costs a rectangle
+    /// of work rather than a scan.
+    ///
+    /// # CORRECTION, part 39: the page, and not the panel
+    ///
+    /// **This used to end `self.damage = self.chrome.full_damage()`** — and the sentence above, which
+    /// was already in this function, says *page*. **So the function's own reasoning and its code
+    /// disagreed, and the code was the one that ran.**
+    ///
+    /// **Measured, in the live window at 20 ppem:** one `Shift+Left` damaged **1,600,000 px — 100 % of
+    /// the frame**. Shift-arrow is a *gesture*: a person selecting a paragraph holds shift down and
+    /// presses the key sixty times, and a pointer drag calls this once per motion event. **A full
+    /// repaint per event is the "the buttons lag" report, reached by a different route than the hover
+    /// that was fixed alongside it.**
+    ///
+    /// **What is damaged now, and why each part is there:**
+    ///
+    /// | rect | why |
+    /// |---|---|
+    /// | the **page** | the old highlight and the new one are both in it, and it is where every row of text lives |
+    /// | the **scrollbar** | `scroll_line_into_view` above may have scrolled, and the thumb is outside the page |
+    /// | the **status bar** | it prints `Ln N, Col M`, and `caret_line` moved — a selection that does not change the line still changes the column |
+    ///
+    /// **The union is the bounding box of the three, which for a 1,280x800 panel is 1,092x680 — 73 % of
+    /// the frame rather than 100 %.** That is not a small number, and it is not meant to be: **the page
+    /// genuinely repaints.** The chrome above it — title, menu bar, toolbar, ruler, sidebar, status bar's
+    /// neighbours — is 27 % of the window that did not change and is no longer touched.
+    ///
+    /// **And the page's scroll is covered by the page rect**, so a shift-arrow that scrolls the view
+    /// does not need a second case: the text that moved is the text in the page.
     fn after_selection_moves(&mut self) {
         self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
@@ -2271,7 +2500,11 @@ impl<'a> Session<'a> {
         let _ = self.refresh_caret_pen(None);
         // **Scroll too, because a shift-arrow to a line off the page needs it as much as a plain one.**
         self.scroll_line_into_view(self.state.caret_line);
-        self.damage = self.chrome.full_damage();
+        let l = self.chrome.layout;
+        self.damage = l
+            .page
+            .union(&l.scrollbar)
+            .union(&l.status);
     }
 
     /// Recompute [`ChromeState::caret_column`] as a count of UTF-8 scalars, and return it if complete.
@@ -2675,6 +2908,7 @@ impl<'a> Session<'a> {
         action: holonomy_render::menus::Action,
     ) -> Result<(), SessionError> {
         use holonomy_render::menus::Action;
+        use widgets::Tool;
         match action {
             Action::Export => {
                 // **A request, like the save, and for the same structural reason**: the sinks are in
@@ -2695,25 +2929,36 @@ impl<'a> Session<'a> {
             Action::ToggleBold => {
                 // **A selection means "style this range", and that takes precedence over arming.**
                 // Part 28 — the thing part 24's own note said selection would unlock.
+                //
+                // **CORRECTION, part 39: the damage follows which of the two happened.** Styling a
+                // selection repaints the page; arming the next character repaints **one toolbar
+                // button**. This was a full window either way, and "press B" is the most-pressed
+                // button in a word processor.
+                let tool = Tool::Bold;
                 if !self.style_selection(
                     !self.armed_style().0,
                     self.armed_style().1,
                     self.armed_colour(),
                 )? {
                     self.set_armed_style(!self.armed_style().0, self.armed_style().1);
+                    self.invalidate_hit(Some(widgets::Hit::Tool(tool)));
+                } else {
+                    self.damage = self.chrome.full_damage();
                 }
-                self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
             Action::ToggleItalic => {
+                let tool = Tool::Italic;
                 if !self.style_selection(
                     self.armed_style().0,
                     !self.armed_style().1,
                     self.armed_colour(),
                 )? {
                     self.set_armed_style(self.armed_style().0, !self.armed_style().1);
+                    self.invalidate_hit(Some(widgets::Hit::Tool(tool)));
+                } else {
+                    self.damage = self.chrome.full_damage();
                 }
-                self.damage = self.chrome.full_damage();
                 self.stats.pointer_chrome += 1;
             }
             // **Part 29: the fourth dropdown, and the first whose value reaches the document.**
@@ -2731,14 +2976,23 @@ impl<'a> Session<'a> {
                 // the next character, which is what the control means with nothing selected and is
                 // part 25's rule for the two style toggles.
                 self.pending_colour = Some(rgb);
-                self.style_selection(self.armed_style().0, self.armed_style().1, rgb)?;
-                self.damage = self.chrome.full_damage();
+                // **Part 39: the page repaints only when there was a page to repaint.** Arming a colour
+                // with nothing selected changes the colour button and nothing else; styling a
+                // selection changes every line the selection covers.
+                let styled = self.style_selection(self.armed_style().0, self.armed_style().1, rgb)?;
+                if styled {
+                    self.damage = self.chrome.full_damage();
+                } else {
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::TextColour)));
+                }
                 self.stats.pointer_chrome += 1;
             }
             Action::SetStyle(i) => {
                 self.state.style_index =
                     usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
-                self.damage = self.chrome.full_damage();
+                // **The label on one button.** Part 39: this was a whole-window repaint to redraw the
+                // word `Normal text` -- 3,201,150 pixels for 120 of text.
+                self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
                 self.stats.pointer_chrome += 1;
             }
             Action::SetFont(i) => {
@@ -2748,7 +3002,7 @@ impl<'a> Session<'a> {
                 // body face, so choosing another name changes the toolbar's label and not one pixel of
                 // the page. Saying so here rather than in the renderer is deliberate: the renderer
                 // draws the choice, and the session admits what it costs.
-                self.damage = self.chrome.full_damage();
+                self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Font)));
                 self.stats.pointer_chrome += 1;
             }
             other => {
@@ -4159,6 +4413,9 @@ impl<'a> Session<'a> {
         // they have to be painted in the page's coordinate space and clipped by the same damage the
         // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
         let mut damage = damage;
+        // **A copy of what the session asked for, before any emitter widens it.** See
+        // `last_damage`'s own comment for why the widened one is not the number to keep.
+        let requested = damage;
         // **Each emitter is passed the source by reborrow**, so all four see the same store and none of
         // them can hold it across the next one's call. `&mut *source` rather than `source`: the emitters
         // take `&mut dyn LeafSource`, and moving the `&mut` would spend it.
@@ -4188,6 +4445,19 @@ impl<'a> Session<'a> {
             )?
         };
         self.last_paint = stats;
+        // **Kept before the clear below, and from the copy rather than from `damage`.**
+        //
+        // **The emitters take `&mut damage` and widen it** -- `emit_body_text` unions the rectangle it
+        // emitted into the damage so that a caller who asks "what did the page contribute" has it --
+        // **and recording the widened value was a measurement that lied.** Measured, part 39: opening
+        // the File menu asked for `24,36 312x342` and `last_damage` reported `24,36 1468x342`, which
+        // reads as "the damage is four and a half times wider than it is" and would have sent the next
+        // person looking for a popup that is too wide.
+        //
+        // `requested` is what the *session* asked to be repainted, which is the number that says whether
+        // the damage is scoped. `PaintStats::pixels` is a separate question and is what it says.
+        self.last_damage = requested
+            .unwrap_or(DamageRect::new(0, 0, self.frame.width(), self.frame.height()));
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
         // The damage goes to the backend as well as to the rasteriser. For the PPM backend that changes
@@ -4800,8 +5070,13 @@ impl<'a> Session<'a> {
             let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
 
             // --- borders, as procedural box-drawing glyph runs on the cell grid.
+            //
+            // **`Node::Repeat` and not `Node::Text`, and this is the table half of the rule bug that
+            // was on the ruler.** A border run is "one glyph, `len` times"; a `TextRun` is "the next
+            // `len` codepoints". A three-cell top edge was `┌─┐┌─┐` on screen and `┌┬┐┌┬┐` in the wire
+            // format, which is a row of unrelated corners rather than a line.
             for run in grid.borders() {
-                let node = Node::Text(TextRun::new(
+                let node = Node::Repeat(holonomy_render::RepeatRun::new(
                     run.x as i32,
                     run.y as i32,
                     run.codepoint,
@@ -5281,15 +5556,7 @@ impl<'a> Session<'a> {
                     // The source is drawn at the text column's left edge, which is where the formula
                     // *starts* -- not where the caret is. A formula that grew to 200 bytes would
                     // otherwise reflow the rest of the line every keystroke.
-                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
-                        l.text.x as i32,
-                        top as i32,
-                        shown.chars().next().map_or(0, |c| c as u32),
-                        shown.chars().count() as u16,
-                        holonomy_render::Style::MONOSPACE,
-                        0,
-                        ink,
-                    ))));
+                    push_math_source(&mut tree.before, m.cell_w, l.text.x as i32, top as i32, &shown, ink);
                 }
                 raw_count += 1;
                 let w = (shown.chars().count() as u32) * m.cell_w;
@@ -5314,15 +5581,7 @@ impl<'a> Session<'a> {
                     .map(|&b| b as char)
                     .collect();
                 if !shown.is_empty() {
-                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
-                        l.text.x as i32,
-                        top as i32,
-                        shown.chars().next().map_or(0, |c| c as u32),
-                        shown.chars().count() as u16,
-                        holonomy_render::Style::MONOSPACE,
-                        0,
-                        ink,
-                    ))));
+                    push_math_source(&mut tree.before, m.cell_w, l.text.x as i32, top as i32, &shown, ink);
                 }
                 raw_count += 1;
                 let w = (shown.chars().count() as u32) * m.cell_w;
@@ -6274,11 +6533,55 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
 /// **`ChromeState::default()` and not the session's own state, deliberately.** The opener's rect does
 /// not depend on any state — a menu heading is where the menu bar puts it — and taking `&self` here
 /// would borrow the session for a value that is a constant function of the layout.
+/// Emit `text` as chrome text at `(x, y)`, one `TextRun` per ascending piece.
+///
+/// # Why this exists, and what it replaced
+///
+/// **A `TextRun` carries a first codepoint and a length, which means *consecutive* codepoints** --
+/// and neither raw-formula path said so. Both of them wrote
+///
+/// ```text
+/// TextRun::new(x, y, shown.chars().next(), shown.chars().count(), ..)
+/// ```
+///
+/// **which draws `\frac{1}{2}` as `\`, then `a`, `c`, `r`, `f`, `{`, …** -- one codepoint per glyph,
+/// each the successor of the one before it. A formula being edited is the state a person looks at
+/// most closely, and it was rendered as a run of unrelated letters.
+///
+/// `holonomy_render::chrome::ascending_runs` is the same splitter the chrome's own labels use, and
+/// reusing it is the point: **there is one definition of "how a string becomes runs" in this
+/// project**, and a second spelling of it in the session is how the two drifted in the first place.
+fn push_math_source(
+    into: &mut Vec<SurfaceTree>,
+    cell_w: u32,
+    x: i32,
+    y: i32,
+    text: &str,
+    colour: u32,
+) {
+    let cell = cell_w as i32;
+    for run in holonomy_render::chrome::ascending_runs(text) {
+        if run.len == 0 {
+            continue;
+        }
+        into.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+            x + (run.char_offset as i32) * cell,
+            y,
+            run.first,
+            run.len,
+            holonomy_render::Style::MONOSPACE,
+            0,
+            colour,
+        ))));
+    }
+}
+
 fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> DamageRect {
     let h = match open {
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
     };
-    widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h)
-        .unwrap_or(DamageRect::new(0, 0, 0, 0))
+    let r = widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h)
+        .unwrap_or(DamageRect::new(0, 0, 0, 0));
+    r
 }

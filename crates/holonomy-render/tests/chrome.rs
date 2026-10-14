@@ -80,6 +80,12 @@ fn the_page_is_centred_and_the_gutters_sum_to_the_panel() {
     // The property integer arithmetic buys. With floats, `(1280 - 736) / 2.0` and an
     // independently-rounded left and right give a page that is off centre by a pixel on odd widths,
     // and which jumps about as the window resizes.
+    //
+    // **CORRECTION, part 39: "centred" now means centred in the *desk*, not in the panel.** The sidebar
+    // is inside the canvas and is drawn over the page's left edge, so the page is centred in
+    // `width - sidebar_w` -- the correction is in `Layout::new`. This gate compared the two gutters as
+    // they stand, which is only true when the sidebar is closed; with it open the left one carries the
+    // sidebar as well, and at 640 px the two were 296 and 40.
     for width in [640u32, 641, 800, 1023, 1024, 1280, 1281, 1366, 1920] {
         let m = ChromeMetrics {
             width,
@@ -91,46 +97,65 @@ fn the_page_is_centred_and_the_gutters_sum_to_the_panel() {
             width,
             "gutters + page must fill the panel at width {width}"
         );
+        let sidebar = m.sidebar_w.min(width / 2);
         assert!(
-            l.gutter_left.abs_diff(l.gutter_right) <= 1,
-            "width {width}: gutters {} and {} differ by more than the remainder",
+            l.gutter_left - sidebar <= l.gutter_right + 1,
+            "width {width}: the left gutter {} is {} of it sidebar and the right is {}, so the desk is \
+             not centred",
             l.gutter_left,
+            sidebar,
             l.gutter_right
         );
-        // And the remainder goes right, always, so the page does not jitter.
-        assert!(l.gutter_left <= l.gutter_right, "width {width}");
+        // And the remainder goes right, always, so the page does not jitter. **In the desk**: with the
+        // sidebar open the desk's left half is a pixel wider, because `(desk - page) / 2` rounds down.
+        assert!(
+            l.gutter_left - sidebar <= l.gutter_right,
+            "width {width}: desk halves {} and {}",
+            l.gutter_left - sidebar,
+            l.gutter_right
+        );
     }
 }
 
-/// **The measure is `columns` at the design width and grows above it, up to `max_columns`.**
+/// **The measure is `columns`, and the ceiling is the same number: a page that does not grow.**
 ///
-/// **CORRECTION, part 27 — twice, and the second correction is the interesting one.** This test was
-/// first written asserting `text.width == 80 * 8` — the measure was a constant, so a bigger window gave
-/// more desk and no more text, and "make it bigger" did nothing to the thing the window is for. It was
-/// then rewritten to assert the 100-column ceiling at [`DESKTOP`], because the room-minus-chrome
-/// arithmetic gives 112 columns there.
+/// # CORRECTION, part 39: this gate said eighty, and part 27's growth is reversed
 ///
-/// **Both were wrong, because both broke something real.** The first made the window meaningless. **The
-/// second silently invalidated every number §2.9.3 measured against a 640 px page column** — the 8.0 MiB
-/// decoded-image budget, the resample thresholds, the "≤ 8.0 MiB at every point of a page-1→50 scroll"
-/// row in §6 — all of which would have become wrong by 40 %.
+/// **The history is worth keeping because it is three corrections deep.** Part 27 first made the measure
+/// a constant (`80 * 8`) and the complaint was *"make the window bigger and nothing happens"*. It then
+/// made the measure grow with the panel, up to a 100-column ceiling, and the complaint became **"the
+/// page fills the whole window"** — which is the same observation wearing a different hat: a resize that
+/// only changes how many characters fit on a line is a resize the eye cannot see.
 ///
-/// **The design width is the anchor: 1,280 px is the width `columns: 80` was chosen for**, and only a
-/// panel wider than that earns more text. `ChromeMetrics::DESKTOP` means what it has always meant, and
-/// the thing the user asked for — a bigger window — is the thing that now helps.
+/// **What the reference does is the third thing, and it is what this gate now asserts.** Measured off
+/// `Plan/Screenshot From 2026-10-01 00-17-42.png`, 1,778 px wide: **a page 813 px wide, centred, with
+/// 310 px of desk on each side — at every screenshot in the folder.** The measure does not move with the
+/// window; the *page* moves, and the gutters take the difference.
+///
+/// **So the resize is still visible, and it is visible in the thing that moves.** Part 39 also fixed the
+/// reason it did not move at all: `Desktop::resize` was an inherent method shadowing the trait's, so
+/// `Session::resize` never resized anything. That fix is what makes this rule affordable; before it,
+/// freezing the measure would have frozen the layout.
+///
+/// **72 and not 80**, because a monospaced cell is wider than the reference's proportional character:
+/// 72 cells at 12 px is 864 px, about the same *count* of characters as the reference's 777 px line.
+/// At the 8 px design cell it is 576 px, so §2.9.3's 640 px page column moves by 10 % — see
+/// `the_design_page_column_is_576_px_and_says_so` below.
 #[test]
-fn the_measure_is_eighty_columns_at_the_design_width_and_grows_above_it() {
+fn the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window() {
     let m = ChromeMetrics::DESKTOP;
     let l = Layout::new(&m);
-    assert_eq!(m.columns, 80);
+    assert_eq!(m.columns, 72, "the design measure, in cells");
     assert_eq!(
-        m.max_columns, 100,
-        "and the typographic ceiling is one field away"
+        m.max_columns, m.columns,
+        "**and the ceiling is the same number**, which is what 'a page that does not grow' means. \
+         Raising this one field brings part 27's growth back."
     );
     assert_eq!(
         l.text.width,
         m.columns * m.cell_w,
-        "**the design width still shows the measured 640 px of text**, so §2.9.3's numbers hold"
+        "the design width shows exactly the design measure: {} px of text",
+        l.text.width
     );
     assert_eq!(
         l.page.width,
@@ -140,61 +165,87 @@ fn the_measure_is_eighty_columns_at_the_design_width_and_grows_above_it() {
 
     // **CORRECTION, part 36: below the design width the measure holds only while the page fits.**
     //
-    // **This loop used to assert the opposite at three widths, including `MIN_WIDTH`** — and it was
-    // asserting a *clip*. At 16 ppem, 80 columns is 896 px of page, and `MIN_WIDTH` is 768: **the
-    // minimum window this file defines has never been able to show the design measure.** Part 27's
-    // rule was written as "nothing changes below the design width", and what it preserved was text
-    // running off the edge of the panel.
+    // **This loop used to assert the opposite at three widths, including `MIN_WIDTH`** -- and it was
+    // asserting a *clip*. **The floor is conditional**, so a panel too narrow for the design page gets a
+    // shorter measure rather than text running off its right edge.
     //
-    // **Part 32 made it much worse and that is what it took to notice:** 80 columns became 1,216 px, so
-    // every panel under about 1,200 px clipped, which is most of them. The reported symptom was *"I
-    // cannot properly use the app"*.
+    // **Part 32 made that much worse and that is what it took to notice:** the measure grew with the
+    // type, so every panel under about 1,200 px clipped, which is most of them. The reported symptom
+    // was *"I cannot properly use the app"*.
     //
     // **So the floor is now conditional, and this loop asserts the new rule:** 1,280 px has room for
-    // the 80-column page and still shows it — **the design width keeps its meaning** — while a narrower
+    // the design page and still shows it -- **the design width keeps its meaning** -- while a narrower
     // panel gets a shorter line instead of a cut one.
     assert_eq!(
         Layout::new(&m.clamp_to(1280, 800)).text.width,
         m.columns * m.cell_w,
-        "1,280 px still shows the 80-column measure, because the design page fits there"
+        "1,280 px still shows the design measure, because the design page fits there"
     );
     //
     // **And the property that replaces the old loop is the one that actually matters, and it is a
     // sweep rather than three widths: the page never overflows the panel, at any width.** It is
     // asserted over a range because a single width is a coincidence and a range is the rule, and it
     // is asserted against `page` rather than against `text` because the page is what is clipped.
-    //
-    // **My first version of this asserted that 1,024 px cannot show an 896 px page. It can** — 896
-    // plus a gutter each side is under 1,024 — and the gate was wrong about arithmetic it could have
-    // run. **The widths that genuinely cannot are the small ones**, and `MIN_WIDTH` is one of them: a
-    // 768 px panel has never held an 896 px page, before or after part 32.
     for w in (ChromeMetrics::MIN_WIDTH..=2560).step_by(8) {
         let n = Layout::new(&m.clamp_to(w, 800));
         assert!(
             n.page.x + n.page.width <= w,
             "**a {w} px panel shows a page running off its right edge**: {}..={}. The measure is \
-             clamped to the room, so this cannot happen -- and before part 36 it did, at every width \
-             below about 1,200 px once the type was 24 ppem",
+             clamped to the room, so this cannot happen",
             n.page.x,
             n.page.x + n.page.width
         );
     }
 
-    // **Above it, the measure grows and then stops.**
-    let wide = Layout::new(&m.clamp_to(1600, 1000));
-    assert_eq!(
-        wide.text.width,
-        m.max_columns * m.cell_w,
-        "1,600 px reaches the ceiling: {} px of text",
-        wide.text.width
-    );
-    assert_eq!(
-        Layout::new(&m.clamp_to(2560, 1440)).text.width,
-        wide.text.width,
-        "and 2,560 px shows the same measure -- the ceiling, not the room"
-    );
+    // **Above the design width the measure is the same number at every width -- the part 39 claim.**
+    //
+    // **This loop is the reversal of part 27 and it is the assertion that makes the reversal a
+    // decision rather than an accident.** Part 27 grew the measure to make a wider window do
+    // something; the complaint it fixed was that a resize was invisible, and the complaint that
+    // replaced it was that the page filled the window. **The reference does neither**: its page is
+    // 813 px in a 1,778 px window at every screenshot, and what a resize moves is the page and the
+    // desk around it.
+    for w in [1600u32, 1920, 2560, 3072] {
+        let n = Layout::new(&m.clamp_to(w, 1000));
+        assert_eq!(
+            n.text.width,
+            m.columns * m.cell_w,
+            "a {w} px panel shows the same measure, and the extra width is desk: gutters {} and {}",
+            n.gutter_left,
+            n.gutter_right
+        );
+        assert!(
+            n.gutter_left >= m.page_pad,
+            "and the desk is at least a page's padding wide, so the page reads as a page on a desk"
+        );
+    }
 }
 
+/// **The design page column is 576 px, and the figures derived from 640 px are 10 % high.**
+///
+/// **This is the number part 27 identified as load-bearing and part 39 has moved.** §2.9.3 measured the
+/// decoded-image budget, the resample thresholds and the page-1→50 scroll row against a **640 px page
+/// column**; `columns` going from 80 to 72 at the 8 px design cell makes it **576**, so every figure
+/// derived from 640 is 10 % high rather than 40 % wrong.
+///
+/// **It is asserted here rather than edited into six places in §2.9.3** because the derivation is the
+/// thing that has to stay true: a document that quotes 576 in six places quotes it wrongly the first
+/// time somebody changes `columns` again. **The gate says where the number comes from.**
+#[test]
+fn the_design_page_column_is_576_px_and_says_so() {
+    let m = ChromeMetrics::DESKTOP;
+    let column = m.columns * m.cell_w;
+    assert_eq!(
+        column, 576,
+        "72 columns at the 8 px design cell. §2.9.3's image budget was measured at 640 px, so every \
+         figure derived from it is 10 % high; the derivation is here and this is the assertion."
+    );
+    assert_eq!(
+        m.page_w(),
+        column + m.page_pad * 2,
+        "and the page is that plus its padding on both sides"
+    );
+}
 #[test]
 fn the_text_column_sits_inside_the_page_with_its_padding() {
     let m = ChromeMetrics::DESKTOP;
@@ -255,8 +306,19 @@ fn a_page_wider_than_the_panel_is_clipped_not_wrapped() {
         ..ChromeMetrics::DESKTOP
     };
     let l = Layout::new(&m);
-    assert_eq!(l.gutter_left, 0);
-    assert_eq!(l.gutter_right, 0);
+    // **CORRECTION, part 39: the left gutter is the sidebar, not zero.**
+    //
+    // The page is centred in `width - sidebar_w`, so in a panel narrower than the page **the sidebar's
+    // reservation is still honoured** and the page starts after it. That was the whole point of the
+    // centring correction: a page that started *under* the sidebar would put the ruler's zero under a
+    // panel that has no business being there. **A 100 px panel with a 50 px sidebar has 50 px of desk,
+    // not none** -- `sidebar_w` is half the panel here, which is the same clamp the toolbar's is.
+    assert_eq!(
+        l.gutter_left,
+        m.sidebar_w.min(100 / 2),
+        "the sidebar's reservation is kept even where the page does not fit beside it"
+    );
+    assert_eq!(l.gutter_right, 0, "and the other side has nothing left");
     assert!(l.page.width <= 100, "the page is clipped to the panel");
 }
 
@@ -383,6 +445,16 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     v.extend(chrome::MENUS.iter().map(|m| (*m).to_string()));
     v.push("Share".to_string());
     v.push("Document tabs".to_string());
+    // **The ruler's numbers, part 39.** The ruler draws `1 .. n` across the measure, one label every ten
+    // columns, and they are text like any other -- **so they belong in the permission list**, and the
+    // fact that they did not is how I know this gate is worth keeping: it named the ruler numbers as
+    // "not an ascending run of any label the chrome draws" the first time they were drawn.
+    //
+    // **`1 ..= m.columns / 10` and not a closed form**, because the count is what the painter's loop is
+    // driven by; a list of the wrong length is the same kind of lie as a label that is never drawn.
+    for n in 1..=(ChromeMetrics::DESKTOP.columns / 10) {
+        v.push(n.to_string());
+    }
     v.push(state.style_name().to_string());
     v.push(state.font_label());
     // The popup's items, because an open menu draws them and the gate's state opens none -- so this is
@@ -555,7 +627,11 @@ fn the_caret_sits_on_its_column_and_row() {
     let c = Chrome::new(m);
     for (line, column) in [
         (0u32, 0u32),
-        (0, 79),
+        // **The last column, from `m.columns`, and not the literal 79.** Part 39 moved the measure from
+        // 80 columns to 72, so 79 is now a column past the end of the line -- and a caret past the end
+        // of the measure is *off the page*, which is what this test's first failure was: `expect("on
+        // screen")` failing because the number in the table had stopped meaning what it said.
+        (0, m.columns - 1),
         (1, 0),
         (7, 40),
         (c.layout.rows - 1, 12),
@@ -794,27 +870,24 @@ fn the_scroll_thumb_moves_down_as_the_view_scrolls() {
     }
 }
 
-/// **A resize widens the measure, and past the ceiling it moves the gutters again.**
+/// **A resize changes where the page is, and does not change how long the line is.**
 ///
-/// **CORRECTION, part 27 — this test asserted the opposite and was right to.** It said *"a wider window
-/// shows the same 80-column measure with more margin, the way a word processor does — _not_ a longer
-/// line"*.
+/// # CORRECTION, part 39: this said "a wider panel shows a longer line", and it does not any more
 ///
-/// **That reasoning was sound and the conclusion was the wrong way round.** A fixed measure is a
-/// *typographic* decision, and it is the right one; making the *window* size irrelevant is not, because
-/// a window's size is how a user asks for more room. The two are reconciled by a **ceiling**: the
-/// measure grows with the panel up to [`max_columns`](ChromeMetrics::max_columns), and only past that
-/// does the extra width become desk.
+/// Part 27 made the measure grow with the panel, and this gate was the claim that it did. **Part 39
+/// reverses that**, for the reason `the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window`
+/// gives in full: the reference's page is a fixed width in every screenshot, and a page that grows with
+/// the window is a page that fills it.
 ///
-/// **So a resize now does three things, and all three are asserted below:** the measure grows with the
-/// panel, it *stops* at the ceiling, and the text column's distance inside the page does not move — the
-/// last being the property that actually matters, because that offset is the origin the caret is located
-/// against.
+/// **So the resize still does three things, and they are the three that are visible:** the page moves
+/// away from the left edge as the panel widens, the desk on both sides grows with it, and a taller panel
+/// fits more rows. **The text column's distance inside the page does not move**, which is the property
+/// that actually matters, because that offset is the origin the caret is located against.
 #[test]
-fn a_resize_widens_the_measure_up_to_the_ceiling() {
+fn a_resize_moves_the_page_and_never_the_line() {
     let small = ChromeMetrics::for_size(1024, 600);
     let large = ChromeMetrics::for_size(1600, 1000);
-    // **`columns` and `cell_w` still do not move with the window** — the *floor* and the grid are
+    // **`columns` and `cell_w` still do not move with the window** -- the *floor* and the grid are
     // constants, and only the derived measure is not.
     assert_eq!(
         small.columns, large.columns,
@@ -825,8 +898,8 @@ fn a_resize_widens_the_measure_up_to_the_ceiling() {
     let a = Layout::new(&small);
     let b = Layout::new(&large);
     assert!(
-        b.text.width > a.text.width,
-        "**a wider panel shows a longer line**: {} then {} px of text",
+        b.text.width >= a.text.width,
+        "**a wider panel never shows a shorter line**: {} then {} px of text",
         a.text.width,
         b.text.width
     );
@@ -844,20 +917,20 @@ fn a_resize_widens_the_measure_up_to_the_ceiling() {
         a.rows,
         b.rows
     );
-    // **What must not change is where the caret is inside the page** — the text column's distance from
+    // **What must not change is where the caret is inside the page** -- the text column's distance from
     // the page's left edge is the origin the caret is located against, and it is the same in both.
     assert_eq!(
-        a.text.x - a.gutter_left,
-        b.text.x - b.gutter_left,
+        a.text.x - a.page.x,
+        b.text.x - b.page.x,
         "the text column sits the same distance inside the page in both"
     );
 
-    // **And past the ceiling the gutters take over**, which is the half that keeps this from being
-    // "fill the panel". A 2,560 px panel has room for ~250 columns and shows 100.
+    // **And the desk takes the extra width**, which is what a wider window is now for. A 2,560 px panel
+    // has room for far more text than 72 columns and shows the same 72.
     let huge = Layout::new(&ChromeMetrics::for_size(2560, 1440));
     assert_eq!(
         huge.text.width, b.text.width,
-        "1,600 px and 2,560 px show the same measure -- the ceiling, not the room"
+        "1,600 px and 2,560 px show the same measure -- the ceiling, which is the floor"
     );
     assert!(
         huge.gutter_left > b.gutter_left,
@@ -877,15 +950,17 @@ fn a_resize_widens_the_measure_up_to_the_ceiling() {
         a.gutter_right,
         b.gutter_right
     );
-    // Centred to within the pixel `Layout::new` deliberately gives away to the right gutter.
-    assert!(
-        b.gutter_left.abs_diff(b.gutter_right) <= 1,
-        "the page is centred: gutters {} and {}",
+    // **Centred within the desk**, which is what part 39 changed: the left gutter is the sidebar *plus*
+    // half the desk, so it is the two halves that are equal, not the two gutters as they stand.
+    assert_eq!(
+        b.gutter_left - large.sidebar_w.min(large.width / 2),
+        b.gutter_right,
+        "the page is centred in the desk: left gutter {} is {} of it sidebar, right {}",
         b.gutter_left,
+        large.sidebar_w.min(large.width / 2),
         b.gutter_right
     );
 }
-
 /// The bands always partition the whole panel, at every size the chrome accepts.
 ///
 /// This is the property that makes a resize safe: if the bands summed to less than the height, the
@@ -1029,6 +1104,24 @@ fn no_chrome_box_ever_lands_outside_its_panel() {
             };
 
             inside(&l.page, "the page");
+            // **A page with no height is not "outside" the panel, and part 39 made it one.**
+            //
+            // `DamageRect::new` does not clamp, and at a 1 px panel the canvas has no room for the
+            // page at all, so the page comes out `y = 1, height = 0` -- **which is `y + height == 1`,
+            // inside a panel of height 1**, and the assertion below read `y + height` as `y` for a
+            // zero-height rect and called it out of bounds.
+            //
+            // **The claim being tested is "no chrome box is drawn outside its panel", and a box with
+            // no area is not drawn at all.** So a degenerate rect is excused by being degenerate, and
+            // the check stays where it bites: on boxes that have pixels.
+            if l.page.height > 0 {
+                assert!(
+                    l.page.y + l.page.height <= h,
+                    "{w}x{h}: the page at y {} is {} tall and runs past the panel",
+                    l.page.y,
+                    l.page.height
+                );
+            }
             assert!(
                 l.page.width <= w,
                 "{w}x{h}: the page is {} wide in a {w}-wide panel",
@@ -1342,4 +1435,137 @@ fn the_chrome_paints_at_every_panel_size_without_drawing_outside_itself() {
             }
         }
     }
+}
+
+/// **The ruler is numbered: `1 .. n` across the measure, and every number is inside the page's text
+/// column.**
+///
+/// **CORRECTION, part 39.** The ruler had ticks and no labels for its whole life — 31 px of band
+/// carrying two rows of one-pixel marks and nothing a person could read, which is a dotted rule and not
+/// a ruler. **The reference's ruler is numbered, and the number is what makes it one**: the ticks say
+/// *something is measured here* and the numbers say *what*.
+///
+/// **The claim is the sequence and its containment, not "there is some text".** A ruler with one number
+/// on it, or with numbers running off the right-hand margin into the page's padding, is not this
+/// design — and the painter **cannot clip** (`push_text` has no clipping), so a number that did not fit
+/// would simply be drawn over the margin. The skip in `Chrome::tree` is the guard; this is what holds
+/// it.
+#[test]
+fn the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it() {
+    let m = ChromeMetrics::DESKTOP;
+    let chrome = Chrome::new(m);
+    let state = ChromeState::default();
+    let tree = chrome.tree(&state);
+    let l = &chrome.layout;
+
+    let drawn = nodes(&tree);
+    let ruler = l.ruler;
+    // Every one-character run of `1 .. 9`, and every two-character run of `10 .. 99`, that sits in the
+    // ruler's band and over the text column. `n.chars()` order is ascending, so these are exactly the
+    // labels `push_text` emitted for the ruler.
+    let mut numbers = Vec::new();
+    for node in &drawn {
+        let Node::Text(run) = node else { continue };
+        if run.len > 2 || run.first_codepoint < b'1' as u32 {
+            continue;
+        }
+        if run.y < ruler.y as i32 || run.y + m.cell_h as i32 > ruler.bottom() as i32 {
+            continue;
+        }
+        if run.x < l.text.x as i32
+            || run.x + (run.len as u32 * m.cell_w) as i32 > l.text.right() as i32
+        {
+            continue;
+        }
+        let s: String = (0..run.len)
+            .map(|i| char::from((run.first_codepoint + i as u32) as u8))
+            .collect();
+        if s.chars().all(|c| c.is_ascii_digit()) {
+            numbers.push(s);
+        }
+    }
+    assert_eq!(
+        numbers,
+        (1..=m.columns / 10 + 1).map(|n| n.to_string()).collect::<Vec<_>>(),
+        "the ruler shows {numbers:?} across a {} column measure; it should show 1..={} -- one \
+         number every ten columns, left to right",
+        m.columns,
+        m.columns / 10 + 1
+    );
+    assert!(
+        numbers.len() >= 7,
+        "only {} numbers on the whole measure, so this is a dotted rule with a label on it",
+        numbers.len()
+    );
+}
+
+/// **A closed sidebar reserves nothing, and an open one reserves exactly `DESKTOP.sidebar_w`.**
+///
+/// **This is the gate for part 39's one-fact change.** Before it, "the sidebar is drawn" was a `bool`
+/// on [`ChromeState`] and "the sidebar's width is reserved" was a constant 208 subtracted from the
+/// width — **two facts, and only one of them followed the flag.** A closed sidebar still pushed the page
+/// 208 px to the right of a window with nothing down its left edge, which is why closing the sidebar
+/// used to look like it did nothing.
+///
+/// **[`sidebar_reservation`] is the whole contract**, and it is asserted in both directions plus across
+/// the flag, because a function that returned `DESKTOP.sidebar_w` for `true` and `1` for `false` would
+/// pass a single-direction check.
+#[test]
+fn the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open() {
+    use holonomy_render::chrome::sidebar_reservation;
+
+    assert_eq!(
+        sidebar_reservation(true),
+        ChromeMetrics::DESKTOP.sidebar_w,
+        "an open sidebar reserves its own width"
+    );
+    assert_eq!(
+        sidebar_reservation(false),
+        0,
+        "**a closed sidebar reserves nothing.** A constant reservation with a conditional draw is the \
+         defect this replaced: the page sat 208 px to the right of a window with an empty left edge, \
+         and no caller could put the two back in step."
+    );
+
+    // **And the reservation has to move the page, or "reserving" is a number nothing reads.**
+    let m = ChromeMetrics::DESKTOP;
+    let open = Layout::new(&m);
+    let closed = Layout::new(&ChromeMetrics {
+        sidebar_w: sidebar_reservation(false),
+        ..m
+    });
+    assert!(
+        open.page.x > closed.page.x,
+        "an open sidebar puts the page at x={} and a closed one at x={}; the reservation is not \
+         changing the layout, so it is a number nothing reads",
+        open.page.x,
+        closed.page.x
+    );
+    // **Half the sidebar, and not all of it — because the page is centred in the *desk*.**
+    //
+    // ```text
+    // closed:  desk = 1280,  page 672 wide,  left = (1280 - 672) / 2 = 304
+    // open:    desk = 1024,  page 672 wide,  left = 256 + (1024 - 672) / 2 = 432
+    // ```
+    //
+    // **The first version of this assertion said the page moves by the sidebar's *width*, and it does
+    // not.** Reserving 256 px out of the panel's right-hand end would move the page 256; reserving it
+    // out of the left end and re-centring moves it half as far, because the desk shrinks on one side
+    // only. **Which of the two is right is a design question, and re-centring is the answer**: it is
+    // what makes the page *stay* in the middle of what is left, which is what the reference does when
+    // the sidebar opens.
+    assert_eq!(
+        open.page.x - closed.page.x,
+        m.sidebar_w / 2,
+        "opening the sidebar takes {} px out of the desk's left side, and the page re-centres in \
+         what is left, so it moves half of it: {} then {}",
+        m.sidebar_w,
+        closed.page.x,
+        open.page.x
+    );
+    assert_eq!(
+        open.text.width, closed.text.width,
+        "**the measure does not change**, because a sidebar and a page are both chrome and the line a \
+         reader gets is the same either way"
+    );
 }

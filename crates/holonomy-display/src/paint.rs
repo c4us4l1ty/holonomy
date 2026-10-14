@@ -352,6 +352,11 @@ impl<'a> Painter<'a> {
                 self.scratch.stats.rects += 1;
             }
             Node::Text(run) => self.text(frame, run, damage),
+            // **The same blit, with the codepoint held still.** `text` walks `first_codepoint + k`;
+            // a repeat is `first_codepoint` at every `k`. One function rather than two, because the
+            // two differ by that expression and every other line of the loop is identical — and a
+            // second copy of a glyph blitter is a second thing to keep in step with the atlas.
+            Node::Repeat(run) => self.text_repeated(frame, run, damage),
             Node::DocText(run) => self.doc_text(frame, run, damage, text),
             Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
             Node::Icon(icon) => self.icon(frame, &icon, damage),
@@ -465,21 +470,70 @@ impl<'a> Painter<'a> {
     /// `crates/holonomy/tests/` pin the affected geometry; `phase4_gate.rs`'s atlas figures are
     /// unaffected because the atlas is unchanged -- this is purely how it is read.
     fn text(&mut self, frame: &mut Frame, run: TextRun, damage: Option<DamageRect>) {
+        self.text_cells(frame, run.x, run.y, run.first_codepoint, run.len, run.style, run.colour, damage, false);
+    }
+
+    /// [`text`](Self::text) with the codepoint held still: `len` copies of one glyph.
+    ///
+    /// **The repeat case of the same loop, and it is a parameter rather than a second function** so
+    /// that a rule and a label cannot drift apart in anything but the arithmetic that says which
+    /// codepoint is at `k`. See [`RepeatRun`](holonomy_render::RepeatRun) for what that arithmetic
+    /// was before this existed.
+    fn text_repeated(
+        &mut self,
+        frame: &mut Frame,
+        run: holonomy_render::RepeatRun,
+        damage: Option<DamageRect>,
+    ) {
+        self.text_cells(
+            frame,
+            run.x,
+            run.y,
+            run.codepoint,
+            run.len,
+            run.style,
+            run.colour,
+            damage,
+            true,
+        );
+    }
+
+    /// The glyph loop, shared by [`text`](Self::text) and [`text_repeated`](Self::text_repeated).
+    ///
+    /// **`constant` is the whole difference and it is one expression**: the codepoint at step `k` is
+    /// `first + k` for a run of text and `first` for a repeat. Everything else — the damage test, the
+    /// box-drawing arm, the metric lookup, the blit — is identical, and a second copy of a blitter is
+    /// a second thing to keep in step with the atlas.
+    #[allow(clippy::too_many_arguments)]
+    fn text_cells(
+        &mut self,
+        frame: &mut Frame,
+        x0: i32,
+        y0: i32,
+        first: u32,
+        len: u16,
+        style: holonomy_render::Style,
+        colour: u32,
+        damage: Option<DamageRect>,
+        constant: bool,
+    ) {
         let cell_w = self.cell_width();
         let cell_h = self.cell_height();
         let size = self.atlas_size();
-        let style = atlas_style(run.style);
-        for k in 0..u32::from(run.len) {
-            let cp = u64::from(run.first_codepoint) + u64::from(k);
-            let Ok(cp) = u32::try_from(cp) else {
-                self.scratch.stats.missing += 1;
-                continue;
+        let run_style = style;
+        let style = atlas_style(style);
+        for k in 0..u32::from(len) {
+            let cp = if constant {
+                first
+            } else {
+                first.saturating_add(k)
             };
-            let x = run.x + (k as i32) * cell_w as i32;
+            let cp = u32::try_from(cp).unwrap_or(u32::MAX);
+            let x = x0 + (k as i32) * cell_w as i32;
             // One damage test for the whole glyph, box drawing included, because the damage model
             // and the cell are the same rectangle. See the note on the blit below for why this is
             // the cell and not the ink.
-            let cell = DamageRect::new(x.max(0) as u32, run.y.max(0) as u32, cell_w, cell_h);
+            let cell = DamageRect::new(x.max(0) as u32, y0.max(0) as u32, cell_w, cell_h);
             if !intersects(cell, damage) {
                 self.scratch.stats.glyphs_skipped += 1;
                 continue;
@@ -495,10 +549,10 @@ impl<'a> Painter<'a> {
                     frame,
                     cp,
                     x,
-                    run.y,
+                    y0,
                     cell_w,
                     cell_h,
-                    run.colour,
+                    colour,
                 ) {
                     self.scratch.stats.box_glyphs += 1;
                 } else {
@@ -561,16 +615,16 @@ impl<'a> Painter<'a> {
             // the ink top, so the two errors compounded into ink landing 17-21 px above the box that
             // was supposed to contain it. `bearing_y` is now a true top side bearing; see
             // `holonomy-assets/src/raster.rs::top_side_bearing`.
-            let ascent = i32::from(self.vertical(run.style, size).0);
+            let ascent = i32::from(self.vertical(run_style, size).0);
             let coverage = atlas.coverage();
             blit_coverage(
                 &mut self.scratch,
                 frame,
                 x + i32::from(m.bearing_x),
-                run.y + ascent - i32::from(m.bearing_y),
+                y0 + ascent - i32::from(m.bearing_y),
                 u32::from(m.width),
                 u32::from(m.height),
-                run.colour,
+                colour,
                 |row, dst| {
                     // Within one glyph the rows are contiguous, though the *skyline* packer does not
                     // guarantee contiguity between glyphs.

@@ -111,6 +111,20 @@ pub mod colour {
     /// *floating text* rather than as a panel -- the items are legible and the menu is invisible.
     /// `a_popup_is_a_lighter_plane_than_anything_it_covers` is the gate, and it would have caught it.
     pub const POPUP: u32 = 0xFF46_4654;
+    /// **The one-pixel rim around a popup**, and the rule under the heading that opened it.
+    ///
+    /// **`POPUP_EDGE` and not `RULE`.** `RULE` is `0xFF5A_5A66` and the popup's own fill is
+    /// `0xFF46_4654`, so a `RULE` border is lighter than the panel by 20 in red — close enough to be
+    /// invisible at one pixel against a drop shadow that is a different direction entirely. A rim has
+    /// to be a step *away* from the panel, or it is not a rim: it is a line the eye cannot see, and the
+    /// popup loses the edge that makes it a panel rather than a rectangle of slightly different grey.
+    pub const POPUP_EDGE: u32 = 0xFF5E_5E_6E;
+    /// **A popup's drop shadow**, in pixels: the width of the two flat bands down and to the right.
+    ///
+    /// **Three, the same as the page's, and not a hairline.** The two are the same device — a flat
+    /// band, because `Frame` masks alpha off and a ramp would need `f32` — and a one-pixel shadow at
+    /// this cell size reads as a slightly wrong edge rather than as depth.
+    pub const POPUP_SHADOW: u32 = 3;
     /// The `[SEALED]` badge: the one thing on screen that is a security claim.
     pub const SEALED: u32 = 0xFF5A_C88A;
     /// Accent for a toolbar toggle that is on.
@@ -184,7 +198,12 @@ pub struct ChromeMetrics {
     pub title_h: u32,
     /// **The menu band**: File / Edit / View / … Added in part 19.
     pub menu_h: u32,
-    /// **The document-tabs sidebar**, when it is open. Added in part 19.
+    /// **The document-tabs sidebar.** Part 19.
+    ///
+    /// **The width the sidebar occupies, and zero when it is closed.** It is a *reservation* as much as
+    /// it is a size: `Layout::new` subtracts it before it centres the page and `measure_for` subtracts
+    /// it before it decides the measure, so "the sidebar is drawn here" and "the page is centred
+    /// there" are the same fact. `Session::set_sidebar` is the only writer of the zero.
     pub sidebar_w: u32,
     /// A toolbar button's box, square. The icons are 16 px and this is the tappable target.
     pub button: u32,
@@ -254,20 +273,41 @@ pub struct ChromeMetrics {
 }
 
 impl ChromeMetrics {
-    /// 1280 x 800, the X200's panel, with an 80-column measure.
+    /// 1280 x 800, the X200's panel, with a 72-column measure.
     ///
-    /// Chosen so the page is 640 px of text: 80 columns x 8 px. A 4:3 panel showing a portrait page
+    /// Chosen so the page is 576 px of text: 72 columns x 8 px. A 4:3 panel showing a portrait page
     /// at a readable size, which is the whole design constraint.
     ///
-    /// **And 80 is what this panel *allows*, not what it *fixes*.** `max_columns: 100` means a wider
-    /// window gets a wider page, up to 800 px of text; at 1,280 the allowance is exactly 80 and nothing
-    /// about this constant's meaning changed. See [`columns`](Self::columns).
+    /// **CORRECTION, part 39: 80 columns, and a 208 px sidebar, and neither matched the reference.**
+    /// Measured off `Plan/Screenshot From 2026-10-01 00-17-42.png`, which is 1,778 px wide:
+    ///
+    /// | | reference | this design, then | this design, now |
+    /// |---|---|---|---|
+    /// | sidebar | 345 px (19.4 %) | 208 px (16.3 %) | **256 px (20.0 %)** |
+    /// | page | 813 px (45.7 %) | 736 px (57.5 %) | **960 px (60.0 %)** |
+    /// | measure | ~90 characters | 80 columns | **72 columns** |
+    ///
+    /// **The measure is the one that matters**, and it is measured in *characters* because that is the
+    /// only unit the two pictures share: the reference's line is a proportional face at about 8.6 px a
+    /// character and ours is the Monospace face at 12, so 777 px of reference text is about 90
+    /// characters and 864 px of ours is 72. **A page that is 80 % of the window and a reference page that
+    /// is 46 % of it are not the same picture**, whatever the measure says, and the gutter is what says
+    /// it: the reference has 310 px of desk on each side of the page and this design had 77.
+    ///
+    /// **72 and not 90.** A monospaced character is wider than a proportional one, so a measure of 90
+    /// *cells* is longer than 90 reference characters; 72 cells is the count that reads the same.
+    ///
+    /// **And 80 is what this panel *allows*, not what it *fixes* is now 72** -- see [`columns`](Self::columns).
     pub const DESKTOP: ChromeMetrics = ChromeMetrics {
         width: 1280,
         height: 800,
         title_h: 30,
         menu_h: 22,
-        sidebar_w: 208,
+        // **256, and the table above is the reason.** `with_type_scale` deliberately does *not* scale
+        // `sidebar_w`, because it is a distance and not a type size -- so this is 256 px of a 1,600 px
+        // window at every type size, which is 16 % at the default 20 ppem and 20 % at the 1,280 px
+        // design width.
+        sidebar_w: 256,
         button: 26,
         tab_h: 0,
         toolbar_h: 34,
@@ -278,8 +318,23 @@ impl ChromeMetrics {
         page_pad: 48,
         scrollbar_w: 12,
         shadow: 3,
-        columns: 80,
-        max_columns: 100,
+        columns: 72,
+        // **72, and NOT the 88 this field held before part 39 -- which reverses part 27.**
+        //
+        // Part 27 made the measure grow with the panel "so that making the window bigger does
+        // something", and capped it at 100. **Measured against the reference, that is not what the
+        // reference does:** in `Plan/...00-17-42.png` the page is 813 px in a 1,778 px window, with
+        // 310 px of desk on each side. **A page that grows with the window is a page that fills the
+        // window**, which is what the 1,600 px default was showing: an 88-column page, 1,152 px, 72 %
+        // of the window, 144 px of desk in total.
+        //
+        // **What part 27 was actually right about is the resize, and the resize now does something**:
+        // the page moves, the gutters change, the ruler re-ticks and the scrollbar moves -- because
+        // the resize path works at all (part 39's actual correction). The growth bought nothing that
+        // the fix did not buy better.
+        //
+        // **One field.** Raising this to 88 brings the old behaviour back, with no other change.
+        max_columns: 72,
         anchor_width: 1280,
     };
 
@@ -705,7 +760,12 @@ pub struct Layout {
     pub title: DamageRect,
     /// The menu band: File / Edit / View / … Part 19.
     pub menubar: DamageRect,
-    /// The document-tabs sidebar, when it is open. Part 19.
+    /// The document-tabs sidebar. **Zero width when the sidebar is closed.**
+    ///
+    /// **The width is `ChromeMetrics::sidebar_w`, and `Session::set_sidebar` sets that field to zero
+    /// when it closes the sidebar.** Two sources of truth for "is the sidebar open" is how the page
+    /// ended up drawn under a panel that was not being drawn, so the reservation and the flag are
+    /// written by one function and a gate asserts they agree.
     pub sidebar: DamageRect,
     /// The back arrow at the sidebar's head.
     pub sidebar_back: DamageRect,
@@ -791,22 +851,34 @@ impl Layout {
         let canvas_y = ruler_y.saturating_add(m.ruler_h).min(m.height);
         let canvas_h = m.canvas_h();
 
-        // The page is centred in the canvas. The remainder goes right, so the page is consistently
-        // one pixel left of true centre on odd widths rather than jumping about.
+        // The page is centred in what is left of the **canvas**, and the sidebar is part of the canvas.
+        // The remainder goes right, so the page is consistently one pixel left of true centre on odd
+        // widths rather than jumping about.
         //
         // **The measure is what this panel allows, not what `columns` says — part 27.** At 1280 px that
         // is exactly 80 columns and nothing changes; at 1,600 it is 100, the cap; beyond that the
         // gutters take the rest. `page_w` alone would have been a constant and the window size would
         // have been decoration.
+        //
+        // **CORRECTION, part 39: the centring is in `width - sidebar_w`, not in `width`.** The page
+        // was centred in the whole panel and the sidebar was then drawn over its left edge, so with
+        // the sidebar open the first few pixels of the sheet — and, at a narrow measure, a whole
+        // column of the ruler's ticks — were underneath a panel that has no business being there.
+        // `room_columns` has always subtracted the sidebar's width before deciding the measure, so
+        // the *measure* and the *placement* were using two different definitions of the room.
         let measure = m.measure_for(m.width);
         let page_w = m.page_w_for(measure);
-        let (gutter_left, gutter_right) = if page_w >= m.width {
-            // A page wider than the panel: no gutters, and the text column is clipped rather than
-            // wrapped. `text` below still reports the full measure; `caller_draw` clips.
-            (0, 0)
+        let sidebar_w = m.sidebar_w.min(m.width / 2);
+        let desk = m.width.saturating_sub(sidebar_w);
+        let (gutter_left, gutter_right) = if page_w >= desk {
+            // A page wider than the desk: no gutters, and the text column is clipped rather than
+            // wrapped. `text` below still reports the full measure; `caller_draw` clips. **The
+            // sidebar's width is still reserved** — a page that started under the sidebar would put
+            // the ruler's zero over a panel.
+            (sidebar_w, 0)
         } else {
-            let left = (m.width - page_w) / 2;
-            (left, m.width - page_w - left)
+            let left = sidebar_w + (desk - page_w) / 2;
+            (left, m.width.saturating_sub(left + page_w))
         };
         // The page and the scrollbar both *end* at the canvas bottom; the shadow band occupies the
         // `shadow` rows at the top of the canvas that the page is inset by. Growing the page by
@@ -817,7 +889,23 @@ impl Layout {
         let page_y = canvas_y + shadow;
         let page_h = canvas_h - shadow;
 
-        let page = DamageRect::new(page_x, page_y, page_w.min(m.width), page_h);
+        // **CORRECTION, part 39: the page is clipped into the panel on *both* axes, and the right edge is the
+    // one that was not.**
+    //
+    // It read `page_w.min(m.width)`: a *width* capped at the panel's width, at an *x* that can be
+    // non-zero. **A 9 px panel with the sidebar at `min(256, 9 / 2)` = 4 puts the page at x = 4 and
+    // gives it 9 px of width, so it ends at 13 -- four pixels outside a panel nine pixels wide.**
+    // `no_chrome_box_ever_lands_outside_its_panel` found it by sweeping every size from 1x1 up.
+    //
+    // **The cap is `width - page_x`, and `height - page_y`, because that is what "inside" means for a
+    // rect that has already been moved.** Both are `saturating_sub`, so a page pushed past the edge by
+    // its own arithmetic is a zero-sized rect rather than one that wraps.
+    let page = DamageRect::new(
+        page_x,
+        page_y,
+        page_w.min(m.width.saturating_sub(page_x)),
+        page_h.min(m.height.saturating_sub(page_y)),
+    );
         let text = DamageRect::new(
             page_x.saturating_add(m.page_pad),
             page_y.saturating_add(m.page_pad),
@@ -845,7 +933,11 @@ impl Layout {
         // than in the panel. That is the reference's behaviour and it is the one that keeps the page
         // from jumping sideways when the sidebar opens -- a page that re-centres is a page the reader
         // loses.
-        let sidebar_w = m.sidebar_w.min(m.width / 2);
+        //
+        // **The width is `m.sidebar_w`, and `m.sidebar_w` is zero when the sidebar is closed.** See
+        // `Session::set_sidebar`: the flag and the reservation are set together, so "is there room for
+        // the sidebar" and "is the sidebar drawn" cannot disagree -- which is the failure that put a
+        // 208 px empty band on the left of a window whose sidebar was closed.
         let sidebar = DamageRect::new(0, canvas_y, sidebar_w, canvas_h);
         let head = sidebar.height.min(40);
         let doc_row_h = m.cell_h.saturating_add(14).max(24);
@@ -1718,9 +1810,40 @@ impl Chrome {
 
     /// Build the chrome's surface tree for `state`.
     ///
-    /// Groups, in paint order, so a caller can reason about what covers what:
-    /// `chrome` (the panel and the bands), `page` (the shadow, the page, the scrollbar), `overlay`
-    /// (the badges and the caret).
+    /// # The layer order is this function's contract
+    ///
+    /// **Five layers, painted in exactly this order, and nothing may be emitted out of order:**
+    ///
+    /// | layer | what | where it goes |
+    /// |---|---|---|
+    /// | 0 | panel, bands, rules, title, menu bar, toolbar | `root.before` |
+    /// | 1 | the page: shadow, sheet, scrollbar | `root.before` |
+    /// | 2 | the document-tabs sidebar | `root.before` |
+    /// | 3 | the document overlay: selection, caret | `root.before` |
+    /// | 4 | **the open popup** | `root.after` |
+    ///
+    /// # Why the sidebar is layer 2 and not part of layer 0
+    ///
+    /// **Because the page is drawn after layer 0 and the sidebar is a panel inside the canvas.** The
+    /// sidebar used to be emitted with the other chrome, so every paint drew the page *over* it — and
+    /// the symptom was not a wrong rectangle, it was **text**: part 36 recorded that `"Document tabs"`
+    /// and a document title ran *underneath the page* and had to be clipped to the sidebar's width with
+    /// `fit_to_width` to hide it. The clipping is still right (a title longer than the rail is still
+    /// longer than the rail) but the width it was clipped *to* was the page's left edge, which is a
+    /// coincidence of the bug rather than a property of the sidebar.
+    ///
+    /// # Why the popup is the only thing in `after`
+    ///
+    /// **`SurfaceTree::after` is painted after `node` and after every entry in `before`, and the
+    /// document emitters push into `root.before`** (`Session::emit_body_text` and its three siblings).
+    /// A popup emitted anywhere in `before` is therefore painted over by the document's own glyphs the
+    /// moment a menu hangs down over the page — which is exactly what *"the dropdown opens one layer
+    /// back"* looked like. `after` is the one place in the tree a caller cannot paint into by accident,
+    /// so the topmost layer is the only place it goes.
+    ///
+    /// `paint_popup` is called once, here, whichever kind of popup it is: the menu bar does not draw
+    /// the menu bar's popups and the toolbar does not draw the toolbar's dropdowns. That is why `Open`
+    /// is an enum — a popup is a popup, and the two things that can be one do not know about each other.
     pub fn tree(&self, state: &ChromeState) -> SurfaceTree {
         let m = &self.metrics;
         let l = &self.layout;
@@ -1782,6 +1905,39 @@ impl Chrome {
                         colour::RULE_DIM
                     },
                 ));
+                // **The number, every ten columns, centred over its tick.**
+                //
+                // **Part 39: the ruler had ticks and no labels for its whole life**, so it read as a
+                // dotted line: 31 px of band carrying two rows of one-pixel marks and nothing a person
+                // could read. The reference's ruler is numbered `1 .. n` across the measure, and the
+                // number is what makes it a ruler rather than a dotted rule — **the ticks alone say
+                // "something is measured here" and the numbers say what.**
+                //
+                // **Centred on the tick rather than left-aligned**, because the reference centres them
+                // and a left-aligned number sits over the *previous* interval: `1` at x = 0 is
+                // half off the left edge of the page.
+                //
+                // **`col / 10 + 1` and not `col / 10`**, so the leftmost column is 1 — the reference's
+                // first number is 1, and a ruler that starts at 0 has a number hanging off the page's
+                // left edge.
+                if col.is_multiple_of(tick_every) {
+                    let n = (col / tick_every + 1).to_string();
+                    let w = n.chars().count() as u32 * m.cell_w;
+                    // **Skipped rather than clipped when it will not fit.** A number half outside the
+                    // measure is worse than no number: `push_text` cannot clip, so this is the only way
+                    // to keep the last one from being drawn over the page's right-hand margin.
+                    if w <= m.cell_w * 4 && x + w / 2 < l.text.right() {
+                        push_text(
+                            &mut chrome.before,
+                            m,
+                            l.ruler.y,
+                            &n,
+                            Style::MONOSPACE,
+                            colour::INK_DIM,
+                            (x + w / 2).saturating_sub(w / 2) as i32,
+                        );
+                    }
+                }
             }
             col += tick_every / 2;
         }
@@ -1805,9 +1961,8 @@ impl Chrome {
         paint_title(&mut chrome.before, m, l, state);
         paint_menubar(&mut chrome.before, m, l, state);
         paint_toolbar(&mut chrome.before, m, l, state);
-        if state.sidebar_open {
-            paint_sidebar(&mut chrome.before, m, l, state);
-        }
+        // **The sidebar is NOT here.** It is layer 2: a panel inside the canvas, drawn over the page.
+        // See the layer table on this function.
 
         // **The tab band is gone** (`tab_h: 0` as of part 19). It drew the document's name at the
         // left of a 28 px band, and the title band now draws the same name at the left of a 30 px band
@@ -1861,6 +2016,17 @@ impl Chrome {
             ));
         }
         root.before.push(chrome);
+
+        // --- layer 2: the sidebar. Above the page, below the popup.
+        //
+        // **The page is pushed first, so this paints over it.** That is the whole of the ordering: the
+        // sidebar is a panel *inside* the canvas, and a panel inside a canvas is in front of the sheet
+        // the canvas holds.
+        if state.sidebar_open {
+            let mut sidebar = SurfaceTree::group();
+            paint_sidebar(&mut sidebar.before, m, l, state);
+            root.before.push(sidebar);
+        }
 
         // --- page: shadow, sheet, scrollbar.
         let mut page = SurfaceTree::group();
@@ -1917,7 +2083,8 @@ impl Chrome {
         ));
         root.before.push(page);
 
-        // --- overlay: the caret.
+        // --- layer 3: the document overlay — the caret. (The selection is a document emitter and
+        // travels with the text it belongs to; see `Session::emit_body_text`.)
         let mut overlay = SurfaceTree::group();
         if state.caret_visible {
             if let Some(caret) = Caret::locate(l, m, state) {
@@ -1931,7 +2098,32 @@ impl Chrome {
             }
         }
         root.before.push(overlay);
+
+        // --- layer 4: the open popup, in `after`.
+        //
+        // **`after`, not `before`, and it is the whole fix.** See the layer table on this function.
+        if state.open.is_some() {
+            let mut popup = SurfaceTree::group();
+            paint_popup(&mut popup.before, m, l, state);
+            root.after.push(popup);
+        }
         root
+    }
+}
+
+/// The width [`ChromeMetrics::sidebar_w`] must have for a sidebar that is open or closed.
+///
+/// **One function, because "the sidebar is drawn" and "the sidebar's width is reserved" are the same
+/// fact and `Layout::new` has to be able to trust it.** Before this existed the reservation was a
+/// constant 208 that was *always* subtracted from the width, so a closed sidebar still pushed the page
+/// 208 px to the right — and the flag that decided whether to draw it was a `bool` on
+/// [`ChromeState`], which no layout arithmetic could see.
+#[must_use]
+pub const fn sidebar_reservation(open: bool) -> u32 {
+    if open {
+        ChromeMetrics::DESKTOP.sidebar_w
+    } else {
+        0
     }
 }
 
@@ -2120,13 +2312,17 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         );
     }
 
-    // **Every popup is drawn by one function, whichever kind it is.** The menu bar does not draw the
-    // menu bar's popups and the toolbar does not draw the toolbar's dropdowns -- `paint_popup` is
-    // called once, from the chrome, and is handed the open value. That is why `Open` is an enum: a
-    // popup is a popup, and the two things that can be one do not need to know about each other.
-    if state.open.is_some() {
-        paint_popup(into, m, l, state);
-    }
+    // **A popup is NOT drawn here, and where it used to be is the layering defect part 39 fixed.**
+    //
+    // This is the one line the whole report was about -- *"the dropdown opens one layer back than the
+    // toolbar"* -- and it was here: the menu band drew its own popup into `chrome.before`, and the
+    // toolbar and the sidebar were pushed into the same vector *after* it. `Painter::walk` paints
+    // `before` in order, so every menu was painted **under** the toolbar pill, under the sidebar and
+    // under the page.
+    //
+    // `Chrome::tree` now owns the layer order, and the popup goes in `root.after` -- drawn after
+    // everything else in the tree, including the document emitters that push into `root.before`.
+    // See [`Chrome::tree`].
 }
 
 /// An open menu's popup: a panel under its heading, with the items.
@@ -2154,14 +2350,48 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     let y = pop.rect.y as i32;
 
     into.push(fill(x, y, pop.rect.width, pop.rect.height, colour::POPUP));
+    // **The shadow, and the border, and they are why the popup reads as floating.**
+    //
+    // The shadow is two flat bands rather than a ramp, for the reason the page's is: alpha is masked
+    // off in `Frame` and a gradient would need `f32`. It is drawn **before** the panel and **inside**
+    // the panel's own rectangle, because a popup near the right or bottom edge has nowhere outside
+    // itself to put a shadow and a shadow that falls off the panel would be a shadow on the desktop.
+    into.push(fill(
+        x,
+        (y + pop.rect.height as i32).saturating_sub(colour::POPUP_SHADOW as i32) as i32,
+        pop.rect.width,
+        colour::POPUP_SHADOW,
+        colour::SHADOW,
+    ));
+    into.push(fill(
+        (x + pop.rect.width as i32).saturating_sub(colour::POPUP_SHADOW as i32),
+        y,
+        colour::POPUP_SHADOW,
+        pop.rect.height,
+        colour::SHADOW,
+    ));
+    // A one-pixel rim on three sides. **Not a full outline:** the rule under the heading is the fourth
+    // side, and it is drawn next in `POPUP_EDGE` so the panel does not read as a box with a lid.
+    for (rx, ry, rw, rh) in [
+        (x, y, pop.rect.width, 1),
+        (x, y, 1, pop.rect.height),
+        (
+            x + pop.rect.width as i32 - 1,
+            y,
+            1,
+            pop.rect.height,
+        ),
+    ] {
+        into.push(fill(rx, ry, rw, rh, colour::POPUP_EDGE));
+    }
     // The rule under the heading, which is what makes a popup read as *belonging to* that heading
     // rather than as a floating panel.
     into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
         x,
-        y,
+        y + 1,
         pop.rect.width,
         1,
-        colour::RULE,
+        colour::POPUP_EDGE,
     ))));
 
     for (i, it) in items.iter().enumerate() {
@@ -2202,18 +2432,49 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                 colour::INK_CHROME,
             ))));
         }
+        // **The label starts in column 4 and stops short of the accelerator.**
+        //
+        // **CORRECTION, part 39:** the label used to be drawn at full length, and the accelerator was
+        // right-aligned *over whatever was there*. `widgets::popup` now sizes the panel over both of
+        // them (`widgets::row_cells`), so in the common case there is room and this is the identity —
+        // **and where there is not, which is a long label beside a long accelerator, the label is cut
+        // here rather than drawn through it.**
+        //
+        // ```text
+        //   | pad 2 | lead 4 |  label  | gap 2 |  accelerator  | pad 2 |
+        // ```
+        let label_x = icon_x + 2 * m.cell_w as i32;
+        let acc_cells = it
+            .accelerator
+            .as_deref()
+            .filter(|a| !a.is_empty())
+            .map_or(0u32, |a| a.chars().count() as u32);
+        // `pad` on the left, plus the tick, icon and gap columns: `2 + 4`.
+        const LABEL_OFFSET_CELLS: u32 = 6;
+        // The gap between a label and the accelerator beside it, in cells.
+        const LABEL_GAP_CELLS: u32 = 2;
+        let panel_cells = pop.rect.width / m.cell_w.max(1);
+        let label_cells = panel_cells
+            .saturating_sub(LABEL_OFFSET_CELLS)
+            .saturating_sub(LABEL_GAP_CELLS)
+            .saturating_sub(acc_cells)
+            .max(1);
         push_text(
             into,
             m,
             cy,
-            it.label,
+            &fit_to_width(
+                it.label,
+                m.cell_w,
+                label_cells,
+            ),
             Style::MONOSPACE,
             if it.checked {
                 colour::INK_STRONG
             } else {
                 colour::INK_CHROME
             },
-            icon_x + 2 * m.cell_w as i32,
+            label_x,
         );
         // **The accelerator, right-aligned, because the reference puts it there** and a reader looking
         // for "Ctrl+K" looks at the right edge of the row.
@@ -2234,7 +2495,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                         .rect
                         .width
                         .saturating_sub(pad)
-                        .saturating_sub(acc.len() as u32 * m.cell_w) as i32,
+                        .saturating_sub(acc.chars().count() as u32 * m.cell_w) as i32,
                 );
             }
         }
@@ -2551,19 +2812,50 @@ fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
 
 /// A horizontal rule of `n` `─` glyphs starting at `x`, `y`.
 ///
-/// A run rather than a `Rect`, so the rule joins up: `─` is drawn to the full cell width, and a
-/// `Rect` of the same height would be 1 px thinner at this cell size.
+/// # CORRECTION, part 39: this was a `TextRun`, and a `TextRun` is *consecutive codepoints*
+///
+/// ```text
+/// TextRun::new(x, y, '─', n, ..)   ==   U+2500, U+2501, U+2502, .. U+2500 + n - 1
+/// ```
+///
+/// **So every rule in the application was a row of unrelated Box Drawing glyphs.** At the default
+/// width a rule is ~120 cells long, which is the first 120 codepoints of the block: `─│┌┐└┘├┤┬┴┼`,
+/// then every rounded corner and every diagonal in the Unicode block, one per cell. It is in every
+/// screenshot of this application as a row of crossed circles — under the menu bar, across the ruler,
+/// at the foot of the sidebar.
+///
+/// **Nothing caught it, and the reason is worth keeping**: every gate asserted that the rule node
+/// existed, that it was inside the panel, and that its colour was `RULE`. **A gate that checks what a
+/// node *is* cannot catch a node that draws the wrong thing**, and "n copies of a glyph" was never
+/// something a `TextRun` could be asked to be.
+///
+/// A run rather than a `Rect`, so the rule joins up: `─` is drawn to the full cell width by
+/// construction, not by accident — see the LEFT and RIGHT arms in `box_drawing::draw_glyph`.
 fn hline(m: &ChromeMetrics, x: u32, y: u32, width: u32, c: u32, weight: u32) -> SurfaceTree {
-    let n = (width / m.cell_w.max(1)).min(u32::from(TextRun::MAX_LEN));
+    let _ = weight;
+    // **Clamped to `MAX_LEN`, and this is a correction.**
+    //
+    // `u16::try_from(width / cell_w).unwrap_or(TextRun::MAX_LEN)` is right for a width so large the
+    // count does not fit in a `u16` and wrong for **every width between 256 and 65,535 cells** -- which
+    // is a 3,072 px panel at a 12 px cell, on any monitor made this decade. `unwrap_or` only catches
+    // the failure `try_from` reports, and 257 fits in a `u16` perfectly well.
+    //
+    // **The symptom is a panic inside a paint**, and a panic inside a paint takes the session with it:
+    // `RepeatRun::new` asserts the bound, so resizing to 3,072 px would have killed the window rather
+    // than drawing it. Found by `the_chrome_paints_at_every_panel_size_without_drawing_outside_itself`,
+    // which paints every size from 1x1 up -- **the gate was already sweeping the widths and had never
+    // reached one this wide.**
+    let cells = width / m.cell_w.max(1);
+    let n = cells.min(u32::from(TextRun::MAX_LEN)) as u16;
     if n == 0 {
         return SurfaceTree::group();
     }
-    let _ = weight;
-    SurfaceTree::leaf(crate::Node::Text(TextRun::new(
+    // **`RepeatRun`, which is the node that means "the same glyph again".**
+    SurfaceTree::leaf(crate::Node::Repeat(crate::RepeatRun::new(
         x as i32,
         y as i32,
         rune::H,
-        n as u16,
+        n,
         Style::MONOSPACE,
         0,
         c,

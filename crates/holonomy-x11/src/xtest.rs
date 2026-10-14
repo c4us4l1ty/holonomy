@@ -47,6 +47,12 @@ pub mod fake {
     pub const KEY_PRESS: u8 = 2;
     /// KeyRelease.
     pub const KEY_RELEASE: u8 = 3;
+    /// ButtonPress. **Detail is the button number, 1 for left.**
+    pub const BUTTON_PRESS: u8 = 4;
+    /// ButtonRelease.
+    pub const BUTTON_RELEASE: u8 = 5;
+    /// MotionNotify. **Moves the pointer to the `x`, `y` in the same request.**
+    pub const MOTION: u8 = 6;
 }
 
 /// An open `XTEST` extension.
@@ -145,6 +151,77 @@ impl XTest {
     pub fn tap_in(&self, conn: &mut Conn, window: u32, keycode: u8) -> Result<(), ConnError> {
         self.fake_key_in(conn, window, keycode, true)?;
         self.fake_key_in(conn, window, keycode, false)
+    }
+
+    /// **Move the pointer to a screen position.**
+    ///
+    /// # Why this is here, and why the coordinates are absolute
+    ///
+    /// [`XTest::fake_key_in`] names a window, and a pointer event has no such field that the server
+    /// routes by: **`MotionNotify` is delivered to whatever window is under `(x, y)`**, and `x`/`y`
+    /// are in **root coordinates**. A driver that passes window-relative coordinates moves the pointer
+    /// to the wrong place and reports "the click did nothing", which is indistinguishable from a hit
+    /// test that is broken — so the gate that drives a window has to add the window's own position to
+    /// whatever it wants to point at. See `Window::geometry`, which reports the position relative to
+    /// the parent, and this window's parent is the root.
+    ///
+    /// # Why it syncs
+    ///
+    /// **Because a move followed by a click has to be ordered, and XTEST does not deliver
+    /// synchronously.** `tap_in` syncs for the same reason: the queue outlives the request that filled
+    /// it, and a click injected before the move is a click at the *old* position.
+    pub fn move_pointer(
+        &self,
+        conn: &mut Conn,
+        root: u32,
+        x: i16,
+        y: i16,
+    ) -> Result<(), ConnError> {
+        self.fake_pointer(conn, fake::MOTION, root, x, y, 0)
+    }
+
+    /// Click at a screen position: press and release, one sync.
+    pub fn click_at(
+        &self,
+        conn: &mut Conn,
+        root: u32,
+        x: i16,
+        y: i16,
+        button: u8,
+    ) -> Result<(), ConnError> {
+        self.fake_pointer(conn, fake::BUTTON_PRESS, root, x, y, button)?;
+        self.fake_pointer(conn, fake::BUTTON_RELEASE, root, x, y, button)
+    }
+
+    /// One `XTestFakeInput` for a pointer event, sync'd.
+    ///
+    /// **The 36-byte layout is the same one `fake_key_in` sends**, because the server has one request
+    /// for both: type in byte 4, keycode/button in byte 5, and the two signed coordinates at bytes 24
+    /// and 26. `detail` is the button number for a press or a release and ignored for a motion.
+    pub fn fake_pointer(
+        &self,
+        conn: &mut Conn,
+        kind: u8,
+        root: u32,
+        x: i16,
+        y: i16,
+        detail: u8,
+    ) -> Result<(), ConnError> {
+        conn.request(
+            Req::new(self.major)
+                .minor(minor::FAKE_INPUT)
+                .u8(kind)
+                .u8(detail)
+                .u16(0)
+                .u32(0) // delay
+                .u32(root)
+                .pad(8)
+                .i16(x)
+                .i16(y)
+                .pad(7)
+                .u8(0), // device id: 0 is the core pointer
+        )?;
+        conn.sync()
     }
 
     /// The X keycode that produces `keysym` unshifted, from the server's own keyboard mapping.

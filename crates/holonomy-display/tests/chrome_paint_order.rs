@@ -1,4 +1,5 @@
-//! **The chrome paints: a sibling in `before` is not erased by `node`.** 5 tests.
+//! **The chrome paints: a sibling in `before` is not erased by `node`, and a popup in `after` is not
+//! painted over.** 7 tests.
 //!
 //! # The bug
 //!
@@ -32,6 +33,8 @@
 //! | and the page is still drawn over the chrome | [`the_page_is_still_drawn_over_the_chrome`] |
 //! | a band is *not* the panel colour | [`a_band_is_not_the_panel_colour`] |
 //! | **and the panel is emitted first** | [`the_panel_is_emitted_before_everything_else`] |
+//! | **a popup is emitted last, into `after`** | [`the_open_popup_is_emitted_into_after_and_nothing_else_is`] |
+//! | **and visible where it hangs over the sidebar** | [`the_open_popup_is_visible_where_it_hangs_over_the_sidebar`] |
 
 use holonomy_display::paint::Painter;
 use holonomy_display::Frame;
@@ -272,5 +275,193 @@ fn the_panel_is_emitted_before_everything_else() {
         "the panel is painted at position {panel_at} and the last band at {last_band}. The panel must \
          be painted first: it is a full-panel rectangle and everything after it is covered. This is \
          the bug this file exists for."
+    );
+}
+
+/// The root's own three layers, for one `ChromeState`: how many subtrees hang off `before`, the root's
+/// own node, and how many off `after`.
+///
+/// **The counts, and not the trees, because the trees borrow a local.** The first version returned
+/// `Vec<&SurfaceTree>` out of the tree it had just built, which does not compile — and the honest fix
+/// is to return what the claim is actually about. **The claim is "how many subtrees are in the
+/// topmost layer", which is a number.**
+fn root_layer_counts(state: &ChromeState) -> (usize, usize) {
+    let m = ChromeMetrics::DESKTOP;
+    let tree = Chrome::new(m).tree(state);
+    (tree.before.len(), tree.after.len())
+}
+
+/// The topmost layer's single subtree, for an open popup. **Owned, because the tree it came from is a
+/// local** — and an assertion about a borrow-checker error is not an assertion about the chrome.
+fn topmost_layer(state: &ChromeState) -> SurfaceTree {
+    let m = ChromeMetrics::DESKTOP;
+    let tree = Chrome::new(m).tree(state);
+    assert_eq!(
+        tree.after.len(),
+        1,
+        "expected exactly one subtree in root.after, found {}. The popup is the only layer that \
+         belongs there: `after` is painted after `node` and after every entry in `before`, and the \
+         document's own emitters push into `root.before`, so a popup painted anywhere else is painted \
+         over.",
+        tree.after.len()
+    );
+    tree.after.into_iter().next().expect("the one subtree")
+}
+
+/// **An open popup is emitted into `root.after`, and nothing else ever is.**
+///
+/// **This is the defect "the dropdown opens one layer back", in the form that can be checked.** The
+/// popup used to be emitted by the band that owns it — the menu band drew the menu's popup into
+/// `chrome.before` — and every one of those bands lives inside the chrome group, which is the **first**
+/// entry of `root.before`. **So a popup hanging down over the canvas was painted first**: the page,
+/// the sidebar and the document's own glyphs all went over it.
+///
+/// **`after` is the only list in the tree that a caller cannot paint into by accident**, which is why
+/// the topmost layer is the only place a popup goes.
+///
+/// **It is a group and not a leaf, and that is asserted too.** `paint_popup` pushes its panel, shadow,
+/// rim and rows into one `SurfaceTree::group()`, so the entry in `after` has `node: None` and
+/// everything in `before`. A version of this gate that asserted `Some(Node::Rect(_))` would have been
+/// asserting the wrong shape and would have "failed" on a correct chrome.
+#[test]
+fn the_open_popup_is_emitted_into_after_and_nothing_else_is() {
+    use holonomy_render::widgets::Open;
+
+    let mut state = ChromeState::default();
+    state.open = Some(Open::Menu(0));
+    let group = topmost_layer(&state);
+
+    // **The group's own node is empty and its children are the popup's.** An entry in `after` carrying
+    // its own `node` would be a leaf painted in the right list — which also works, and is worth
+    // allowing, so this asserts the *shape that is actually there* rather than forbidding the other.
+    assert!(
+        group.node.is_none(),
+        "the subtree in root.after carries its own node {:?}; it is a group of the popup's rects and \
+         labels, and a node here would be painted in the topmost layer for no stated reason.",
+        group.node
+    );
+    let has_rect = group
+        .before
+        .iter()
+        .any(|c| matches!(c.node, Some(Node::Rect(_))));
+    assert!(
+        has_rect,
+        "the subtree in root.after has {} children and not one of them is a rect, so there is no \
+         popup panel in the topmost layer at all.",
+        group.before.len()
+    );
+
+    // **And the negative direction, which is the half a count alone would miss.** Without it, a chrome
+    // that painted an *empty* popup panel into `after` on every frame — every keystroke, every caret
+    // blink — would pass the first half while paying for a node that does nothing.
+    let (_, closed_after) = root_layer_counts(&ChromeState::default());
+    assert_eq!(
+        closed_after, 0,
+        "a frame with no popup open still puts {closed_after} subtrees in root.after. `after` is for \
+         the popup and nothing else."
+    );
+}
+
+/// **Where a popup hangs over a panel the chrome painted above it, the sidebar shows through nowhere.**
+///
+/// **The test above is structural — it asks which list the popup is in. This one asks what the frame
+/// looks like**, for two reasons: a structural assertion can be satisfied by a tree whose paint is
+/// wrong some other way, and **the reported symptom was a picture, not a tree.**
+///
+/// # Why this counts pixels instead of probing one
+///
+/// **Three single-pixel probes were tried and all three were wrong, in three different ways.** The
+/// File menu's popup hangs from the left end of the menu bar, so it lands over the **sidebar** — and the
+/// sidebar is layer 2, a solid panel drawn into `root.before` *after* the chrome group that used to hold
+/// the popup. **Before the fix the whole rect was sidebar.**
+///
+/// | probe | what it read | why it was the wrong pixel |
+/// |---|---|---|
+/// | `bottom() - 1` | `SHADOW` = `0xFF16161A` | **the drop shadow is drawn *inside* the panel** — three flat bands down the bottom and right — and its colour is the chrome background's, so the failure message named a layer that was never involved |
+/// | `(x + w/2, bottom() - 5)` | `INK_CHROME` | it landed on a **glyph** in the last menu item's label |
+/// | `y + 6` | not over the sidebar at all | it is in the popup's **top padding**, which is over the toolbar |
+///
+/// **A single pixel is the wrong tool for a rect that contains text, a rim and a shadow.** So the claim
+/// is made about the whole rect: **not one pixel of the popup is the sidebar's colour.** That is what
+/// "the panel covers what it hangs over" means, it cannot be wrong by landing on a glyph, and it fails
+/// loudly on a *partial* fix that covered the popup's middle and not its edge.
+#[test]
+fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
+    use holonomy_render::widgets::Open;
+
+    let mut state = ChromeState::default();
+    state.open = Some(Open::Menu(0));
+    let (frame, chrome, _) = paint_chrome(&state);
+    let popup = holonomy_render::widgets::popup(&chrome.layout, &state, state.open)
+        .expect("a popup for an open menu");
+    let side = chrome.layout.sidebar;
+
+    // **The popup has to overlap the sidebar, or there is nothing here to prove.** The File popup is at
+    // the menu bar's left end, so this holds — and it is asserted rather than assumed, because the claim
+    // below silently becomes vacuous if a future layout moves the popup off the sidebar.
+    let overlap_w = popup
+        .rect
+        .right()
+        .min(side.right())
+        .saturating_sub(popup.rect.x.max(side.x));
+    let overlap_h = popup
+        .rect
+        .bottom()
+        .min(side.bottom())
+        .saturating_sub(popup.rect.y.max(side.y));
+    assert!(
+        overlap_w > 0 && overlap_h > 0,
+        "the popup at {:?} does not overlap the sidebar at {:?}, so 'the popup covers the sidebar' is \
+         not a claim this frame can decide.",
+        popup.rect,
+        side
+    );
+
+    // **The sidebar's band colour inside the popup's rect: zero, over every pixel.**
+    let band = c(colour::BAND);
+    let mut leaked = 0;
+    let mut first_leak = None;
+    for y in popup.rect.y.max(side.y)..popup.rect.bottom().min(side.bottom()) {
+        for x in popup.rect.x.max(side.x)..popup.rect.right().min(side.right()) {
+            if pixel(&frame, x, y) == band {
+                leaked += 1;
+                first_leak.get_or_insert((x, y));
+            }
+        }
+    }
+    assert_eq!(
+        leaked, 0,
+        "{leaked} px inside the popup at {first_leak:?} are the sidebar's band colour, over a \
+         {overlap_w}x{overlap_h} overlap. The popup is being painted under the sidebar, which is the \
+         'dropdown opens one layer back' report."
+    );
+
+    // **And the premise, so a zero above is not a zero because nothing was there.** The same band
+    // colour, a column of the sidebar in the strip *between* the popup's right edge and the sidebar's
+    // own: it has to be there in bulk, or the scan above is reading the wrong rect.
+    //
+    // **The strip is computed, not guessed.** The sidebar is 0..256 and the File popup is 16..224, so
+    // 224..256 is the only part of the sidebar the popup does not cover — and the first version of this
+    // line probed the sidebar's *centre*, x = 128, which is inside the popup and proved nothing.
+    let lo = popup.rect.right().max(side.x);
+    assert!(
+        lo < side.right(),
+        "the popup at {:?} covers the whole sidebar at {:?}, so there is no strip of the sidebar \
+         beside it to use as a premise.",
+        popup.rect,
+        side
+    );
+    let beside = (lo + side.right()) / 2;
+    let mut show = 0;
+    for y in side.y..side.bottom() {
+        if pixel(&frame, beside, y) == band {
+            show += 1;
+        }
+    }
+    assert!(
+        show > side.height / 2,
+        "only {show} of the sidebar's {height} rows at x={beside} are the band colour, so the scan \
+         above would have found zero for the wrong reason.",
+        height = side.height
     );
 }

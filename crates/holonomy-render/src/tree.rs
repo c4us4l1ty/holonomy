@@ -371,6 +371,87 @@ impl Icon {
     }
 }
 
+/// A run of **one codepoint, repeated** — a rule, a table border, a row of dashes.
+///
+/// # Why this is a second kind and not a [`TextRun`]
+///
+/// **`TextRun` means consecutive codepoints, and "the same codepoint N times" is a different thing
+/// that it cannot say.** `TextRun::new(x, y, '─', 40, ..)` is **U+2500 .. U+2527** — the whole
+/// Box Drawing block — so every rule in this application was drawn as a picket fence of unrelated
+/// glyphs: `─│┌┐└┘├┤┬┴┼…`. It is visible in a screenshot as a row of crossed circles along the
+/// ruler and under the menu bar, and it is invisible in every gate, because **every gate asserted
+/// that the rule node existed and none of them looked at what it drew.** The same mistake was in the
+/// table borders (`┌─┐┌─┐` across a three-cell top edge) and in a formula's raw source (`\frac` came
+/// out as `\f,ac,r{1...`).
+///
+/// **`ascending_runs` is the other half of the answer** and it already existed: a *label* is split
+/// into maximal ascending pieces so that each `TextRun` really is consecutive. A *repeat* cannot be
+/// split that way, because there is nothing ascending about it — so it needs its own node.
+///
+/// # Why not a `Vec<TextRun>` of length 1
+///
+/// **Because it is one node per frame instead of one per cell**, and a full-width rule is 120 cells
+/// at the default width. The node count is the thing this whole module is shaped by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatRun {
+    /// Left edge in pixels.
+    pub x: i32,
+    /// Top of the line box.
+    pub y: i32,
+    /// The codepoint drawn at every step.
+    pub codepoint: u32,
+    /// How many times, at most [`TextRun::MAX_LEN`].
+    pub len: u16,
+    /// Atlas style.
+    pub style: Style,
+    /// Atlas size index.
+    pub size: u8,
+    /// Packed 0xAARRGGBB.
+    pub colour: u32,
+}
+
+impl RepeatRun {
+    /// `len` copies of `codepoint`, starting at `x`.
+    pub fn new(
+        x: i32,
+        y: i32,
+        codepoint: u32,
+        len: u16,
+        style: Style,
+        size: u8,
+        colour: u32,
+    ) -> Self {
+        assert!(
+            len <= TextRun::MAX_LEN,
+            "a repeated run is at most {} glyphs, got {len}",
+            TextRun::MAX_LEN
+        );
+        Self {
+            x,
+            y,
+            codepoint,
+            len,
+            style,
+            size,
+            colour,
+        }
+    }
+
+    /// The box `len` cells occupy, on the monospaced grid. Same arithmetic as [`TextRun::bounds`],
+    /// and for the same reason: over-estimating is safe and under-estimating leaves stale pixels.
+    pub fn bounds(&self, line_height: u32, advance: u32) -> Option<DamageRect> {
+        if self.len == 0 || advance == 0 {
+            return None;
+        }
+        Some(DamageRect::new(
+            self.x.max(0) as u32,
+            self.y.max(0) as u32,
+            u32::from(self.len).saturating_mul(advance),
+            line_height.max(1),
+        ))
+    }
+}
+
 /// One thing to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Node {
@@ -378,6 +459,8 @@ pub enum Node {
     Rect(Rect),
     /// A run of glyphs.
     Text(TextRun),
+    /// **One codepoint, repeated.** See [`RepeatRun`] for why a rule is not a [`TextRun`].
+    Repeat(RepeatRun),
     /// A run of glyphs from **document bytes**. Phase 12.
     ///
     /// A second kind rather than a widened [`TextRun`], for the reason [`DocRun`]'s docs give: a
@@ -424,6 +507,7 @@ impl Node {
         let raw = match self {
             Node::Rect(r) => r.bounds(),
             Node::Text(t) => t.bounds(line_height, advance),
+            Node::Repeat(t) => t.bounds(line_height, advance),
             Node::DocText(t) => t.bounds(line_height, advance),
             Node::Icon(i) => i.bounds(),
             Node::Image { rect, .. } => rect.bounds(),
@@ -438,7 +522,7 @@ impl Node {
     pub fn kind(&self) -> NodeKind {
         match self {
             Node::Rect(_) => NodeKind::Rect,
-            Node::Text(_) => NodeKind::Text,
+            Node::Text(_) | Node::Repeat(_) => NodeKind::Text,
             Node::DocText(_) => NodeKind::Text,
             Node::Icon(_) => NodeKind::Icon,
             Node::Image { .. } => NodeKind::Image,

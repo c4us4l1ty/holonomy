@@ -87,7 +87,28 @@ fn assert_static_pie(path: &Path, what: &str) {
 /// the desktop build. Phase 9B's whole cost was 69,472 bytes on the default build, and it came *down*
 /// on the asset side -- the pruned math face removed 22,468 bytes of compressed payload, which is more
 /// than the parser, the layout and the wiring added.
+///
+/// # CORRECTION, part 39: this gate is `#[cfg]`d to the run it can actually say something about
+///
+/// **It used to fail in `cargo test --features desktop --workspace`, and it was right to.** The binary
+/// this gate reads is `target/<profile>/release/holonomy`, and **that is one path for two feature
+/// sets**: a desktop test run has a desktop binary sitting there, and every one of the five markers is
+/// in it.
+///
+/// **The repair is not a bigger ceiling, a `#[ignore]`, or a documented three-command dance** -- the
+/// file carried all three, and each of them made the gate weaker rather than clearer. **It is that
+/// cargo guarantees the correspondence the gate was missing**: `cargo test --features desktop` builds
+/// this package's binary with `desktop` **on**, and `cargo test` without it builds the binary with it
+/// **off**. So the binary on disk always carries the feature set of the test run, and
+/// `cfg!(feature = "desktop")` names which of the two claims the run can make.
+///
+/// **Why this and not a "skip if it looks like a desktop build" probe.** That probe would skip on
+/// seeing the markers, which is exactly the signal a regression produces -- **one stray `use
+/// holonomy_x11` in the sealed path would turn the gate off rather than red**, and the Zero-Compositor
+/// Invariant would go unchecked without a word. `cfg` cannot be fooled that way: a regressed *default*
+/// build is still a run without the feature, so the gate still runs and still fails.
 #[test]
+#[cfg(not(feature = "desktop"))]
 fn the_default_release_binary_carries_no_x11_client() {
     let path = binary();
     if !path.exists() {
@@ -154,11 +175,18 @@ fn skip_without_an_optimised_build(what: &str) -> bool {
     false
 }
 
-/// The default release binary is under the ceiling.
+/// **The release binary is under the ceiling, whichever feature set it was built with.**
 ///
 /// Measured: 1,032,472 bytes against a 2,097,152-byte ceiling, so there is 1,064,680 bytes of room.
+///
+/// **CORRECTION, part 39: renamed from `the_default_release_binary_is_under_the_ceiling`.** The
+/// ceiling is a *profile* number and the claim is about size, so the binary on disk is the right one
+/// whichever feature set built it — and the old name said *"default"* while the test ran unchanged over
+/// a desktop build, which is a name asserting something the test never checked. Part 39's
+/// measurements: **1,587,224 bytes default and 1,689,880 with `--features desktop`**, both inside the
+/// 2,097,152 ceiling, the second with 407,272 bytes of room.
 #[test]
-fn the_default_release_binary_is_under_the_ceiling() {
+fn the_release_binary_is_under_the_ceiling() {
     if skip_without_an_optimised_build("the binary size ceiling") {
         return;
     }
@@ -181,11 +209,13 @@ fn the_default_release_binary_is_under_the_ceiling() {
     );
 }
 
-/// The binary is static even with the window in it.
+/// **The binary is static even with the window in it, and the check does not care which build it sees.**
 ///
 /// A window needs a socket, and a socket is where a static musl binary is most likely to reach for
 /// `dlopen` -- which is why `minifb` and `softbuffer` were rejected in favour of a hand-written client.
-/// This test is the check that the rejection was worth it.
+/// This test is the check that the rejection was worth it, **and it is the one gate in this file whose
+/// subject is the profile rather than the feature set**, so it runs over whichever binary the test run
+/// produced. Part 39 renamed its sibling from `the_default_release_binary_…` for exactly this reason.
 #[test]
 fn the_binary_is_static_pie() {
     let path = binary();
@@ -199,24 +229,28 @@ fn the_binary_is_static_pie() {
 
 /// The desktop feature costs what the X11 client costs, and no more.
 ///
-/// **Run separately, and in a specific order.** This test needs a binary built *with* `--features
-/// desktop`, and `target/<profile>/release/holonomy` is **one path for two feature sets** -- while
-/// `cargo test` rebuilds the *default* binary on its way to building the test. So:
+/// # CORRECTION, part 39: the three-command dance is gone, and so is the `#[ignore]`
 ///
-/// ```text
-/// cargo test  --release -p holonomy --test release_artifact --no-run
-/// cargo build --release -p holonomy --features desktop
-/// ./target/<profile>/release/deps/release_artifact-* --include-ignored
-/// ```
+/// **This used to be `#[ignore]`d, with a three-step procedure in its docs** -- build the tests, build
+/// the desktop binary over the top of them, then run the test binary by hand with `--include-ignored` --
+/// and [`the_default_release_binary_carries_no_x11_client`] failed as a side effect, correctly, because
+/// the file it reads was the desktop build.
 ///
-/// And then [`the_default_release_binary_carries_no_x11_client`] fails, correctly, because the file it
-/// is looking at is the desktop build. That is not a broken gate; it is two gates over one output path,
-/// and each says so. This one is `#[ignore]`d rather than skipped-and-passing so a plain
-/// `cargo test --workspace` never reports success for something it did not check.
+/// **The reason for the dance is gone: `cargo test --features desktop` builds the desktop binary at
+/// `binary()`'s path itself**, so a feature-gated test needs no ordering and no manual invocation. It
+/// runs in `cargo test --features desktop --workspace` and does not exist in the default run, which is
+/// the pair of statements that makes the two claims over one output path unambiguous.
+///
+/// **`#[ignore]` was the wrong tool for the same reason it was wrong for the debug case**: a plain
+/// `cargo test --workspace` would report success for a gate it had not run, and an `#[ignore]`d gate is
+/// one nobody ever un-ignores.
 ///
 /// **Measured 2026-10-06:** 1,536,472 bytes, 560,680 bytes of room under the 2,097,152 ceiling.
+/// **Measured part 39**, after the chrome's `Node::Repeat`, the sidebar, the ruler numbers and the
+/// 72-column measure: **1,689,880 bytes, 407,272 bytes of room**, and the default build of the same
+/// source is 1,587,224 -- **102,656 bytes of difference, which is the whole X11 client.**
 #[test]
-#[ignore = "needs `--features desktop` on disk at release_artifact.rs's binary(); see this test's docs"]
+#[cfg(feature = "desktop")]
 fn the_desktop_build_is_still_static_and_under_the_ceiling() {
     let path = binary();
     let bytes = std::fs::read(&path).expect("read the release binary");

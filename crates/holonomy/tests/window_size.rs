@@ -32,11 +32,23 @@
 
 use holonomy::windowed::{opening_size, DESIGN_H, DESIGN_W, SCREEN_MARGIN};
 
-/// **The window opens at the design size, and the design ratio holds.** 1 test.
+/// **The window opens at the design size, and the page does not shrink as the screen grows.** 1 test.
 ///
 /// The thing being held constant is not the pixel size, it is **the share of the window the page
-/// occupies** — 58% at the 1,280 px design width and 56% at 1,600 px. At ninety per cent of a 3,072 px
-/// screen the same window gave 32%, and that gap is the report.
+/// occupies** — and part 39 moved the band this accepts, for a reason.
+///
+/// **It used to be 50–65 %, measured at 58 % and 56 %** — the page growing with the panel, so a wider
+/// window kept the same proportion. **Now the page is a fixed 672 px of the design cell and the window
+/// is a fixed 1,600 px**, so the share is 52 % at the 1,280 px design width and 42 % at 1,600, and it
+/// falls from there as the screen grows — which is the reference's own behaviour: 46 % in
+/// `Plan/Screenshot From 2026-10-01 00-17-42.png`.
+///
+/// **Two things this gate is not measuring, and both matter more than the number.** It builds
+/// `ChromeMetrics::for_size` with no atlas, so `cell_w` is the design 8 px; **the product's cell is 12 px
+/// at the default 20 ppem and its page is 960 px — 60 % of the same 1,600 px window.** And the thing the
+/// original report was about was *a page too small to use*: **at 42 % of a 1,600 px window the page is
+/// 672 px of monospaced text, which is 84 characters — a long measure, not a short one.** The floor
+/// here is a floor on the page, not on the proportion.
 #[test]
 fn the_opening_size_is_the_design_size_on_a_big_screen() {
     use holonomy_render::chrome::{ChromeMetrics, Layout};
@@ -49,16 +61,28 @@ fn the_opening_size_is_the_design_size_on_a_big_screen() {
             "{screen:?}: a screen this size opens at the design size, not a fraction of itself"
         );
 
-        let l = Layout::new(&ChromeMetrics::for_size(w, h));
+        let m = ChromeMetrics::for_size(w, h);
+        let l = Layout::new(&m);
         let share = 100 * l.page.width / w;
         assert!(
-            (50..=65).contains(&share),
-            "{screen:?}: the page is {share}% of the {w}px window; below ~50% the window is mostly \\
-             desk, which is what \"too small\" was"
+            (35..=65).contains(&share),
+            "{screen:?}: the page is {share}% of the {w}px window. Below ~35% the window is mostly \
+             desk; the reference's own page is 46% and this design is 42% at this cell"
+        );
+        // **The page itself, which is the claim that does not depend on the window at all.** 72 columns
+        // of the design cell plus its padding — and 84 characters is a measure a person can read.
+        assert_eq!(
+            l.page.width,
+            m.page_w(),
+            "{screen:?}: the page is the design measure, whatever the screen is"
+        );
+        assert!(
+            l.text.width / m.cell_w >= 70,
+            "and the line is {} characters, which is a measure a person can read",
+            l.text.width / m.cell_w
         );
     }
 }
-
 /// **The window never exceeds the screen.** 1 test.
 ///
 /// **This is the half that the fixed size got wrong, and it is a gate rather than a hope.** A

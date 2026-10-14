@@ -590,11 +590,12 @@ fn a_run_boundary_does_not_move_the_text_after_it() {
     );
 }
 
-/// **A second full repaint of an unchanged session is not the same frame as the first.** Part 31.
+/// **A second full repaint of an unchanged session is the same frame as the first.** Part 31, fixed in
+/// part 39.
 ///
-/// ## What this is
+/// ## What this was
 ///
-/// `repaint_all()` **twice**, with no edit and no state change in between, differs from **once** by
+/// `repaint_all()` **twice**, with no edit and no state change in between, differed from **once** by
 /// **970 pixels**, deterministically and in the same place every time:
 ///
 /// ```text
@@ -608,51 +609,73 @@ fn a_run_boundary_does_not_move_the_text_after_it() {
 /// (1, 53) the first frame has `0x2a2a30`, `colour::BAND`, and the second has `0x5a5a66`,
 /// `colour::RULE`.** **Every toolbar icon is among the differing pixels.**
 ///
-/// ## It is part 29's residual, isolated
+/// ## It was part 29's residual, isolated
 ///
 /// Part 29 recorded *"two separately built sessions differ in the toolbar after one of them has been
 /// through an edit and an undo — **1,898 pixels in a box of (0, 51, 905, 792)** — recorded rather than
 /// asserted either way"*.
 ///
-/// **That was not two sessions. It was one session painted twice.** Everything after the first paint
-/// in that fixture — the edit, the undo, the second `caret_to` — was a red herring, and the whole of
-/// the difference is `repaint_all` not being idempotent. **Part 29's instruction to record it rather
-/// than assert it was right, and the reason it was hard to isolate is that the gate was written to
-/// compare two sessions rather than one session with itself.**
+/// **That was not two sessions. It was one session painted twice.** Everything after the first paint in
+/// that fixture — the edit, the undo, the second `caret_to` — was a red herring, and the whole of the
+/// difference is `repaint_all` not being idempotent. **Part 29's instruction to record it rather than
+/// assert it was right, and the reason it was hard to isolate is that the gate was written to compare
+/// two sessions rather than one session with itself.**
 ///
-/// ## Why this gate asserts the defect
+/// # Why it is gone, and what the cause was
 ///
-/// **Because it is not part 31's.** Part 31 made `emit_body_text` and `Painter::doc_text` agree on
-/// where a run goes, and this is in the chrome's paint path — the menu band and the toolbar, not the
-/// document. **Fixing it means finding which chrome emitter draws something conditionally on whether
-/// it has drawn before**, which is a different piece of work in a different file.
+/// **The differing pixels were the toolbar's *rules*.** `Chrome::hline` built a
+/// [`TextRun`](holonomy_render::TextRun) of length `n` starting at `─` (U+2500), and **a `TextRun` is
+/// *consecutive codepoints*** — so a 120-cell rule was `U+2500, U+2501, … U+2577`, the whole Box
+/// Drawing block, one glyph per cell. Part 39 replaced it with [`Node::Repeat`](holonomy_render::Node),
+/// which is one codepoint `n` times.
 ///
-/// **It goes green the day that happens.**
+/// **Why a repeat makes the paint idempotent when a run did not:** `TextRun::MAX_LEN` is 256 glyphs, so
+/// a rule wider than 256 cells was silently *cut at 256*, and which part of it was cut depended on the
+/// cell the painter was using — which is a function of the atlas size index the run carried. **The
+/// band fills around it then landed on different pixels depending on what had been drawn before.** The
+/// `Repeat` node is 16 bytes of geometry with no glyph stream at all, so there is nothing in it that can
+/// depend on history.
+///
+/// ## Why the gate now asserts zero rather than asserting a small number
+///
+/// **Because a small number is not a property anybody can maintain.** A gate that says "fewer than 200
+/// pixels differ" is a gate that a new conditional emitter will creep up against until it is the 970
+/// again. **Zero is the property a repaint has**: the same state, the same frame, every time.
 #[test]
-fn a_repaint_is_not_idempotent() {
+fn a_repaint_is_idempotent() {
     let once = painted("alpha bravo charlie\n", None);
     let mut twice = painted("alpha bravo charlie\n", None);
-    // **Nothing but the repaint.** No edit, no caret move, no state change — which is what took part 29
+    // **Nothing but the repaint.** No edit, no caret move, no state change -- which is what took part 29
     // three gates and a page-sized correction to establish.
     twice.repaint_all().expect("second repaint");
 
     let (n, box_) = difference(&once, &twice);
-    assert!(
-        n > 0,
-        "**painting the same unchanged session twice gave the same frame.** Part 31 expected 970 \\
-         differing pixels here; if the chrome's emitters have been made idempotent, the 970 in \\
-         PROJECT.md and the 1,898 in part 29 can both be deleted."
-    );
-    let l = once.chrome_layout();
-    assert!(
-        box_.1 >= l.toolbar.y - 8 && box_.1 < l.toolbar.y + 8,
-        "**and the difference is at the top of the toolbar, not in the document**: first differing row \
-         {} against a toolbar at {:?}",
-        box_.1,
-        l.toolbar
+    assert_eq!(
+        n, 0,
+        "**painting the same unchanged session twice gave a different frame.** Part 31 measured 970 \\
+         differing pixels in a box of {box_:?}; the cause was `Chrome::hline` emitting a `TextRun` of \\
+         consecutive Box Drawing codepoints, which was cut at `MAX_LEN` and so depended on the cell the \\
+         painter used. `Node::Repeat` replaced it."
     );
 }
 
+/// **And the difference is still *measured* rather than asserted away, so a regression says where.**
+///
+/// **Zero is the assertion above; this is the diagnosis.** A gate that only says "zero" leaves the next
+/// person with no idea what a non-zero result *means* -- so this one prints the bounding box of whatever
+/// differs, and asserts that the *first* paint is the one that gets repeated.
+#[test]
+fn a_repaint_differs_nowhere_at_all_and_the_first_paint_is_the_one_kept() {
+    let mut s = painted("alpha bravo charlie\n", None);
+    let first = s.frame().clone();
+    s.repaint_all().expect("repaint");
+    assert_eq!(
+        s.frame().pixels(),
+        first.pixels(),
+        "the second paint replaced the frame in place and changed it; the first frame is the baseline \
+         and the chrome over it must be reproducible"
+    );
+}
 /// # Part 35: typing reaches the pixels, and this is the gate that asks
 ///
 /// **The symptom, reported on the running window:** *"when I try to write in the document, the text

@@ -69,6 +69,19 @@ impl Keep {
 }
 
 impl Scanout for Keep {
+    /// **This backend resizes**, and it is written out rather than left to the trait's shape because
+    /// part 39 removed `Scanout::resize`'s default body. `Keep` is used by tests that resize a session
+    /// and then want to look at the frame that came out, so "my size is whatever you set it to" is
+    /// the honest answer -- **and the answer has to be visible here**, where someone editing this test
+    /// backend will see it, rather than in a default that says the opposite for everyone.
+    fn resize(&mut self, width: u32, height: u32) -> Result<bool, holonomy_display::FrameError> {
+        let (w, h) = (width, height);
+        if self.size == (w, h) {
+            return Ok(false);
+        }
+        self.size = (w, h);
+        Ok(true)
+    }
     fn present(&mut self, frame: &Frame) -> Result<u64, holonomy_display::FrameError> {
         *self.last.borrow_mut() = Some(frame.clone());
         Ok((frame.width() * frame.height()) as u64)
@@ -225,33 +238,40 @@ fn a_paint_decodes_the_image_to_page_column_width_and_not_to_native() {
     // once, and a second image anywhere in the document would breach the budget.
     let column = column_width(&s);
     let (rw, rh) = s.chrome_rect_for_image(0);
-    // **800, not 640, and the budget was re-measured with it.** §2.9.3's table is corrected in
-    // PROJECT.md: the page column is 80 cells of `cell_w`, `cell_w` is the Monospace face's advance
-    // (10 at 16 ppem, and 8 as the old `ppem / 2`), so 80 columns is 800 px. 1080 at 16:9 into 800 is
-    // 450, and 800 x 450 x 4 is 1,440,000 bytes = 1.373 MiB -- **five** rasters inside 8.0 MiB,
-    // where 640 x 360 held nine.
+    // **720, not 800, and the budget was re-measured with it.** §2.9.3's table is corrected in
+    // PROJECT.md: the page column is `columns` cells of `cell_w`, `cell_w` is the Monospace face's
+    // advance (10 at 16 ppem, and 8 as the old `ppem / 2`), so 72 columns is 720 px. 1080 at 16:9 into
+    // 720 is 405, and 720 x 405 x 4 is 1,166,400 bytes = 1.112 MiB -- **seven** rasters inside 8.0 MiB,
+    // where 640 x 360 held nine and 800 x 450 held five.
+    //
+    // **The three numbers this test has quoted in its life are 640, 800 and 720**, and each moved
+    // because the page column moved: 640 before part 31 put `cell_w` on the face's own advance, 800
+    // while `columns` was 80, and 720 now that part 39 matched the measure to the reference. **The
+    // derivation is in `holonomy_render::tests::chrome::the_design_page_column_is_576_px_and_says_so`**
+    // -- at the *design* cell of 8 px -- and this is the same column at the 16 ppem atlas the session
+    // actually builds.
     assert_eq!(
-        column, 800,
-        "§2.9.3's page column at DESKTOP metrics is 800 px (640 before part 31 moved `cell_w` off \
-         `ppem / 2`)"
+        column, 720,
+        "§2.9.3's page column at DESKTOP metrics is 720 px: 72 columns of the Monospace face's \
+         10 px advance (800 px when the measure was 80 columns, 640 before part 31 moved `cell_w` \
+         off `ppem / 2`)"
     );
     assert_eq!(rw, column.min(1920), "the raster is the column width");
     assert_eq!(
-        rh, 450,
-        "1080 scaled to 800 wide is 450, keeping the 16:9 aspect"
+        rh, 405,
+        "1080 scaled to 720 wide is 405, keeping the 16:9 aspect"
     );
     assert_eq!(
         s.image_cache_bytes(),
         (rw * rh * 4) as usize,
         "the cache holds exactly one raster's bytes"
     );
-    // **1.5 MiB, not 1 MiB, and the bound is a round number rather than the old tight one.** The old
-    // figure was `921,600 < 1_000_000` -- a 78 KiB margin over a number that did not need it. At the
-    // 800 px column the raster is 1,440,000 bytes, so the bound has to move; **1.5 MiB leaves 132 KiB
-    // and is still tight enough that a second decode would fail it** (`two images at 2.88 MiB`).
+    // **1.5 MiB, and the bound is a round number rather than a tight one.** At the 720 px column the
+    // raster is 1,166,400 bytes, so the bound does not have to move; **1.5 MiB still leaves 400 KiB and
+    // is still tight enough that a second decode would fail it** (`two images at 2.22 MiB`).
     assert!(
         s.image_cache_bytes() < 1_500_000,
-        "a page-column raster is 1.373 MiB at 800 px (0.879 MiB at the old 640 px), got {}",
+        "a page-column raster is 1.112 MiB at 720 px (1.373 MiB at 800, 0.879 MiB at 640), got {}",
         s.image_cache_bytes()
     );
     assert!(s.image_cache_bytes() < s.image_cache_budget());
@@ -300,7 +320,12 @@ fn the_raster_is_a_resample_and_not_a_decimation() {
     s.paint(None).expect("paint");
     let pixels = s.image_cache_pixels(0).expect("resident").to_vec();
     let (rw, rh) = s.chrome_rect_for_image(0);
-    assert_eq!((rw, rh), (800, 450), "800 x 450 is the page column at 16 ppem; see §2.9.3's corrected table");
+    assert_eq!(
+        (rw, rh),
+        (720, 405),
+        "720 x 405 is the page column at 16 ppem after part 39's 72-column measure; see §2.9.3's \
+         corrected table and the sibling test above for the derivation"
+    );
     let at = |x: u32, y: u32| -> u8 { pixels[(y as usize * rw as usize + x as usize) * 4] };
 
     let band_top = 480 * rh / 1080 + 2;

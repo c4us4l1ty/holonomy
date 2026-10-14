@@ -243,7 +243,17 @@ mod tests {
                 event_x: 0,
                 event_y: 0,
             },
-            Event::ButtonRelease { button: 1 },
+            // **The position the decoder used to throw away.** `ButtonRelease` grew `event_x` and
+            // `event_y` when a release had to be routed (see `proto.rs`), and this table was left
+            // with the old one-field form -- which is a compile error rather than a silent hole, so
+            // the `--features desktop` build caught it where the plain build cannot see the variant
+            // at all. **Both coordinates are set to something the key mapping never looks at, which
+            // is the point: a release must not become a keystroke whatever it carries.**
+            Event::ButtonRelease {
+                button: 1,
+                event_x: 4096,
+                event_y: 4096,
+            },
             Event::ClientMessage {
                 type_atom: 0,
                 data1: 0,

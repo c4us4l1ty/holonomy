@@ -67,18 +67,26 @@ pub trait Scanout: std::any::Any {
 
     /// Change the size of what this presents into. Returns whether it changed.
     ///
-    /// **The default is "I have a fixed size", which is true of a DRM panel** and is the honest answer
-    /// for one: a panel's size is its mode, and changing it is a mode set, not a resize. A backend
-    /// whose size can change -- a window -- overrides this.
+    /// **A backend whose size cannot change returns `Ok(false)`** — which is true of a DRM panel and is
+    /// the honest answer for one: a panel's size is its mode, and changing it is a mode set, not a
+    /// resize. [`DrmScanout`](crate::drm::DrmScanout) is the example, and it says so in its own body.
     ///
     /// This exists so that a resize has one owner. [`Session::resize`](../../holonomy/session/struct.Session.html#method.resize)
     /// calls this *before* it rebuilds its own frame, because `present` checks the frame's size against
     /// the backend's and refuses a mismatch; and it checks the two agree afterwards, so a caller cannot
     /// leave a session and a backend at different sizes even by accident. Two halves, one method, one
     /// order.
-    fn resize(&mut self, _width: u32, _height: u32) -> Result<bool, FrameError> {
-        Ok(false)
-    }
+    ///
+    /// # CORRECTION, part 39: **no default body.** It had one — `Ok(false)`, meaning "I have a fixed
+    /// size" — **and that default is what a shadowed inherent method hit.**
+    ///
+    /// `Desktop` had `pub fn resize` of its own, of the same name and the same effect; `Session` calls
+    /// this through `Box<dyn Scanout>`, so it got the default, returned "unchanged", and the window
+    /// never resized for the whole life of the feature. **A default body is a silent answer to a
+    /// question the implementer has to answer**, and this is a question with a wrong answer that looks
+    /// like a right one. Required means a backend that has not thought about its size says so in its
+    /// own words, where the next reader of that file will find it.
+    fn resize(&mut self, _width: u32, _height: u32) -> Result<bool, FrameError>;
 
     /// Present only `damage` of a frame, where the backend can.
     ///

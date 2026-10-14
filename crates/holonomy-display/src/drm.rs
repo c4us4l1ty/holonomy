@@ -96,6 +96,15 @@ impl Scanout for DrmScanout {
         Err(DrmError::NotBuilt.into())
     }
 
+    /// **Always `false`: a panel's size is its mode.**
+    ///
+    /// Written out rather than inherited, because part 39 removed the trait's default body: a default
+    /// answer to "can you resize" is an answer the implementer has to make, and this backend's answer
+    /// is that changing it is a mode set, which `holonomy-display` does not do.
+    fn resize(&mut self, _width: u32, _height: u32) -> Result<bool, FrameError> {
+        Ok(false)
+    }
+
     fn width(&self) -> u32 {
         self.width
     }

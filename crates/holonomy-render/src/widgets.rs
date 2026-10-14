@@ -383,9 +383,29 @@ pub const SEPARATOR: u32 = 9;
 /// **`Layout` does not keep a back-pointer to its metrics**, and adding one for this would make every
 /// `Layout` two words larger for the benefit of one function. The button is derived from the toolbar's
 /// own height, which is the honest source: **the button is as tall as the toolbar's content box.**
+///
+/// # CORRECTION, part 39: `toolbar.height / 2 + 1`, and a 38 px band gave a 20 px button
+///
+/// **`icons::SIZE` is 16**, so the button was **2 px of padding on each side of its icon** and the row
+/// read as a strip of glyphs set shoulder to shoulder rather than as buttons. Measured in the running
+/// window at 20 ppem: four icons in 80 px, each 16 of it ink.
+///
+/// **It is now the band's height less [`BUTTON_INSET`]**, which is 6: **32 px of button for 16 px of
+/// icon**, so a pressed or hovered button has somewhere to be seen, and the reference's proportion —
+/// an icon at about half its button — is roughly what this gives. **The cap is the old one, 40**, so a
+/// scaled-up toolbar cannot grow buttons without bound.
+///
+/// **The padding is a constant rather than a fraction because the icon is not.** The icon is 16 px at
+/// every type scale, so a button that is a *fraction* of the band gets tighter as the type grows, which
+/// is the opposite of what the band growing was for.
 fn chrome_button(l: &Layout) -> u32 {
-    (l.toolbar.height / 2 + 1).min(40)
+    l.toolbar.height.saturating_sub(BUTTON_INSET).clamp(16, 40)
 }
+
+/// How much of the toolbar's height a button leaves empty above and below, in total.
+///
+/// **Six, so three on each side** — see [`chrome_button`] for the measurement this replaces.
+const BUTTON_INSET: u32 = 6;
 
 impl ChromeState {
     /// The current paragraph style's name, borrowed from the list rather than owned by the state.
@@ -520,33 +540,58 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     };
 
     let pad = 2 * l.cell_w;
-    // **The tick column.** A dropdown that shows a check needs room for it, or the tick lands on the
-    // label -- so the width is computed over `label + icon + tick` rather than `label` alone.
+    // **The width is computed over the whole row, and the whole row is more than the label.**
+    //
+    // # CORRECTION, part 39: the accelerator was not in it, and a menu row is not a label
+    //
+    // ```text
+    // | tick |   icon |  Save  .......  Ctrl+S |     <- what is drawn
+    // | tick |   icon |  Save  |                 <- what the panel was sized for
+    // ```
+    //
+    // **Measured in the running window, at 20 ppem:** `Save` ends at x = 144 and `Ctrl+S` starts at
+    // x = 143, so the two are drawn **on top of each other** and the row reads `SaveCtrl+S`. The same
+    // arithmetic put `Ctrl+O` through the middle of `Page Setup`. **Nothing clipped and nothing
+    // overflowed** -- each label fitted the panel on its own, so every gate that checked "is this text
+    // inside the popup" was green while the two texts were inside each other.
+    //
+    // **The rule is that a row is `leading + label + gap + accelerator`,** and `leading` is a constant
+    // four cells whether or not the row has a tick and an icon, because the painter puts the tick in
+    // column 0, the icon in column 2 and the label in column 4 -- it does not move the label left to
+    // fill a gap. The old formula counted the tick and the icon *conditionally* and so disagreed with
+    // the painter by up to two cells as well.
     let widest = items
         .iter()
-        .map(|it| {
-            let icon = if it.icon.is_some() { 2 } else { 0 };
-            let tick = if it.checked { 2 } else { 0 };
-            (it.label.len() as u32 + 2 + icon + tick) * l.cell_w
-        })
+        .map(|it| row_cells(it, l.cell_w))
         .max()
         .unwrap_or(40)
         .max(14 * l.cell_w);
     let row_h = l.cell_h + 6;
     let w = widest + pad * 2;
-    let h = (items.len() as u32).saturating_mul(row_h) + pad;
 
     // **Clamped to the panel, not to the anchor.** `Extensions` is the longest heading and its popup
     // is 336 px wide; anchored without a clamp it runs off the right edge and the last two items are
     // drawn into the scrollbar. The clamp is on the panel because that is where the pixels stop.
+    //
+    // **And the height is clamped too, which it was not.** `y` was `min(height - h).max(0)`, so a popup
+    // taller than the panel had its *top* pushed up to 0 and its rows — which were laid out from the
+    // clamped top — ran off the bottom of the window, where they were drawn and clipped by the frame.
+    // **The rows are now the thing that is cut**, so a row that is on screen is a row that can be
+    // clicked, which is the one invariant `Popup` exists to keep.
+    let y = anchor_y.min(l.height.saturating_sub(1));
+    let room = l.height.saturating_sub(y).saturating_sub(pad);
+    let fits = usize::try_from(room / row_h.max(1)).unwrap_or(0);
+    let shown = items.len().min(fits);
     let x = (anchor_x as i32).min(l.width as i32 - w as i32).max(0);
-    let y = (anchor_y as i32).min(l.height as i32 - h as i32).max(0);
+    let h = ((shown as u32).saturating_mul(row_h) + pad).min(l.height.saturating_sub(y));
 
-    let rows = (0..items.len())
+    let rows = (0..shown)
         .map(|i| {
+            // **All `u32`, and the arithmetic cannot underflow because `shown` was bounded by the room
+            // above**: `pad + shown * row_h <= room`, so the last row's bottom is inside the panel.
             DamageRect::new(
                 x as u32,
-                (y + pad as i32 + (i as i32) * row_h as i32) as u32,
+                y + pad + (i as u32).saturating_mul(row_h),
                 w,
                 row_h,
             )
@@ -557,6 +602,26 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         rows,
         open,
     })
+}
+
+/// How many cells one popup row needs: `leading + label + gap + accelerator`.
+///
+/// **The one definition of a popup row's width.** `widgets::popup` sizes the panel with it and
+/// `chrome::paint_popup` cuts a label with it, so a label can never be drawn wider than the room the
+/// panel was built for -- which is the defect part 39 corrected, where each side had its own arithmetic
+/// and the label fitted the panel while the accelerator did not.
+///
+/// * **leading, four cells: tick in column 0, icon in column 2, label in column 4.** Constant,
+///   because a row without a tick still starts its label in column 4: the columns are *reserved*, not
+///   packed, which is what makes every label in a popup line up with every other.
+/// * **gap, two cells,** so a label and the accelerator beside it do not read as one word.
+/// * **accelerator, its own length, or nothing** -- a row with no accelerator is not padded out to
+///   make one.
+pub fn row_cells(it: &crate::menus::Item, cell_w: u32) -> u32 {
+    const LEADING: u32 = 4;
+    const GAP: u32 = 2;
+    let acc = it.accelerator.as_deref().unwrap_or("");
+    (LEADING + it.label.chars().count() as u32 + GAP + acc.chars().count() as u32) * cell_w
 }
 
 /// The rect a [`Hit`] is drawn at, or `None` if it is not drawn.

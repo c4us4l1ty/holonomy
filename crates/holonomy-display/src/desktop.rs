@@ -119,6 +119,12 @@ pub struct Desktop {
     presented: u64,
     /// Bytes pushed, which is the number worth watching: it is what the socket cost.
     bytes: u64,
+    /// **The `PutImage` staging buffer, reused across pushes.**
+    ///
+    /// **Held here and taken out for the duration of a push** (`std::mem::take`) so that a
+    /// reallocation on the frame path cannot happen while the borrow of it is live in
+    /// `Window::put_image`. `put_image` borrows the slice for the whole call.
+    scratch: Vec<u8>,
     /// Frames pushed, and how many of those were damage-only.
     full_frames: u64,
     events: VecDeque<Event>,
@@ -204,6 +210,7 @@ impl Desktop {
             height,
             presented: 0,
             bytes: 0,
+            scratch: Vec::new(),
             full_frames: 0,
             events: VecDeque::with_capacity(64),
         };
@@ -250,6 +257,40 @@ impl Desktop {
 
     /// Adopt a new window size. Returns `true` if it changed.
     ///
+    /// # CORRECTION, part 39: this was an **inherent** `pub fn resize`, and `Session` holds a
+    /// `Box<dyn Scanout>`
+    ///
+    /// ```text
+    /// impl Desktop       { pub fn resize(..) }        // inherent
+    /// trait  Scanout      { fn resize(..) { Ok(false) } }  // the default, "I have a fixed size"
+    /// ```
+    ///
+    /// **An inherent method of the same name and signature shadows the trait's — for a caller that has
+    /// a `Desktop`. `Session` does not have a `Desktop`; it has a `Box<dyn Scanout>`, so
+    /// `self.scanout.resize(w, h)` resolved to the *trait's* `resize`, which is the default body, which
+    /// returns `Ok(false)`.** Every window resize in the product therefore returned "nothing changed",
+    /// `Session::resize` returned `false` before rebuilding anything, and the frame stayed at its
+    /// original size.
+    ///
+    /// # What the user saw, and why it looked like a layout bug
+    ///
+    /// The window manager resized the window; the app kept presenting a **1,600 x 1,000 frame into
+    /// it**; the server clipped it; and the user was looking at the top-left corner of a chrome laid
+    /// out for a different window. The menu bar kept its 1,600 px spacing and ran off the right edge
+    /// mid-word, the status bar sat at y = 970 in a 700 px window, and the page's right edge was past
+    /// the window — **none of which is what a 900 x 700 layout looks like**, and all of which is what
+    /// a 1,600 x 1,000 layout looks like when it is cropped.
+    ///
+    /// # Why no gate caught it
+    ///
+    /// **Every gate that tested this called it on a concrete `Desktop`,** where the inherent method wins
+    /// and the behaviour is correct. The one gate named in the doc below — `resize_is_recorded_not_
+    /// requested` — **does not exist**; it is described in a comment and was never written, so the one
+    /// check that would have gone through a trait object went with it. The fix is three parts: the method
+    /// is a trait override, `Scanout::resize` has **no default body** so that a backend which forgets
+    /// it is a compile error rather than a silent `false`, and there is a gate that reads this file and
+    /// counts the `resize` definitions.
+    ///
     /// # The backend and the session have to agree, and this is the half that cannot fail
     ///
     /// [`Scanout::present`] checks the frame's size against the backend's and refuses a mismatch, which
@@ -290,15 +331,24 @@ impl Desktop {
     /// **A size that arrived from outside is recorded, not re-requested.** The only caller that may
     /// *ask* for a size is a test or a caller that genuinely wants a specific one, and it has
     /// [`Window::configure_size`] for that.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, DesktopError> {
+    ///
+    /// **This is now a [`Scanout`] override and not an inherent method**, so `Box<dyn Scanout>` reaches
+    /// it; the body is unchanged. See the correction at the top of it.
+    ///
+    /// **There is deliberately no inherent `Desktop::resize` any more, not even a delegate.** A delegate
+    /// would have been correct -- same body, same answer -- and it would also have been the second
+    /// entrance that the next reader would call instead of the trait one, in the one situation where
+    /// calling the wrong one is silent. **The method is private now and has exactly one caller**, which
+    /// is the impl block below.
+    fn resize_recorded(&mut self, width: u32, height: u32) -> bool {
         let (w, h) = (width.min(u16::MAX as u32), height.min(u16::MAX as u32));
         if (self.width, self.height) == (w, h) {
-            return Ok(false);
+            return false;
         }
         // **No `ConfigureWindow` here, and that sentence is the fix.**
         self.width = w;
         self.height = h;
-        Ok(true)
+        true
     }
 
     /// How many frames have been pushed.
@@ -357,6 +407,14 @@ impl Desktop {
     }
 
     /// Push `frame`'s pixels for `rect`.
+    ///
+    /// # The buffer is the session's, not this frame's
+    ///
+    /// **One `Vec<u8>` on `Desktop`, reused for every push.** A full 1,600 x 1,000 frame is 6.4 MB, and
+    /// `Vec::with_capacity` on the frame path is 6.4 MB handed to the allocator and taken back on
+    /// every full repaint — which is every keystroke on a chrome change and every menu open. The
+    /// rectangle is *copied* into it a row at a time by [`Frame::append_xrgb_row`], which is one
+    /// `memcpy` per row rather than one four-byte copy per pixel.
     fn push(
         &mut self,
         frame: &Frame,
@@ -378,19 +436,16 @@ impl Desktop {
         // visual's masks are R=0x00FF0000 G=0x0000FF00 B=0x000000FF in LSBFirst order, and a frame put
         // into a pixmap comes back byte for byte. So the rectangle is copied out row by row and sent
         // as it is, with no conversion and no palette.
-        let row_bytes = rw as usize * 4;
-        let mut buf = Vec::with_capacity(row_bytes * rh as usize);
+        let mut buf = std::mem::take(&mut self.scratch);
+        buf.clear();
         for y in ry..ry + rh {
-            let start = (y * frame.width() + rx) as usize;
-            let row = &frame.pixels()[start..start + rw as usize];
-            for px in row {
-                buf.extend_from_slice(&px.to_le_bytes());
-            }
+            frame.append_xrgb_row(rx, rw, y, &mut buf);
         }
         let sent = self
             .window
             .put_image(&mut self.conn, &buf, rw, rh, rx as i16, ry as i16)
             .map_err(DesktopError::Window)?;
+        self.scratch = buf;
         self.bytes += sent;
         self.presented += 1;
         if whole {
@@ -401,6 +456,16 @@ impl Desktop {
 }
 
 impl Scanout for Desktop {
+    /// **The override that part 39 added, and the whole of the window-resize fix.**
+    ///
+    /// **A window resizes because the window manager said so, and this records that.** It does not ask
+    /// for the size: the size came *from* the WM in a `ConfigureNotify`, and asking again is the
+    /// feedback loop this module's docs describe. `Session::resize` calls it before it rebuilds its own
+    /// frame, because `present` refuses a frame whose size is not the backend's.
+    fn resize(&mut self, width: u32, height: u32) -> Result<bool, FrameError> {
+        Ok(self.resize_recorded(width, height))
+    }
+
     fn present(&mut self, frame: &Frame) -> Result<u64, FrameError> {
         if frame.size() != (self.width, self.height) {
             return Err(FrameError::SizeMismatch {

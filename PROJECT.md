@@ -5135,3 +5135,165 @@ than fixed in passing, because it changes how often the loop wakes and that is a
 cost rather than a correction to a fact. `ConfigureNotify` is event-driven and unaffected — `next_event`
 returns the moment an event arrives, so this is not the resizing defect; it is the window manager
 finding the app never sleeps.
+
+---
+
+# Part 39 — three reports, three structural mistakes, 2026-10-13
+
+*"Resizing the window does not resize the contents." "The buttons are laggy." "Dropdowns open one layer
+back."* Every one of those is a sentence about **structure** rather than about a feature, which is why
+none of them was answered by adding anything.
+
+## A. The resize resized nothing, and it was silent about it
+
+`Desktop::resize` was an **inherent** method and `Scanout` also had one. Rust resolves
+`Box<dyn Scanout>`'s call to the **trait's**, so `Session::resize` never reached the desktop backend at
+all — it called the trait's default body, which returned `Ok(false)`, which is spelled *nothing changed*.
+
+```text
+before:  resize: server 900x700, changed false, frame 1600x1000
+after:   resize: server 900x700, changed true,  frame 900x700, metrics 900x700
+```
+
+**A default body that answers "no" is the defect as much as the shadowing is.** It existed so that a
+backend which did not care could ignore resizing, and it turned a forgotten method into a working
+feature that did nothing. `Scanout::resize` now has **no default body**: a backend that forgets it is a
+compile error.
+
+**This is the only change in the project where the gate had to read the source rather than call it**,
+because the bug *is* a name resolution: `crates/holonomy-display/tests/desktop_resize.rs` counts `fn
+resize` definitions in `desktop.rs`, `lib.rs` and `session.rs` and fails if the inherent one comes back.
+`resize_is_recorded_not_requested` (part 42) could not have caught it: the request was sent, and the
+answer it was given said no.
+
+## B. Dropdowns opened one layer back
+
+`Painter::walk` draws `before`, then `node`, then `after`. The popup was emitted by the band that owns
+it — the menu band drew the File menu's popup into `chrome.before` — and every band is inside the chrome
+group, which is the **first** entry of `root.before`. **So a popup was painted first** and the page, the
+sidebar and the document's own glyphs went over it.
+
+`Chrome::tree` now owns the layer order, and it is written down as a table on the function:
+
+| layer | what | where |
+|---|---|---|
+| 0 | panel, bands, rules, title, menu bar, toolbar | `root.before` |
+| 1 | the page: shadow, sheet, scrollbar | `root.before` |
+| 2 | the document-tabs sidebar | `root.before` |
+| 3 | the document overlay: selection, caret | `root.before` |
+| 4 | **the open popup** | **`root.after`** |
+
+**`after` is the only list a caller cannot paint into by accident**, which is the entire argument for
+putting the topmost layer there. The gates are a structural one (exactly one subtree in `root.after`, and
+none at all when no popup is open) and a pixel one — **not one pixel of the popup's rect is the sidebar's
+colour**, which is the form of "the panel covers what it hangs over" that survives a rect containing a
+glyph, a rim and a drop shadow.
+
+### The probe that was wrong three times
+
+A single pixel is the wrong tool here. `bottom() - 1` reads the drop shadow, which is drawn *inside* the
+panel and is the chrome background's own colour; `(x + w/2, bottom() - 5)` reads a glyph; `y + 6` is
+over the toolbar and not over the sidebar at all. Each failure named a layer that was never involved.
+**A claim about a rect that contains text has to be made about the rect.**
+
+## C. The buttons lagged, and it was area rather than speed
+
+Measured in the live window with `HOLONOMY_WINDOW_TRACE=1`, against a 1,600 x 1,000 frame:
+
+| what | damage then | damage now |
+|---|---|---|
+| hover over a toolbar button | **583,808 px (36%)** | **2,880 px (0.2%)** |
+| dismissing a menu (`Hit::None`) | `full_damage()` | the two popup rects |
+| an armed style toggle | `full_damage()` | that one button |
+| **one `Shift+Left`** | **1,600,000 px (100%)** | **page ∪ scrollbar ∪ status** |
+
+The last row is the one worth keeping. `after_selection_moves` ended `self.damage =
+self.chrome.full_damage()` **while its own doc comment, one line above, said *"the page is the damage
+unit for anything that moves the selection"*** — the function's reasoning and its code disagreed and the
+code was the one that ran. **Shift-arrow is a gesture, not a keystroke**: sixty presses to select a
+paragraph, and one call per motion event in a drag.
+
+**`PaintStats::pixels` cannot hold any of this**, by the way: it counts ~1.17 M for a rect of 107 k
+pixels, because it counts emitter invocations. `Session::last_damage` is the rect the paint was actually
+given, and a rect is something a person can reason about.
+
+## D. Box-drawing garbage in every rule, and why it also broke repaint idempotence
+
+`Chrome::hline` built a `TextRun` starting at `─` (U+2500). **A `TextRun` is consecutive codepoints**,
+so a 120-cell rule was `U+2500 … U+2577` — the whole Box Drawing block, one glyph per cell — which is
+why every rule in the UI rendered as rows of crossed circles. `Node::Repeat(RepeatRun)` is the node that
+means *the same glyph again*, and the same correction went into table borders and raw-LaTeX source.
+
+**It was also why `repaint_all()` twice differed from once by 970 pixels.** `TextRun::MAX_LEN` is 256, so
+a wider rule was cut at 256 and which part was cut depended on the cell the painter was using — which is
+a function of the atlas index the run carried, which is a function of what had been painted before. The
+`Repeat` node is 16 bytes of geometry with no glyph stream in it, so there is nothing in it that can
+depend on history. **A gate that said "fewer than 200 pixels" would have been crept up against; the gate
+says zero.**
+
+And while fixing it: `hline` clamped with `u16::try_from(...).unwrap_or(MAX_LEN)`, which catches a count
+that does not fit in a `u16` and **not** one between 256 and 65,535 — so a 3,072 px panel at a 12 px cell
+was a **panic inside a paint**, which takes the session with it. `RepeatRun::new` asserts the bound, so
+the gate that sweeps every panel size from 1x1 up would have found it if it had reached that wide.
+
+## E. The measure does not grow with the window, which reverses part 27
+
+Measured off `Plan/Screenshot From 2026-10-01 00-17-42.png` (1,778 px):
+
+| | reference | ours at 1,600 px, before | ours now |
+|---|---|---|---|
+| sidebar | 345 px (**19.4%**) | 208 px (13%) | 256 px (**16%**) |
+| page | 813 px (**45.7%**) | 1,152 px (72%) | 960 px (**60%**) |
+| desk each side | 310 px | 144 px | 320 px |
+
+**The reference's page is the same 813 px in every screenshot in the folder**, and a page that grows with
+the window is a page that fills it. So `max_columns` is now `columns` — 72 — and the ceiling and the
+design are the same number. **This reverses part 27**, whose complaint was *"make the window bigger and
+nothing happens"*, and the honest answer is that part 27 was answering the right complaint with the wrong
+mechanism: **a resize that only changes how many characters fit on a line is a resize the eye cannot see,
+and the resize path did not work at all until A.**
+
+Our page is still wider than the reference's in *pixels* and closer in *characters*: a monospaced cell is
+12 px where the reference's proportional character is about 8.6, and 72 cells is the same count of
+characters as the reference's ~90.
+
+## F. What §2.9.3's figures are now
+
+The page column is `columns * cell_w`: **576 px at the 8 px design cell** (640 before) and **720 px at
+the 16 ppem atlas the session actually builds** (800 while `columns` was 80). Every decoded-image
+figure in §2.9.3 derived from 640 px is **10 % high**, which is recorded rather than edited into six
+places, because the derivation is the thing that has to stay true:
+`the_design_page_column_is_576_px_and_says_so` asserts it.
+
+## G. Gates added or corrected in this part
+
+| gate | what it holds |
+|---|---|
+| `desktop_resize.rs::desktop_resize_is_the_trait_override_and_not_an_inherent_method` | A |
+| `chrome_paint_order.rs::the_open_popup_is_emitted_into_after_and_nothing_else_is` | B |
+| `chrome_paint_order.rs::the_open_popup_is_visible_where_it_hangs_over_the_sidebar` | B |
+| `session_damage.rs::a_hover_damages_one_widget_and_not_a_third_of_the_frame` | C |
+| `session_damage.rs::dismissing_a_menu_damages_the_popup_and_not_the_panel` | C |
+| `session_damage.rs::an_armed_toggle_damages_its_button_and_nothing_else` | C |
+| `session_damage.rs::a_selection_change_damages_the_page_and_no_band_above_the_canvas` | C |
+| `text_colour.rs::a_repaint_is_idempotent` | D |
+| `chrome.rs::the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window` | E |
+| `chrome.rs::the_design_page_column_is_576_px_and_says_so` | F |
+| `widgets.rs::a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs` | the `Save`/`Ctrl+S` overlap |
+| `widgets.rs::a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window` | the height and right clamps |
+| `chrome.rs::the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it` | the ruler |
+| `chrome.rs::the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open` | the sidebar |
+
+## H. And a gate that had to be `#[cfg]`d rather than made more forgiving
+
+`release_artifact.rs` asserts the **default** release binary contains no X11, and it reads
+`target/<profile>/release/holonomy` — **which is one path for two feature sets**. `cargo test --features
+desktop --workspace` puts a desktop binary there, so the gate failed, correctly. The file's answer was
+`#[ignore]` plus a three-command procedure in the docs. **That is the wrong repair for the same reason it
+was wrong in `write_through_cost.rs`**: a plain `cargo test --workspace` would report success for a gate
+it had not run.
+
+**`cfg` is the root fix**, because cargo guarantees the correspondence the gate was missing: a test run
+with `--features desktop` built the desktop binary, and a run without it built the default one. A probe
+that skipped when it *saw* X11 markers would switch the gate off on exactly the regression it exists to
+catch; `cfg` cannot be fooled that way.
