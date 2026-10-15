@@ -6079,3 +6079,64 @@ that names a structure which exists and is not the thing you want is worse than 
 for a *document line*, so a line taking three visual rows gets one slot and everything below it stays
 where it is. **That is one line of `chrome.rs`, not four of `session.rs`** — and it is why the emitter
 is still the place the text is cut, rather than the wrap rule being the obstacle.
+
+## J. Three gates part 44 made false, and what reconciling them says
+
+**Recorded because the gates were right and the numbers were wrong, and "update the test" is the
+outcome that hides both facts.** Part 44 shipped, and only the *full workspace* run found these —
+every targeted run I did had passed.
+
+### `pointer.rs`: a press is exactly one of five things
+
+The gate counts every tool press across `fired`, `inert`, `toggled`, `opened` and `chrome`, and
+asserts the sum is **exactly 1**. Part 44's dropdown branch incremented `pointer_chrome` as well as
+the `opened` counter, so `zoom` scored 2.
+
+**Opening a popup *is* a chrome-state change — that is true and is not why it was wrong.** The gate's
+model is five *mutually exclusive* outcomes and a dropdown press is `opened`. **Part 21 hit the same
+thing** with a zoom choice counted as `fired`, and part 23 measured that a zoom change produces no
+`Command` at all. **All three times the fix was to name the outcome, not to relax the sum**, and that
+is now written at the site.
+
+### `pointer.rs`: the atlas fixture was one size
+
+`bold_and_italic_left_the_inert_set_and_nothing_else_did` presses Zoom's second row and got
+`ZoomUnavailable { percent: 125 }` — **correct product behaviour**: a one-size atlas refuses every
+percentage above the first, and `AtlasBuilder::new` will not hold a third size against the 512 KiB
+ceiling.
+
+**The fixture builds `[16]`**, which is right for what that file measures (a pen position at one size)
+and wrong for a gate that exercises zoom. **It now builds `[16, 20]`, which is what `main` builds**,
+and `pen` still reads `sizes().first()`, so **every position assertion in the file is unchanged** — the
+second size is present and nothing there draws at it.
+
+### `actions.rs`: `has_dropdown` and `dropdown_items` disagree for exactly one tool
+
+`Overflow` is a menu button whose rows are the tools that did not fit, and there are none at `DESKTOP`.
+The gate — *"this is what stops a tool being drawn with a chevron that opens nothing"* — went red.
+
+**The alternative was to take `Overflow` out of `has_dropdown`** and let the press path ask only "is
+the list empty". **That is worse**: `has_dropdown` is what draws the chevron, so a button whose chevron
+means *this opens a menu* and whose predicate says false would have an affordance and a predicate
+disagreeing about the same fact. **So the exception is one tool, named at the gate**, rather than a
+blanket relaxation that would have stopped the gate holding for the other nineteen — and the four
+static tables are exactly where "a chevron that opens nothing" is the defect.
+
+## K. The number, restated
+
+**Six inert buttons, down from ten.** `pointer.rs` now spells the arithmetic out:
+
+> 20 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome changes.
+
+**Two of those five are new *categories* this project created rather than new members of an old one** —
+`Mode` made the dropdown count five, and `Overflow` is a chrome change that changes nothing at
+`DESKTOP`. That second one is worth a reader's attention: it is counted because the alternative was
+`pointer_inert`, and `pointer_inert` means *a widget with no action behind it*, which would be the
+false claim.
+
+## L. Final state
+
+| gate | count |
+|---|---|
+| `cargo test --release -j 4 --workspace --no-fail-fast` | **116 binaries, 1465 tests, exit 0** |
+| `cargo clippy --release -j 4 --workspace --all-targets -- -D warnings` | **clean** |
