@@ -2884,8 +2884,8 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             m.cell_w,
             cells_left_of(l.page.x, l.sidebar_back.right() as i32 + 8, m.cell_w),
         ),
-        Style::MONOSPACE,
-        colour::INK_DIM,
+        Style::BOLD,
+        colour::INK_CHROME,
         l.sidebar_back.right() as i32 + 8,
     );
     into.push(SurfaceTree::leaf(crate::Node::Icon(
