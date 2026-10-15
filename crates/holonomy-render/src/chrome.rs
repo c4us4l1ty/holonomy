@@ -2927,6 +2927,16 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // **Visible in a dump of the running window** as `← Document t|` with the page over the rest.
         // Nothing clips the chrome's own text -- `Painter::doc_text` clips the *document*, and the
         // sidebar row is a `TextRun` -- so the only fix is to not emit the part that does not fit.
+        // Separate rows with a subtle line for clean layout, matching reference design
+        if !active && i < l.sidebar_rows as usize - 1 {
+            into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
+                r.x as i32,
+                (r.y + r.height) as i32 - 1,
+                r.width,
+                1,
+                colour::RULE_DIM,
+            ))));
+        }
         push_text(
             into,
             m,
