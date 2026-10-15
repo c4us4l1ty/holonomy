@@ -841,6 +841,40 @@ impl<'a> Painter<'a> {
         n
     }
 
+    /// **Select which of the atlas's sizes this painter draws at.** Part 43.
+    ///
+    /// ## Why this is a setter and not a constructor argument
+    ///
+    /// **`Painter::new` has taken an atlas and left the size at zero since the atlas gained multiple
+    /// sizes**, which means `size_index` was a field with exactly one reachable value. **Zoom is
+    /// what the field is for**, and the alternative — a second painter — would be a second scratch
+    /// buffer and a second stats counter for the same atlas.
+    ///
+    /// ## The clamp, and why it is not a panic
+    ///
+    /// **`min(atlas.sizes().len() - 1)`**, because `atlas_size()` already falls back to the first
+    /// size when the index is out of range and a panic here would be a second, stricter rule than
+    /// the one the rest of the file obeys. **A zoom to a size the atlas does not hold becomes the
+    /// largest size it does hold**, which is the same answer and is visible in the pixels.
+    pub fn set_size_index(&mut self, index: u8) {
+        let Some(atlas) = self.atlas else {
+            self.size_index = index;
+            return;
+        };
+        let last = u32::try_from(atlas.sizes().len().saturating_sub(1)).unwrap_or(0);
+        self.size_index = u8::try_from(u32::from(index).min(last)).unwrap_or(0);
+    }
+
+    /// **The ppem this painter is drawing at, or `None` with no atlas.**
+    ///
+    /// **The session needs this and could not get it**: `atlas_size` is private, and a zoom that
+    /// changed the size without being able to read it back would not be able to say whether it had
+    /// worked. **`zoom.rs` reads this after every `set_zoom`.**
+    #[must_use]
+    pub fn size(&self) -> Option<u16> {
+        self.atlas.map(|_| self.atlas_size())
+    }
+
     fn atlas_size(&self) -> u16 {
         let Some(atlas) = self.atlas else { return 16 };
         atlas

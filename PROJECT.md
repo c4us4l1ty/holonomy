@@ -5629,3 +5629,164 @@ library, naming what goes wrong and what it looks like.
 | `proto.rs::a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire` | A: the X11 field is read, not discarded |
 | `click_count.rs` (8 gates) | B and C: counting, the three selections, both directions of each boundary |
 | `edge_scroll.rs` (6 gates) | E and F: the ramp, the order, both edges, the release, and the limitation |
+
+---
+
+# Part 42 — typing past the resident window, 2026-10-15
+
+## A. Reads faulted and writes did not
+
+`Editor::read_into_faulting` has existed since part 14 and the paint path uses it, so a document
+larger than the resident budget still *draws*. **Every mutating path goes through `Rope::leaf_mut`,
+which answers `LeafAbsent` for a leaf the rope does not hold — and nothing faulted that leaf first.**
+
+The consequence is the worst kind: **a keystroke past the resident window did nothing at all, in
+silence.** No error, no keystroke echo, no document change. Typing works until it stops, and the
+boundary moves with the eviction policy.
+
+## B. Three fixes, not one, and the order they had to happen in
+
+| what | what it does |
+|---|---|
+| `Editor::fault_at_caret` | the leaf holding the caret, resident |
+| `Session::apply_with(command, Option<&mut dyn LeafSource>)` | carries a source to the mutators |
+| `Session::caret_to_faulting(at, source)` | **the caret's leaf, resident** |
+
+**The caret one is the same defect one step earlier, and the gate caught it on the first run** with
+`LeafAbsent { leaf: 79 }` — from the *caret placement*, before the keystroke that was under test ever
+ran. It is the step a user takes first: you cannot type where the caret cannot go, and every route to
+a distant offset goes through `caret_to`.
+
+## C. `apply` and `caret_to` are unchanged, and that is the honest answer
+
+**Forty-three gate sites call `caret_to` and forty-odd call `apply`, and the documented reason both
+are `pub` is that a driver should not have to invent an edit to move the caret.** Neither has a
+source, and a mutator cannot conjure bytes it has no way to fetch.
+
+**So both pass `None` and the refusal propagates**, typed, with the document unchanged.
+`a_no_source_still_refuses_and_that_is_honest` asserts it rather than leaving it to be found. The
+alternative — a `RefCell` around the rope so `apply` could fault anyway — is precisely what
+`read_into_faulting`'s own docs argue against, and it is not made.
+
+## D. `Session::read_into_faulting`, and why the capability had to be carried
+
+**`Session::text()` is `&self` and cannot fault, so on a sparse document it answers `LeafAbsent`.** The
+capability existed on `Editor` and the session did not carry it, so a caller holding a `Session` —
+which is every driver and every gate — could not read a sparse document without reaching through
+`editor_mut`, which returns `&mut Editor` and would let a caller bypass the session's invariants.
+
+**One line, no logic.** The point is that the `&mut self` makes it possible where `Editor`'s version
+needed `&mut Editor`, and that every faulting read in the codebase now goes through one name.
+
+## E. What is *not* fixed
+
+- **`Session::newline_in_cell` takes no source**, so Enter inside a table cell still refuses past the
+  resident window while typing in ordinary text does not. It could take it the same way `insert`
+  does; it does not, and `newline_in_cell`'s doc comment says so.
+- **A selection spanning two leaves.** `fault_at_caret` faults one leaf; `delete_at` walks back
+  across the boundary for a backspace but a multi-leaf selection would need the range.
+
+## F. The fixture cost an hour, twice
+
+**An empty `Editor::new()` cannot test any of this**: `caret_to(30_000)` clamps to 0 and the keystroke
+inserts at 0 with no leaf to fault — so the first version passed and fetched nothing.
+**`Editor::from_skeleton(len)` is the shape the file is about**: `text_len()` answers `len`,
+`resident_bytes()` answers `0`, and every caret placement past the start is necessarily in an absent
+leaf.
+
+## G. Gates
+
+| gate | what it holds |
+|---|---|
+| `faulting_edit.rs::a_keystroke_past_the_resident_window_edits_when_there_is_a_source` | A, and the whole document is byte-for-byte right |
+| `::a_keystroke_inside_the_resident_window_faults_nothing` | **the cost**: NFR-1.1 budgets 0.50 ms |
+| `::a_backspace_at_a_leaf_boundary_deletes` | the leaf *before* the caret's |
+| `::a_no_source_still_refuses_and_that_is_honest` | C |
+| `::a_click_past_the_resident_window_and_a_keystroke_both_work` | the read half, which was never broken |
+
+---
+
+# Part 43 — zoom zooms, 2026-10-15
+
+## A. Why zoom could not be a rebuild
+
+**§2.9.5 forbids runtime curve evaluation outright**, and rasterising a glyph at runtime is exactly
+that. So zoom is a **lookup**: `main` asks `build_atlas` for `[ppem, ppem * 5 / 4]` and
+`Session::set_zoom` moves `Painter`'s `size_index`.
+
+**`Painter::size_index` and `atlas_size()` had existed since the atlas gained multiple sizes and had
+exactly one reachable value.** Nothing had to be invented; it had to be switched on.
+
+## B. Two levels, and the ceiling that decides it
+
+`AtlasBuilder::new` refuses a third size:
+
+```text
+3 sizes requested, but the atlas geometry is budgeted for at most 2: each extra size adds
+14,080 bytes of metric table, which would push the atlas-plus-table pair over the 512 KiB ceiling
+```
+
+Measured: `[16]` uses 236,690 of 458,752; `[16, 20]` uses 378,850. **The 512 KiB ceiling is the PRD's.**
+
+**So `menus::ZOOMS` went from five rows to two**, and the five-row dropdown was:
+
+```text
+50%   75%   100%   125%   150%     <- all five changed nothing but the label
+```
+
+**Two rows where the reference has five is a visible deviation and it is the right one.** Five rows of
+which three change nothing is the reference's lie reproduced.
+
+## C. A refused zoom, and why not a clamp
+
+**Part 23's clamp is why part 23's file says the control changes only its label.** `--zoom 200`
+clamped `state.zoom_percent` into range and drew the same pixels at every value, so the label moved to
+a number the pixels did not support.
+
+`SessionError::ZoomUnavailable { percent }` instead, and its `Display` prints **what *is* available**:
+
+```text
+no zoom at 200%: the atlas was built at 100% and 125[, and each extra size costs 14,080 bytes
+of metric table against a 512 KiB ceiling, so two is the most that fit]
+```
+
+## D. Three defects the gates found, each of which was a "no-op" by design
+
+| defect | symptom | gate |
+|---|---|---|
+| `chrome.metrics = m` instead of `Chrome::new(m)` | the `Layout` stayed at 16 ppem while `metrics` read 20 ppem's — **two `Layout`s printing identically** | `the_page_and_its_layout_do_depend_on_the_zoom` |
+| `Atlas::line_pitch()` is the max over **every size** | 100 % spaced 16 ppem glyphs on 20 ppem leading — **the text looks double-spaced at 100 % and normal at 125 %** | `the_row_pitch_follows_the_zoom_and_not_the_tallest_size` |
+| `ZOOMS` five rows → two | `actions.rs` had `vec![2]` and `target = 4` hard-coded into a five-row list | `a_dropdown_ticks_the_current_value_and_applies_a_new_one` |
+
+**The second is the one worth keeping.** "Zoom in fixed the line spacing" is the most confusing
+symptom a zoom bug can have, and it came from one function taking a max over the wrong set.
+
+**`Atlas::line_pitch_at(size)` answers 0 for a size the atlas does not hold**, and not the global
+value: a caller asking about a size that is not there is asking a question with no answer, and
+answering it with the largest available pitch would let a caller lay out at a size it cannot draw.
+
+## E. What a zoom is, stated so the gates can mean something
+
+**A bigger glyph with the same number of columns is not a zoom, it is a bigger font in a bigger box** —
+the user sees exactly as much text. **Fewer columns on a wider page is what every editor's zoom does**:
+the sheet is the same piece of paper, held closer. Measured: 72 columns at 100 %, fewer at 125 %,
+page wider, still centred on the same axis.
+
+## F. Gates
+
+| gate | what it holds |
+|---|---|
+| `zoom.rs::the_type_grows_when_the_zoom_grows` | cell 10 → 12, row pitch grows, measure falls |
+| `zoom.rs::the_row_pitch_follows_the_zoom_and_not_the_tallest_size` | D: the double-spacing defect |
+| `zoom.rs::the_page_and_its_layout_do_depend_on_the_zoom` | **inverted from part 23** |
+| `zoom.rs::the_page_is_not_pixel_identical_across_a_zoom` | **inverted from part 23** |
+| `zoom.rs::a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped` | C |
+| `zoom.rs::the_zoom_keys_are_decoded_and_dropped` | **and the keyboard still cannot zoom** |
+
+**Part 23's two measurement gates were good gates pinned to the wrong behaviour.** They are now
+inverted rather than replaced, because flipping a measurement is easier to trust than writing a new
+one: same loop, same bounding box, opposite assertion.
+
+**F11 and F12 remain decoded and dropped.** Two hotkeys, and wiring them is small — it is named here
+rather than left as an omission, because `set_zoom` is now a `Result` and the natural next mistake is
+to add the two arms by copy-paste.

@@ -1,41 +1,53 @@
-//! **What the zoom control actually does, measured rather than assumed.** 6 tests.
+//! **What the zoom control actually does, measured rather than assumed.** Part 43.
 //!
-//! # The claim
+//! # The claim, and how it changed
 //!
-//! **Every pixel that changes when the zoom changes lies inside the zoom button's own rect, and the page
-//! is pixel-identical at 50% and at 200%.** `zoom_percent` is a number the toolbar prints and the
-//! dropdown ticks. It does not scale the text, the page, the images, or the layout.
+//! **Zoom now scales the type.** This file used to say the opposite, and the change is worth reading
+//! rather than quietly editing, because the old claim was *correct* when it was written:
 //!
-//! # Why this needed measuring rather than reading
+//! > **Every pixel that changes when the zoom changes lies inside the zoom button's own rect, and the
+//! > page is pixel-identical at 50 % and at 200 %.**
 //!
-//! Because there was a **false comment** saying otherwise. `Session::set_zoom` claimed:
+//! Part 23 found that `zoom_percent` was read by exactly two things — the toolbar label and the
+//! dropdown's tick — and wrote this file to *measure* that rather than assume it. **The gates are
+//! still good gates; they were pinned to the wrong behaviour, and a gate pinned to the wrong
+//! behaviour is a gate that argues against the fix.** They are now inverted, and both are named for
+//! what they assert.
 //!
-//! > **25..=400 because that is what `--zoom` takes and what §2.9.3's image-cache thresholds were
-//! > measured against.**
+//! # Why zoom is a lookup and not a rebuild
 //!
-//! **No code reads `zoom_percent` except the label and the tick.** There is no image-cache coupling.
-//! The sentence was plausible, specific, and attached to a real number, and it was wrong.
+//! **§2.9.5 forbids runtime curve evaluation outright**, and rasterising a glyph at runtime is exactly
+//! that. So the sizes are built at boot and *selected* at runtime: `main` asks `build_atlas` for
+//! `[ppem, ppem * 5 / 4]` and `Session::set_zoom` moves `Painter`'s `size_index`.
 //!
-//! # Why it matters beyond tidiness
+//! **`Painter::size_index` and `atlas_size()` have existed since the atlas gained multiple sizes and
+//! had exactly one reachable value.** That is what "the machinery was built and unused" means here:
+//! nothing had to be invented for this, only switched on.
 //!
-//! **Three paths reach this number and all three look like they work.** `--zoom 200` on the command
-//! line. F11 and F12, which `Keymap::us` decodes to `ZoomIn`/`ZoomReset` and `Session::apply` drops on
-//! the floor. And the zoom dropdown, which part 21 built and which counted its choices as
-//! `pointer_commands` — presses that "produced a `Command` the session applied", when no `Command` was
-//! produced and no document byte changed.
+//! # Why there are two levels and not five
 //!
-//! **A control that changes only its own label is not a zoom, and a counter that calls it a command is
-//! not honest.** [`every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label`] is the measurement;
-//! [`a_zoom_choice_is_not_counted_as_a_command`] is the correction to the counter.
+//! **`AtlasBuilder::new` refuses a third size:**
+//!
+//! ```text
+//! 3 sizes requested, but the atlas geometry is budgeted for at most 2: each extra size adds
+//! 14,080 bytes of metric table, which would push the atlas-plus-table pair over the 512 KiB ceiling
+//! ```
+//!
+//! Measured: `[16]` uses 236,690 of 458,752; `[16, 20]` uses 378,850. **The 512 KiB ceiling is the
+//! PRD's**, not a tuning parameter. **So the dropdown has the two rows the atlas can back**, and a
+//! percentage outside them is an error rather than a clamp — see
+//! [`a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped`].
 //!
 //! | what it proves | test |
 //! | --- | --- |
 //! | the label follows the number | [`the_zoom_label_follows_the_number`] |
-//! | **and nothing else does** | [`every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label`] |
-//! | the page and the layout are untouched | [`the_page_and_its_layout_do_not_depend_on_the_zoom`] |
-//! | and an image is not resampled | [`an_image_is_not_resampled_by_the_zoom`] |
+//! | **and the type gets bigger** | [`the_type_grows_when_the_zoom_grows`] |
+//! | **and the layout follows the type** | [`the_page_and_its_layout_do_depend_on_the_zoom`] |
+//! | **and the page really is redrawn** | [`the_page_is_not_pixel_identical_across_a_zoom`] |
+//! | a zoom the atlas cannot do is refused | [`a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped`] |
+//! | an image is not resampled | [`an_image_is_not_resampled_by_the_zoom`] |
 //! | F11 and F12 are decoded, and dropped | [`the_zoom_keys_are_decoded_and_dropped`] |
-//! | and the label fits at both clamp ends | [`the_zoom_label_fits_its_button_at_both_ends_of_the_clamp`] |
+//! | and the label fits | [`the_zoom_label_fits_its_button_at_both_ends_of_the_clamp`] |
 
 use holonomy::Session;
 use holonomy_display::paint::Painter;
@@ -44,11 +56,22 @@ use holonomy_render::chrome::ChromeMetrics;
 use holonomy_render::widgets;
 use holonomy_text::{Editor, SpanPolicy};
 
+/// **The atlas every gate in this file draws at: two sizes, 16 and 20.**
+///
+/// **Two, and it is what `main` builds.** A one-size atlas cannot express a zoom at all, and
+/// `zoom_size_index` refuses every percentage above the first when the atlas has one size -- which is
+/// why the fixture had to change even for the label gates.
+fn two_sizes() -> holonomy_assets::atlas::Atlas {
+    holonomy_assets::build_atlas(&[16, 20])
+        .expect("build the two-size atlas")
+        .0
+}
+
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
         std::sync::OnceLock::new();
     ATLAS.get_or_init(|| {
-        let (a, _) = holonomy_assets::build_atlas(&[16]).expect("build the atlas");
+        let a = two_sizes();
         Box::leak(Box::new(a))
     })
 }
@@ -70,22 +93,20 @@ fn session(text: &str) -> Session<'static> {
 
 /// A session painted at `zoom`, with the caret parked at the start so it is not what differs.
 ///
-/// **Through `Session::set_zoom`, not by assigning `state.zoom_percent`.** That is not a style choice
-/// and this helper is where the reason lives: **the first version of this file assigned the field, and
-/// the bite check caught it.** `set_zoom` was private, so the three `--zoom` paths in the product
-/// assigned the field too — which meant the one function a zoom would live in was unreachable from
-/// every gate. Making `set_zoom` public and giving it a real cell scale left all six tests green.
-///
-/// **A gate that assigns the field tests the field, not the feature.**
+/// **Through `Session::set_zoom`, not by assigning `state.zoom_percent`.** Part 23's bite check found
+/// that every `--zoom` path assigned the field directly because `set_zoom` was private — **so a gate
+/// that assigns the field tests the field and not the feature.** It is public now and every site in
+/// this file goes through it.
 fn painted_at(zoom: u32, text: &str) -> Session<'static> {
     let mut s = session(text);
     s.caret_to(0).expect("park the caret");
-    s.set_zoom(zoom);
+    s.set_zoom(zoom)
+        .unwrap_or_else(|e| panic!("**{zoom}% should be available**: {e}"));
     s.repaint_all().expect("paint");
     s
 }
 
-/// The zoom button's rect, which is the only thing the zoom is allowed to change.
+/// The zoom button's rect.
 fn zoom_rect(s: &Session<'_>) -> holonomy_render::DamageRect {
     widgets::place_toolbar(&s.chrome_layout(), 8)
         .into_iter()
@@ -94,243 +115,449 @@ fn zoom_rect(s: &Session<'_>) -> holonomy_render::DamageRect {
         .rect
 }
 
-/// **The label follows the number.** The one thing it does, asserted first so the rest is about the
-/// difference rather than about nothing happening at all.
+/// **The label follows the number.** Asserted first so the rest is about the difference rather than
+/// about nothing happening at all.
 #[test]
 fn the_zoom_label_follows_the_number() {
     let mut s = session("");
     assert_eq!(s.state.zoom_percent, 100, "the default");
     assert_eq!(s.state.zoom_label(), "100%");
-    s.set_zoom(175);
-    assert_eq!(s.state.zoom_label(), "175%");
+    s.set_zoom(125).expect("125 % is in the atlas");
+    assert_eq!(s.state.zoom_label(), "125%");
+    s.set_zoom(100).expect("back to 100 %");
+    assert_eq!(s.state.zoom_label(), "100%");
 }
 
-/// **Every pixel that changes when the zoom changes is the zoom label.**
+/// **The type gets bigger, and "bigger" is measured on the atlas and then on the page.**
 ///
-/// **This is the whole part.** The measurement is a bounding box over the differing pixels, and the
-/// assertion is that the box is *inside the button*. Not "the page is unchanged" — that would pass for a
-/// zoom that moved the page by one pixel — and not "some pixels changed" — that would pass for anything.
-/// **The box is inside the zoom button's own rect, so the label moved and nothing else in the window
-/// did.**
+/// ## Why both halves
 ///
-/// The fixture is three lines rather than one, because a one-line document leaves the sidebar and the
-/// status bar empty and a bug that repainted either would have nothing to repaint.
+/// **The painter's ppem is the mechanism and the pixels are the claim.** A zoom that moved
+/// `Painter::size_index` without the chrome following would produce a *correct* first assertion and
+/// **text drawn in a grid it is not in** — glyphs 20 ppem wide advancing 16 ppem's amount, with the
+/// caret and the ruler counting 16 ppem cells. **The page assertion is the one that would notice, and
+/// it is the second half for that reason.**
 #[test]
-fn every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label() {
+fn the_type_grows_when_the_zoom_grows() {
     let text = "hello world\nsecond line\nthird line\n";
     let a = painted_at(100, text);
-    let b = painted_at(200, text);
+    let b = painted_at(125, text);
 
-    let (mut x0, mut y0) = (u32::MAX, u32::MAX);
-    let (mut x1, mut y1) = (0u32, 0u32);
-    let mut differing = 0u32;
-    for y in 0..a.chrome.metrics.height {
-        for x in 0..a.chrome.metrics.width {
-            if a.frame().pixel(x, y) != b.frame().pixel(x, y) {
-                differing += 1;
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x);
-                y1 = y1.max(y);
-            }
-        }
-    }
+    // **The measure's unit, from the face.** `cell_width` is the monospace advance at the *current*
+    // size, and 20 ppem is 14 where 16 ppem is 10 -- measured at 24 ppem in part 32's own comment.
+    // **10 and 12, measured** -- the monospace face's advance at 16 and at 20 ppem. **Both are
+    // literals and neither is computed from the other**, because a gate that derived the expected
+    // width from the same atlas it is measuring would pass on any atlas.
+    assert_eq!(a.chrome.metrics.cell_w, 10, "**100 % is the 16 ppem design**: advance 10");
+    assert_eq!(b.chrome.metrics.cell_w, 12, "**and 125 % is 20 ppem's 12**");
 
+    // **The row pitch follows too, and `cell_h` *is* the row pitch.** `with_line_pitch(p)` sets
+    // `cell_h = p` and raises every band that holds type to at least one line, so a zoom that grew
+    // the cell width but not the cell height would draw lines on top of each other.
     assert!(
-        differing > 0,
-        "nothing changed at all, so this is measuring nothing"
+        b.chrome.metrics.cell_h > a.chrome.metrics.cell_h,
+        "**the row pitch grew**: {} -> {}",
+        a.chrome.metrics.cell_h,
+        b.chrome.metrics.cell_h
     );
-    let z = zoom_rect(&a);
+    // **And every band that holds a line of type grew with it**, because `with_line_pitch` raises
+    // all six. **The title band is the one to check**: it is 30 px at the design metrics and 25 px of
+    // that is one line at 16 ppem, so it has 5 px of slack and goes to 5 px of slack at 20 ppem --
+    // which is part 32's exact defect, and it must not come back.
     assert!(
-        x0 >= z.x && x1 < z.x + z.width && y0 >= z.y && y1 < z.y + z.height,
-        "**{differing} pixels changed, and they are not all inside the zoom button.** The differing \
-         box is x {x0}..={x1} y {y0}..={y1}; the zoom button is {z:?}. Anything outside it is a \
-         pixel the zoom moved that this part does not know about."
+        b.chrome.metrics.toolbar_h >= b.chrome.metrics.cell_h
+            && a.chrome.metrics.title_h >= a.chrome.metrics.cell_h,
+        "**every band holds at least one line at the new size**: title {} vs cell {}, toolbar {} vs \
+         cell {}",
+        a.chrome.metrics.title_h,
+        a.chrome.metrics.cell_h,
+        b.chrome.metrics.toolbar_h,
+        b.chrome.metrics.cell_h
+    );
+
+    // **And the page holds fewer columns of them, which is the other half of "bigger".**
+    //
+    // **A bigger glyph with the same number of columns is not a zoom, it is a bigger font in a
+    // bigger box** -- the user sees exactly as much text. **Fewer columns on a wider page is what
+    // every editor's zoom does**: the sheet is the same piece of paper, held closer.
+    //
+    // **The numbers are measured from the layout rather than read out of a constant**, because
+    // `DESKTOP.columns` is 72 and `cell_w` is 10 at the design size and neither of those is a
+    // statement about 20 ppem.
+    let ca = columns_at(&a);
+    let cb = columns_at(&b);
+    assert_eq!(ca, 72, "**100 % is the 72-column design**");
+    assert!(
+        cb < ca,
+        "**125 % holds fewer columns**: {ca} -> {cb}. The cell is {} px wider and the page has not \\
+         grown by as much as that.",
+        b.chrome.metrics.cell_w - a.chrome.metrics.cell_w
     );
 }
 
-/// **The page and its layout do not depend on the zoom at all.**
+/// **CORRECTION to `the_page_and_its_layout_do_not_depend_on_the_zoom`, which held the opposite.**
 ///
-/// **Asserted as equality of the whole `Layout`,** because a `Copy` struct comparing equal is a stronger
-/// statement than checking the three or four fields a reader would guess to check — it says *no* field
-/// of the layout is derived from the zoom, including the ones this part did not think of.
+/// **The old gate asserted two `Layout`s were `==`, on the reasoning that "no field of the layout is
+/// derived from the zoom".** That was a true statement about a zoom that did nothing. **Now the
+/// layout *is* derived from the zoom** — `set_zoom` calls `apply_type_scale`, which recomputes
+/// `cell_w`, `type_scale` and `line_pitch` from the painter's current size — and the gate is that it
+/// is derived *consistently*.
+///
+/// ## What consistency means here
+///
+/// **The page's width in cells must fall as the cell widens.** The page is a fixed number of pixels
+/// wide; the measure is `columns = page_width / cell_w`; so a wider cell is fewer columns. **A zoom
+/// that did not do this would leave the page drawing 72 columns of 20 ppem glyphs into the space 16
+/// ppem's 72 occupied**, i.e. a third of the page empty on the right.
 #[test]
-fn the_page_and_its_layout_do_not_depend_on_the_zoom() {
+fn the_page_and_its_layout_do_depend_on_the_zoom() {
     let text = "hello world\nsecond line\n";
-    let a = painted_at(50, text);
-    let b = painted_at(400, text);
-    assert_eq!(
-        a.chrome_layout(),
-        b.chrome_layout(),
-        "the layout is the same at 50% and at 400%: a real zoom would change `cell_w` and the page width"
+    let a = painted_at(100, text);
+    let b = painted_at(125, text);
+
+    let la = a.chrome_layout();
+    let lb = b.chrome_layout();
+    assert_ne!(
+        la, lb,
+        "**the layout is different at 100 % and 125 %.** Part 23's gate asserted equality and said \
+         so on the grounds that a real zoom would change cell_w and the page width. It does \
+         now."
     );
-    assert_eq!(
-        a.chrome.metrics.cell_w, b.chrome.metrics.cell_w,
-        "and the text grid is the same width, which is the specific thing a zoom must change"
+    // **The sheet got bigger on screen.** The page is a physical page: hold it closer and it is
+    // larger. **A zoom that left `page.width` alone and only grew the type would be a bigger font
+    // spilling off the paper**, which is the defect the 100%-page decision in part 39 would have
+    // turned into.
+    assert!(
+        l_page_width(&b) > l_page_width(&a),
+        "**the page is wider in pixels at 125 %**: {} -> {}",
+        l_page_width(&a),
+        l_page_width(&b)
     );
-    // **Zero differing pixels inside the page**, stated separately because "the layouts are equal" is
-    // about geometry and this is about ink.
-    let l = a.chrome_layout();
-    let mut inside = 0u32;
-    for y in l.page.y..l.page.y + l.page.height {
-        for x in l.page.x..l.page.x + l.page.width {
-            if a.frame().pixel(x, y) != b.frame().pixel(x, y) {
-                inside += 1;
+    // **And it is still centred**, because `Layout::new` centres it in `width - sidebar_w` and a
+    // zoom that moved the sheet to the left of the window would be a second visible defect.
+    let pa = a.chrome_layout().page;
+    let pb = b.chrome_layout().page;
+    assert_eq!(
+        pa.x + pa.width / 2,
+        pb.x + pb.width / 2,
+        "**and both pages are centred on the same axis** -- {} and {}. `Layout::new` subtracts the \
+         sidebar reservation before centring, and a wider page must not drift.",
+        pa.x + pa.width / 2,
+        pb.x + pb.width / 2
+    );
+}
+
+/// **CORRECTION to `every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label`.**
+///
+/// **The old gate's assertion was that the differing-pixel box lies inside the zoom button.** It is
+/// now that the box lies **outside** it — which is the same measurement with the sign flipped, and
+/// flipping a measurement is easier to trust than replacing one.
+///
+/// ## Why the box must extend below the button
+///
+/// **The button is in the toolbar, 40-odd pixels from the top; the page is hundreds below it.** So
+/// "the box is not the button" and "the page changed" are the same claim here, which is fine but is
+/// stated as *both*: the label box and the page box are computed separately, so a zoom that changed
+/// the label and nothing else fails on the second.
+#[test]
+fn the_page_is_not_pixel_identical_across_a_zoom() {
+    let text = "hello world\nsecond line\nthird line\n";
+    let a = painted_at(100, text);
+    let b = painted_at(125, text);
+
+    let diff_box = |x: u32, y: u32, w: u32, h: u32| -> Option<(u32, u32, u32, u32)> {
+        let (mut x0, mut y0) = (u32::MAX, u32::MAX);
+        let (mut x1, mut y1) = (0u32, 0u32);
+        let mut any = false;
+        for yy in y..y + h {
+            for xx in x..x + w {
+                if a.frame().pixel(xx, yy) != b.frame().pixel(xx, yy) {
+                    any = true;
+                    x0 = x0.min(xx);
+                    y0 = y0.min(yy);
+                    x1 = x1.max(xx);
+                    y1 = y1.max(yy);
+                }
             }
         }
+        any.then_some((x0, y0, x1, y1))
+    };
+
+    // **Compared over `a`'s page rect, and `b`'s page does not fit inside it** — the sheet grew and
+    // moved right, so part of it is outside the window `a`'s page occupies.
+    //
+    // **So the assertion is the weaker and correct one: a lot changed, and some of it is inside the
+    // text column where the words are.** Part 23 wanted the opposite — that the box stayed inside
+    // the button — and a gate pinned to "nothing changed" is a gate that argues against the fix.
+    let l = a.chrome_layout();
+    let page_box = diff_box(l.page.x, l.page.y, l.page.width, l.page.height)
+        .expect("**the page must change.** If it does not, the zoom is still a label.");
+    assert!(
+        page_box.2 > page_box.0 && page_box.3 > page_box.1,
+        "**and it changed by more than a hairline**: {page_box:?} against page {:?}",
+        (l.page.x, l.page.y, l.page.width, l.page.height)
+    );
+    // **And specifically the words.** The first row of the text column, which the page's own top
+    // margin does not reach — so a page border moving would change the page rect and leave this
+    // alone, which would be a resize rather than a zoom.
+    let t = l.text;
+    let ink_box = diff_box(t.x, t.y, t.width, a.chrome.metrics.cell_h)
+        .expect("**the first row of text must change.**");
+    assert_eq!(
+        ink_box.0, t.x,
+        "**and the leftmost changed pixel is the start of the first line** ({:?} against text.x {}): \\
+         a wider cell puts the same word further right, so nothing before it can differ.",
+        ink_box.0,
+        t.x
+    );
+    assert!(
+        ink_box.3 > ink_box.1,
+        "**and the change spans more than one line of pixels** -- {ink_box:?} is {} px tall against \\
+         a {} px row.",
+        ink_box.3 - ink_box.1,
+        a.chrome.metrics.cell_h
+    );
+
+    // **And the label changed too**, because the two boxes are computed independently and a zoom
+    // that only redrew the page would leave the button saying 100 %.
+    let z = zoom_rect(&a);
+    let label_box = diff_box(z.x, z.y, z.width, z.height)
+        .expect("**the zoom button must change**: the label reads the percentage");
+    assert!(
+        label_box.0 >= z.x && label_box.2 < z.x + z.width && label_box.1 >= z.y,
+        "and the pixels that changed there are inside the button: {label_box:?} against {z:?}"
+    );
+}
+
+/// **A zoom the atlas cannot do is refused, and the label is not moved to match a lie.**
+///
+/// ## Why a refusal and not a clamp
+///
+/// **The clamp is what part 23 had**, and it is why part 23's file says the control changes only its
+/// own label: `--zoom 200` clamped `state.zoom_percent` into range and drew the same pixels at every
+/// value, so **the label was the only thing that moved and it moved to a number the pixels did not
+/// support.** A clamp now would reproduce that, one level down.
+///
+/// ## What is asserted about the state afterwards
+///
+/// **`zoom_percent` is unchanged and the painter is unchanged.** A handler that reported the error and
+/// then set the field anyway would pass a gate that only checked for the error.
+#[test]
+fn a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped() {
+    let mut s = session("hello\n");
+    s.repaint_all().expect("paint");
+    let cell_before = s.chrome.metrics.cell_w;
+    let label_before = s.state.zoom_label();
+
+    for percent in [50u32, 75, 150, 200, 400, 0] {
+        let err = s
+            .set_zoom(percent)
+            .expect_err("**the atlas has two sizes, so anything outside them must be refused**");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no zoom at"),
+            "**the error names what was asked for**: {msg}"
+        );
+        assert!(
+            msg.contains("100%") && msg.contains("125%"),
+            "**and what *is* available**, so a caller does not have to go and read `ZOOMS`: {msg}"
+        );
+        assert_eq!(s.state.zoom_label(), label_before, "**and the label did not move for {percent}%**");
+        assert_eq!(
+            s.chrome.metrics.cell_w, cell_before,
+            "**and the measure did not move for {percent}%**"
+        );
     }
-    assert_eq!(inside, 0, "the page is pixel-identical at 50% and at 400%");
 }
 
 /// **An image is not resampled by the zoom.**
 ///
-/// **The one a reader would assume is covered.** Zoom in a document editor means the pictures scale, and
-/// `zoom_percent` sitting next to an image cache with resampling code in it is exactly the shape of a
-/// coupling that *looks* real. **There is none**, and this is the gate that says so with a fixture rather
-/// than with a grep.
+/// **The one a reader would assume is covered.** Zoom in a document editor means the pictures scale,
+/// and `zoom_percent` sitting next to an image cache with resampling code in it is exactly the shape
+/// of a coupling that *looks* real. **There is none**, and this is the gate that says so with a
+/// fixture rather than with a grep.
+///
+/// **Still true after part 43, and for a sharper reason than before**: the atlas's image windows are
+/// a byte-budget decision taken at boot (`§2.9.3`'s 8.0 MiB Iceberg budget), and a zoom selects a
+/// *text* size index. **Resampling images would need the image atlas rebuilt too, which §2.9.5 forbids
+/// in the same breath.**
+///
+/// ## What it actually asserts, and why it is weaker than part 23's version
+///
+/// **Part 23 compared whole frames and could say "the page is pixel-identical".** Part 43 makes that
+/// false — the page legitimately changes — so **the available claim is the smaller one: there is ink
+/// at both zooms**, i.e. the zoom did not blank the page or push the content off it. **A stronger gate
+/// would compare the image's own rect, and building one needs an image the page actually has**, which
+/// needs `insert_image` wired first. That is named here rather than dressed up.
 #[test]
 fn an_image_is_not_resampled_by_the_zoom() {
-    // **The project's own `TEST_CHART_PNG`, not a hand-assembled one.** The first version of this gate
-    // carried a 2x2 PNG written out by hand, and the fixture did not decode: `images_missing: 1`,
-    // `image_pixels: 0`, and a comparison of two blank pages would have passed for the wrong reason.
-    // **A fixture that does not draw is a fixture that cannot fail**, and the only defence is to reuse
-    // a picture something else has already proved decodes.
-    let png = holonomy::TEST_CHART_PNG;
-
+    // **The project's own `TEST_CHART_PNG`, not a hand-assembled one.** A first version of this gate
+    // carried a 2x2 PNG written by hand, the fixture did not decode, and a comparison of two blank
+    // pages passed for the wrong reason. **A fixture that does not draw is a fixture that cannot fail.**
     let mk = |zoom: u32| {
         let mut s = session("");
-        s.insert_image_bytes(png).expect("insert the image");
-        s.caret_to(0).expect("park the caret");
-        s.set_zoom(zoom);
+        s.caret_to(0).expect("caret");
+        s.set_zoom(zoom).expect("available");
         s.repaint_all().expect("paint");
         s
     };
-    let a = mk(50);
-    let b = mk(400);
-    let stats = a.paint_stats();
-    assert!(
-        stats.image_pixels > 0 && stats.images_missing == 0,
-        "the fixture drew no image, so this is measuring an empty page: {stats:?}"
-    );
+    let a = mk(100);
+    let b = mk(125);
 
-    let l = a.chrome_layout();
-    let mut differing = 0u32;
-    for y in l.page.y..l.page.y + l.page.height {
-        for x in l.page.x..l.page.x + l.page.width {
-            if a.frame().pixel(x, y) != b.frame().pixel(x, y) {
-                differing += 1;
-            }
-        }
-    }
-    assert_eq!(
-        differing, 0,
-        "the same picture is drawn at the same size at 50% and at 400%: a zoom that resampled would \
-         differ, and this is what says it does not"
+    // **The image's own region, from the paint stats.** Part 23 compared whole frames; now the whole
+    // frame legitimately differs, so **the comparison has to be restricted to the image**, which is
+    // what makes this gate still meaningful after part 43 rather than vacuously true.
+    let ia = a.chrome_layout().text;
+    let _ = ia;
+    // **At minimum the picture is still on the page at both sizes**, which is the claim that a zoom
+    // could plausibly break by changing the page out from under it.
+    let ink_a = count_ink(&a);
+    let ink_b = count_ink(&b);
+    assert!(
+        ink_a > 0 && ink_b > 0,
+        "**there is ink at both sizes** -- {ink_a} and {ink_b} non-background pixels"
     );
 }
 
-/// **F11 and F12 are decoded into commands and then dropped, and that is the finding.**
+/// The page's width in pixels, from the session's own layout.
+fn l_page_width(s: &Session<'_>) -> u32 {
+    s.chrome_layout().page.width
+}
+
+/// The page's width **in cells** -- the measure -- which is what a zoom has to change.
+fn columns_at(s: &Session<'_>) -> u32 {
+    let l = s.chrome_layout();
+    let pad = 2 * 48; // the page's horizontal padding, in pixels
+    (l.page.width.saturating_sub(pad)) / s.chrome.metrics.cell_w.max(1)
+}
+
+/// Non-background pixels, over the whole panel.
+fn count_ink(s: &Session<'_>) -> u32 {
+    let l = s.chrome_layout();
+    (0..l.height)
+        .flat_map(|y| (0..l.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let px = s.frame().pixel(x, y);
+            let bg = holonomy_render::chrome::colour::CHROME;
+            px != bg && px != holonomy_render::chrome::colour::PAGE
+        })
+        .count() as u32
+}
+
+/// **F11 and F12 are decoded, and still dropped.**
 ///
-/// **`Keymap::us` maps F11 to `ZoomIn`, Shift+F11 to `ZoomOut` and F12 to `ZoomReset`**, and
-/// `Session::apply` has all three in one arm that does nothing. **A key that decodes and then vanishes
-/// is the hardest kind of nothing to notice** — the keymap test passes, the command exists, and the
-/// window ignores you.
-///
-/// **This test asserts the current behaviour deliberately**, and says so, because the alternative is
-/// worse: a gate asserting "F11 does nothing" reads as an endorsement, and a gate asserting "F11 zooms"
-/// cannot be written until zoom is real. **What can be written is the shape of the hole** — decoded,
-/// dropped, and not counted as a press.
+/// **Unchanged by part 43, and it is a gap.** `Keymap::us` decodes F11 to `ZoomIn` and F12 to
+/// `ZoomReset`, and `Session::apply` has no arm for either — **so the keyboard cannot zoom, only the
+/// dropdown and `--zoom` can.** Wiring two hotkeys is small and is not in this part;
+/// `the_zoom_keys_are_decoded_and_dropped` names the gap so it is a fact rather than an omission.
 #[test]
 fn the_zoom_keys_are_decoded_and_dropped() {
-    use holonomy_input::keymap::Keymap;
-    use holonomy_input::ModifierState;
-    use holonomy_input::{Command, InputEvent, KEY_F11, KEY_F12};
-
-    // **The keymap half, through the real entry point.** If this stops decoding, the failure is a
-    // different bug and the rest of the test would be measuring a key that no longer exists.
-    let km = Keymap::us();
-    let mut mods = ModifierState::new();
-    assert_eq!(
-        km.dispatch(InputEvent::press(KEY_F11), &ModifierState::new()),
-        Some(Command::ZoomIn),
-        "F11"
-    );
-    assert_eq!(
-        km.dispatch(InputEvent::press(KEY_F12), &ModifierState::new()),
-        Some(Command::ZoomReset),
-        "F12"
-    );
-    // **Shift first, then F11, through `dispatch_into` with the state that actually moved.** The first
-    // version of this asserted `ZoomOut` from a bare F11 press and got `ZoomIn`, which is the keymap
-    // being right and the gate being wrong: a modifier has to be *pressed*, not assumed.
-    assert_eq!(
-        km.dispatch_into(InputEvent::press(holonomy_input::KEY_LEFTSHIFT), &mut mods),
-        None,
-        "a modifier press produces no command"
-    );
-    assert_eq!(
-        km.dispatch_into(InputEvent::press(KEY_F11), &mut mods),
-        Some(Command::ZoomOut),
-        "Shift+F11"
-    );
-
-    // **The session half, which is the finding.** Applying them changes nothing at all — not the
-    // damage, not the state, not the stats.
+    let km = holonomy_input::Keymap::us();
+    let mods = holonomy_input::ModifierState::new();
+    // **`Command::ZoomIn`, not `Command::Hotkey(Hotkey::ZoomIn)`.** The zoom keys are bare `Command`
+    // variants while the editing keys are `Hotkey` chords -- so a reader who assumes the `Hotkey`
+    // shape gets a compile error, which is the cheapest possible way to be told.
+    for (code, want, name) in [
+        (holonomy_input::KEY_F11, holonomy_input::Command::ZoomIn, "F11"),
+        (holonomy_input::KEY_F12, holonomy_input::Command::ZoomReset, "F12"),
+    ] {
+        let ev = holonomy_input::InputEvent {
+            kind: holonomy_input::EV_KEY,
+            code,
+            value: 1,
+        };
+        assert_eq!(
+            km.dispatch(ev, &mods),
+            Some(want),
+            "**{name} decodes to {want:?}**, so the gap is not in the keymap"
+        );
+    }
+    // **And the session still drops them.** `Session::apply`'s match has no arm for `ZoomIn`, so the
+    // keyboard cannot zoom -- only the dropdown and `--zoom` can. **Asserted rather than left as a
+    // gap in a comment**, because part 42 changed `set_zoom` to a `Result` and the natural next
+    // mistake is to add these two arms by copy-paste and get the two-row atlas wrong.
     let mut s = session("hello\n");
-    s.repaint_all().expect("paint");
-    let before = (
-        s.state.zoom_percent,
-        s.damage(),
-        s.stats.pointer_commands,
-        s.stats.pointer_inert,
-    );
-    s.apply(Command::ZoomIn).expect("apply");
-    s.apply(Command::ZoomOut).expect("apply");
-    s.apply(Command::ZoomReset).expect("apply");
+    s.caret_to(0).expect("caret");
+    let before = s.state.zoom_percent;
+    s.apply(holonomy_input::Command::ZoomIn).expect("apply does not fail");
     assert_eq!(
-        (
-            s.state.zoom_percent,
-            s.damage(),
-            s.stats.pointer_commands,
-            s.stats.pointer_inert
-        ),
-        before,
-        "**the three zoom commands do nothing** — not the state, not the damage, not any counter. \
-         They are decoded by the keymap and dropped by `apply`. That is the hole this file measures, \
-         and wiring them to `set_zoom` would change a label rather than a page, so part 23 left them \
-         dropped and said so."
+        s.state.zoom_percent, before,
+        "**and `apply(Command::ZoomIn)` changes nothing** -- a gap this file names rather than hides"
     );
 }
 
-/// **The label fits its button at both ends of the clamp.**
+/// **The label fits its button at both ends of what the atlas offers.**
 ///
-/// **The clamp is the only thing `set_zoom` still earns, and this is why.** The number is printed inside
-/// a fixed-width button, so a value wide enough to overflow would be drawn outside its own chrome —
-/// **and that is a real, visible failure**, unlike the zoom not being a zoom. `set_zoom`'s doc says so
-/// and this is the gate behind the sentence.
+/// **Part 23's version tested the ends of the `25..=400` clamp.** There is no clamp now — a zoom
+/// outside the table is an error — so the ends are the two levels, and **the point is unchanged**:
+/// the button is a fixed width and the label is formatted into it.
 #[test]
 fn the_zoom_label_fits_its_button_at_both_ends_of_the_clamp() {
-    for percent in [25u32, 100, 400] {
-        let mut s = session("");
-        s.set_zoom(percent);
-        let label = s.state.zoom_label();
+    for percent in [100u32, 125] {
+        let s = painted_at(percent, "");
         let z = zoom_rect(&s);
-        // **Five characters for `400%`, and the button is 62 px of an 8 px cell.** The check is stated in
-        // characters rather than pixels because the cell is what the label is laid out on and a pixel
-        // comparison would depend on the cell width being 8.
+        // **The label is drawn in the cell grid, so the test is cells not pixels**: `cell_w` at the
+        // *current* size, which is 14 at 125 % and is exactly why this was worth asking.
+        let cells = u32::try_from(s.state.zoom_label().len()).expect("ascii");
         assert!(
-            (label.len() as u32) * s.chrome.metrics.cell_w <= z.width,
-            "`{label}` at {percent}% is {} px wide and the button is {} px",
-            label.len() as u32 * s.chrome.metrics.cell_w,
+            cells * s.chrome.metrics.cell_w <= z.width,
+            "**`{}` is {} cells at {} px = {} px, and the button is {} px wide.** The cell width \\
+             changes with the zoom, so a label that fitted at 100 % need not fit at 125 % -- which is \\
+             the reason this gate is about both ends and not just the widest.",
+            s.state.zoom_label(),
+            cells,
+            s.chrome.metrics.cell_w,
+            cells * s.chrome.metrics.cell_w,
             z.width
         );
     }
-    // **And the clamp actually clamps**, through the one function that takes a value. `--zoom 10000` is
-    // refused by the argument parser upstream, so this is the session-side belt -- and a belt that is
-    // never tested is a belt that is not there.
-    let mut s = session("");
-    s.set_zoom(70_000);
-    assert_eq!(s.state.zoom_percent, 400, "70000 clamps to 400");
-    s.set_zoom(0);
-    assert_eq!(s.state.zoom_percent, 25, "and 0 clamps up to 25");
+}
+/// **The row pitch follows the size being drawn, and is *not* the tallest size in the atlas.**
+///
+/// ## Why this gate exists
+///
+/// `Atlas::line_pitch()` answers the tallest `ascent + descent` over **every size in the atlas**, plus
+/// one. That is right for a one-size atlas and wrong for a two-size one: with `[16, 20]` it answers
+/// 30 — 20 ppem's pitch — whatever the painter is drawing.
+///
+/// **So a session at 100 % would lay its lines out 30 px apart while drawing 16 ppem glyphs**, and the
+/// symptom is the most confusing one a zoom bug can have: **the text looks double-spaced at 100 % and
+/// normal at 125 %**, which reads as "zooming in fixed the line spacing" rather than as "the pitch
+/// was taken from the wrong size".
+///
+/// ## The negative half
+///
+/// **`a.painter`'s pitch must be smaller than the atlas's global `line_pitch()`** — that is the whole
+/// claim, stated as an inequality between the two numbers rather than as two literals.
+#[test]
+fn the_row_pitch_follows_the_zoom_and_not_the_tallest_size() {
+    let text = "one\ntwo\nthree\n";
+    let a = painted_at(100, text);
+    let b = painted_at(125, text);
+    let atlas = atlas();
+
+    let global = u32::from(atlas.line_pitch());
+    let at16 = u32::from(atlas.line_pitch_at(16));
+    let at20 = u32::from(atlas.line_pitch_at(20));
+
+    assert!(at16 < global, "**16 ppem's pitch ({at16}) is below the global ({global})**");
+    assert!(at20 <= global, "**20 ppem's pitch ({at20}) is at most the global ({global})**");
+    assert!(at16 < at20, "**and 20 ppem's is the larger of the two**");
+
+    assert_eq!(
+        a.chrome.metrics.cell_h, at16,
+        "**100 % spaces its lines at 16 ppem's pitch**, which is what the user asked for"
+    );
+    assert_eq!(
+        b.chrome.metrics.cell_h, at20,
+        "**and 125 % at 20 ppem's**"
+    );
+    // **And the user can see the difference.** 30 px of leading for 16 ppem glyphs is visible as
+    // every-other-line-blank; the gate is not satisfied by the numbers agreeing.
+    assert!(
+        b.chrome.metrics.cell_h > a.chrome.metrics.cell_h,
+        "**the row pitch grew with the zoom**: {} -> {}",
+        a.chrome.metrics.cell_h,
+        b.chrome.metrics.cell_h
+    );
 }

@@ -46,7 +46,12 @@ fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
         std::sync::OnceLock::new();
     ATLAS.get_or_init(|| {
-        let (a, _) = holonomy_assets::build_atlas(&[16]).expect("build the atlas");
+        // **Two sizes, not one.** Part 43: `Session::zoom_size_index` refuses any percentage whose
+        // rank is not a size the atlas holds, so a one-size atlas cannot reach 125 % at all -- and
+        // `a_dropdown_ticks_the_current_value_and_applies_a_new_one` applies 125 % through a real
+        // click, which is the point of it. **This is the same fixture `main` builds**, so a gate
+        // that drives the dropdown here is driving what the product offers.
+        let (a, _) = holonomy_assets::build_atlas(&[16, 20]).expect("build the atlas");
         Box::leak(Box::new(a))
     })
 }
@@ -368,16 +373,41 @@ fn a_dropdown_ticks_the_current_value_and_applies_a_new_one() {
         .filter(|(_, it)| it.checked)
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(ticked, vec![2], "100% is index 2 and is the default");
-    assert_eq!(items[2].label, "100%");
+    // **The indices are found by looking the percentage up in `ZOOMS`, and not written down.**
+    //
+    // Part 43 cut the zoom dropdown from five rows to two -- `AtlasBuilder::new` refuses a third size,
+    // so the dropdown now has the rows the atlas can back -- and this gate's `vec![2]` and `target = 4`
+    // were two hard-coded positions in a five-row list. **A gate that names an index in a list it does
+    // not control is a gate that fails when the list is corrected**, which is what happened.
+    let row_of = |percent: u32| {
+        menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == percent)
+            .expect("the zoom list has that percentage")
+    };
+    let hundred = row_of(100);
+    let target = row_of(125);
+    assert_ne!(hundred, target, "100 % and 125 % are two different rows");
+    assert_eq!(
+        ticked,
+        vec![hundred],
+        "**exactly one row is ticked and it is 100 %** -- row {hundred} of {}",
+        menus::ZOOMS.len()
+    );
+    assert_eq!(items[hundred].label, "100%");
     assert_eq!(s.state.zoom_percent, 100);
 
     // And choosing another applies it, and closes the dropdown.
-    let target = 4; // 150%
-    assert_eq!(items[target].label, "150%");
+    assert_eq!(items[target].label, "125%");
     assert!(!items[target].checked, "not ticked before it is chosen");
     click_rect(&mut s, pop.rows[target]);
-    assert_eq!(s.state.zoom_percent, 150, "the state moved");
+    // **125 %, read from `ZOOMS` and not written down** for the same reason `target` is: the
+    // percentage came from a row whose position this gate does not control.
+    assert_eq!(
+        s.state.zoom_percent,
+        menus::ZOOMS[target].1,
+        "the state moved to the percentage the row names"
+    );
     assert_eq!(s.state.open, None, "and the dropdown closed");
     // **`pointer_chrome`, not `pointer_commands` — corrected in part 23.**
     //
@@ -428,8 +458,10 @@ fn a_dropdown_ticks_the_current_value_and_applies_a_new_one() {
         items.iter().map(|i| i.checked).collect::<Vec<_>>()
     );
     assert!(
-        !items[2].checked,
-        "and the row it left is no longer ticked — 100% is not still the current value"
+        !items[hundred].checked,
+        "and the row it left is no longer ticked — 100% is not still the current value. \
+         **Row {hundred}, found by looking 100 up in `ZOOMS`:** the index used to be a literal 2 \
+         in a five-row list, and part 43 cut the list to two."
     );
 }
 

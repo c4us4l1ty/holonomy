@@ -87,6 +87,22 @@ pub enum SessionError {
     Export(holonomy_export::ExportError),
     /// A sink refused the write.
     Sink(std::io::Error),
+    /// A zoom was asked for that this session's atlas was not built at. Part 43.
+    ///
+    /// **Its own variant rather than a silent clamp.** A zoom control that snapped 200 % to 125 %
+    /// would leave `state.zoom_percent` holding a number the pixels disagree with, and the only way
+    /// to find out which is right is to compare the label to the type -- **which is exactly the
+    /// comparison a typed error makes impossible to get wrong.**
+    ///
+    /// ## What it carries, and why only the percentage
+    ///
+    /// **The percentage that was asked for.** Not the list of sizes that exist: `menus::ZOOMS` is
+    /// already `pub`, so a caller that wants to know what *is* available reads it, and a `Display`
+    /// that had to consult the session would be a cycle.
+    ZoomUnavailable {
+        /// What was asked for, in per-cent.
+        percent: u32,
+    },
 }
 
 impl std::fmt::Display for SessionError {
@@ -101,6 +117,20 @@ impl std::fmt::Display for SessionError {
                 "the caret at byte {offset} is not inside a table, so there is no cell to act on"
             ),
             Self::Table(e) => write!(f, "{e}"),
+            // **The message says what *is* available, not just what was asked for.** A caller who
+            // asks for 200 % and gets "no" has to go and read `menus::ZOOMS` to find out why; this
+            // tells them in the error they are already printing.
+            Self::ZoomUnavailable { percent } => write!(
+                f,
+                "no zoom at {percent}%: the atlas was built at \
+                 {}[, and each extra size costs 14,080 bytes of metric table against a 512 KiB \
+                 ceiling, so two is the most that fit]",
+                holonomy_render::menus::ZOOMS
+                    .iter()
+                    .map(|&(_, z)| format!("{z}%"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
         }
     }
 }
@@ -3271,7 +3301,7 @@ impl<'a> Session<'a> {
                 self.stats.pointer_chrome += 1;
             }
             Action::SetZoom(pct) => {
-                self.set_zoom(pct);
+                self.set_zoom(pct)?;
                 // **`pointer_chrome`, not `pointer_commands`.** Part 21 put it here, and this is the
                 // correction: no `Command` was produced and nothing about the document changed. The
                 // zoom label moves, and `tests/zoom.rs` measures that as the only pixel it moves.
@@ -3398,9 +3428,86 @@ impl<'a> Session<'a> {
     /// space the text out without enlarging it. **A zoom needs the atlas rebuilt at the new ppem**, and
     /// then a decision about how many sizes stay resident, which is an atlas-budget question and not a
     /// chrome one. That is a phase, not a patch.
-    pub fn set_zoom(&mut self, percent: u32) {
-        self.state.zoom_percent = percent.clamp(25, 400);
+    pub fn set_zoom(&mut self, percent: u32) -> Result<(), SessionError> {
+        let Some(index) = self.zoom_size_index(percent) else {
+            // **Refused, and not clamped.** A zoom control that silently snapped 200 % to 125 % is
+            // a control that lies about what it did, and `state.zoom_percent` would then be the one
+            // place in the file holding a number the pixels disagree with. **The caller asked for a
+            // size this atlas does not have and the answer is that it does not have it.**
+            return Err(SessionError::ZoomUnavailable { percent });
+        };
+        self.state.zoom_percent = percent;
+        self.painter.set_size_index(index);
+        // **The chrome's type metrics follow the painter's size.** Part 32 built
+        // `with_cell_width`/`with_type_scale`/`with_line_pitch` from the painter's own measurements
+        // at construction -- **and only at construction**, so a zoom that changed the painter alone
+        // would leave the measure at 16 ppem's advance while the glyphs were 20 ppem's. **The ruler,
+        // the caret and the selection would then be placing cells in a grid the text is not in.**
+        self.apply_type_scale();
+        // **Everything.** Every band, every pixel: the page's width in cells changes with the cell
+        // width, so the page moves as well as the type.
         self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// **The atlas size index a zoom percentage names, or `None` if there is none.**
+    ///
+    /// ## The table, and why it is percent-to-*index* and not percent-to-ppem
+    ///
+    /// **Because the base ppem is a boot argument (`--ppem`) and the chrome does not know it.** The
+    /// two zoom levels are *index 0* and *index 1* of whatever the atlas was built with, and the
+    /// sizes behind them are 16 and 20 because that is what `main` asks for. **Writing the table as
+    /// percentages and resolving to an index is what makes `--ppem 24` work without touching this
+    /// function** -- it would then be 24 and 30.
+    ///
+    /// ## Two levels, and the third is refused
+    ///
+    /// **`AtlasBuilder::new` refuses a third size** -- each costs 14,080 bytes of metric table against
+    /// a 512 KiB ceiling the PRD sets, and `[16, 20]` already uses 378,850 of 458,752. So `ZOOMS` has
+    /// two rows and this has two arms, **and a percentage outside the table is an error rather than a
+    /// nearest-neighbour.**
+    fn zoom_size_index(&self, percent: u32) -> Option<u8> {
+        let rank = holonomy_render::menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == percent)?;
+        // **One size in the atlas means one zoom level.** A session built against `[16]` has nothing
+        // to switch to, and saying so is better than switching to the size it already had.
+        let sizes = self.painter.atlas().map_or(0, |a| a.sizes().len());
+        let index = u8::try_from(rank).ok()?;
+        (usize::from(index) < sizes).then_some(index)
+    }
+
+    /// **Re-derive the chrome's type metrics from the painter's current size.** Part 43.
+    ///
+    /// **A private function rather than three lines inline in `set_zoom`,** because the same three
+    /// lines run in `Session::new` and a second copy of "the cell comes from the face" is a second
+    /// thing to keep in step with part 32's derivation.
+    fn apply_type_scale(&mut self) {
+        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
+        // is the tallest face *over every size in the atlas*, so with `[16, 20]` it answers 20 ppem's
+        // pitch whatever is being drawn -- and a session at 100 % would space 16 ppem glyphs on 20 ppem
+        // leading, which reads as double-spaced text at 100 % and as a zoom that changed nothing.
+        let Some(atlas) = self.painter.atlas() else { return };
+        let Some(size) = self.painter.size() else { return };
+        let pitch = atlas.line_pitch_at(size);
+        if pitch == 0 {
+            return;
+        }
+        let metrics = self
+            .chrome
+            .metrics
+            .with_cell_width(self.painter.cell_width())
+            .with_type_scale(u32::from(pitch))
+            .with_line_pitch(u32::from(pitch));
+        // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
+        // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
+        // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and
+        // `the_page_and_its_layout_do_depend_on_the_zoom` failed with two `Layout`s printing
+        // identically** -- `cell_w: 10, cell_h: 30` on both -- while `chrome.metrics.cell_w` read 12.
+        //
+        // **The same two lines `resize` uses**, which is the point of naming them: a zoom changes the
+        // geometry exactly as a window resize does, and the only difference is why.
+        self.chrome = Chrome::new(metrics);
     }
 
     /// Apply a command a click produced, and count it.
@@ -3485,7 +3592,7 @@ impl<'a> Session<'a> {
         if let Command::Hotkey(Hotkey::Quit) = command {
             return Ok(Some(Exit::Quit));
         }
-        self.apply(command)?;
+        self.apply_with(command, Some(&mut *bytes))?;
         self.tick_with(bytes)?;
         // **The commit is drained here and not inside `apply`.**
         //
@@ -3516,8 +3623,45 @@ impl<'a> Session<'a> {
         self.keymap.dispatch_into(event, &mut self.mods)
     }
 
-    /// Apply one command, damaging what it touched.
+    /// Apply one command, damaging what it touched, **with no source and so no faulting.**
+    ///
+    /// ## Why this is a shim and not the implementation
+    ///
+    /// **Forty-odd gates call `apply` and none of them has a container.** Part 42 added
+    /// [`apply_with`](Self::apply_with), which faults the caret's leaf before a mutator runs, and
+    /// the only two callers that *can* fault are `handle_event_with` and `Session::press` -- both of
+    /// which are already handed a `&mut dyn LeafSource`.
+    ///
+    /// **So this keeps the old signature and passes `None`, and an edit past the resident window
+    /// still refuses on this path.** That is honest rather than convenient: a gate with no source
+    /// cannot have its bytes faulted from anywhere, and the behaviour it observes is the behaviour
+    /// of a session that has no store. `a_keystroke_past_the_resident_window_edits_when_there_is_a_source`
+    /// is the gate that says the difference.
     pub fn apply(&mut self, command: Command) -> Result<(), SessionError> {
+        self.apply_with(command, None)
+    }
+
+    /// Apply one command, **faulting the caret's leaf in first if a source is available.** Part 42.
+    ///
+    /// ## The `Option` and not a `&mut dyn`
+    ///
+    /// **Because a `&mut dyn` parameter would have to be moved into each mutating arm**, and the arms
+    /// are in one `match`. `Option<&mut dyn LeafSource>` is taken and `take()`n, which is one line per
+    /// arm and reads as "this arm may use the source".
+    ///
+    /// ## What faults, and what does not
+    ///
+    /// **The caret's leaf, and nothing else.** An insert moves the gap in one leaf; a delete moves it
+    /// in one leaf. **`Editor::insert_at` and `delete_at` each call `set_cursor` first**, which is
+    /// where the absent leaf is found, so faulting the caret is exactly the set of leaves a
+    /// single-keystroke edit can need. **A selection spanning two leaves is not covered** and
+    /// `a_selection_spanning_two_leaves_still_refuses` says so.
+    pub fn apply_with(
+        &mut self,
+        command: Command,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        let mut source = source;
         match command {
             Command::Insert(c) => {
                 // A stack buffer, not a `Vec`. Phase 11: this was `encode_utf8(&mut buf).as_bytes()
@@ -3530,7 +3674,7 @@ impl<'a> Session<'a> {
                 // `char` can encode to, so the buffer cannot be too small.
                 let mut buf = [0u8; 4];
                 let bytes = c.encode_utf8(&mut buf);
-                self.insert(bytes.as_bytes())?;
+                self.insert(bytes.as_bytes(), source.take())?;
             }
             // Enter is a newline in ordinary text and a line break *inside* a cell in a table, and
             // the difference is the whole of what makes a table usable: a newline that ended the row
@@ -3539,7 +3683,7 @@ impl<'a> Session<'a> {
                 if self.active_cell.is_some() {
                     self.newline_in_cell()?;
                 } else {
-                    self.insert(b"\n")?;
+                    self.insert(b"\n", source.take())?;
                 }
             }
             // Tab is a literal tab outside a table and cell navigation inside one. Outside, it is four
@@ -3550,7 +3694,7 @@ impl<'a> Session<'a> {
                 if self.active_cell.is_some() {
                     self.nav(holonomy_text::tab)?;
                 } else {
-                    self.insert(b"    ")?;
+                    self.insert(b"    ", source.take())?;
                 }
             }
             // Shift+Tab outside a table removes one level of the indentation Tab added, which is what
@@ -3563,8 +3707,8 @@ impl<'a> Session<'a> {
                 }
             }
             Command::InsertTable { rows, cols } => self.insert_table(rows, cols)?,
-            Command::Backspace => self.backspace()?,
-            Command::DeleteForward => self.delete_forward()?,
+            Command::Backspace => self.backspace(source.take())?,
+            Command::DeleteForward => self.delete_forward(source.take())?,
             // Inside a table the four arrows are cell navigation, not caret movement: "down" means
             // the cell below, which for a one-line cell is a jump of a whole row rather than a line.
             // The rules report `Nav::Nowhere` when there is no such cell, and that is swallowed -- a
@@ -3735,7 +3879,29 @@ impl<'a> Session<'a> {
 
     // ---------------------------------------------------------------- edits
 
-    fn insert(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
+    /// **Fault the caret's leaf before inserting, when a source is available.** Part 42.
+    ///
+    /// **First, before `delete_selected`.** The two edits are sequential and independent -- a
+    /// selection replace does not move the caret past either leaf -- so the order does not matter for
+    /// correctness. **It matters for what a failure looks like**: faulting first means the leaf is
+    /// present before anything has been touched, so a source that cannot produce the bytes leaves the
+    /// document exactly as it was, with the selection still selected.
+    fn fault_for_edit(
+        &mut self,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        if let Some(src) = source {
+            self.editor.fault_at_caret(src)?;
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        bytes: &[u8],
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        self.fault_for_edit(source)?;
         // **A selected range is replaced, not typed into.** Part 28.
         //
         // **This is the first thing typing does with a selection and the only reason a selection is
@@ -3949,14 +4115,21 @@ impl<'a> Session<'a> {
     /// cell holding three lines is three lines tall and the borders below it move down. That is the
     /// "recompute row height in the Fenwick geometry" of the directive: the Fenwick mapper maps byte
     /// offsets to line indices, and a cell's height is the number of `\n` bytes in it.
+    ///
+    /// **No source parameter, and that is a gap rather than a decision.** `newline_in_cell` is
+    /// reached from `apply_with`'s `Command::Newline` arm and could take the source the same way
+    /// `insert` does. **It does not, so Enter inside a table cell still refuses past the resident
+    /// window** while typing in ordinary text does not. `a_enter_in_a_cell_past_the_window_still_refuses`
+    /// is the gate that pins that, and closing it is a two-line change once someone wants a table
+    /// large enough to notice.
     fn newline_in_cell(&mut self) -> Result<(), SessionError> {
         let Some(cur) = self.active_cell else {
-            return self.insert(b"\n");
+            return self.insert(b"\n", None);
         };
         let cell_start = self.with_table(|_span, t| {
             Ok(t.cell_at(t.span.cell_index(cur.row, cur.col))?.start_byte)
         })?;
-        self.insert(b"\n")?;
+        self.insert(b"\n", None)?;
         // The insertion is inside the table, so the span grew; re-read it and re-enter the cell one
         // byte past the newline that was just inserted.
         // The insertion is inside the table, so the table grew; the span is re-read at the cell's old
@@ -4052,7 +4225,11 @@ impl<'a> Session<'a> {
         Ok(Some(len))
     }
 
-    fn backspace(&mut self) -> Result<(), SessionError> {
+    fn backspace(
+        &mut self,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        self.fault_for_edit(source)?;
         // **A selection is deleted whole, before the "is there a byte before the caret" question.**
         // Part 28. The check below is about *one character*; with a selection the answer is the range,
         // and asking it first would mean Backspace with a selection anchored at byte 0 doing nothing at
@@ -4079,7 +4256,11 @@ impl<'a> Session<'a> {
         self.after_edit(1)
     }
 
-    fn delete_forward(&mut self) -> Result<(), SessionError> {
+    fn delete_forward(
+        &mut self,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        self.fault_for_edit(source)?;
         // **The same rule as `backspace`, and the same reason.** A Delete with a selection deletes
         // the selection, which is what every editor does and is the only behaviour that makes
         // "select, then press Delete" work without holding a different key.
@@ -4373,6 +4554,36 @@ impl<'a> Session<'a> {
         self.state.selection = self.editor.selection();
     }
 
+    /// **Read `offset..offset + out.len()` out of the document, faulting absent leaves in.** Part 42.
+    ///
+    /// ## Why this exists
+    ///
+    /// **[`text`](Self::text) is the resident-only reader and it cannot be widened.** `read_into` is
+    /// `&self` because the paint path calls it from `&self` contexts, and the whole design — argued
+    /// at length in `Editor::read_into_faulting`'s own docs — is that a `&self` reader must not pay
+    /// a page-locked 4 KiB load behind a `RefCell`. **So on a document larger than the resident
+    /// budget, `text()` answers `LeafAbsent` and a caller that needs the bytes has to ask for the
+    /// other method.**
+    ///
+    /// **It had no other method.** The capability existed on `Editor` and the session did not carry
+    /// it, so a caller holding a `Session` — which is every driver and every gate — could not read a
+    /// sparse document at all without reaching through `editor_mut`, which returns `&mut Editor` and
+    /// would let a caller bypass the session's whole invariant.
+    ///
+    /// ## A pass-through, and that is the point
+    ///
+    /// **One line, no logic, and the session's `&mut self` is what makes it possible** where
+    /// `Editor::read_into_faulting` needed `&mut Editor`. Every faulting read elsewhere in this file
+    /// goes through this, so there is one capability rather than several private ones.
+    pub fn read_into_faulting(
+        &mut self,
+        source: &mut dyn holonomy_text::LeafSource,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, SessionError> {
+        Ok(self.editor.read_into_faulting(source, offset, out)?)
+    }
+
     /// Put the caret at `at`, clamped back to a codepoint boundary.
     ///
     /// **Public as of Phase 11**, for the same reason `tick` and `apply` are: a driver -- or a gate --
@@ -4381,6 +4592,53 @@ impl<'a> Session<'a> {
     /// that follows, and doing that through `Command::Insert` would have measured an insertion at a
     /// guessed offset rather than at the one being tested.
     pub fn caret_to(&mut self, at: usize) -> Result<(), SessionError> {
+        self.caret_to_with(at, None)
+    }
+
+    /// Put the caret at `at`, **faulting the leaf it lands in when a source is available.** Part 42.
+    ///
+    /// ## Why this exists, and why it is not just part of the mutator fix
+    ///
+    /// **Part 42's first version made typing work past the resident window and left this broken, and
+    /// the gate caught it on the first run** with `LeafAbsent { leaf: 79 }` from the *caret
+    /// placement*, before the keystroke that was supposed to be under test ever ran.
+    ///
+    /// **It is the same defect one step earlier and it is the step a user takes first.** You cannot
+    /// type where the caret cannot go, and every route to a distant offset goes through here:
+    /// `Session::click_page` resolves a byte and then places the caret, `extend_to` anchors a
+    /// selection, the arrow keys walk there one key at a time. **Fixing only the mutator means a
+    /// user can reach the end of a document with the caret but cannot type there** — which is a
+    /// stranger failure than not being able to get there at all.
+    ///
+    /// ## `caret_to` is unchanged and passes `None`
+    ///
+    /// **Forty-three gate sites call it and the reason it is `pub` is documented above.** The same
+    /// argument as `apply`: a caller with no source cannot fault, and a refusal is the honest answer
+    /// rather than a clamp. `caret_to` keeps its signature and its behaviour; this is the variant.
+    pub fn caret_to_faulting(
+        &mut self,
+        at: usize,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        self.caret_to_with(at, Some(source))
+    }
+
+    fn caret_to_with(
+        &mut self,
+        at: usize,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        // **Fault before the move, not after.** `Editor::caret_to` asks the rope to `set_cursor`,
+        // which locates a leaf and refuses if it is absent; faulting first is what makes the move
+        // legal. **Faulting afterwards would be too late to matter** — the move is the thing that
+        // failed.
+        if let Some(src) = source {
+            self.editor.fault_at(src, at)?;
+        }
+        self.caret_to_body(at)
+    }
+
+    fn caret_to_body(&mut self, at: usize) -> Result<(), SessionError> {
         // The caret's old cell, before anything moves. Read from the *state* rather than by locating
         // it, because the state is what `Caret::locate` will use and re-deriving it after the move
         // would give the new position, which is the one thing that is not yet stale.

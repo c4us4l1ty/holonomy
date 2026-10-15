@@ -1245,6 +1245,56 @@ impl Editor {
         self.park(offset)
     }
 
+    /// **Make the leaf holding `offset` resident, so an edit at `offset` can be applied.** Part 42.
+    ///
+    /// # Why this exists, and what was broken
+    ///
+    /// **Every mutating path refused to touch an absent leaf.** `Rope::leaf_mut` answers
+    /// `LeafAbsent` for a leaf the rope does not hold, and that refusal is deliberate and correct:
+    /// the alternative is a leaf whose gap has moved without its bytes being present, which is not a
+    /// wrong answer but no answer at all. **And because nothing called [`Rope::fault_leaf_containing`]
+    /// first, the refusal reached the user** -- a keystroke past the resident window did nothing at
+    /// all, silently, with no error the user could see and no keystroke the user could see either.
+    ///
+    /// **Reads faulted and writes did not**, which is the asymmetry. `read_into_faulting` has been
+    /// here since part 14 and the paint path uses it; the edit path had no equivalent.
+    ///
+    /// # Why `fault_leaf_containing` and not a `locate` plus a `fault_leaf`
+    ///
+    /// **Because `locate` answers `(leaf, within)` and every caller wants to say "the bytes at this
+    /// offset".** A caller that dropped the `within` half would fault the right leaf and then get a
+    /// confusing error out of `set_cursor`. The rope's own method exists for exactly this and it is
+    /// the one called.
+    ///
+    /// # What it costs when the leaf is already resident
+    ///
+    /// **One `is_resident` check, which is an array index.** This is on the keystroke path, where
+    /// NFR-1.1 budgets 0.50 ms for the whole turn, and it is worth saying that the common case is a
+    /// leaf that was just read -- `a_keystroke_faults_nothing_when_the_leaf_is_already_resident`
+    /// is the gate that holds it.
+    pub fn fault_at(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+        offset: usize,
+    ) -> Result<(), EditorError> {
+        self.rope.fault_leaf_containing(source, offset)?;
+        Ok(())
+    }
+
+    /// **The caret's leaf, resident.** The mutator's precondition, and the one method a caller that
+    /// is about to edit needs.
+    ///
+    /// **`fault_at(self.caret() as usize)` spelled out rather than delegated**, so that a reader of
+    /// this function does not have to know `caret()` is a `u32` that has been `usize` for four
+    /// phases.
+    pub fn fault_at_caret(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+    ) -> Result<(), EditorError> {
+        let at = self.caret() as usize;
+        self.fault_at(source, at)
+    }
+
     // ---------------------------------------------------------------- selection, part 28
 
     /// **The selection, or `None`.**

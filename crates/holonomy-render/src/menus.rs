@@ -457,14 +457,29 @@ pub const FONTS: &[&str] = &[
 /// spelling of one concept, and it cost a real conversion: part 23 made `set_zoom` public so the
 /// `--zoom` sites could reach it, and the compiler rejected `set_zoom(args.zoom)` because the types
 /// disagreed. **A width chosen for economy and then paid for at every boundary is not a saving.**
-pub const ZOOMS: &[(&str, u32)] = &[
-    ("50%", 50),
-    ("75%", 75),
-    ("100%", 100),
-    ("125%", 125),
-    ("150%", 150),
-    ("200%", 200),
-];
+///
+/// # CORRECTION, part 43: five rows became two, and the reason is an atlas ceiling
+///
+/// **The list was 50 / 75 / 100 / 125 / 150 and every one of them did nothing to the pixels.**
+/// `Painter` already had a `size_index` and an `atlas_size()` that reads `atlas.sizes()[index]` --
+/// **the machinery was built and unused** -- and the thing missing was a second size in the atlas.
+///
+/// **There is room for exactly two.** `AtlasBuilder::new` refuses a third:
+///
+/// ```text
+/// 3 sizes requested, but the atlas geometry is budgeted for at most 2: each extra size adds
+/// 14,080 bytes of metric table, which would push the atlas-plus-table pair over the 512 KiB ceiling
+/// ```
+///
+/// **and that ceiling is the PRD's, not this crate's.** Measured: `[16]` uses 236,690 of 458,752;
+/// `[16, 20]` uses 378,850; a third does not fit. **So the honest dropdown has the rows the atlas
+/// can back**, and 125 % is the second one -- 20 ppem against 16 is exactly 125 %.
+///
+/// **Two rows where the reference has five is a visible deviation and it is the right one.** Five
+/// rows of which three change nothing is the reference's lie reproduced; two rows that both change
+/// the pixels is a control that works. `a_zoom_row_that_is_not_in_the_table_is_refused` is the gate
+/// that says what happens to a percentage outside the table.
+pub const ZOOMS: &[(&str, u32)] = &[("100%", 100), ("125%", 125)];
 
 /// **The text colours the toolbar offers, and the values [`SpanMap::style_range`] takes.**
 ///

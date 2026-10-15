@@ -209,6 +209,48 @@ impl Atlas {
             .saturating_add(1)
     }
 
+    /// **The line pitch at one size** — the tallest `ascent + descent` over the faces *at that size*,
+    /// plus one pixel. Part 43.
+    ///
+    /// # Why this and not [`Self::line_pitch`]
+    ///
+    /// **`line_pitch` is the max over every size in the atlas, which is the right answer for one
+    /// size and the wrong one for two.** With `[16, 20]` it answers 20 ppem's pitch (30) whatever
+    /// the painter is drawing, so a session at 100 % would space its lines at 20 ppem's leading:
+    /// **the glyphs would be 16 ppem's and the line boxes 30 px apart**, which reads as
+    /// double-spaced text at 100 % and as a zoom that changed nothing.
+    ///
+    /// # Why a session at 100 % must not use the global one
+    ///
+    /// **Because the whole cost of the second size is paid at boot and none of it should be visible
+    /// until it is used.** The gate is `the_row_pitch_follows_the_zoom_and_not_the_tallest_size`:
+    /// at 100 % the pitch is 16 ppem's and at 125 % it is 20 ppem's, and the global value is neither
+    /// of those at 100 %.
+    ///
+    /// # And a size the atlas does not hold
+    ///
+    /// **`0`, and not a fallback to `line_pitch()`.** A caller asking about a size that is not there
+    /// is asking a question with no answer, and answering it with the largest available pitch would
+    /// let a caller lay out at a size it cannot draw. `Session::apply_type_scale` only ever passes
+    /// `Painter::size()`, which is clamped to a real index.
+    #[must_use]
+    pub fn line_pitch_at(&self, size: u16) -> u16 {
+        let Some(hi) = self.sizes.iter().position(|&s| s == size) else {
+            return 0;
+        };
+        // **Over the table, not over a face list.** `vertical` is indexed by
+        // `style * MAX_SIZES + size_index`, so the whole set is `MAX_SIZES` entries per style and
+        // this size's column is `hi`. **Iterating the column is what makes it per-size** -- the
+        // global `line_pitch` iterates every column.
+        let max_styles = crate::metric::MAX_SIZES;
+        (0..(self.vertical.len() / max_styles.max(1)))
+            .map(|style| self.vertical.get(style * max_styles + hi).copied().unwrap_or((0, 0)))
+            .map(|(a, d)| a.saturating_add(d))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
     /// Sizes rasterised, ascending.
     pub fn sizes(&self) -> &[u16] {
         &self.sizes

@@ -120,6 +120,29 @@ impl SessionContext {
 /// The atlas, built once. Leaked so the session's lifetime is not tied to a local.
 static ATLAS: std::sync::OnceLock<holonomy_assets::atlas::Atlas> = std::sync::OnceLock::new();
 
+/// **The ppem sizes the atlas is built at, for a `--ppem` of `base`.**
+///
+/// **Two, and the second is `base * 5 / 4`.** `menus::ZOOMS` has two rows and this has two sizes;
+/// `Session::zoom_size_index` resolves one to the other by rank. **The relationship is the point**:
+/// 16 gives 16 and 20, 24 gives 24 and 30, and neither needs this function to know what "125 %"
+/// means.
+///
+/// **`sort_unstable` and `dedup`, and the sort is not cosmetic.** `zoom_size_index` resolves a
+/// percentage to a *rank* in `ZOOMS` and uses that rank as an index into `atlas.sizes()`, so the
+/// atlas has to hold them in ascending order or 125 % would draw at 100 %. **`dedup` is for the
+/// degenerate case**: `--ppem` is clamped to 10..=26 so `base * 5 / 4 != base` always today, and
+/// `dedup` is what makes that a fact of the arithmetic rather than a fact of the range.
+///
+/// **A free function and not an inline expression**, because `args.rs` has a gate about which ppem
+/// values fit the atlas and this changes the question it is asking: it is no longer "does one size
+/// fit" but "do two". `atlas_sizes_fit_the_geometry` is that gate.
+fn atlas_sizes(base: u16) -> Vec<u16> {
+    let mut sizes = vec![base, base.saturating_mul(5) / 4];
+    sizes.sort_unstable();
+    sizes.dedup();
+    sizes
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -214,7 +237,16 @@ fn run() -> Result<(), Fail> {
     // The atlas is the largest allocation the session makes, and it is made *before* the jail so
     // that nothing after `seccomp` has to touch the allocator.
     let atlas = ATLAS.get_or_init(|| {
-        holonomy_assets::build_atlas(&[args.ppem])
+        // **Two sizes, and the second is 125 % of the first.** Part 43: zoom needs the glyphs
+        // rasterised at the size being drawn, and §2.9.5 forbids rasterising at runtime -- so the
+        // sizes are built at boot and *selected* at runtime. **Two is the ceiling**:
+        // `AtlasBuilder::new` refuses a third (`each extra size adds 14,080 bytes of metric table`,
+        // against a 512 KiB ceiling the PRD sets), and `[16, 20]` measures 378,850 of 458,752 used.
+        //
+        // **`atlas_sizes` rather than a literal**, because `--ppem` chooses the base and the second
+        // size follows it: 24 gives 24 and 30, which is the same relationship and not a second
+        // table to keep in step.
+        holonomy_assets::build_atlas(&atlas_sizes(args.ppem))
             .expect("the packed faces must rasterise")
             .0
     });
@@ -254,7 +286,12 @@ fn run() -> Result<(), Fail> {
             Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
             metrics,
         );
-        s.set_zoom(args.zoom);
+        // **A zoom this atlas cannot do is a refusal, not a clamp.** `--zoom 200` on a two-size
+        // atlas is a command-line error and saying so beats drawing 125 % under a "200%" label.
+        s.set_zoom(args.zoom).unwrap_or_else(|e| {
+            eprintln!("holonomy: {e}");
+            eprintln!("holonomy: continuing at 100 %");
+        });
         s.state.sealed = false;
         // **No container here**, so no store and no fetching: this is the pre-open path, an empty editor
         // on a headless frame. `NoSource` refuses every fetch, which is exactly right -- there is nothing
@@ -392,7 +429,10 @@ fn run() -> Result<(), Fail> {
 
         let ctx = sealed.context_mut();
         ctx.session.state.sealed = true;
-        ctx.session.set_zoom(args.zoom);
+        ctx.session.set_zoom(args.zoom).unwrap_or_else(|e| {
+            eprintln!("holonomy: {e}");
+            eprintln!("holonomy: continuing at 100 %");
+        });
 
         // **The passphrase is used now.** It was read above and dropped on the floor (`let _ = &phrase`),
         // which is why this product had never opened a document: there was no path from a descriptor to

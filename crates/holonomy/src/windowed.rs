@@ -269,7 +269,13 @@ pub fn run(
         Box::new(desktop),
         metrics,
     );
-    session.set_zoom(args.zoom);
+    // **A zoom this atlas cannot do is reported, not clamped.** Part 43: `set_zoom` returns
+    // `Result` because "125 % drawn under a '200 %' label" is a lie the label is uniquely positioned
+    // to tell, and `--zoom` is exactly where such a lie would arrive from.
+    if let Err(e) = session.set_zoom(args.zoom) {
+        eprintln!("holonomy: {e}");
+        eprintln!("holonomy: continuing at 100 %");
+    }
     // **The document's name, in the title bar and in the sidebar.**
     //
     // **Part 39: the window said `untitled` and the sidebar said nothing at all**, whatever the user
