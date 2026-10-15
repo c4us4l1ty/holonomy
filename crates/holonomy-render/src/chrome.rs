@@ -2912,6 +2912,14 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 r.height,
                 colour::PILL_ACTIVE,
             ));
+            // Left accent border on active tab for clear selection visibility, matching Plan reference
+            into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
+                r.x as i32,
+                r.y as i32,
+                3,
+                r.height,
+                colour::ACTIVE,
+            ))));
         } else if let Some(c) = state_fill(state, crate::widgets::Hit::Doc(i)) {
             into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
         }
