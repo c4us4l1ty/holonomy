@@ -1348,6 +1348,24 @@ pub struct ChromeState {
     pub sealed: bool,
     /// Zoom, as a percentage.
     pub zoom_percent: u32,
+    /// **Which mode is selected, as an index into [`crate::menus::MODES`].** Part 44.
+    ///
+    /// **An index and not a `ViewMode`, and the reason is the same as `style_index` and
+    /// `font_index`.** The chrome holds `u8`s into `&'static [&'static str]` tables so a label is a
+    /// borrow rather than a `format!` on the paint path, and **a state loaded from a file written by a
+    /// build with more modes must not panic** -- so it is an index and the accessor clamps.
+    /// `an_out_of_range_mode_index_falls_back` is the gate.
+    pub mode_index: u8,
+    /// **The tools that did not fit on the toolbar, in `TOOLBAR` order.** Part 44.
+    ///
+    /// **`Vec` and not a count**, because the overflow popup draws *rows* and one of those rows is a
+    /// clickable `Tool`. **A count could not answer "which"** and a parallel `HashSet` would be a
+    /// second copy of a fact the layout already computed.
+    ///
+    /// **The session writes this and only the session writes it**, from `widgets::place_toolbar`'s
+    /// zero-width rects -- which are already the definition of "did not fit". See
+    /// `Session::refresh_overflow`.
+    pub overflow_tools: Vec<crate::widgets::Tool>,
     /// Caret line, 0-based, relative to the first visible row.
     pub caret_line: u32,
     /// Caret column, 0-based.
@@ -1513,6 +1531,8 @@ impl Default for ChromeState {
             pressed: None,
             sealed: false,
             zoom_percent: 100,
+            mode_index: 0,
+            overflow_tools: Vec::new(),
             caret_line: 0,
             caret_column: 0,
             caret_pen_x: None,
@@ -2642,7 +2662,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     ));
 
     let mut prev_separated = false;
-    for p in crate::widgets::place_toolbar(l, 8) {
+    for p in crate::widgets::place_toolbar(l, crate::widgets::TOOLBAR_PAD) {
         // # CORRECTION 2026-10-12: a tool with no room is skipped, not drawn at zero
         //
         // `place_toolbar` now hands back a zero-extent rect for a tool that does not fit — the right
@@ -2759,6 +2779,27 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                     colour::INK_DIM,
                 ),
             )));
+        } else if p.tool == crate::widgets::Tool::Overflow {
+            // **Part 44: `Overflow`'s chevron is drawn only when there is something in the menu.**
+            //
+            // **A chevron on a button that opens an empty popup is a button that lies**, and unlike
+            // the labelled controls -- whose rows are a compile-time table -- `Overflow`'s rows are
+            // the tools that did not fit, which is empty on a 1,280 px panel. **Drawing it
+            // conditionally is what makes `has_dropdown` able to answer "empty means closed"**, and
+            // `an_overflow_button_with_nothing_hidden_draws_no_chevron` is the gate.
+            //
+            // **The chevron goes to the right of the icon rather than under a label**, because
+            // `Overflow` has no label -- the reference draws it as an icon and a small caret, and
+            // `Tool::has_label` is what decides which of the two this is.
+            if !state.overflow_tools.is_empty() {
+                into.push(SurfaceTree::leaf(crate::Node::Icon(
+                    crate::icons::IconId::ChevronDown.at(
+                        p.rect.right() as i32 - ih,
+                        iy,
+                        colour::INK_DIM,
+                    ),
+                )));
+            }
         }
     }
 }

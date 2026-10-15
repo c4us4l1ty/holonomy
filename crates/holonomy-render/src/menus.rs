@@ -104,6 +104,17 @@ pub enum Action {
     ToggleBold,
     /// **Arm or disarm italic for the next character typed.**
     ToggleItalic,
+    /// **Switch to the mode at this index in [`MODES`].** Part 44.
+    SetMode(u8),
+    /// **Run the toolbar tool named by this row.** Part 44.
+    ///
+    /// **A `Tool` in an `Action`, and the dependency runs the right way.** `holonomy-render` owns
+    /// `Tool` and `Action` and the renderer neither knows nor needs to know what a mode does or what
+    /// `Tool::Bold` toggles -- it draws the row and passes the value through, and the session is
+    /// where `Tool::Bold` becomes a flag. **Without this the overflow menu would need a parallel
+    /// `Action` per tool**, which is a table that has to be kept in step with `TOOLBAR` and is wrong
+    /// the moment a tool is added.
+    SelectTool(crate::widgets::Tool),
 }
 
 impl Action {
@@ -130,6 +141,13 @@ impl Action {
             Action::SetColour(_) => "set-colour",
             Action::ToggleBold => "toggle-bold",
             Action::ToggleItalic => "toggle-italic",
+            Action::SetMode(_) => "set-mode",
+            // **One name for both tools, and not `format!("select-tool-{}", ..)`.** `name` is a
+            // `const fn` answering `&'static str`, so it cannot format. **The tool's own name is
+            // already on the row** -- `Item::label` is `tool.name()` -- so a gate that wants to know
+            // which row it is holding already has it, and a slug that repeated it would be a second
+            // spelling to keep in step.
+            Action::SelectTool(_) => "select-tool",
         }
     }
 }
@@ -563,9 +581,57 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
             .enumerate()
             .map(|(i, (name, _))| chosen(name, Action::SetColour(i as u8), i == state.colour_index))
             .collect(),
+        // **Part 44: `Mode` is a real dropdown, and both of its rows are real.** `MODES` is one row
+        // per mode the session can actually be in; see `ViewMode`.
+        Tool::Mode => MODES
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| chosen(label, Action::SetMode(i as u8), i == usize::from(state.mode_index)))
+            .collect(),
+        // **Part 44: `Overflow` lists the tools that did not fit.** The rows carry the tool's *name*
+        // and `Action::SelectTool` is what runs one -- a different shape from `Action::SetZoom`, which
+        // is a statement about the chrome's own state.
+        Tool::Overflow => state
+            .overflow_tools
+            .iter()
+            .map(|&tool| Item {
+                label: tool.name(),
+                icon: tool.icon(),
+                accelerator: None,
+                submenu: false,
+                action: Some(Action::SelectTool(tool)),
+                checked: false,
+            })
+            .collect(),
         // **Every other tool opens nothing**, and `None` rather than an empty `Vec` so the caller can
         // tell "no dropdown" from "a dropdown with no rows" — which is the difference between a
         // button that does nothing and a button that is broken.
         _ => Vec::new(),
     }
+}
+
+/// The modes the mode switcher offers, and what each one means.
+///
+/// **Two, and both are real.** `Editing` is the ordinary mode; `Viewing` is read-only — every mutator
+/// is refused and the caret still moves, which is what "viewing" means in every editor and is
+/// implementable with what this model already has.
+///
+/// **There is no `Suggesting`, and that is the interesting omission.** The reference offers it and a
+/// wireframe can offer it for free. **A suggestion mode needs a suggestion store, a provenance flag
+/// per span and a reviewer identity**, and none of those exist; a `Suggesting` row that behaved like
+/// `Editing` under a different label would be the most dishonest thing on the toolbar — worse than
+/// the inert button it replaces, because it would *look* like it was tracking other people's edits.
+pub const MODES: &[(&str, ViewMode)] = &[("Editing", ViewMode::Editing), ("Viewing", ViewMode::Viewing)];
+
+/// What a mode is, as far as the renderer is concerned.
+///
+/// **A copy of the session's vocabulary and not the session's type**, for the same reason `Action`
+/// is: `holonomy-render` must not depend on `holonomy`, and the renderer only needs to put a name
+/// and a tick on a row. **The session is the only thing that decides what a mode *does*.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Type, delete, format.
+    Editing,
+    /// Move the caret, select, scroll. **Refuse every edit.**
+    Viewing,
 }

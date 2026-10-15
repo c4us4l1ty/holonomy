@@ -103,6 +103,19 @@ pub enum SessionError {
         /// What was asked for, in per-cent.
         percent: u32,
     },
+    /// An edit was attempted while the session was in a read-only mode. Part 44.
+    ///
+    /// ## Why an error and not a silent no-op
+    ///
+    /// **Because a keystroke that does nothing is the defect this project keeps finding.** Part 42's
+    /// was exactly that: typing past the resident window failed in silence. **A viewing mode where
+    /// typing is silently dropped is the same bug with a different cause.**
+    ///
+    /// ## And why not "the caret blinks and nothing happens"
+    ///
+    /// **Because that is what a crashed application looks like.** The error is what lets
+    /// `windowed.rs` put something in the status bar and what makes the refusal countable.
+    ReadOnly,
 }
 
 impl std::fmt::Display for SessionError {
@@ -117,6 +130,11 @@ impl std::fmt::Display for SessionError {
                 "the caret at byte {offset} is not inside a table, so there is no cell to act on"
             ),
             Self::Table(e) => write!(f, "{e}"),
+            // **"A read-only mode" and not the mode's name.** `Display` has no session to ask, and a
+            // `SessionError` that had to carry a `&'static str` to name the mode would be a second
+            // copy of `menus::MODES` -- a table that already exists and is the one to read.
+            // **The caller that wants to say which mode has `Session::mode_name`.**
+            Self::ReadOnly => write!(f, "the session is in a read-only mode, which does not edit"),
             // **The message says what *is* available, not just what was asked for.** A caller who
             // asks for 200 % and gets "no" has to go and read `menus::ZOOMS` to find out why; this
             // tells them in the error they are already printing.
@@ -196,6 +214,17 @@ impl From<holonomy_input::InputError> for SessionError {
 pub struct SessionStats {
     /// Commands applied, including movement and navigation.
     pub commands: u32,
+    /// **Edits refused because the session was in a read-only mode.** Part 44.
+    ///
+    /// **Its own counter rather than `pointer_inert`, and the difference is the whole point.**
+    /// `pointer_inert` is "a widget was pressed and nothing is behind it" -- a defect the project is
+    /// trying to drive to zero. **This is "a key was pressed and a policy said no"**, which is correct
+    /// behaviour, and a gate that asserted `pointer_inert == 0` after typing in viewing mode would be
+    /// asserting that the mode does not exist.
+    ///
+    /// **Counted in `Session::fault_for_edit`, which every mutator goes through**, so it covers
+    /// typing, backspace, delete-forward and every range-styling action — one number for all of them.
+    pub edits_readonly_refused: u32,
     /// Edits that changed the document.
     pub edits: u32,
     /// Edits that changed exactly one line's length, so the geometry was a `O(log n)` point update.
@@ -532,6 +561,23 @@ pub struct Session<'a> {
     /// `holonomy_input::pointer::Event::Button::time_ms`: X11 and evdev stamp differently, and the
     /// only question asked of the number is whether the *difference* between two of them is small.
     clicks: Option<Click>,
+    /// **The mode the session is in, and the model's copy of it.** Part 44.
+    ///
+    /// ## Why this and not `state.mode_index`
+    ///
+    /// **Because the chrome holds a number for display and the session needs the thing.** Every other
+    /// chrome-selection (`style_index`, `font_index`, `colour_index`) is the same arrangement and the
+    /// same argument: the index is what the state file stores and the label is derived from it,
+    /// **and the model keeps its own copy** so that reading the mode on a mutating path does not
+    /// require re-deriving it from a `u8` through a table.
+    ///
+    /// ## `Viewing` is enforced where the edits are, not where the button is
+    ///
+    /// **`fault_for_edit` is the choke point** (part 42 put it there and every mutator goes through
+    /// it), so refusing here refuses typing, backspace, delete-forward and every action that styles
+    /// a range — **in one place**, rather than one place per command. That is the reason it is not
+    /// implemented as `if self.state.mode == Viewing { return }` in twenty match arms.
+    pub mode: holonomy_render::menus::ViewMode,
     /// **The pointer's position at the top or bottom edge of the page, if it is there.**
     ///
     /// Part 41. **This is the state an auto-scroll needs and the only state it needs**: which way to
@@ -939,7 +985,7 @@ impl<'a> Session<'a> {
             counts.lines(),
             editor.text_len()
         );
-        let state = ChromeState {
+        let mut state = ChromeState {
             // The document's first line is on screen at the caret's line.
             scroll_line: 0,
             // **The document's real totals, not `Default`'s.** `ChromeState::default()` has
@@ -957,6 +1003,22 @@ impl<'a> Session<'a> {
             bytes: editor.text_len() as u32,
             ..ChromeState::default()
         };
+        // **Part 44: the overflow list is seeded here, before the struct is built, because it is a
+        // function of the layout and not of the session.** `Chrome::new` already computed every
+        // rect -- including the zero-width ones -- so this is reading what exists rather than
+        // deciding anything, **and doing it here means a fresh session already has a correct menu**
+        // rather than one that fills in on the first resize.
+        state.overflow_tools = widgets::place_toolbar(&chrome.layout, widgets::TOOLBAR_PAD)
+            .into_iter()
+            .filter(|p| {
+                !matches!(
+                    p.tool,
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                )
+                    && (p.rect.width == 0 || p.rect.height == 0)
+            })
+            .map(|p| p.tool)
+            .collect();
         let mut s = Self {
             editor,
             // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
@@ -971,6 +1033,7 @@ impl<'a> Session<'a> {
             mods: ModifierState::new(),
             page_drag: false,
             clicks: None,
+            mode: holonomy_render::menus::ViewMode::Editing,
             edge_scroll: None,
             pending_colour: None,
             blink: Blink::new(Blink::DEFAULT_PERIOD),
@@ -1553,9 +1616,89 @@ impl<'a> Session<'a> {
             }));
         }
         self.chrome = Chrome::new(metrics);
+        // **The overflow menu is part of the layout, so it is recomputed wherever the layout is.**
+        // **Here and in `set_zoom`, and nowhere else**: those are the only two things that build a
+        // new `Chrome`. A resize that did not would leave the menu offering tools that now fit.
+        self.refresh_overflow();
         self.frame = Frame::black(w, h);
         self.damage = DamageRect::new(0, 0, w, h);
         Ok(true)
+    }
+
+    /// **Recompute `state.overflow_tools` from the toolbar's own layout.** Part 44.
+    ///
+    /// ## Where the answer comes from, and why it is not a second computation
+    ///
+    /// **`place_toolbar` already knows.** Its own comment says it: *"A tool with no room left gets a
+    /// zero-width rect, which `DamageRect::contains` answers `false` for at every point — so a
+    /// hidden tool is also an unclickable one."* **A zero-width rect is the definition of "did not
+    /// fit", and it is already computed**; re-deriving it from the button width and the panel width
+    /// would be a second rule to keep in step with the first, and it would be wrong the moment the
+    /// separators moved.
+    ///
+    /// ## `Mode` and `Collapse` are excluded
+    ///
+    /// **Because they are in the right-hand group and are placed from the right edge**, so their
+    /// rects are non-zero whenever the panel is wide enough to hold them — **and when it is not,
+    /// they are the last things to be dropped**, which is correct: the collapse button and the mode
+    /// switcher are the two a user needs most in a small window. **They are excluded here for the
+    /// same reason they are excluded from `place_toolbar`'s left group.**
+    ///
+    /// ## When it runs
+    ///
+    /// **On every resize and on every zoom**, and nowhere else. Those are the two operations that
+    /// change `Layout`, and a gate that watched the counter on a keystroke would see it move for no
+    /// reason. `a_narrow_toolbar_puts_the_hidden_tools_in_the_overflow_menu` is the gate.
+    pub fn refresh_overflow(&mut self) {
+        let l = self.chrome.layout;
+        let hidden: Vec<widgets::Tool> = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
+            .into_iter()
+            // **`Overflow` is excluded too, and the reason is its role.** Part 44 put it in the
+            // right-hand group and gave the right-hand group priority over the left-hand one, so it
+            // has a rect on any panel wide enough to hold it — **and if it did not, a menu listing
+            // itself would be a menu whose only reachable row is the one that cannot be pressed.**
+            .filter(|p| {
+                !matches!(
+                    p.tool,
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                )
+            })
+            .filter(|p| p.rect.width == 0 || p.rect.height == 0)
+            .map(|p| p.tool)
+            .collect();
+        if hidden != self.state.overflow_tools {
+            self.state.overflow_tools = hidden;
+        }
+    }
+
+    /// **The zoom percentage `steps` places away from where the session is.** Part 44.
+    ///
+    /// ## Why a rank walk and not a percentage offset
+    ///
+    /// **Because the percentages are not evenly spaced** -- 100 and 125 with nothing between them --
+    /// so "the next one up" is the next *row of `ZOOMS`*, and `+25` would leave the table and be
+    /// refused. **A rank walk is also what makes the two ends behave**: stepping past the last row
+    /// returns the last row, so SizeUp at 125 % is a no-op rather than an error, and a button that
+    /// errors when you press it twice is worse than one that does nothing.
+    ///
+    /// **Clamped, not wrapped.** Wrapping would make SizeUp at 125 % jump to 100 %, which is a
+    /// zoom control that moves the wrong way.
+    fn zoom_step(&self, steps: i32) -> u32 {
+        let current = holonomy_render::menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == self.state.zoom_percent)
+            .unwrap_or(0) as i32;
+        let next = (current + steps).clamp(0, holonomy_render::menus::ZOOMS.len() as i32 - 1);
+        holonomy_render::menus::ZOOMS[next as usize].1
+    }
+
+    /// The mode's name, for the status bar and for an error message.
+    ///
+    /// **A `Session` method and not a `ChromeState` one**, because the chrome holds the index and
+    /// the model holds the mode, and a caller asking this question usually has one of the two.
+    #[must_use]
+    pub fn mode_name(&self) -> &'static str {
+        self.state.mode_name()
     }
 
     /// Name the document this session has open, and put it in the sidebar.
@@ -1615,6 +1758,12 @@ impl<'a> Session<'a> {
             ..self.chrome.metrics
         };
         self.chrome = Chrome::new(metrics);
+        // **Part 44: the sidebar takes 256 px away from the toolbar.** Collapsing it does not change
+        // the toolbar's own width -- the toolbar spans the panel and the sidebar overlays it -- so
+        // this call is belt and braces rather than a fix. **It is here because the rule is "every
+        // place that builds a new `Chrome` recomputes the overflow"**, and a rule with a list of its
+        // own call sites is a rule that will be half-remembered.
+        self.refresh_overflow();
         self.invalidate(self.chrome.full_damage());
     }
 
@@ -2481,11 +2630,25 @@ impl<'a> Session<'a> {
                 }
                 // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
                 // the same reason: the user needs a way to close it with the gesture that opened it.**
-                if tool.has_dropdown() {
+                // **`Overflow` opens nothing when nothing is hidden**, and that is a decision made
+                // here rather than in `has_dropdown` because emptiness is a runtime fact: the tools
+                // that did not fit depend on the panel width, which is not a `const`.
+                //
+                // **And it is counted as `pointer_chrome`, not `pointer_inert`.** The button pressed;
+                // the button found there was nothing to show. **`pointer_inert` means a widget with no
+                // action behind it**, and there is one -- it just has nothing to do at this width.
+                if tool.has_dropdown()
+                    && !(tool == widgets::Tool::Overflow && self.state.overflow_tools.is_empty())
+                {
                     let before = self.state.open;
                     let open = widgets::Open::Tool(tool);
                     self.state.open = (self.state.open != Some(open)).then_some(open);
                     self.invalidate_popup_change(before);
+                    self.stats.pointer_chrome += 1;
+                    return Ok(());
+                }
+                if tool == widgets::Tool::Overflow {
+                    self.stats.pointer_chrome += 1;
                     return Ok(());
                 }
                 self.invalidate_popup_change(self.state.open);
@@ -2493,6 +2656,29 @@ impl<'a> Session<'a> {
                 match tool {
                     Tool::Collapse => {
                         self.set_sidebar(!self.state.sidebar_open);
+                    }
+                    // **Part 44: the font-size pair is the zoom pair.** `SizeUp` and `SizeDown` are
+                    // the two atlas sizes the project can afford, reached from the toolbar rather than
+                    // from the zoom dropdown.
+                    //
+                    // **A nearest neighbour and not a step, because the list has two entries.** With
+                    // one size, SizeUp *is* 125 %; with two, SizeUp from 125 % stays at 125 % and
+                    // SizeDown from 100 % stays at 100 %. **Both ends are therefore no-ops at their
+                    // ends**, which is what a pair of buttons on a two-position control should be,
+                    // and neither is counted as inert -- **they pressed and something happened, which
+                    // was "there is nothing further".**
+                    //
+                    // **`zoom_step` and not an index arithmetic here**, because the percentage and
+                    // the rank are different things and the mapping lives in one place.
+                    Tool::SizeUp => {
+                        let next = self.zoom_step(1);
+                        self.set_zoom(next)?;
+                        self.stats.pointer_chrome += 1;
+                    }
+                    Tool::SizeDown => {
+                        let next = self.zoom_step(-1);
+                        self.set_zoom(next)?;
+                        self.stats.pointer_chrome += 1;
                     }
                     _ => {
                         if let Some(cmd) = tool_command(tool) {
@@ -3307,6 +3493,60 @@ impl<'a> Session<'a> {
                 // zoom label moves, and `tests/zoom.rs` measures that as the only pixel it moves.
                 self.stats.pointer_chrome += 1;
             }
+            // **Part 44: the mode switcher, and `Viewing` is the whole of it.**
+            Action::SetMode(i) => {
+                let before = self.state.mode_index;
+                if let Some(mode) = holonomy_render::menus::MODES
+                    .get(usize::from(i))
+                    .map(|&(_, m)| m)
+                {
+                    self.state.mode_index = i;
+                    self.mode = mode;
+                    self.stats.pointer_chrome += 1;
+                    // **Only the toolbar repaints.** The mode changes no document byte and moves no
+                    // page pixel; the caret may stop being drawn (it does in viewing mode, because a
+                    // blinking caret in a read-only view is an invitation to type), and that is one
+                    // cell. **`full_damage()` here would be 1.28 million pixels to move a caret.**
+                    let r = widgets::hit_rect(
+                        &self.chrome.layout,
+                        &self.state,
+                        widgets::Hit::Tool(widgets::Tool::Mode),
+                    );
+                    match r {
+                        Some(r) => self.invalidate(r),
+                        None => self.damage = self.chrome.full_damage(),
+                    }
+                    debug_assert_ne!(
+                        before,
+                        self.state.mode_index,
+                        "a row that is already ticked should not be clickable, and if this fires the \
+                         popup is offering the current mode as a choice"
+                    );
+                } else {
+                    // **An out-of-range index is a refusal, and `pointer_inert` is where it shows.**
+                    // **`mode_name` clamps for display but this does not**: the state carries what
+                    // the user chose, and a state carrying a number nothing can act on is the
+                    // defect `an_out_of_range_mode_index_falls_back` exists to keep visible.
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            // **Part 44: the overflow menu's rows, which run a toolbar tool.**
+            Action::SelectTool(tool) => {
+                // **Through `press`, not through a second copy of what `press` does.** `press` is the
+                // one function that turns a `Hit` into an action, and re-implementing it here would
+                // be the "two copies of one thing" that `run_clicked`'s own note warns about --
+                // **and it would miss the armed-toggle branch and the dropdown branch, both of which
+                // are things a row in an overflow menu can be.**
+                //
+                // **`Hit::None` and not the tool's rect**, because the tool has no rect -- it is
+                // precisely the tool that did *not* fit, and `place_toolbar` gave it a zero-width
+                // one. `press` takes the hit and a position; the position is only read by
+                // `Hit::Page`, which this is not.
+                let l = self.chrome.layout;
+                let pos = (l.toolbar.x as i32, l.toolbar.y as i32);
+                self.press(widgets::Hit::Tool(tool), pos.0, pos.1, &mut crate::store::NoSource)?;
+                self.stats.pointer_commands += 1;
+            }
             Action::ToggleBold => {
                 // **A selection means "style this range", and that takes precedence over arming.**
                 // Part 28 — the thing part 24's own note said selection would unlock.
@@ -3508,6 +3748,10 @@ impl<'a> Session<'a> {
         // **The same two lines `resize` uses**, which is the point of naming them: a zoom changes the
         // geometry exactly as a window resize does, and the only difference is why.
         self.chrome = Chrome::new(metrics);
+        // **Part 44: same reason as `resize`.** A zoom changes `cell_w`, which changes every button's
+        // width, so it changes which tools fit -- and an overflow menu that was right at 100 % is
+        // wrong at 125 %.
+        self.refresh_overflow();
     }
 
     /// Apply a command a click produced, and count it.
@@ -3592,7 +3836,20 @@ impl<'a> Session<'a> {
         if let Command::Hotkey(Hotkey::Quit) = command {
             return Ok(Some(Exit::Quit));
         }
-        self.apply_with(command, Some(&mut *bytes))?;
+        // **A refused edit is not a session failure.** Part 44: `Viewing` mode makes every mutator
+        // answer `SessionError::ReadOnly`, and `run_with` and `windowed.rs` both `?` this — **so a
+        // keystroke in a read-only session would have ended the session with an error.** That is a
+        // policy decision arriving as a crash.
+        //
+        // **Swallowed here, and only here.** `Session::apply` still returns the error, so a caller
+        // that *wants* to know a key did nothing can ask; **the event path is where "the key was
+        // handled" is the right answer**, and `SessionStats::edits_readonly_refused` is where the
+        // count lives.
+        if let Err(e) = self.apply_with(command, Some(&mut *bytes)) {
+            if !matches!(e, SessionError::ReadOnly) {
+                return Err(e);
+            }
+        }
         self.tick_with(bytes)?;
         // **The commit is drained here and not inside `apply`.**
         //
@@ -3890,6 +4147,24 @@ impl<'a> Session<'a> {
         &mut self,
         source: Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
+        // **The read-only check, and it is here rather than in twenty match arms.** Part 44: every
+        // mutator in this file reaches this function -- `insert`, `backspace`, `delete_forward`, and
+        // therefore every `Command` that edits -- so **one check here refuses typing, backspace,
+        // delete-forward and every range-styling action in one place.**
+        //
+        // **And it is here, *before* the fault, for the reason the ordering is what it is**: a
+        // read-only session that faulted a 4 KiB leaf in before refusing would have paid for a page
+        // load to produce an error.
+        //
+        // **The refusal is counted as chrome, not as inert.** `pointer_inert` means "a widget with no
+        // action behind it"; viewing mode is a mode with a policy, and a user who types in it has
+        // pressed a key that does something -- it just does not do that. **`edits_readonly_refused`
+        // is the counter**, and it is a new one rather than a reuse so that "the keyboard is dead in
+        // viewing mode" and "the keyboard is dead" are different numbers.
+        if self.mode != holonomy_render::menus::ViewMode::Editing {
+            self.stats.edits_readonly_refused += 1;
+            return Err(SessionError::ReadOnly);
+        }
         if let Some(src) = source {
             self.editor.fault_at_caret(src)?;
         }
@@ -7198,7 +7473,15 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // rather than leaving it to be discovered as a dead row. It has no meaning without a document
         // list and a multi-document model, neither of which exists.
         Action::Close => return None,
-        Action::SetZoom(_) | Action::SetStyle(_) | Action::SetFont(_) | Action::SetColour(_) => {
+        Action::SetZoom(_)
+        | Action::SetStyle(_)
+        | Action::SetFont(_)
+        | Action::SetColour(_)
+        // **Part 44: same reasoning as the three above.** A mode is chrome state; selecting a tool
+        // from the overflow menu is routed through `Session::press`, which is a pointer gesture and
+        // not a `Command`. **Neither reaches `apply_command`.**
+        | Action::SetMode(_)
+        | Action::SelectTool(_) => {
             return None
         }
         // **Arming a style is a chrome-state change, not a command** -- the same shape as the three

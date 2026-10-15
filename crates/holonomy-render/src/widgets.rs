@@ -35,7 +35,7 @@ use crate::icons::IconId;
 use crate::DamageRect;
 
 /// What a toolbar button is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Undo.
     Undo,
@@ -176,10 +176,34 @@ impl Tool {
     /// **The chevron is drawn from this and not from a separate list**, which is the whole point of
     /// asking the tool: a button drawn with a chevron that the hit test does not know about is the
     /// "drawn one way, clicked another" bug this file exists to prevent.
+    ///
+    /// # Part 44: `Mode` and `Overflow` joined, and one of them is a different kind of answer
+    ///
+    /// **A tool opens a dropdown when `menus::dropdown_items` has rows for it.** That is a compile-time
+    /// question for `Zoom`, `Style`, `Font`, `TextColour` and `Mode` -- their rows are `&'static`
+    /// tables -- and a *runtime* one for `Overflow`, whose rows are the tools that did not fit and are
+    /// therefore empty on a panel wide enough to hold all twenty.
+    ///
+    /// **`Overflow` is in the list anyway, and the emptiness check lives in the caller.** **This is
+    /// the shape of the bug worth recording**: part 44 added `Overflow`'s dropdown *rows* and drew its
+    /// chevron conditionally and wrote the session's emptiness check, and **left this predicate
+    /// untouched** -- so the button looked right, had rows, and on a narrow panel did nothing.
+    /// `the_overflow_menu_lists_the_tools_that_did_not_fit` failed with `pointer_chrome == 1` and
+    /// `open == None`, which is the exact signature of "the emptiness branch ran instead of the
+    /// dropdown branch".
+    ///
+    /// **So `has_dropdown` answers "is this button a menu?" and the session answers "is there
+    /// anything in it?"** Two questions, two places, and the reason they are not one is that only one
+    /// of them depends on the window.
     pub const fn has_dropdown(self) -> bool {
         matches!(
             self,
-            Tool::Zoom | Tool::Style | Tool::Font | Tool::TextColour
+            Tool::Zoom
+                | Tool::Style
+                | Tool::Font
+                | Tool::TextColour
+                | Tool::Mode
+                | Tool::Overflow
         )
     }
 
@@ -286,6 +310,18 @@ pub struct Placed {
 /// left-to-right pass would push them against the toolbar's left edge with a hundred pixels of dead
 /// space in the middle. **`TOOLBAR` is still one list** — the anchor is a property of the tool, not of
 /// the loop.
+/// **The toolbar's horizontal padding, in pixels.** Part 44.
+///
+/// **A `const` and not the literal `8`, which was at five call sites.** Two of those sites -- the
+/// painter's and the hit test's -- have to agree with the third, `Session::refresh_overflow`, which
+/// asks the same question for a different consumer. **Three questions about the same row with the
+/// same number written at each is three numbers that can drift**, and the drift would show as a tool
+/// that is clickable on the toolbar and absent from its own overflow menu.
+///
+/// **It is a parameter of [`place_toolbar`] and not a field of `Layout`**, so a caller that genuinely
+/// wants a different inset can pass one; this constant is what the project uses.
+pub const TOOLBAR_PAD: u32 = 8;
+
 pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
     let m = &l;
     let button = chrome_button(m);
@@ -325,19 +361,73 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         DamageRect::new(x, y, w.min(panel_w - x), h.min(panel_h - y))
     };
 
+    // ## How much room the right-hand group needs, measured *before* the left group is laid out
+    //
+    // **CORRECTION, part 44: the left group had no budget at all.** Its only stopping condition was
+    // `x >= panel_w`, and the right-hand group was placed from the right afterwards — so on a 480 px
+    // panel the left group ran to the edge *and* the right-hand group sat on top of it. Two
+    // consequences, and the second is the one that is not visible:
+    //
+    // - **the last left-hand buttons were painted over**, which is a screenshot;
+    // - **and the hit test disagreed with the picture.** `widgets::hit` walks `place_toolbar`'s
+    //   output in `TOOLBAR` order and returns the *first* rect containing the point, so a point in
+    //   the overlap resolved to whichever of the two came first in `TOOLBAR` — which is the left-hand
+    //   one. `the_overflow_menu_lists_the_tools_that_did_not_fit` failed with `open == Some(Style)`
+    //   while pressing `Overflow`: **the press landed on a button the user was not looking at.**
+    //
+    // **So the right group's width is reserved first and the left group is given what is left.**
+    // Which of the two loses is not arbitrary: the right-hand group wins, because it holds the
+    // overflow menu, and **a menu that cannot be reached is worse than a toolbar with a gap in it.**
+    let right_w = [Tool::Collapse, Tool::Mode, Tool::Overflow]
+        .iter()
+        .fold(SEPARATOR, |acc, &t| {
+            acc.saturating_add(t.width(button, m.cell_w))
+        });
+    let left_limit = m
+        .width
+        .saturating_sub(pad)
+        .saturating_sub(right_w)
+        // **The right-hand group never starts before `pad`,** so a panel narrower than the group
+        // plus its own inset cannot produce a negative budget — and `saturating_sub` here is what
+        // makes `x >= left_limit` true for every remaining tool rather than a wrap.
+        .max(pad);
+
     // Left group.
     let mut x = pad;
     for p in out.iter_mut() {
-        if matches!(p.tool, Tool::Mode | Tool::Collapse) {
+        // **`Overflow` is in the right-hand group too, and that is a correction.** Part 44: it was
+        // laid out with the left group, and the left group's rule is *"a tool with no room left gets
+        // a zero-width rect"* — so at 480 px `Overflow` was dropped along with everything after it,
+        // **and the menu that exists to reach the tools that did not fit could not itself be
+        // reached.** `the_overflow_menu_lists_the_tools_that_did_not_fit` failed on its first run
+        // with `open == None` for exactly that reason.
+        //
+        // **A menu button that is dropped before the items it lists is worse than no menu button**,
+        // because the user sees a toolbar with a gap in it and no way to find out what went missing.
+        // So it is placed from the right, with `Mode` and `Collapse`.
+        if matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;
         }
         if p.tool.separated() {
             x += SEPARATOR;
         }
-        // **A tool with no room left gets a zero-width rect**, which `DamageRect::contains` answers
+        // **A tool that does not *fit* gets a zero-width rect**, which `DamageRect::contains` answers
         // `false` for at every point — so a hidden tool is also an unclickable one, and the row does
         // not accumulate invisible targets past the edge.
-        if x >= panel_w {
+        //
+        // ## `x + w`, and not `x`
+        //
+        // **The original test was `x >= panel_w`, which asks whether the button's *left* edge has
+        // passed the limit** — and a 136 px button whose left edge is 36 px inside the limit can still
+        // stick 100 px out of it. Part 44's reservation made that visible at 480 px: `font` starts at
+        // 313 with a `left_limit` of 379 and ends at 449, **drawing over the whole right-hand group**,
+        // and the hit test — which takes the first match in `TOOLBAR` order — resolved a press on
+        // `Overflow` to `Style`.
+        //
+        // **So the test is `x + w > left_limit`, and it is `>` rather than `>=` because a button that
+        // ends exactly on the line has fit.**
+        let w = p.tool.width(button, m.cell_w);
+        if x.saturating_add(w) > left_limit || x.saturating_add(w) > panel_w {
             p.rect = DamageRect::new(0, 0, 0, 0);
             continue;
         }
@@ -346,20 +436,31 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
             m.toolbar.y
                 .saturating_add(m.toolbar.height / 2)
                 .saturating_sub(button / 2),
-            p.tool.width(button, m.cell_w),
+            w,
             button,
         );
-        x += p.tool.width(button, m.cell_w);
+        x = x.saturating_add(w);
     }
 
-    // Right group, from the right edge inwards.
+    // Right group, from the right edge inwards: Collapse, then Mode, then Overflow.
+    //
+    // **In that order**, because `iter_mut().rev()` walks `TOOLBAR` backwards and `Collapse` is last
+    // in it -- so Collapse is placed first at the rightmost slot and each of the others lands to its
+    // left. **Overflow is before Mode in `TOOLBAR`, so it lands to the left of Mode**, which puts it
+    // next to the left-hand group where it belongs and next to the gap it will fill.
     let mut r = l.toolbar.right().saturating_sub(pad);
     for p in out.iter_mut().rev() {
-        if !matches!(p.tool, Tool::Mode | Tool::Collapse) {
+        if !matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;
         }
         let w = p.tool.width(button, m.cell_w);
         r = r.saturating_sub(w);
+        // **The separator follows `Mode` and precedes `Overflow`**, which is where the reference puts
+        // it: the left-hand group, then a gap, then the two controls that act on the window rather
+        // than on the text.
+        if p.tool == Tool::Mode {
+            r = r.saturating_sub(SEPARATOR);
+        }
         p.rect = fit(
             r,
             m.toolbar.y
@@ -368,9 +469,6 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
             w,
             button,
         );
-        if p.tool == Tool::Mode {
-            r = r.saturating_sub(SEPARATOR);
-        }
     }
     out
 }
@@ -421,7 +519,18 @@ impl ChromeState {
             .unwrap_or("Normal text")
     }
 
-    /// The current font's name. See [`style_name`](Self::style_name).
+    /// **The current mode's name.** Part 44. See [`style_name`](Self::style_name).
+    ///
+    /// **`.unwrap_or(MODES[0].0)` and not a panic**, for the reason that gate records: a state file
+    /// written by a build with more modes must not take the session down.
+    #[must_use]
+    pub fn mode_name(&self) -> &'static str {
+        crate::menus::MODES
+            .get(usize::from(self.mode_index))
+            .map_or(crate::menus::MODES[0].0, |&(label, _)| label)
+    }
+
+    /// **The current font's name. See [`style_name`](Self::style_name).
     pub fn font_name(&self) -> &'static str {
         crate::menus::FONTS
             .get(self.font_index)
@@ -527,7 +636,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let anchor_x = match open {
         Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
         Open::Tool(tool) => {
-            place_toolbar(l, 8)
+            place_toolbar(l, TOOLBAR_PAD)
                 .into_iter()
                 .find(|p| p.tool == tool)?
                 .rect
@@ -651,7 +760,7 @@ pub fn row_cells(it: &crate::menus::Item, cell_w: u32) -> u32 {
 /// cheaper mistake.**
 pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
     match h {
-        Hit::Tool(t) => place_toolbar(l, 8)
+        Hit::Tool(t) => place_toolbar(l, TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool == t)
             .map(|p| p.rect),
@@ -788,7 +897,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         return Hit::None;
     }
 
-    for p in place_toolbar(l, 8) {
+    for p in place_toolbar(l, TOOLBAR_PAD) {
         if at(&p.rect) {
             return Hit::Tool(p.tool);
         }

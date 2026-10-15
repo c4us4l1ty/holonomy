@@ -5790,3 +5790,128 @@ one: same loop, same bounding box, opposite assertion.
 **F11 and F12 remain decoded and dropped.** Two hotkeys, and wiring them is small — it is named here
 rather than left as an omission, because `set_zoom` is now a `Result` and the natural next mistake is
 to add the two arms by copy-paste.
+
+---
+
+# Part 44 — four of the ten inert buttons, and two layout bugs under them, 2026-10-15
+
+## A. The list, and what each of the four became
+
+Part 39 recorded *"ten toolbar buttons remain inert"* and named them. Four are now real:
+
+| button | what it does now |
+|---|---|
+| `SizeUp` / `SizeDown` | the zoom pair (part 43's two atlas sizes), reached from the toolbar |
+| `Overflow` | a menu of the tools that did not fit |
+| `Mode` | a real mode switcher, with a **read-only mode that refuses edits** |
+
+**Six are still inert**, and the reason is not "not done yet" — it is that each needs a model this
+program does not have:
+
+| button | what is missing |
+|---|---|
+| `Spellcheck` | a dictionary. **The atlas budget is already 378,850 of 458,752 used at two sizes** and a word list of any useful size does not fit in what is left. |
+| `Link` | a URL model — a span field plus something that resolves a URL. |
+| `Comment` | an annotation store: a list, an anchor range, an author, and a way to move an anchor when the text before it is edited. |
+
+**`Underline`, `Highlight` and `PaintFormat` are implementable** and are not attempted here; they need
+painter work on the body-text runs rather than chrome work, which is a different file and a different
+risk profile.
+
+## B. `Overflow` needed a *two-pass* toolbar layout, and the reason is an overlap nobody drew a gate for
+
+**`Overflow` was in the left-hand group, and the left-hand group has always dropped from the tail.**
+So at 480 px — the width of `bugs/1.png` — `Overflow` was dropped along with everything after it, and
+**the menu that exists to reach the tools that did not fit could not itself be reached.** It is now in
+the right-hand group with `Mode` and `Collapse`.
+
+**That exposed two more, and both were latent before it:**
+
+### The left group had no budget at all
+
+Its only stopping condition was `x >= panel_w`, and the right-hand group was placed from the right
+*afterwards*. **So on a narrow panel the left group ran to the edge and the right-hand group sat on
+top of it.** Measured at 480 px before the fix:
+
+```text
+font       x=  313 w= 136      OVERLAPS [Overflow, Mode, Collapse]
+overflow   x=  379 w=  28
+mode       x=  407 w=  28
+collapse   x=  444 w=  28
+```
+
+The visible half is the last left-hand buttons painted over. **The invisible half is worse**: `hit`
+walks `place_toolbar`'s output in `TOOLBAR` order and takes the first containing rect, so a point in
+the overlap resolved to whichever came first in `TOOLBAR` — the left-hand one. **The gate pressed
+`Overflow` and got `Hit::Tool(Style)`.** A hit test disagreeing with the picture is a different class
+of defect from a picture being wrong.
+
+**The right group's width is now measured before the left group is laid out, and the left group is
+given what is left.** Which of the two loses is not arbitrary: the right-hand group wins, because it
+holds the overflow menu, and **a menu that cannot be reached is worse than a toolbar with a gap in it.**
+
+### And the budget test was on the wrong edge
+
+The new condition is `x + w > left_limit`, not `x >= left_limit`. **A 136 px button whose *left* edge
+is 36 px inside the limit can still stick 100 px out of it** — `font` starts at 313 with a
+`left_limit` of 379 and ends at 449. **The original test asked whether the button's left edge had
+passed the limit, which is not the question.**
+
+## C. `has_dropdown` was the bug that three other correct changes hid
+
+Part 44 added `Overflow`'s dropdown *rows*, drew its chevron only when there is something to show, and
+wrote the session's "empty means closed" check. **It left `Tool::has_dropdown` untouched.**
+
+The result was a button that looked correct, had rows to show, and did nothing:
+
+```text
+DBG after press open=None inert=0 chrome=1
+```
+
+**`pointer_chrome == 1` with `open == None` is the exact signature of the emptiness branch running
+instead of the dropdown branch.** The fix is to put `Overflow` in `has_dropdown` and leave the
+emptiness check in the session, because **they are different questions**: *is this button a menu?* is
+a compile-time fact, and *is there anything in it?* is a fact about the window.
+
+**Three changes that each look right can add up to a feature that does not fire**, and the only thing
+that caught this was a gate that pressed the button rather than reading the code.
+
+## D. `Viewing` mode, and why the refusal is an error
+
+`menus::MODES` has two rows: `Editing` and `Viewing`. **`Suggesting` is deliberately absent** — it
+needs a suggestion store, a provenance flag per span and a reviewer identity, and a `Suggesting` row
+that behaved like `Editing` under a different label **would look like it was tracking other people's
+edits**, which is worse than the inert button it replaces.
+
+**`Viewing` is enforced in `fault_for_edit`**, which part 42 put at the top of every mutator. **One
+check there refuses typing, backspace, delete-forward and every range-styling action**, rather than one
+place per command.
+
+**The refusal is `SessionError::ReadOnly`, and it is not a silent no-op.** A keystroke that does
+nothing is the defect this project keeps finding; part 42's was exactly that. So:
+
+- `Session::apply` returns the error, for a caller that wants to know;
+- **the event path swallows it**, because `run_with` and `windowed.rs` both `?` `handle_event_with`
+  and **a policy decision would have arrived as a crash**;
+- and `SessionStats::edits_readonly_refused` counts it. **Its own counter rather than `pointer_inert`**,
+  because `pointer_inert` is the number this project is trying to drive to zero and a correct refusal
+  would either pin it or make the mode lie.
+
+## E. Gates
+
+| gate | what it holds |
+|---|---|
+| `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six` | the count and the list, with a **fresh session per tool** |
+| `::the_size_buttons_are_the_zoom_buttons` | the pair changes the type, not a label |
+| `::the_size_buttons_clamp_rather_than_wrapping` | both ends clamp and neither is inert |
+| `::the_overflow_menu_lists_the_tools_that_did_not_fit` | B and C |
+| `::an_overflow_button_with_nothing_hidden_opens_nothing` | **emptiness is not inertness** |
+| `::the_mode_button_opens_a_two_row_menu` | the switcher, through the real popup hit test |
+| `::viewing_mode_refuses_every_edit_and_counts_it` | D |
+| `::viewing_mode_still_moves_the_caret` | **and the mode can be left** |
+| `::an_out_of_range_mode_index_falls_back` | a state file cannot panic the session |
+
+**The measurement loop uses a fresh session per tool**, because a press that opens a popup swallows the
+next press as a dismissal. The first version of that loop used one session for all twenty and counted
+four perfectly well-wired buttons as inert: **a measurement that counts its fixture is worse than no
+measurement, because the number looks like a result.**
