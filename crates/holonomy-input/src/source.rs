@@ -235,13 +235,24 @@ impl RecordDecoder {
             bytes.copy_from_slice(record);
             match decode_record(&bytes) {
                 Record::Key(ev) => return Some(Event::Key(ev)),
-                Record::Button { button, pressed } => {
+                Record::Button {
+                    button,
+                    pressed,
+                    time_ms,
+                } => {
                     self.pointer.press(button, pressed);
                     return Some(Event::Button {
                         button,
                         pressed,
                         x: self.pointer.x,
                         y: self.pointer.y,
+                        // **No conversion.** `decode_record` already answered in milliseconds and
+                        // `Event::Button::time_ms` is a `u64` too, so there is nothing here to
+                        // decide. **This line had a `u32::try_from(..).unwrap_or(u32::MAX)` in it and
+                        // then an `as u32`**, both of which truncated the kernel's clock past
+                        // 49.7 days; the gate `a_button_records_the_kernels_own_clock` caught the
+                        // first and this comment records why the second went too.
+                        time_ms,
                     });
                 }
                 Record::Motion { axis, delta } => {

@@ -5473,3 +5473,159 @@ by another name.
 |---|---|
 | `cargo clippy --all-targets -- -D warnings` | 68 lints, zero, both feature sets |
 | `actions.rs::a_dropdown_ticks_the_current_value_and_applies_a_new_one` | C: the tick moves, and only once |
+
+---
+
+# Part 41 — double-click, triple-click, and half of an auto-scroll, 2026-10-15
+
+Three of the six gaps. The order was: a click counter, then what a click *selects*, then the drag.
+
+## A. Nothing could tell two clicks from one
+
+**The input had no clock.** A double-click is two presses that are close together *in time*, and
+`holonomy_input::pointer::Event::Button` carried a button, a state and a position. The evdev record
+has a timestamp — two 64-bit words at 0..8 and 8..16, `sec` then `usec` — and the crate's module docs
+already said they were skipped. X11's `Event::ButtonPress` had a `time` field and **the decoder read
+it into `_time` and threw it away.**
+
+**So the timestamp is now carried, and it took three steps to get it right:**
+
+| step | what it was |
+|---|---|
+| `Record::Button::time_ms` | `u64`, read from bytes 0..16 as `sec * 1000 + usec / 1000` |
+| `pointer::Event::Button::time_ms` | `u64`, narrowed from nothing |
+| `x11key::pointer_event` | fills it from X11's own `time`, widened |
+
+**`u64`, and the `u32` it was first written as was wrong.** X11's counter is 32 bits and the
+kernel's is two 64-bit words, so `u32` looked like the width that fits both. It does not fit either
+*in practice*: the kernel stamps `sec * 1000`, so a host up for fifty days stamps 4.32e9 and a `u32`
+silently truncates it.
+
+**The gate `a_button_records_the_kernels_own_clock` is what found that.** It asserted
+`1_700_000_000_250` and got `3487918330` — the same number's low 32 bits. It then caught a second
+defect in the narrowing itself: `u32::try_from(time_ms).unwrap_or(u32::MAX)` looks like the careful
+choice and is the worst one available, because it pins every stamp past 49.7 days to the same value.
+**A saturating narrowing in a clock is indistinguishable from a stopped one.**
+
+## B. `Click::next` — 400 ms and 5 pixels, both of them stated
+
+Two constants, and neither is a taste question this project is entitled to have quietly:
+
+- **`WINDOW_MS = 400`** — GTK's `gtk-double-click-time` and Qt's `QApplication::doubleClickInterval`
+  both default to it.
+- **`SLOP_PX = 5`** — **smaller than the distance between two adjacent glyph centres in the body
+  face.** A slop larger than a glyph lets a click on `word` and a click on the space after it become
+  one word-selection, which is the exact bug the position check exists to prevent.
+
+**The counter stops at three.** A fourth press is a fresh first press, so a user clicking five times
+in a row settles on a caret rather than staying stuck on "select the line".
+
+## C. What a click selects, and the two wrong answers
+
+`click_page` grew a `clicks` parameter and one `match`. `Session::word_around` is a **byte** rule —
+`is_ascii_alphanumeric() || b'_'` — and that is deliberate: `char::is_alphanumeric` on a UTF-8
+document is a grapheme walk, and a grapheme walk inside a 64-byte scratch buffer over a *line* is a
+second parser next to the one that put the line there.
+
+**The first version was wrong in the way the gate existed to catch.** It tracked `(word_start,
+word_end)` and closed the run on the first non-word byte *after* the click — which ran every earlier
+word on the line into one. A double-click on `bravo` returned `0..11`, which is `alpha bravo`.
+Measured: **the gate failed on its first run.**
+
+**`line_around` is `&mut` and reads the last byte of the line.** `DocLines::line_end` is one past the
+end of the *stored* range and the stored range includes the `\n`, so `line_begin..line_end` selects
+the newline. **The next thing a user does with a triple-click is type to replace the line, and that
+would have eaten the line break and joined the line to the next one.** The geometry index knows where
+the line ends and not what is there; reading the one byte at the boundary is what decides.
+
+## D. Every gate in `click_count.rs` finds its own pixel, and why
+
+**The face is proportional and `cell_w` is 10, so a cell is not a character.** The first version
+computed `x = text.x + cell * cell_w` and asserted byte 6 for cell 9. The measured table:
+
+```text
+cell  0 -> byte  1     cell  7 -> byte 10
+cell  1 -> byte  2     cell  8 -> byte 11
+cell  2 -> byte  3     cell  9 -> byte 12
+cell  3 -> byte  4     cell 10 -> byte 13
+cell  4 -> byte  6     cell 11 -> byte 14
+cell  5 -> byte  7     cell 12 -> byte 16
+cell  6 -> byte  8     cell 13 -> byte 18
+```
+
+**The spaces at bytes 5, 11 and 17 are about 5 px wide and the click in the middle of their 10 px
+cell lands past them.** `chrome::cell_w` is a grid for the caret and the ruler; it is not the
+advance, and `column_at_pen` — part 33's fix for exactly this — walks real advances.
+
+So each gate asks for a byte, finds the pixel that reaches it, and asserts on the **shape** of the
+result (`maximal_word_run`) rather than a hard-coded pair. **A hard-coded pair would also have been a
+claim about the atlas**, which changes when the font does.
+
+## E. Auto-scroll: the half that needs no clock
+
+**`EdgeScroll::at` measures depth from the canvas, and the canvas is 85 px taller than the last row
+of text** — that gap is the page's bottom margin. The first version dragged to `last_row + 6` = 696
+and every gate failed with `scroll_line == 0`, **correctly**: 696 is inside the page.
+
+**This is a real usability gap, not just a test bug.** A user reads "the bottom of the page" as the
+bottom of the sheet, and here they have to drag past the bottom of the *window*. `EdgeScroll::at`
+says so; the fix is `MAX_DEPTH` measured from the page instead of the canvas, and it is not made
+because the page margin is what a *layout* question and the edge is a *behaviour* one.
+
+**`lines()` is `ceil(depth * 3 / 24)`, clamped at 24 first.** Both halves are deliberate:
+
+- **`ceil`, not floor — there is no dead zone.** Truncated, the first eight pixels would scroll
+  nothing, and a drag that overshoots the last line by four pixels would do nothing at all.
+- **The clamp is a saturation point.** A drag two hundred pixels below the edge must not scroll
+  twice as fast as one twenty-four pixels below, or the speed would depend on the window's height.
+
+**The order in `step_edge_scroll` is the feature:** scroll *then* re-aim, because `caret_at` takes
+`scroll_line` into account. Ask first and the selection reaches the row that has just scrolled away.
+
+**This needed `Layout::caret_at_drag`, and the reason is a disagreement between two callers.**
+`caret_at` answers `None` for a point off the sheet, which is right for a click and wrong for a drag
+— a drag that has run off the page means *keep going*, and `None` makes the selection stop while the
+pointer keeps moving. **Two functions rather than a boolean parameter**, because the two callers want
+opposite answers and a flag would make the difference invisible at the call site.
+
+## F. What is deliberately not built, and is gated as not built
+
+**There is no timer.** `step_edge_scroll` runs on pointer motion, so a pointer held at the edge by a
+hand that is not moving produces no evdev records and the page stops.
+
+**The first version of that gate asserted the wrong thing and failed with `3` against `12`.** It sent
+three more motions to the *same pixel* and expected the page not to move. **Three more motions to
+one pixel is not a pointer being held still** — it is a pointer moving, to the same place, three
+times, and the implementation scrolls on each, correctly. The rewritten gate asserts the real
+mechanism: scroll is per event, the amount depends only on the depth, and **a quiet device produces
+no events and so no scroll.**
+
+**Why no timer, still.** The sealed loop blocks in `epoll_wait` with `EVENT_WAIT_MS = -1`, and part
+39's note on `EVENT_WAIT` measures a periodic wake-up at 0.02 % of a core — twenty times NFR-1.2's
+0.001 % idle budget. **The honest options are to charge the timer against a *dragging* budget, which
+does not exist and would have to be argued from measurement, or to spend the 24 px of travel the user
+has already made.** The second is what is built.
+
+## G. Two fixture traps, both of which cost an hour
+
+Worth recording because neither fails loudly:
+
+1. **`RecordDecoder` owns the pointer's position, and a decoder per frame resets it.** The first
+   helpers sent *absolute* coordinates to a *relative* device (pointer lands at `2x`). The rewrite
+   sent deltas and built a **fresh decoder per frame**, so the second frame's delta was applied to
+   `(0, 0)` and the pointer arrived at `(0, 519)`.
+2. **`struct timeval` is `sec` then `usec`, and `encode_record_at`'s third parameter is *seconds*.**
+   A click "400 ms later" stamped 400,000 ms — twenty seconds — and the two gates that were *meant*
+   to be outside the window still passed.
+
+**Neither has an error message.** Both are now comments at the site, in the fixture and in the
+library, naming what goes wrong and what it looks like.
+
+## H. Gates
+
+| gate | what it holds |
+|---|---|
+| `pointer_decode.rs::a_button_records_the_kernels_own_clock` | A: the clock is read, and in the right units |
+| `proto.rs::a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire` | A: the X11 field is read, not discarded |
+| `click_count.rs` (8 gates) | B and C: counting, the three selections, both directions of each boundary |
+| `edge_scroll.rs` (6 gates) | E and F: the ramp, the order, both edges, the release, and the limitation |

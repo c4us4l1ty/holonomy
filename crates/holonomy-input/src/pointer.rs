@@ -142,6 +142,20 @@ pub enum Record {
         button: Button,
         /// `true` for the press.
         pressed: bool,
+        /// **Milliseconds, from the record's own clock.**
+        ///
+        /// **`i64` and not a `timeval`, and not `CLOCK_MONOTONIC`.** The kernel's `struct
+        /// input_event` carries `sec`/`usec` as two 64-bit words at 0..8 and 8..16, and the crate's
+        /// module docs already decline to build a `timeval` out of them. **This does the one
+        /// arithmetic that needs doing -- `(sec * 1000) + usec / 1000` -- and stops**, which turns a
+        /// two-word layout problem into one `u64` read.
+        ///
+        /// **The clock is the kernel's, and only differences between stamps are ever used.** A
+        /// double-click is "two clicks close together *in time*", so the only question asked of this
+        /// value is `now.wrapping_sub(then) < 400` -- which is true or false for any monotonic
+        /// source regardless of when it started. **What this must not be is a second clock the
+        /// session compares against `Instant::now()`**, and nothing does.
+        time_ms: u64,
     },
     /// `EV_SYN`, `EV_MSC`, and anything this crate does not act on.
     Noise,
@@ -183,10 +197,18 @@ pub fn decode_record(bytes: &[u8]) -> Record {
             // `value` is 0/1/2 here, and autorepeat does not apply to a button: 2 would be a
             // third state a button does not have. Treated as pressed, which is what a driver that
             // emits 2 for a button means.
-            Some(button) => Record::Button {
-                button,
-                pressed: value != 0,
-            },
+            Some(button) => {
+                // **The timestamp, from bytes 0..16, and the only place in the crate that reads
+                // them.** `sec` is the first 64-bit word and `usec` the second; both are native-endian
+                // in the kernel's struct, and the crate is little-endian only (see `RECORD_BYTES`).
+                let sec = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or([0; 8]));
+                let usec = u64::from_le_bytes(bytes[8..16].try_into().unwrap_or([0; 8]));
+                Record::Button {
+                    button,
+                    pressed: value != 0,
+                    time_ms: sec.saturating_mul(1000).saturating_add(usec / 1000),
+                }
+            }
             None => Record::Key(InputEvent { kind, code, value }),
         },
         EV_REL => Record::Motion {
@@ -214,7 +236,29 @@ pub fn decode_record(bytes: &[u8]) -> Record {
 /// express `EV_REL`. A second encoder is cheaper than widening the first one's type to something
 /// that is not a keyboard record.
 pub fn encode_record(kind: u16, code: u16, value: i32) -> [u8; RECORD_BYTES] {
+    // **A stamp of zero, and that is what this one means.** `encode_record` is the fixture builder:
+    // it answers "what record has these three fields", and the kernel's timestamp is not one of the
+    // three. `encode_record_at` is the one that sets it, and the gate that says the decoder reads it
+    // uses that. **A fixture with a real timestamp would make every existing expectation in every
+    // test file carry a number nobody chose.**
+    encode_record_at(kind, code, value, 0, 0)
+}
+
+/// [`encode_record`] with the record's own clock, in `sec` and `usec`.
+///
+/// **Exists so that one gate can ask whether `decode_record` reads bytes 0..16 at all.** The risk with
+/// a timestamp that is zero in every fixture is a decoder that hard-codes zero and passes every
+/// other test in the project; a fixture that sets it is the only thing that rules that out.
+pub fn encode_record_at(
+    kind: u16,
+    code: u16,
+    value: i32,
+    sec: u64,
+    usec: u64,
+) -> [u8; RECORD_BYTES] {
     let mut out = [0u8; RECORD_BYTES];
+    out[0..8].copy_from_slice(&sec.to_le_bytes());
+    out[8..16].copy_from_slice(&usec.to_le_bytes());
     out[16..18].copy_from_slice(&kind.to_le_bytes());
     out[18..20].copy_from_slice(&code.to_le_bytes());
     out[20..24].copy_from_slice(&value.to_le_bytes());
@@ -247,6 +291,31 @@ pub enum Event {
         /// Where it happened.
         x: i32,
         y: i32,
+        /// **Milliseconds since this source's own clock started, monotonic.**
+        ///
+        /// **Present only so that a double-click can be told from two slow clicks.** It costs one
+        /// integer on a variant every pointer event already pays for, and it is the whole difference
+        /// between "clicking twice selects the word" working and not existing.
+        ///
+        /// # `u64`, and this was a `u32` and was wrong
+        ///
+        /// **X11's timestamp is 32 bits and the kernel's is two 64-bit words**, so `u32` looked like
+        /// the width that fits both. It does not fit either *in practice*: the kernel reports
+        /// `sec * 1000`, so a host that has been up for a day stamps 86,400,000 — fine — and one up
+        /// for fifty days stamps 4.32e9, which is past `u32::MAX`. **A `u32` is a truncation of the
+        /// kernel's clock at all but the first 49.7 days of it**, and the truncation is silent.
+        ///
+        /// The gate `a_button_records_the_kernels_own_clock` is what found this: it asserted
+        /// `1_700_000_000_250` and got `3487918330`, which is the same number's low 32 bits.
+        ///
+        /// **`u64` costs four bytes and removes the entire subject.** X11's 32-bit counter widens
+        /// losslessly; the kernel's needs 51 bits; and both now wrap far enough out that
+        /// `wrapping_sub` is correct without an argument about it.
+        ///
+        /// **Nothing compares this to wall-clock time** — only the difference between two clicks is
+        /// ever taken, which is why a stamp with no shared epoch across the two backends is not a
+        /// problem.
+        time_ms: u64,
     },
     /// A wheel notch.
     Wheel {

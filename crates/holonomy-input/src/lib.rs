@@ -57,8 +57,8 @@ pub use event::{
 pub use keymap::{Command, Hotkey, Keymap};
 pub use modifiers::ModifierState;
 pub use pointer::{
-    decode_record, encode_record, Button, Event, Frame, Pointer, Record, BTN_LEFT, BTN_MIDDLE,
-    BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
+    decode_record, encode_record, encode_record_at, Button, Event, Frame, Pointer, Record, BTN_LEFT,
+    BTN_MIDDLE, BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
 };
 pub use source::{
     errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, Wait,

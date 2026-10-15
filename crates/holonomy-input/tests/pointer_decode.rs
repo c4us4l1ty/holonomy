@@ -34,8 +34,8 @@
 
 use holonomy_input::event::{encode, InputEvent, EV_KEY, EV_REL, EV_SYN, RECORD_BYTES};
 use holonomy_input::pointer::{
-    decode_record, encode_record, Button, Event, Record, BTN_LEFT, BTN_RIGHT, REL_HWHEEL,
-    REL_WHEEL, REL_X, REL_Y,
+    decode_record, encode_record, encode_record_at, Button, Event, Record, BTN_LEFT, BTN_RIGHT,
+    REL_HWHEEL, REL_WHEEL, REL_X, REL_Y,
 };
 use holonomy_input::{decode, InputSource, RecordDecoder, ScriptedInputSource};
 
@@ -137,7 +137,10 @@ fn a_button_and_motion_in_one_frame_are_two_events() {
                 button: Button::Left,
                 pressed: true,
                 x: 10,
-                y: 5
+                y: 5,
+                // **Zero, because `encode_record` stamps zero.** See its doc comment; the gate
+                // that reads a *non*-zero stamp is `a_button_records_the_kernels_own_clock`.
+                time_ms: 0,
             },
             Event::Motion { x: 10, y: 5 },
         ],
@@ -216,7 +219,8 @@ fn a_button_code_is_not_a_key_code() {
         decode_record(&bytes),
         Record::Button {
             button: Button::Left,
-            pressed: true
+            pressed: true,
+            time_ms: 0,
         }
     );
     // A keycode above the button range is still a key.
@@ -322,13 +326,15 @@ fn the_scripted_source_delivers_pointer_events_the_same_way_a_device_does() {
                 button: Button::Left,
                 pressed: true,
                 x: 30,
-                y: 12
+                y: 12,
+                time_ms: 0,
             },
             Event::Button {
                 button: Button::Left,
                 pressed: false,
                 x: 30,
-                y: 12
+                y: 12,
+                time_ms: 0,
             },
             Event::Motion { x: 30, y: 12 },
         ],
@@ -344,9 +350,93 @@ fn the_scripted_source_delivers_pointer_events_the_same_way_a_device_does() {
             button: Button::Left,
             pressed: false,
             x: 0,
-            y: 0
+            y: 0,
+            time_ms: 0,
         }),
         "a source starts with the pointer at the origin, which is what makes the first REL_X move \
          it by its delta"
+    );
+}
+
+/// **The button's timestamp comes off the wire and is not invented.**
+///
+/// # Why this gate exists at all
+///
+/// **Every other fixture in this file stamps zero**, because `encode_record` does not take a clock and
+/// the three fields it does take are the three anyone writes. That is the right default and it is
+/// also a hazard: **a decoder that returned a constant `0` for `time_ms` would pass every test in the
+/// project**, and the feature it exists for — telling a double-click from two slow clicks — would be
+/// dead code that compiles forever.
+///
+/// So this gate is the only one that writes a *non-zero* stamp, and it asserts the number that comes
+/// back is that number.
+///
+/// # What the arithmetic under test is
+///
+/// `sec * 1000 + usec / 1000`, because the record's clock is `struct timeval` with `sec` and `usec` in
+/// **two separate 64-bit words** at 0..8 and 8..16 — the layout this crate's module docs go to some
+/// length about. A decoder that read one word, or read them in the wrong order, or added them without
+/// dividing, fails here and nowhere else.
+#[test]
+fn a_button_records_the_kernels_own_clock() {
+    // **A stamp chosen so the arithmetic is not the identity.** `sec = 1_700_000_000` and
+    // `usec = 250_000` give 1_700_000_250 ms; a decoder that read `usec` as seconds, or skipped the
+    // division, or took one byte of the timestamp, all miss it.
+    let (sec, usec) = (1_700_000_000u64, 250_000u64);
+    let bytes = encode_record_at(EV_KEY, BTN_LEFT, 1, sec, usec);
+
+    assert_eq!(
+        decode_record(&bytes),
+        Record::Button {
+            button: Button::Left,
+            pressed: true,
+            time_ms: sec * 1000 + usec / 1000,
+        },
+        "**the record's own clock, in milliseconds** — `sec * 1000 + usec / 1000` and nothing else"
+    );
+
+    // **And through the source, not just the decoder.** `decode_record` and `ScriptedInputSource` are
+    // two different code paths — the source narrows `u64` to `u32`, which is the conversion that could
+    // quietly saturate — so a gate that stopped at the decoder would not cover the narrowing.
+    let mut src = ScriptedInputSource::new(&bytes);
+    let got = src.next_event().ok().flatten();
+    let Some(Event::Button {
+        button,
+        pressed,
+        x: _,
+        y: _,
+        time_ms,
+    }) = got
+    else {
+        panic!("a scripted button record is a Button event, got {got:?}");
+    };
+    assert_eq!((button, pressed), (Button::Left, true), "the rest of the event is unchanged");
+    assert_eq!(
+        time_ms,
+        1_700_000_000_250,
+        "**1.7e12, which does not fit a `u32` and is the reason this field is a `u64`.** \
+         `1_700_000_000 * 1000 + 250_000 / 1000`. A `u32` truncation of this is 3487918330, which \
+         is a plausible-looking number and is the same clock with its top 32 bits removed -- so this \
+         assertion is the only thing standing between a correct decoder and one that quietly loses \
+         the high half of every timestamp on a host that has been up for more than 49 days."
+    );
+
+    // **And the arithmetic between the two words, not just the width.** A `usec` of 2,500,000 is not
+    // a legal `usec` -- the field is microseconds and this is two and a half of them -- but the
+    // decoder does not police the kernel's field, and **a decoder that read the two words in the
+    // wrong order, or added them without dividing, produces a different number from any legal
+    // stamp and would pass the assertion above.**
+    let mut src = ScriptedInputSource::new(&encode_record_at(EV_KEY, BTN_LEFT, 1, 5, 2_500_000));
+    let Event::Button { time_ms, .. } = src.next_event().ok().flatten().expect("a button") else {
+        panic!("a scripted button record is a Button event");
+    };
+    assert_eq!(
+        time_ms,
+        7_500,
+        "**`5 * 1000 + 2_500_000 / 1000` = 7,500** -- the division by 1,000 is what turns the \
+         microsecond word into milliseconds. Adding it raw gives 2,500,005; reading `usec` first \
+         gives 2,500,000; and reading the words as one 128-bit little-endian number gives something \
+         else again. **Only the multiplication and the division put `sec` and `usec` in the same \
+         units**, which is the whole of what a two-word timestamp asks for."
     );
 }

@@ -216,9 +216,15 @@ fn the_all_list_and_the_match_agree() {
     // **Only the first `ALL.len()` discriminants are required**, because `#[repr(u8)]` numbers the
     // variants from zero -- walking all 256 would be asserting a range that was never populated,
     // which is the same shape of mistake as the check itself was guarding against.
-    // **`iter().enumerate()` and not `0..len`.** `seen` is indexed by discriminant, and the loop
-    // variable *is* the index -- `d` reads better here than `_` but only because it is used twice.
-    for (d, &s) in seen.iter().enumerate() {
+    // **`take(IconId::ALL.len())`, and that `take` is the point.**
+    //
+    // Clippy asks for `iter().enumerate()` over `0..len`, and the rewrite that satisfied it walked
+    // *all 256* discriminants -- so the gate failed on discriminant 33, which is past the last real
+    // icon. **The `take` is what the comment above this loop is about**: `#[repr(u8)]` numbers the
+    // variants from zero, so walking 256 would be asserting a range nobody populated. The index is
+    // still the discriminant, which is why `enumerate` and `take` together are right and either
+    // alone is not.
+    for (d, &s) in seen.iter().enumerate().take(IconId::ALL.len()) {
         assert!(
             s,
             "discriminant {d} has no entry in `IconId::ALL`. Every variant must be listed or the \

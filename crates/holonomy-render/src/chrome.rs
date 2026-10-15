@@ -1021,6 +1021,73 @@ impl Layout {
         Some((row + state.scroll_line, column))
     }
 
+    /// **The row and column a *drag* is at, clamped to the page's last row and column.** Part 41.
+    ///
+    /// # Why this exists, and why [`Self::caret_at`] still refuses
+    ///
+    /// **`caret_at` answers `None` for a point outside the sheet, and that is right for a click.** A
+    /// click on the desk beside the page is not a click on the page, and planting a caret at the end
+    /// of the document because the user clicked 3 px too low is its own bug.
+    ///
+    /// **It is wrong for a drag.** A drag that has run off the bottom of the page means *keep
+    /// going*, and answering `None` makes the selection stop at the last line while the pointer
+    /// keeps moving -- which is exactly the shape of "the drag stopped working". **This clamps the
+    /// row into `scroll_line .. scroll_line + rows` and the column into `0 .. columns`,** so a drag
+    /// past any edge selects to that edge and stops there until the page scrolls under it.
+    ///
+    /// # Why it is a separate function and not a flag on `caret_at`
+    ///
+    /// **Because the two callers want opposite answers and a boolean parameter would make the
+    /// difference invisible at the call site.** `click_page` calls both -- one for a click, one for a
+    /// drag -- and a reader needs to see which is which.
+    ///
+    /// # Why the column clamps rather than wrapping
+    ///
+    /// **`caret_at` computes `(x - text.x) / cell_w` with no bound, so a drag far to the right of
+    /// the text answers a column past the end of the line.** `Session::offset_of` clamps that to
+    /// the line's length, so the behaviour is already right; **clamping here as well would be the
+    /// same clamp twice**, and the test that says so is `a_drag_past_the_right_edge_clamps_to_the_line_end`.
+    #[must_use]
+    pub fn caret_at_drag(&self, state: &ChromeState, x: i32, y: i32) -> Option<(u32, u32)> {
+        if !self.canvas.contains(x, y) {
+            // **Outside the canvas entirely** -- above the page or below the window. **The last
+            // visible row, not `None`:** a drag that leaves the window upward means "to the top",
+            // and a drag that leaves downward means "to the bottom". **Which of those it is comes
+            // from which side it left**, so the two edges are handled separately rather than by
+            // one clamp.
+            let edge_row = if y < self.canvas.y as i32 {
+                state.scroll_line
+            } else {
+                state.scroll_line.saturating_add(self.rows.saturating_sub(1))
+            };
+            let column = self.column_at(x);
+            return Some((edge_row, column));
+        }
+        let row = if y < self.text.y as i32 {
+            0
+        } else {
+            u32::try_from(y - self.text.y as i32).ok()?.checked_div(self.cell_h)?
+        };
+        // **`min(rows - 1)`, and `rows` is never 0** -- `ChromeMetrics::rows` is derived from the
+        // metrics at construction, and a zero would mean a page with no lines, which
+        // `ChromeMetrics::for_size` does not produce.
+        let row = row.min(self.rows.saturating_sub(1));
+        Some((row + state.scroll_line, self.column_at(x)))
+    }
+
+    /// The glyph column `x` falls in, unclamped at the right.
+    ///
+    /// **A private helper because two callers now want it** and it is three lines; **and it is
+    /// deliberately *not* clamped**, because `Session::offset_of` already clamps a column to its
+    /// line's length and clamping twice would put the rule in two places.
+    fn column_at(&self, x: i32) -> u32 {
+        if x < self.text.x as i32 {
+            0
+        } else {
+            u32::try_from(x - self.text.x as i32).unwrap_or(u32::MAX) / self.cell_w
+        }
+    }
+
     /// Document row `i` of the sidebar, if the sidebar is that tall.
     ///
     /// **`None` past [`sidebar_rows`](Self::sidebar_rows), and not a clamped rect.** The caller asked

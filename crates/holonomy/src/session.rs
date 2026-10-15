@@ -480,6 +480,34 @@ pub struct Session<'a> {
     /// then dragged back over the page would start selecting text. **The flag is set only by a press
     /// that landed on the page**, and nothing else touches it.
     page_drag: bool,
+    /// **The click that came before this one, and how many clicks in a row it was.** Part 41.
+    ///
+    /// ## Why the session keeps this and not the chrome
+    ///
+    /// **Because the answer is about time and position and neither of those is chrome.** The chrome
+    /// is told what the pointer is over; it is not told how many times the pointer has been pressed
+    /// in the last 400 ms, and it should not be: a `u32` and an `Option` on `Session` is a private
+    /// detail of the gesture and putting it on `ChromeState` would make it something a paint could
+    /// read and a state file could hold.
+    ///
+    /// ## Why `None` and not a count of 0
+    ///
+    /// **Because "no click yet" and "one click" are different questions and a `u32` of 0 answers
+    /// neither.** A triple-click is `Some(.., 3)`, and the *next* press after it is a single click
+    /// again -- which is what clearing it on a timeout does.
+    ///
+    /// ## What the timestamp is
+    ///
+    /// **The source's own clock, never this process's.** See
+    /// `holonomy_input::pointer::Event::Button::time_ms`: X11 and evdev stamp differently, and the
+    /// only question asked of the number is whether the *difference* between two of them is small.
+    clicks: Option<Click>,
+    /// **The pointer's position at the top or bottom edge of the page, if it is there.**
+    ///
+    /// Part 41. **This is the state an auto-scroll needs and the only state it needs**: which way to
+    /// scroll, and how far in, both of which are functions of `(x, y)`. **`None` is not "idle"** —
+    /// it is "not at an edge", and the flag below is what says the drag is still running.
+    edge_scroll: Option<EdgeScroll>,
     /// The caret blink.
     blink: Blink,
     /// Counters.
@@ -912,6 +940,8 @@ impl<'a> Session<'a> {
             keymap: Keymap::us(),
             mods: ModifierState::new(),
             page_drag: false,
+            clicks: None,
+            edge_scroll: None,
             pending_colour: None,
             blink: Blink::new(Blink::DEFAULT_PERIOD),
             stats: SessionStats::default(),
@@ -1912,7 +1942,14 @@ impl<'a> Session<'a> {
                 // captured by the drag: highlighting a toolbar button the user is dragging past would
                 // be a lie about what is being pressed. `tick_with` below still runs.
                 if self.page_drag {
+                    // **The auto-scroll is armed *before* the drag extends, and that order is the
+                    // feature.** Reaching the bottom of the window is how a user says "keep going",
+                    // and if the extension happens first the selection is one line behind the pointer
+                    // on the very tick that starts the scroll. **One line behind, growing by one line
+                    // per tick, is a lag the user reads as "it is not working".**
+                    self.edge_scroll = EdgeScroll::at(&self.chrome.layout, x, y);
                     self.drag_to(x, y, bytes)?;
+                    self.step_edge_scroll(x, y, bytes)?;
                     self.tick_with(bytes)?;
                     return Ok(());
                 }
@@ -1964,11 +2001,20 @@ impl<'a> Session<'a> {
                 }
             }
             P::Button {
-                button: holonomy_input::Button::Left,
+                button,
                 pressed: true,
+                time_ms,
                 ..
             } => {
                 self.stats.pointer_presses += 1;
+                // **The left button is the only one that reaches the chrome at all**, and that was
+                // already true below; it is stated here because the arm now has to *not* fire for
+                // button 2 while still counting the press. **`let Some(button) = button.into_left()`**
+                // -- there is no such method, so: an early return with the counter left alone.
+                if button != holonomy_input::Button::Left {
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
                 let hit = self.hover_at(x, y);
                 let was = self.state.pressed;
                 self.state.pressed = (hit != widgets::Hit::None).then_some(hit);
@@ -1983,6 +2029,21 @@ impl<'a> Session<'a> {
                 // landed *on the page* arms it: a press on a toolbar button that the user then drags
                 // back over the page must not start selecting text.
                 self.page_drag = hit == widgets::Hit::Page;
+                // **Counted on every press, not only on the page, and not only on the left button.**
+                // The cheap and correct thing is to fold *every* press into one running count and let
+                // `Click::next` decide: a press far away in space or time is its own first click, so
+                // a click on the toolbar and then a click on the word under it cannot add up. **The
+                // alternative -- counting only page presses -- means a press somewhere else has to
+                // clear the count, which is a second rule to get right.**
+                if button == holonomy_input::Button::Left {
+                    self.clicks = Some(Click::next(self.clicks, time_ms, x, y));
+                }
+                // **The auto-scroll arms on the press, not on the first motion.** A drag that
+                // starts at the last visible line and never moves has to scroll: the user is
+                // already past the end.
+                if self.page_drag {
+                    self.edge_scroll = EdgeScroll::at(&self.chrome.layout, x, y);
+                }
                 self.press(hit, x, y, bytes)?;
             }
             P::Button {
@@ -2008,6 +2069,10 @@ impl<'a> Session<'a> {
                 // to the caret, which the model already reports as no selection, so "did the user
                 // select anything" is answered by the selection rather than by a distance.
                 self.page_drag = false;
+                // **The auto-scroll stops with the drag, and not one tick later.** `edge_scroll` is
+                // only read while `page_drag` is set, so leaving it set would be harmless -- and a
+                // field that is harmless when it is wrong is a field nobody has to keep correct.
+                self.edge_scroll = None;
             }
             // **Right and middle buttons are not bound, and are counted as nothing.**
             //
@@ -2052,7 +2117,185 @@ impl<'a> Session<'a> {
         // **`click_page(.., true)` — and `extend` unconditionally rather than reading shift.** A drag
         // extends whether or not shift is down, because that is what a drag *is*. Reading the
         // modifier here would mean shift-free drags silently select nothing.
-        self.click_page(bytes, x, y, true)
+        // **`1`, and not the session's own click count.** A drag is one gesture however many presses
+        // preceded it: the user who double-clicked a word and then dragged past it is extending a
+        // selection, not selecting the line they started on.
+        self.click_page(bytes, x, y, true, 1)
+    }
+
+    /// **Scroll the document if the drag is at the top or bottom edge.** Part 41.
+    ///
+    /// # Why this is called on *motion* and not on a timer
+    ///
+    /// **Because on a timer it would need a timer.** The sealed loop blocks in `epoll_wait` with
+    /// `EVENT_WAIT_MS = -1`, and part 39's note on `EVENT_WAIT` is explicit that a periodic wake-up
+    /// costs twenty times NFR-1.2's idle-CPU budget -- **and an auto-scroll that stops when the
+    /// pointer stops moving is an auto-scroll that does not work**, because a pointer held at the
+    /// bottom edge is by definition not moving.
+    ///
+    /// # What that leaves, and it is a real limitation
+    ///
+    /// **The page scrolls on every motion event while the pointer is within `EDGE_DEPTH` of an
+    /// edge, and does not scroll while the pointer is there and still.** Holding at the edge does
+    /// nothing. **The fix is a `CLOCK_MONOTONIC` timer armed only while a drag is at an edge**, and
+    /// it is not in this change: it needs a budget, and NFR-1.2's 0.001 % is a budget for *idle*,
+    /// not for *dragging*, so the number to spend has to be argued rather than borrowed.
+    ///
+    /// **What is built here is the half that needs no clock**, which is the half that has to be right
+    /// either way: which pixels are an edge, how fast each is, and that the drag is re-aimed after
+    /// the scroll rather than before. `crates/holonomy/tests/edge_scroll.rs` holds all three and
+    /// names the held-at-the-edge case as not-working.
+    fn step_edge_scroll(
+        &mut self,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        if let Some(edge) = self.edge_scroll.filter(|_| self.page_drag) {
+            let lines = edge.lines();
+            if lines != 0 {
+                self.scroll_by(i64::from(lines));
+                // **The drag is re-aimed at the pointer *after* the scroll, not before.**
+                //
+                // `caret_at` takes `scroll_line` into account, so scrolling and *then* asking where
+                // the pointer is gives the row the pointer is over *now* -- while asking first and
+                // scrolling after extends the selection to the row that has just scrolled away.
+                // **The order is the feature, and both orders are one line.**
+                //
+                // **The pointer position is a parameter and not `state.cursor`.** That field is
+                // written by the *hover* path, and a drag returns from the hover path before it
+                // gets there -- so reading it here answered `None` and the re-aim silently did
+                // nothing. **The caller has the coordinates; it is the only place that does.**
+                self.drag_to(x, y, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **The word containing `at`, as `(start, end)`, or `None` if the line cannot be read.**
+    ///
+    /// ## What a word is here, exactly
+    ///
+    /// **A run of `is_alphanumeric()` bytes, extended to nothing else.** Not a Unicode word --
+    /// `char::is_alphanumeric` on a UTF-8 document is a grapheme walk, and a grapheme walk inside a
+    /// 64-byte scratch buffer over a *line* is a second parser next to the one that put the line
+    /// there. **The measure is ASCII, the body face is ASCII in every fixture, and the rule is the
+    /// one that is cheap and total**: letters and digits and `_` and nothing else.
+    ///
+    /// **Bytes, not characters.** For ASCII the two are the same, and for anything else the rule
+    /// below stops at the first byte that is not alphanumeric -- which is the correct answer for a
+    /// *word* in an editor whose word-wrap is not built, because wrapping a line at its first
+    /// non-ASCII byte is not worse than not selecting the word at all.
+    ///
+    /// ## Why it returns `None` rather than an empty range
+    ///
+    /// **Because "there is no word here" and "the line is not readable" are different answers.**
+    /// A click on a run of spaces has no word, and `None` makes the caller do a single click -- which
+    /// is right. A line that will not fault in *also* gives `None` here, and the caller cannot tell
+    /// them apart, which is recorded: a double-click on a non-resident line places a caret rather
+    /// than a word. `crates/holonomy/tests/click_count.rs::a_double_click_on_an_unreadable_line_places_a_caret`
+    /// is what says so rather than leaving it to be found.
+    fn word_around(
+        &mut self,
+        at: u32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<Option<(u32, u32)>, SessionError> {
+        // **`DocLines::line_of`, which is `u32` already.** Going through `self.geo.line_of_byte`
+        // would reach past the wrapper for no gain and would need an `as u32` this does not.
+        let line = self.lines.line_of(at as usize);
+        let start = self.lines.line_begin(line as usize) as u32;
+        let end = self.lines.line_end(line as usize) as u32;
+        if end <= start {
+            return Ok(None);
+        }
+        // **One pass over one line, in 64-byte chunks through a stack buffer.** The same shape as
+        // `column_at_pen` and `refresh_caret_pen`, and for the same reason: the document is
+        // faulting and a whole line may not be resident.
+        let mut buf = [0u8; 64];
+        // **`run_start` and not a pair of bounds.** The question is "which maximal run of word bytes
+        // contains `at`", and a run is open-ended until a non-word byte closes it -- so one `Option`
+        // is the state and the closing byte is the answer. **The first version tracked
+        // `(word_start, word_end)` and closed the run on the first non-word byte *after* `at`,** which
+        // silently ran every earlier word on the line into one: a double-click on `bravo` returned
+        // `0..11` -- `alpha bravo` -- and the gate caught it on its first run.
+        let mut run_start = None;
+        let mut pos = start;
+        while pos < end {
+            let n = usize::try_from(end - pos).unwrap_or(0).min(buf.len());
+            if self
+                .editor
+                .read_into_faulting(bytes, pos as usize, &mut buf[..n])
+                .is_err()
+            {
+                return Ok(None);
+            }
+            for (i, &b) in buf[..n].iter().enumerate() {
+                let off = pos + i as u32;
+                if is_word_byte(b) {
+                    run_start.get_or_insert(off);
+                } else if let Some(from) = run_start.take() {
+                    // **The run closed at `off`, and the click is inside it if `from <= at < off`.**
+                    // **`at < off` and not `at <= off`**: `off` is itself a non-word byte, so a click
+                    // that lands on the *space after* a word is not a click in the word. That is the
+                    // rule `a_double_click_on_a_space_selects_nothing` holds, and it is the difference
+                    // between a word-selection and the word next door.
+                    if from <= at && at < off {
+                        return Ok(Some((from, off)));
+                    }
+                }
+            }
+            pos += n as u32;
+        }
+        // **The last word on the line, which no non-word byte ever closed.**
+        //
+        // `charlie` is the end of the fixture and is followed by `\n`, which the loop *does* see --
+        // so this arm only fires for a line whose last byte is a word byte, which is the case the
+        // fixture's `\n` hides. **It is here because a document does not have to end in a newline**,
+        // and an editor that cannot select the last word of a file with no trailing newline is broken
+        // in a way that only shows on files nobody has looked at.
+        match run_start {
+            Some(from) if from <= at && at < end => Ok(Some((from, end))),
+            _ => Ok(None),
+        }
+    }
+
+    /// **The whole line `line`, as `(start, end)`, with the newline left out.**
+    ///
+    /// ## The newline is excluded, and that is the whole point of this function
+    ///
+    /// **`DocLines::line_end` is one past the last byte *of the stored range*, and the stored range
+    /// includes the `\n`.** So the obvious implementation -- `line_begin..line_end` -- selects the
+    /// newline, and the very next thing a user does with a triple-click is type to replace the line,
+    /// **which would then eat the line break and join this line to the next one.** The usual sequence
+    /// is triple-click, type; a triple-click that breaks it is worse than no triple-click.
+    ///
+    /// ## How the newline is identified, and why by reading and not by trusting the geometry
+    ///
+    /// **`self.editor.read_into(end - 1)` and check it is `\n`.** The geometry index knows where the
+    /// line ends and not what is there; **the one byte at the boundary is what decides**, and reading
+    /// it is the difference between a gate that can be written and a comment that says `end - 1`.
+    ///
+    /// **A read that fails leaves the end alone.** If the last byte cannot be read then the range is
+    /// the whole line, which over-selects by one byte rather than under-selecting -- **and a
+    /// triple-click is never load-bearing enough for a byte either way to matter.**
+    fn line_around(&mut self, line: u32) -> Option<(u32, u32)> {
+        let l = line as usize;
+        if l >= self.lines.len() {
+            return None;
+        }
+        let begin = self.lines.line_begin(l) as u32;
+        let mut end = self.lines.line_end(l) as u32;
+        if end > begin {
+            let mut last = [0u8; 1];
+            if self
+                .editor
+                .read_into((end - 1) as usize, &mut last)
+                .is_ok_and(|n| n == 1 && last[0] == b'\n')
+            {
+                end -= 1;
+            }
+        }
+        Some((begin, end))
     }
 
     /// What is under `(x, y)`, with the open menu's grab applied.
@@ -2283,7 +2526,14 @@ impl<'a> Session<'a> {
                 // nothing looked at it for a pointer. Shift-click was therefore *available* the
                 // whole time — the capability existed and was unused, which is the other kind of
                 // thing this project goes looking for.
-                self.click_page(bytes, x, y, self.mods.shift())?;
+                // **The session's own click count, and not a hard-coded 1.** `press` is where a
+                // click on the page is turned into a caret, a word or a line, and the only thing
+                // that knows how many presses have happened is `self.clicks` -- which the `handle_pointer`
+                // arm above has already updated for this press. **Shift wins**, though: an
+                // extend-drag that happens to be the second click of a pair is still an
+                // extend-drag, because the user is dragging.
+                let clicks = if self.mods.shift() { 1 } else { self.clicks.map_or(1, |c| c.count) };
+                self.click_page(bytes, x, y, self.mods.shift(), clicks)?;
             }
             Hit::None => {
                 // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
@@ -2341,8 +2591,15 @@ impl<'a> Session<'a> {
         x: i32,
         y: i32,
         extend: bool,
+        clicks: u32,
     ) -> Result<(), SessionError> {
-        let Some((line, grid_column)) = self.chrome.layout.caret_at(&self.state, x, y) else {
+        // **`caret_at_drag`, and the difference is the whole of this feature.** A *click* outside
+        // the page sheet is not a click on the page and plants no caret; a *drag* outside it means
+        // "keep going", and answering `None` there stops the selection while the pointer keeps
+        // moving. `click_page` serves both, so it asks for the clamped answer and the click path's
+        // strictness comes from [`Session::press`] having already resolved a page hit -- a press
+        // that did not land on the sheet never reaches this function.
+        let Some((line, grid_column)) = self.chrome.layout.caret_at_drag(&self.state, x, y) else {
             return Ok(());
         };
         // **The column by the pen, and not the grid column.** Part 33.
@@ -2360,6 +2617,36 @@ impl<'a> Session<'a> {
             .column_at_pen(line, x - self.chrome.layout.text.x as i32, bytes)
             .unwrap_or(grid_column);
         let at = self.offset_of(line, column, bytes)? as u32;
+
+        // ## The three things a click can select, and where they branch
+        //
+        // **Double-click selects the word, triple-click selects the line, and both branch here
+        // rather than in `press`.** That is the point of the `clicks` parameter: `press` does not
+        // know what a click is for, and `click_page` is the one function that has already done the
+        // hit test, resolved the column by the pen and computed a byte offset. **Any of the three
+        // could be derived from `at`, which is why they are one `match` and not three paths that
+        // each re-derive it.**
+        if !extend && clicks >= 2 {
+            // **`saturating_sub(1)` and not a match on 2 and 3 separately.** A word is a range; a line
+            // is a range; the difference is which range, and `>= 3` is the only question the caller
+            // asked by raising the count past two. **A fourth click is a line again, and that is the
+            // documented behaviour** -- see `Click::next`, which stops counting at three.
+            let range = if clicks == 2 {
+                self.word_around(at, bytes)?
+            } else {
+                self.line_around(line)
+            };
+            match range {
+                Some((from, to)) => self.select_at(from, to)?,
+                // **No range means the same thing a single click does, and not nothing.** A
+                // double-click on a line the fault could not read in full is a click; dropping it
+                // would leave the caret where the last click left it, which is the one outcome a
+                // user cannot explain from what they saw.
+                None => self.select_at(at, at)?,
+            }
+            return Ok(());
+        }
+
         if extend {
             self.extend_to(at)?;
         } else {
@@ -6725,4 +7012,153 @@ fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> Dama
     // question about where a widget sits, and a state with nothing hovered and no popup open is the
     // one that answers it.
     widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h).unwrap_or(DamageRect::new(0, 0, 0, 0))
+}
+
+
+/// **How many clicks in a row have landed in the same place, quickly.** Part 41.
+///
+/// ## Why this is a struct and not a `(u32, u64, i32, i32)`
+///
+/// **Because the pairing is the invariant, and a four-tuple is four independent numbers.** A tuple
+/// invites `count` being carried across a click that should have reset it, or the position being
+/// carried across a click that should have moved it; `Click` has no way to express either mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Click {
+    /// `1` for a single click, `2` for a double, `3` or more for a triple and beyond.
+    count: u32,
+    /// **The source's own millisecond clock.** Never compared against this process's `Instant`.
+    at_ms: u64,
+    /// Where the click was, in panel pixels.
+    x: i32,
+    /// Where the click was, in panel pixels.
+    y: i32,
+}
+
+impl Click {
+    /// **How long apart two clicks may be and still be one gesture.**
+    ///
+    /// **400 ms, and the number is the one every toolkit uses** -- GTK's `gtk-double-click-time` and
+    /// Qt's `QApplication::doubleClickInterval` both default to 400. **It is not measured here
+    /// because it cannot be**: this is a constant, and the honest thing about a constant is to write
+    /// it down and say where it came from. `crates/holonomy/tests/click_count.rs` is what says it is
+    /// applied at all.
+    const WINDOW_MS: u64 = 400;
+
+    /// **How far apart two clicks may be and still be one gesture.**
+    ///
+    /// **5 pixels, and this one is not a taste question.** A double-click is a *precision* gesture,
+    /// and a 5-pixel slop is smaller than the distance between two adjacent glyph centres in the
+    /// body face at 16 ppem. **A slop larger than a glyph would let a click on `word` and a click on
+    /// the space after it be one word-selection**, which is the same bug the click-position slop
+    /// exists to prevent.
+    const SLOP_PX: i32 = 5;
+
+    /// The count this press makes, given when and where it landed and what came before.
+    ///
+    /// ## The three ways it is not a continuation
+    ///
+    /// **Too slow, too far, or too many.** A fourth click is a single click again rather than a
+    /// quadruple, because the editor has nothing to do with four: `click_page` reads `2` as a word
+    /// and `>= 3` as a line, so `4` would be a line again -- and a user who clicks five times has
+    /// stopped clicking and started testing.
+    fn next(previous: Option<Self>, at_ms: u64, x: i32, y: i32) -> Self {
+        let continued = previous.is_some_and(|p| {
+            at_ms.wrapping_sub(p.at_ms) <= Self::WINDOW_MS
+                && (x - p.x).abs() <= Self::SLOP_PX
+                && (y - p.y).abs() <= Self::SLOP_PX
+        });
+        let count = match previous {
+            Some(p) if continued && p.count < 3 => p.count + 1,
+            _ => 1,
+        };
+        Self { count, at_ms, x, y }
+    }
+}
+
+/// **Which edge of the page the pointer is at, and how far in.** Part 41.
+///
+/// ## Why the depth is stored and not recomputed
+///
+/// **Because it changes as the pointer moves and an auto-scroll has to answer "how much" every tick.**
+/// Recomputing it from `(x, y)` at each tick would be four lines and would also be *the same four
+/// lines twice* -- once when arming and once when stepping. `EdgeScroll::at` is the one place the
+/// arithmetic lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EdgeScroll {
+    /// `-1` to scroll towards the top, `1` towards the bottom, `0` for neither.
+    ///
+    /// **`i32` and not `Direction`**, because there are exactly two and the arithmetic here is
+    /// `depth * DIRECTION` with no case to match on. A named enum would be one more type to
+    /// convert at every use.
+    direction: i32,
+    /// How far past the edge the pointer is, in pixels, **1 at the edge and `EDGE_DEPTH` at the
+    /// furthest.**
+    depth: u32,
+}
+
+impl EdgeScroll {
+    /// **How far past the edge a pointer has to be before the page scrolls at all.**
+    ///
+    /// **0, and that is a decision worth stating.** Every other auto-scroll in a toolkit has a small
+    /// dead zone at the edge so that a drag that ends *on* the last visible line does not start
+    /// moving the document under the pointer. **This one has none, because the pointer being inside
+    /// the page at all is already the test** -- `widgets::Hit::Page` -- and a pointer one pixel
+    /// below the last line is unambiguously past it. A dead zone here would mean a drag that reaches
+    /// the bottom stops working for the one pixel where the user is most likely to be looking.
+    const MAX_DEPTH: u32 = 24;
+
+    /// How fast the page scrolls at the edge, in lines per event, at [`Self::MAX_DEPTH`].
+    ///
+    /// **Three lines, which is a wheel notch.** The wheel scrolls `dy * 3`, so an auto-scroll that
+    /// moved a different amount would make "drag to the bottom" and "spin the wheel at the bottom"
+    /// feel like two different documents.
+    const LINES_AT_MAX_DEPTH: i32 = 3;
+
+    /// The scroll this pointer position calls for, or `None` when it is not at an edge.
+    ///
+    /// ## Why "not at an edge" is measured from the *canvas* and not the page
+    ///
+    /// **Because the canvas is what scrolls.** `Layout::canvas` is the scrollable region and `page`
+    /// is the sheet drawn inside it; a pointer below the sheet but inside the canvas is still at the
+    /// bottom of the document as far as the user is concerned, and refusing to scroll there would
+    /// make the bottom of a short document unselectable by dragging.
+    fn at(l: &holonomy_render::chrome::Layout, x: i32, y: i32) -> Option<Self> {
+        if x < l.canvas.x as i32 || x >= l.canvas.right() as i32 {
+            return None;
+        }
+        let past_top = (l.canvas.y as i32 - y).max(0);
+        let past_bottom = (y - l.canvas.bottom() as i32).max(0);
+        let (direction, past) = if past_top > 0 {
+            (-1, past_top)
+        } else if past_bottom > 0 {
+            (1, past_bottom)
+        } else {
+            return None;
+        };
+        let depth = u32::try_from(past).unwrap_or(u32::MAX).min(Self::MAX_DEPTH);
+        Some(Self { direction, depth })
+    }
+
+    /// How many lines this scroll moves, **sign included.**
+    ///
+    /// ## The arithmetic, and why it is a product rather than a table
+    ///
+    /// **`depth / MAX_DEPTH * LINES_AT_MAX_DEPTH`** means one pixel past the edge moves nothing and
+    /// 24 pixels moves three lines, with every value between proportional. **A `match` on depth
+    /// would be a table of 25 rows** and would have to be re-derived by hand every time
+    /// `MAX_DEPTH` changed; this is one division and one multiplication, and the gate
+    /// `an_auto_scroll_accelerates_with_depth` is what says the ends are right.
+    fn lines(self) -> i32 {
+        (self.depth * Self::LINES_AT_MAX_DEPTH as u32).div_ceil(Self::MAX_DEPTH) as i32 * self.direction
+    }
+}
+
+/// **One byte of a word, by the rule [`Session::word_around`] states.**
+///
+/// **A free function and not a method, and not a `char` method.** The whole point of that rule is
+/// that it is a *byte* rule, and reaching for `char::is_alphanumeric` here -- which is what a reader
+/// will expect -- would silently make it a character rule on a non-UTF-8 boundary and produce a
+/// different answer than the doc comment claims. **The name says "byte" for that reason.**
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }

@@ -613,6 +613,14 @@ pub enum Event {
         event_x: i16,
         /// Y within the event window.
         event_y: i16,
+        /// **Milliseconds since the X server started.**
+        ///
+        /// **Not a wall clock and not this crate's.** It is the server's own monotonic counter, and it
+        /// is the only time the X protocol gives an input event. **A consumer must compare two of
+        /// these and never one of them against `Instant::now()`** -- see
+        /// `holonomy_input::pointer::Event::Button::time_ms`, which is the same number narrowed to a
+        /// `u32` and used for exactly that.
+        time: u32,
     },
     /// A button came up.
     ///
@@ -628,6 +636,10 @@ pub enum Event {
         event_x: i16,
         /// Y within the event window.
         event_y: i16,
+        /// **Milliseconds since the X server started** -- the same clock and the same rule as
+        /// [`Event::ButtonPress::time`]. A release carries one so that the pair can be compared
+        /// without knowing where in the protocol either field sits.
+        time: u32,
     },
     /// The pointer moved.
     MotionNotify {
@@ -770,7 +782,11 @@ impl Event {
             event::BUTTON_PRESS => {
                 let button = r.u8();
                 let _sequence = r.u16();
-                let _time = r.u32();
+                // **Read, not discarded.** X stamps every input event with milliseconds since the
+                // *server* started, and this crate was reading the field and throwing it away. It is
+                // the only timestamp in the X protocol, and it is what lets a double-click be told
+                // from two slow clicks -- see `crate::holonomy_input`'s `Event::Button::time_ms`.
+                let time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
                 let _child = r.u32();
@@ -783,12 +799,15 @@ impl Event {
                     button,
                     event_x,
                     event_y,
+                    time,
                 }
             }
             event::BUTTON_RELEASE => {
                 let button = r.u8();
                 let _sequence = r.u16();
-                let _time = r.u32();
+                // Read for the same reason as the press's: the field is on the wire and this is the
+                // one pass over it. `holonomy_input::x11key` uses it to fill `Event::Button::time_ms`.
+                let time = r.u32();
                 let _root = r.u32();
                 let _event = r.u32();
                 let _child = r.u32();
@@ -801,6 +820,7 @@ impl Event {
                     button,
                     event_x,
                     event_y,
+                    time,
                 }
             }
             event::MOTION_NOTIFY => {
@@ -1228,15 +1248,29 @@ mod tests {
         assert_eq!(event_y, 0x2626, "event-y is at offset 26, not 18");
         assert_eq!(state, 0x2828, "the modifier mask is at offset 28, not 20");
     }
-    /// **`ButtonPress` reads the button at offset 1 and the coordinates at 24 and 26.**
+    /// **`ButtonPress` reads the button at offset 1, the timestamp at 4, and the coordinates at
+    /// 24 and 26.**
+    ///
+    /// **The timestamp is asserted here and not only in the session's gates** because this is the one
+    /// decoder for both a press and a release, and a field it reads and does not expose is a field
+    /// nothing can be wrong about. `holonomy_input::x11key` fills
+    /// `pointer::Event::Button::time_ms` from it, and **that is the whole of what the double-click
+    /// window on the X path rests on.**
     #[test]
-    fn a_button_press_reads_the_button_and_the_coordinates_from_the_wire() {
+    fn a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire() {
         let mut p = packet(4);
         p[1] = 1; // button 1
+        // **All four bytes of the timestamp, written explicitly.** The `packet()` helper fills
+        // offset 4 with `0x04040404`, which is a fine value to read back and a poor one to read back
+        // -- `0x04040404` is also what a decoder that skipped a byte would produce for a field two
+        // bytes early. **A byte pattern that cannot be produced by an off-by-one is the whole point
+        // of writing it by hand.**
+        p[4..8].copy_from_slice(&0xA1B2_C3D4u32.to_le_bytes());
         let Some(Event::ButtonPress {
             button,
             event_x,
             event_y,
+            time,
         }) = Event::decode(&p)
         else {
             panic!("a code-4 packet must decode as ButtonPress");
@@ -1244,6 +1278,12 @@ mod tests {
         assert_eq!(button, 1, "the button is byte 1");
         assert_eq!(event_x, 0x2424, "event-x is at offset 24");
         assert_eq!(event_y, 0x2626, "event-y is at offset 26");
+        // **`0xA1B2C3D4`, little-endian, from bytes 4..8 and nowhere else.** Every byte differs from
+        // its neighbour, so reading the field at 0, 2, 6 or 8, or as a big-endian u32, or not
+        // reading it at all, each produce a different number. **The `packet()` helper's own fill
+        // would not have: `0x04040404` has the same bytes at every position, so a decoder that
+        // started one byte early and read three would still match.**
+        assert_eq!(time, 0xA1B2_C3D4, "**time is the little-endian u32 at offset 4**");
     }
     /// **`MotionNotify` reads the coordinates at 24 and 26.**
     ///

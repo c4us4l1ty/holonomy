@@ -103,6 +103,7 @@ pub fn pointer_event(event: &Event) -> Option<crate::pointer::Event> {
             button,
             event_x,
             event_y,
+            time,
         } => {
             let (x, y) = (*event_x as i32, *event_y as i32);
             match button {
@@ -113,6 +114,7 @@ pub fn pointer_event(event: &Event) -> Option<crate::pointer::Event> {
                     pressed: true,
                     x,
                     y,
+                    time_ms: u64::from(*time),
                 }),
             }
         }
@@ -120,11 +122,13 @@ pub fn pointer_event(event: &Event) -> Option<crate::pointer::Event> {
             button,
             event_x,
             event_y,
+            time,
         } => Some(P::Button {
             button: x_button(*button),
             pressed: false,
             x: *event_x as i32,
             y: *event_y as i32,
+            time_ms: u64::from(*time),
         }),
         _ => None,
     }
