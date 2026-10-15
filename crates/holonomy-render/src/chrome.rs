@@ -1553,7 +1553,7 @@ pub struct ChromeState {
 impl Default for ChromeState {
     fn default() -> Self {
         Self {
-            title: "untitled".to_string(),
+            title: "Journal".to_string(),
             sidebar_open: true,
             docs: Vec::new(),
             active_doc: 0,
