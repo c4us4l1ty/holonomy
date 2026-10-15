@@ -495,11 +495,14 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome changes.**
     assert_eq!(
         widgets::TOOLBAR.len(),
-        20,
-        "**twenty tools**, and it was twenty-one until part 33 removed Print. The count is asserted \
+        19,
+        "**nineteen tools.** Twenty-one until part 33 removed Print; twenty until part 46 removed \
+         Comment. **Two tools have now been deleted rather than wired**, and the pattern is worth \
+         naming: a button with nothing behind it is a claim about the product that is false, and \
+         removing it costs one line of layout while wiring it costs a model. The count is asserted \
          separately so that the inert arithmetic below cannot be quietly wrong on both sides."
     );
-    // **Six, and it was ten until part 44.** Four buttons left the inert list, each with a decision
+    // **Five, and it was ten until part 44.** Four buttons left the inert list, each with a decision
     // behind it:
     //
     // | left | part | what it is now |
@@ -519,10 +522,11 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six` records by name.
     assert_eq!(
         inert.len(),
-        6,
-        "**six inert buttons**, which is 20 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome \
+        5,
+        "**five inert buttons**, which is 19 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome \
          changes. The list is {inert:?}. Part 44 removed four from this list and each removal came \
-         with a recorded decision -- see the comment above."
+         with a recorded decision; part 46 removed a fifth tool from the toolbar altogether rather \
+         than leave a button that will never work."
     );
 }
 

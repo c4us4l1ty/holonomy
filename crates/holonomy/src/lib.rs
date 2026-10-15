@@ -14,6 +14,7 @@
 //! loop lives in a library rather than in `main`.
 
 pub mod args;
+pub mod atlas_plan;
 pub mod counts;
 pub mod doclines;
 pub mod manifest;

@@ -106,7 +106,30 @@ impl Default for Args {
             // against 10 — **without the viewport shrinking**, and it costs 20 px of chrome against
             // 16 ppem rather than 66 px against 24. `--ppem 24` remains, and is what part 32 measured
             // everything against.
-            ppem: 20,
+            //
+            // # # Part 46 moved this back to 16, and the reason is the atlas rather than the viewport
+            //
+            // **The table three lines above already answered the viewport question and 16 won it**:
+            // 16 ppem shows **30 rows and 100 columns** against 20 ppem's **24 rows and 98 columns**,
+            // so 16 is better on *both* axes of "I cannot properly use the app". Choosing 20 over 16
+            // bought larger letters, not more document — and part 32 never said larger was the goal,
+            // it said the viewport was too small.
+            //
+            // **What part 46 made true is that 16 is also the only default at which zoom works.**
+            // Part 43 gave the atlas a second size so 125 % would have glyphs, and measured it once at
+            // `[16, 20]` without asking whether the same expression holds elsewhere. It does not: two
+            // sizes fit up to `--ppem 17` and the default was 20, so `cargo run` aborted with
+            // `AtlasFull { need: 554236, have: 458752 }` and **the application could not start**.
+            //
+            // **So the default is now 16**, which is where the pair fits (378,850 of 458,752), where
+            // 125 % zoom has glyphs behind it, **and where every test fixture in the suite already
+            // built its atlas.** That last one is not incidental: several parts were spent on a gate
+            // that failed because a test built `[16]` while the product built `[20]`, and the fix
+            // for the next one of those is for the two to be the same number.
+            //
+            // **`--ppem 20` still works** and still gives larger type. It builds one atlas size and
+            // says so once on stderr; see `crate::atlas_plan`.
+            ppem: 16,
             headless: false,
             window: false,
             display: None,
@@ -209,7 +232,7 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
   --height N           Panel height in pixels (default 1000).
                          Wider than 1280 grows the text column up to 100 columns
                          and then stops; past that the extra width is desk. Part 27.
-  --ppem N             Pixels per em for the faces (default 20; 28 and above
+  --ppem N             Pixels per em for the faces (default 16; 27 and above
                          do not fit the atlas). This is the type size: it
                          enlarges the glyphs and every band that holds them,
                          so it costs rows as well as pixels. Part 32 chose
@@ -297,6 +320,19 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
         // `need: 406,068, have: 458,752`. 26 is the largest size that fits, and the range is clamped
         // here rather than at the build so that `--ppem 9999` says *why* rather than aborting on an
         // allocator error sixteen frames later.
+        //
+        // # **Every value in this range builds an atlas, and that is a gate**
+        //
+        // **`atlas_plan::tests`... no: `tests/atlas_plan.rs::every_legal_ppem_builds_an_atlas`
+        // rasterises all seventeen.** This clamp is what makes that gate possible, so the two are the
+        // same decision read from opposite ends: **the range here is the promise, and there it is
+        // kept.**
+        //
+        // **Note what the clamp does *not* cover.** Two atlas sizes — the pair zoom needs — fit only
+        // up to `--ppem 17`, and the default is now 16. **That is not this function's error to
+        // refuse**, because the request is legal and the answer is *one size plus a message*, not an
+        // error. `--ppem 20` builds and runs; it just has no second size to zoom to, and says so.
+        // See `crate::atlas_plan::build`.
         if !(10..=26).contains(&out.ppem) {
             return Err(ParseError::OutOfRange {
                 flag: "ppem".into(),

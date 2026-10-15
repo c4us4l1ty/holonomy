@@ -6140,3 +6140,138 @@ false claim.
 |---|---|
 | `cargo test --release -j 4 --workspace --no-fail-fast` | **116 binaries, 1465 tests, exit 0** |
 | `cargo clippy --release -j 4 --workspace --all-targets -- -D warnings` | **clean** |
+
+---
+
+# Part 46 — the application would not start, and the gate that should have said so, 2026-10-15
+
+## A. The report
+
+```
+$ cargo run --release --features desktop --bin holonomy -- --window
+the packed faces must rasterise: AtlasFull { need: 554236, have: 458752 }
+Aborted (core dumped)
+```
+
+**This was mine.** Part 43 gave the atlas a second size so zoom would have glyphs to switch to, and
+verified it **once**, at `[16, 20]` — which fits, 378,850 bytes of 458,752. **The default `--ppem` is
+20**, the same expression gives `[20, 25]`, and that needs 554,236.
+
+**So the application could not be started at all, and it shipped that way.**
+
+## B. Why no gate caught it
+
+`atlas.rs::atlas_and_table_fit_the_ceiling` asserts `ATLAS_BYTES + table <= 512 KiB`.
+
+**That is the *metric table's* arithmetic** — 14,080 bytes per size — and it says nothing at all about
+glyph coverage, which depends on which codepoints the payload holds and how many sizes are
+rasterised. **The gate was right about the bytes it measured and it measured the wrong ones**, which
+is a different failure from being wrong and much easier to miss: it passes, it is green, and the
+requirement it does not describe is the one that bit.
+
+Part 43's own comment recorded the reasoning: *"`[16, 20]` measures 378,850 of 458,752 used"*. **It
+wrote down the one value that worked and generalised from it**, and the generalisation is the bug.
+
+## C. The measured law
+
+Bytes of glyph coverage against a 458,752-byte atlas, by rasterising every pair:
+
+| `--ppem` | one size | two sizes, `(base, base*5/4)` |
+|---|---|---|
+| 10 | 70,478 | 165,640 |
+| 16 | 153,571 | **378,850** |
+| 17 | 169,174 | **412,608** |
+| 18 | 186,916 | 450,645 — **does not fit** |
+| 20 | 225,279 | 554,236 — **does not fit** ← the default that shipped |
+| 24 | 308,864 | 767,350 — **does not fit** |
+| 26 | 353,961 | 865,205 — **does not fit** |
+
+**Two sizes fit up to `--ppem 17` and not one step further.** Coverage grows with the *area* of the
+glyphs, so a second size nearly doubles it.
+
+## D. What was built, and why not a formula
+
+**`holonomy::atlas_plan`, with `tests/atlas_plan.rs` (7 gates).**
+
+- `sizes_for(base)` returns the **wish**.
+- `build(base)` finds out whether the budget grants it, and if not, builds one size and returns
+  **what it refused and why**.
+
+**No formula, deliberately.** The wall is visibly `base + second <= 38`, and writing that down as a
+constant would look like understanding. **It is a coincidence of today's codepoint ranges**, and a
+formula that encodes the glyph set's area is the same class of bug one range change away — and it
+fails by aborting a window somebody was trying to open. **The fallback costs a second rasterisation
+pass on that path: a tenth of a second, once, at startup, versus a core dump.**
+
+**The fallback keeps `base` and loses the zoom size**, because `base` is what the chrome was laid out
+for. Every band height, the cell width and the ruler's column count derive from `--ppem`.
+
+## E. The refusal is not silent
+
+```text
+holonomy: two atlas sizes need 554236 bytes of glyphs and the atlas holds 458752, so this build
+has one size and zoom has nothing to switch to; --ppem 17 or smaller keeps 125 % (at --ppem 20)
+```
+
+**A zoom control that is on the toolbar and does nothing is the defect this project keeps refusing to
+ship.** The difference is that it is no longer silent, and **the message names the flag value that
+would fix it** — a refusal the user cannot act on is the same defect as the keystroke that does
+nothing. `a_refusal_names_the_numbers_and_the_flag` is the gate.
+
+## F. The default moved to 16 ppem
+
+**Chosen on the measurements, not on preference.**
+
+| | rows | columns | two atlas sizes |
+|---|---|---|---|
+| 16 ppem | **30** | **100** | **fits** |
+| 20 ppem | 24 | 98 | does not fit |
+
+**Part 32's table already answered the viewport question and 16 won it** — 16 ppem shows more
+document on *both* axes. Choosing 20 bought larger letters, not more document, and part 32 never said
+larger was the goal; it said *"the view port is way too small and I cannot properly use the app"*.
+
+**And 16 is the only default at which zoom works.** It is also what every test fixture in the suite
+already built its atlas, and that is not incidental: parts 41–45 each spent time on a gate that
+failed because a test built `[16]` while the product built `[20]`. **The fix for the next one of those
+is for the two to be the same number.**
+
+**`--ppem 20` still works** and still gives larger type. It builds one atlas size and says so.
+
+## G. `Comment` removed rather than left inert
+
+`Tool::Comment`, `TitleButton::Comments`, `IconId::Comment` and `mask::COMMENT` are gone.
+
+**`Print` was removed in part 33 for exactly this reason** — *"a button that does nothing and never
+will is a lie about the product"*. `Comment` needed an annotation store: a list, an anchor range, an
+author, and a way to move an anchor when the text before it is edited. **This program has no reason
+to want one**, so the second argument to part 33 applies and the button is gone.
+
+**The toolbar is now nineteen tools and five are inert** — `Spellcheck`, `PaintFormat`, `Underline`,
+`Highlight`, `Link`. `pointer.rs` spells the arithmetic: 19 − 3 commands − 1 toggle − 5 dropdowns − 5
+chrome changes.
+
+`icons.rs::the_all_list_and_the_match_agree` caught it on the number, which is what it is for.
+
+## H. Gates
+
+| gate | what it holds |
+|---|---|
+| `atlas_plan.rs::the_default_ppem_builds_an_atlas` | **the exact assertion whose absence let the core dump ship** |
+| `::every_legal_ppem_builds_an_atlas` | **all seventeen values rasterise** |
+| `::the_pair_boundary_is_where_the_documentation_says` | 17 pairs, 18 does not — **pins the doc and the stderr line to the product** |
+| `::the_fallback_keeps_the_requested_size` | the chrome and the glyphs agree |
+| `::a_refusal_names_the_numbers_and_the_flag` | **the message is code and needs a gate** |
+| `::sizes_for_is_two_ascending_sizes` | ascending, because a rank indexes `Atlas::sizes` |
+| `::above_the_boundary_the_build_is_one_size_and_nothing_claims_otherwise` | the fallback claims nothing it has not got |
+
+**`DEFAULT_PPM` is read from `Args::default()` and not written down.** The two facts that broke were
+"the default is 20" and "the pair does not fit at 20"; a literal here would have kept asserting the
+first while the second stopped being true.
+
+## I. Final state
+
+| gate | count |
+|---|---|
+| `cargo clippy --release -j 4 --workspace --all-targets -- -D warnings` | **clean** |
+| `cargo test --release -j 4 --workspace --no-fail-fast` | see the commit message |

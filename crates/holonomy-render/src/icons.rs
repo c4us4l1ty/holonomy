@@ -410,25 +410,6 @@ pub mod mask {
         b"................",
     ]);
 
-    /// A speech balloon with a tail.
-    pub static COMMENT: [u64; 16] = pack(&[
-        b"................",
-        b"................",
-        b"..############..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..#..........#..",
-        b"..############..",
-        b".....#..........",
-        b"....#...........",
-        b"...#............",
-        b"..#.............",
-        b"................",
-        b"................",
-    ]);
 
     /// A frame with a sun and a mountain.
     pub static IMAGE: [u64; 16] = pack(&[
@@ -792,8 +773,6 @@ pub enum IconId {
     Highlight,
     /// Link.
     Link,
-    /// Comment.
-    Comment,
     /// Image.
     Image,
     /// Overflow.
@@ -847,7 +826,6 @@ impl IconId {
         IconId::TextColour,
         IconId::Highlight,
         IconId::Link,
-        IconId::Comment,
         IconId::Image,
         IconId::Overflow,
         IconId::ArrowLeft,
@@ -890,7 +868,6 @@ impl IconId {
             IconId::TextColour => &mask::TEXT_COLOUR,
             IconId::Highlight => &mask::HIGHLIGHT,
             IconId::Link => &mask::LINK,
-            IconId::Comment => &mask::COMMENT,
             IconId::Image => &mask::IMAGE,
             IconId::Overflow => &mask::OVERFLOW,
             IconId::ArrowLeft => &mask::ARROW_LEFT,

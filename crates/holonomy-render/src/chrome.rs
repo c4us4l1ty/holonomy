@@ -310,7 +310,7 @@ impl ChromeMetrics {
         menu_h: 22,
         // **256, and the table above is the reason.** `with_type_scale` deliberately does *not* scale
         // `sidebar_w`, because it is a distance and not a type size -- so this is 256 px of a 1,600 px
-        // window at every type size, which is 16 % at the default 20 ppem and 20 % at the 1,280 px
+        // window at every type size, which is 16 % at the default 16 ppem and 20 % at the 1,280 px
         // design width.
         sidebar_w: 256,
         button: 26,
@@ -2366,7 +2366,6 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
             crate::widgets::TitleButton::Folder => crate::icons::IconId::Folder,
             crate::widgets::TitleButton::Cloud => crate::icons::IconId::Cloud,
             crate::widgets::TitleButton::History => crate::icons::IconId::History,
-            crate::widgets::TitleButton::Comments => crate::icons::IconId::Comment,
             crate::widgets::TitleButton::Share => crate::icons::IconId::Lock,
         };
         // **Share is a button with a label**, so it is drawn as one; the rest are the icon alone,

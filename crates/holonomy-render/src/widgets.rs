@@ -67,8 +67,6 @@ pub enum Tool {
     Highlight,
     /// Link.
     Link,
-    /// Comment.
-    Comment,
     /// Image.
     Image,
     /// Overflow: the rest of the toolbar.
@@ -100,7 +98,6 @@ impl Tool {
             Tool::TextColour => Some(IconId::TextColour),
             Tool::Highlight => Some(IconId::Highlight),
             Tool::Link => Some(IconId::Link),
-            Tool::Comment => Some(IconId::Comment),
             Tool::Image => Some(IconId::Image),
             Tool::Overflow => Some(IconId::Overflow),
             Tool::Mode => Some(IconId::Pen),
@@ -156,7 +153,6 @@ impl Tool {
             Tool::TextColour => "text-colour",
             Tool::Highlight => "highlight",
             Tool::Link => "link",
-            Tool::Comment => "comment",
             Tool::Image => "image",
             Tool::Overflow => "overflow",
             Tool::Mode => "mode",
@@ -287,7 +283,6 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::TextColour,
     Tool::Highlight,
     Tool::Link,
-    Tool::Comment,
     Tool::Image,
     Tool::Overflow,
     Tool::Mode,
@@ -824,8 +819,6 @@ pub enum TitleButton {
     Cloud,
     /// Version history.
     History,
-    /// Comments.
-    Comments,
     /// Share.
     Share,
 }
@@ -838,7 +831,6 @@ pub fn place_title(l: &Layout, pad: u32) -> Vec<(TitleButton, DamageRect)> {
     let mut x = l.title.right().saturating_sub(pad);
     for (btn, w) in [
         (TitleButton::Share, b * 5),
-        (TitleButton::Comments, b),
         (TitleButton::History, b),
         (TitleButton::Cloud, b),
         (TitleButton::Folder, b),

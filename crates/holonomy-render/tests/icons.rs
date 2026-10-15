@@ -194,12 +194,29 @@ fn the_all_list_and_the_match_agree() {
     // never will is a lie about the product, and inventing a print backend to keep a gate green
     // would be the more expensive lie. **The mask, the enum variant and the `ALL` entry went
     // together**, which is what this gate is for: had any one of them stayed, it would have said so.
+    // ## 32, and that is two icons fewer than it was
+    //
+    // **Part 33 removed `Print`**: the icon existed only for a toolbar button that was removed
+    // rather than wired up, because a button that does nothing and never will is a lie about the
+    // product, and inventing a print backend to keep a gate green would be the more expensive lie.
+    //
+    // **Part 46 removed `Comment`, on the same reasoning applied earlier.** `Tool::Comment` needed
+    // an annotation store -- a list, an anchor range, an author, and anchors that move when the text
+    // before them is edited -- and this program has no reason to want one. **`IconId::Comment`,
+    // `mask::COMMENT`, `Tool::Comment` and `TitleButton::Comments` went together**, and the two
+    // removed toolbar buttons are now `Print` and `Comment`, both of which would have needed a model
+    // nobody has asked for.
+    //
+    // **Deleting rather than disabling is the pattern worth keeping.** Both removals cost one line of
+    // layout and saved a button that lied, and in both cases the mask, the enum variant and the `ALL`
+    // entry had to go together -- **which is exactly what this gate is for, and it said so by
+    // failing on a number rather than on a missing reference.**
     assert_eq!(
         IconId::ALL.len(),
-        33,
+        32,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. Part 33 removed \
-         `Print`, so this is one fewer than it was."
+         `Print` and part 46 removed `Comment`, both rather than wired."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.

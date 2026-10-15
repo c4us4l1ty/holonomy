@@ -13,21 +13,27 @@
 //!
 //! # And what is still inert, and why
 //!
-//! **Six: `Spellcheck`, `PaintFormat`, `Underline`, `Highlight`, `Link`, `Comment`.** Each is
-//! recorded below with the reason, because **a count with no reasons is a number nobody can act on**:
+//! **Five: `Spellcheck`, `PaintFormat`, `Underline`, `Highlight`, `Link`.** Each is recorded below
+//! with the reason, because **a count with no reasons is a number nobody can act on**:
 //!
-//! - **`Spellcheck`** needs a dictionary. **The 512 KiB atlas budget is already 378,850 of 458,752
-//!   used at two sizes**, and a word list of any useful size does not fit in what is left.
+//! - **`Spellcheck`** needs a dictionary. **The 512 KiB atlas budget cannot even hold the two zoom
+//!   sizes at the default `--ppem`** — see part 46 — and a word list of any useful size does not fit
+//!   in what is left of that.
 //! - **`Link`** needs a URL model — a span field plus something that resolves a URL.
-//! - **`Comment`** needs an annotation store: a list, an anchor range, an author, and a way to move
-//!   an anchor when the text before it is edited.
 //!
-//! **Those three are not "not done yet".** They are features that need models this program does not
+//! **Those two are not "not done yet".** They are features that need models this program does not
 //! have, and a button that pretends to one is worse than a button that is visibly absent.
+//!
+//! # `Comment` was removed rather than left inert
+//!
+//! **`Tool::Comment`, `TitleButton::Comments` and `IconId::Comment` are gone** (part 46). The other
+//! five are features that might be built; Comment needed an annotation store that this program has no
+//! reason to want, **and a button that will never work is a lie about the product** — the same
+//! argument that removed `Tool::Print` in part 33.
 //!
 //! # The measurement
 //!
-//! [`every_tool_that_is_not_wired_is_one_of_the_six`] presses all twenty toolbar tools through the
+//! [`every_tool_that_is_not_wired_is_one_of_the_five`] presses all nineteen toolbar tools through the
 //! real hit test on a fresh session each time and counts the ones whose press lands in
 //! `pointer_inert`. **A fresh session per tool**, because a press that opens a popup swallows the next
 //! press as a dismissal — **the first version of this measurement looped over one session and counted
@@ -35,7 +41,7 @@
 //!
 //! | what it proves | test |
 //! | --- | --- |
-//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_six`] |
+//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_five`] |
 //! | `SizeUp` changes the type | [`the_size_buttons_are_the_zoom_buttons`] |
 //! | and clamp at their ends | [`the_size_buttons_clamp_rather_than_wrapping`] |
 //! | `Overflow` lists what did not fit | [`the_overflow_menu_lists_the_tools_that_did_not_fit`] |
@@ -110,18 +116,21 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
     }
 }
 
-/// **The six buttons part 39 listed as inert and that are still inert, by name.**
+/// **The five buttons part 39 listed as inert and that are still inert, by name.**
 ///
-/// **A `const` and not a list built from `TOOLBAR`**, because the claim is about *these six* and a
-/// computed list would silently become a different six when a tool is renamed. **`six` is written
+/// **A `const` and not a list built from `TOOLBAR`**, because the claim is about *these five* and a
+/// computed list would silently become a different five when a tool is renamed. **Five is written
 /// down and the gate compares against it.**
-const STILL_INERT: [Tool; 6] = [
+///
+/// **It was six, and part 46 removed `Comment`.** The count is in the type as well as the value, so
+/// dropping a tool from the list without dropping the array length is a compile error rather than a
+/// gate that quietly measures one fewer thing.
+const STILL_INERT: [Tool; 5] = [
     Tool::Spellcheck,
     Tool::PaintFormat,
     Tool::Underline,
     Tool::Highlight,
     Tool::Link,
-    Tool::Comment,
 ];
 
 /// **Pressing every tool and counting the ones with nothing behind them.
@@ -139,7 +148,7 @@ const STILL_INERT: [Tool; 6] = [
 /// **Because a click is decided on the press.** `Session::press`'s own note says so, and a release
 /// would be measuring a different gesture.
 #[test]
-fn every_tool_that_is_not_wired_is_one_of_the_six() {
+fn every_tool_that_is_not_wired_is_one_of_the_five() {
     let mut inert: Vec<&'static str> = Vec::new();
     for &tool in TOOLBAR {
         let mut s = session();
@@ -158,8 +167,9 @@ fn every_tool_that_is_not_wired_is_one_of_the_six() {
     assert_eq!(
         inert,
         expected,
-        "**{inert:?} are inert, and the list part 39 named is {expected:?}.** Part 39 said ten; \
-         part 44 wires SizeUp, SizeDown, Overflow and Mode."
+        "**{inert:?} are inert, and the list is {expected:?}.** Part 39 said ten; part 44 wired \
+         SizeUp, SizeDown, Overflow and Mode, and part 46 removed Comment outright rather than \
+         leaving a button that will never work."
     );
 }
 
