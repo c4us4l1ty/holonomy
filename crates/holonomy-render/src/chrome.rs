@@ -2694,6 +2694,14 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         pill.height,
         colour::PILL,
     ));
+    // Subtle border around toolbar pill for clean, modern appearance matching reference design
+    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
+        pill.x as i32,
+        pill.y as i32,
+        pill.width,
+        1,
+        colour::PILL_HOVER,
+    ))));
 
     let mut prev_separated = false;
     for p in crate::widgets::place_toolbar(l, crate::widgets::TOOLBAR_PAD) {
