@@ -5561,7 +5561,7 @@ impl<'a> Session<'a> {
         // pixels because the cell is what every other part of the renderer agrees on: `Caret::locate`
         // puts the caret at `column * cell_w`, damage rects are `cell_h` tall, and the tables lay
         // themselves out on cells.
-        let cells_per_row = (l.width / m.cell_w.max(1)).max(1) as usize;
+        let cells_per_row = self.chrome.layout.cells_per_row(m.cell_w);
         let ink = holonomy_render::chrome::colour::INK;
         // **The selection, read once.** Part 28.
         //

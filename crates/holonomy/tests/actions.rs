@@ -567,6 +567,36 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
 fn the_two_dropdown_lists_agree() {
     for p in widgets::TOOLBAR {
         let rows = menus::dropdown_items(*p, &ChromeState::default());
+
+        // # `Overflow` is the exception, and it is named rather than relaxed
+        //
+        // **Part 44 made `Overflow` a menu button and this gate went red**, with *"has_dropdown says
+        // true, dropdown_items returned 0 rows"*. **The gate is right and the code needs the
+        // exception**, because `Overflow`'s rows are the tools that did not fit and there are none on
+        // a panel wide enough to hold all twenty.
+        //
+        // **The alternative was to take `Overflow` out of `has_dropdown`** and have the press path ask
+        // only "is the list empty". **That is worse**, because `has_dropdown` is what draws the
+        // chevron: a button whose chevron means "this opens a menu" and whose `has_dropdown` says
+        // false would have an affordance and a predicate disagreeing about the same fact, **and the
+        // chevron is what a user reads.**
+        //
+        // **So the exception is one tool, stated here, rather than a blanket relaxation** -- which
+        // would have stopped this gate holding for the other nineteen, and the four static tables are
+        // the ones where "a chevron that opens nothing" is the defect this gate exists to catch.
+        if *p == widgets::Tool::Overflow {
+            assert!(
+                rows.is_empty(),
+                "**a default state hides nothing, so `Overflow` has no rows** -- got {}",
+                rows.len()
+            );
+            assert!(
+                p.has_dropdown(),
+                "**and it is still a menu button**: `has_dropdown` is the capability, and the empty                  menu is a runtime fact about the window. The chevron is drawn only when there is                  something to show -- `an_overflow_button_with_nothing_hidden_draws_no_chevron`."
+            );
+            continue;
+        }
+
         assert_eq!(
             rows.is_empty(),
             !p.has_dropdown(),

@@ -1021,6 +1021,41 @@ impl Layout {
         Some((row + state.scroll_line, column))
     }
 
+    /// **The measure in whole cells: how many columns of type the text rectangle holds.**
+    ///
+    /// # Why this exists, and why the emitter must not compute it
+    ///
+    /// **`emit_body_text` had `let cells_per_row = (l.width / cell_w.max(1)).max(1)` inline**, and the
+    /// soft-wrap rule needs the same number. **Two computations of the measure is two answers waiting
+    /// to differ** — and they would differ *silently*, because a wrap point one cell off from a
+    /// `codepoints_upto` clip looks like a ragged margin rather than like a bug.
+    ///
+    /// **The `max(1)` is in both halves** and they are not the same guard: `cell_w.max(1)` stops a
+    /// divide-by-zero on a degenerate metrics, and the outer `.max(1)` stops a measure of *zero*, which
+    /// `wrap::WrapMap` also refuses. **Two layers of defensiveness for one layout fact is the right
+    /// amount here**, because a page narrower than one cell cannot be produced by
+    /// [`ChromeMetrics::for_size`] and is therefore *unreachable*, and an unreachable panic is one a
+    /// layout change turns reachable without anybody looking.
+    ///
+    /// # Why the whole text width and not the page's
+    ///
+    /// **Because the text rectangle is where the type goes** — `emit_body_text` and every other
+    /// emitter work in `text`'s coordinates, and mixing that with the page's is how a run ends up on
+    /// the page margin.
+    ///
+    /// **Not `const fn`, and that is the toolchain**: `Ord::max` is not yet a const trait
+    /// (rust-lang/rust#143874), so a `const` version of this does not compile. **The function is
+    /// still evaluated from written-out arithmetic**, which is the property that matters — and it is
+    /// called once per paint, so the difference is not measurable.
+    #[must_use]
+    pub fn cells_per_row(&self, cell_w: u32) -> usize {
+        // **`as usize` rather than a `try_into`**: `DamageRect::width` is a `u32` and the cell count is
+        // always far below `usize::MAX` on every target this builds for, **and this function is called
+        // once per paint**. A saturating conversion would be more defensible and would also be a
+        // silent answer on a hypothetical 16-bit `usize`, which is not a target.
+        (self.text.width / cell_w.max(1)).max(1) as usize
+    }
+
     /// **The row and column a *drag* is at, clamped to the page's last row and column.** Part 41.
     ///
     /// # Why this exists, and why [`Self::caret_at`] still refuses
