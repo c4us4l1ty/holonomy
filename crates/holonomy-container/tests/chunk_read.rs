@@ -324,7 +324,10 @@ fn the_formats_maximum_document_is_reachable_chunk_by_chunk() {
     // and be refused by `chunks_for` as `PayloadTooLarge`. An earlier version of this test used the
     // latter and failed in the container constructor, which is a test-fixture error masquerading as a
     // format limitation.
-    let max_document = (S_MAX_PAYLOAD / holonomy_container::layout::CHUNK_SLOT as u64 - 1) as usize
+    // **No `as u64` on `CHUNK_SLOT`: it is already a `u64`.** The cast came from an earlier
+    // type and reads as a deliberate widening; the `as usize` below is the real conversion and it
+    // narrows, which is the one that can lose.
+    let max_document = (S_MAX_PAYLOAD / holonomy_container::layout::CHUNK_SLOT - 1) as usize
         * CHUNK_PLAINTEXT;
     let text = content(max_document);
     let (path, _wf) = container(&text);
@@ -332,10 +335,11 @@ fn the_formats_maximum_document_is_reachable_chunk_by_chunk() {
     let mut buf = vec![0u8; CHUNK_PLAINTEXT];
     let mut chunks = 0u64;
     let mut at = 0usize;
-    loop {
-        let Ok(got) = wf.read_chunk_into(chunks + 1, &mut buf) else {
-            break;
-        };
+    // **A `while let Ok(..)` and not a `loop` with a `break`.** The loop's only exit was a read that
+    // did not succeed, which is what `while let` says directly -- **and reading past the last chunk is
+    // how this loop terminates**, so the exit condition is the point of the test and belongs where it
+    // can be read as a condition.
+    while let Ok(got) = wf.read_chunk_into(chunks + 1, &mut buf) {
         assert_eq!(&buf[..got], &text[at..at + got], "chunk {}", chunks + 1);
         at += got;
         chunks += 1;

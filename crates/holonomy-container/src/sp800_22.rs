@@ -946,7 +946,6 @@ mod tests {
     /// a fast path that disagrees with the obvious implementation is the classic way to ship
     /// a subtly wrong number. Checked on adversarial patterns, not just random data, because
     /// random data almost never reaches the excursion extremes the table encodes.
-    #[test]
     /// **The two directions are two different statistics, not one statistic reported twice.**
     ///
     /// `cumulative_sums` computed a single `z` and used it for both directions, varying only the p-value
@@ -964,6 +963,11 @@ mod tests {
     ///
     /// So: 48 bytes of `0xFF` then 16 of `0x00`. Forward, the walk climbs to 384 and falls back to 256;
     /// reversed, it drops to −128 and climbs to 256. 384 ≠ 256, and the difference is structural.
+    ///
+    /// **The `#[test]` is below this paragraph rather than above it.** It sat above a second `///` block,
+    /// which is a *duplicated attribute* to rustc -- the attribute ended the doc comment, and the rest of
+    /// the explanation became documentation of nothing. A warning that has been in the build since the
+    /// paragraph was added is a warning nobody reads.
     #[test]
     fn the_forward_and_reverse_cusums_are_different_statistics() {
         let data: Vec<u8> = vec![0xFF; 48].into_iter().chain(vec![0x00; 16]).collect();

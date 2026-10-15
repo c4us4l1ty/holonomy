@@ -417,9 +417,10 @@ fn every_symbol_the_grammar_names_resolves_to_a_codepoint() {
     for &(name, cp) in SYMBOLS {
         assert_eq!(symbol(name), Some(cp), "`\\{name}` resolves to U+{cp:04X}");
         assert!(char::from_u32(cp).is_some(), "U+{cp:04X} is a scalar value");
-        assert_ne!(
-            (0x2500..=0x257F).contains(&cp),
-            true,
+        // **`assert!(!..)` and not `assert_ne!(_, true)`.** A math symbol inside Box Drawing would
+        // be drawn procedurally rather than from the math face, and the claim is that none is.
+        assert!(
+            !(0x2500..=0x257F).contains(&cp),
             "`\\{name}` is U+{cp:04X}, inside Box Drawing, which is procedural"
         );
     }

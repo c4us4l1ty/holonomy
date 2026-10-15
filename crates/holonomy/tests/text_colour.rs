@@ -224,9 +224,13 @@ fn a_coloured_span_is_drawn_and_this_is_the_gate_that_says_so() {
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
     let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
-    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
+    // **The pen bound of `bravo`, read from the atlas. See `pen_of`.**
+    //
+    // **`charlie_lo`/`charlie_hi` were removed.** They are the pen bounds of the word *after* the
+    // coloured run, and the far-edge assertion below was replaced in part 31 by a comparison against
+    // `bravo`'s own pen end -- so both bindings were left over from the assertion they used to feed.
+    // **They are kept in the sibling gate below, where they are live.**
     let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
-    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
     // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
     // advance on either side, so the ink is not the pen; the bound is an overhang
     // allowance, not a position claim. See the note in `the_colour_lands_...`.
@@ -300,15 +304,10 @@ fn the_colour_lands_on_the_run_and_not_on_its_neighbours() {
     let plain = painted("alpha bravo charlie\n", None);
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
     let (_, box_) = difference(&plain, &coloured);
-    let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
-    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
-    let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
-    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
-    // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
-    // advance on either side, so the ink is not the pen; the bound is an overhang
-    // allowance, not a position claim. See the note in `the_colour_lands_...`.
-    const OVER: u32 = 3;
+    // **The pen start of `bravo`, read from the atlas. See `pen_of`.** Only the *start* is live here:
+    // this gate asserts the near edge, and the far edge is the assertion that follows.
+    let bravo_lo = l.x + pen("alpha");
 
     // **Within one cell of `bravo`, and the one cell is not a tolerance.**
     //
@@ -330,6 +329,19 @@ fn the_colour_lands_on_the_run_and_not_on_its_neighbours() {
     // assert it: the changed region reached 464 where `bravo` ends at 409, because **the text after the
     // run moved**. Part 31 put run positions and the painter on the same pen, and the region now stops
     // where it should. See `a_run_boundary_does_not_move_the_text_after_it`.
+    //
+    // **Three pixels of overhang, the same allowance as the near edge.** A glyph's ink can reach past
+    // its advance on either side, and the bound has to allow it on both ends or it is not a bound on
+    // the run but a bound on the run's *first* glyph.
+    let bravo_hi = l.x + pen("alpha bravo");
+    const OVER: u32 = 3;
+    assert!(
+        box_.2 <= bravo_hi + OVER,
+        "**no pixel past `bravo` changed**: the region reaches {} and `bravo`'s pen ends at {}. This \
+         is the assertion part 31 made assertable and this gate was supposed to make.",
+        box_.2,
+        bravo_hi
+    );
 }
 
 /// Two colours on one line are two runs and two colours.
@@ -353,9 +365,9 @@ fn two_colours_on_one_line_are_two_runs_and_two_colours() {
 
     let crimson = crimson_pixels(&both);
     let teal = teal_pixels(&both);
-    let m = both.chrome.metrics;
     let l = both.chrome_layout().text;
-    // **The pen bounds of `charlie`, the second coloured run. See `pen_of`.**
+    // **The pen bounds of `charlie`, the second coloured run. See `pen_of`.** The metrics binding that
+    // stood here is gone: this gate places its two bounds from the **pen** and nowhere from `cell_w`.
     const OVER: u32 = 3;
     let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
 
@@ -497,15 +509,15 @@ fn a_colour_is_taken_back_by_one_undo() {
 fn a_run_boundary_does_not_move_the_text_after_it() {
     let plain = painted("alpha bravo charlie\n", None);
     let coloured = painted("alpha bravo charlie\n", Some((6, 11, CRIMSON)));
-    let m = coloured.chrome.metrics;
     let l = coloured.chrome_layout().text;
-    // **The pen bounds of `bravo` and `charlie`, read from the atlas. See `pen_of`.**
-    let (bravo_lo, bravo_hi) = (l.x + pen("alpha"), l.x + pen("alpha bravo"));
-    let (charlie_lo, charlie_hi) = (l.x + pen("alpha bravo "), l.x + pen("alpha bravo charlie"));
-    // **Three pixels of glyph overhang, measured.** A glyph can extend past its own
-    // advance on either side, so the ink is not the pen; the bound is an overhang
-    // allowance, not a position claim. See the note in `the_colour_lands_...`.
-    const OVER: u32 = 3;
+    //
+    // **The pen bounds and `OVER` are gone from this copy, and `beyond` below carries what this gate
+    // needs.** An earlier version compared the tail against `charlie_lo`/`charlie_hi` and `bravo_lo`;
+    // the two repairs the comment below describes replaced every one of those comparisons with a single
+    // measured `beyond`, so four bindings and a constant were left bound to nothing. **They read as
+    // shared setup for the reader and as dead code for the compiler**, and rustc had been warning
+    // about them on every build of this file since part 29.
+    //
     // **Past the coloured run's last cell, on the grid.** `bravo` ends at cell 11.
     // **Where the tail begins, from the pen, plus room for the bold run's overhang.**
     //
@@ -748,7 +760,7 @@ fn typed(ppem: u16) -> (u32, u32) {
     }
     assert_eq!(s.text().expect("text"), b"hi", "the keystrokes are in the document");
     s.repaint_all().expect("repaint");
-    let (ink, page) = body_ink(&s);
+    let (ink, _) = body_ink(&s);
     (ink, empty)
 }
 

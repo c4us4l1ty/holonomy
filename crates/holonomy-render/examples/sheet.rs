@@ -6,7 +6,10 @@ fn main() {
     const CELL_H: usize = 24;
     const COLS: usize = 9;
     let n = IconId::ALL.len();
-    let rows = (n + COLS - 1) / COLS;
+    // **`div_ceil`, and the arithmetic is the same.** `(n + COLS - 1) / COLS` overflows on a
+    // `usize::MAX` and has to be written correctly by hand every time; `div_ceil` is the question
+    // asked directly.
+    let rows = n.div_ceil(COLS);
     let (w, h) = (COLS * CELL_W, rows * CELL_H);
     let mut px = vec![0x1E1E22u32; w * h];
     for (i, id) in IconId::ALL.iter().enumerate() {

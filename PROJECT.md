@@ -5382,3 +5382,94 @@ visibly, and a gate written to record a *different* limitation is what read 73 w
 | `session_damage.rs::typing_repaints_the_status_bar_and_a_hover_does_not` | A: the damage, and the negative half |
 | `session_damage.rs::the_word_count_on_the_status_bar_counts_the_document` | A: the pixels, not the state |
 | `session_body_text.rs::a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn` | B and C |
+
+---
+
+# Part 40 — the build was never clean, and `PROJECT.md` said it was, 2026-10-15
+
+Part 5's gate reads, verbatim:
+
+> `cargo build --release --target x86_64-unknown-linux-musl` produces a static binary; `ldd` prints
+> `statically linked`; `cargo clippy --all-targets -- -D warnings` is clean.
+
+**That last clause was false from the day it was written.** It was checked once, or never: 68 lints
+across 39 files, and every one of them had been visible in the build output of every contributor since.
+
+## A. What "clean" was hiding
+
+Two categories, and the difference between them matters for what the fix was.
+
+**Compiler warnings (25) were the smaller half.** `unused variable` and `variable does not need to be
+mutable`, mostly in test files, and mostly *left over from a repair*. The pattern is consistent enough
+to be worth naming: a gate is written, a bound stops being read when the assertion it fed is replaced
+by a stronger one, and the binding stays. `text_colour.rs` had four of these, and one of them — `m`,
+`bravo_hi`, `charlie_lo`, `charlie_hi` in `the_colour_lands_on_the_run_and_not_on_its_neighbours` —
+turned out to be the remains of **an assertion that part 31 made possible and this gate never adopted**.
+
+**Clippy (43) were the larger half, and they were not cosmetic.** The ones that mattered:
+
+| lint | what it was hiding |
+|---|---|
+| `wildcard_covers_match_arms` | `EV_ABS \| EV_MSC \| EV_SYN \| _` — three types named, all unreachable |
+| `len_without_is_empty` | `SelectionRange::len`, `DocLines::len` — two types asking `len() == 0` |
+| `manual_is_multiple_of` | a ceiling division, spelled by hand, in a `const fn` |
+| `while_let_loop` ×2 | `loop { let Some(x) = .. else { break } }` in the event pump and in a chunk read |
+| `type_complexity` | `((i16, i16, i16, i16), bool)` — `QueryPointer`'s four coordinates, unnamed |
+| `bool_assert_comparison` ×4 | `assert_eq!(x, true)`, `assert_ne!(x, true)` — the expected value is the *claim* |
+| `doc_lazy_continuation` ×4 | a numbered list whose continuation lines read as separate paragraphs |
+| `items_after_test_module` | a helper the tests use, below `mod tests` |
+
+**The `QueryPointer` one is the one to keep.** `PointerPosition` now names root-x, root-y, win-x and
+win-y, and gives `root()` and `in_window()` as the two accessors that are not interchangeable — XTEST
+addresses the screen, a click's `event_x`/`event_y` addresses the window, and part 34 spent a day
+looking at `event_x: -27541` without a type that could rule out the two being swapped.
+
+## B. Two repairs that were not repairs
+
+Three of the fixes removed a cast or a `let` that a lint flagged, and in each case the comment I left
+had to be rewritten because **the honest version of the reason is less impressive than the one the
+code implied**.
+
+- `paint.rs` had `u32::try_from(cp).unwrap_or(u32::MAX)` on a value already a `u32`. That looks like
+  saturation for an out-of-range codepoint run. **It was not: `From<u32> for u32` cannot fail, so the
+  `unwrap_or` arm was dead and the saturation it appeared to promise was never there.** The run that
+  does exceed `0x10FFFF` is caught at the atlas lookup, and `missing` is what records it.
+- `session.rs` had `l.width * 0 + ChromeMetrics::DESKTOP.height` — multiplied by zero, so the layout
+  contributed nothing to a test that reads the layout.
+- `store.rs` had `copy_from_slice(&entry.block.as_slice())`, a reference to a reference.
+
+**This is why the lint list is worth reading rather than silencing.** A clippy warning is a defect
+report about *intent*, and each of these three is a place where the code said one thing and meant
+another. `#[allow]` would have been the wrong answer in all three cases.
+
+## C. One gate of my own that was wrong
+
+Cleaning the lints surfaced a failure in `actions.rs` that had nothing to do with them. I had replaced
+
+```rust
+assert_eq!(items[2].checked, false);
+```
+
+with an "exactly one row is ticked" assertion — and written it as `items[2..].iter().all(|i| !i.checked)`.
+**That is false**: the tick *moves* to the row just chosen, which is the whole of what the first half of
+the gate proves. `items[4]` is ticked, and it is supposed to be.
+
+The replacement asserts the real property: exactly one ticked row, it is `target`, and the row it left
+is not. **A stronger-looking assertion that is simply wrong is worse than the `assert_eq!(_, false)` it
+replaced**, because the original at least failed loudly.
+
+## D. The result
+
+`cargo clippy --release --workspace --all-targets -- -D warnings` — clean, in both feature sets.
+`cargo build` and `cargo test --no-run` — zero warnings.
+
+**Every comment added or corrected in this part says what the code does, including where that is less
+impressive than what it used to look like.** That is the only thing separating this from lint-silencing
+by another name.
+
+## E. Gates
+
+| gate | what it holds |
+|---|---|
+| `cargo clippy --all-targets -- -D warnings` | 68 lints, zero, both feature sets |
+| `actions.rs::a_dropdown_ticks_the_current_value_and_applies_a_new_one` | C: the tick moves, and only once |

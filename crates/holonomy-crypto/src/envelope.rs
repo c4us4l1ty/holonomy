@@ -513,10 +513,11 @@ pub fn derive_root(
     }
 
     let t = std::time::Instant::now();
-    let k_int = match argon2id_k_int(&normalised, salt) {
-        Ok(k) => k,
-        Err(e) => return Err(e),
-    };
+    // **`?` and not a `match` that re-wraps `Err(e) => return Err(e)`.** The error type is the same
+    // on both sides, so the `match` was four lines spelling `?` and one line of room for the two to
+    // drift apart. **The scrubbing below is unaffected**: it is after this line either way, which is
+    // the property the `match` might have looked like it protected and did not.
+    let k_int = argon2id_k_int(&normalised, salt)?;
     // **Two copies of the passphrase in memory at once, and both are now scrubbed.** `argon2id_k_int`
     // normalises internally, so the argument below is *already* the normalised text and the call
     // above made a second copy of it, which it scrubs on its own way out.
@@ -606,11 +607,17 @@ pub(crate) fn take_post_drop_snapshots() -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// `(before, after)` for every [`scrub_blocks`] call, so the gate can assert both halves.
-///
-/// **Two `Vec<u64>`, recorded together, because either alone proves nothing.** `after` alone is a
-/// scrub of a buffer that was already zero; `before` alone is a buffer that was filled and then
-/// abandoned. Only the pair says *"this held derived material and this is what is left"*.
+// `(before, after)` for every [`scrub_blocks`] call, so the gate can assert both halves.
+//
+// **Two `Vec<u64>`, recorded together, because either alone proves nothing.** `after` alone is a
+// scrub of a buffer that was already zero; `before` alone is a buffer that was filled and then
+// abandoned. Only the pair says *"this held derived material and this is what is left"*.
+//
+// **A comment and not a doc comment, and that is the correction.** It was `///`, which rustc reads as
+// documenting the `thread_local!` *macro invocation* -- and a macro invocation is not a documented item,
+// so every `cargo build` printed `warning: unused doc comment` and the project carried a standing
+// reminder of it. **The declaration it describes is the next two lines**, so the comment belongs on the
+// `static`, or as a plain comment here.
 #[cfg(test)]
 thread_local! {
     static SCRUBS: std::cell::RefCell<Vec<(Vec<u64>, Vec<u64>)>> =

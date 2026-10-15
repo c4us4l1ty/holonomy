@@ -216,9 +216,11 @@ fn the_all_list_and_the_match_agree() {
     // **Only the first `ALL.len()` discriminants are required**, because `#[repr(u8)]` numbers the
     // variants from zero -- walking all 256 would be asserting a range that was never populated,
     // which is the same shape of mistake as the check itself was guarding against.
-    for d in 0..IconId::ALL.len() {
+    // **`iter().enumerate()` and not `0..len`.** `seen` is indexed by discriminant, and the loop
+    // variable *is* the index -- `d` reads better here than `_` but only because it is used twice.
+    for (d, &s) in seen.iter().enumerate() {
         assert!(
-            seen[d],
+            s,
             "discriminant {d} has no entry in `IconId::ALL`. Every variant must be listed or the \
              'every icon' gates silently stop covering it."
         );

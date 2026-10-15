@@ -1638,10 +1638,12 @@ impl<'a> Session<'a> {
         // chrome. **They share the `tick_with` afterwards**, because a hover highlight and a keystroke
         // both need the frame's damage drained and both need the blink advanced -- which is the
         // existing reason that call is outside the branch and not inside each arm.
-        loop {
-            let Some(event) = self.next_or_wait(source, bytes)? else {
-                break;
-            };
+        // **A `while let` and not a `loop` with a `break`.** The loop's only exit condition was
+        // `next_or_wait` answering `None`, which is exactly what `while let` says -- **and the `loop`
+        // form put three statements of real work at the bottom of the body where a reader looking for
+        // the exit has to scroll past them.** The `?` stays on the `while let`: a read error is a
+        // failure of the stream, not an end of it.
+        while let Some(event) = self.next_or_wait(source, bytes)? {
             match event {
                 holonomy_input::Event::Key(k) => {
                     if let Some(exit) = self.handle_event_with(bytes, k)? {
@@ -1837,7 +1839,8 @@ impl<'a> Session<'a> {
     /// message goes to stderr — the channel every other boot-time diagnostic uses — and the counts land
     /// in [`SessionStats`] where a gate can read them.
     pub fn commit_to(&mut self, source: &mut dyn holonomy_text::LeafSource) -> usize {
-        let want = self.editor.text_len() as usize;
+        // **No cast: `text_len` answers a `usize` already.**
+        let want = self.editor.text_len();
         match source.commit_document(&mut self.editor) {
             Ok(written) => {
                 if written > 0 {
@@ -2620,9 +2623,14 @@ impl<'a> Session<'a> {
             let got = match source.as_deref_mut() {
                 Some(src) => self
                     .editor
-                    .read_into_faulting(src, at as usize, &mut buf[..n])
+                    // **No cast: `at` is already a `usize`**, and the `as usize` sat on a line
+                    // where the one genuinely typed offset was four lines above -- which is how a
+                    // reader stops trusting both.
+                    .read_into_faulting(src, at, &mut buf[..n])
                     .ok()?,
-                None => self.editor.read_into(at as usize, &mut buf[..n]).ok()?,
+                // **No `as usize`: `at` is already one.** See the sibling arm above, which is the
+                // faulting read.
+                None => self.editor.read_into(at, &mut buf[..n]).ok()?,
             };
             // **A short read means the rest is not there**, and counting what arrived would be a
             // number that is wrong by an unknown amount -- worse than the byte count it replaces,
@@ -3736,11 +3744,12 @@ impl<'a> Session<'a> {
             // *capacity* is the invariant and whose *length* is meaningless between uses, exactly as
             // `line_scratch` is. `set_len` on uninitialised capacity would hand `after_delete` bytes
             // that were never written, so the read is what makes the first `n` bytes real.
-            let got = self
-                .editor
+            // **The read is the value, not a binding that is returned on the next line.** `got` was
+            // assigned and then returned immediately, which is two statements saying one thing and
+            // gives a reader a line to misread as "and then something happens to `got`".
+            self.editor
                 .read_into(start, &mut self.line_scratch[..len as usize])
-                .unwrap_or(0);
-            got
+                .unwrap_or(0)
         } else {
             heap = vec![0u8; len as usize];
             self.editor.read_into(start, &mut heap).unwrap_or(0)
@@ -4185,7 +4194,7 @@ impl<'a> Session<'a> {
     fn line_end_offset(&self, at: usize) -> usize {
         let line = self.line_index(at) as usize;
         let end = self.lines.line_end(line);
-        if end == 0 || end > self.editor.text_len() as usize {
+        if end == 0 || end > self.editor.text_len() {
             return end;
         }
         let mut last = [0u8; 1];
@@ -4364,7 +4373,8 @@ impl<'a> Session<'a> {
     /// line appears or vanishes, because fixed-size sections shift. Same trade as `DocLines::sync`, in a
     /// second currency, and one keystroke in forty.
     pub fn sync_manifest(&mut self) {
-        let caret = self.editor.caret() as u32;
+        // **No cast: `Editor::caret` already answers a `u32`.**
+        let caret = self.editor.caret();
         let mut scratch = std::mem::take(&mut self.manifest_scratch);
         let out = self.manifest.sync(&self.editor, caret, &mut scratch);
         self.manifest_scratch = scratch;
@@ -6073,8 +6083,13 @@ fn math_blocks(
 /// The fallback is a linear scan rather than a `partition_point`, because `spans` is a dozen entries and
 /// a branch-free binary search over something that small costs more to read than a loop.
 fn line_of_span(spans: &[(u32, u32)], offset: usize) -> u32 {
-    let mut row = 0u32;
-    for &(at, len) in spans {
+    // **`enumerate` and not a hand-rolled counter.** The index *is* the row -- `spans` is the page's
+    // `(at, len)` pairs in order, so entry N is row N -- and a counter incremented at the bottom of a
+    // loop is a second copy of that fact to keep in step. **`enumerate` cannot drift**, which matters
+    // because the `saturating_sub(1)` below is the whole of "an offset before the page belongs to the
+    // last row of the previous page".
+    for (row, &(at, len)) in spans.iter().enumerate() {
+        let row = row as u32;
         let start = at as usize;
         if offset < start {
             return row.saturating_sub(1);
@@ -6082,7 +6097,6 @@ fn line_of_span(spans: &[(u32, u32)], offset: usize) -> u32 {
         if offset < start + len as usize {
             return row;
         }
-        row += 1;
     }
     spans.len().saturating_sub(1) as u32
 }
@@ -6706,7 +6720,9 @@ fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> Dama
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
     };
-    let r = widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h)
-        .unwrap_or(DamageRect::new(0, 0, 0, 0));
-    r
+    // **The value, not a binding returned on the next line.** `r` was assigned and returned
+    // immediately; **and the `ChromeState::default()` is deliberate** -- this is a *geometry*
+    // question about where a widget sits, and a state with nothing hovered and no popup open is the
+    // one that answers it.
+    widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h).unwrap_or(DamageRect::new(0, 0, 0, 0))
 }

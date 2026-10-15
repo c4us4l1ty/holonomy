@@ -146,7 +146,9 @@ fn a_keystroke_costs_the_same_in_a_big_document_as_in_a_small_one() {
         }
         // Warm the tail, so both windows split their leaves the same way rather than one of them
         // paying for a leaf the other has already paid for.
-        for i in 0..N as u32 {
+        // **`for _ in` and not `for i in`.** The warm-up loop inserts the same byte N times; the
+        // index is not read, and a named one invites a reader to think it is.
+        for _ in 0..N {
             rope.insert_byte(b'A').expect("room");
         }
         let start = Instant::now();

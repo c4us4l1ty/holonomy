@@ -52,7 +52,14 @@ fn the_baked_constant_equals_its_own_derivation() {
         "VDF_ITERATIONS must be TARGET_VDF_MS worth of squarings at MEASURED_NS_PER_SQUARING -- \
          edit one and this fails, which is the point of deriving it"
     );
-    assert!(VDF_ITERATIONS > 0, "and it must be a time-lock, not nothing");
+    // **In a `const` block, so this is checked when the crate is compiled rather than when the test
+    // runs.** `VDF_ITERATIONS` is a constant; asserting about it at run time means a build that ships
+    // a zero iteration count compiles fine and fails here, **once someone remembers to run the
+    // tests**. A constant assertion is a compile error, which is the earlier and stronger instrument.
+    //
+    // **The runtime assertion above is kept and is not the same claim**: that one says the derived
+    // value equals the target, and it needs both values, so it cannot be a `const` check.
+    const { assert!(VDF_ITERATIONS > 0, "a time-lock, not nothing") };
 }
 
 /// **The budget is a ceiling.** `floor` bounds the cost above and never below the target.

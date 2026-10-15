@@ -66,7 +66,7 @@ use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
 use holonomy_input::InputEvent;
 use holonomy_render::chrome::ChromeMetrics;
-use holonomy_text::{Editor, SpanPolicy};
+use holonomy_text::Editor;
 
 /// NFR-2.1.
 const BUDGET_MIB: f64 = 16.0;
@@ -267,7 +267,10 @@ fn rss_probe_child() {
     let scanout_bytes = (m.width as usize) * (m.height as usize) * 4;
     let leaves = session.leaf_count();
     let lines = session.state.total_lines as usize;
-    let text = session.text_len() as u64 as u64;
+    // **One `as u64`, not two.** `text_len` answers a `u32`; the second cast was left from a version
+    // where it answered a `usize`, and two casts of the same kind read as a pair of deliberate
+    // conversions rather than one cast and a typo.
+    let text = session.text_len() as u64;
 
     println!(
         "PROBE {total} {loaded} {baseline} {leaves} {frame} {atlas_bytes} {scratch} {scanout_bytes} \

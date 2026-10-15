@@ -214,7 +214,9 @@ fn the_marginal_cost_of_a_document_byte_falls_as_the_document_grows() {
     // Nothing is lost by dropping it: the **monotone-decrease assertion directly above is the actual
     // sublinearity property**, and it is strictly stronger -- O(document) would have a *rising* marginal
     // cost, which that loop would catch immediately.
-    let (big_len, big) = *readings.last().unwrap();
+    // **The length is not asserted here.** The gate compares resident sections and RSS growth, and
+    // the document's byte length is an input to both rather than a property of either.
+    let (_, big) = *readings.last().unwrap();
 
     // And the smallest and largest are within 2x of *each other* in absolute terms, which is the property
     // that makes the crossover irrelevant.
@@ -303,7 +305,9 @@ fn the_floor_is_the_framebuffer_not_the_document() {
     if skip_without_an_optimised_build("this RSS comparison") {
         return;
     }
-    let (fbase, fpeak, _) = probe("empty", 0, DEFAULT_RESIDENT_SECTIONS);
+    // **The baseline RSS is destructured and not read.** The gate is about the *peak* a probe causes
+    // against that probe's own floor, which is what `probe` returns alongside it.
+    let (_, fpeak, _) = probe("empty", 0, DEFAULT_RESIDENT_SECTIONS);
     let (sbase, speak, sok) = probe("sparse", 256 * 1024, DEFAULT_RESIDENT_SECTIONS);
     let (mbase, mpeak, mok) = probe("sparse", MAX_DOCUMENT, DEFAULT_RESIDENT_SECTIONS);
     assert!(sok && mok, "both documents must open for this comparison to mean anything");

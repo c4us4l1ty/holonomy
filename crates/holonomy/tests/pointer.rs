@@ -557,7 +557,9 @@ fn clicking_a_sidebar_row_makes_it_active() {
 #[test]
 fn every_tool_that_has_a_command_is_routed_through_it() {
     let mut s = session("abc");
-    let l = s.chrome_layout();
+    // **No layout binding, and the loop reads `s.chrome_layout()` inside itself.** The comment below
+    // says why: clicking Collapse re-lays the toolbar, so a rects-taken-once loop would be wrong the
+    // day a tool after Collapse exists. **A binding taken here would invite exactly that loop.**
     let mut wired = 0;
     // **The layout is re-read inside the loop, and the honest reason is a hazard that does not fire
     // today.** Clicking Collapse toggles the sidebar, which changes `Layout` and moves every toolbar
@@ -665,7 +667,12 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
 fn the_layout_a_gate_reads_is_self_consistent() {
     let s = session("x");
     let l = s.chrome_layout();
-    let m = l.width * 0 + ChromeMetrics::DESKTOP.height; // the panel is the full height
+    // **The panel's height, and not `l.width * 0 + ...`.** The multiplication by zero was there to
+    // make the expression read as "derived from the layout" -- and it multiplied by zero, so the
+    // layout contributed nothing. **The panel is the full height**, which is what the partition below
+    // is checked against, and it is a constant because `DESKTOP` is the metrics the session was built
+    // with.
+    let m = ChromeMetrics::DESKTOP.height;
 
     let covered: u32 = [
         l.title, l.menubar, l.tabs, l.toolbar, l.ruler, l.canvas, l.status,

@@ -23,7 +23,7 @@
 //! `from_text` returns, its `&[u8]` argument may already be collectable and the peak already past.
 //! `VmHWM` is monotonic, so it reports the high-water mark whether or not anyone was looking at the time.
 
-use holonomy_text::{LeafSource, Rope, RopeError, GAP_MINIMUM, LEAF_CAPACITY};
+use holonomy_text::{LeafSource, Rope, RopeError, GAP_MINIMUM};
 
 /// The skeleton fill: a fresh leaf's gap target, so a faulted-in leaf has a usable gap.
 const FILL: usize = GAP_TARGET_LOCAL;
@@ -115,7 +115,7 @@ fn the_spine_knows_the_document_without_holding_it() {
             at += l;
         }
         assert_eq!(at, len, "the leaves cover {} bytes, not {len}", at);
-        assert!(rope.is_resident(0) == false, "nothing is resident in a skeleton");
+        assert!(!rope.is_resident(0), "nothing is resident in a skeleton");
     }
 }
 

@@ -93,15 +93,16 @@ use holonomy_text::Editor;
 /// choice and none of them would hold for a round number like 64 KiB:
 ///
 /// 1. **One section is one `pread64`.** The container addresses plaintext as a slot array —
-///   `chunk_offset(omega, i)` is `omega + i * CHUNK_SLOT` (`holonomy-container/src/layout.rs:149`) — so
-///   a section is one authenticated read with no offset arithmetic inside it. A 64,000-byte section
-///   would straddle two chunks and need two reads and a straddling check in the load path forever.
-/// 2. **A section is the unit `mlock` already counts.** The leaves are 4 KiB and the document's lock is
-///   measured in leaves, so a 65,520-byte section is 16 leaves plus a fraction. Any size would be; this
-///    one is the size that makes the number legible.
-/// 3. **Eviction wastes at most one chunk of the budget.** §2.9.3's Iceberg budget for images is 8.0 MiB;
-///    the text budget Phase 13 introduces is a section count, so rounding it up to a whole section costs
-///    at most 65,520 bytes rather than an arbitrary fraction of a chosen size.
+///    `chunk_offset(omega, i)` is `omega + i * CHUNK_SLOT` (`holonomy-container/src/layout.rs:149`) —
+///    so a section is one authenticated read with no offset arithmetic inside it. A 64,000-byte
+///    section would straddle two chunks and need two reads and a straddling check in the load path
+///    forever.
+/// 2. **A section is the unit `mlock` already counts.** The leaves are 4 KiB and the document's lock
+///    is measured in leaves, so a 65,520-byte section is 16 leaves plus a fraction. Any size would
+///    be; this one is the size that makes the number legible.
+/// 3. **Eviction wastes at most one chunk of the budget.** §2.9.3's Iceberg budget for images is
+///    8.0 MiB; the text budget Phase 13 introduces is a section count, so rounding it up to a whole
+///    section costs at most 65,520 bytes rather than an arbitrary fraction of a chosen size.
 ///
 /// # What the number is *not*, and the arithmetic that rules out the alternatives
 ///
@@ -548,7 +549,8 @@ impl Manifest {
     /// renderer as worse than a wrong scrollbar.
     fn recompute_section(&mut self, editor: &Editor, i: usize, scratch: &mut Vec<u8>) -> bool {
         let start = self.bytes.prefix(i) as usize;
-        let len = editor.text_len() as usize;
+        // **No cast: `text_len` already answers a `usize`.** See the note on `doclines.rs`'s cast.
+        let len = editor.text_len();
         if start >= len {
             return false;
         }
@@ -914,7 +916,9 @@ mod tests {
         // `é` is two bytes, and the text is built so SECTION_BYTES lands in the middle of one.
         let mut text: Vec<u8> = vec![b'x'; SECTION_BYTES - 1];
         text.extend_from_slice("é".as_bytes());
-        text.extend_from_slice(&vec![b'y'; 64]);
+        // **A slice and not a `vec!`.** `extend_from_slice` copies, so a heap buffer for 64 bytes
+        // of filler is an allocation with no reader.
+        text.extend_from_slice(&[b'y'; 64]);
         let d = Manifest::from_text(&text);
         assert_eq!(d.len(), 2);
         let first = d.section(0).expect("section 0");

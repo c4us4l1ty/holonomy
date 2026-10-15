@@ -410,6 +410,46 @@ impl<'a> Rdr<'a> {
 /// scanlines to stay under it rather than needing the extension.
 pub const MAX_REQUEST_BYTES: usize = 65_535 * 4;
 
+/// Where the pointer is, in both coordinate systems, as `QueryPointer` reports it.
+///
+/// **A named struct rather than a four-tuple**, and the names are the whole point. `QueryPointer`
+/// answers four signed coordinates in a fixed order — root-x, root-y, win-x, win-y — and **a
+/// `(i16, i16, i16, i16)` leaves the caller to remember which is which.** The protocol serves them in
+/// order and the compiler does not check that a reader remembered it, which is part 34's defect in its
+/// smaller form: the pointer reported `event_x: -27541` in a 1,024x700 window, and one candidate for
+/// that was "the reader has the fields the wrong way round", which nothing in the type system could
+/// rule out.
+///
+/// **The two accessors are not redundant.** [`Self::root`] is what XTEST's fake motion wants, because
+/// it addresses the screen; [`Self::in_window`] is what a click's `event_x`/`event_y` will carry,
+/// because X reports a pointer event relative to the *reporting* window. Passing one where the other
+/// belongs is the mistake the names prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PointerPosition {
+    /// X on the root window.
+    pub root_x: i16,
+    /// Y on the root window.
+    pub root_y: i16,
+    /// X within this window.
+    pub win_x: i16,
+    /// Y within this window.
+    pub win_y: i16,
+}
+
+impl PointerPosition {
+    /// The pointer in **root** coordinates, which is the pair `XTestFakeInput` moves to.
+    #[must_use]
+    pub const fn root(self) -> (i16, i16) {
+        (self.root_x, self.root_y)
+    }
+
+    /// The pointer **inside the window**, which is the pair a click's `event_x`/`event_y` carries.
+    #[must_use]
+    pub const fn in_window(self) -> (i16, i16) {
+        (self.win_x, self.win_y)
+    }
+}
+
 /// A protocol error reported by the server.
 ///
 /// An X11 error is *not* a fatal condition: it names one request, the connection stays up, and the
@@ -1234,12 +1274,16 @@ mod tests {
     #[test]
     fn an_expose_reads_its_rectangle_from_the_wire() {
         let p = packet(12);
+        // **`count` is bound and not asserted, and that is deliberate.** `Expose`'s `count` is the
+        // number of `Expose` events the server coalesced; it is decoded because the field is on the
+        // wire at 20, not because anything reads it. **`count: _` says that on purpose**, where an
+        // unused binding said it by accident and warned on every build.
         let Some(Event::Expose {
             x,
             y,
             width,
             height,
-            count,
+            count: _,
         }) = Event::decode(&p)
         else {
             panic!("a code-12 packet must decode as Expose");

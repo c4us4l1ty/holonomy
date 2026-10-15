@@ -709,7 +709,11 @@ impl Wavefunction {
         }
         // Content byte 0 is chunk 1's byte 0, so the offset is `(index - 1) * CHUNK_PLAINTEXT`.
         let start = (index - 1) * CHUNK_PLAINTEXT as u64;
-        let remaining = (self.frame.content_len as u64).saturating_sub(start);
+        // **No cast, and the cast is what this used to say.** `content_len` is already a `u64`; the
+        // `as u64` was left from a version where it was `usize`, and it read as a deliberate widening
+        // that a reader would otherwise have to check. **`saturating_sub` rather than `-` is the part
+        // that matters here** and is unchanged: `start` can exceed the length when a page is short.
+        let remaining = self.frame.content_len.saturating_sub(start);
         let want = remaining.min(CHUNK_PLAINTEXT as u64) as usize;
 
         let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);

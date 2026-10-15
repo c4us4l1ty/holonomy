@@ -218,7 +218,9 @@ fn the_cost_of_a_read_does_not_grow_with_the_edit_count() {
     let n = 60_000;
     let (mut rope, mut source) = resident_rope(n);
 
-    let mut reads_of_512 = |rope: &mut Rope, source: &mut CountingSource| {
+    // **A `let` and not `let mut`.** The closure takes both arguments explicitly, so it captures
+    // `n` and nothing else; the `mut` was on the binding rather than on any borrow.
+    let reads_of_512 = |rope: &mut Rope, source: &mut CountingSource| {
         let before = source.fetches;
         let mut buf = vec![0u8; 512];
         for at in (0..n - 512).step_by(20_000) {

@@ -127,7 +127,10 @@ fn every_styled_byte_was_drawn_in_the_bold_face() {
 fn only_the_styled_row_changes() {
     let plain = painted("one\ntwo\nthree\n", None);
     let bold = painted("one\ntwo\nthree\n", Some((4, 7, STYLE_BOLD)));
-    let (_, (x0, y0, x1, y1)) = difference(&plain, &bold);
+    // **`x0: _`.** The gate asks which *rows* changed, and `x` is not one of the four questions it
+    // asks -- but the tuple comes from a shared `difference` helper, so one of its four fields is
+    // unused in every caller that only reads rows.
+    let (_, (_, y0, x1, y1)) = difference(&plain, &bold);
 
     // **From the *text* rect, not the page rect.** The first version of this divided by `page.y`, which is
     // the top of the white sheet rather than the top of the first line, so every row came out three rows

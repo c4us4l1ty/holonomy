@@ -496,9 +496,11 @@ pub const COLOURS: &[(&str, u32)] = &[
     // named teal, and the second entry's value was the reason.
     ("Teal", 0x008C_C8C0),
     ("Forest", 0x00B0_4A3C),
-    ("Amber", 0x00C0_7A_1E),
-    ("Violet", 0x0075_4A_C0),
-    ("Slate", 0x005A_5A_66),
+    // **`AA_RR_GG_BB` in groups of two, like every other colour in the project.** These three were
+    // written `00C0 | 7A | 1E`, which is the same number and a different shape.
+    ("Amber", 0x00_C0_7A_1E),
+    ("Violet", 0x00_75_4A_C0),
+    ("Slate", 0x00_5A_5A_66),
 ];
 
 /// The item at `(menu, row)`, if there is one.

@@ -75,10 +75,16 @@ pub const fn pack(rows: &[&[u8; SIZE as usize]]) -> [u64; SIZE as usize] {
     out
 }
 
-/// One of the masks below, by name.
-///
-/// A `const` rather than a `static` per icon so the whole catalogue is one symbol and a caller cannot
-/// accidentally hold a reference into a `Vec`.
+// One of the masks below, by name.
+//
+// A `const` rather than a `static` per icon so the whole catalogue is one symbol and a caller cannot
+// accidentally hold a reference into a `Vec`.
+//
+// **A comment and not a doc comment.** The `///` above `pub mod mask` documented the *module*, and the
+// inner `//!` on its first line re-documented it -- so rustdoc saw one item described twice in two
+// voices, the outer `///` won, and the inner `//!` became an error under
+// `clippy::mixed_attributes_style`. **The outer one is the module's documentation and it is the one a
+// reader of the module sees**, so the inner line is gone and this paragraph is a plain comment.
 pub mod mask {
     //! The masks. One `static` per icon, each `const`-evaluated so it lands in `.rodata`.
 

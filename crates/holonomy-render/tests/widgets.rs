@@ -437,7 +437,7 @@ fn a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window() {
         let l = Layout::new(&m);
         let st = state();
         let opens: Vec<Open> = (0..MENUS.len())
-            .map(|i| Open::Menu(i))
+            .map(Open::Menu)
             .chain(TOOLBAR.iter().map(|t| Open::Tool(*t)))
             .collect();
         for open in opens {
@@ -510,7 +510,7 @@ fn a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs() {
         let l = Layout::new(&m);
         let st = state();
         for open in (0..MENUS.len())
-            .map(|i| Open::Menu(i))
+            .map(Open::Menu)
             .chain(TOOLBAR.iter().map(|t| Open::Tool(*t)))
         {
             let items = open.items(&st);

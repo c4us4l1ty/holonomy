@@ -554,12 +554,13 @@ impl<'a> Painter<'a> {
         let run_style = style;
         let style = atlas_style(style);
         for k in 0..u32::from(len) {
-            let cp = if constant {
-                first
-            } else {
-                first.saturating_add(k)
-            };
-            let cp = u32::try_from(cp).unwrap_or(u32::MAX);
+            // **No `try_from` here: `first` is a `u32` and so is `k`.** The conversion was left
+            // from the `usize` codepoint days, and `unwrap_or(u32::MAX)` on a value that cannot
+            // fail is a branch that can never be taken -- **which means the saturating behaviour it
+            // appeared to promise for an out-of-range run was never there at all.** A run that
+            // does run past `0x10FFFF` is caught further down, where the atlas lookup has
+            // something to say about it, and `missing` is the counter that records it.
+            let cp = if constant { first } else { first.saturating_add(k) };
             let x = x0 + (k as i32) * cell_w as i32;
             // One damage test for the whole glyph, box drawing included, because the damage model
             // and the cell are the same rectangle. See the note on the blit below for why this is

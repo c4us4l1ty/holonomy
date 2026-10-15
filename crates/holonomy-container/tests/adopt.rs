@@ -117,7 +117,12 @@ fn adopt_still_refuses_a_wrong_passphrase() {
     // happened to reach first. Naming one here would pin a diagnostic rather than the security property,
     // and the property is only that a wrong passphrase **does not open the container**.
     assert!(
-        !matches!(err, holonomy_container::ContainerError::Io(_)) && err.to_string().is_empty() == false,
+        // **`!is_empty()` and not `is_empty() == false`.** The property is "the error has a
+        // message", and spelling it as an equality with `false` makes a reader check which way round
+        // it goes. **The two halves are still both asserted**: the error is not an `Io`, and it is
+        // not silent -- a wrong passphrase that says nothing is as much a failure as one that opens
+        // the container.
+        !matches!(err, holonomy_container::ContainerError::Io(_)) && !err.to_string().is_empty(),
         "a wrong passphrase must be refused with a real error, got {err:?}"
     );
     // And the right one still works on a fresh descriptor, so the failure was the passphrase.

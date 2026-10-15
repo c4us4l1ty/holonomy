@@ -124,7 +124,6 @@ fn down_moves_the_caret_in_the_document_and_not_only_in_the_state() {
 fn up_at_the_first_line_stays_put_and_does_not_underflow() {
     let mut s = session("alpha\nbravo\ncharlie\n");
     s.caret_to(2).expect("caret");
-    let before = s.editor().caret();
 
     s.apply(holonomy_input::Command::Up).expect("up");
     // **The caret stays at byte 2, and this gate's first draft said it should go to 0.** That was

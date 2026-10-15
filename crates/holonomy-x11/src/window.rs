@@ -1014,10 +1014,15 @@ impl Window {
     ///
     /// `same_screen` is returned as the fourth element's shadow: `true` when the pointer is on the
     /// same screen as this window, which is the `None` case for every other screen's pointer.
+    ///
+    /// **The coordinates are a struct and not a four-tuple.** `((i16, i16, i16, i16), bool)` says how
+    /// many things there are and nothing about which is which; **a caller that read `win_y` as
+    /// `root_y` gets a pointer on the wrong window and no error**, which is precisely the class of bug
+    /// this function was written to settle. [`PointerPosition`] names all five.
     pub fn pointer_position(
         &self,
         conn: &mut Conn,
-    ) -> Result<((i16, i16, i16, i16), bool), WindowError> {
+    ) -> Result<(crate::proto::PointerPosition, bool), WindowError> {
         let seq = conn.request(Req::new(op::QUERY_POINTER).second_byte(0).u32(self.id))?;
         conn.flush()?;
         let body = conn.reply(seq)?;
@@ -1034,7 +1039,15 @@ impl Window {
         let root_y = r.i16();
         let win_x = r.i16();
         let win_y = r.i16();
-        Ok(((root_x, root_y, win_x, win_y), same_screen))
+        Ok((
+            crate::proto::PointerPosition {
+                root_x,
+                root_y,
+                win_x,
+                win_y,
+            },
+            same_screen,
+        ))
     }
 
     /// **Read `WM_NORMAL_HINTS` back off the server.** Part 34.

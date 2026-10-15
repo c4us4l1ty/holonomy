@@ -221,14 +221,14 @@ fn every_action_is_routed_or_accounted_for() {
     //
     // `Close` has no meaning without a document list and a multi-document model, neither of which
     // exists — `store::open_document` opens one container and `ChromeState` has one `title`.
-    for a in [Action::Close] {
-        assert_eq!(
-            action_command(a),
-            None,
-            "{} is not wired in this build and pointer_inert is where that shows up",
-            a.name()
-        );
-    }
+    // **Stated as the one action it is, and not as a loop over a one-element list.** The loop was a
+    // shape left from when this list had three entries; a reader has to check whether the others
+    // were moved out, and a loop over one thing says "list" where there is a single claim.
+    assert_eq!(
+        action_command(Action::Close),
+        None,
+        "Close is not wired in this build and pointer_inert is where that shows up"
+    );
 }
 
 /// **Every action has a name, and no two share one.**
@@ -404,8 +404,33 @@ fn a_dropdown_ticks_the_current_value_and_applies_a_new_one() {
     // **Re-opening ticks the new value, because the tick is computed from the state and not stored.**
     click_tool(&mut s, "zoom");
     let items = Open::Tool(widgets::Tool::Zoom).items(&s.state);
-    assert_eq!(items[target].checked, true);
-    assert_eq!(items[2].checked, false);
+    // **`assert!` and not `assert_eq!(_, true)`.** The row's tick is the claim; comparing it against
+    // the literal `true` would report a mismatch between two booleans rather than saying what is
+    // wrong.
+    assert!(items[target].checked);
+    // **And still exactly one row, which is now the chosen one.**
+    //
+    // The tick *moved* rather than accumulating: `dropdown_items` computes `checked` by comparing each
+    // row's value against the state, so there is nowhere for a second tick to come from — which is
+    // the property the first half of this gate establishes and the second half has to re-establish,
+    // because a dropdown that re-opened with both the old and the new value ticked would look exactly
+    // like one that works until you open it a second time.
+    let ticked: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.checked)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        ticked,
+        vec![target],
+        "the tick moved to the chosen row and did not stay where it was: {:?}",
+        items.iter().map(|i| i.checked).collect::<Vec<_>>()
+    );
+    assert!(
+        !items[2].checked,
+        "and the row it left is no longer ticked — 100% is not still the current value"
+    );
 }
 
 /// **Only one popup is open at a time, and that is what the type is for.**
@@ -466,11 +491,38 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     assert_eq!(menus::FONTS.len(), 5);
     // An index past the end falls back rather than panicking: a state loaded from a file written by a
     // build with more styles should not take the session down.
-    let mut oob = ChromeState::default();
-    oob.style_index = 999;
+    // **Both indices in one initializer, because the two assertions are one property.** A state
+    // whose style index is out of range *and* whose font index is out of range is what a file written
+    // by a build with more styles and more fonts looks like, and the fallback has to hold for each
+    // field independently -- so both are set at once and each is checked on its own.
+    let oob = ChromeState {
+        style_index: 999,
+        font_index: 999,
+        ..ChromeState::default()
+    };
     assert_eq!(oob.style_name(), "Normal text");
-    oob.font_index = 999;
     assert_eq!(oob.font_name(), "Inter");
+    // **And one at a time, so the first assertion is not carrying the second.** Setting both and
+    // checking both passes if `style_name` ignores its index entirely and reads `font_index`; the
+    // second pass below is what rules that out.
+    let style_only = ChromeState {
+        style_index: 999,
+        ..ChromeState::default()
+    };
+    assert_eq!(
+        style_only.style_name(),
+        "Normal text",
+        "a bad style index alone still falls back"
+    );
+    let font_only = ChromeState {
+        font_index: 999,
+        ..ChromeState::default()
+    };
+    assert_eq!(
+        font_only.font_name(),
+        "Inter",
+        "and a bad font index alone does too"
+    );
 }
 
 /// **The two lists that say which tools have dropdowns agree.**

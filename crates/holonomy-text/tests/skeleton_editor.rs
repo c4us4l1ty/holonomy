@@ -26,7 +26,7 @@ use holonomy_text::{LeafSource, RopeError};
 
 /// The filler the source serves. Plain ASCII with no markup, so `SpanMap::plain` is genuinely true here.
 fn text(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (b'a' + (i % 26) as u8)).collect()
+    (0..n).map(|i| b'a' + (i % 26) as u8).collect()
 }
 
 struct VecSource {
@@ -126,7 +126,10 @@ fn the_span_map_covers_the_whole_document_without_reading_it() {
 #[test]
 fn a_skeleton_editor_refuses_an_edit_until_the_leaf_is_faulted_in() {
     let doc = text(300_000);
-    let mut e = holonomy_text::Editor::from_skeleton(doc.len());
+    // **`e` and not `mut e`.** This test refuses an edit and then asserts nothing moved, so it never
+    // needs `&mut Editor` -- and a `mut` binding that is never mutably borrowed is a claim about the
+    // test that is not true.
+    let e = holonomy_text::Editor::from_skeleton(doc.len());
 
     // `read_into` is `&self` and cannot fault, so it refuses rather than inventing bytes.
     let mut one = [0u8; 1];

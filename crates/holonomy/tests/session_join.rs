@@ -62,7 +62,9 @@ fn unique() -> u128 {
 fn container(content: &[u8]) -> (std::path::PathBuf, Wavefunction) {
     let path = scratch_dir().join(format!("join-{}-{}.wavefunction", content.len(), unique()));
     let _ = Wavefunction::create(&path, PASS, "join", content, ITER).expect("create");
-    let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
+    // **A `let` and not a `let mut`.** `Wavefunction::open` takes `&self`-only methods afterwards;
+    // the mutation goes through interior mutability, which is the point of the crate under test.
+    let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
     (path, wf)
 }
 

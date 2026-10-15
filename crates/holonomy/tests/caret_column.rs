@@ -192,7 +192,9 @@ fn a_click_and_the_drawn_cell_agree_in_both_directions() {
     // **A click in pixels, at the midpoint of the column's cell on the grid** — which is a *click
     // position*, not a claim about where the caret lands. Part 33 resolved the click by the pen, so
     // what has to hold is that a click at the middle of a glyph's cell selects that glyph.
-    let mut click = |s: &mut Session<'static>, column: u32| {
+    // **A `let` and not a `let mut`.** Every borrow goes through the argument, so the binding itself is
+    // never mutated -- and a `mut` on it is a claim about the closure that is not true.
+    let click = |s: &mut Session<'static>, column: u32| {
         let x = (l.text.x + column * cell_w) as i32;
         let y = l.text.y as i32;
         let mut d = RecordDecoder::new();
@@ -340,7 +342,7 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     use holonomy::store::{open_document, SectionStore, DEFAULT_RESIDENT_SECTIONS};
     use holonomy_container::io::DirectFile;
     use holonomy_container::Wavefunction;
-    use holonomy_input::Command;
+
 
     const PASS: &str = "correct horse battery staple";
     const ITER: u64 = holonomy_container::TEST_VDF_ITERATIONS;

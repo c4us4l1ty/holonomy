@@ -320,6 +320,9 @@ fn shift_click_grows_the_selection_rather_than_replacing_it() {
 fn a_selection_draws_a_highlight_where_its_bytes_are() {
     let (with, without) = painted_pair("alpha bravo charlie\n", Some((6, 11)));
     let (n, box_) = difference(&without, &with);
+    // **The metrics, for one thing: the row's height.** Every *horizontal* bound below comes from the
+    // pen (`pen("alpha bravo")`), and the gate's own note at line ~483 records why -- four gates here
+    // used to measure a highlight's width as `n * cell_w`, which is only true for a grid.
     let m = with.chrome.metrics;
     let l = with.chrome_layout().text;
 
@@ -368,7 +371,6 @@ fn a_selection_draws_a_highlight_where_its_bytes_are() {
 fn a_selection_highlight_stops_at_the_end_of_its_bytes() {
     let (with, without) = painted_pair("alpha bravo charlie delta\n", Some((6, 11)));
     let (_, box_) = difference(&without, &with);
-    let m = with.chrome.metrics;
     let l = with.chrome_layout().text;
 
     // **`+ 1` because `difference`'s box is inclusive at both ends.** See the note in
@@ -401,7 +403,7 @@ fn a_selection_across_two_lines_highlights_both() {
     // **And that is precisely the bug this gate exists for** -- a clip that ran to the end of each
     // *line* rather than the end of each *line's share of the selection* would put eight cells on both
     // rows and look, on a two-line selection, almost right.
-    let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h, m.cell_w);
+    let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h);
     assert_eq!(
         widths[0],
         pen("bravo\n"),
@@ -458,7 +460,7 @@ fn the_newline_cell_is_highlighted_on_purpose() {
     let (with, without) = painted_pair("alpha bravo\\ncharlie delta\\n", Some((0, 5)));
     let m = with.chrome.metrics;
     let l = with.chrome_layout().text;
-    let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h, m.cell_w);
+    let widths = row_widths(&without, &with, l.y, l.y + 2 * m.cell_h, m.cell_h);
     assert_eq!(
         widths[0],
         pen("alpha"),
@@ -536,7 +538,10 @@ fn row_widths(
     top: u32,
     bottom: u32,
     row_h: u32,
-    cell_w: u32,
+    // **`cell_w` is not a parameter any more.** Every caller passed it and no caller read it: the
+    // helper scans pixels, and a pixel is a pixel at any cell width. **The argument was a claim that
+    // the geometry was grid-based**, which part 33 made false, and removing it is how that stops
+    // reading as a requirement.
 ) -> Vec<u32> {
     let mut out = Vec::new();
     let mut row = 0u32;

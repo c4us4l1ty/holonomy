@@ -97,9 +97,12 @@ fn the_resident_set_never_exceeds_its_budget() {
                 store.resident()
             );
         }
-        assert_eq!(
+        // **`assert!` and not `assert_eq!(_, true)`.** The comparison is the claim and `true` is
+        // the expected value of it; a failure here reports *which side* was wrong, which is the whole
+        // value of an assertion, and `assert_eq!(x, true)` reports it as a mismatch between two
+        // booleans.
+        assert!(
             store.resident_bytes() <= budget * SECTION_BYTES,
-            true,
             "and resident *bytes* are bounded too, not just the count"
         );
     }
@@ -151,7 +154,10 @@ fn every_eviction_released_memory() {
     let stats = store.stats();
     assert_eq!(stats.evictions, 8, "12 loads into 4 slots is 8 evictions");
     assert!(
-        stats.released_bytes >= stats.evictions as u64 * SECTION_BYTES as u64,
+        // **One cast, on the multiplier.** `evictions` is a `u64` and `SECTION_BYTES` is a `usize`,
+        // so the product needs one widening and the other cast is a no-op that reads as a second
+        // deliberate conversion.
+        stats.released_bytes >= stats.evictions * SECTION_BYTES as u64,
         "each eviction released at least a section: {} bytes over {} evictions",
         stats.released_bytes,
         stats.evictions
@@ -238,7 +244,6 @@ fn a_budget_of_zero_holds_nothing_and_still_returns_bytes() {
     let (path, _wf) = container(&text);
     let mut wf = Wavefunction::open(&path, PASS, ITER).expect("open");
     let mut store = SectionStore::new(&mut wf, 0);
-    let mut buf = vec![0u8; SECTION_BYTES];
 
     read(&mut store, 0, &text);
     read(&mut store, 1, &text);

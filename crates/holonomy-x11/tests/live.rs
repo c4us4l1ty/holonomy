@@ -581,15 +581,19 @@ fn a_run_of_keystrokes_arrives_as_coherent_thirty_two_byte_events() {
         let deadline = std::time::Instant::now() + Duration::from_secs(4);
         while keycodes.len() < 8 && std::time::Instant::now() < deadline {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if let Ok(Some(ev)) = conn.next_event(Some(left.min(Duration::from_millis(250)))) {
-                match ev {
-                    holonomy_x11::Event::KeyPress { keycode, time, .. }
-                    | holonomy_x11::Event::KeyRelease { keycode, time, .. } => {
-                        keycodes.push(keycode);
-                        times.push(time);
-                    }
-                    _ => {}
-                }
+            if let Ok(Some(
+                holonomy_x11::Event::KeyPress { keycode, time, .. }
+                | holonomy_x11::Event::KeyRelease { keycode, time, .. },
+            )) = conn.next_event(Some(left.min(Duration::from_millis(250))))
+            {
+                // **Collapsed into the `if let` rather than a `match` with a `_ => {}` arm.** The
+                // `match` said "every other event is fine, do nothing", which is the same as not
+                // matching it -- and the `if let` says that directly, without an arm that has to be
+                // read as a decision. **Both directions of a key are collected on purpose**: this
+                // gate's claim is that the server delivers a press *and* a release, so keeping only
+                // the press would prove half of it.
+                keycodes.push(keycode);
+                times.push(time);
             }
         }
         let focused = conn.input_focus().expect("read the focus back");

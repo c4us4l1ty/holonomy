@@ -598,7 +598,12 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         })
         .collect();
     Some(Popup {
-        rect: DamageRect::new(x as u32, y as u32, w, h),
+        // **`x as u32` and `y` as they are.** `x` is the toolbar's left-to-right accumulator and is
+        // `i32` so the `min(panel_w)` clamp above it can go negative without wrapping; this is where it
+        // becomes a geometry again, and a `u32` accumulator would need that clamp rewritten as a
+        // subtraction -- which is the `opt-level=0` panic `place_toolbar`'s own comment records.
+        // **`y` is already a `u32`**, computed from the toolbar band's own `y`.
+        rect: DamageRect::new(x as u32, y, w, h),
         rows,
         open,
     })
@@ -620,7 +625,11 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
 pub fn row_cells(it: &crate::menus::Item, cell_w: u32) -> u32 {
     const LEADING: u32 = 4;
     const GAP: u32 = 2;
-    let acc = it.accelerator.as_deref().unwrap_or("");
+    // **`as_deref()` removed and not replaced.** `Item::accelerator` is `Option<&'static str>`, so
+    // `as_deref()` asks for `Option<&str>` from a value that is already one -- **the deref was a no-op
+    // that read as a conversion**, which is how a reader comes to believe the field is an owned `String`
+    // somewhere below.
+    let acc = it.accelerator.unwrap_or("");
     (LEADING + it.label.chars().count() as u32 + GAP + acc.chars().count() as u32) * cell_w
 }
 

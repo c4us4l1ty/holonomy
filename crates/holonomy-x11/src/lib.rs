@@ -64,7 +64,7 @@ pub mod window;
 pub mod xtest;
 
 pub use conn::{Conn, ConnError, Setup};
-pub use proto::{Event, ProtocolError, MAX_REQUEST_BYTES};
+pub use proto::{Event, PointerPosition, ProtocolError, MAX_REQUEST_BYTES};
 pub use window::{Pixmap, Window, WindowError};
 pub use xtest::XTest;
 

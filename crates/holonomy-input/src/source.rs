@@ -391,6 +391,20 @@ impl InputSource for ScriptedInputSource {
     }
 }
 
+/// Whether a 24-byte record is an `EV_SYN` frame boundary.
+///
+/// **Read from the bytes rather than from a decoded `Record`, because `decode_record` collapses
+/// `EV_SYN` into [`Record::Noise`]** along with `EV_MSC` and everything else -- and the boundary is
+/// the one piece of "noise" the decoder absolutely cannot ignore. Keeping the check here, against
+/// the raw record, is what makes it possible to see.
+///
+/// **Above the test module and not below it**, which is where it stood: the tests use it, so it has
+/// to be in scope for them, and an item after a `mod tests` is read as *not* being part of the
+/// module's subject. It compiles either way -- which is why it sat there unnoticed.
+fn axis_is_syn(bytes: &[u8]) -> bool {
+    u16::from_le_bytes([bytes[16], bytes[17]]) == crate::event::EV_SYN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,14 +594,4 @@ mod tests {
         assert_eq!(errno_name(4), "EINTR");
         assert_eq!(errno_name(9999), "?");
     }
-}
-
-/// Whether a 24-byte record is an `EV_SYN` frame boundary.
-///
-/// **Read from the bytes rather than from a decoded `Record`, because `decode_record` collapses
-/// `EV_SYN` into [`Record::Noise`]** along with `EV_MSC` and everything else -- and the boundary is
-/// the one piece of "noise" the decoder absolutely cannot ignore. Keeping the check here, against
-/// the raw record, is what makes it possible to see.
-fn axis_is_syn(bytes: &[u8]) -> bool {
-    u16::from_le_bytes([bytes[16], bytes[17]]) == crate::event::EV_SYN
 }

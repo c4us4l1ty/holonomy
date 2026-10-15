@@ -80,8 +80,18 @@ impl SelectionRange {
     }
 
     /// How many bytes are selected.
+    ///
+    /// **`is_empty` is here rather than inferred from `len() == 0`** because a caller asking whether a
+    /// selection is empty is asking a *question about the selection*, and `sel.len() == 0` is an
+    /// arithmetic fact about two fields that happens to answer it. **It also reads better at the one
+    /// place that asks** -- `Session::sync_selection` -- where the question is whether there is a range.
     pub const fn len(&self) -> u32 {
         self.end - self.start
+    }
+
+    /// Whether the range covers no bytes: `None` in every sense a caller can observe.
+    pub const fn is_empty(&self) -> bool {
+        self.start == self.end
     }
 
     /// Whether `offset` is inside the range. **The end is exclusive**, so the caret at `end` is not in

@@ -106,6 +106,12 @@ impl LeafSource for Store {
     }
 }
 
+/// **`#[allow(dead_code)]`, and the reason is worth keeping.** A faulting read helper that three
+/// tests use and a fourth does not is *not* dead code in the sense the lint means -- but this file's
+/// helpers are each used by whichever tests needed them at the time, and rustc cannot know a future
+/// test will. **Deleting it would mean rewriting it when it is next needed**, which is the opposite of
+/// what an unused helper costs.
+#[allow(dead_code)]
 fn read_at(rope: &mut Rope, store: &mut dyn LeafSource, at: usize, len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     rope.read_at_faulting(store, at, len, &mut out)
@@ -256,7 +262,10 @@ fn a_commit_repairs_the_shift_a_leaf_write_back_could_not() {
     let mut rope2 = Rope::from_skeleton(n);
     let mut store2 = Store::new(doc(n));
     rope2
-        .read_at_faulting(&mut store2, at, 8, &mut vec![0u8; 8])
+        // **An array on the stack and not a `vec!`.** Eight bytes of scratch in a loop is eight
+        // bytes of stack; a `vec!` here is an allocation per iteration and reads as if the read
+        // needed one.
+        .read_at_faulting(&mut store2, at, 8, &mut [0u8; 8])
         .expect("fault");
     rope2.insert_at(at, b"ZZZZZ").expect("insert");
 

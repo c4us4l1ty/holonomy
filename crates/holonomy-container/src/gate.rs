@@ -323,9 +323,10 @@ fn the_ring_buffer_is_page_locked() {
     // **And the alignment `O_DIRECT` needs still holds**, because a page-locked `mmap` and a
     // 4096-aligned `alloc_zeroed` are the same guarantee reached two ways, and a change that
     // swapped the backing without checking this would break every read.
-    assert_eq!(
+    // **`assert!` and not `assert_eq!(_, true)`.** The property is the alignment; comparing it against
+    // the literal `true` reports a mismatch between two booleans rather than naming what is wrong.
+    assert!(
         wf.ring_slot_alignment_is_direct_io_safe(),
-        true,
         "a SecureBlock's payload is page-aligned, which is what lets a locked slot be a direct-I/O \
          buffer at all"
     );
@@ -843,6 +844,8 @@ mod duress {
     /// gate failure rather than as two helpers that agree by accident.
     fn payload_bytes(content: &[u8]) -> u64 {
         let body = (content.len() as u64).div_ceil(CHUNK_PLAINTEXT as u64);
-        (body + 1) * CHUNK_SLOT as u64
+        // **No `as u64` on `CHUNK_SLOT`: it is already one.** `CHUNK_PLAINTEXT` above is a `usize`
+        // and does need the cast, which is why the two lines look alike and only one of them is.
+        (body + 1) * CHUNK_SLOT
     }
 }

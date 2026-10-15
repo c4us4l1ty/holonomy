@@ -132,14 +132,18 @@ fn an_unreadable_screen_opens_at_the_design_size_not_one_pixel() {
 #[test]
 fn the_minimum_is_honoured_where_the_screen_allows_it() {
     use holonomy_render::chrome::ChromeMetrics;
-    let (MIN_WIDTH, MIN_HEIGHT) = (ChromeMetrics::MIN_WIDTH, ChromeMetrics::MIN_HEIGHT);
+    // **`min_w`/`min_h`, and not `MIN_WIDTH`/`MIN_HEIGHT`.** Those names shadow the `ChromeMetrics`
+    // constants they are bound to, so a local read and a constant read look identical in a failure
+    // message -- and rustc warned about it on every build. **The constants are still the source**: the
+    // binding is a destructuring of them, not a second pair of numbers.
+    let (min_w, min_h) = (ChromeMetrics::MIN_WIDTH, ChromeMetrics::MIN_HEIGHT);
 
     // A screen with room for the minimum: the minimum is the floor.
-    let (w, h) = opening_size((1920, 1080), Some((MIN_WIDTH, MIN_HEIGHT)));
+    let (w, h) = opening_size((1920, 1080), Some((min_w, min_h)));
     assert_eq!((w, h), (DESIGN_W, DESIGN_H), "a big screen opens at the design size");
 
     // A screen without room: the screen wins, and the floor does not push past it.
-    let (w, h) = opening_size((400, 300), Some((MIN_WIDTH, MIN_HEIGHT)));
+    let (w, h) = opening_size((400, 300), Some((min_w, min_h)));
     assert!(
         w <= 400 && h <= 300,
         "a 400x300 screen opened at {w}x{h}: **the minimum must not push the window past the \\
@@ -148,7 +152,7 @@ fn the_minimum_is_honoured_where_the_screen_allows_it() {
     assert!(w >= 1 && h >= 1);
 
     // Exactly the screen, no room for a margin: one pixel, not the minimum.
-    let (w, h) = opening_size((SCREEN_MARGIN, SCREEN_MARGIN), Some((MIN_WIDTH, MIN_HEIGHT)));
+    let (w, h) = opening_size((SCREEN_MARGIN, SCREEN_MARGIN), Some((min_w, min_h)));
     assert_eq!((w, h), (1, 1), "a screen the size of the margin leaves a 1px window, honestly");
 }
 

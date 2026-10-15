@@ -38,7 +38,10 @@ use holonomy_image::scale::{
 /// A solid image of one value, so a mean is trivially checkable.
 fn solid(w: u32, h: u32, v: u8) -> Rgba {
     let mut img = Rgba::new(w, h);
-    for px in img.pixels.chunks_exact_mut(4) {
+    // **`as_chunks_mut::<4>().0` and not `chunks_exact_mut(4)`.** Both walk the buffer four bytes at
+    // a time; `as_chunks` hands back the remainder separately, so this loop cannot silently drop a
+    // trailing partial pixel the way `chunks_exact` does.
+    for px in img.pixels.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&[v, v, v, 255]);
     }
     img

@@ -98,6 +98,17 @@ impl DocLines {
         self.count
     }
 
+    /// Whether the document has no lines at all.
+    ///
+    /// **A fresh document does**, which is why this is not `len() == 0` written out at the call
+    /// sites: `is_empty` is false for an empty document and `DocLines::len` is 1, so **an
+    /// `is_empty` that meant "nothing to show" would be a different question and is not this one.**
+    /// The honest answer for "is this page empty" is `line_begin(0) == line_end(0)`.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
     /// The 0-based line containing document byte `at`. `O(log n)`.
     ///
     /// An `at` past the end returns the last line, matching `LineGeometry::line_of_byte`.
@@ -199,7 +210,9 @@ impl DocLines {
 
         // No line was added or removed, so line starts are unchanged and the tree is a valid index.
         // Recompute the caret line's length and, if it moved, that is a one-point update.
-        let line = self.geo.line_of_byte(caret) as usize;
+        // **No cast.** `line_of_byte` answers a `usize`; the `as usize` was left over from the
+        // `u32`-indexed geometry of an earlier phase and read as a deliberate conversion.
+        let line = self.geo.line_of_byte(caret);
         let start = self.geo.byte_of(line).unwrap_or(0);
         let len = Self::line_len_from(editor, start) as u32;
         if self.geo.line_len(line).unwrap_or(0) == len as usize {

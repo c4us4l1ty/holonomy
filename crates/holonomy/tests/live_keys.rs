@@ -264,7 +264,9 @@ fn page_down_moves_the_caret_by_a_screenful() {
 
 #[test]
 fn repeated_page_downs_lose_no_line() {
-    let mut s = session_at(0, 0);
+    // **`s` and not `mut s`.** The session below this one is the one the page-downs are driven on;
+    // this binding exists only to read the page's row count, and `chrome_layout` takes `&self`.
+    let s = session_at(0, 0);
     let rows = s.chrome_layout().rows;
     let step = rows - 1;
 

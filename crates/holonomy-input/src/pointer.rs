@@ -45,7 +45,13 @@
 //! per-frame coalescer would take five bare keystrokes and emit one. **So the coalescing is
 //! restricted to records that cannot stand alone**, and `EV_REL` is the only such thing.
 
-use crate::event::{InputEvent, EV_ABS, EV_KEY, EV_MSC, EV_REL, EV_SYN, RECORD_BYTES};
+// **`EV_ABS`, `EV_MSC` and `EV_SYN` are not imported, and that is the correction.** They were named
+// in an arm that also had `_`, which the wildcard made unreachable -- so the names said *"a tablet's
+// absolute position is deliberately not understood"* while the code said *"and neither is the next
+// type anyone invents"*. **The second is the true statement**, so the comment says it and the imports
+// go: the note about absolute positioning is worth keeping and belongs above the arm, not in a
+// pattern that could never match.
+use crate::event::{InputEvent, EV_KEY, EV_REL, RECORD_BYTES};
 
 /// `REL_X`. Horizontal relative motion.
 pub const REL_X: u16 = 0x00;
@@ -187,11 +193,17 @@ pub fn decode_record(bytes: &[u8]) -> Record {
             axis: code,
             delta: value,
         },
-        // **`EV_ABS` is dropped rather than guessed at.** A tablet's absolute position is in a
-        // device's own range, which `open` would have to scale to the panel, and a wrong scale is a
-        // caret in the wrong place with no way to tell why. `Record::Noise` and a note here is the
-        // honest answer: the record is not lost, it is not understood.
-        EV_ABS | EV_MSC | EV_SYN | _ => Record::Noise,
+        // **`EV_ABS` is dropped rather than guessed at**, and so is every other type.
+        //
+        // A tablet's absolute position is in a device's own range, which `open` would have to scale to
+        // the panel, and **a wrong scale is a caret in the wrong place with no way to tell why** --
+        // so the arm is `Record::Noise` and the reason is written here rather than as a pattern.
+        //
+        // **The arm used to be `EV_ABS | EV_MSC | EV_SYN | _`, which named three types and then
+        // matched everything.** Clippy is right that the three are unreachable, and the honest reading
+        // is the one that remains: *this decoder understands two record types and records the rest.*
+        // Naming three before the wildcard said the second sentence and hid the first.
+        _ => Record::Noise,
     }
 }
 

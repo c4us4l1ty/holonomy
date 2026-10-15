@@ -99,7 +99,7 @@ impl LeafSource for VecSource {
 /// misaddressed leaf is visible rather than plausible.
 fn doc(leaves: usize) -> Vec<u8> {
     let n = leaves * FILL + 123;
-    (0..n).map(|i| (b'a' + (i % 26) as u8)).collect()
+    (0..n).map(|i| b'a' + (i % 26) as u8).collect()
 }
 
 /// **The load-bearing test.** Eviction must not move the document's length.
@@ -287,7 +287,10 @@ fn editing_an_absent_leaf_is_refused_not_applied() {
     // The real path: `set_cursor` is what an edit does first, and it is where the leaf is resolved.
     let err = rope.set_cursor(rope.leaf_offset(target));
     assert!(
-        matches!(err, Err(RopeError::LeafAbsent { leaf })),
+        // **`leaf: _` and not `leaf`.** The payload's `leaf` field is the index of the absent
+        // leaf, which the *next* assertion checks on the formatted error rather than by binding it:
+        // binding it without using it is the same silence, one field over.
+        matches!(err, Err(RopeError::LeafAbsent { leaf: _ })),
         "an edit into an absent leaf must be a typed refusal, got {err:?}"
     );
     assert_eq!(rope.text_len(), before_len, "and must not have changed the length");

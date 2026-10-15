@@ -998,7 +998,7 @@ impl Conn {
             }
             _ => Packet::Event(
                 Event::decode(&self.rbuf[self.rstart - want..self.rstart])
-                    .map(|ev| {
+                    .inspect(|ev| {
                         // **The raw packet, on demand, and it settled a question three readings of the
                         // source could not.** Part 34: the window's pointer was reporting
                         // `event_x: -27541` in a 1024x700 window, and the candidates were "the parser
@@ -1019,7 +1019,6 @@ impl Conn {
                                 .collect();
                             eprintln!("x11 pkt {ev:?}\n     {}", hex.join(" "));
                         }
-                        ev
                     })
                     .expect("an event code"),
             ),

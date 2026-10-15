@@ -913,7 +913,7 @@ fn saved_runs_are_maximal_and_contiguous_in_both_systems() {
             // Coverage: exactly the positions `to_saved` says are saved.
             let covered: Vec<usize> = runs
                 .iter()
-                .flat_map(|r| (r.out_at..r.out_at + r.len))
+                .flat_map(|r| r.out_at..r.out_at + r.len)
                 .collect();
             let expected: Vec<usize> = (0..len)
                 .filter(|&i| rec.to_saved(at + i).is_some())

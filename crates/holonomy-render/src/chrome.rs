@@ -118,7 +118,12 @@ pub mod colour {
     /// invisible at one pixel against a drop shadow that is a different direction entirely. A rim has
     /// to be a step *away* from the panel, or it is not a rim: it is a line the eye cannot see, and the
     /// popup loses the edge that makes it a panel rather than a rectangle of slightly different grey.
-    pub const POPUP_EDGE: u32 = 0xFF5E_5E_6E;
+    /// **`0xFF_5E_5E_6E` and not `0xFF5E_5E_6E`.** Every other colour in this block is `AA_RR_GG_BB`
+    /// in groups of two -- `0xFF1E_1E22`, `0xFF5A_5A66`, `0xFF2A_2A30` -- and this one grouped its
+    /// digits `FF5E | 5E | 6E`. **Same value, and the only reason it matters is that a colour read at
+    /// 3am is compared digit by digit against its neighbours**: one constant in twenty with a different
+    /// shape is the one that gets misread.
+    pub const POPUP_EDGE: u32 = 0xFF_5E_5E_6E;
     /// **A popup's drop shadow**, in pixels: the width of the two flat bands down and to the right.
     ///
     /// **Three, the same as the page's, and not a hairline.** The two are the same device — a flat
@@ -1253,9 +1258,17 @@ impl LineHeights {
         if pitch == 0 {
             return 0;
         }
-        // `u32::from(bool)` is not a `const fn` on this toolchain (rust-lang/rust#143874), so the
-        // ceiling is spelled out. Both operands are already `u32` and `pitch` is non-zero here.
-        height / pitch + if height % pitch == 0 { 0 } else { 1 }
+        // **The ceiling is spelled out rather than `u32::from(bool)`, and `as u32` rather than a cast
+        // on the `bool` being obvious.** Both operands are already `u32` and `pitch` is non-zero here.
+        // **`as u32` is the conversion that compiles**: `From<bool> for u32` is not yet a const trait
+        // (rust-lang/rust#143874), and this is a `const fn`, so `u32::from` is a hard error rather
+        // than a style difference.
+        //
+        // **`is_multiple_of` and not `% == 0`**, which is the same arithmetic with a name: the question
+        // being asked is "is the pitch dividing this exactly", and that is the question
+        // `is_multiple_of` asks. A band whose height is not a whole number of line pitches still
+        // occupies one extra slot, which is what the `+ 1` is for.
+        height / pitch + (!height.is_multiple_of(pitch)) as u32
     }
 }
 
@@ -2137,6 +2150,10 @@ pub const fn sidebar_reservation(open: bool) -> u32 {
 /// call sites and made "which of these four numbers is a signed coordinate" a question at each one.
 /// Clamping to zero also means a band that collapsed to nothing draws nothing instead of wrapping to
 /// four billion pixels.
+fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
+    SurfaceTree::leaf(crate::Node::Rect(Rect::new(x, y, width, height, colour)))
+}
+
 // ---------------------------------------------------------------- pointer state
 //
 // **Three functions, and they are the whole of the chrome's response to a pointer.** Every emitter
@@ -2147,6 +2164,16 @@ pub const fn sidebar_reservation(open: bool) -> u32 {
 // `hit()` to return it cheaply, and because a widget's look is a question about *state*, not a
 // property of what it is.** Nothing about `Hit::Tool(Tool::Bold)` says whether it is currently under
 // the pointer; that is a fact about the world.
+//
+// **This banner is `//` throughout, and it stood as `///`.** A doc comment followed by a blank line
+// and then a function is a doc comment *for that function*, so rustdoc published "the whole of the
+// chrome's response to a pointer" as the documentation of `hovered` -- **a claim about three functions
+// recorded as the documentation of one.** Clippy's `empty_line_after_doc_comments` is what noticed.
+//
+// **The trailing `///` line above was the whole of it.** A block that is `//` for four lines and `///`
+// for the fifth is *still* a doc comment to rustdoc -- the attributes are per line and the last one
+// before the blank line is what counts. **It is now `//` like the rest, and there is no doc comment
+// here for anything to attach to.**
 
 /// Whether `h` is what the pointer is over.
 #[inline]
@@ -2358,7 +2385,10 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     // itself to put a shadow and a shadow that falls off the panel would be a shadow on the desktop.
     into.push(fill(
         x,
-        (y + pop.rect.height as i32).saturating_sub(colour::POPUP_SHADOW as i32) as i32,
+        // **`POPUP_SHADOW as i32` and not a plain `POPUP_SHADOW`.** The shadow band's height is a
+        // `u32` constant and the expression below it is `i32` arithmetic; the cast is the conversion,
+        // and `saturating_sub` is what keeps a panel near the top of the window from wrapping.
+        (y + pop.rect.height as i32).saturating_sub(colour::POPUP_SHADOW as i32),
         pop.rect.width,
         colour::POPUP_SHADOW,
         colour::SHADOW,
@@ -2444,9 +2474,10 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         //   | pad 2 | lead 4 |  label  | gap 2 |  accelerator  | pad 2 |
         // ```
         let label_x = icon_x + 2 * m.cell_w as i32;
+        // **`map_or` and not `.map(..).unwrap_or(0)`.** The chain reads as: the accelerator if there is
+        // one and it is not empty, otherwise zero cells.
         let acc_cells = it
             .accelerator
-            .as_deref()
             .filter(|a| !a.is_empty())
             .map_or(0u32, |a| a.chars().count() as u32);
         // `pad` on the left, plus the tick, icon and gap columns: `2 + 4`.
@@ -2648,12 +2679,15 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 &p.tool.label(state),
                 Style::MONOSPACE,
                 colour::INK_CHROME,
-                ix + ih as i32 + 4,
+                // **`ih` and not `ih as i32`.** The icon size is cast to `i32` once, on the line that
+                // binds it, because every use here is `i32` arithmetic on a `u32` rectangle -- and a
+                // cast repeated at four call sites is four places to keep in step.
+                ix + ih + 4,
             );
             // The chevron that says "this opens a popup".
             into.push(SurfaceTree::leaf(crate::Node::Icon(
                 crate::icons::IconId::ChevronDown.at(
-                    p.rect.right() as i32 - ih as i32 - 4,
+                    p.rect.right() as i32 - ih - 4,
                     iy,
                     colour::INK_DIM,
                 ),
@@ -2804,12 +2838,8 @@ fn cells_left_of(to: u32, from: i32, cell_w: u32) -> u32 {
     to.saturating_sub(INSET).saturating_sub(from.max(0) as u32) / cell
 }
 
-fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
-    SurfaceTree::leaf(crate::Node::Rect(Rect::new(x, y, width, height, colour)))
-}
-
 /// A `TextRun` for one glyph at `x, y`.
-
+///
 /// A horizontal rule of `n` `─` glyphs starting at `x`, `y`.
 ///
 /// # CORRECTION, part 39: this was a `TextRun`, and a `TextRun` is *consecutive codepoints*

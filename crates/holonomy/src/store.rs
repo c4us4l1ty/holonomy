@@ -265,7 +265,10 @@ impl<'c> SectionStore<'c> {
                     want: entry.len as usize,
                 });
             }
-            out[..entry.len as usize].copy_from_slice(&entry.block.as_slice());
+            // **`as_slice()` and not `&...as_slice()`.** The extra `&` makes a reference to a
+            // reference, which the compiler dereferences immediately; the byte count it copies is
+            // `entry.len`, not the slice's length, and that is the whole of what this line decides.
+            out[..entry.len as usize].copy_from_slice(entry.block.as_slice());
             self.stats.hits += 1;
             return Ok(entry.len as usize);
         }
@@ -885,7 +888,8 @@ pub fn commit_document(
     store: &mut SectionStore<'_>,
     editor: &mut holonomy_text::Editor,
 ) -> Result<usize, StoreError> {
-    let total = editor.text_len() as usize;
+    // **No cast: `text_len` answers a `usize`.**
+    let total = editor.text_len();
 
     // **Grow before writing.** A grown document's last chunk writes past the container's current
     // `content_len`, and `write_at` refuses a range past it. This is the same defect as part 8's `set_len`

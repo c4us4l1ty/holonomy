@@ -112,8 +112,10 @@ fn the_toolbar_band_reaches_the_frame() {
 /// fix that moved only the bands would pass the one above and still show no title.
 #[test]
 fn the_title_reaches_the_frame() {
-    let mut state = ChromeState::default();
-    state.title = "field notes".into();
+    let state = ChromeState {
+        title: "field notes".into(),
+        ..ChromeState::default()
+    };
     let (frame, chrome, _) = paint_chrome(&state);
 
     // **The title band, not the tab bar.** Part 19 removed the tab band (`tab_h: 0`, because the title
@@ -327,8 +329,10 @@ fn topmost_layer(state: &ChromeState) -> SurfaceTree {
 fn the_open_popup_is_emitted_into_after_and_nothing_else_is() {
     use holonomy_render::widgets::Open;
 
-    let mut state = ChromeState::default();
-    state.open = Some(Open::Menu(0));
+    let state = ChromeState {
+        open: Some(Open::Menu(0)),
+        ..ChromeState::default()
+    };
     let group = topmost_layer(&state);
 
     // **The group's own node is empty and its children are the popup's.** An entry in `after` carrying
@@ -389,8 +393,10 @@ fn the_open_popup_is_emitted_into_after_and_nothing_else_is() {
 fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     use holonomy_render::widgets::Open;
 
-    let mut state = ChromeState::default();
-    state.open = Some(Open::Menu(0));
+    let state = ChromeState {
+        open: Some(Open::Menu(0)),
+        ..ChromeState::default()
+    };
     let (frame, chrome, _) = paint_chrome(&state);
     let popup = holonomy_render::widgets::popup(&chrome.layout, &state, state.open)
         .expect("a popup for an open menu");

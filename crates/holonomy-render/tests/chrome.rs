@@ -1415,7 +1415,9 @@ fn the_chrome_paints_at_every_panel_size_without_drawing_outside_itself() {
     {
         {
             let m = ChromeMetrics::for_size(w, h);
-            let tree = Chrome::new(m.clone()).tree(&state);
+            // **No `clone`: `ChromeMetrics` is `Copy`.** The clone reads as a deliberate copy of a
+            // large struct and hides that `m` is passed to `for_size` above anyway.
+            let tree = Chrome::new(m).tree(&state);
             if containment {
                 let mut found = Vec::new();
                 rects(&tree, &mut found);
