@@ -31,6 +31,7 @@ pub mod icons;
 pub mod menus;
 pub mod table;
 pub mod widgets;
+pub mod wrap;
 
 pub use chrome::{
     AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, LineHeights,

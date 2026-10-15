@@ -5915,3 +5915,150 @@ nothing is the defect this project keeps finding; part 42's was exactly that. So
 next press as a dismissal. The first version of that loop used one session for all twenty and counted
 four perfectly well-wired buttons as inert: **a measurement that counts its fixture is worse than no
 measurement, because the number looks like a result.**
+
+---
+
+# Part 45 — the soft-wrap coordinate system, 2026-10-15
+
+## A. What this part is, and what it is not
+
+**Built: the rule.** `holonomy-render/src/wrap.rs` splits a line's bytes into visual rows from
+`(bytes, measure)` alone — no session, no atlas, no layout, no scroll position, no clock — and
+`tests/wrap.rs` holds it with **18 gates that are pure arithmetic**.
+
+**Not yet wired.** `emit_body_text`, `Layout::caret_at`, `Session::column_at_pen` and the selection
+highlight still index by logical line, so **the product still cuts long lines the way part 39b
+recorded.** That is stated here rather than in a commit message so the next reader knows exactly what
+they are picking up.
+
+**The rule was built and gated first on purpose.** A wrap point derived independently by the emitter,
+the caret, the hit test and the highlight is **four coordinates that will disagree**, and the
+disagreement is invisible: the text is drawn, the caret is somewhere, the highlight is a slightly wrong
+number of pixels. That is the failure mode parts 22, 23 and 33 each found by hand. **A defect in the
+rule is one arithmetic mistake; the same defect after wiring is a caret three rows off.**
+
+## B. The five rules
+
+1. **Every codepoint occupies a cell, whitespace included.** A space is a column of its row.
+2. **Break *after* the last whitespace at or before the overflow point.** A wrap that leaves a leading
+   space on every continuation indents the whole paragraph by one cell.
+3. **Break hard when there is no whitespace to break at.** A 300-character URL, a digest or a path
+   exceeds any measure, and refusing to break them makes them *unreachable* rather than merely ugly.
+4. **Break between codepoints, never inside one.** A 4-byte emoji across a boundary would be an invalid
+   UTF-8 slice, which the painter would reject or decode to a replacement glyph.
+5. **An empty line is one row of zero cells, and the row exists.** A line with no rows has nowhere to
+   put a caret.
+
+## C. Three defects the gates found in the rule itself
+
+### The break space has to *stay on the row it ends*
+
+The first version **consumed** it — `end = at`, `row_start = at + 1` — and the rows stopped tiling:
+`a_lines_rows_tile_it_exactly` failed with *"alpha bravo charlie" ends at 19 and "delta echo foxtrot"
+starts at 20*, **byte 19 in no row at all.**
+
+**A gap is not cosmetic and it is why the tiling gate exists.** `row_at_byte` finds a row by
+`start <= byte`, so a byte in a gap resolves to whichever row is nearest rather than the row it is drawn
+in — **the caret would sit at the end of one row while the next row's glyphs began a byte further on.**
+
+**And the space belongs to the row it ends**: it is what the user typed, it is one cell wide, and the
+row it ends is the row it belongs to. **The wrap is the invisible thing, not the space.**
+
+### `row_at_byte`'s `wrapping` flag was complexity with a wrong answer on the side that had one
+
+The flag existed because a byte at a row's `end` is both that row's last byte and the next row's first,
+and a click wanted one answer while pressing Right wanted the other. **That stopped being true when
+the rows were made to tile.**
+
+**Measured over every byte of the longest fixture: the two flag values differed for 22 bytes, and all
+22 were past the end of the content**, where `wrapping: true` answered `None`. **`None` is the wrong
+answer there** — a caret at the end of a document is a real position, the one `End` puts it at. The flag
+is gone.
+
+### `is_continuation` needed a `measure` it should not have needed
+
+`start_column > 0 && start_column < measure` — **false for the most ordinary continuation there is**,
+because `alpha bravo charlie delta echo foxtrot` at a measure of 20 gives a second row starting at column
+**20**, exactly at the measure.
+
+**And the distinction it was reaching for does not exist.** A "short last row" and a "continuation" are
+the same thing: a row that starts at column 3 has a row above it in its line. There is no non-first row
+that is not a continuation, so `start_column > 0` is both sufficient and necessary.
+
+## D. Two of my own gates were wrong, and both were wrong by arithmetic
+
+**Worth recording because a hand-written expectation is a hand-written expectation.**
+
+| gate | what it expected | what is true |
+|---|---|---|
+| `the_wrap_falls_after_the_whitespace` | five rows for a 35-character line at a measure of 20 | **two**, because `delta echo foxtrot` is 18 |
+| `line_rows_is_exactly_the_line_s_own_rows` | one row for `"one line that is short"` | **two**: it is 22 characters |
+
+**Neither was a defect in the rule.** The alternative — computing the expected value from the
+implementation — is the thing this file exists to avoid.
+
+## E. Why the measure is in cells and not in pixels
+
+**Because every other length in this program is in cells**: the ruler counts them, `Caret::locate` puts
+the caret at `column * cell_w`, damage rects are `cell_h` tall, and the tables lay themselves out on
+them. **A wrap point measured in pixels would put the last glyph of a row a fraction of a cell past the
+edge, and the caret would have no cell to sit in.**
+
+**It introduces nothing new either.** The body face is proportional, so a 72-cell row of glyphs drawn
+at their own advances already ends wherever their advances end — part 39b measured exactly that. **The
+ragged right margin is the existing behaviour of a proportional face, not something wrapping adds.**
+
+The cost is stated rather than hidden: **the wrap column and the drawn ink disagree by up to one cell
+per row**, because a cell is the monospace advance (10 at 16 ppem) and the body face's mean advance is
+8.58. That is a *shortfall* — ink ends before the measured column — which is the safe direction.
+
+## F. `Line::start` is the caller's offset, and that is load-bearing
+
+**A map that counted lines up from zero would be correct for page 1 and wrong for every page after it**,
+by one byte — the newline — per line seen. `an_offset_in_the_second_line_is_exact` proves the
+alternative: the same line built alone produces byte-identical rows to its slice of a three-line map.
+**Without that property the symptom is a caret that drifts further off the longer you scroll**, which
+is the worst kind of bug to notice.
+
+## G. Gates
+
+| gate | what it holds |
+|---|---|
+| `wrap.rs::a_line_that_fits_is_one_row` | the negative half of everything else |
+| `::the_wrap_falls_after_the_whitespace` | rule 2, and no row starts with a space |
+| `::a_row_that_ends_at_a_space_keeps_it_so_the_rows_tile` | **C: the tiling defect** |
+| `::a_lines_rows_tile_it_exactly` | **the invariant the caret, highlight and emitter rest on** |
+| `::an_unbreakable_token_wraps_hard_and_every_byte_stays_reachable` | rule 3, and byte-level coverage |
+| `::a_multi_byte_codepoint_is_never_split_across_two_rows` | rule 4 |
+| `::a_row_mixes_word_wrap_and_multi_byte_codepoints` | both at once |
+| `::an_empty_line_is_one_row_of_zero_cells` | rule 5 |
+| `::a_line_of_only_spaces_is_one_row_that_uses_cells` | rule 1 against rule 2 |
+| `::a_leading_space_does_not_produce_an_empty_row` | the `w > row_start` guard |
+| `::an_offset_in_the_second_line_is_exact` | F |
+| `::a_byte_belongs_to_exactly_one_row_and_needs_no_flag` | **C: the flag's removal** |
+| `::row_at_byte_is_monotonic_and_in_range` | what scrolling depends on |
+| `::line_rows_is_exactly_the_line_s_own_rows` | the `> line` predicate |
+| `::a_zero_measure_degrades_to_one_cell` | the unreachable panic |
+| `::a_row_reports_no_more_cells_than_it_has_codepoints` | the cell counter has not drifted |
+| `::a_continuation_is_anything_but_its_lines_first_row` | **C: the `measure` argument** |
+
+## H. What the wiring has to do, and in what order
+
+Four call sites, and the order matters because three of them are only correct once the first is:
+
+1. **`emit_body_text`** builds a `WrapMap` over the visible lines and emits one `DocRun` per row — and
+   one selection-highlight rect per row.
+2. **`Layout::caret_at`** stops dividing `y` by `cell_h` into a line number and answers with the byte
+   offset of the row under the pointer. **`caret_at_drag` stays as it is**, because a drag past the edge
+   clamps to the last row and that is a different question from "which row is under the pointer".
+3. **`Session::column_at_pen`** clamps to the row's `start..end` rather than to the line. **Without
+   this a click to the right of a short row resolves to a byte on the next row**, which is the one
+   thing the emitter and the caret would then disagree about.
+4. **The scrollbar.** **`scroll_line` is a logical line and `Layout::rows` is a count of them, so a
+   wrapped line still consumes one "row" of scroll regardless of how many visual rows it takes.** The
+   consequence is a document whose wrapped lines overflow the bottom of the page, and the fix is to make
+   `scroll_line` a visual-row index — **which changes the ruler, the sidebar, `Caret::locate` and the
+   status bar together**, and is why it is listed last rather than first.
+
+**Step 4 is the one that is not mechanical, and it is the one that decides whether soft wrap is a
+feature or a clipping change.**
