@@ -6062,3 +6062,20 @@ Four call sites, and the order matters because three of them are only correct on
 
 **Step 4 is the one that is not mechanical, and it is the one that decides whether soft wrap is a
 feature or a clipping change.**
+
+## I. The codebase had already predicted this shape
+
+`emit_body_text`'s truncation comment, written in phase 13 and still in place, says:
+
+> **Wrapping needs a second index mapping document line to visual rows, and Phase 13's section manifest
+> is where that belongs** — it is the same "structure without content" problem, and building it twice
+> would be worse than building it once.
+
+**Part 45 built it once, and the prediction was right about the shape.** That comment now points at
+`holonomy_render::wrap::WrapMap` rather than at a hypothetical future module, because a "recorded gap"
+that names a structure which exists and is not the thing you want is worse than one that names nothing.
+
+**What the comment also named correctly is the part that is still missing**: `LineHeights::y` answers
+for a *document line*, so a line taking three visual rows gets one slot and everything below it stays
+where it is. **That is one line of `chrome.rs`, not four of `session.rs`** — and it is why the emitter
+is still the place the text is cut, rather than the wrap rule being the obstacle.

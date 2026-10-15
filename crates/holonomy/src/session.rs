@@ -5959,6 +5959,24 @@ impl<'a> Session<'a> {
             // mapping document line to visual rows, and Phase 13's section manifest is where that belongs
             // -- it is the same "structure without content" problem, and building it twice would be worse
             // than building it once.
+            //
+            // # UPDATE, part 45: that index exists. It is `holonomy_render::wrap::WrapMap`.
+            //
+            // **The paragraph above predicted the shape and got it right**, and the prediction is worth
+            // keeping next to the fact: *"a second index mapping document line to visual rows, and Phase
+            // 13's section manifest is where that belongs -- it is the same 'structure without content'
+            // problem, and building it twice would be worse than building it once."*
+            //
+            // **Part 45 built it once** -- `WrapMap::build` over `Line { line, start, bytes }`, 18 gates
+            // in `crates/holonomy-render/tests/wrap.rs`, and a rule that is a pure function of
+            // `(bytes, measure)`. **What is still missing is the `LineHeights` half**: `LineHeights::y`
+            // answers for a *document line*, so a line taking three visual rows still gets one slot and
+            // everything below it stays where it is.
+            //
+            // **So this emitter is still the place the text is cut, and the reason is one line of
+            // `chrome.rs`, not four of this file.** See `PROJECT.md` part 45 section H for the four
+            // call sites and the order they have to change in -- step 4, making `scroll_line` a visual-row
+            // index, is the one that decides whether soft wrap is a feature or a clipping change.
             extra = union_opt(extra, Some(rect));
         }
 
