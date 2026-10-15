@@ -37,11 +37,22 @@ use holonomy_render::chrome::{ChromeMetrics, ChromeState};
 use holonomy_render::{widgets, Chrome};
 use holonomy_text::{Editor, SpanPolicy};
 
+/// **The two-size atlas, because the session is now built with one.**
+///
+/// **This file's fixture was `[16]`**, which is right for what it measures — a pen position at one
+/// size — and wrong for `bold_and_italic_left_the_inert_set_and_nothing_else_did`, which presses the
+/// Zoom dropdown's *second row* and got `ZoomUnavailable { percent: 125 }`: **a one-size atlas
+/// refuses every percentage above the first, by design** (part 43, and `AtlasBuilder::new` will not
+/// hold a third size against the 512 KiB ceiling).
+///
+/// **Two sizes is what `main` builds**, so the fixture now builds what the product builds. `pen`
+/// below reads `sizes().first()` — 16 ppem — so **every position assertion in this file is unchanged**:
+/// the second size is present but nothing here draws at it.
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
         std::sync::OnceLock::new();
     ATLAS.get_or_init(|| {
-        let (a, _) = holonomy_assets::build_atlas(&[16]).expect("build the atlas");
+        let (a, _) = holonomy_assets::build_atlas(&[16, 20]).expect("build the atlas");
         Box::leak(Box::new(a))
     })
 }
@@ -437,11 +448,30 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
         !inert.contains(&"bold") && !inert.contains(&"italic"),
         "Bold and Italic must not be counted inert: {inert:?}"
     );
+    // # Three more tools joined this list in part 44, each for a recorded reason
+    //
+    // **The gate's own message is the reason to be careful here**: a third would mean something else
+    // started claiming to work without a decision. Each of these three came with a decision, and the
+    // decision is the thing a reader would otherwise have to reconstruct from a counter.
+    //
+    // | tool | part | why it changes chrome state |
+    // |---|---|---|
+    // | `size-down`, `size-up` | 44 | they are the zoom pair, and a zoom moves `zoom_percent` |
+    // | `overflow` | 44 | **it changes nothing on a wide panel** -- see below |
+    //
+    // **`overflow` is the interesting one, and it is not really a "chrome change" at all.** Its rows
+    // are the tools that did not fit, and at `DESKTOP` that list is empty, so the press moves no
+    // state. **It is counted because the alternative was `pointer_inert`**, and `pointer_inert` means
+    // *a widget with no action behind it* -- which would be the false claim, since there is an action
+    // behind it and it simply had nothing to do at this width.
+    // `an_overflow_button_with_nothing_hidden_opens_nothing` is the gate that says what it actually
+    // did.
     assert_eq!(
         chrome,
-        vec!["bold", "italic"],
-        "**and the tools that change chrome state are exactly these**, in toolbar order. A third would \\
-         mean something else started claiming to work without a decision."
+        vec!["size-down", "size-up", "bold", "italic", "overflow"],
+        "**and the tools that change chrome state are exactly these, in toolbar order.** Bold and \
+         Italic arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty menu. A \
+         sixth would mean something else started claiming to work without a decision."
     );
     // **Zoom, Style and Font are not in that list, and their absence is the point.** They *open a
     // dropdown* and return before anything is applied, so they are counted by the routing gate's
@@ -469,12 +499,30 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
         "**twenty tools**, and it was twenty-one until part 33 removed Print. The count is asserted \
          separately so that the inert arithmetic below cannot be quietly wrong on both sides."
     );
+    // **Six, and it was ten until part 44.** Four buttons left the inert list, each with a decision
+    // behind it:
+    //
+    // | left | part | what it is now |
+    // |---|---|---|
+    // | `size-down`, `size-up` | 44 | the zoom pair, reached from the toolbar |
+    // | `mode` | 44 | a two-row switcher -- **a fifth dropdown** |
+    // | `overflow` | 44 | a menu of the tools that did not fit |
+    //
+    // **The arithmetic, restated: 20 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome changes.**
+    // Two of those five are new categories this part created rather than new members of an old one --
+    // `mode` made the dropdown count five, and `overflow` is a chrome change that changes nothing at
+    // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
+    //
+    // **The list in the message is the evidence.** It is [`spellcheck`, `paint-format`, `underline`,
+    // `highlight`, `link`, `comment`], and every one of the six is either a model this program does
+    // not have (a dictionary, a URL, an annotation store) or painter work on body-text runs that
+    // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six` records by name.
     assert_eq!(
         inert.len(),
-        10,
-        "**ten inert buttons**, which is 20 minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome \
-         changes. The list is {inert:?} and it no longer contains `print` -- that is the whole of what \
-         part 33 did to this gate."
+        6,
+        "**six inert buttons**, which is 20 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome \
+         changes. The list is {inert:?}. Part 44 removed four from this list and each removal came \
+         with a recorded decision -- see the comment above."
     );
 }
 
@@ -627,12 +675,30 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
                 "Collapse toggles the sidebar, and does not also fire"
             );
         }
-        if p.has_dropdown() {
+        if p.has_dropdown() && p != widgets::Tool::Overflow {
             assert_eq!(
                 opened,
                 1,
                 "{} opens a dropdown, and does not also fire or count inert",
                 p.name()
+            );
+        }
+        // # `Overflow` is exempt, and the exemption is its behaviour rather than a relaxation
+        //
+        // **`has_dropdown` says "this is a menu button"; whether the menu has rows is a fact about
+        // the window.** This gate runs at `DESKTOP`, where all twenty tools fit, so `Overflow`'s row
+        // list is empty and a press opens nothing -- which is correct, and `toolbar_wiring.rs::
+        // an_overflow_button_with_nothing_hidden_opens_nothing` is the gate that says so.
+        //
+        // **What this gate must still hold for `Overflow` is the half that matters:** the press is
+        // neither a command nor an inert count. A menu that is empty because nothing was hidden is
+        // *not* a button with nothing behind it.
+        if p == widgets::Tool::Overflow {
+            assert_eq!(
+                fired + inert,
+                0,
+                "**Overflow on a wide panel fires nothing and is not inert** -- it opened an empty \
+                 menu because there was nothing to put in one"
             );
         }
         // Leave nothing open for the next tool.

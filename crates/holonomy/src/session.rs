@@ -2640,11 +2640,21 @@ impl<'a> Session<'a> {
                 if tool.has_dropdown()
                     && !(tool == widgets::Tool::Overflow && self.state.overflow_tools.is_empty())
                 {
+                    // **No `pointer_chrome` here, and that is the gate `pointer.rs::
+                    // every_tool_that_has_a_command_is_routed_through_it` enforcing.** Part 44 added
+                    // one, on the reasoning that opening a popup *is* a chrome-state change -- which
+                    // is true and is not why it was wrong. **That gate counts a press as exactly one
+                    // of five things and never two** (fired, inert, toggled, opened, chrome), and a
+                    // dropdown press is `opened`; counting it twice makes a button that works look
+                    // like two buttons working.
+                    //
+                    // **Part 21 hit the same thing** -- it counted a zoom choice as `fired` -- and
+                    // part 23 measured that a zoom change produces no `Command` at all. **Both times
+                    // the fix was to name the outcome, not to relax the sum.**
                     let before = self.state.open;
                     let open = widgets::Open::Tool(tool);
                     self.state.open = (self.state.open != Some(open)).then_some(open);
                     self.invalidate_popup_change(before);
-                    self.stats.pointer_chrome += 1;
                     return Ok(());
                 }
                 if tool == widgets::Tool::Overflow {
