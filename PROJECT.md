@@ -5297,3 +5297,88 @@ it had not run.
 with `--features desktop` built the desktop binary, and a run without it built the default one. A probe
 that skipped when it *saw* X11 markers would switch the gate off on exactly the regression it exists to
 catch; `cfg` cannot be fooled that way.
+
+---
+
+# Part 39b — the status bar never repainted, and a line is cut rather than wrapped, 2026-10-13
+
+Both of these were found the same way and neither was a bug report: **by typing into the running window
+and reading the frame**, which is the only way to see a claim about what is *on screen* rather than about
+what the session emits. `Plan/` screenshots show an empty document.
+
+## A. The status bar showed `0 words 0 B` with 122 characters on the page
+
+```text
+typed: "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly..."
+page:  122 characters' worth, laid out on one row and cut at the measure
+bar:   Ln 1, Col 1  0 words  0 B          <-- the first frame, forever
+after: Ln 1, Col 123  23 words  122 B
+```
+
+**The state was right the whole time.** `publish_counts` runs on every edit, `reconcile_caret` refreshes
+`caret_line` and `caret_column` on every caret move, and `after_edit` sets `dirty`. **Nothing asked for
+the pixels**, because `after_edit` damages `line_box(caret_line)` — one text row — **and the status bar
+is not in it.**
+
+**Why no gate caught it.** Every chrome gate asserts what the chrome *emits*; every session gate asserts
+what the session *records*. **A number that is correct in the state and stale on the screen is invisible to
+both**, and the dirty-dot has been in that position since part 29 wrote the flag.
+
+### The fix, and why it is a second region
+
+**A union into `damage` would be the whole window.** The caret's cell is a 54x50 rect in the middle of the
+page; the status bar is at the foot; the bounding box of the two is the entire panel — **on the keystroke
+path, which NFR-1.1 budgets at 0.50 ms and which `session_latency.rs` measures at p99.**
+
+So `Session` carries `status_damage` beside `damage`, `paint_with` makes a **second clipped pass over the
+same tree** after the main one, and presents that rect separately. `last_damage` stays the main rect and
+`last_status_damage()` is the other, because a single number covering both is a bounding box that is true
+of neither.
+
+**Three call sites and no more:** `reconcile_caret` (Ln/Col), `publish_counts` (words and bytes) and
+`commit_to` (the dirty marker clearing). **A hover, a menu press and a scroll leave it empty** — the
+negative half is the one that keeps 28,160 px per frame off the pointer path, and it is the half an
+"always repaint the bar" fix would lose.
+
+`PaintStats::merge` is new and exists for this: a frame stopped being one call, and reporting the first
+pass's counters as the frame's would say a frame drew no status bar when it drew one.
+
+## B. A line longer than the measure is cut, and the caret past the cut is not drawn
+
+**122 characters typed, `Col 123`, and the first 72 on the page.** `emit_body_text` emits one `DocRun` per
+*document* line, cut at `codepoints_upto(text, 0, cells_per_row)`; the next row is the next document line,
+so there is nowhere for a wrapped one to go. `Caret::locate` answers *none* for a caret past the cut, which
+is the right answer for a caret past the page and the wrong one for a product.
+
+**This is the largest thing not built**, and it is a design rather than a patch: `LineHeights`,
+`Caret::locate`, `Layout::caret_at`, `column_at_pen` and the selection highlight all speak in document
+lines, and a wrap in the emitter alone puts the caret in the wrong place.
+
+**What part 39 did about it: wrote the gate that says so.**
+`a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn` asserts the *current* behaviour
+exactly, so the day wrapping arrives it goes red and names what changed, rather than the limitation
+sitting in a comment in `grid_vs_glyphs.rs` where part 39's typing found it anyway.
+
+## C. And that gate found an off-by-one in `codepoints_upto`
+
+```text
+72-cell measure, 300-character line, glyphs drawn: 73
+```
+
+`codepoints_upto` broke out of its loop with `count == limit` and `i` sitting on the first byte of the
+codepoint **the limit excluded** — a character boundary, because the byte that triggered the test is
+exactly the one that is not a continuation byte. The answer was `end = i + 1` plus a continuation scan,
+so the slice carried one codepoint more than asked.
+
+**The last glyph sat one cell past the text column, inside the page's 48 px of padding.** So nothing was
+clipped, nothing overlapped, and no screenshot showed it — **while the ruler, the caret and the selection
+highlight all counted 72.** Three parts of the chrome disagreeing about where the line ends, none of them
+visibly, and a gate written to record a *different* limitation is what read 73 where it had said 72.
+
+## D. Gates
+
+| gate | what it holds |
+|---|---|
+| `session_damage.rs::typing_repaints_the_status_bar_and_a_hover_does_not` | A: the damage, and the negative half |
+| `session_damage.rs::the_word_count_on_the_status_bar_counts_the_document` | A: the pixels, not the state |
+| `session_body_text.rs::a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn` | B and C |

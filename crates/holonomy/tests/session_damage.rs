@@ -1,12 +1,14 @@
-//! **What a click costs, and what the sidebar and the title agree on.** 7 tests.
+//! **What a click costs, what the chrome lies about, and what the sidebar and the title agree on.** 9 tests.
 //!
 //! # What this file is about
 //!
-//! Two reported symptoms, both of which look like speed and are both really *area*:
+//! Four reported symptoms. They look like speed, and two of them are really *area*:
 //!
 //! * **"the buttons lag."** Measured in the live window with `HOLONOMY_WINDOW_TRACE=1`, a hover was
 //!   damaging **583,808 px — 36 % of a 1,600x1,000 frame** — and dismissing a menu was calling
 //!   `full_damage()`, which is the whole panel for a panel where **one popup's rect** changed.
+//! * **"the word count says 0"** — 122 characters on the page and a status bar reading
+//!   `Ln 1, Col 1  0 words  0 B`. Found by typing into the live window and reading the frame.
 //! * **"the sidebar does nothing"** and **"the title says one thing and the tab rail another"**: two
 //!   facts that are one fact each, held in two places.
 //!
@@ -27,6 +29,8 @@
 //! | the sidebar's flag and its reservation agree | [`the_sidebar_flag_and_its_reservation_agree_after_every_change`] |
 //! | and the same for the title and the one row | [`the_title_and_the_one_document_row_are_the_same_fact`] |
 //! | and the widgets are all smaller than the frame | [`every_toolbar_widget_is_small_next_to_the_frame`] |
+//! | **typing repaints the status bar, a hover does not** | [`typing_repaints_the_status_bar_and_a_hover_does_not`] |
+//! | **and the bar draws the real count** | [`the_word_count_on_the_status_bar_counts_the_document`] |
 
 use holonomy::session::Session;
 use holonomy::store::NoSource;
@@ -442,4 +446,123 @@ fn every_toolbar_widget_is_small_next_to_the_frame() {
     );
     let _: ChromeState = ChromeState::default();
     let _ = m;
+}
+
+/// **Typing repaints the status bar, and a hover does not.**
+///
+/// # CORRECTION, part 39: the status bar never repainted at all
+///
+/// **Found by typing into the live window and reading the frame.** 122 characters on the page and a
+/// status bar reading **`Ln 1, Col 1  0 words  0 B`**; the same document after the fix reads
+/// **`Col 123  23 words  122 B`**. The state was right --
+/// `publish_counts` runs on every edit -- and the pixels were from the first frame: `after_edit`
+/// damages `line_box(caret_line)`, which is one text row, **and the status bar is not in it**.
+///
+/// **A word count that does not count words is the chrome lying about the document**, and it survived
+/// every gate in the project because every gate asserts what the session *emits*. The emitter had the
+/// right numbers; nothing asked whether they were *drawn*.
+///
+/// ## Why this is a second region and not a bigger rect
+///
+/// **Because the union is a bounding box and the status bar is at the bottom of the window.** The
+/// caret's cell is a 54x50 rect in the middle of the page, the status bar is at the foot of the panel,
+/// and the bounding box of the two is the whole frame -- **on the keystroke path, which NFR-1.1 budgets
+/// at 0.50 ms.** So the bar is painted as its own clipped pass and *reported* as its own rect, and the
+/// two numbers stay separately true.
+///
+/// **The negative half is the half that keeps the cost down**: a hover changes nothing the bar prints,
+/// so it must not drag a 1,280x22 repaint into every pointer motion event.
+#[test]
+fn typing_repaints_the_status_bar_and_a_hover_does_not() {
+    let mut s = session();
+    // **A hover first, because it is the cheap case and the one an "always repaint" fix would break.**
+    let bold = tool_rect(&s, "bold");
+    hover(
+        &mut s,
+        (bold.x + bold.width / 2) as i32,
+        (bold.y + bold.height / 2) as i32,
+    );
+    assert_eq!(
+        s.last_status_damage(),
+        holonomy_render::DamageRect::EMPTY,
+        "a hover over Bold asked for the status bar to be repainted. The bar's text does not change \
+         when the pointer moves, so this is 28,160 px per pointer event for nothing."
+    );
+
+    // **And now type, through the same `Command` the keymap produces.** `apply` rather than
+    // `handle_event`: the keymap's contribution is *which* command a key becomes, and this gate is
+    // about what happens after that, so synthesising keycodes for characters would be testing the
+    // keymap again rather than the damage.
+    for c in "hi".chars() {
+        s.apply(holonomy_input::Command::Insert(c)).expect("insert");
+        s.tick().expect("tick");
+    }
+    let bar = s.chrome_layout().status;
+    assert_eq!(
+        s.last_status_damage(),
+        bar,
+        "typing did not ask for the status bar to be repainted, so the word count and the column on \
+         screen are the ones from the first frame. The state has the right numbers -- `publish_counts` \
+         ran -- and nothing draws them."
+    );
+
+    // **And the main damage is still one line**, which is the reason the bar is a second region rather
+    // than a union. This is the assertion that would fail if somebody "simplified" it into `damage`.
+    let d = s.last_damage();
+    assert!(
+        d.bottom() <= bar.y,
+        "typing damaged {d:?} down to y={}, and the status bar starts at {}. The union of a caret cell \
+         and the bar is the whole window, which is the thing this design exists to avoid.",
+        d.bottom(),
+        bar.y
+    );
+    assert!(
+        d.height <= 3 * s.chrome_metrics().cell_h,
+        "and it is {} px tall, which is a line or two rather than a frame",
+        d.height
+    );
+}
+
+/// **What the status bar prints is what the document is, on the pixels and not only in the state.**
+///
+/// **The gate above holds the damage; this one holds the result.** They are separate claims, and the
+/// defect they cover had the *state* right the whole time -- so a state-only gate would have been green
+/// throughout and this defect would still be in the product.
+#[test]
+fn the_word_count_on_the_status_bar_counts_the_document() {
+    let mut s = session();
+    let bar = s.chrome_layout().status;
+    let blank = ink_in(&s, bar);
+    for c in "one two three".chars() {
+        s.apply(holonomy_input::Command::Insert(c)).expect("insert");
+        s.tick().expect("tick");
+    }
+    // **Two words came from the fixture's `alpha\nbravo\n` and three from here.** The first version
+    // of this line expected `3`, read `5`, and **the `5` was right** -- which is worth recording,
+    // because a gate that expected a smaller number would have been "fixing" a correct count.
+    assert_eq!(
+        s.state.words, 5,
+        "two words in the fixture and three typed. A word count that does not count is the defect, and \\
+         this is the number it has to get right to draw anything true."
+    );
+    let after = ink_in(&s, bar);
+    assert_ne!(
+        blank, after,
+        "**the status bar drew the same thing before and after typing three words.** A word count that \
+         never counts is the defect, and a damage gate cannot see it -- the damage was the right rect."
+    );
+
+    // **And the column moved**, because `Ln 1, Col 1` is the other half of what the live window showed.
+    assert_eq!(
+        s.state.caret_column, 13,
+        "thirteen characters were typed, so the bar should be about to read `Col 14`"
+    );
+}
+
+/// Every pixel of `r`, for a comparison a gate can make.
+fn ink_in(s: &Session<'_>, r: holonomy_render::DamageRect) -> Vec<u32> {
+    (r.y..r.bottom())
+        .flat_map(|y| (r.x..r.right()).map(move |x| (x, y)))
+        .map(|(x, y)| s.frame().pixel(x, y))
+        .collect()
 }

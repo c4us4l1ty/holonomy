@@ -102,6 +102,37 @@ pub struct PaintStats {
     pub pixels: u64,
 }
 
+impl PaintStats {
+    /// **Fold one pass's counts into another's, for a frame made of more than one clipped pass.**
+    ///
+    /// # Why this exists
+    ///
+    /// **Because a frame stopped being one call.** Part 39 gave the session a second damaged region —
+    /// the status bar's — which is painted as its own clipped pass over the same tree, because a single
+    /// bounding box from the caret's cell to the bottom of the window is the whole window. So the frame
+    /// is `main pass + status pass`, and **the stats have to be the sum or they are the first pass's
+    /// alone**, which would report a frame that drew its status bar as one that did not.
+    ///
+    /// **Summed rather than replaced, and every field, because a field left out is a field that stops
+    /// being true.** `rects_skipped` in particular: the status pass *skips* almost everything in the
+    /// tree, and that is the number that says the clipping worked.
+    pub fn merge(&mut self, other: PaintStats) {
+        self.rects += other.rects;
+        self.rects_skipped += other.rects_skipped;
+        self.glyphs += other.glyphs;
+        self.glyphs_skipped += other.glyphs_skipped;
+        self.box_glyphs += other.box_glyphs;
+        self.missing += other.missing;
+        self.doc_glyphs += other.doc_glyphs;
+        self.runs_missing += other.runs_missing;
+        self.runs_truncated += other.runs_truncated;
+        self.resampled += other.resampled;
+        self.images_missing += other.images_missing;
+        self.image_pixels += other.image_pixels;
+        self.pixels += other.pixels;
+    }
+}
+
 /// The painter's mutable working state, as one value.
 ///
 /// Named rather than three separate `&mut` parameters because a row blitter with nine parameters is

@@ -539,3 +539,85 @@ fn a_document_frame_is_distinguishable_from_a_blank_page() {
         ink_in_text_column(&blank)
     );
 }
+
+/// **A line longer than the measure is cut, not wrapped — and the rest of it is not drawn on the row
+/// below.**
+///
+/// # This is a recorded limitation, not a gate about correctness, and part 39 re-measured it
+///
+/// **Found by typing into the live window at part 39:** 122 characters went in, the status bar said
+/// `Col 123`, and the page showed **70** of them. The other 52 were not on the next row.
+///
+/// **The mechanism is one line.** `emit_body_text` emits **one `DocRun` per document line**, cut at
+/// `codepoints_upto(text, 0, cells_per_row)`. There is no loop over the remainder, so there is nothing to
+/// put a second row of the same line into — **the next row is the next *document* line**, and with one
+/// document line there is no next row.
+///
+/// `tests/grid_vs_glyphs.rs` has said since part 33 that a long line is *"clipped a little before the page
+/// edge rather than a little after it, which is the safe direction to be wrong in"*, so this is a known
+/// behaviour rather than a regression: part 39 moved the cut point from 80 cells to 72 and changed nothing
+/// about the kind.
+///
+/// ## Why a gate rather than a note
+///
+/// **Because a note is how this was found.** The limitation was recorded in the file about the grid's
+/// honesty and was not in README's "Not done, and not claimed", so the first person to see it was the one
+/// typing into the window. **This gate cannot make wrapping appear, and it can make sure nobody believes
+/// it has**: it asserts the *current* behaviour exactly, so the day soft wrap arrives this goes red and
+/// says what changed — which is the moment to update the README line rather than to leave it behind.
+///
+/// ## What wrapping would cost, for whoever does it
+///
+/// **The measure is shared by five things** and all five would have to agree about visual rows rather
+/// than document lines: `LineHeights` (a wrapped line occupies two slots), `Caret::locate` (a caret in the
+/// second row of line 4 is at row 4 or row 5 depending on which line you mean), `Layout::caret_at` and
+/// `column_at_pen` (the two functions a click is resolved through), and the selection highlight's
+/// geometry. **A wrap implemented in the emitter alone would put the caret in the wrong place**, which is
+/// why this is a design and not a patch.
+#[test]
+fn a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn() {
+    // **Three times the measure in one line**, so the tail is unmistakable and not a glyph of antialiasing.
+    let long = "abcdefghij".repeat(30);
+    let cells = holonomy_render::chrome::ChromeMetrics::DESKTOP.columns as usize;
+    assert!(
+        long.len() > cells * 2,
+        "the fixture is {} characters and the measure is {cells} cells",
+        long.len()
+    );
+    let mut s = with_text(&long);
+    s.paint(None).expect("paint");
+
+    assert_eq!(
+        s.stats.lines_drawn, 1,
+        "**one document line is one row.** Wrapping would make this {}. The emitter emits one run per \\
+         document line, so a second row can only be a second *line*.",
+        long.len() / cells
+    );
+    assert_eq!(
+        s.stats.glyphs_drawn as usize,
+        cells.min(long.len()),
+        "and it draws exactly the measure's worth of it: {} of {} characters. The rest is not \\
+         compressed, not overlapped and not drawn on the next row.",
+        cells.min(long.len()),
+        long.len()
+    );
+
+    // **And the caret can still be past the cut, which is the sharper half of the limitation.** The
+    // document holds all 300 characters and the status bar counts them, so the caret moves to a column
+    // that is off the right-hand end of the drawn row — **and nothing draws it**, because the caret is
+    // placed by the column and the row ends at the measure.
+    s.caret_to(long.len()).expect("caret to the end");
+    s.paint(None).expect("paint");
+    assert_eq!(
+        s.state.caret_column as usize,
+        long.len(),
+        "the model knows the caret is at column {} of a row drawn {} wide",
+        long.len(),
+        cells
+    );
+    assert!(
+        holonomy_render::Caret::locate(&s.chrome_layout(), &s.chrome_metrics(), &s.state).is_none(),
+        "**and `Caret::locate` returns nothing for it**, which is the correct answer for a caret past the \\
+         page rather than a caret drawn at the page's edge. Soft wrap is what makes it drawable again."
+    );
+}

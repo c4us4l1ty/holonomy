@@ -368,6 +368,41 @@ carrying two rows of one-pixel marks and nothing a person could read. It is numb
 measure now, every ten columns, centred over its tick — the number is what makes it a ruler rather than a
 line.
 
+**The word count never counted, and `Ln 1, Col 1` never moved.** Found by typing into the live window
+and reading the frame: 122 characters on the page and a status bar reading
+**`Ln 1, Col 1  0 words  0 B`** — and the same document reads **`Col 123  23 words  122 B`** now. The state was right — `publish_counts` runs on every edit — and the
+pixels were from the first frame, because `after_edit` damages the caret's **line box** and the status bar
+is not in it. **Every gate in the project asserts what the session *emits*, so the emitter had the right
+numbers and nothing asked whether they were drawn.**
+
+The status bar is now its **own damage region**, painted as a second clipped pass over the same tree. It
+is not unioned into `damage` because the union of a rect in the middle of the page and one at the foot of
+the window is a bounding box that reaches the top — **on the keystroke path, which NFR-1.1 budgets at
+0.50 ms.** The cost is one 1,280x22 repaint on a keystroke, a caret move or a commit, and none at all on a
+hover, a menu press or a scroll.
+
+**A line longer than the measure is cut, not wrapped, and this is the largest thing not built.** Typed
+into the live window at 20 ppem: **122 characters went in, the status bar said `Col 123`, and the page
+showed the first 72 of them** — the rest was not drawn, and not drawn on the next row. The mechanism is
+one line: `emit_body_text` emits **one run per document line**, cut at
+`codepoints_upto(text, 0, cells_per_row)`, so the next row is the next *document* line and a
+wrapped line has nowhere to go. A caret past the cut is not drawn either: `Caret::locate` correctly
+answers *none* rather than parking it at the page's edge.
+
+**It is a design and not a patch, because the measure is shared by five things**: `LineHeights` (a wrapped
+line occupies two slots), `Caret::locate`, `Layout::caret_at`, `column_at_pen` and the selection
+highlight's geometry all speak in document lines today, and a wrap implemented in the emitter alone would
+put the caret in the wrong place. `tests/grid_vs_glyphs.rs` has said since part 33 that a long line is
+*"clipped a little before the page edge rather than a little after it"*; the gate
+`a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn` now pins the exact behaviour, so
+the day wrapping arrives it goes red and says what changed.
+
+**And writing that gate found an off-by-one in `codepoints_upto`.** It returned the first byte of the
+codepoint the limit excluded, and that codepoint's continuation bytes: **73 glyphs drawn at a 72-cell
+measure.** The last glyph sat one cell past the text column — inside the page's padding, so nothing looked
+wrong and nothing was clipped — while the ruler, the caret and the selection highlight all counted 72.
+**Three parts of the chrome disagreeing about where the line ends, none of them visibly.**
+
 **Typing did nothing, and the whole suite had never painted twice.** `emit_body_text` read the visible
 page into `line_scratch` and then called `truncate(used)` on it, so the next paint's guard compared a
 fresh line against the *previous page's* byte count. One byte more and it broke out of the read loop

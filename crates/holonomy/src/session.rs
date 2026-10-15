@@ -486,6 +486,41 @@ pub struct Session<'a> {
     pub stats: SessionStats,
     /// Damage accumulated since the last paint.
     damage: DamageRect,
+    /// **The status bar's own damage, and why it is not `damage`.**
+    ///
+    /// # CORRECTION, part 39: the status bar never repainted
+    ///
+    /// **Measured in the live window, by typing:** 122 characters on the page and a status bar reading
+    /// **`Ln 1, Col 1  0 words  0 B`**; after the fix the same document reads **`Col 123  23 words
+    /// 122 B`**. The counts were correct in the state --
+    /// `publish_counts` ran on every edit -- and the pixels were from the first frame. `after_edit`
+    /// damages `line_box(caret_line)`, which is one text row, **and the status bar is not in it.**
+    ///
+    /// **A word count that does not count words, and a `Col 1` that never moves, is the chrome lying
+    /// about the document.** It survived every gate because every gate asserts what the session
+    /// *emits*; the emitter had the right numbers and nothing asked whether they were *drawn*.
+    ///
+    /// ## Why it is a second field and not a union into `damage`
+    ///
+    /// **Because the union is a bounding box and the status bar is at the bottom of the window.**
+    /// `reconcile_caret` damages the caret's cell -- a 54x50 rect in the middle of the page -- and
+    /// `reconcile_caret` is the funnel every caret move goes through, including every keystroke.
+    /// Unioning a rect at `y = 978` with one at `y = 200` gives **1,280x800: the whole window, on the
+    /// path NFR-1.1 budgets at 0.50 ms.** So the status bar is carried beside the damage and painted
+    /// as its own clipped pass, which costs one 1,280x22 repaint instead of a full frame.
+    ///
+    /// ## Why it is not "always repaint the status bar"
+    ///
+    /// **Because that is 28,160 px per frame against a keystroke's ~2,700, on every caret blink tick
+    /// and on every frame where nothing at all changed.** The status bar's text changes when the caret
+    /// moves, when the counts change and when the dirty marker clears -- and
+    /// [`invalidate_status_bar`](Self::invalidate_status_bar) is called from exactly those three
+    /// places: `reconcile_caret`, `publish_counts` and the commit.
+    status_damage: DamageRect,
+    /// What the last paint did with [`status_damage`](Self::status_damage), for the same reason
+    /// [`last_damage`](Self::last_damage) exists: *pending* and *painted* are two different questions,
+    /// and a gate asking "what did that keystroke repaint" must not be answered by what is still queued.
+    last_status: DamageRect,
     /// Which table cell the caret is in, if it is in one. Phase 9A.
     ///
     /// `None` means the caret is in ordinary text, which is the only thing that was possible before
@@ -881,6 +916,9 @@ impl<'a> Session<'a> {
             blink: Blink::new(Blink::DEFAULT_PERIOD),
             stats: SessionStats::default(),
             damage: DamageRect::EMPTY,
+            // **Part 39.** A fresh session has painted nothing, so it has asked for nothing.
+            status_damage: DamageRect::EMPTY,
+            last_status: DamageRect::EMPTY,
             active_cell: None,
             tables_shape_dirty: false,
             save_requested: false,
@@ -1804,6 +1842,9 @@ impl<'a> Session<'a> {
             Ok(written) => {
                 if written > 0 {
                     self.state.dirty = false;
+                    // **Part 39: the dirty marker is drawn in the status bar**, so clearing it changed
+                    // what the bar shows and has to ask for the repaint that shows it gone.
+                    self.invalidate_status_bar();
                 }
                 self.stats.committed += 1;
                 self.stats.bytes_committed += written as u64;
@@ -2740,6 +2781,21 @@ impl<'a> Session<'a> {
         if !r.is_empty() {
             self.damage = self.damage.union(&r);
         }
+    }
+
+    /// **Ask for the status bar to be repainted, and only the status bar.** Part 39.
+    ///
+    /// **Called from the three places that change what it prints**: [`reconcile_caret`] (Ln/Col),
+    /// [`publish_counts`] (words and bytes) and the commit (the dirty marker clearing). **It is not
+    /// called from a hover, a menu press or a scroll, and that is the whole point** — the field exists
+    /// because "the status bar changes on a keystroke" and "the status bar changes on everything" are
+    /// different claims and only the first one is true.
+    ///
+    /// **The whole band, not the words.** The band is 22 px and the words are 5, and a rect that
+    /// tracked the words would have to be re-measured from the string that changed — which is the
+    /// painter's job, not the session's.
+    fn invalidate_status_bar(&mut self) {
+        self.status_damage = self.chrome.layout.status;
     }
 
     /// The byte offset of `(line, column)`, clamped into the line.
@@ -3985,6 +4041,10 @@ impl<'a> Session<'a> {
         let _ = self.refresh_caret_pen(None);
         self.sync_selection();
         self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        // **The status bar prints this line, so it is part of what moving the caret changed.** Part 39:
+        // without this the bar reads `Ln 1, Col 1` for the life of the document, which is what the live
+        // window showed after 122 typed characters.
+        self.invalidate_status_bar();
         let cell = self.caret_cell();
         if let Some(rect) = cell {
             self.damage = self.damage.union(&rect);
@@ -4328,6 +4388,10 @@ impl<'a> Session<'a> {
         self.state.bytes = self.editor.text_len() as u32;
         self.state.words = self.counts.words;
         self.state.total_lines = self.counts.lines();
+        // **Part 39: the numbers these three fields hold are drawn in the status bar**, so publishing
+        // them is half of changing what it shows -- and the other half is asking for the repaint. A
+        // word count that is correct in the state and stale on the screen is the defect this line fixes.
+        self.invalidate_status_bar();
     }
 
     /// Recount the words and bytes the status bar shows.
@@ -4465,7 +4529,56 @@ impl<'a> Session<'a> {
         // the difference between 4 MiB per keystroke and 92 KiB.
         self.scanout.present_damage(&self.frame, damage)?;
         self.damage = DamageRect::EMPTY;
+        // **The status bar's own pass, and the reason it is a second pass.** Part 39.
+        //
+        // `status_damage` is not part of `damage` because a union with a rect at the bottom of the
+        // window is a bounding box that reaches the top of it -- on the keystroke path, which is the
+        // path NFR-1.1 budgets. **So it is painted here, clipped to itself, and presented as itself**:
+        // one 1,280x22 repaint instead of a 1,280x800 one.
+        //
+        // **The same tree, not a second one.** It is built once above and both passes walk it, so there
+        // is no second `chrome.tree` and no second emitter pass; the damage argument is what makes the
+        // second walk touch only the status bar.
+        //
+        // **Skipped when the main damage already covers it**, which is every full repaint: presenting
+        // the same pixels twice would be a second PutImage for nothing. The test is containment rather
+        // than intersection because a main rect that *overlaps* the status bar but does not cover it
+        // -- a repaint of the bottom of the page -- has still left the bar's words alone.
+        let status = self.status_damage;
+        self.status_damage = DamageRect::EMPTY;
+        let painted = damage.unwrap_or(DamageRect::new(0, 0, self.frame.width(), self.frame.height()));
+        let covered = painted.x <= status.x
+            && painted.right() >= status.right()
+            && painted.y <= status.y
+            && painted.bottom() >= status.bottom();
+        self.last_status = DamageRect::EMPTY;
+        if !status.is_empty() && !covered {
+            let page = PageText(&self.line_scratch[..self.page_used]);
+            let stats = self.painter.paint_with(
+                &mut self.frame,
+                &tree,
+                Some(status),
+                Some(&self.images),
+                Some(&page),
+            )?;
+            self.last_paint.merge(stats);
+            self.stats.pixels += stats.pixels;
+            self.scanout.present_damage(&self.frame, Some(status))?;
+            self.last_status = status;
+        }
         Ok(())
+    }
+
+    /// **What the last paint repainted of the status bar, outside its own damage.**
+    ///
+    /// **`DamageRect::EMPTY` when the status bar was not a second region** — a hover, a menu press and a
+    /// scroll all leave it empty, and so does a full repaint, which carries the bar inside its own rect.
+    ///
+    /// **It is a second number rather than an addition to [`last_damage`](Self::last_damage) on
+    /// purpose.** `last_damage` is what a scoping claim is made about, and one bounding box reaching
+    /// from the toolbar to the status bar would be true of both and useless for either.
+    pub fn last_status_damage(&self) -> DamageRect {
+        self.last_status
     }
 
     /// Rebuild the chrome's line-height model from the tables, and park it in the state.
@@ -6293,11 +6406,23 @@ fn codepoints_upto(bytes: &[u8], from: usize, limit: usize) -> usize {
     if i >= bytes.len() {
         return bytes.len() - from;
     }
-    let mut end = i + 1;
-    while end < bytes.len() && bytes[end] & 0xC0 == 0x80 {
-        end += 1;
-    }
-    end - from
+    // **CORRECTION, part 39: this returned `i + 1` and drew one cell more than the measure.**
+    //
+    // The loop above breaks with `count == limit` and `i` sitting on **the first byte of the
+    // (limit + 1)-th codepoint** -- which is a character boundary, because the byte that triggered the
+    // test is exactly the one that is not a continuation byte. So the end of what was asked for is `i`,
+    // and the `end = i + 1` tail added the one codepoint the limit excluded.
+    //
+    // **Measured, in a gate written to record a different limitation**: 300 characters typed at a 72-cell
+    // measure drew **73** glyphs. The last glyph sat one cell past the text column -- inside the page's
+    // 48 px padding, so nothing looked wrong and nothing was clipped -- while the ruler, the caret and
+    // the selection highlight all counted 72. **Three parts of the chrome disagreeing about where the
+    // line ends, none of them visibly.**
+    //
+    // **The continuation-byte scan that is not here any more was never needed in this branch.** Its only
+    // purpose would be to land on a character boundary, and `i` already is one: it is the byte that the
+    // `& 0xC0 != 0x80` test looked at.
+    i - from
 }
 
 /// Read the whole document into `out`, growing it if needed. Returns the bytes read.
