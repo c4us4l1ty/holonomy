@@ -156,47 +156,80 @@ unsafe extern "C" fn census_handler(
         -1i64
     } else {
         // SAFETY: `info` is the kernel's `siginfo_t`, whose layout for a seccomp SIGSYS is
-        // `SigSys`. See its doc comment -- and the note there about `si_arch` not being populated.
+        // `SigSys`. See its doc comment -- it pins every offset against the kernel's uapi header
+        // and `tests/census.rs`, which traps a known syscall and requires the exact name back.
         let sig = unsafe { core::ptr::read_unaligned(info.cast::<SigSys>()) };
+        // `si_code == SYS_SECCOMP` and `si_arch == AUDIT_ARCH_X86_64` are what make this a
+        // *filter* trap rather than a bare `kill(pid, SIGSYS)`: a hand-sent signal leaves the
+        // union zeroed, and recording it would name syscall 0 -- a census line of pure fiction.
+        // Both are checked here, before `record`, because this line is the evidence every other
+        // test in the file reasons from.
+        if sig.code != crate::SYS_SECCOMP || sig.arch() != crate::AUDIT_ARCH_X86_64 {
+            unsafe {
+                let mut line = [0u8; 80];
+                let mut at = 0usize;
+                push_bytes(&mut line, &mut at, b"holonomy-census rejected code=");
+                let (digits, len) = decimal(sig.code as i64);
+                push_bytes(&mut line, &mut at, &digits[..len]);
+                push_bytes(&mut line, &mut at, b" arch=");
+                let (digits, len) = decimal(sig.arch() as i64);
+                push_bytes(&mut line, &mut at, &digits[..len]);
+                push_bytes(&mut line, &mut at, b"\n");
+                libc::write(
+                    REPORT_FD.load(Ordering::Acquire) as i32,
+                    line.as_ptr().cast(),
+                    at,
+                );
+                libc::_exit(CENSUS_EXIT);
+            }
+        }
         sig.syscall() as i64
     };
     TRIPS.fetch_add(1, Ordering::AcqRel);
     let fresh = record(nr);
     unsafe {
         let line = format_line(nr, fresh);
+        // Up to and including the newline, not `line.len()`: the buffer is 96 bytes and the line
+        // is shorter, and the padding is NULs that would otherwise land in the report stream.
+        let len = line.iter().position(|&b| b == 0).unwrap_or(line.len());
         libc::write(
             REPORT_FD.load(Ordering::Acquire) as i32,
             line.as_ptr().cast(),
-            line.len(),
+            len,
         );
         libc::_exit(CENSUS_EXIT);
     }
 }
 
-/// `"holonomy-census syscall=<n> arch=<n> first=yes|no\n"` in a single `write`.
+/// `"holonomy-census syscall=<n> name=<name> first=yes|no\n"` in a single `write`.
 ///
 /// Uses a stack buffer, not `format!`: this runs in a signal handler, where the allocator may
 /// be in any state and where musl's buffered stdio is not involved at all.
+///
+/// The returned length is carried separately from the buffer by the caller's `write` (it stops
+/// at the first NUL), because the fixed-size buffer is zero-padded and writing the padding would
+/// push a run of NUL bytes into the report stream after the newline.
 fn format_line(nr: i64, fresh: bool) -> [u8; 96] {
     let mut buf = [0u8; 96];
     let mut at = 0usize;
-    let push = |buf: &mut [u8; 96], at: &mut usize, bytes: &[u8]| {
-        for byte in bytes {
-            if *at < buf.len() {
-                buf[*at] = *byte;
-                *at += 1;
-            }
-        }
-    };
+    let push = push_bytes;
     push(&mut buf, &mut at, b"holonomy-census syscall=");
     let (nr_digits, nr_len) = decimal(nr);
     push(&mut buf, &mut at, &nr_digits[..nr_len]);
     push(&mut buf, &mut at, b" name=");
-    push(
-        &mut buf,
-        &mut at,
-        crate::seccomp::table::name_of(nr).as_bytes(),
-    );
+    // **The `&'static str` lookup, never `name_of`.** `name_of` allocates, and a `SIGSYS` that
+    // lands while the heap lock is held would deadlock the handler on the very allocator call
+    // the trap interrupted -- malloc is not async-signal-safe by contract. Unknown numbers are
+    // rendered inline as `<n>` from the same stack digits as the syscall itself.
+    match crate::seccomp::table::name_of_static(nr) {
+        Some(name) => push(&mut buf, &mut at, name.as_bytes()),
+        None => {
+            push(&mut buf, &mut at, b"<");
+            let (nr_digits, nr_len) = decimal(nr);
+            push(&mut buf, &mut at, &nr_digits[..nr_len]);
+            push(&mut buf, &mut at, b">");
+        }
+    }
     push(
         &mut buf,
         &mut at,
@@ -206,6 +239,20 @@ fn format_line(nr: i64, fresh: bool) -> [u8; 96] {
     let mut out = [0u8; 96];
     out[..at].copy_from_slice(&buf[..at]);
     out
+}
+
+/// Append `bytes` to `buf` at `*at` and advance `at`, stopping silently at the end of `buf`.
+///
+/// A plain function rather than a closure over the buffer so it can be used from any buffer in
+/// the handler without borrowing the whole array for its lifetime. Never panics: every path is
+/// bounds-checked before the write.
+fn push_bytes(buf: &mut [u8], at: &mut usize, bytes: &[u8]) {
+    for &byte in bytes {
+        if *at < buf.len() {
+            buf[*at] = byte;
+            *at += 1;
+        }
+    }
 }
 
 /// Render a possibly-negative `i64` as ASCII, returning the buffer and the bytes used.
@@ -317,10 +364,12 @@ mod tests {
         // An unlisted number is the normal case during a census run; printing `<nr>` rather than
         // a wrong name is the point.
         //
-        // There is no architecture in the line at all, deliberately: `seccomp_send_kill_signal`
-        // never populates `si_arch`, so a report that printed one would be printing the syscall
-        // number twice. The first version did, and printed `syscall=149 arch=149` -- which is how
-        // the aliasing was found.
+        // There is no architecture in the line at all, deliberately. `si_arch` *is* populated --
+        // measured at offset 28 as `0xC000003E` for every trap this filter can produce -- which
+        // is exactly why printing it would be dead weight: `Program::build` hard-kills every
+        // other architecture, so the value is a constant of the build and cannot distinguish
+        // two lines. The first version did print it, and read it from the syscall's own offset,
+        // which is how the offset mix-up was found.
         let line = format_line(9999, false);
         let text =
             core::str::from_utf8(&line[..line.iter().position(|&b| b == b'\n').unwrap() + 1])

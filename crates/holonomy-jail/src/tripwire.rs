@@ -150,6 +150,26 @@ pub fn install(alt: &AltStack) -> Result<(), TripwireError> {
         Some(_) => return Err(TripwireError::WrongAltStack),
         None => return Err(TripwireError::NoAltStack),
     }
+    // **Everything the handler reads is published *before* any handler can run.**
+    //
+    // `sigaction` is what arms the tripwire: a fault landing between the syscall below and these
+    // stores would run the handler with `ALT_BASE == 0`, so `installed_altstack()` answers `None`
+    // and `scrub_all()` walks the *interrupted* stack instead of excluding the alternate one --
+    // exactly the wild-zeroing the handler exists to prevent. The atomics are plain stores, so
+    // publishing them first costs nothing and closes the window.
+    //
+    // Same reasoning for the sealed-state snapshot: the handler cannot call `prlimit64` or
+    // `prctl` once the filter is installed (both are `BOOT_ONLY`, `seccomp/table.rs`), so the
+    // two numbers the report needs are read once here, while they can still be read at all.
+    ALT_BASE.store(alt.base(), Ordering::Release);
+    ALT_LEN.store(alt.len(), Ordering::Release);
+    // `u64::MAX` is the report's "inf" encoding, and also what an unreadable limit degrades to.
+    SNAP_CORE.store(
+        crate::rlimits::getrlimit(libc::RLIMIT_CORE).map_or(u64::MAX, |(soft, _)| soft),
+        Ordering::Release,
+    );
+    // -1 is the report's "unreadable" encoding, matching `PR_GET_DUMPABLE`'s own failure value.
+    SNAP_DUMPABLE.store(read_dumpable(), Ordering::Release);
     for signal in [libc::SIGSEGV, libc::SIGBUS] {
         // SAFETY: a `sigaction` needs a valid `sigaction`; `handler` is an
         // `extern "C"` function with the mandated signature, and the flags are a plain mask.
@@ -173,8 +193,6 @@ pub fn install(alt: &AltStack) -> Result<(), TripwireError> {
             ));
         }
     }
-    ALT_BASE.store(alt.base(), Ordering::Release);
-    ALT_LEN.store(alt.len(), Ordering::Release);
     INSTALLED.store(1, Ordering::Release);
     Ok(())
 }
@@ -364,9 +382,17 @@ unsafe fn scrub_own_stack_and_exit(top: usize, code: i32) -> ! {
         // token in expression") and where LLVM's assembler rejects AT&T spellings like `movq` and
         // `addq` outright ("invalid instruction mnemonic"). Same trap as the `xorps` block above; the
         // operand-size suffix goes in the instruction instead, as in `QWORD PTR [r10]`.
-        "mov  rsp, r10",
+        // **`mov r10, rsp`, not `mov rsp, r10`.** `asm!` is Intel syntax, where the destination
+        // comes first: the old spelling wrote the *uninitialised* `r10` into `rsp` (corrupting the
+        // stack pointer the syscall frame depends on) and left the cursor unassigned, so the loop
+        // below ran from garbage or not at all.
+        "mov  r10, rsp",
         "2:",
-        "cmp  r11, r10",
+        // **`cmp r10, r11` / `jae`, i.e. exit when the cursor has reached the top.** The old
+        // `cmp r11, r10` tested the operands the other way round, so the loop left on its *first*
+        // comparison -- `top >= cursor` is true whenever the cursor is below the top, which is
+        // always -- and the wipe was dead code.
+        "cmp  r10, r11",
         "jae  3f",
         "mov  QWORD PTR [r10], 0",
         "add  r10, 8",
@@ -626,8 +652,10 @@ impl ReportBuf {
 ///   registered payload lengths to prove the scrub was complete.
 /// * `stack=on-alt` -- the handler is running on the alternate stack, which is the fact
 ///   `SA_ONSTACK` is supposed to guarantee and cannot be checked any other way.
-/// * `core=0` -- `RLIMIT_CORE` re-read at fault time. Must be 0; a non-zero value means the
-///   plaintext was eligible for a core file at the moment it was scrubbed.
+/// * `core=0` -- `RLIMIT_CORE`'s soft limit, snapshotted at boot (the handler cannot re-read
+///   it: `prlimit64` is refused by the filter, and asking would `SIGSYS` this handler). Must
+///   be 0; a non-zero value means the plaintext was eligible for a core file at the moment it
+///   was scrubbed.
 /// * `exit=137` -- the exit code, restated so a log line is self-contained.
 ///
 /// # Safety
@@ -691,14 +719,18 @@ unsafe fn emit_report(report: &Report) {
     buf.str(" kflags=0x");
     buf.hex(report.kernel_says as u32 as u64);
     buf.str(" core=");
-    // `inf` rather than 18446744073709551615: shorter, and `RLIM_INFINITY` read back is exactly
-    // what an unsealed process looks like.
-    match crate::rlimits::getrlimit(libc::RLIMIT_CORE) {
-        Some((soft, _)) if soft != u64::MAX => buf.dec(soft),
+    // **The snapshot, not a fresh `getrlimit`.** `prlimit64` is `BOOT_ONLY`, so asking for it
+    // from a sealed process is a `SIGSYS` inside this handler: the report's `write` would never
+    // run and the exit code would be the kernel's, not `TRIPWIRE_EXIT`. `SNAP_CORE` is read
+    // once at install; `u64::MAX` is both `RLIM_INFINITY` and "unreadable", and both print as
+    // `inf` -- shorter, and what an unsealed process looks like.
+    match SNAP_CORE.load(Ordering::Acquire) {
+        soft if soft != u64::MAX => buf.dec(soft),
         _ => buf.str("inf"),
     }
     buf.str(" dumpable=");
-    buf.dec(read_dumpable() as u64);
+    // Same: `prctl` is `BOOT_ONLY` and would self-kill the handler.
+    buf.dec(SNAP_DUMPABLE.load(Ordering::Acquire) as u64);
     buf.str(" exit=");
     buf.dec(TRIPWIRE_EXIT as u64);
     buf.byte(b'\n');
@@ -710,8 +742,11 @@ unsafe fn emit_report(report: &Report) {
 
 /// `PR_GET_DUMPABLE`, or -1 if the call failed.
 ///
-/// Read at fault time rather than remembered from boot, because "was it sealed" is exactly the
-/// question a post-mortem is asking.
+/// **Boot-only, and the handler must not call it.** `prctl` is `BOOT_ONLY` in the seccomp
+/// table, so a fault-time read is a `SIGSYS` inside the `SIGSEGV` handler -- the report would
+/// never be written and the exit code would not be `TRIPWIRE_EXIT`. `install` snapshots the
+/// value into [`SNAP_DUMPABLE`] while `prctl` still works; this function remains only for the
+/// boot path that takes that snapshot.
 fn read_dumpable() -> libc::c_int {
     // SAFETY: `PR_GET_DUMPABLE` writes one `int` and reads none.
     unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }
@@ -728,6 +763,18 @@ fn read_dumpable() -> libc::c_int {
 /// a full-width `usize` on every target, so it is not.
 static ALT_BASE: AtomicUsize = AtomicUsize::new(0);
 static ALT_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// `RLIMIT_CORE`'s soft limit, snapshotted at install time.
+///
+/// The handler cannot re-read it: `prlimit64` is `BOOT_ONLY` and is refused by the filter, so a
+/// fault-time `getrlimit` would be a `SIGSYS` *inside* the `SIGSEGV` handler -- the process would
+/// die before the report's `write`, with no exit code and no line. `u64::MAX` is both
+/// `RLIM_INFINITY` and the "could not read it" encoding, and both print as `inf`.
+static SNAP_CORE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// `PR_GET_DUMPABLE`, snapshotted at install time. For the same reason as [`SNAP_CORE`].
+/// `-1` is `PR_GET_DUMPABLE`'s own failure value.
+static SNAP_DUMPABLE: AtomicI32 = AtomicI32::new(-1);
 
 /// The recorded alternate stack, or `None` if [`install`] has not run.
 fn installed_altstack() -> Option<AltStack> {

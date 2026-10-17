@@ -178,6 +178,19 @@ pub fn name_of(nr: i64) -> String {
     }
 }
 
+/// The canonical name for a syscall number, without allocating.
+///
+/// `name_of` cannot be used from the census handler: `to_string`/`format!` reach the allocator,
+/// and a `SIGSYS` that arrives while the heap lock is held turns the handler into a deadlock
+/// (malloc is not async-signal-safe by contract). This is the `&'static str` lookup behind the
+/// same table, so the handler's only remaining work is a byte copy into a stack buffer.
+pub fn name_of_static(nr: i64) -> Option<&'static str> {
+    ALLOWLIST
+        .iter()
+        .find(|entry| entry.nr == nr)
+        .map(|entry| entry.name)
+}
+
 /// Every allowlisted number, as a sorted `Vec<i64>`.
 pub fn numbers() -> Vec<i64> {
     let mut v: Vec<i64> = ALLOWLIST.iter().map(|entry| entry.nr).collect();

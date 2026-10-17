@@ -152,14 +152,23 @@ pub struct SigFault {
 
 /// The kernel's `siginfo_t` as this crate needs it, for a seccomp `SIGSYS`.
 ///
-/// `_sifields._sigpoll`:
+/// `_sifields._sigsys` on x86-64, straight from `include/uapi/asm-generic/siginfo.h`. The union
+/// is 8-aligned, so it starts at offset 16 and the three members land as:
 /// ```c
-/// int      __pad[3];       // offset 12..24
-/// __u64_t  si_call_addr;   // offset 24
+/// void __user *_call_addr;  // offset 16: the trapping syscall instruction
+/// int          _syscall;    // offset 24: the syscall number, or a negative "unimplemented"
+/// unsigned int _arch;       // offset 28: AUDIT_ARCH_* of the syscall
 /// ```
-/// and, at the *same* offset, the `_sigsys` union holding `si_arch` and `si_syscall`. So this
-/// struct carries the slot as a `u64` and the two interpretations are taken by splitting it,
-/// which is exactly the aliasing the C union has.
+/// `slot` is the 8 bytes at offset 24 -- `si_syscall` in the low half, `si_arch` in the high --
+/// and `syscall()` takes the low half, which is the field `force_sig_seccomp` fills in.
+///
+/// **The three-int pad is load-bearing, and this is worth stating plainly because it has been
+/// "fixed" the wrong way before.** `__pad0` at 12..16 only serves to align the union; `slot`
+/// must sit at 24, *not* at 16. Offset 16 is `si_call_addr`, the code address of the `syscall`
+/// instruction, and reading it as a number yields a program-counter fragment: a census run with
+/// `slot` moved to 16 named `-1782543226` instead of `getrandom`, because it was printing the
+/// low 32 bits of an address in libc. `tests/census.rs::the_census_finds_a_syscall_the_allowlist_is_missing`
+/// is what pins this down -- it traps a known syscall and requires the exact name back.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SigSys {
@@ -169,8 +178,12 @@ pub struct SigSys {
     pub errno: libc::c_int,
     /// `SYS_SECCOMP`.
     pub code: libc::c_int,
-    __pad: [libc::c_int; 3],
-    /// `_sigsys`: `si_syscall` on x86-64, `si_call_addr` on i386.
+    /// `__pad0`: 12..16, so `_sifields` starts 8-aligned.
+    __pad: [libc::c_int; 1],
+    /// `si_call_addr` at 16..24: the address of the trapping instruction. Kept as a field so the
+    /// offset of `slot` is derived from the kernel's struct rather than from a comment.
+    __call_addr: libc::c_ulong,
+    /// `si_syscall` (24..28) | `si_arch` (28..32).
     slot: libc::c_ulong,
 }
 
@@ -180,22 +193,25 @@ impl SigSys {
         self.slot as libc::c_int
     }
 
-    // **There is no `arch()` accessor, and that is not an oversight.**
-    //
-    // `siginfo_t._sifields._sigpoll` puts `si_arch` and `si_syscall` in a union at the same offset,
-    // which makes it look like the kernel reports the offending architecture. It does not.
-    // `seccomp_send_kill_signal` does `memset(&info, 0, sizeof(info))`, sets `si_signo`,
-    // `si_errno` and `si_code`, and then switches on `sd->arch` to write *either* `si_syscall`
-    // (x86-64) or `si_call_addr` (i386) into that union -- without ever writing `si_arch`.
-    //
-    // So on x86-64 the low 32 bits of `si_arch` are `sd->nr`, and reading it back yields the
-    // syscall number. Measured here: for the trapped syscall 149 the report printed
-    // `syscall=149 arch=149`, which is the signature of the two fields being the same 8 bytes.
-    //
-    // The architecture is therefore taken from the *filter*, not from the signal: `Program::build`
-    // hard-kills anything whose `seccomp_data.arch` is not `AUDIT_ARCH_X86_64`, so a SIGSYS this
-    // crate ever sees is by construction an x86-64 one.
+    /// `si_arch`: the `AUDIT_ARCH_*` the trapping syscall came in on.
+    ///
+    /// Measured on this kernel rather than assumed: a census run that printed the 8 bytes at
+    /// offset 28 read back `0xC000003E`, i.e. `AUDIT_ARCH_X86_64`, for a trapped `getrandom`.
+    /// The field is real and the kernel does fill it, so a SIGSYS whose `si_arch` is anything
+    /// else did not come from this process's filter -- `Program::build` hard-kills foreign
+    /// architectures, which leaves a forged `kill(pid, SIGSYS)` as the only other way to get
+    /// here. `census_handler` rejects exactly that.
+    pub fn arch(&self) -> u32 {
+        (self.slot >> 32) as u32
+    }
 }
+
+/// `SYS_SECCOMP` (`si_code` for a seccomp `SIGSYS`), absent from `libc`'s public constants.
+///
+/// Kernel uapi: `SI_SYS`-class `si_code` 1 means "this signal came from the filter, not from
+/// `kill`". `SI_USER` (0) is what a hand-sent `SIGSYS` carries, and the two must never be
+/// confused: only the first has a meaningful `si_syscall`.
+pub const SYS_SECCOMP: libc::c_int = 1;
 
 /// `SEGV_MAPERR`: the address is not mapped to the process.
 pub const SEGV_MAPERR: libc::c_int = 1;

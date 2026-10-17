@@ -334,10 +334,30 @@ impl Program {
         self.len.saturating_sub(7) / 2
     }
 
+    /// Install the filter, with `value` as the deny action's `k` if it differs from the one the
+    /// program was built with.
+    ///
+    /// **The `value` argument is load-bearing, and it used to be ignored.** The deny epilogue is
+    /// the *last* instruction, so downgrading means patching `insns[len - 1].k` and installing
+    /// the patched copy. The old version echoed `value` back to the caller without ever putting
+    /// it in the program, so the `KillProcess` -> `Kill` retry in [`Program::install`] re-sent
+    /// the identical 107-instruction program with the identical unsupported epilogue, got the
+    /// identical `EINVAL`, and reported `ProgramRejected` -- the documented graceful-downgrade
+    /// path could never succeed, and `Installed { action: Kill, downgraded: true }` described a
+    /// filter that was never installed.
+    ///
+    /// The copy is a fixed-size stack array, not an allocation: this runs between "the filter is
+    /// decided" and "the filter is in force", which is the one place this crate must not touch
+    /// the allocator.
     fn try_install(&self, value: u32) -> Result<u32, SeccompError> {
+        // SAFETY invariant: `len >= 1` for any program `build` produced (the prologue alone is
+        // six instructions), so the epilogue index is always valid.
+        let epilogue = self.len - 1;
+        let mut patched = self.insns;
+        patched[epilogue].k = value;
         let prog = libc::sock_fprog {
             len: self.len as libc::c_ushort,
-            filter: self.insns.as_ptr() as *mut libc::sock_filter,
+            filter: patched.as_ptr() as *mut libc::sock_filter,
         };
         // SAFETY: `prog` points at `self.insns[..self.len]`, which is initialised, and the
         // kernel copies the program before returning. The filter is compiled, not referenced,
