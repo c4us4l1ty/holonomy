@@ -43,7 +43,7 @@ use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
 use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
-use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, UNDO_DEPTH};
+use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 use zeroize::Zeroize;
 
 /// Removed-span slices retained for undoing a styled deletion.
@@ -814,6 +814,21 @@ impl Editor {
         }
         if !self.is_char_boundary(offset_u) || !self.is_char_boundary(end) {
             return Err(EditorError::NotCharBoundary { offset });
+        }
+        // **The arena's size limit is a precondition, checked before anything is mutated.**
+        //
+        // `push_delete` refuses a payload larger than [`ARENA_BYTES`] (64 KiB) by design -- see
+        // [`UndoError::ActionTooLarge`] -- but this function used to ask it *after* the span map, the
+        // table map and the asset catalog had already been shifted. A select-all delete in a document
+        // over 64 KiB therefore mutated all three and then failed loudly, leaving the bytes still in
+        // the rope with every style, table and image detached: a corrupt document behind an error
+        // dialog. Checked here, the refusal costs nothing but the keystroke and leaves the document
+        // and the history exactly as they were.
+        if len as usize > ARENA_BYTES {
+            return Err(EditorError::Undo(UndoError::ActionTooLarge {
+                len: len as usize,
+                capacity: ARENA_BYTES,
+            }));
         }
 
         // Capture the bytes before the rope scrubs them, into the editor's pre-allocated scratch buffer.
@@ -1597,16 +1612,68 @@ impl Editor {
     /// [`delete_at`](Self::delete_at) does for a fresh delete, so that an undo of this redo can put
     /// the styling back.
     pub fn redo(&mut self) -> Result<EditOutcome, EditorError> {
+        // **Pop before taking the stashes.** Taking them first and then finding the redo stack empty
+        // -- which is what a second Ctrl+Y does, and [`Session::redo`](https://docs.rs) swallows
+        // `NothingToRedo` -- drained the table spans and, worse, the assets a *future* undo of the
+        // delete being redone has to put back. `restore_at` returns the remainder, and dropping it
+        // detaches the image from its anchor: the next `undo` finds an empty stash, skips the restore,
+        // and the anchor serves nothing. Popping first makes a refused redo touch nothing at all.
+        let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
         // Restored after the bytes go back in, so the spans are the ones the re-inserted bytes belong
         // to rather than a guess about where they should be.
         let restore = self.undo_tables.take();
         let restore_assets = core::mem::take(&mut self.undo_assets);
-        let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
+
+        // The replay in its own helper, so that *every* path out of it -- including a refusal that
+        // returns early -- reaches the zeroize below. `action.bytes` is a plain `Vec`, not
+        // `Zeroizing`, and these are the deleted plaintext: dropping them to the heap on an error
+        // return is exactly what FR-1.2 forbids, and the old `?`-inside-the-match let it happen.
+        let replayed = self.replay_redo(&action, restore, restore_assets);
+        let outcome = match replayed {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Refused mid-replay: scrub the plaintext rather than dropping it to the heap.
+                action.bytes.zeroize();
+                return Err(e);
+            }
+        };
+
+        // Back on the undo stack, so undo and redo can alternate indefinitely. `push` may evict the
+        // oldest entries to make room, which is the same trade a fresh edit makes and the reason redo
+        // is not guaranteed forever: it is bounded exactly as deeply as undo is.
+        let pushed = self
+            .undo
+            .push(action.offset, action.kind, &action.bytes)
+            .map_err(EditorError::Undo);
+        // The arena owns a copy now, so scrub ours rather than dropping plaintext to the heap. Order
+        // matters: this is after the push for exactly that reason -- and it runs on the push's own
+        // error path too, so a refused push cannot leak the payload either.
+        action.bytes.zeroize();
+        pushed?;
+        Ok(outcome)
+    }
+
+    /// Apply one redone action's bytes and map updates, with no history record of its own.
+    ///
+    /// Split out of [`redo`](Self::redo) for one reason: the caller has to zeroize `action.bytes` on
+    /// the way out no matter what happens here, and that is only expressible if the replay reports a
+    /// `Result` the caller can inspect *before* the payload is dropped. Keeping it inline with `?`
+    /// inside the match arms was the shape that leaked plaintext on every error return.
+    ///
+    /// Each arm mirrors its fresh-edit counterpart -- [`insert_at`](Self::insert_at)'s rope-and-span
+    /// half for `Insert`, and [`delete_at`](Self::delete_at)'s full map-update sequence for `Delete`
+    /// -- minus the history push, which is the caller's job because a redo is the *same* edit
+    /// replayed, not a new one.
+    fn replay_redo(
+        &mut self,
+        action: &UndoAction,
+        restore: Option<Vec<crate::TableSpan>>,
+        restore_assets: Vec<crate::asset::Asset>,
+    ) -> Result<EditOutcome, EditorError> {
         let offset = action.offset as usize;
         let len = action.bytes.len();
         let lines_changed = action.bytes.contains(&b'\n');
-
-        let outcome = match action.kind {
+        match action.kind {
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
@@ -1622,49 +1689,60 @@ impl Editor {
                     let want = after.saturating_sub(first);
                     self.undo_assets = self.assets.restore_at(first, restore_assets, want);
                 }
-                EditOutcome {
+                Ok(EditOutcome {
                     offset: action.offset,
                     len: len as u32,
                     kind: ActionKind::Insert,
                     line: None,
                     lines_changed,
-                }
+                })
             }
             ActionKind::Delete => {
-                // Capture the styling this redo is about to destroy, so an undo of the redo can put
-                // it back. Pushed to the same `style_undo` as a fresh delete, for the same reason
-                // that vector is total: both are Delete actions on one undo stack, and `undo` cannot
-                // tell them apart.
-                let removed = self.capture_spans(action.offset, len as u32)?;
-                // No table restore here. Redoing a delete removes bytes again, and `apply_delete`
-                // below shortens the same spans the original delete did, which is the same answer.
-                // The stash is for the `Insert` arm alone.
-                let _ = &restore;
+                // Mirror `delete_at`'s map updates, in the same order. Redoing a delete removes the
+                // bytes again, and the span map, the table map and the asset catalog all have to see
+                // it. The old arm captured only the styling (`capture_spans`, which is `&self` and
+                // therefore read-only) and then deleted out of the rope, leaving every map still
+                // describing bytes that no longer exist -- `check_invariants`, which asserts the spans
+                // cover the rope exactly, fails on the next keystroke, and the anchor count drifts by
+                // one per redone image, so a later undo restores assets to the wrong anchors.
+                let removed_spans = self.spans.apply_delete(action.offset, len as u32)?;
+                self.tables.apply_delete(action.offset, len as u32);
+                let first = self.anchor_ordinal_at(offset);
+                let anchor_count = self.anchors_in_range(offset, len as u32);
+                self.undo_assets = self.assets.remove_n(first, anchor_count);
+                // A table whose separators have all gone has no cells, and `cell_count()` subtracts
+                // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a
+                // later keystroke walking into a zero-cell table; same reason as in `delete_at`.
+                self.tables.retain_intact();
+                self.delete_range_in_rope(offset, len)?;
+                // The styling this redo removed, pushed **total** so `undo`'s pop pairs one-for-one
+                // with it, exactly as `delete_at` does. `Vec::new()` allocates nothing, so an unstyled
+                // region costs only a header.
+                let styled: Vec<TextIntervalSpan> = if removed_spans
+                    .iter()
+                    .all(|s| s.style_flags == 0 && s.color_rgb == 0)
+                {
+                    Vec::new()
+                } else {
+                    removed_spans
+                        .iter()
+                        .copied()
+                        .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
+                        .collect()
+                };
                 if self.style_undo.len() == STYLE_UNDO_DEPTH {
                     self.style_undo.remove(0);
                 }
-                self.style_undo.push(removed);
-                self.delete_range_in_rope(offset, len)?;
-                EditOutcome {
+                self.style_undo.push(styled);
+                Ok(EditOutcome {
                     offset: action.offset,
                     len: len as u32,
                     kind: ActionKind::Delete,
                     line: None,
                     lines_changed,
-                }
+                })
             }
-        };
-
-        // Back on the undo stack, so undo and redo can alternate indefinitely. `push` may evict the
-        // oldest entries to make room, which is the same trade a fresh edit makes and the reason redo
-        // is not guaranteed forever: it is bounded exactly as deeply as undo is.
-        self.undo
-            .push(action.offset, action.kind, &action.bytes)
-            .map_err(EditorError::Undo)?;
-        // The arena owns a copy now, so scrub ours rather than dropping plaintext to the heap. Order
-        // matters: this is after the push for exactly that reason.
-        action.bytes.zeroize();
-        Ok(outcome)
+        }
     }
 
     /// Apply a byte insertion to the rope and the span map, with no history record.
@@ -1698,23 +1776,6 @@ impl Editor {
             action.bytes.zeroize();
         }
         self.redo.clear();
-    }
-
-    /// The span records covering `[offset, offset+len)`, for restoring them on undo.
-    ///
-    /// Returns an empty vector when the region is plain, which is the case for almost every
-    /// keystroke in an unstyled document.
-    fn capture_spans(&self, offset: u32, len: u32) -> Result<Vec<TextIntervalSpan>, EditorError> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .spans
-            .spans()
-            .iter()
-            .filter(|s| s.start_byte < offset + len && s.end_byte > offset)
-            .copied()
-            .collect())
     }
 
     /// Assert the editor's cross-structure invariants. Test-only.

@@ -187,15 +187,18 @@ fn redo_of_a_delete_does_not_disturb_the_undo_pairing() {
     assert_eq!(text(&ed), "ABCDwxyz");
     assert_eq!(flags(&ed, 0), STYLE_BOLD);
 
-    // Redo the ABCD delete: it must record its styling again.
+    // Redo the ABCD delete: it must record its styling again, *and* remove ABCD's styling from the
+    // live map along with its bytes.
     let out = ed.redo().expect("redo ABCD");
     assert_eq!(out.kind, ActionKind::Delete);
     assert_eq!(text(&ed), "wxyz");
-    assert_eq!(
-        flags(&ed, 0),
-        STYLE_BOLD,
-        "ABCD came back bold from the redo"
-    );
+    // `w` -- now at offset 0, and plain in the original `"ABCDwxyz"` -- must read plain. This is the
+    // observable half of the span-map fix: the redo's `Delete` arm shortens the span map the same
+    // way `delete_at` does, so no bold `ABCD` run survives at offset 0 describing bytes the rope no
+    // longer holds. The styling the redo removed lives in `style_undo` instead, which the undo below
+    // puts back. (Before that fix this read `STYLE_BOLD`, because the map still covered the deleted
+    // `ABCD` while the rope held only `"wxyz"`.)
+    assert_eq!(flags(&ed, 0), 0, "w at offset 0 is plain once ABCD is gone");
 
     // Undoing the redo puts ABCD back bold -- this is the pairing that a separate redo-side record
     // vector would have broken, since `undo` pops one `style_undo` for a Delete it cannot attribute.
