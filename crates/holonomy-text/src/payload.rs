@@ -580,13 +580,29 @@ pub fn decode(input: &[u8]) -> Result<Decoded, PayloadError> {
         }
         let start_byte = u32::from_le_bytes([t[20], t[21], t[22], t[23]]);
         let end_byte = u32::from_le_bytes([t[24], t[25], t[26], t[27]]);
-        tables.push(TableSpan {
-            rows,
-            cols,
-            col_widths,
-            start_byte,
-            end_byte,
-        });
+        // **Through the validating constructor, and bounds-checked against the text.** This is the
+        // one place a table enters the document from bytes no code in this process produced, and the
+        // decoded shape is *used* unguarded afterwards: `separator_count()` subtracts one from
+        // `rows * cols` (a `rows == 0` record underflows `u32`, and release builds here have overflow
+        // checks on), `cell_rc` divides by `cols`, and `width_cells` indexes `col_widths[..cols]`
+        // past its eight elements for a `cols > 8` record. `TableMap::retain_intact` calls
+        // `separator_count` on every span at the next Backspace anywhere in the document, so the
+        // underflow is not theoretical: open one corrupt file, press one key, abort.
+        //
+        // The length check mirrors `retain_intact`'s own arithmetic (`end - start >=
+        // separator_count`), so a table that survives decode is one no later edit will silently drop
+        // for being too short to hold its own separators -- a quiet data loss, which is worse for
+        // being quiet. `TableSpan::new` already proved `end >= start`, so the subtraction is safe.
+        let span = TableSpan::with_widths(rows, cols, col_widths, start_byte, end_byte)?;
+        if span.end_byte > text_len_u32 || span.end_byte - span.start_byte < span.separator_count()
+        {
+            return Err(PayloadError::RecordOverruns {
+                what: "table span",
+                need: span.end_byte as usize,
+                have: text_len as usize,
+            });
+        }
+        tables.push(span);
         cursor += TABLE_BYTES;
     }
 

@@ -27,7 +27,9 @@
 
 use holonomy_text::asset::{catalog_fixed_bytes, AssetCatalog, AssetError, AssetId, ANCHOR_BYTES};
 use holonomy_text::payload::{self, PayloadError, FORMAT, HEADER_LEN, MAGIC};
-use holonomy_text::{Editor, SpanPolicy, STYLE_BOLD, STYLE_ITALIC};
+use holonomy_text::{
+    col_widths_for, Editor, SpanMap, SpanPolicy, TableError, TableSpan, STYLE_BOLD, STYLE_ITALIC,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -456,6 +458,76 @@ fn an_absurd_count_is_refused_before_anything_is_allocated() {
         }
         other => panic!("expected CountTooLarge, got {other:?}"),
     }
+}
+
+#[test]
+fn a_table_record_that_cannot_describe_a_table_is_refused() {
+    // A decoded table is used *unguarded* afterwards: `TableMap::retain_intact` calls
+    // `separator_count()` -- `rows * cols - 1` -- on every span at the next Backspace anywhere in the
+    // document, `cell_rc` divides by `cols`, and `width_cells` indexes `col_widths[..cols]` past its
+    // eight elements. Release builds here have overflow checks on, so a `rows == 0` record did not
+    // open a corrupt table, it armed an abort one keystroke away. `TableSpan::with_widths` is the
+    // single validating constructor, and decode now runs every table from bytes through it.
+    let text = "a|b|c|d";
+    let widths = col_widths_for(20, 2).expect("widths");
+    let honest =
+        TableSpan::with_widths(2, 2, widths, 0, text.len() as u32).expect("a real 2x2 shape");
+    let p = payload::encode(
+        text,
+        &SpanMap::plain(text.len() as u32),
+        &[honest],
+        &AssetCatalog::new(),
+    );
+    assert!(payload::decode(&p).is_ok(), "the honest table decodes");
+
+    // The table record sits right after the header, the text, and the span table (one plain span,
+    // 16 bytes). Its own layout is rows 2 | cols 2 | widths 16 | start 4 | end 4.
+    let text_len = u32::from_le_bytes([p[8], p[9], p[10], p[11]]) as usize;
+    let span_count = u16::from_le_bytes([p[12], p[13]]) as usize;
+    let table_at = HEADER_LEN + text_len + span_count * 16;
+
+    // `rows = 0`: `cell_count()` is 0, `separator_count()` underflows u32.
+    let mut zero_rows = p.clone();
+    zero_rows[table_at..table_at + 2].copy_from_slice(&0u16.to_le_bytes());
+    assert_eq!(
+        payload::decode(&zero_rows).unwrap_err(),
+        PayloadError::Table(TableError::ZeroExtent)
+    );
+
+    // `cols = 0`: `cell_rc` divides by cols.
+    let mut zero_cols = p.clone();
+    zero_cols[table_at + 2..table_at + 4].copy_from_slice(&0u16.to_le_bytes());
+    assert_eq!(
+        payload::decode(&zero_cols).unwrap_err(),
+        PayloadError::Table(TableError::ZeroExtent)
+    );
+
+    // `cols > MAX_COLS`: `width_cells` reads col_widths[8..] out of the 8-element array.
+    let mut huge_cols = p.clone();
+    huge_cols[table_at + 2..table_at + 4].copy_from_slice(&9u16.to_le_bytes());
+    assert!(matches!(
+        payload::decode(&huge_cols).unwrap_err(),
+        PayloadError::Table(TableError::TooManyColumns { got: 9, .. })
+    ));
+
+    // A table whose byte range ends past the text it claims to live in.
+    let mut past_end = p.clone();
+    past_end[table_at + 24..table_at + 28]
+        .copy_from_slice(&((text.len() + 1) as u32).to_le_bytes());
+    assert!(matches!(
+        payload::decode(&past_end).unwrap_err(),
+        PayloadError::RecordOverruns { .. }
+    ));
+
+    // A table too short to hold its own separators is one `retain_intact` would silently drop on the
+    // next edit; decode refuses it here instead, where the report can still name the cause.
+    let mut too_short = p.clone();
+    too_short[table_at..table_at + 2].copy_from_slice(&3u16.to_le_bytes()); // 3 rows x 2 cols = 6 cells = 5 separators
+    too_short[table_at + 24..table_at + 28].copy_from_slice(&2u32.to_le_bytes()); // ...in a 2-byte range
+    assert!(matches!(
+        payload::decode(&too_short).unwrap_err(),
+        PayloadError::RecordOverruns { .. }
+    ));
 }
 
 #[test]
