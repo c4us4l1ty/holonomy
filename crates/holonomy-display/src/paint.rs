@@ -1033,9 +1033,10 @@ impl<'a> Painter<'a> {
 /// raster's own coordinates have to be recovered by subtracting the node's origin. That is why `x` and
 /// `y` are passed alongside `dst` rather than being read out of it.
 ///
-/// Returns the pixels written. The row loop skips rows the frame does not have, and the inner loop
-/// clips each row to the frame, so a raster hanging off the right or bottom edge is normal rather
-/// than something to guard against.
+/// Returns the pixels written. The row loop skips rows the frame does not have, and both the row loop
+/// and the inner loop clip to the damage rect -- so a raster hanging off the frame, or straddling any
+/// edge of the damage, paints only the pixels inside both, and nothing is written where the caller did
+/// not ask for paint.
 fn blit_rgba(
     frame: &mut Frame,
     dst: &DamageRect,
@@ -1051,7 +1052,20 @@ fn blit_rgba(
         if sy < 0 {
             continue;
         }
-        let dst_row = frame.row_mut(u32::try_from(sy).unwrap_or(u32::MAX));
+        let Ok(py) = u32::try_from(sy) else { continue };
+        // **Clip to the damage rect, and this is the vertical twin of the column clip below.** The
+        // horizontal axis has had it from the start (`px < dst.x || px >= dst.x + dst.width`), so an
+        // image straddling the left or right edge of the damage painted only the damaged columns. The
+        // vertical axis did not, so the same image straddling the *top or bottom* edge painted every
+        // row the frame had -- which is a correctness bug (pixels written outside the damage rect the
+        // caller asked for) and, in a damage-driven renderer, a performance one: the whole point of
+        // `paint(..., Some(damage))` is that untouched rows are not touched. `dst.y`/`dst.height` are
+        // `u32`, so the comparison is done after the `try_from` that the frame-bound check already
+        // needs, keeping the two clips symmetrical.
+        if py < dst.y || py >= dst.y.saturating_add(dst.height) {
+            continue;
+        }
+        let dst_row = frame.row_mut(py);
         if dst_row.is_empty() {
             continue;
         }

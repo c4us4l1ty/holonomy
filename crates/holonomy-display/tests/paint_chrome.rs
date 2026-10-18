@@ -228,6 +228,120 @@ fn a_damage_rect_outside_everything_paints_nothing() {
     assert_eq!(stats.box_glyphs, 0);
 }
 
+/// **An image straddling a damage edge paints only its damaged half — on *both* axes.**
+///
+/// `blit_rgba` clipped columns to the (already intersected) damage rect from the start but never
+/// clipped rows, so an image whose rect crossed the *top* or *bottom* edge of the damage painted
+/// every row it had. Two failures in one: pixels were written where the caller had not asked for
+/// paint — a correctness bug in a damage-driven renderer — and the whole point of
+/// `paint(..., Some(damage))` (which this file's other tests measure) is that undamaged work is not
+/// done at all, so a caret blink over a page with a picture repainted the picture's every row.
+///
+/// The horizontal case is asserted alongside it, not instead of it: the two clips live in one
+/// function, and a fix that added the vertical clip by rewriting the loop could easily have dropped
+/// the horizontal one. The `image_pixels` count is the assertion for both halves at once, because a
+/// double-write or a missed half move it.
+#[test]
+fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
+    /// One opaque white 8 x 8 raster, which is what an admitted RGBA image looks like before it is
+    /// laid out. Opaque so the blend is the identity and the frame's own colour never appears.
+    ///
+    /// Owned rather than `const`: a `const` array is built by const-evaluated slice indexing, which
+    /// is not stable, and the raster has to be a field of a `struct` the trait impl can borrow.
+    struct One {
+        px: Vec<u8>,
+    }
+    impl One {
+        fn white() -> Self {
+            let mut px = vec![0xFFu8; 8 * 8 * 4];
+            for p in px.chunks_exact_mut(4) {
+                p.copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+            }
+            Self { px }
+        }
+    }
+    impl holonomy_render::RasterSource for One {
+        fn raster(
+            &self,
+            _asset_id: holonomy_render::AssetId,
+        ) -> Option<holonomy_render::Raster<'_>> {
+            Some(holonomy_render::Raster {
+                width: 8,
+                height: 8,
+                pixels: &self.px,
+            })
+        }
+    }
+    let rasters = One::white();
+
+    // A 32 x 32 frame with one 8 x 8 image at (8, 8), so its rows are 8..16 and its columns 8..16.
+    let id = holonomy_render::AssetId::of(b"one image");
+    let tree = holonomy_render::SurfaceTree::leaf(holonomy_render::Node::Image {
+        rect: holonomy_render::Rect::new(8, 8, 8, 8, 0),
+        asset_id: id,
+    });
+
+    // Damage is the image's top half: rows 8..12, all eight columns. `image()` intersects the rect
+    // with the damage before blitting, so `dst` is 8 x 4 while the raster is 8 x 8 — precisely the
+    // case the row loop used to ignore.
+    let mut half = Frame::black(32, 32);
+    let half_stats = Painter::new(&atlas(), 0)
+        .paint_with_rasters(&mut half, &tree, Some(DamageRect::new(8, 8, 8, 4)), Some(&rasters))
+        .expect("paint the top half");
+    assert_eq!(
+        half_stats.image_pixels, 32,
+        "only the four damaged rows may be painted: {half_stats:?}"
+    );
+    for y in 8..12 {
+        assert!(
+            half.row(y)[8..16].iter().all(|&p| p == 0xFFFF_FFFF),
+            "damaged row {y} is painted: {:x?}",
+            &half.row(y)[8..16]
+        );
+    }
+    for y in 12..16 {
+        assert!(
+            half.row(y).iter().all(|&p| p == 0),
+            "undamaged row {y} must be untouched, but it holds {:x?}",
+            half.row(y)
+        );
+    }
+
+    // The mirror: damage is the image's left half, which is the axis that already worked. Asserted
+    // because the two clips are one function, and this is what fails if a rewrite drops one.
+    let mut side = Frame::black(32, 32);
+    let side_stats = Painter::new(&atlas(), 0)
+        .paint_with_rasters(&mut side, &tree, Some(DamageRect::new(8, 8, 4, 8)), Some(&rasters))
+        .expect("paint the left half");
+    assert_eq!(
+        side_stats.image_pixels, 32,
+        "only the four damaged columns may be painted: {side_stats:?}"
+    );
+    assert!(
+        side.row(9)[8..12].iter().all(|&p| p == 0xFFFF_FFFF),
+        "the damaged columns are painted"
+    );
+    assert!(
+        side.row(9)[12..16].iter().all(|&p| p == 0),
+        "the undamaged columns are untouched: {:x?}",
+        &side.row(9)[12..16]
+    );
+
+    // And a full-damage paint is the whole 64 pixels, so the clip is not over-eager: an image fully
+    // inside the damage still arrives intact.
+    let mut whole = Frame::black(32, 32);
+    let whole_stats = Painter::new(&atlas(), 0)
+        .paint_with_rasters(&mut whole, &tree, Some(DamageRect::new(8, 8, 8, 8)), Some(&rasters))
+        .expect("paint the whole image");
+    assert_eq!(whole_stats.image_pixels, 64, "the whole image lands: {whole_stats:?}");
+    for y in 8..16 {
+        assert!(
+            whole.row(y)[8..16].iter().all(|&p| p == 0xFFFF_FFFF),
+            "row {y} is fully painted"
+        );
+    }
+}
+
 #[test]
 fn the_caret_is_actually_drawn_into_the_frame() {
     // The chrome's caret node is a filled rect; if the painter skipped it the frame would look fine
