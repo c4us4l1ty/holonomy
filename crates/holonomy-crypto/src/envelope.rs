@@ -47,7 +47,7 @@ use core::fmt;
 use hkdf::Hkdf;
 use secrecy::SecretBox;
 use sha2::Sha512;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::bignum::{to_le_bytes, U2048};
 use crate::modulus::{self, VdfError};
@@ -287,16 +287,21 @@ pub fn argon2id_k_int(passphrase: &str, salt: &[u8]) -> Result<[u8; K_INT_LEN], 
     if salt.len() != SALT_LEN {
         return Err(EnvelopeError::BadSaltLength);
     }
-    let mut passphrase = normalize_passphrase(passphrase);
+    // **RAII, because a scrub written at each exit is a scrub missing from one of them.**
+    //
+    // This was a plain `String` with `passphrase.zeroize()` *after* the Argon2 call, and the
+    // empty-passphrase return two lines below skipped it — a return that is reachable by typing a
+    // passphrase made entirely of spaces, which is precisely what someone does when they have
+    // forgotten they had one set. The comment above this function claimed the scrub happened "on
+    // every path, including the error one", and for that one it did not.
+    //
+    // `Zeroizing` costs nothing: the wrapper *is* the same `String` in the same place, not a copy,
+    // and it scrubs on every path out of this function including any a later edit adds.
+    let passphrase = Zeroizing::new(normalize_passphrase(passphrase));
     if passphrase.is_empty() {
         return Err(EnvelopeError::EmptyPassphrase);
     }
-    let result = argon2id_k_int_inner(&passphrase, salt);
-    // **On every path, including the error one.** An Argon2 failure after filling 128 MiB still
-    // leaves the buffer to be scrubbed, and a scrub written only on the success path is a scrub
-    // that does not happen when something has already gone wrong.
-    passphrase.zeroize();
-    result
+    argon2id_k_int_inner(&passphrase, salt)
 }
 
 /// The Argon2id call, with the working memory owned by this frame. See [`argon2id_k_int`].
@@ -495,18 +500,26 @@ pub fn derive_root(
     let wall = std::time::Instant::now();
     let mut timings = Timings::default();
 
-    // **The normalised passphrase is scrubbed on every path out, not on the happy path.**
+    // **Every secret in this function is `Zeroizing`, which is the whole change.**
     //
-    // `normalised` is NFKD-expanded text derived directly from what the user typed, living on
-    // the heap, and it is live across the whole of the derivation — the longest part of an
-    // unlock. `ScopeGuard` does not exist in `core` and this crate is not adding a dependency
-    // for one call, so the scrub is written at each exit instead: **there are exactly four, and
-    // the compiler says so if a fifth is added.**
+    // These were plain bindings scrubbed by hand at the bottom of the function, which reads as
+    // thorough and is not: the four early returns below skipped all of it. `normalised` is
+    // NFKD-expanded text derived from what the user typed, on the heap, and it is live across the
+    // whole derivation — the longest part of an unlock. An empty passphrase returned at the first
+    // check; an Argon2 failure returned at the second; a VDF rejection (`ZeroIterations`,
+    // `ZeroSeed`, `SeedNotCoprime`) returned at the third, and a `HkdfLengthMismatch` at the fourth.
+    // **Every one of those left a passcode-derived secret in freed heap and stack memory**, and the
+    // comment here used to say the opposite: *"the scrub is written at each exit instead: there are
+    // exactly four, and the compiler says so if a fifth is added."* There was one scrub, on the
+    // success path, and nothing checked the arithmetic.
     //
-    // FR-4.5 is about the Argon2id *memory block*, which `argon2id_k_int` now scrubs itself. This
-    // is a different buffer, in a different crate, that the same requirement covers and that
-    // nothing else in the envelope was reaching.
-    let normalised = normalize_passphrase(passphrase);
+    // `Zeroizing` makes the claim true by construction rather than by counting: the secret is
+    // scrubbed when the binding goes out of scope, on every path, including one a future edit adds.
+    // It costs nothing — the wrapper is the value in the same place, not a copy — and the same
+    // applies to the four stack arrays, whose `Drop` also carries `Zeroize`'s compiler fence, so
+    // the explicit `compiler_fence` at the bottom is no longer what makes the scrub survive
+    // optimisation.
+    let normalised = Zeroizing::new(normalize_passphrase(passphrase));
     timings.normalize_us = wall.elapsed().as_micros() as u64;
     if normalised.is_empty() {
         return Err(EnvelopeError::EmptyPassphrase);
@@ -515,55 +528,28 @@ pub fn derive_root(
     let t = std::time::Instant::now();
     // **`?` and not a `match` that re-wraps `Err(e) => return Err(e)`.** The error type is the same
     // on both sides, so the `match` was four lines spelling `?` and one line of room for the two to
-    // drift apart. **The scrubbing below is unaffected**: it is after this line either way, which is
-    // the property the `match` might have looked like it protected and did not.
-    let k_int = argon2id_k_int(&normalised, salt)?;
-    // **Two copies of the passphrase in memory at once, and both are now scrubbed.** `argon2id_k_int`
-    // normalises internally, so the argument below is *already* the normalised text and the call
-    // above made a second copy of it, which it scrubs on its own way out.
-    let mut normalised = normalised;
-    normalised.zeroize();
+    // drift apart.
+    let k_int = Zeroizing::new(argon2id_k_int(&normalised, salt)?);
     timings.argon2_ms = t.elapsed().as_millis() as u64;
 
     let t = std::time::Instant::now();
-    // **`k_int` is now the only live copy of the intermediate, and it is scrubbed below.**
-    let seed = modulus::seed_from_k_int(&k_int);
-    let s_t = modulus::sequential_squarings(&seed, vdf_iterations)?;
+    // **`k_int` and `seed` are the chain state, and neither is in a `Secret`** — that is why `K_int`
+    // appeared in the audit as "never zeroized".
+    let seed = Zeroizing::new(modulus::seed_from_k_int(&k_int));
+    let s_t = Zeroizing::new(modulus::sequential_squarings(&seed, vdf_iterations)?);
     timings.vdf_ms = t.elapsed().as_millis() as u64;
 
     let t = std::time::Instant::now();
-    let k_root = root_key(&s_t, &k_int);
-    let okm = expand_root_keys(&k_root)?;
+    let k_root = Zeroizing::new(root_key(&s_t, &k_int));
+    let okm = Zeroizing::new(expand_root_keys(&k_root)?);
     timings.hkdf_us = t.elapsed().as_micros() as u64;
     timings.total_ms = wall.elapsed().as_millis() as u64;
 
-    // **Every intermediate is scrubbed before this returns, on the success path.**
-    //
-    // `k_int` is a `[u8; 64]` on the stack — the passcode-derived secret that seeds the VDF and is
-    // one of the two halves of `K_root`. `k_root` and `okm` are its descendants; `okm` is copied
-    // into the `SecretBox` below and then scrubbed. **None of these four is in a `Secret`,** and
-    // that was the reason `K_int` appeared in the audit as "never zeroized". `seed` is a `U2048`
-    // limb array holding the chain state, which is no less sensitive.
-    //
     // **The root is built before the scrub, not after.** `RootMaterial::from_okm` copies, so the
-    // order is: copy into the owned `Secret`, then wipe every stack copy. Doing it the other way
-    // round would hand a `SecretBox` full of zeros — which compiles, passes a length assertion,
-    // and opens nobody's container.
+    // order is: copy into the owned `Secret`, and `okm` is scrubbed as this scope ends. Doing it the
+    // other way round would hand a `SecretBox` full of zeros — which compiles, passes a length
+    // assertion, and opens nobody's container.
     let root = RootMaterial::from_okm(&okm);
-
-    let mut k_int = k_int;
-    let mut seed = seed;
-    let mut k_root = k_root;
-    let mut okm = okm;
-    k_int.zeroize();
-    seed.zeroize();
-    k_root.zeroize();
-    okm.zeroize();
-    // **The fence, and it is the point of using `zeroize` rather than `fill`.** It tells the
-    // compiler not to reorder the scrub relative to the stores above, and not to elide stores whose
-    // values are never read again — which is exactly the optimisation that would turn a scrub into
-    // a comment.
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 
     Ok(Derived {
         root: SecretBox::new(Box::new(root)),
