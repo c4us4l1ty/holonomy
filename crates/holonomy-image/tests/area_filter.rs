@@ -30,6 +30,7 @@
 //! | below the threshold nothing moved | [`below_the_threshold_the_bytes_are_exactly_what_they_were`] |
 //! | the footprints tile without gaps or overlap | [`the_footprints_tile_the_source_without_gaps_or_overlap`] |
 //! | and a long run of 255s does not overflow | [`a_long_footprint_does_not_overflow_the_accumulator`] |
+//! | and neither does the longest one the decoder admits | [`the_longest_admitted_footprint_does_not_overflow_the_accumulator`] |
 
 use holonomy_image::scale::{
     axis_area_map, axis_map, resample, use_area, AreaSample, Rgba, AREA_THRESHOLD,
@@ -353,5 +354,62 @@ fn a_long_footprint_does_not_overflow_the_accumulator() {
         out[0], 101,
         "(100 + 101 + 1) / 2 rounds half-up to 101. Truncating gives 100, and a systematic dark bias \\
          is worse than the half-step it costs."
+    );
+}
+/// **The longest footprint the decoder admits does not overflow the accumulator** — and this is the
+/// one that used to abort the process.
+///
+/// [`a_long_footprint_does_not_overflow_the_accumulator`] and its doc comment both reason to
+/// "65536:1 would put 16.7 M in a `u32`, which still fits". That is the correct arithmetic and it stops
+/// **one step short of the actual ceiling**: `u32::MAX / 255 = 16,843,009.8`, so a footprint of
+/// 16,843,010 rows of white overflows. The test above stops at 512, three orders of magnitude short,
+/// which is why the gap survived.
+///
+/// And nothing above the scaler stops a document getting there. `png::MAX_PIXELS` is 32 Mi *pixels*,
+/// not a bound on either axis, so a 1 x 33,554,432 image is admissible — one pixel wide, so the strip
+/// is 134 MB of decoded RGBA, and a hostile document containing it is ~100 KB on disk because all-zero
+/// rows compress to nothing. Reducing that strip to page-column width makes the vertical footprint the
+/// whole strip, and the accumulator sums 33,554,432 x 255 = 8.56e9 against a `u32` ceiling of 4.29e9.
+///
+/// **This was an abort, not a wrong pixel.** Release builds here run `overflow-checks = true` under
+/// `panic = "abort"`, so the add trap took the process down mid-paint. The wrapped value would also
+/// have been visibly wrong — the mean of all-white rows is 255, and a wrap yields 0 — so the assertion
+/// below distinguishes the two only by which one fires first; it is written to be right either way.
+///
+/// The horizontal pass has the same bound by the same argument (`scale_x_area`'s footprint is up to
+/// `src_w`), so it is driven too, with the transpose.
+///
+/// **Memory.** The fixture is two 134 MB allocations (source and the full-height intermediate the
+/// two-pass form requires) and about a second of work, which is why the numbers are the smallest that
+/// actually cross the ceiling rather than the round 33,554,432.
+#[test]
+fn the_longest_admitted_footprint_does_not_overflow_the_accumulator() {
+    // The exact first footprint that overflows a u32 accumulator of channel bytes.
+    const ROWS: u32 = 16_843_010;
+    assert!(
+        u64::from(ROWS) * 255 > u64::from(u32::MAX),
+        "the fixture must actually overflow a u32, or this test proves nothing"
+    );
+
+    // Down the vertical axis: a one-pixel-wide strip `ROWS` tall, reduced to one row.
+    let img = solid(1, ROWS, 255);
+    let mut out = vec![0u8; holonomy_image::scale::bytes_for(1, 1)];
+    resample(&img, 1, 1, &mut out).expect("ROWS tall -> 1");
+    assert_eq!(
+        out[0..4],
+        [255, 255, 255, 255],
+        "{} rows of white must average to white; a wrapped u32 accumulator lands near 0",
+        ROWS
+    );
+
+    // And across it, which is `scale_x_area`'s accumulator: the same strip laid on its side.
+    let img = solid(ROWS, 1, 255);
+    let mut out = vec![0u8; holonomy_image::scale::bytes_for(1, 1)];
+    resample(&img, 1, 1, &mut out).expect("ROWS wide -> 1");
+    assert_eq!(
+        out[0..4],
+        [255, 255, 255, 255],
+        "{} columns of white must average to white: the horizontal area pass accumulates the same way",
+        ROWS
     );
 }

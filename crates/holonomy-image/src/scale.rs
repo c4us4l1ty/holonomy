@@ -349,7 +349,12 @@ pub fn resample_pixels(
     // the point where the width is known, rather than inside a kernel that is handed a slice.
     if use_area(src_h, dst_h) {
         let ymap = axis_area_map(src_h, dst_h);
-        let mut acc: Vec<u32> = Vec::new();
+        // **u64 lanes**, because a footprint sums up to `src_h * 255` per channel and `MAX_PIXELS`
+        // admits `src_h == 33_554_432` on a one-pixel-wide image -- 8.56e9, twice a u32's ceiling.
+        // Under `overflow-checks = true` that was an abort rather than a wrong pixel. The scratch is
+        // `dst_w * 4` lanes hoisted out of the loop, so at the product's 640-wide destination this is
+        // 20 KB -- it doubles from 10 KB, against a 2.64 MiB intermediate buffer it is not the cost.
+        let mut acc: Vec<u64> = Vec::new();
         for dy in 0..dst_h as usize {
             let s = ymap[dy];
             let out = &mut dst[dy * mid_stride..(dy + 1) * mid_stride];
@@ -397,16 +402,22 @@ fn scale_x_area(row: &[u8], out: &mut [u8], map: &[AreaSample]) {
         }
         let start = (sample.start as usize).min(last / 4);
         let len = (sample.len as usize).max(1).min(s.len() / 4 - start);
-        let mut acc = [0u32; 4];
+        // **u64, and the bound is the decoder's own, not a guess.** A footprint is up to `src_w` pixels
+        // long and a channel byte is up to 255, so the sum reaches `src_w * 255`. `MAX_PIXELS` admits
+        // a 1 x 33,554,432 image, which sums to 8.56e9 against a u32 ceiling of 4.29e9 -- so the old
+        // u32 accumulator overflowed on a one-pixel-wide strip, and because release builds here carry
+        // `overflow-checks = true` under `panic = "abort"` that is a process abort, not a wrong pixel:
+        // a ~100 KB crafted PNG (all-zero rows compress to nothing) took the whole editor with it.
+        let mut acc = [0u64; 4];
         for px in start..start + len {
             let at = px * 4;
             for c in 0..4 {
-                acc[c] += u32::from(s[at + c]);
+                acc[c] += u64::from(s[at + c]);
             }
         }
-        let half = (len as u32) / 2;
+        let half = len as u64 / 2;
         for c in 0..4 {
-            out[i + c] = ((acc[c] + half) / len as u32) as u8;
+            out[i + c] = ((acc[c] + half) / len as u64) as u8;
         }
     }
 }
@@ -423,7 +434,7 @@ fn scale_y_area(
     mid_stride: usize,
     sample: AreaSample,
     out: &mut [u8],
-    acc: &mut [u32],
+    acc: &mut [u64],
 ) {
     let n = (out.len()).min(acc.len());
     if n == 0 || mid.is_empty() {
@@ -435,13 +446,16 @@ fn scale_y_area(
     for row in start..start + len {
         let base = row * mid_stride;
         let line = &mid[base..(base + n).min(mid.len())];
+        // **u64, for the same reason and the same bound as `scale_x_area`'s**: the footprint is up to
+        // `src_h` rows and a channel byte is up to 255, so the sum reaches `src_h * 255`. `MAX_PIXELS`
+        // admits a 33,554,432-tall strip, which is 8.56e9 against a u32 ceiling of 4.29e9.
         for (a, b) in acc.iter_mut().zip(line) {
-            *a += u32::from(*b);
+            *a += u64::from(*b);
         }
     }
-    let half = (len as u32) / 2;
+    let half = len as u64 / 2;
     for (i, a) in acc.iter().enumerate().take(n) {
-        out[i] = ((*a + half) / len as u32) as u8;
+        out[i] = ((*a + half) / len as u64) as u8;
     }
     // **Zeroed on the way out.** The accumulator holds plaintext pixel values summed from the decoded
     // image, and it is reused for the next row rather than dropped -- so the last row's sums would
