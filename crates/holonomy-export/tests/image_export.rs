@@ -347,6 +347,52 @@ fn a_standalone_html_document_with_an_image_is_well_formed() {
 // PDF
 // -----------------------------------------------------------------------------------------
 
+/// **The PDF exporter finds an image whose anchor straddles a run boundary** -- the counterpart of
+/// [`html_finds_an_image_whose_anchor_straddles_a_run_boundary`], and the test for a bug that test's
+/// existence made obvious.
+///
+/// `html.rs` carries a `carry` across slice boundaries and `pdf.rs` did not: `split_on_anchors`
+/// subtracted the partial lead from the trailing text and returned, **discarding** it. That is one
+/// line and two failures. The bytes are gone from the export, so the author's text is short by one or
+/// two characters at every run edge that lands there. And because the next slice then begins mid-anchor
+/// -- `0x80 0x99` where the scanner looks for `0xE2` -- the anchor is never recognised at all, so
+/// `anchor_ordinal`, the only thing mapping an anchor to a catalog entry, does not advance. Every
+/// picture after the cut one is then placed with its neighbour's bytes: a document that exports
+/// successfully and shows the wrong photographs, which is worse in every way than one that failed.
+///
+/// The same fixture as the HTML test is used deliberately: one image, one run boundary two bytes into
+/// its anchor, so the only thing under test is the boundary.
+#[test]
+fn pdf_finds_an_image_whose_anchor_straddles_a_run_boundary() {
+    let png = png();
+    let mut e = Editor::from_text(b"left\n").expect("editor");
+    e.insert_image(5, &png)
+        .expect("insert at the end of line 0");
+    e.insert_at(e.text_len() as u32, b"right\n", SpanPolicy::Strict)
+        .expect("tail");
+    let anchors = e.image_anchors().expect("anchors");
+    let at = anchors[0] as usize;
+    e.style_range(0, at as u32 + 2, holonomy_text::STYLE_BOLD, 0)
+        .expect("a run boundary two bytes into the anchor");
+
+    let mut stats = holonomy_export::pdf::PdfStats::default();
+    let out = holonomy_export::pdf::build(&e, &PdfOptions::default(), &mut stats).expect("build");
+    let pdf = String::from_utf8_lossy(&out).into_owned();
+
+    assert_eq!(
+        stats.images, 1,
+        "the straddling anchor was found exactly once: it was neither dropped nor counted twice"
+    );
+    assert_eq!(stats.images_missing, 0, "and it was not reported as a lost asset");
+    assert!(
+        pdf.contains("/Subtype /Image"),
+        "the picture did not survive the cut: {pdf}"
+    );
+    // The text on both sides of the boundary is still laid out. A dropped lead byte shows up here as a
+    // lost glyph rather than as a broken picture, which is why this is asserted separately.
+    assert_eq!(stats.lines, 2, "both lines of text survived the cut: {pdf}");
+}
+
 #[test]
 fn pdf_writes_an_image_xobject_with_device_rgb_samples() {
     let (e, _) = with_image();

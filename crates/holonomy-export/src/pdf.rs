@@ -343,6 +343,13 @@ pub fn build(
     // How many anchors have gone past; the n-th serves catalog entry n. See `html.rs`'s note on why this
     // is a counter and not a search: the walk is already in document order.
     let mut anchor_ordinal = 0usize;
+    // The at-most-two bytes an anchor can be cut into by a slice edge, held between slices so the next
+    // one can complete it. Mirrors `html.rs`'s `carry`; see `split_on_anchors` for why dropping these
+    // instead cost both text bytes and every picture after the first cut anchor.
+    let mut carry: Vec<u8> = Vec::with_capacity(holonomy_text::ANCHOR_BYTES.len());
+    // `carry ++ slice`, rebuilt per slice. One allocation for the life of the export, and the same
+    // buffer serves both roles so what the scanner sees and what the layouter is fed cannot differ.
+    let mut joined: Vec<u8> = Vec::with_capacity(crate::html::CHUNK_BYTES + holonomy_text::ANCHOR_BYTES.len());
     let mut y = opts.page.height - opts.margin;
     let mut lines_on_page = 0usize;
     // The line being accumulated. It survives across runs, which is the whole point: the span map's
@@ -382,11 +389,21 @@ pub fn build(
                 opts.font_size
             };
 
+            // **The carry goes in front of this slice**, which is the whole of `split_on_anchors`'s
+            // tail contract: an anchor split across the previous slice's end is completed here and
+            // nowhere else, so it is found exactly once and `anchor_ordinal` advances exactly once.
+            // Reusing one buffer for both roles keeps the pair from drifting -- the bytes read by
+            // `find_anchor` and the bytes fed to the layouter are the same allocation, by construction.
+            joined.clear();
+            joined.extend_from_slice(&carry);
+            joined.extend_from_slice(slice);
+            let pieces = split_on_anchors(&joined, &mut carry);
+
             // Split the slice on anchors before it reaches the layouter. An anchor is a picture, not a
             // word: it has no glyph, no advance, and it wants the whole measure and a height derived
             // from its aspect ratio. Feeding it to the layouter as a 3-byte run would typeset U+FFFC's
             // replacement glyph if the font had one and a blank otherwise, so the split happens here.
-            for piece in split_on_anchors(slice) {
+            for piece in pieces {
                 if let Piece::Text(t) = piece {
                     let mut pending: Vec<u8> = t.to_vec();
                     for line in layout.feed(&pending, font_name, metric, size, big, stats) {
@@ -473,6 +490,28 @@ pub fn build(
         }
         chunk_base = chunk_end;
     }
+
+    // **Whatever is still held back is an anchor the document ended in the middle of.** It cannot
+    // happen through `insert_image` -- the anchor is inserted whole -- but a hand-edited or
+    // corrupt document can end on one or two bytes of U+FFFC. Those bytes are not valid UTF-8, so
+    // feeding them to the layouter would be meaningless rather than lossy; the honest reading is the
+    // one `html.rs` takes, a picture reference with no picture behind it, which reserves the space a
+    // picture would have and counts itself so a document that lost an asset says so here rather than
+    // looking like one that never had images. No ordinal is consumed: nothing placed an image, and
+    // the walk is over, so a counter nothing reads is worse than no counter.
+    if !carry.is_empty() {
+        let h = opts.line_height;
+        if y < opts.margin + h {
+            pages.push(std::mem::replace(&mut current, Content::new()));
+            y = opts.page.height - opts.margin;
+            lines_on_page = 0;
+        }
+        y -= h;
+        lines_on_page += 1;
+        stats.images_missing += 1;
+        carry.clear();
+    }
+
     // A trailing run with no newline still produced a line, via `finish`.
     for line in layout.finish() {
         if lines_on_page == lines_per_page(opts) || y < opts.margin {
@@ -609,27 +648,45 @@ enum Piece<'a> {
 
 /// The pieces of `slice`, in order, with anchors as their own item.
 ///
-/// The *tail* problem: `slice` is a run's bytes and the anchor is three, so an anchor can straddle the
-/// end. A partial lead is left in the trailing text rather than consumed, and the next slice continues
-/// it -- so the anchor is found once, by the slice that completes it, and `anchor_ordinal` advances
-/// once with it.
-fn split_on_anchors(slice: &[u8]) -> Vec<Piece<'_>> {
+/// # The tail problem, and what used to happen to it
+///
+/// `slice` is a run's bytes and the anchor is three, so an anchor can straddle the end: `read_into`
+/// and `runs_in` both cut on their own edges, and neither knows where an anchor is.
+///
+/// The previous version subtracted the partial lead from the trailing text and returned -- which meant
+/// **two** bugs from one line. The lead bytes were *dropped*, so the exported PDF lost one or two bytes
+/// of the author's text at every run boundary that happened to land there; and because the next slice
+/// then began mid-anchor with `0x80 0x99` where the scanner looks for `0xE2`, the anchor was never
+/// found at all. That second half is the worse one: `anchor_ordinal` is the *only* thing mapping an
+/// anchor to a catalog entry, so a single missed anchor shifts every picture after it onto its
+/// neighbour's bytes -- a document that exports successfully and pictures the wrong photographs in
+/// the wrong places.
+///
+/// So the partial lead is **held back into `carry`**, not consumed, exactly as `html.rs`'s
+/// `emit_with_anchors` does; `build` prepends `carry` to the next slice, the anchor is found once by
+/// the slice that completes it, and `anchor_ordinal` advances once with it. `carry` is at most two
+/// bytes, so prepending costs one `memcpy` per slice and nothing per document.
+fn split_on_anchors<'a>(slice: &'a [u8], carry: &mut Vec<u8>) -> Vec<Piece<'a>> {
     let mut out = Vec::new();
     let mut rest = slice;
     loop {
         let (found, partial) = crate::asset::find_anchor(rest);
         let Some(found) = found else {
-            // Everything except a possible partial lead at the very end.
+            // Everything except a possible partial lead at the very end, which goes back in `carry`
+            // for the next slice to prepend rather than vanishing from the export.
             let keep = rest.len().saturating_sub(partial);
             out.push(Piece::Text(&rest[..keep]));
+            carry.clear();
+            carry.extend_from_slice(&rest[keep..]);
             return out;
         };
         if found > 0 {
             out.push(Piece::Text(&rest[..found]));
         }
         out.push(Piece::Anchor);
-        rest = &rest[found + 3..];
+        rest = &rest[found + holonomy_text::ANCHOR_BYTES.len()..];
         if rest.is_empty() {
+            carry.clear();
             return out;
         }
     }
