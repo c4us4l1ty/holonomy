@@ -88,14 +88,41 @@ pub const VDF_ITERATIONS_OFFSET: u64 = SALT_LEN as u64;
 /// Alignment required of every `O_DIRECT` transfer: the file offset and the buffer address.
 pub const IO_ALIGN: u64 = 4096;
 
-/// On-disk bytes per chunk: ciphertext followed by the 16-byte Poly1305 tag.
+/// On-disk bytes per chunk: ciphertext, the predecessor tag it chains on, and its own tag.
 pub const CHUNK_SLOT: u64 = 65_536;
 
 /// Poly1305 tag length. FR-2.3.1.
 pub const TAG_LEN: usize = 16;
 
-/// Usable plaintext per chunk: the slot minus the tag it carries.
-pub const CHUNK_PLAINTEXT: usize = (CHUNK_SLOT - TAG_LEN as u64) as usize;
+/// Usable plaintext per chunk: the slot minus the two tag-sized trailers.
+///
+/// # Why there are two trailers
+///
+/// One is this seal's Poly1305 tag. The other is the tag of the seal this one **supersedes**,
+/// and it exists because the AEAD nonce is `N_root XOR index XOR predecessor_tag`
+/// (`crate::aead`). Without it the nonce would be a pure function of the chunk index and would
+/// therefore be **reused on every re-save** — and a reused nonce in counter mode is a one-time
+/// pad worn twice, which is a confidentiality break on the container's own save path rather
+/// than an exotic one.
+///
+/// It has to be on disk because `open_chunk` must be able to rebuild the nonce from the slot
+/// alone: it is handed a slot and a key, and nothing else. A reader that needed a predecessor
+/// tag from anywhere else would need a second read, a cache, or a format change — and the
+/// format change is what this is.
+///
+/// The cost is 16 bytes of plaintext per chunk, which is **0.024%** of a chunk and
+/// proportionally the same of the [`S_MAX_PAYLOAD`] cap.
+pub const CHUNK_PLAINTEXT: usize = (CHUNK_SLOT - 2 * TAG_LEN as u64) as usize;
+
+/// Where the predecessor tag sits inside a slot: immediately after the ciphertext.
+///
+/// Everything from `0` to [`TAG_OFFSET`] is authenticated as ciphertext, so an attacker cannot
+/// rewrite the chaining term without invalidating the tag — which is the property that keeps
+/// this from being an attacker-steerable nonce.
+pub const PREV_TAG_OFFSET: usize = CHUNK_PLAINTEXT;
+
+/// Where this seal's own Poly1305 tag sits inside a slot: the last [`TAG_LEN`] bytes.
+pub const TAG_OFFSET: usize = PREV_TAG_OFFSET + TAG_LEN;
 
 /// The 3-stage ring holds `[N−1, N, N+1]`, three slots, 192 KiB.
 pub const RING_STAGES: usize = 3;
@@ -136,7 +163,20 @@ const _: () = {
         SALT_LEN as u64 <= CHUNK_SLOT,
         "salt must fit in the reserved head"
     );
-    assert!(CHUNK_PLAINTEXT + TAG_LEN == CHUNK_SLOT as usize);
+    // The slot is `ciphertext | prev_tag | tag` and the two trailers are adjacent and
+    // distinct, which is what makes `open_chunk` able to rebuild a nonce from the slot alone.
+    assert!(
+        PREV_TAG_OFFSET + TAG_LEN == TAG_OFFSET,
+        "the predecessor tag must end where this seal's tag begins"
+    );
+    assert!(
+        TAG_OFFSET + TAG_LEN == CHUNK_SLOT as usize,
+        "a slot must be exactly ciphertext plus two tag-sized trailers"
+    );
+    assert!(
+        CHUNK_PLAINTEXT == PREV_TAG_OFFSET,
+        "plaintext must end where the predecessor tag begins"
+    );
     assert!(
         S_MAX_PAYLOAD < CONTAINER_SIZE - CHUNK_SLOT,
         "payload cap must leave at least one slot of head chaff"
@@ -273,12 +313,20 @@ mod tests {
         assert_eq!(RING_BYTES, 192 * 1024);
     }
 
-    /// The tag lives inside the slot, so slot + tag must not be added.
+    /// A slot carries **two** tag-sized trailers — the predecessor tag it chains on and its own
+    /// Poly1305 tag — so slot + tag must not be added, and the layout must not drift into
+    /// overlapping them.
     #[test]
     fn chunk_slot_carries_its_own_tag() {
         assert_eq!(CHUNK_SLOT, 65_536);
-        assert_eq!(CHUNK_PLAINTEXT, 65_520);
-        assert_eq!(CHUNK_PLAINTEXT + TAG_LEN, CHUNK_SLOT as usize);
+        assert_eq!(CHUNK_PLAINTEXT, 65_504);
+        assert_eq!(TAG_LEN, 16);
+        assert_eq!(PREV_TAG_OFFSET, 65_504);
+        assert_eq!(TAG_OFFSET, 65_520);
+        assert_eq!(TAG_OFFSET + TAG_LEN, CHUNK_SLOT as usize);
+        // The two trailers are adjacent, so one 4 KiB read of the slot's last page gets both.
+        assert_eq!(TAG_OFFSET - PREV_TAG_OFFSET, TAG_LEN);
+        assert!(TAG_OFFSET + TAG_LEN <= IO_ALIGN as usize + CHUNK_SLOT as usize);
     }
 
     /// Every chunk address must be `O_DIRECT`-legal, which is the whole reason Ω is

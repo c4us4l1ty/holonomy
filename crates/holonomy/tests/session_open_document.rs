@@ -85,7 +85,7 @@ fn text(n: usize) -> Vec<u8> {
 /// reason about** rather than imported, because `SECTION_BYTES` is `pub(crate)` -- and a test that
 /// re-derives a constant the code also defines is a test that can pass against a *different* section size.
 /// So this asserts they agree instead.
-const SECTION_BYTES: usize = 65_520;
+const SECTION_BYTES: usize = 65_504;
 
 /// Create a container and return its path. `content` is what it must read back as.
 fn make(content: &[u8]) -> std::path::PathBuf {
@@ -162,8 +162,8 @@ fn the_opened_document_knows_its_whole_length_before_reading() {
 /// # The first version of this asserted the wrong bound, and the failure was informative
 ///
 /// It required `resident <= budget * SECTION_BYTES`, and budget 1 gave **65,536 B resident against a
-/// 65,520 B section**. That is not a leak: residency is counted in **leaves**, and a leaf holds up to
-/// `GAP_TARGET` = 2,048 B, so a 65,520 B window is 31.99 leaves and rounds to **32 leaves = 65,536 B**.
+/// 65,504 B section**. That is not a leak: residency is counted in **leaves**, and a leaf holds up to
+/// `GAP_TARGET` = 2,048 B, so a 65,504 B window is 31.99 leaves and rounds to **32 leaves = 65,536 B**.
 /// The overshoot is bounded by one leaf's fill.
 ///
 /// So the honest relation is `resident = ceil(window / FILL) * FILL`, and the assertion pins that rather

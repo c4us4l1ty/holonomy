@@ -55,7 +55,7 @@
 //!
 //! **8 bytes per section.** Two `Fenwick` trees over `n` weights each store `n + 1` `u32`s, so the
 //! manifest is `2 * (n + 1) * 4 = 8n + 8` bytes — 8 per section plus an 8-byte constant. A 6 MiB document
-//! at [`SECTION_BYTES`] = 65,520 is 97 sections, so **784 bytes total, 0.0013 % of the text.** It was 12
+//! at [`SECTION_BYTES`] = 65,504 is 97 sections, so **784 bytes total, 0.0013 % of the text.** It was 12
 //! bytes per section while it had three trees, and losing the `newlines` tree is worth 4 bytes of memory —
 //! nothing. It is worth the 3.3 ms, because that is what the field cost and this is what removing it
 //! bought.
@@ -89,8 +89,8 @@ use holonomy_text::Editor;
 ///
 /// # The number is derived from the format, not chosen
 ///
-/// `CHUNK_PLAINTEXT = CHUNK_SLOT - TAG_LEN = 65,536 - 16 = 65,520`. Three things fall out of that
-/// choice and none of them would hold for a round number like 64 KiB:
+/// `CHUNK_PLAINTEXT = CHUNK_SLOT - 2 * TAG_LEN = 65,536 - 32 = 65,504`. Three things fall out of
+/// that choice and none of them would hold for a round number like 64 KiB:
 ///
 /// 1. **One section is one `pread64`.** The container addresses plaintext as a slot array —
 ///    `chunk_offset(omega, i)` is `omega + i * CHUNK_SLOT` (`holonomy-container/src/layout.rs:149`) —
@@ -98,11 +98,11 @@ use holonomy_text::Editor;
 ///    section would straddle two chunks and need two reads and a straddling check in the load path
 ///    forever.
 /// 2. **A section is the unit `mlock` already counts.** The leaves are 4 KiB and the document's lock
-///    is measured in leaves, so a 65,520-byte section is 16 leaves plus a fraction. Any size would
+///    is measured in leaves, so a 65,504-byte section is 16 leaves plus a fraction. Any size would
 ///    be; this one is the size that makes the number legible.
 /// 3. **Eviction wastes at most one chunk of the budget.** §2.9.3's Iceberg budget for images is
 ///    8.0 MiB; the text budget Phase 13 introduces is a section count, so rounding it up to a whole
-///    section costs at most 65,520 bytes rather than an arbitrary fraction of a chosen size.
+///    section costs at most 65,504 bytes rather than an arbitrary fraction of a chosen size.
 ///
 /// # What the number is *not*, and the arithmetic that rules out the alternatives
 ///
@@ -122,7 +122,7 @@ use holonomy_text::Editor;
 /// # The floor, and the arithmetic that makes it a floor rather than a hope
 ///
 /// One section is [`SECTION_BYTES`] and a document has **at least one**, so the smallest residency any
-/// document can have is 65,520 bytes. A 2000-page document at 1M words is ~6 MiB of text = 96 sections;
+/// document can have is 65,504 bytes. A 2000-page document at 1M words is ~6 MiB of text = 96 sections;
 /// a budget of 8 sections = **524,160 bytes**, which is Phase 13's number for a working set, and leaves
 /// 32.5× headroom between "one page of text" and "the whole document". §NFR-1.2's 16 MiB budget
 /// survives that by a wide margin — the point of the whole phase, and the thing that is measured rather
@@ -132,7 +132,7 @@ pub const SECTION_BYTES: usize = holonomy_container::layout::CHUNK_PLAINTEXT;
 /// What one section of the document holds. Phase 13.
 ///
 /// **8 bytes.** Two `u32`s, and both are bounded by the section size rather than by the document, so
-/// neither can overflow a `u32` on any document this format can hold: [`SECTION_BYTES`] is 65,520 and
+/// neither can overflow a `u32` on any document this format can hold: [`SECTION_BYTES`] is 65,504 and
 /// `S_MAX_PAYLOAD` is 8 MiB.
 ///
 /// # What is *not* here, and why — the field a measurement removed
@@ -217,7 +217,7 @@ pub struct Manifest {
     /// because it is the one that decides whether to read the document at all.
     spans: Fenwick,
     /// The section size this manifest was built at. Reported rather than assumed, because a manifest
-    /// built at 64 KiB and a document at 65,520 must not be reported as either.
+    /// built at 64 KiB and a document at 65,504 must not be reported as either.
     section_bytes: usize,
 }
 
@@ -970,7 +970,11 @@ mod tests {
     /// `SECTION_BYTES` is the container's chunk size, so a section is one `pread64`.
     #[test]
     fn a_section_is_one_container_chunk() {
-        assert_eq!(SECTION_BYTES, 65_520);
+        // **65,504, not 65,504.** The container slot is `ciphertext | predecessor tag | own tag`,
+        // so the usable plaintext per chunk is 16 bytes smaller than it was when this was written.
+        // The number is pinned rather than derived so that a change to the container's layout
+        // cannot quietly leave the session reading sections at a size the container cannot serve.
+        assert_eq!(SECTION_BYTES, 65_504);
         assert_eq!(
             SECTION_BYTES,
             holonomy_container::layout::CHUNK_PLAINTEXT,
@@ -986,8 +990,10 @@ mod tests {
         );
         assert_eq!(
             8 * SECTION_BYTES,
-            524_160,
-            "an 8-section working set, which is the bound Phase 13 quotes"
+            524_032,
+            "an 8-section working set, which is the bound Phase 13 quotes. It is 128 bytes smaller \
+             than it was at 65,504 per section -- the container's second tag-sized trailer -- and the \
+             number is pinned so the quoted bound cannot drift away from the section size silently"
         );
     }
 

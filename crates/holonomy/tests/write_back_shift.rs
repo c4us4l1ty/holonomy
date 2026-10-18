@@ -12,7 +12,7 @@
 //! leaf's bytes back into a `Vec` overwrites exactly that leaf's range and disturbs nothing else, so a
 //! shift is invisible: the tests read back the leaf they just wrote and never a later one.
 //!
-//! `SectionStore` is section-granular. A section is 65,520 B and a leaf is at most 3,841 B, so **writing
+//! `SectionStore` is section-granular. A section is 65,504 B and a leaf is at most 3,841 B, so **writing
 //! one leaf back repairs at most 1 leaf in 17 of a section, and leaves the rest of that section holding
 //! pre-shift bytes.** Past an edit, every offset is wrong by the delta, and write-back touches only the
 //! leaf that was evicted.
@@ -61,7 +61,7 @@ use holonomy_text::{LeafSource, Rope};
 
 const PASS: &str = "correct horse battery staple";
 const ITER: u64 = 1;
-const SECTION: usize = 65_520;
+const SECTION: usize = 65_504;
 
 fn scratch_dir() -> std::path::PathBuf {
     let d = std::env::current_exe()

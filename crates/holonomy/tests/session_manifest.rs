@@ -266,7 +266,17 @@ fn no_keystroke_rebuilds_the_manifest_including_a_newline() {
 /// The section size is the container's chunk size, so a section is one `pread64`.
 #[test]
 fn a_section_is_the_size_of_one_container_chunk() {
-    assert_eq!(SECTION_BYTES, 65_520, "CHUNK_SLOT minus a 16-byte tag");
+    // **CHUNK_SLOT minus *two* 16-byte trailers**, not one: the slot ends with the predecessor
+    // tag the nonce chains on and then this seal's own Poly1305 tag. Asserting the arithmetic
+    // rather than the constant is the point — a future trailer must make this fail, not pass
+    // quietly with a stale number.
+    assert_eq!(
+        SECTION_BYTES,
+        holonomy_container::layout::CHUNK_SLOT as usize
+            - 2 * holonomy_container::layout::TAG_LEN,
+        "CHUNK_SLOT minus two 16-byte trailers"
+    );
+    assert_eq!(SECTION_BYTES, 65_504);
     assert_eq!(
         SECTION_BYTES,
         holonomy_container::layout::CHUNK_PLAINTEXT,
@@ -278,11 +288,12 @@ fn a_section_is_the_size_of_one_container_chunk() {
     assert_eq!(six_mib.div_ceil(SECTION_BYTES), 97);
     assert_eq!(
         8 * SECTION_BYTES,
-        524_160,
-        "an 8-section working set, which is the bound Phase 13 quotes"
+        524_032,
+        "an 8-section working set, which is the bound Phase 13 quotes. 128 bytes smaller than the \
+         figure quoted when a section was 65,520 -- the container's second tag-sized trailer"
     );
     assert!(
-        524_160 * 32 > six_mib,
+        524_032 * 32 > six_mib,
         "and 8 sections is 1/32 of a 6 MiB document, so the residency budget is not the whole document \\
          wearing a smaller name"
     );

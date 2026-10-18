@@ -19,7 +19,7 @@
 //! hit, because touching the LRU tick is a write and the caller holds a borrow. `SecureBlock` is not
 //! `Sync`-shareable and the tick is per-entry, so the alternatives are a lock on the read path or a raw
 //! pointer. **A caller-supplied buffer is the option with no `unsafe` in it**, and the cost is one
-//! `copy_from_slice` of a section — 65,520 bytes, which is what the read did anyway.
+//! `copy_from_slice` of a section — 65,504 bytes, which is what the read did anyway.
 //!
 //! # What this is *not*, and it is the important half of the doc
 //!
@@ -155,7 +155,7 @@ pub struct SectionStore<'c> {
     /// [`copy_into`](Self::copy_into), which needs `&mut self` *and* a destination it cannot share with
     /// the receiver's own fields. Taken out with `mem::take` for the call.
     ///
-    /// **A second 65,520-byte buffer, deliberately.** The alternative -- reading straight into the leaf's
+    /// **A second 65,504-byte buffer, deliberately.** The alternative -- reading straight into the leaf's
     /// destination in `out` -- only works when the leaf starts exactly on a section boundary, which is 1
     /// leaf in 17. So this is what the straddling case costs, and it is paid once and then reused.
     fetch_scratch: Vec<u8>,
@@ -331,7 +331,7 @@ impl<'c> SectionStore<'c> {
     /// Part 8 documented it as *"`fetch_leaf` returns bytes as they are now, at current offsets"* — that a
     /// store and a rope describing the same document at the same offsets needs no second coordinate system.
     /// **Part 13 measured that premise false** (`tests/write_back_shift.rs`): a shift moves every offset
-    /// after an edit, a section is 65,520 B against a leaf's 3,841 B, and writing one leaf back repaired
+    /// after an edit, a section is 65,504 B against a leaf's 3,841 B, and writing one leaf back repaired
     /// 0.15 % of a shifted document while reporting success.
     ///
     /// **The invariant now is the one part 14 established: this store holds the SAVED document at SAVED
@@ -351,7 +351,7 @@ impl<'c> SectionStore<'c> {
     ///
     /// ## A leaf that straddles a section boundary writes to both
     ///
-    /// `65,520 / 2,048 = 32` leaves per section, so a leaf straddles in 1 case in 32. Both sides are patched
+    /// `65,504 / 2,048 = 31.98` leaves per section, so a leaf straddles in 1 case in 32. Both sides are patched
     /// and both are marked dirty, or the boundary leaf comes back half-old — and half-old is exactly the
     /// shape of bug that survives a length check.
     ///
@@ -652,7 +652,7 @@ impl SectionStore<'_> {
 ///
 /// Section `s` holds document bytes `[s * SECTION_BYTES, (s + 1) * SECTION_BYTES)`. A leaf at `offset`
 /// with `len` bytes therefore touches sections `offset / SECTION_BYTES` through
-/// `(offset + len - 1) / SECTION_BYTES` — and because `65,520 / 3,840 = 17.0625`, **that is two sections
+/// `(offset + len - 1) / SECTION_BYTES` — and because `65,504 / 3,840 = 17.0625`, **that is two sections
 /// for most leaves**, not one. See [`SectionStore`]'s `fetch_leaf` for what that costs.
 impl holonomy_text::LeafSource for SectionStore<'_> {
     /// Write a leaf's bytes at `into`, patching whichever cached sections they overlap.
@@ -723,7 +723,7 @@ impl holonomy_text::LeafSource for SectionStore<'_> {
     ///
     /// # The two-section case, which is the whole difficulty
     ///
-    /// A leaf is at most 3,841 bytes and a section is 65,520, so a leaf usually sits inside one section and
+    /// A leaf is at most 3,841 bytes and a section is 65,504, so a leaf usually sits inside one section and
     /// **straddles the boundary in 1 leaf in 17**. When it straddles, the bytes come from two sections, and
     /// the two `copy_into` calls must not be allowed to evict each other:
     ///

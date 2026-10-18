@@ -45,7 +45,11 @@ const BUDGET_MIB: f64 = 16.0;
 /// A section is one container chunk. **Asserted against the container's own arithmetic below** rather
 /// than imported, because `SECTION_BYTES` is private to the store and re-typing it here would let this
 /// file reason about a section size the product does not use.
-const SECTION_BYTES: usize = 65_520;
+///
+/// **65,504, and it used to be 65,520.** The container slot ends with *two* tag-sized trailers — the
+/// predecessor tag the nonce chains on, then this seal's own Poly1305 tag — so a section lost 16 bytes
+/// when the container stopped re-using a nonce on every save.
+const SECTION_BYTES: usize = 65_504;
 /// The format's maximum: `127 x CHUNK_PLAINTEXT`.
 const MAX_DOCUMENT: usize = 127 * SECTION_BYTES;
 
@@ -168,7 +172,7 @@ fn the_maximum_document_opens_through_the_sparse_path() {
 ///
 /// **Because three costs are O(1) or O(chunks), not O(bytes):** the resident window, the rope's *spine*
 /// (24 B per leaf, 4,062 leaves = 97 KiB at the maximum document), and the container's own per-chunk state
-/// (127 chunks). Only the window is O(window); the other two are fixed or step in chunks of 65,520 bytes.
+/// (127 chunks). Only the window is O(window); the other two are fixed or step in chunks of 65,504 bytes.
 /// So the marginal cost per byte tends to a floor set by the per-chunk and per-leaf terms rather than to
 /// zero — and asserting it *reaches* zero would be asserting something false about a design that
 /// deliberately keeps a spine.

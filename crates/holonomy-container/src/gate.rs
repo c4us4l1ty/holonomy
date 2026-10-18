@@ -196,7 +196,10 @@ fn create_write_read_round_trip() {
 #[test]
 fn the_file_is_exactly_128_mib_whatever_the_content() {
     let dir = scratch_dir("size");
-    for (i, len) in [0usize, 1, 65_520, 1_000_000].iter().enumerate() {
+    for (i, len) in [0usize, 1, crate::layout::CHUNK_PLAINTEXT, 1_000_000]
+        .iter()
+        .enumerate()
+    {
         let path = dir.join(format!("c{i}.wavefunction"));
         Wavefunction::create(&path, "pw", "t", &content(*len), TEST_VDF_ITERATIONS)
             .expect("create");
@@ -849,3 +852,4 @@ mod duress {
         (body + 1) * CHUNK_SLOT
     }
 }
+

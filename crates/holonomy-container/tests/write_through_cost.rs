@@ -18,7 +18,7 @@
 //!
 //! | step | what it is | what it depends on |
 //! | --- | --- | --- |
-//! | **seal** | `aead::seal_in_place` — XChaCha20-Poly1305 over 65,520 B | CPU only, machine-independent-ish |
+//! | **seal** | `aead::seal_in_place` — XChaCha20-Poly1305 over 65,504 B | CPU only, machine-independent-ish |
 //! | **write** | `DirectFile::write_exact_at` — one `O_DIRECT` `pwrite` of 65,536 B | the storage device |
 //!
 //! **These have completely different magnitudes and completely different remedies.** If seal dominates,
@@ -31,7 +31,7 @@
 //! # This file is a RELEASE-profile gate, and it says so by skipping
 //!
 //! **Both assertions here compare against a constant that only exists in an optimised build.** The seal is
-//! pure-Rust XChaCha20-Poly1305; at `opt-level = 0` it measures **28–29 ms** per 65,520-byte section and
+//! pure-Rust XChaCha20-Poly1305; at `opt-level = 0` it measures **28–29 ms** per 65,504-byte section and
 //! at `opt-level = 3` it measures **106 µs** on this same host — a factor of **270**, which is the gap
 //! between "the cipher, compiled" and "the cipher, written by a human to be read".
 //!
@@ -155,7 +155,7 @@ fn sealing_one_section_is_a_pure_cpu_cost() {
         slot.as_mut_slice()[..CHUNK_PLAINTEXT].fill((i % 251) as u8);
 
         let t = Instant::now();
-        aead::seal_in_place(&k, &n_root, 1, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
+        aead::seal_in_place(&k, &n_root, 1, &aead::UNSEALED, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
         seal.push(nanos(t.elapsed()));
 
         // And the decrypt the fault path already pays for the same bytes.
@@ -279,7 +279,7 @@ fn write_throughs_charge_is_dominated_by_the_device_not_the_cipher() {
     for i in 0..SEAL_N {
         slot.as_mut_slice()[..CHUNK_PLAINTEXT].fill((i % 251) as u8);
         let t = Instant::now();
-        aead::seal_in_place(&k, &n_root, 1, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
+        aead::seal_in_place(&k, &n_root, 1, &aead::UNSEALED, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
         seal.push(nanos(t.elapsed()));
     }
     let seal_us = median_micros(seal);

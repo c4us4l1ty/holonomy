@@ -299,7 +299,7 @@ fn an_index_past_the_end_is_refused_rather_than_guessed() {
     let mut small = vec![0u8; 16];
     assert!(
         wf.read_chunk_into(1, &mut small).is_err(),
-        "a 16-byte output buffer must not be filled with 65,520 bytes"
+        "a 16-byte output buffer must not be filled with 65,504 bytes"
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -420,21 +420,27 @@ fn the_formats_maximum_document_is_reachable_chunk_by_chunk() {
         chunks += 1;
     }
     assert_eq!(at, text.len(), "every byte of a maximum-size document read back");
-    // **The maximum is 8,321,040, not 8,388,592, and the 2,032-byte gap is the format's.**
+    // **The maximum is 8,319,008, not 8,388,608, and the 69,600-byte gap is the format's.**
     // `chunks_for(plaintext) = plaintext.div_ceil(CHUNK_PLAINTEXT) + 1` — the `+ 1` reserves a whole slot
     // for the master frame — and `payload_len(chunks) <= S_MAX_PAYLOAD` then forces
-    // `chunks <= 128`, so `content <= 127 * 65,520`. Slot 128's last 2,032 bytes (65,536 − 16 − 65,520,
-    // and the 2,032 the `div_ceil` refuses to use) are unreachable as content.
+    // `chunks <= 128`, so `content <= 127 * 65,504`. The remainder is one whole slot for the master
+    // frame (65,536) plus the two tag-sized trailers every content slot pays (127 × 32 = 4,064).
     //
-    // **0.024 % of the payload, and it is not fixed here**: a partial trailing chunk is a format change,
-    // and the master frame's `chunk_count` is authenticated data that an older reader also has to
-    // understand. Recorded because "the maximum document is 8,321,040 bytes" is a number a reader should
-    // not have to derive, and because it is 2,032 bytes smaller than the ceiling it is derived from.
+    // **The trailers used to be one, not two.** Slot 128's last 16 bytes are this seal's own Poly1305
+    // tag; the other 16 is the predecessor tag the nonce chains on, and without it every re-save of a
+    // chunk reuses a nonce (see `aead::a_re_seal_of_one_index_does_not_reuse_the_nonce`). So the
+    // reachable document shrank by 2,032 bytes — 0.024% — to buy a container that is not
+    // deterministically broken on its second save. That is the right trade and the arithmetic is
+    // pinned here rather than left to a reader to reconstruct.
+    //
+    // **The remaining gap is not fixed here**: a partial trailing chunk would be a format change, and
+    // the master frame's `chunk_count` is authenticated data that an older reader also has to
+    // understand.
     assert_eq!(text.len(), 127 * CHUNK_PLAINTEXT);
     assert_eq!(
         S_MAX_PAYLOAD as usize - text.len(),
-        holonomy_container::layout::CHUNK_SLOT as usize + 2_032,
-        "the payload exceeds the largest usable document by one slot plus 2,032 bytes"
+        holonomy_container::layout::CHUNK_SLOT as usize + 4_064,
+        "the payload exceeds the largest usable document by one slot plus two trailers per content slot"
     );
     println!(
         "maximum document: {} bytes in {} chunks, read through one {}-byte buffer",

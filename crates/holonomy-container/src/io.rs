@@ -304,17 +304,44 @@ impl DirectFile {
     pub fn read_exact_at(&self, offset: u64, buf: &mut AlignedBuf) -> io::Result<()> {
         layout::require_aligned(offset)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let slice = buf.as_mut_slice();
+        self.read_slice_at(offset, buf.as_mut_slice())
+    }
+
+    /// [`Self::read_exact_at`] for caller-owned scratch rather than an [`AlignedBuf`].
+    ///
+    /// Exists for the two call sites whose buffer is 4 KiB and lives on the stack — the
+    /// nonce-chaining tag read — where an `AlignedBuf` would be a heap allocation of exactly
+    /// the size `Ring` is measured against. **The alignment contract is the caller's**, exactly
+    /// as it is for `read_exact_at` with an `AlignedBuf`: `O_DIRECT` fails with `EINVAL` on a
+    /// misaligned buffer, so a caller that skips `#[repr(align(4096))]` gets an error rather
+    /// than a silent short read.
+    pub fn read_slice_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        layout::require_aligned(offset)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let mut done = 0usize;
-        while done < slice.len() {
-            // SAFETY: `slice` is a live allocation of at least `slice.len() - done` bytes
-            // and the descriptor is valid. `pread` does not move the file offset.
+        while done < buf.len() {
+            // `off_t` is `i64`, and an `as` cast here would turn an offset above `i64::MAX`
+            // into a negative number, which `pread` rejects with `EINVAL` and which reads as
+            // "this filesystem does not like aligned offsets" rather than "this offset does not
+            // exist". Nothing in a 128 MiB container gets near it, but `read_raw` and
+            // `region_is_chaff` are `pub` and take a caller-supplied offset.
+            let at = offset
+                .checked_add(done as u64)
+                .and_then(|o| i64::try_from(o).ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("offset {offset}+{done} is not representable as off_t"),
+                    )
+                })?;
+            // SAFETY: `buf` is a live allocation of at least `buf.len() - done` bytes and the
+            // descriptor is valid. `pread` does not move the file offset.
             let n = unsafe {
                 libc::pread(
                     self.as_raw(),
-                    slice[done..].as_mut_ptr().cast(),
-                    slice.len() - done,
-                    (offset + done as u64) as libc::off_t,
+                    buf[done..].as_mut_ptr().cast(),
+                    buf.len() - done,
+                    at as libc::off_t,
                 )
             };
             if n < 0 {
@@ -329,7 +356,7 @@ impl DirectFile {
                     io::ErrorKind::UnexpectedEof,
                     format!(
                         "short read at {offset}: got {done} of {} bytes",
-                        slice.len()
+                        buf.len()
                     ),
                 ));
             }
@@ -345,13 +372,23 @@ impl DirectFile {
         let slice = buf.as_slice();
         let mut done = 0usize;
         while done < slice.len() {
-            // SAFETY: as `read_exact_at`, for a shared slice.
+            // Checked, not `as` — the reasoning is `read_slice_at`'s.
+            let at = offset
+                .checked_add(done as u64)
+                .and_then(|o| i64::try_from(o).ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("offset {offset}+{done} is not representable as off_t"),
+                    )
+                })?;
+            // SAFETY: as `read_slice_at`, for a shared slice.
             let n = unsafe {
                 libc::pwrite(
                     self.as_raw(),
                     slice[done..].as_ptr().cast(),
                     slice.len() - done,
-                    (offset + done as u64) as libc::off_t,
+                    at as libc::off_t,
                 )
             };
             if n < 0 {

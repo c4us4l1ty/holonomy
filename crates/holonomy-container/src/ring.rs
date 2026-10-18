@@ -95,6 +95,53 @@ impl From<AeadError> for RingError {
     }
 }
 
+/// Stack scratch for reading one chunk's trailing page.
+///
+/// `#[repr(align)]` rather than an [`AlignedBuf`] because the point is that it costs **nothing**:
+/// a `Ring` is measured against FR-3.1's 192 KiB ceiling and a fourth heap buffer would break that
+/// number for the sake of a value that is 16 bytes of it. It lives on the caller's stack, is
+/// never retained, and holds only bytes the file already exposes in the clear.
+#[repr(align(4096))]
+struct TagPage([u8; layout::IO_ALIGN as usize]);
+
+/// The Poly1305 tag chunk `index` carries on disk right now — the seal the next one supersedes.
+///
+/// # Why this exists and why it is a read
+///
+/// `aead`'s nonce chains on the previous tag, so re-sealing needs that tag. It cannot be
+/// cached across calls: `commit` is allowed to fail after sealing, and a cache updated before
+/// the write lands would name a predecessor tag the file does not have, which is a nonce reuse
+/// again. **Reading the authoritative value from the file is the only construction that cannot
+/// desynchronise**, and it costs one 4 KiB `pread64` against a path that already writes 64 KiB.
+///
+/// # Why one page is enough, and why it is aligned
+///
+/// The tag is the last 16 bytes of a 64 KiB slot, so it is inside the slot's final
+/// [`layout::IO_ALIGN`] page. `chunk_offset` is a multiple of [`CHUNK_SLOT`] (64 KiB) and
+/// `CHUNK_SLOT` is a multiple of `IO_ALIGN` (4 KiB), so that page starts at an aligned offset
+/// and the transfer satisfies `O_DIRECT` exactly as a full-slot transfer would.
+///
+/// # What it returns for an unwritten region
+///
+/// The bytes are whatever is there — chaff, on a container that has been created but whose
+/// payload has not reached this index yet. That is the right answer: an unwritten slot has no
+/// predecessor seal, and the chaff underneath is unpredictable, which is all the chaining term
+/// requires.
+pub fn prev_tag_from_disk(
+    file: &DirectFile,
+    omega: u64,
+    index: u64,
+) -> Result<[u8; layout::TAG_LEN], std::io::Error> {
+    let mut page = TagPage([0u8; layout::IO_ALIGN as usize]);
+    let base = layout::chunk_offset(omega, index);
+    let tail = base + CHUNK_SLOT - layout::IO_ALIGN;
+    file.read_slice_at(tail, &mut page.0)?;
+    let mut tag = [0u8; layout::TAG_LEN];
+    let start = (layout::IO_ALIGN - layout::TAG_LEN as u64) as usize;
+    tag.copy_from_slice(&page.0[start..]);
+    Ok(tag)
+}
+
 /// A three-slot window over the chunk stream.
 pub struct Ring {
     /// Exactly three, indexed 0..2 as described in the module docs. A `Vec` would allow the
@@ -402,10 +449,21 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
             };
             // The plaintext is already in `slot[..CHUNK_PLAINTEXT]`; sealing in place
             // avoids a fourth 64 KiB buffer, which would break the 192 KiB ceiling.
+            //
+            // **The predecessor tag is read from the file, here, and not before the loop.**
+            //
+            // The slot's own tag region is not a source: a dirty slot reached by
+            // `center_bytes_mut` still carries the tag `load_slot` left there, but a dirty slot
+            // reached by `stage_plaintext` went through `stage_blank`, which wipes. Reading one
+            // and assuming the other is the kind of reasoning that is right until the day it is
+            // not. One `pread64` of 4 KiB against a 64 KiB write, taken from the authoritative
+            // copy, is what makes the nonce un-repeatable even across a failed write and a retry.
+            let prev_tag = prev_tag_from_disk(file, omega, index)?;
             aead::seal_in_place(
                 k_enc,
                 n_root,
                 index,
+                &prev_tag,
                 CHUNK_PLAINTEXT,
                 self.slots[slot].as_mut_slice(),
             )?;

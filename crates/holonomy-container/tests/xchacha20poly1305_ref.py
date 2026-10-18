@@ -146,13 +146,29 @@ if __name__ == '__main__':
     print()
     KEY = bytes([0x2B])*32
     NONCE = bytes([0x7C])*24
-    SLOT, TAGOFF, CPLEN = 65536, 65520, 65520
+    # Slot layout: ciphertext | predecessor tag | Poly1305 tag.
+    SLOT, PREVOFF, TAGOFF, CPLEN = 65536, 65504, 65520, 65504
 
-    # Vector A: plaintext fills the slot exactly (no random gap), so ct and tag are both
-    # deterministic. Mirrors what the Rust test does.
+    def seal(key, n_root, index, prev_tag, plaintext):
+        """The whole of the container's chunk seal, in one function.
+
+        Nonce:  n_root with the predecessor tag XORed into the HIGH 16 bytes and the index
+                XORed as a big-endian u64 into the LOW 8.
+        AAD:    index || prev_tag.
+        Message: only slot[..CPLEN] -- the predecessor tag sits outside it in the clear.
+        """
+        nonce = bytearray(n_root)
+        for j in range(16): nonce[j] ^= prev_tag[j]
+        idx = index.to_bytes(8, 'big')
+        for j in range(8): nonce[16+j] ^= idx[j]
+        aad = idx + prev_tag
+        ct, tag = xchacha20poly1305_encrypt(key, bytes(nonce), plaintext, aad)
+        return bytes(nonce), ct, tag
+
+    # Vector A: plaintext fills the ciphertext region exactly (no random gap), so ct and tag
+    # are both deterministic. Mirrors what the Rust test does.
     PT = bytes((i % 251) for i in range(CPLEN))
-    AAD = (0).to_bytes(8,'big')
-    ct, tag = xchacha20poly1305_encrypt(KEY, NONCE, PT, AAD)
+    nA, ct, tag = seal(KEY, NONCE, 0, b'\x00'*16, PT)
     # Chaff vectors at three offsets, including a non-zero one.
     ck = bytes([0x21]) * 32
     for off in (0, 4096, 1 << 20):
@@ -161,19 +177,22 @@ if __name__ == '__main__':
     print()
     print("A ct[:32] =", ct[:32].hex())
     print("A tag     =", tag.hex())
+    print("A nonce   =", nA.hex())
 
-    # Vector B: index 5, different N_root, short plaintext. Proves the nonce XOR.
+    # Vector B: index 5, a N_root whose low 8 bytes are not uniform, and a NON-ZERO predecessor
+    # tag. Proves all three parts of the nonce at once: the index lands in the low 8 bytes, the
+    # tag lands in the high 16, and neither disturbs the other. A zero predecessor tag would
+    # leave the high half untested, which is how a chained nonce can be wrong and still agree
+    # with itself everywhere else.
     KEY2 = bytes([0x2B])*32
     NONCE2 = bytes([0x7C])*24
     # "N_root XOR i" means XOR with i encoded as an 8-byte big-endian integer into the
     # low 8 bytes -- not with the integer value repeated per byte. Getting that wrong gives
     # a7..a0 instead of a0..a0 and a nonce that matches nothing.
-    n2 = bytearray(NONCE2); n2[16:24] = bytes([0xA5] * 8)
-    idx = (5).to_bytes(8, 'big')
-    for j in range(8): n2[16+j] ^= idx[j]
+    n_root2 = bytearray(NONCE2); n_root2[16:24] = bytes([0xA5] * 8)
+    prev2 = bytes(range(0x10, 0x20))
     PT2 = bytes((i % 253) for i in range(CPLEN))
-    AAD2 = (5).to_bytes(8,'big')
-    ct2, tag2 = xchacha20poly1305_encrypt(KEY2, bytes(n2), PT2, AAD2)
+    nB, ct2, tag2 = seal(KEY2, bytes(n_root2), 5, prev2, PT2)
     print("B ct[:32] =", ct2[:32].hex())
     print("B tag     =", tag2.hex())
-    print("B nonce   =", bytes(n2).hex())
+    print("B nonce   =", nB.hex())

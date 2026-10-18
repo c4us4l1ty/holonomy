@@ -144,7 +144,7 @@ fn a_fresh_handle_still_sees_the_committed_plaintext() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// **A commit whose write fails must leave nothing staged for a retry.**
+/// **A commit that fails must never leave a slot that is dirty *and* no longer holds plaintext.**
 ///
 /// The fix above clears `resident` and `dirty` when the slot is *sealed*. It used to clear them when
 /// the slot was *written*, which is one line too late: on a failed write the slot still claimed to
@@ -156,6 +156,20 @@ fn a_fresh_handle_still_sees_the_committed_plaintext() {
 /// * A retry re-seals that ciphertext and writes the result as the chunk's **plaintext**. A chunk
 ///   that merely failed to save becomes garbage that decrypts perfectly.
 ///
+/// # There are now two places a commit can fail, and the invariant covers both
+///
+/// `Ring::commit` reads each dirty chunk's predecessor tag from the file before sealing it (see
+/// `ring::prev_tag_from_disk` — that is what makes the nonce un-repeatable). So a closed
+/// descriptor fails at the *read*, one step before it would have failed at the *write*, and at
+/// that point the slot still holds its plaintext, which is the good outcome.
+///
+/// Asserting `!has_dirty()` unconditionally would therefore be asserting an accident of ordering
+/// rather than the safety property. What is asserted instead is the property itself, from the
+/// bytes: **if the slot is not dirty then it is not claiming residency either, and if it is dirty
+/// then it still holds the exact plaintext that was staged.** The dangerous state -- dirty, still
+/// resident, and holding ciphertext -- is the one that has no safe reading, so it is the one the
+/// test rules out.
+///
 /// The write is made to fail by taking the descriptor away from the `DirectFile`: the test takes
 /// ownership of it, closes it, and forgets the handle so nothing closes it twice. Reaching an I/O
 /// error from a test otherwise needs a full filesystem, and this path is the entire point.
@@ -165,8 +179,8 @@ fn a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry() {
     let _ = std::fs::remove_file(&path);
     let open = DirectFile::create_or_open(&path).expect("a container-shaped file");
     let mut ring = Ring::new(4).expect("three page-locked slots");
-    ring.stage_plaintext(1, b"plaintext that must never be stored as ciphertext")
-        .expect("stage");
+    const STAGED: &[u8] = b"plaintext that must never be stored as ciphertext";
+    ring.stage_plaintext(1, STAGED).expect("stage");
 
     // **Close the descriptor behind the handle's back.** `from_raw_fd` takes ownership of a number
     // this test is giving up, and the value is dropped on this statement, so the close happens here
@@ -182,19 +196,34 @@ fn a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry() {
 
     let err = ring
         .commit(&open, 0, &[7u8; 32], &[9u8; 24])
-        .expect_err("a closed descriptor cannot be written to");
+        .expect_err("a closed descriptor cannot be read from or written to");
     assert!(
         matches!(err, holonomy_container::ring::RingError::Io(_)),
-        "expected the write's own error, got {err:?}"
+        "expected the i/o error itself, got {err:?}"
     );
-    assert!(
-        !ring.has_dirty(),
-        "the slot is still dirty, so the next commit would seal the ciphertext already in it"
-    );
-    assert!(
-        ring.center_bytes().iter().all(|&b| b == 0),
-        "sealed bytes that never reached the disk are left sitting in the slot"
-    );
+
+    // **The invariant, read off the bytes rather than off the flag.** A commit that failed before
+    // sealing leaves the plaintext exactly where it was and leaves the slot dirty, which is
+    // correct: the retry re-seals plaintext. A commit that failed after sealing must have dropped
+    // both flags and wiped the slot. What must never happen is a slot that is dirty *and* has
+    // stopped being the plaintext it claims to be.
+    let still_plaintext = ring.center_bytes().starts_with(STAGED);
+    if still_plaintext {
+        assert!(
+            ring.has_dirty(),
+            "the slot kept its plaintext but was marked clean, so the bytes would never be written"
+        );
+    } else {
+        assert!(
+            !ring.has_dirty(),
+            "the slot no longer holds its plaintext and is still dirty: the next commit would seal \
+             the ciphertext already in it and store it as the chunk's plaintext"
+        );
+        assert!(
+            ring.center_bytes().iter().all(|&b| b == 0),
+            "sealed bytes that never reached the disk are left sitting in the slot"
+        );
+    }
     let _ = std::fs::remove_file(&path);
 }
 

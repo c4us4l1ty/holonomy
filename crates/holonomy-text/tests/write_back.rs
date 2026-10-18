@@ -9,7 +9,7 @@
 //! that leaf's range and disturbs nothing else, so a shift is invisible. Each test read back the leaf it
 //! had just written and never a later one.
 //!
-//! Part 13 measured the rule against a real `SectionStore` — which is 65,520 B per section against a
+//! Part 13 measured the rule against a real `SectionStore` — which is 65,504 B per section against a
 //! 3,841 B leaf, so a leaf write-back repairs at most 1 leaf in 17 — and found **132,987 of 135,045 bytes
 //! wrong** after a single 5-byte insert, with the container's `content_len` five bytes short of the
 //! in-memory document while the commit reported success. See `crates/holonomy/tests/write_back_shift.rs`,

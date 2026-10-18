@@ -219,7 +219,7 @@ fn a_committed_growth_reaches_the_disk_whole() {
 #[test]
 fn a_commit_repairs_a_shift_the_disk_would_otherwise_keep() {
     // **Three sections**, so a leaf write-back would repair one section's worth and leave two stale.
-    let n = 65_520 * 2 + 4_000;
+    let n = 65_504 * 2 + 4_000;
     let saved = text(n);
     let (path, _wf) = container(&saved);
 
@@ -338,7 +338,7 @@ fn the_commit_reports_what_it_actually_wrote() {
 /// still blow an 8 MiB page-lock ceiling on a large document.
 #[test]
 fn a_commit_leaves_the_rope_holding_nothing() {
-    let n = 65_520 * 2 + 4_000;
+    let n = 65_504 * 2 + 4_000;
     let saved = text(n);
     let (path, _wf) = container(&saved);
 

@@ -213,7 +213,7 @@ fn the_victim_is_the_least_recently_used_section() {
 }
 
 /// A hit is a hit. **Asserted on the load count rather than on timing**, because a timing assertion on a
-/// 65,520-byte read would be measuring the page cache.
+/// 65,504-byte read would be measuring the page cache.
 #[test]
 fn a_section_already_resident_is_not_read_again() {
     let text = content(SECTION_BYTES * 3);

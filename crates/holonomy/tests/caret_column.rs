@@ -368,13 +368,13 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     // finds the leaf absent, and returns `LeafAbsent` before the column scan ever runs. That is part
     // 16's rule doing its job, and it is why this fixture is shaped the way it is.
     //
-    // **A container-backed rope's leaves are the container's sections**, 65,520 bytes each (the figure
+    // **A container-backed rope's leaves are the container's sections**, 65,504 bytes each (the figure
     // `tests/session_open_document.rs` states rather than imports, for the same reason it states it
     // there: a test that re-derives a constant the code also defines is a test that can pass against a
     // different value). So a caret four bytes into section 1, with section 0 evicted, is a caret whose
     // *line prefix* is absent and whose own byte is present — and that is the only state in which the
     // resident scan can fail after a `caret_to` that succeeded.
-    const SECTION: usize = 65_520;
+    const SECTION: usize = 65_504;
     let mut doc: Vec<u8> = Vec::new();
     // **Padding made of two-byte characters, not ASCII — and that is the premise, so it is asserted.**
     //
@@ -391,12 +391,19 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     assert_eq!(
         doc.len(),
         SECTION + 9,
-        "65520 + 8 bytes of two-byte characters, then a newline"
+        "one section plus 8 bytes of two-byte characters, then a newline"
     );
     // Four bytes in is **two characters**, and there is no reading of this offset under which that is
     // the byte count.
     let caret_at = SECTION + 4;
-    assert_eq!(caret_at / 2, 32762, "and 32762 characters precede it");
+    assert_eq!(
+        caret_at / 2,
+        SECTION / 2 + 2,
+        "the character count is derived from the section size rather than written down, because the \
+         section size moved from 65,520 to 65,504 when the container gained its second tag-sized \
+         trailer and a literal here would have gone stale in silence"
+    );
+    assert_eq!(caret_at / 2, 32_754);
     let path = dir.join(format!("cc-{}.wavefunction", doc.len()));
     let _ = std::fs::remove_file(&path);
     Wavefunction::create(&path, PASS, "p22", &doc, ITER).expect("create the container");
@@ -426,12 +433,17 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     drop(store);
     let mut store = SectionStore::new(&mut container, DEFAULT_RESIDENT_SECTIONS);
 
-    // **The fixture's own premise, asserted first and with both numbers in it: the caret is 65,524
-    // bytes in and 32,762 characters in, and those are not the same number.** If the scan ever
-    // returned the byte count the rest of this test would still pass its own assertions, so the
-    // premise is a separate assertion rather than a comment.
-    const BYTE_COLUMN: u32 = 65_524;
-    const CHAR_COLUMN: u32 = 32_762;
+    // **The fixture's own premise, asserted first and with both numbers in it: the caret is
+    // 65,508 bytes in and 32,754 characters in, and those are not the same number.** If the scan
+    // ever returned the byte count the rest of this test would still pass its own assertions, so
+    // the premise is a separate assertion rather than a comment.
+    //
+    // **Derived from `SECTION`, not written down.** A section was 65,520 and is 65,504 — the
+    // container gained a second tag-sized trailer when it stopped re-using a nonce on every save —
+    // so both literals moved. Deriving them means the next container change cannot leave this
+    // test asserting a byte count the fixture no longer has.
+    const BYTE_COLUMN: u32 = SECTION as u32 + 4;
+    const CHAR_COLUMN: u32 = SECTION as u32 / 2 + 2;
     assert_ne!(
         BYTE_COLUMN, CHAR_COLUMN,
         "the two counts must differ for this test to mean anything"
@@ -441,7 +453,7 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     assert_eq!(
         s.caret_column(),
         CHAR_COLUMN,
-        "**32,762 characters, not 65,524 bytes** -- the whole premise of this test in one assertion"
+        "**32,754 characters, not 65,508 bytes** -- the whole premise of this test in one assertion"
     );
 
     // **Now break it on purpose.** Park the caret at the line's start so the stale value is a *specific*
@@ -487,7 +499,7 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
          0 back and counted it"
     );
 
-    // **No drawn-cell assertion here, and that is deliberate.** This caret is 32,762 characters into a
+    // **No drawn-cell assertion here, and that is deliberate.** This caret is 32,754 characters into a
     // line and the page is 80 columns wide, so `Caret::locate` answers `None` — the caret is scrolled
     // off the right-hand end of a document that has no horizontal scroll in this build. Asserting a
     // cell would mean asserting one the renderer does not draw. **The cell is gated instead on an

@@ -511,10 +511,20 @@ impl Wavefunction {
         let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
         let n = frame.encode(&mut frame_bytes)?;
         let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
+        // **The predecessor tag is read, even on a path that is creating the container.**
+        //
+        // `create` lays chaff over the whole file before calling this, so the tag region of
+        // every slot holds unpredictable chaff rather than the zeroes a zeroed buffer would
+        // hold. Reading it is what makes that true — and `write_payload` is also the FR-4.9
+        // decoy path, which writes a *second* payload at a different Ω over the first one, so
+        // "this slot has never been written" is not a safe assumption to bake in here even if
+        // it happens to hold for the primary.
+        let prev = ring::prev_tag_from_disk(file, omega, MASTER_FRAME_CHUNK)?;
         aead::seal_chunk(
             &root.k_enc,
             &root.n_root,
             MASTER_FRAME_CHUNK,
+            &prev,
             &frame_bytes[..n],
             slot.as_mut_slice(),
         )?;
@@ -530,7 +540,15 @@ impl Wavefunction {
             } else {
                 &[][..]
             };
-            aead::seal_chunk(&root.k_enc, &root.n_root, index, piece, slot.as_mut_slice())?;
+            let prev = ring::prev_tag_from_disk(file, omega, index)?;
+            aead::seal_chunk(
+                &root.k_enc,
+                &root.n_root,
+                index,
+                &prev,
+                piece,
+                slot.as_mut_slice(),
+            )?;
             file.write_exact_at(layout::chunk_offset(omega, index), &slot)?;
         }
         slot.wipe();
@@ -720,7 +738,7 @@ impl Wavefunction {
         // **Copy out before wiping, and the order is load-bearing.** `aead::open_chunk` decrypts *in
         // place* — the module's own doc says "sealed or opened in place" (`aead.rs:4`) — so the plaintext
         // lands in the first `CHUNK_PLAINTEXT` bytes of the slot that held its own ciphertext. Wiping
-        // first and reading after returns 65,520 zeros for every chunk, which authenticates fine and looks
+        // first and reading after returns 65,504 zeros for every chunk, which authenticates fine and looks
         // like a perfectly good chunk of empty document.
         let opened = (|| -> Result<usize, ContainerError> {
             self.file
@@ -926,14 +944,23 @@ impl Wavefunction {
     }
 
     /// Re-seal and write chunk 0 from the in-memory frame.
+    ///
+    /// **Chunk 0 is the chunk that is rewritten most often** — every `write_content`, every
+    /// `set_content_len`, every `set_title` — so it is the chunk a deterministic nonce reuses
+    /// most, and the one whose two ciphertexts XOR to the most readable difference. The
+    /// predecessor tag is therefore read from the file rather than assumed, which is what
+    /// `ring::prev_tag_from_disk` is for. It also reads only 4 KiB of a slot that is about to
+    /// be overwritten with 64 KiB.
     fn rewrite_master_frame(&mut self) -> Result<(), ContainerError> {
         let mut frame_bytes = [0u8; CHUNK_PLAINTEXT];
         let n = self.frame.encode(&mut frame_bytes)?;
         let mut slot = AlignedBuf::zeroed(CHUNK_SLOT as usize);
+        let prev = ring::prev_tag_from_disk(&self.file, self.omega, MASTER_FRAME_CHUNK)?;
         aead::seal_chunk(
             &self.root.k_enc,
             &self.root.n_root,
             MASTER_FRAME_CHUNK,
+            &prev,
             &frame_bytes[..n],
             slot.as_mut_slice(),
         )?;
@@ -945,9 +972,33 @@ impl Wavefunction {
     }
 
     /// Replace the document title, rewriting chunk 0.
+    ///
+    /// # The frame is not touched until the rewrite has succeeded
+    ///
+    /// This assigns `self.frame.title` and *then* calls `rewrite_master_frame`, which can
+    /// fail on `MasterFrame::encode` with `TitleTooLong`. Assigning first meant a rejected
+    /// title left the handle holding a title it can never encode: **every later
+    /// `write_content`, `set_content_len` and `commit` then failed for the rest of the
+    /// process's life**, because they all go through the same frame, with an error that names
+    /// nothing the caller did wrong. The candidate is built, encoded-checked by the rewrite,
+    /// and only then adopted.
     pub fn set_title(&mut self, title: &str) -> Result<(), ContainerError> {
-        self.frame.title = title.chars().take(frame::MAX_TITLE_LEN).collect();
-        self.rewrite_master_frame()
+        // **Truncate by bytes, not by chars.**
+        //
+        // `MasterFrame::new` takes `MAX_TITLE_LEN` *chars* while `encode` refuses anything
+        // over `MAX_TITLE_LEN` *bytes*, and a character is up to 4 bytes — so 512 chars of a
+        // non-ASCII title is up to 2,048 bytes and always rejected. `frame::truncate_title` is
+        // the shared, byte-budgeted truncator, so this and `MasterFrame::new` cannot drift back
+        // into disagreeing about what the limit means.
+        let previous = core::mem::replace(&mut self.frame.title, frame::truncate_title(title));
+        match self.rewrite_master_frame() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Put back exactly what was there, so a refused title leaves no trace.
+                self.frame.title = previous;
+                Err(e)
+            }
+        }
     }
 
     /// Replace chunk `index`'s **plaintext** and write it to disk.
@@ -956,7 +1007,7 @@ impl Wavefunction {
     ///
     /// Everything else in this crate either reads a chunk or rewrites the whole payload through
     /// [`write_content`](Self::write_content). Neither can serve a document being edited in place, where
-    /// **one chunk's 65,520 bytes have changed and the other 126 have not** — and
+    /// **one chunk's 65,504 bytes have changed and the other 126 have not** — and
     /// `write_content` cannot be used for it because it takes the whole document, which is precisely what
     /// Phase 13 exists to stop doing.
     ///

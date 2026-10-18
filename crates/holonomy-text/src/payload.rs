@@ -3,7 +3,7 @@
 //! # The container does not know what this is
 //!
 //! `Wavefunction::create` and `Wavefunction::write_content` take `&[u8]`; `read_content` returns
-//! `Vec<u8>`. `MasterFrame` records `content_len` and the container chops it into 65,520-byte chunks.
+//! `Vec<u8>`. `MasterFrame` records `content_len` and the container chops it into 65,504-byte chunks.
 //! **That is the entire contract**, and it is why the container format could be frozen while this
 //! module was written: nothing outside this file has an opinion about a payload byte, so a payload
 //! section can be added without a `FORMAT_VERSION` bump, a `MasterFrame` field, or a section table at

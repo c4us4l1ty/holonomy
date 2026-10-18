@@ -99,6 +99,15 @@ pub enum FrameError {
         /// What the chunk count implies.
         implied: u64,
     },
+    /// `chunk_count` does not fit the 4-byte field it is written into.
+    ///
+    /// Only reachable by a caller that built a [`MasterFrame`] by hand — `chunks_for` bounds
+    /// it well below `u32::MAX` — but the encode boundary is where a truncation that *decodes
+    /// cleanly as a different document* has to be refused rather than performed.
+    ChunkCountOverflow {
+        /// The count that was offered.
+        found: u64,
+    },
 }
 
 impl core::fmt::Display for FrameError {
@@ -136,6 +145,9 @@ impl core::fmt::Display for FrameError {
                     "content_len {content_len} disagrees with chunk count {implied}"
                 )
             }
+            Self::ChunkCountOverflow { found } => {
+                write!(f, "chunk count {found} does not fit the 32-bit field")
+            }
         }
     }
 }
@@ -162,13 +174,45 @@ pub struct MasterFrame {
     pub argon2_p: u32,
 }
 
+/// [`MAX_TITLE_LEN`] bytes of `title`, stopping before any character that would cross the limit.
+///
+/// Byte-budgeted rather than character-budgeted, and it stops *before* the offending character
+/// rather than truncating mid-encoding — a frame cut through a multi-byte character is not UTF-8,
+/// and `decode` refuses it with `TitleNotUtf8`. See [`MasterFrame::new`].
+pub fn truncate_title(title: &str) -> String {
+    if title.len() <= MAX_TITLE_LEN {
+        return title.to_string();
+    }
+    let mut out = String::with_capacity(MAX_TITLE_LEN);
+    for ch in title.chars() {
+        if out.len() + ch.len_utf8() > MAX_TITLE_LEN {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 impl MasterFrame {
     /// A frame for a document of `content_len` bytes in `chunk_count` chunks.
+    ///
+    /// # The title is truncated by **bytes**, at a character boundary
+    ///
+    /// This used to be `title.chars().take(MAX_TITLE_LEN)`, and the two limits did not agree:
+    /// `MAX_TITLE_LEN` is a byte budget (`encode` refuses more than that, and `decode` reads a
+    /// `u16` byte count), while `chars().take` counts characters. A character is up to 4 bytes,
+    /// so 512 characters of a non-ASCII title is 2,048 bytes — accepted here, and then rejected
+    /// by `encode` on the first `write_payload`, **after** the container had derived keys and
+    /// written 128 MiB of chaff. `create` failed with `TitleTooLong` naming a title the caller
+    /// had every reason to believe was fine.
+    ///
+    /// Truncating at the byte budget and stopping before a character that would cross it makes
+    /// the two limits the same number, so a frame built here is always encodable.
     pub fn new(content_len: u64, chunk_count: u64, title: &str) -> Self {
         Self {
             content_len,
             chunk_count,
-            title: title.chars().take(MAX_TITLE_LEN).collect(),
+            title: truncate_title(title),
             vdf_iterations: 0,
             argon2_m_kib: 0,
             argon2_t: 0,
@@ -211,7 +255,16 @@ impl MasterFrame {
         b[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         // b[6..8] stays zero: reserved.
         b[8..16].copy_from_slice(&self.content_len.to_le_bytes());
-        b[16..20].copy_from_slice(&(self.chunk_count as u32).to_le_bytes());
+        // **Checked, not `as`.** `decode` validates `chunk_count` against its own
+        // `content_len` arithmetic and against the caller's, so a value that does not fit the
+        // 4-byte field would be silently truncated here into a frame that decodes as a
+        // *different, self-consistent* document — the one shape of corruption this format cannot
+        // detect later. It is unreachable today (`chunks_for` caps the count), which is exactly
+        // why the check belongs at the encode boundary rather than in a comment.
+        let chunk_count = u32::try_from(self.chunk_count).map_err(|_| FrameError::ChunkCountOverflow {
+            found: self.chunk_count,
+        })?;
+        b[16..20].copy_from_slice(&chunk_count.to_le_bytes());
         b[20..22].copy_from_slice(&(title.len() as u16).to_le_bytes());
         // b[22..26] stays zero: reserved.
         b[26..34].copy_from_slice(&self.vdf_iterations.to_le_bytes());

@@ -894,7 +894,7 @@ impl Rope {
     ///
     /// ## The two-section case
     ///
-    /// A leaf is 3,840 B and a section 65,520 B, so one leaf can need two sections and `fetch_leaf` gets
+    /// A leaf is 3,840 B and a section 65,504 B, so one leaf can need two sections and `fetch_leaf` gets
     /// called with a whole leaf's worth of room either way. **Pinning both sections for the leaf's
     /// lifetime is the source's problem, not the rope's** — which is the point of the seam: the rope asks
     /// for a leaf, and whatever stores leaves in sections answers.
@@ -1182,7 +1182,7 @@ impl Rope {
     /// Part 8 proposed per-leaf write-back on eviction. Part 13 measured it end to end and **falsified it**:
     /// a 135,040-byte document, one 5-byte insert, every resident leaf written back and committed, and
     /// **132,987 of 135,045 bytes still differ from the truth** (`tests/write_back_shift.rs`). A shift moves
-    /// every offset after the edit; a section is 65,520 B and a leaf at most 3,841 B, so a leaf write-back
+    /// every offset after the edit; a section is 65,504 B and a leaf at most 3,841 B, so a leaf write-back
     /// repairs at most 1 leaf in 17 of a section and the rest of that section keeps pre-shift bytes. The
     /// container's `content_len` did not even grow — the commit reported success and left the document on
     /// disk **five bytes short** of the one in memory.
@@ -1697,7 +1697,7 @@ impl Rope {
 /// The contract is deliberately narrow, and it is **not** "give me a leaf's bytes": it is *fill `out`*
 /// and report how many. The rope knows the length; the source knows the storage; neither has to
 /// translate for the other. That is what keeps the leaf/section size mismatch out of this crate —
-/// `65,520 / 3,840 = 17.0625`, so a leaf can straddle two sections and the *source* is the only thing
+/// `65,504 / 3,840 = 17.0167`, so a leaf can straddle two sections and the *source* is the only thing
 /// that has to care.
 pub trait LeafSource {
     /// Fill `out` with leaf `index`'s bytes, returning how many were written.
@@ -1724,7 +1724,7 @@ pub trait LeafSource {
     /// has no sections**: writing a leaf's bytes back overwrites exactly that leaf's range and disturbs
     /// nothing else, so a shift is invisible.
     ///
-    /// `SectionStore` is section-granular — a section is 65,520 B and a leaf at most 3,841 B — so writing
+    /// `SectionStore` is section-granular — a section is 65,504 B and a leaf at most 3,841 B — so writing
     /// one leaf back repairs at most 1 leaf in 17 of a section and leaves the rest of it holding
     /// pre-shift bytes. Measured end to end (`tests/write_back_shift.rs`): a 135,040-byte document, one
     /// 5-byte insert, **every** resident leaf written back and committed, and **132,987 of 135,045 bytes

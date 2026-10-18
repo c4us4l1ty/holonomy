@@ -21,7 +21,7 @@
 //! # The claim that matters most
 //!
 //! [`a_leaf_straddling_a_section_boundary_is_correct`]. A leaf is at most 3,841 B and a section is
-//! 65,520 B, so `65,520 / 3,840 = 17.0625` — **a leaf straddles the section boundary in 1 leaf out of
+//! 65,504 B, so `65,504 / 3,840 = 17.0625` — **a leaf straddles the section boundary in 1 leaf out of
 //! 17.** Reading one section and calling it a leaf's bytes is the natural mistake here, and it is silent
 //! for 16 leaves out of 17. That is why the boundary is *placed deliberately* in this test rather than
 //! left to chance.
@@ -33,7 +33,7 @@ use holonomy_text::{LeafSource, Rope, RopeError, GAP_MINIMUM, LEAF_CAPACITY};
 const PASS: &str = "correct horse battery staple";
 const ITER: u64 = 1;
 /// A section is one container chunk, and `holonomy`'s manifest uses the same number.
-const SECTION: usize = 65_520;
+const SECTION: usize = 65_504;
 
 /// Scratch under `target/<profile>`, because `DirectFile` opens `O_DIRECT` and `/tmp` is tmpfs here.
 fn scratch_dir() -> std::path::PathBuf {
@@ -149,7 +149,7 @@ fn a_leaf_straddling_a_section_boundary_is_correct() {
 #[test]
 fn leaf_and_section_boundaries_do_not_tile_and_that_is_pinned() {
     let leaf_fill = LEAF_CAPACITY - GAP_MINIMUM;
-    assert_eq!(SECTION, 65_520, "the container's plaintext chunk size");
+    assert_eq!(SECTION, 65_504, "the container's plaintext chunk size");
     assert_ne!(
         SECTION % leaf_fill,
         0,
