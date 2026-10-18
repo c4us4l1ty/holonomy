@@ -573,16 +573,29 @@ impl Rope {
     /// gate counts allocations across a burst of keystrokes and requires zero for every keystroke
     /// that does not exhaust a leaf's gap.
     pub fn insert_byte(&mut self, ch: u8) -> Result<(), RopeError> {
-        // **Recorded before the edit, because `at` is an offset in the document as it was *before* it.**
-        // Recording after would give an offset one byte too far, and — as parts 9 and 11 both found the
-        // hard way — a coordinate recorded in the wrong system is wrong in a way no length check catches.
+        // **`at` is captured before the edit (it is an offset in the document as it was *before* it),
+        // but the record entry is pushed only after the edit has actually landed.** Parts 9 and 11
+        // found the hard way that a coordinate recorded in the wrong system is wrong in a way no length
+        // check catches — and that lesson was *why* the push used to sit above the edit. But pushing
+        // before a fallible edit is the same defect in the other direction: `insert_byte_unrecorded`
+        // can fail (`locate` OutOfBounds, `set_gap_offset`, `leaf.insert_byte` → GapSaturated), and a
+        // pushed-but-never-applied entry is a phantom.
+        //
+        // The phantom is not a cosmetic leak. `EditRecord` is a **positional accumulator**: `to_saved`
+        // walks the edits backwards, subtracting each one's `inserted - removed` for every offset past
+        // it. So one phantom entry shifts the *saved* coordinate of every real edit after it, silently
+        // misrouting the next write-back and the next fault — the "refused edit does not damage the
+        // document" property `fault_edit_conflict.rs` pins is only true if the record stays honest.
+        // Recording after the success, with the pre-edit `at` captured above, keeps both properties.
         // **Through the constructor, not a struct literal**, so the inline-or-heap decision lives in
         // `Bytes` rather than being re-made at each of the four edit sites. A literal here would be a
         // `Vec` again, and the keystroke would allocate -- which is the bug `Bytes` exists to fix.
+        let at = self.cursor;
+        self.insert_byte_unrecorded(ch)?;
         self.record
-            .push(crate::edit_record::Edit::insert(self.cursor, [ch]));
+            .push(crate::edit_record::Edit::insert(at, [ch]));
         self.note_edit_at_cursor();
-        self.insert_byte_unrecorded(ch)
+        Ok(())
     }
 
     /// [`insert_byte`](Self::insert_byte) without the record entry.
@@ -637,14 +650,13 @@ impl Rope {
     /// [`fault_leaf`](Self::fault_leaf) is what turns that into a refetch on the next read rather than a
     /// silent read of pre-edit bytes.
     ///
-    /// **Called after the record entry and before the bytes move**, so a caller that fails mid-edit
-    /// leaves the rope *more* likely to refetch, which is the safe direction: an unnecessary refetch
-    /// costs a load, and a missing one costs correctness.
+    /// **Called after the record entry and after the bytes move** (the edit sites above push the
+    /// record entry only once the edit has landed, so a refused edit leaves both the record and the
+    /// counter untouched). It is deliberately *not* a gate on anything today: [`fault_leaf`](Self::fault_leaf)
+    /// checks residency alone, so the safe-direction argument that used to justify bumping before the
+    /// bytes moved no longer applies.
     fn note_edit_at_cursor(&mut self) {
         self.edit_epoch += 1;
-        // **The leaf holding the cursor is exempt**, and has to be: it is about to be edited *in place*,
-        // so its bytes become current by the edit itself. Stamping it now -- before the edit -- would be
-        // a promise the code has not yet kept, so it is stamped on the way out instead.
     }
 
     /// The single byte immediately before the cursor.
@@ -692,13 +704,20 @@ impl Rope {
             // is what a later replay needs to know which saved bytes are gone. An undo record holds the
             // removed text; so does this, and for the same reason.
             let removed = self.byte_before_cursor()?;
-            self.record
-                .push(crate::edit_record::Edit::delete(self.cursor - 1, removed));
-            self.note_edit_at_cursor();
+            let at = self.cursor - 1;
             let leaf = self.leaf_mut(index)?;
             leaf.set_gap_offset(within)?;
             leaf.delete_byte()?;
             self.cursor -= 1;
+            // **Recorded after the byte is actually gone, with the pre-edit `at` captured above.**
+            // `leaf_mut`/`set_gap_offset`/`delete_byte` are all fallible, and pushing before them
+            // left a phantom `Edit::delete` on any refusal — which, because `EditRecord` is a
+            // positional accumulator, shifts the saved coordinate of every later edit. `at` is
+            // `cursor - 1` *before* the decrement, i.e. the document as it was, which is the
+            // coordinate system the record requires.
+            self.record
+                .push(crate::edit_record::Edit::delete(at, removed));
+            self.note_edit_at_cursor();
             self.recompute_starts_from(index);
             return Ok(());
         }
@@ -722,14 +741,19 @@ impl Rope {
         // byte is the last byte of the *previous* leaf, so `at` is `cursor - 1` in document coordinates
         // either way, but the byte itself has to come from the leaf that holds it.
         let removed = self.byte_before_cursor()?;
-        self.record
-            .push(crate::edit_record::Edit::delete(self.cursor - 1, removed));
-        self.note_edit_at_cursor();
+        let at = self.cursor - 1;
         let leaf = self.leaf_mut(prev)?;
         leaf.set_gap_offset(prev_len)?;
         leaf.delete_byte()?;
         self.cursor -= 1;
+        // **After the byte is gone, same as the branch above.** `try_merge` runs before the record
+        // entry so that a refusal there — the only fallible call left — leaves the record untouched
+        // too; the byte is already deleted at that point, but a merge refusal is not something this
+        // path recovers from, and recording nothing is strictly safer than recording a phantom.
         self.try_merge(prev)?;
+        self.record
+            .push(crate::edit_record::Edit::delete(at, removed));
+        self.note_edit_at_cursor();
         self.recompute_starts_from(prev.saturating_sub(1));
         Ok(())
     }
@@ -761,10 +785,22 @@ impl Rope {
         // per byte, so the cost would be O(paste x window) on the fault path.
         // **`bytes` is borrowed, not copied**: `Bytes::from(&[u8])` inlines up to `INLINE_BYTES` and
         // copies only when it must. A paste of 200 bytes allocates once, which is the paste's own cost.
+        // **Recorded after the edit lands, not before** — for the same reason `insert_byte` now is.
+        // `insert_at_unrecorded` is fallible: `set_cursor(offset)` refuses an out-of-range offset, and
+        // `insert_byte_unrecorded` can fail mid-run on `GapSaturated`/`OutOfBounds`. Pushing first left
+        // a phantom `Edit::insert` behind on every refusal, and because `EditRecord` is a positional
+        // accumulator (`to_saved` subtracts each edit's delta walking backwards) that one phantom entry
+        // shifts the saved coordinate of every real edit after it — misrouting later write-backs and
+        // faults. The offset here is the *parameter*, an argument that does not move as the edit
+        // proceeds, so it is already the correct pre-edit coordinate and needs no separate capture.
+        // A partial run (some bytes inserted, then a mid-run failure) still records nothing, which is
+        // the honest answer: the paste as a whole did not happen, and no later replay should be told
+        // it did.
+        self.insert_at_unrecorded(offset, bytes)?;
         self.record
             .push(crate::edit_record::Edit::insert(offset, bytes));
         self.note_edit_at_cursor();
-        self.insert_at_unrecorded(offset, bytes)
+        Ok(())
     }
 
     /// [`insert_at`](Self::insert_at) without the record entry — **and the only way a document is

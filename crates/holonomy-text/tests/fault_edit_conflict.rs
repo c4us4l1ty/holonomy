@@ -1,4 +1,4 @@
-//! **The hazard that stopped faulting and editing from coexisting — and that Part 14 removed.** 5 tests.
+//! **The hazard that stopped faulting and editing from coexisting — and that Part 14 removed.** 6 tests.
 //!
 //! # The finding, and it was a real one
 //!
@@ -35,6 +35,7 @@
 //! | a faulting read is safe | [`a_faulting_read_of_an_unedited_document_is_correct`] |
 //! | a faulting cursor move is safe | [`a_faulting_cursor_move_does_not_drift_the_store`] |
 //! | reads are unaffected by the removal | [`the_window_still_reads_correctly_after_a_mutation_refuses`] |
+//! | a refused edit records nothing | [`a_refused_edit_leaves_no_phantom_in_the_record`] |
 //! | no mutator slipped through | [`there_is_no_faulting_mutator_on_the_rope`] |
 
 use holonomy_text::{LeafSource, Rope, RopeError};
@@ -212,6 +213,94 @@ fn the_window_still_reads_correctly_after_a_mutation_refuses() {
     // The refusal left everything consistent, so a read is still right.
     let got = read_at(&mut rope, &mut store, 0, 64);
     assert_eq!(got[..], bytes[..64], "a refused edit does not damage the document");
+}
+
+/// **A refused edit leaves no phantom in the edit record**, and the phantom is invisible to a
+/// document-only check — which is why the test above could not catch it.
+///
+/// `EditRecord` is a *positional accumulator*: `to_saved`/`saved_runs` walk the edits backwards,
+/// subtracting each one's `inserted - removed` to translate a current offset into a saved one. Every
+/// mutator used to push its `Edit` **before** the fallible work (`insert_at_unrecorded` calls
+/// `set_cursor`, which refuses an absent leaf; `insert_byte_unrecorded`/`delete_byte` can refuse on a
+/// saturated gap or a bounds check). A push that precedes a refusal leaves behind an `Edit` describing
+/// bytes that never moved, and because the record is positional that one phantom shifts the saved
+/// coordinate of **every real edit after it** — so the next fault fetches the wrong run and the next
+/// write-back lands in the wrong place. The mutators now push only after the edit lands, keeping the
+/// pre-edit `at` (the offset parameter, or `cursor - 1` before the decrement) as the recorded
+/// coordinate.
+///
+/// The scenario is the one a session actually hits: a click places the caret by faulting one leaf,
+/// then a keystroke lands *there* (recorded, real), then a second keystroke lands in a leaf nobody
+/// faulted (refused, must record nothing), then a third lands back in the resident leaf. Only the two
+/// real edits may be in the record; if the refused one left a phantom, the third edit's saved offset
+/// is off by the phantom's delta and the read-back after a commit is wrong from `deep` onward.
+#[test]
+fn a_refused_edit_leaves_no_phantom_in_the_record() {
+    let n = 40_000;
+    let bytes = doc(n);
+    let mut rope = Rope::from_skeleton(n);
+    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+
+    let leaf = rope.leaf_len_of(0);
+    let deep = 3 * leaf + 100;
+
+    // A click faults one leaf and puts the caret there. That is the only resident leaf.
+    rope.fault_leaf_containing(&mut store, deep).expect("fault the click's leaf");
+    rope.set_cursor_faulting(&mut store, deep).expect("place the caret");
+
+    // Keystroke 1: a real insert into the resident leaf. Recorded.
+    rope.insert_byte(b'A').expect("insert into a resident leaf");
+
+    // Keystroke 2: into an **absent** leaf. This refuses with `LeafAbsent` and must record nothing.
+    // There is no faulting mutator by design (`there_is_no_faulting_mutator_on_the_rope`), so the
+    // only way to attempt an edit into an absent leaf is the direct call, which is exactly the
+    // refusal path a mis-placed caret would hit if the caret logic ever drifted.
+    let refused = rope.insert_at(deep + 2 * leaf, b"NO");
+    assert!(
+        matches!(refused, Err(RopeError::LeafAbsent { .. })),
+        "an un-faulted edit refuses -- got {refused:?}"
+    );
+
+    // Keystroke 3: back in the resident leaf, one byte after keystroke 1. Recorded.
+    rope.insert_byte(b'B').expect("second insert into a resident leaf");
+
+    // Now commit and read the whole document back. `commit` writes every leaf and clears the record,
+    // so this exercises the *store*; but before commit the two resident reads below already pin the
+    // record. The truth is built by performing the two real edits — the refused one contributes
+    // nothing.
+    let mut truth = bytes.clone();
+    truth.insert(deep, b'A');
+    truth.insert(deep + 1, b'B');
+    assert_eq!(
+        rope.text_len(),
+        truth.len(),
+        "the refused edit added no bytes; only the two real ones did"
+    );
+
+    // The two resident bytes come straight from the rope's leaf, and are correct by construction.
+    let near = read_at(&mut rope, &mut store, deep, 2);
+    assert_eq!(
+        &near[..],
+        &truth[deep..deep + 2],
+        "the two real edits landed as 'AB' at the caret"
+    );
+
+    // The decisive assertion: fault a leaf **after** the edits and read it. This goes through
+    // `saved_runs`, which walks the record backwards. A phantom insert left by the refused keystroke
+    // would shift this leaf's saved offset and hand back bytes from one position early — the exact
+    // one-byte-per-phantom drift this file exists to rule out.
+    let after_point = deep + 2 * leaf + 2;
+    let got = read_at(&mut rope, &mut store, after_point, 8);
+    assert_eq!(
+        &got[..],
+        &truth[after_point..after_point + 8],
+        "a fault past a refused edit is not shifted -- the refused edit left no phantom in the record"
+    );
+
+    // The store here is read-only by design (`SavedDocument::store_leaf` refuses), so the commit tail
+    // belongs to `write_back.rs`'s commit-capable store. What this file pins is the half that only a
+    // phantom could break: the *record* stayed honest across a refusal, so `saved_runs` still maps
+    // current offsets to the right saved ones.
 }
 
 /// **There is no faulting mutator on the rope, and that is a property worth asserting.**
