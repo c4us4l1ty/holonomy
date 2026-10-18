@@ -169,14 +169,16 @@ impl DocLines {
     /// newline" is a way to be wrong in twelve places. This compares the document's newline count with
     /// the geometry's line count instead:
     ///
-    /// * **Counts agree** — the edit neither added nor removed a newline, so every line *start* is
-    ///   unchanged and the tree is still valid for lookup. Only the caret line's *length* moved, so
-    ///   that one weight is recomputed. `O(log n)` plus a scan of one line.
+    /// * **Counts agree** — the edit neither added nor removed a newline, so exactly one line's *length*
+    ///   moved and the tree is still a valid index for every other line. Both sides of the caret are
+    ///   probed and each candidate that starts on a real boundary is remeasured. `O(log n)` plus a scan
+    ///   of one or two lines.
     /// * **Counts disagree** — a newline appeared or vanished, which shifts every subsequent line start,
     ///   and `LineGeometry` has no way to do that in less than `O(n)`. Both trees are rebuilt.
     ///
     /// The caret is a *hint about where to look*, not the source of truth: an undo can move it far from
-    /// the edit, so the count comparison is what decides, and the caret only bounds the rebuild.
+    /// the edit, so the count comparison is what decides, and what the probes cannot account for is
+    /// caught by comparing the stored lengths against the document's and rebuilt.
     ///
     /// **`expected_lines` is passed in rather than counted here, and that is the whole point.** The
     /// first version took `text` and counted newlines itself -- which put a whole-document read back on
@@ -197,31 +199,91 @@ impl DocLines {
             // A newline was added or removed. Everything after it moved, so both trees are rebuilt --
             // which is the `O(n)` the geometry documents for `resize_lines`. This is the one place a
             // whole-document read remains on the keystroke path, and it is one keystroke in forty.
-            let Ok(text) = editor.text() else {
-                // A document that will not read cannot be measured either, and a stale geometry is
-                // better than no session. The next successful sync repairs it.
-                return Sync::Unchanged;
-            };
-            let fresh = Self::build(&text, metrics);
-            self.geo = fresh.geo;
-            self.count = fresh.count;
-            return Sync::Rebuilt;
+            return self.rebuild(editor, metrics);
         }
 
-        // No line was added or removed, so line starts are unchanged and the tree is a valid index.
-        // Recompute the caret line's length and, if it moved, that is a one-point update.
-        // **No cast.** `line_of_byte` answers a `usize`; the `as usize` was left over from the
-        // `u32`-indexed geometry of an earlier phase and read as a deliberate conversion.
-        let line = self.geo.line_of_byte(caret);
-        let start = self.geo.byte_of(line).unwrap_or(0);
-        let len = Self::line_len_from(editor, start) as u32;
-        if self.geo.line_len(line).unwrap_or(0) == len as usize {
-            return Sync::Unchanged;
+        // **Counts agree, so exactly one line's length is wrong, and finding that line is the whole job.**
+        //
+        // This used to resolve it as `line_of_byte(caret)` and remeasure that one weight, which is wrong
+        // in the most ordinary way to type. A keystroke leaves the caret one past the byte it inserted,
+        // and an insertion at the *end* of a line — appending to it, which is what a caret sitting on the
+        // `\n` does — puts that caret on the next line's first byte as the pre-edit tree counts it. So
+        // the probe named the line after the one that grew, found its length unmoved, and did nothing:
+        // the edited line stayed a byte short **for the rest of the session**, and because a Fenwick
+        // tree's offsets are prefix sums of its weights, every line below it answered `line_start`
+        // shifted by one from there on. One letter typed at the end of line 0 put a phantom `Ln 2` in
+        // the status bar and drew the line below one byte out.
+        //
+        // So both sides of the caret are probed — `caret` and `caret - 1` — which bracket the edit in
+        // every shape it takes. An insertion is caught by the last byte it added, a deletion by where
+        // the removed bytes began, and undoing an insertion parks the caret on the *far* side of what it
+        // removed, which is why one probe was never going to be enough.
+        let mut out = Sync::Unchanged;
+        for probe in [caret, caret.saturating_sub(1)] {
+            let line = self.geo.line_of_byte(probe);
+            let start = self.line_begin(line);
+            // **A neighbour of the edited line is not measurable, so it is not measured.** Every line
+            // after the edit is indexed from a stale prefix sum, and reading a line length from the
+            // middle of a line returns a number that belongs to no line at all — writing that down is
+            // how a one-point update becomes a corrupt tree. The byte in front of a genuine line start
+            // is its terminator, so one byte decides whether this candidate's start is real, and a
+            // candidate whose start is real names its own line correctly: the edit moved no newline, so
+            // every boundary ahead of it kept its index.
+            if start > 0 && !Self::byte_is_newline(editor, start - 1) {
+                continue;
+            }
+            let len = Self::line_len_from(editor, start);
+            if self.geo.line_len(line).unwrap_or(0) == len {
+                continue;
+            }
+            self.geo
+                .set_line_len(line, len)
+                .expect("a line that exists");
+            out = Sync::OneLine;
         }
-        self.geo
-            .set_line_len(line, len as usize)
-            .expect("a line that exists");
-        Sync::OneLine
+        // **And then it is checked, because being wrong here is silent.** The probes assume the caret
+        // brackets the edit, which holds for every path `Session` routes through here but is an
+        // assumption about callers rather than a fact about the document. The stored lengths sum to the
+        // document's length, so a disagreement means a line is still wrong, and one `O(n)` rebuild on
+        // an undo is a good trade against a tree that quietly misplaces every line below the mistake.
+        if self.bytes() != editor.text_len() {
+            return self.rebuild(editor, metrics);
+        }
+        out
+    }
+
+    /// Rebuild both trees from the document. `O(document)`, and the answer whenever a one-point update
+    /// cannot account for the difference it was asked to explain.
+    fn rebuild(&mut self, editor: &Editor, metrics: LineMetrics) -> Sync {
+        let Ok(text) = editor.text() else {
+            // A document that will not read cannot be measured either, and a stale geometry is
+            // better than no session. The next successful sync repairs it.
+            return Sync::Unchanged;
+        };
+        let fresh = Self::build(&text, metrics);
+        self.geo = fresh.geo;
+        self.count = fresh.count;
+        Sync::Rebuilt
+    }
+
+    /// Whether document byte `at` is a `\n`.
+    fn byte_is_newline(editor: &Editor, at: usize) -> bool {
+        let mut one = [0u8; 1];
+        matches!(editor.read_into(at, &mut one), Ok(1) if one[0] == b'\n')
+    }
+
+    /// The document length these stored line lengths describe. `O(log n)`.
+    ///
+    /// **Not `LineGeometry::total_bytes`, which would be wrong by one per line here.** That method adds
+    /// the line count to the sum of the weights because it was written for terminator-*exclusive*
+    /// lengths; this module stores terminators (see the module docs), so on this tree its answer is
+    /// `document length + lines`, and comparing it against `Editor::text_len` would report every
+    /// document as too long by its own line count. The end of the last line says it directly.
+    fn bytes(&self) -> usize {
+        match self.count.checked_sub(1) {
+            Some(last) => self.line_begin(last) + self.geo.line_len(last).unwrap_or(0),
+            None => 0,
+        }
     }
 
     /// Length in bytes of the line starting at `start`, **including** its `\n`, read through
@@ -395,6 +457,86 @@ mod tests {
             d.sync(&e, expected_lines(&text), 1, metrics()),
             Sync::OneLine
         );
+        assert_agrees(&d, &text);
+    }
+
+    /// **Typing at the end of a line must update the line that grew.**
+    ///
+    /// `sync` used to resolve the edited line from the caret alone, and a keystroke leaves the caret one
+    /// past the byte it inserted. Appending to a line — which is what a caret sitting on the `\n` does —
+    /// puts that caret on the *next* line's first byte as the pre-edit tree counts it, so the probe
+    /// named a line whose length had not moved, reported that nothing had changed, and left the edited
+    /// line a byte short for the rest of the session. Because the tree's offsets are prefix sums of its
+    /// weights, every line below it answered `line_start` shifted by one from there on.
+    #[test]
+    fn a_letter_typed_at_a_line_end_updates_the_line_that_grew() {
+        let mut text = b"aa\nbb\ncc\n".to_vec();
+        let mut d = DocLines::build(&text, metrics());
+        let mut e = editor_with(&text);
+        // The caret is on the '\n' closing line 0, which is where a person sits to append to that line.
+        e.insert_at(2, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
+            .expect("room");
+        text.insert(2, b'x');
+        // The caret after the insert is 3, which the *pre-edit* tree counts as line 1's first byte.
+        assert_eq!(
+            d.sync(&e, expected_lines(&text), 3, metrics()),
+            Sync::OneLine
+        );
+        assert_agrees(&d, &text);
+        assert_eq!(d.line_begin(1), 4, "line 1 still starts after 'aax\\n'");
+        assert_eq!(d.line_begin(2), 7, "line 2 still starts after 'bb\\n'");
+    }
+
+    /// The same trap from the other two sides, because both put the caret and the edit in different
+    /// lines: typing into an *empty* line leaves the caret on the following line's first byte, and
+    /// undoing an insertion parks the caret on the far side of the bytes it removed.
+    #[test]
+    fn an_edit_that_straddles_a_line_boundary_still_finds_its_line() {
+        // Into an empty line.
+        let mut text = b"aa\n\ncc\n".to_vec();
+        let mut d = DocLines::build(&text, metrics());
+        let mut e = editor_with(&text);
+        e.insert_at(3, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
+            .expect("room");
+        text.insert(3, b'x');
+        assert_eq!(
+            d.sync(&e, expected_lines(&text), 4, metrics()),
+            Sync::OneLine
+        );
+        assert_agrees(&d, &text);
+
+        // Removed from the end of a line, with the caret left on the far side of the hole — where
+        // `Editor::undo` puts it, since it parks at `offset + bytes.len()`.
+        let mut text = b"aax\nbb\ncc\n".to_vec();
+        let mut d = DocLines::build(&text, metrics());
+        let mut e = editor_with(&text);
+        e.delete_at(2, 1).expect("delete");
+        text.remove(2);
+        e.caret_to(3).expect("a caret in range");
+        assert_eq!(
+            d.sync(&e, expected_lines(&text), 3, metrics()),
+            Sync::OneLine
+        );
+        assert_agrees(&d, &text);
+    }
+
+    /// **A caret that is nowhere near the edit must not leave a stale tree behind.**
+    ///
+    /// The probes bracket the edit only if the caret does, and every `Session` edit path places it there
+    /// — but that is a fact about callers, not about the document. A line's stored lengths sum to the
+    /// document's length, so a caller that breaks the rule is caught by that and answered with a
+    /// rebuild instead of a tree that misplaces every line below the mistake.
+    #[test]
+    fn an_edit_far_from_the_caret_rebuilds_rather_than_lying() {
+        let mut text = b"aa\nbb\ncc\n".to_vec();
+        let mut d = DocLines::build(&text, metrics());
+        let mut e = editor_with(&text);
+        e.delete_at(0, 1).expect("delete");
+        text.remove(0);
+        // The caret is parked at the very end of the document, nowhere near the byte that went.
+        let far = text.len();
+        e.caret_to(far).expect("a caret in range");
+        d.sync(&e, expected_lines(&text), far, metrics());
         assert_agrees(&d, &text);
     }
 

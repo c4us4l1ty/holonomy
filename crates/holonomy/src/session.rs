@@ -5091,6 +5091,13 @@ impl<'a> Session<'a> {
     /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
     fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
+        // **The caret's line before this edit, captured before `reconcile_caret` overwrites it.**
+        // `state.caret_line` is a *view* of where the caret is, and it is kept current by
+        // `reconcile_caret` — which every caret move and every edit goes through — so at the top of
+        // this function it is exactly where the caret was when the edit began. That is the second
+        // half of the damage below, and it is only recoverable here, because every caller has
+        // already mutated the document by the time it gets here and the line number is gone.
+        let old_line = self.state.caret_line;
         // **The document now differs from what is on disk**, and that is the only thing this flag means.
         //
         // `ChromeState::dirty` has existed since Phase 8 and had **no writer anywhere in the workspace**
@@ -5101,17 +5108,30 @@ impl<'a> Session<'a> {
         // clear the marker rather than leave it lit; the flag is cleared by a successful commit, not
         // recomputed, which is the honest direction to be wrong in.
         self.state.dirty = true;
+        // **The line geometry must agree with the document before anything reads it, and the caller
+        // has already changed the document.** `line_index` used to count newlines, so it was correct
+        // whatever the geometry said; now it is a tree lookup, and a tree that a previous edit left
+        // stale answers with the *previous* document's line numbers.
+        //
+        // **This used to sit *after* `reconcile_caret`, which is the bug rather than an
+        // optimisation.** The comment above it said the geometry must agree before anything reads it
+        // and that `caret_to` had "already used it above" — the two halves of that sentence were
+        // true and the order it implied was inverted. `reconcile_caret` is where `caret_line` is
+        // *set* (`self.state.caret_line = self.line_index(...)`), so the very function that read the
+        // tree was the one allowed to run against a stale one. Measured: in `"alpha bravo ... golf"`
+        // with the caret at 44 after typing, the fresh tree says line 0 (offset 44 is the newline's
+        // own slot) and the stale one said line 1. So the status bar read `Ln 2` while the caret was
+        // on line 1, `caret_cell` placed the caret a row too low, and `line_box` damaged the wrong
+        // row — three symptoms of one ordering mistake, all of them "off by one line, one edit late".
+        //
+        // Nothing here reads the tree before this point, so moving it to the top of the function
+        // changes no caller: `sync_lines` needs only `counts.lines()` (the caller folded it before
+        // calling) and `editor.caret()` (the edit has parked it).
+        self.sync_lines();
         self.reconcile_caret()?;
         // **Scroll after reconciling, not inside it.** `Session::new` also reconciles and must not
         // scroll; an edit moves the caret like a keystroke does and must. See `reconcile_caret`.
         self.scroll_line_into_view(self.state.caret_line);
-        // The line geometry must agree with the document before anything reads it, and `caret_to` has
-        // already used it above — so the order here is not free. **This is the fix for a latent bug,
-        // not only an optimisation**: `line_index` used to count newlines, so it was correct whatever
-        // the geometry said; now it is a tree lookup, and a tree that a previous edit left stale
-        // answers with the *previous* document's line numbers. Every edit syncs, so the tree is never
-        // stale at the top of this function.
-        self.sync_lines();
         // **And the section manifest**, for the same reason and at the same point: `DocLines` answers line
         // questions and `Manifest` answers *"does this document contain a formula, table or image?"*,
         // which is the question four emitters ask before deciding whether to read the whole document.
@@ -5126,10 +5146,39 @@ impl<'a> Session<'a> {
         // FR-3.4: an edit invalidates one line's box. The damaged region is the caret's line, and
         // the *old* caret's line if the edit moved it -- both, or a line that got longer would keep
         // a tail of stale pixels.
+        //
+        // **Both, and the second one used to be missing.** The comment above described the invariant
+        // and the code beneath it damaged `self.state.caret_line` alone -- the line the caret ended up
+        // on, which after `reconcile_caret` is the *new* one. So any edit that moves the caret across a
+        // line boundary repainted only where the caret landed and left the line it left behind
+        // untouched. Press Enter at the end of a long line and that line's tail stays on screen for as
+        // long as nothing else dirties it; Backspace at the start of a line joins it to the previous one
+        // and the previous one's box keeps the pixels that used to be the start of the deleted line.
+        // Nothing else damages these boxes -- `reconcile_caret` unions only the *new* caret cell, which
+        // is inside the new line -- so this was not covered elsewhere either.
+        //
+        // `old_line` can be past the end of the document after an edit that removed lines (Backspace
+        // joining two, or an undo that undid a newline), and `line_box` answers `None` for a line that
+        // is not on screen. Both cases fall back to a full repaint, which is the correct direction: an
+        // unnecessary repaint costs a frame, and a missing one leaves visible garbage.
         let line = self.state.caret_line;
-        self.damage = self
+        let mut damage = self
             .line_box(line)
             .unwrap_or_else(|| self.chrome.full_damage());
+        if old_line != line {
+            damage = damage.union(
+                &self
+                    .line_box(old_line)
+                    .unwrap_or_else(|| self.chrome.full_damage()),
+            );
+        }
+        // **Assigned, not unioned into `self.damage`.** `reconcile_caret` above unions the caret cell
+        // into the pending damage, and that rect is inside the new line's box, so it is already covered
+        // — but the assignment is now load-bearing in the other direction too: `self.damage` may hold
+        // geometry from *before* this edit, and a line that moved needs its old box repainted regardless
+        // of where the caret is. Anything else that damaged the frame before `after_edit` would be
+        // dropped, so the union above is what has to stand on its own.
+        self.damage = damage;
         let _ = inserted;
         Ok(())
     }

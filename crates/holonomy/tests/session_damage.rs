@@ -1,4 +1,4 @@
-//! **What a click costs, what the chrome lies about, and what the sidebar and the title agree on.** 9 tests.
+//! **What a click costs, what the chrome lies about, and what the sidebar and the title agree on.** 10 tests.
 //!
 //! # What this file is about
 //!
@@ -31,6 +31,7 @@
 //! | and the widgets are all smaller than the frame | [`every_toolbar_widget_is_small_next_to_the_frame`] |
 //! | **typing repaints the status bar, a hover does not** | [`typing_repaints_the_status_bar_and_a_hover_does_not`] |
 //! | **and the bar draws the real count** | [`the_word_count_on_the_status_bar_counts_the_document`] |
+//! | **an edit that moves the caret repaints the line it left** | [`a_caret_that_moves_line_damages_the_line_it_left`] |
 
 use holonomy::session::Session;
 use holonomy::store::NoSource;
@@ -565,4 +566,95 @@ fn ink_in(s: &Session<'_>, r: holonomy_render::DamageRect) -> Vec<u32> {
         .flat_map(|y| (r.x..r.right()).map(move |x| (x, y)))
         .map(|(x, y)| s.frame().pixel(x, y))
         .collect()
+}
+
+/// **An edit that moves the caret to another line damages both lines, not just the one it landed on.**
+///
+/// `after_edit`'s own comment stated the invariant — "The damaged region is the caret's line, and the
+/// *old* caret's line if the edit moved it — both, or a line that got longer would keep a tail of stale
+/// pixels" — and the code beneath it damaged `self.state.caret_line` alone, which after `reconcile_caret`
+/// is the *new* one. Nothing else covers the gap: `reconcile_caret` unions only the new caret cell,
+/// which is inside the new line's box, so the line the caret left was never repainted by anything.
+///
+/// **Enter at the end of a long line is the smallest reproduction.** The line splits; everything from
+/// the caret to the end of the row moves down a line; and the pixels where it used to be are nobody's
+/// damage. They stay on screen until some unrelated repaint happens to cover them — which on a still
+/// screen is a long time, because the point of damage tracking is that nothing else covers them.
+#[test]
+fn a_caret_that_moves_line_damages_the_line_it_left() {
+    let m = ChromeMetrics::DESKTOP;
+    let mut ed = Editor::new();
+    // One long line, then a second, so the caret has somewhere to go and the first line is wide enough
+    // that "its tail stayed on screen" is a visible claim rather than a hypothetical.
+    ed.insert_at(0, b"alpha bravo charlie delta echo foxtrot golf\nsecond\n", SpanPolicy::GrowIntoInsert)
+        .expect("room");
+    let mut s = Session::new(
+        ed,
+        Painter::new(atlas(), 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
+    s.repaint_all().expect("first paint");
+
+    // Put the caret at the end of the long first line — the worst case, since the whole tail of that
+    // row moves to the new line and only the new line was being repainted.
+    s.caret_to("alpha bravo charlie delta echo foxtrot golf".len())
+        .expect("caret to the end of line 0");
+    s.repaint_all().expect("settle");
+
+    // **`damage()`, the accumulator, not `last_damage()`.** The latter is the rect the *previous* paint
+    // was given and only becomes interesting after a `tick`; this gate is about what an edit asks for,
+    // which is what a repaint would then be given.
+    //
+    // **And the session's own `cell_h`,** not the fixture's `ChromeMetrics::DESKTOP`. The session
+    // derives its metrics on the way in and the two differ (18 against 25 here), so asserting the row
+    // geometry against the fixture's constant would be asserting a number that is not the one on
+    // screen.
+    let cell_h = s.chrome_metrics().cell_h;
+    let text = s.chrome_layout().text;
+    let row0 = text.y;
+    let row1 = text.y + cell_h;
+
+    s.apply(holonomy_input::Command::Newline).expect("enter");
+    assert_eq!(
+        s.caret_line(),
+        1,
+        "Enter at the end of line 0 put the caret on line 1, so the two lines to compare are 0 and 1"
+    );
+
+    let d = s.damage();
+    // **The decisive assertion: the row the caret left is inside the damage.** Before the fix the
+    // damage was row 1 alone and this failed.
+    assert!(
+        d.y <= row0 && d.bottom() > row0,
+        "Enter split line 0 and the damage {d:?} does not reach row 0 (y={row0}). Everything from the \
+         caret to the end of that row moved down a line, and nothing repainted where it was."
+    );
+    assert!(
+        d.y <= row1 && d.bottom() > row1,
+        "and it does not reach the new row 1 (y={row1}) either: {d:?}"
+    );
+    // **Two rows, not a frame.** The point of the fix is not "damage more" — a session that answered a
+    // keystroke with `full_damage()` would pass it too, and that is the defect the other tests in this
+    // file exist to prevent.
+    assert_eq!(
+        d.height,
+        2 * cell_h,
+        "the damage is exactly the two lines the edit touched, and not more: {d:?}"
+    );
+    assert_eq!(
+        d.y,
+        row0,
+        "and it starts at the top of the line the caret left: {d:?}"
+    );
+
+    // **And a keystroke that does not move the caret is still one row**, which is what makes this a fix
+    // rather than a regression to the behaviour the rest of this file pins.
+    s.apply(holonomy_input::Command::Insert('x')).expect("type on line 1");
+    let d = s.damage();
+    assert_eq!(
+        d.height,
+        cell_h,
+        "typing inside line 1 must still damage exactly one row, not two: {d:?}"
+    );
 }
