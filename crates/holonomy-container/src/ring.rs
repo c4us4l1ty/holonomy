@@ -409,22 +409,33 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
                 CHUNK_PLAINTEXT,
                 self.slots[slot].as_mut_slice(),
             )?;
-            file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot])?;
+            // **The slot stops being resident when it is sealed, not when the write lands.**
+            //
+            // Sealing happened in place, so from this line on the slot holds ciphertext while
+            // `resident` would still be claiming it holds chunk `index` as plaintext. Both flags
+            // are therefore cleared *before* the write, which is the whole fix: they used to be
+            // cleared after it, so a `write_exact_at` that failed left a slot marked resident and
+            // dirty that held sealed bytes. Two things then followed from that one ordering, and
+            // the second is unrecoverable.
+            //
+            // `ensure_center_loaded` returns early when `resident[slot] == Some(center)`, so the
+            // next `read_content` handed the ciphertext back as document text. And because
+            // `dirty` was still set, a *retry* re-sealed that ciphertext and wrote the result as
+            // the chunk's plaintext — a chunk that had merely failed to save is now garbage, and
+            // nothing in the format can tell it from real content. That is why the flags are
+            // dropped first and the slot is wiped below rather than left holding sealed bytes
+            // for a retry to find: **the plaintext is already gone either way, so the honest
+            // state is "not resident", which forces the next read to re-fetch from the disk.**
             self.dirty[slot] = false;
-            // **The slot is no longer resident.** Sealing happened in place, so the slot now
-            // holds ciphertext while `resident` still claims it holds chunk `index` as plaintext.
-            //
-            // That was a real bug, found by the Phase 7 census workload rather than by the
-            // container's own tests: `ensure_center_loaded` returns early when
-            // `resident[slot] == Some(center)`, so a `read_content()` after a `commit()` handed
-            // back the sealed bytes verbatim. The Phase 3 tests never hit it because they read
-            // through a freshly opened handle, whose ring is empty; the Phase 8 session hits it on
-            // every autosave-then-export, which is the single most common sequence there is.
-            //
-            // Forgotten rather than decrypted-back: there is no cheaper way to know whether the
-            // slot was the one just sealed, and re-reading costs one `pread64` for a chunk the
-            // caller is about to read anyway.
             self.resident[slot] = None;
+            if let Err(e) = file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot])
+            {
+                // Wipe what was sealed but never stored, so no ciphertext derived from a live
+                // document key is left sitting in a slot that a later `stage_plaintext` could
+                // mistake for a blank.
+                self.slots[slot].wipe();
+                return Err(e.into());
+            }
             written += 1;
         }
         if written > 0 {

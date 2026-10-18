@@ -32,13 +32,40 @@
 //! One `pread64` for the chunk the caller is about to read anyway. There is no cheaper option that
 //! is also correct: distinguishing "sealed by commit" from "resident plaintext" would need another
 //! bit of per-slot state to answer a question the answer to which is always "reload".
+//!
+//! # And the same fix, one line earlier, for the case where the write never landed
+//!
+//! `reading_after_a_commit_on_the_same_handle_returns_plaintext` is about a commit that *succeeded*.
+//! [`a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry`] is about one that did not, and it
+//! is the more dangerous of the two: the flags were cleared *after* the write, so a failed write left
+//! a slot marked resident and dirty that held sealed bytes -- and the retry sealed them again and
+//! wrote the result as the chunk's plaintext.
 
+use std::os::fd::FromRawFd;
+
+use holonomy_container::io::DirectFile;
+use holonomy_container::ring::Ring;
 use holonomy_container::Wavefunction;
 
 /// A shared passphrase and a deliberately tiny VDF count: this test is about the ring, not about
 /// the delay function, and the container's own constants are the ones that matter.
 const PASSPHRASE: &str = "regression";
 const VDF_ITERATIONS: u64 = 2;
+
+/// A container file next to the build output rather than in `/tmp`, because `DirectFile` opens with
+/// `O_DIRECT` and `/tmp` is tmpfs on this host. `tests/chunk_read.rs` says the same thing about its
+/// own scratch directory.
+fn scratch_path(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test exe path");
+    let dir = exe
+        .ancestors()
+        .nth(3)
+        .expect("target/<profile> layout")
+        .join("holonomy-container-tests")
+        .join("commit-then-read");
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir.join(format!("{}-{name}.wavefunction", std::process::id()))
+}
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -117,8 +144,60 @@ fn a_fresh_handle_still_sees_the_committed_plaintext() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A document large enough to occupy all three ring slots, so the "forgotten slot" path is the only
-/// one available and the prefetch logic is exercised.
+/// **A commit whose write fails must leave nothing staged for a retry.**
+///
+/// The fix above clears `resident` and `dirty` when the slot is *sealed*. It used to clear them when
+/// the slot was *written*, which is one line too late: on a failed write the slot still claimed to
+/// hold chunk `index` as plaintext while holding sealed bytes, and it was still dirty. Two things
+/// follow, and the second cannot be undone by anything in the format:
+///
+/// * `ensure_center_loaded` short-circuits on the resident claim, so the next read hands the
+///   ciphertext back as document text.
+/// * A retry re-seals that ciphertext and writes the result as the chunk's **plaintext**. A chunk
+///   that merely failed to save becomes garbage that decrypts perfectly.
+///
+/// The write is made to fail by taking the descriptor away from the `DirectFile`: the test takes
+/// ownership of it, closes it, and forgets the handle so nothing closes it twice. Reaching an I/O
+/// error from a test otherwise needs a full filesystem, and this path is the entire point.
+#[test]
+fn a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry() {
+    let path = scratch_path("unwritable");
+    let _ = std::fs::remove_file(&path);
+    let open = DirectFile::create_or_open(&path).expect("a container-shaped file");
+    let mut ring = Ring::new(4).expect("three page-locked slots");
+    ring.stage_plaintext(1, b"plaintext that must never be stored as ciphertext")
+        .expect("stage");
+
+    // **Close the descriptor behind the handle's back.** `from_raw_fd` takes ownership of a number
+    // this test is giving up, and the value is dropped on this statement, so the close happens here
+    // and here only. `ManuallyDrop` is what keeps the `DirectFile`'s own `OwnedFd` from closing the
+    // same number again on drop, which would risk closing a descriptor a later test in this binary
+    // has since been given.
+    //
+    // SAFETY: `stolen` is a live descriptor owned by `open`, and exactly one of the two owners
+    // closes it.
+    let stolen = open.as_raw();
+    let open = std::mem::ManuallyDrop::new(open);
+    drop(unsafe { std::fs::File::from_raw_fd(stolen) });
+
+    let err = ring
+        .commit(&open, 0, &[7u8; 32], &[9u8; 24])
+        .expect_err("a closed descriptor cannot be written to");
+    assert!(
+        matches!(err, holonomy_container::ring::RingError::Io(_)),
+        "expected the write's own error, got {err:?}"
+    );
+    assert!(
+        !ring.has_dirty(),
+        "the slot is still dirty, so the next commit would seal the ciphertext already in it"
+    );
+    assert!(
+        ring.center_bytes().iter().all(|&b| b == 0),
+        "sealed bytes that never reached the disk are left sitting in the slot"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn a_document_spanning_the_whole_ring_reads_back_after_a_commit() {
     let path = temp_path("whole-ring");

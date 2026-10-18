@@ -16,12 +16,13 @@
 //! | and reads back in any order | [`chunks_read_the_same_in_any_order`] |
 //! | the last chunk is short, and says so | [`the_last_chunk_is_short_and_says_so`] |
 //! | a windowed walk is cheaper than the whole document | [`a_windowed_walk_allocates_one_chunk_not_the_document`] |
+//! | **a document that grows past a boundary still saves** | [`growing_a_document_across_a_chunk_boundary_saves`] |
 //! | chunk 0 is not readable as content | [`the_master_frame_is_not_readable_as_content`] |
 //! | an out-of-range index is refused, not guessed | [`an_index_past_the_end_is_refused_rather_than_guessed`] |
 //! | the payload sits where the frame says | [`the_first_payload_byte_is_where_the_frame_says_it_is`] |
 //! | the frame's index arithmetic is right | [`chunk_content_offset_is_the_offset_chunks_are_read_at`] |
 
-use holonomy_container::layout::{CHUNK_PLAINTEXT, S_MAX_PAYLOAD};
+use holonomy_container::layout::{chunks_for, CHUNK_PLAINTEXT, S_MAX_PAYLOAD};
 use holonomy_container::{ContainerError, Wavefunction};
 
 /// A passphrase every test in this file uses. The VDF cost is lowered so 10 containers do not take
@@ -176,6 +177,80 @@ fn a_windowed_walk_allocates_one_chunk_not_the_document() {
     );
     println!(
         "windowed walk: one {CHUNK_PLAINTEXT}-byte buffer for a {whole}-byte document (8 chunks)"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A document that grows past a chunk boundary must still save, and be readable afterwards.**
+///
+/// [`Wavefunction::set_content_len`] is the primitive an eviction calls when an edit changes the
+/// document's length, and it is the only path that grows a container: it stages a blank chunk for
+/// each new one and commits it. Two things about that were wrong, and neither was a transient
+/// failure — the document could not be saved again, at any size, until the handle was reopened.
+///
+/// * **The ring's bound never moved.** `Ring::check_range` refuses any index at or past
+///   `ring.chunks`, and the count the ring was holding was the *old* one, so the ring refused the
+///   very chunk being staged: `OutOfRange { index: old_chunks, chunks: old_chunks }`. The count it
+///   refused is the count the frame had not been told about yet.
+/// * **The blank chunk was never written.** `stage_blank` deliberately leaves a slot clean, so the
+///   `commit` after it skipped the slot and the new chunk stayed whatever the trailing chaff was.
+///   The frame then claimed a chunk the disk did not have, and reading it failed authentication.
+///
+/// The region past the old content is not asserted to be zeros: a short chunk's gap is filled with
+/// fresh randomness by `seal_in_place` — that is deliberate, so a file cannot be told from its
+/// histogram where the document ends — and the rope's leaves are what fill it in the product.
+#[test]
+fn growing_a_document_across_a_chunk_boundary_saves() {
+    let text = content(CHUNK_PLAINTEXT + 512);
+    let (path, mut wf) = container(&text);
+    let grown = CHUNK_PLAINTEXT * 2 + 777;
+    assert!(
+        grown > text.len(),
+        "the fixture must actually cross a chunk boundary: {} then {grown}",
+        text.len()
+    );
+    let before = chunks_for(text.len() as u64).expect("the fixture fits a container");
+    let after = chunks_for(grown as u64).expect("the grown fixture fits too");
+    assert_eq!(after, before + 1, "the fixture crosses exactly one boundary");
+
+    wf.set_content_len(grown).expect("grow past the chunk boundary");
+    assert_eq!(
+        wf.content_len(),
+        grown as u64,
+        "the frame records the length this call established"
+    );
+
+    // The new chunk is on disk and decrypts, which is the half that used to be chaff. Its index is
+    // the *old* chunk count: index 0 is the master frame, so `chunk_count` content chunks live at
+    // `1..chunk_count` and growing to `before + 1` adds the one at `before`.
+    let mut buf = vec![0xA5u8; CHUNK_PLAINTEXT];
+    let got = wf
+        .read_chunk_into(before, &mut buf)
+        .expect("the grown chunk reads back");
+    assert_eq!(
+        got,
+        grown - 2 * CHUNK_PLAINTEXT,
+        "the new chunk is the last one, so it is the short one"
+    );
+    assert!(
+        buf[..got].iter().all(|&b| b == 0),
+        "and it is blank, as `set_content_len` documents: a grown region has no content yet"
+    );
+
+    let read = wf.read_content().expect("read after growing");
+    assert_eq!(read.len(), grown, "the new length is what the frame says");
+    assert_eq!(
+        &read[..text.len()],
+        &text[..],
+        "the bytes that were already there are untouched by a length change"
+    );
+    // And the new chunk count survived the master-frame rewrite, so a fresh handle agrees.
+    drop(wf);
+    let mut reopened = Wavefunction::open(&path, PASS, ITER).expect("open");
+    assert_eq!(
+        reopened.read_content().expect("read after reopen").len(),
+        grown,
+        "the length a reopened container reports is the one that was written"
     );
     let _ = std::fs::remove_file(&path);
 }

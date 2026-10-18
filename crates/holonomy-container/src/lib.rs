@@ -885,11 +885,37 @@ impl Wavefunction {
         }
 
         let old_chunks = self.frame.chunk_count;
+        // **The ring's bound is `ring.chunks`, and this is the only caller that left it behind.**
+        //
+        // `Ring::check_range` refuses any index at or past `ring.chunks`, and `ring.chunks` is
+        // assigned in exactly three places: on `open`, and twice inside `write_content`'s loop. This
+        // function staged chunk `old_chunks` with the ring still bounded by the *old* count, so the
+        // ring answered `OutOfRange { index: old_chunks, chunks: old_chunks }` on the first
+        // iteration of the growth loop — **and the document could then never be saved again**, at
+        // any size, because the count it is refusing is the count the frame has not been told about
+        // yet. A 66 KiB document grew past one chunk, `Ctrl+S` reported the write failed, and
+        // nothing but closing the file cleared it.
+        //
+        // Set before the loop, so `stage_blank` and `commit` are bounded by the count this call is
+        // establishing. Narrowing on a shrink is the harmless direction: every read path is gated on
+        // the authenticated `frame.chunk_count`, so a ring that knows about more chunks than the
+        // frame does cannot serve a byte the frame would not ask for.
+        self.ring.chunks = chunk_count;
         if chunk_count > old_chunks {
             // **Commit per chunk, as `write_content` does**, for the same reason: `stage_blank` discards every
             // slot, so a single trailing commit would drop the previous chunk's dirty slot before it was written.
             for index in old_chunks..chunk_count {
                 self.ring.stage_blank(index)?;
+                // **A blank chunk is not a written chunk, and the difference is this call.**
+                // `stage_blank` deliberately leaves the slot *clean* -- a chunk that has been staged but not
+                // given content must not be committed over the payload -- so `commit` below skipped it, and
+                // the new chunk was never stored. The frame then claimed a chunk the disk did not have, which
+                // is chaff, and the first read of the grown region failed authentication on it. The write was
+                // the second half of the same defect as the missing `ring.chunks` above: neither the ring's
+                // bound nor the ring's dirty flag was moved to the count this call was establishing.
+                //
+                // `center_bytes_mut` is what marks the slot dirty, and zeroes are what a grown region holds.
+                self.ring.center_bytes_mut().fill(0);
                 self.ring
                     .commit(&self.file, self.omega, &self.root.k_enc, &self.root.n_root)?;
             }
@@ -942,8 +968,12 @@ impl Wavefunction {
     ///
     /// Stage, then commit, then return. A caller that wants to batch several chunks pays this once per
     /// chunk; a caller that stages without committing gets nothing, because `stage_plaintext` leaves the
-    /// bytes in the ring's scratch slot and the ring holds only three. **There is no partially-applied
-    /// state**: if the write fails the error propagates and the caller knows nothing reached the disk.
+    /// bytes in the ring's scratch slot and the ring holds only three. **A failed write leaves nothing
+    /// half-applied to this chunk**: the ring drops the slot's resident and dirty flags at the moment it
+    /// is sealed rather than after the write lands, so the next read re-fetches from the disk instead of
+    /// handing back sealed bytes, and a retry cannot re-seal them into the chunk's plaintext. **Other
+    /// chunks a single [`commit`](Self::commit) had already written are not rolled back** — it is a
+    /// sequence of independent writes, and the error says which one failed.
     pub fn write_chunk(&mut self, index: u64, plaintext: &[u8]) -> Result<(), ContainerError> {
         if self.chunk_content_offset(index).is_none() {
             return Err(ContainerError::NoSuchChunk { index });
