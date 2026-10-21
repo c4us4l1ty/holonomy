@@ -1152,6 +1152,10 @@ impl<'a> Session<'a> {
     /// [`Session::insert_table`]'s first-cell placement, and it is the reason this method moves the
     /// caret at all rather than inserting and returning.
     pub fn insert_math(&mut self) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+M in viewing mode
+        // wrote four bytes into the document**, with the refusal counter at zero.
+        self.check_editable()?;
         let at = self.editor.caret() as usize;
         self.editor
             .insert_at(at as u32, b"$$$$", SpanPolicy::GrowIntoInsert)?;
@@ -1164,7 +1168,7 @@ impl<'a> Session<'a> {
         // will fail the same way, which is why `tests/session_counts.rs` drives all of them.
         self.counts.after_insert(&self.editor, at, b"$$$$");
         self.editor.caret_to(at + 2)?;
-        self.after_edit(4)
+        self.after_edit(4, &mut None)
     }
 
     /// Insert an image at the caret, from the built-in chart.
@@ -1196,6 +1200,10 @@ impl<'a> Session<'a> {
     /// a fixture of its own and a future file picker can use the same code without either being a
     /// special case.
     pub fn insert_image_bytes(&mut self, png: &[u8]) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+I in viewing mode
+        // wrote an anchor and a catalog entry into the document**, with the refusal counter at zero.
+        self.check_editable()?;
         let at = self.editor.caret();
         // `Editor::insert_image` writes the catalog entry *before* the anchor, so a malformed PNG
         // leaves nothing behind rather than an anchor that nothing serves.
@@ -1212,7 +1220,7 @@ impl<'a> Session<'a> {
         // The *whole page* is invalidated, not one line: an image is hundreds of pixels tall and
         // `after_edit` damages `cell_h` by construction, which would leave the image's own rows stale.
         self.damage = self.chrome.full_damage();
-        self.after_edit(ANCHOR_BYTES.len() as u32)
+        self.after_edit(ANCHOR_BYTES.len() as u32, &mut None)
     }
 
     /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
@@ -1264,6 +1272,10 @@ impl<'a> Session<'a> {
     /// person who has just asked for a table wants to type into it, and the insertion point is the
     /// table's first *separator*, which is not inside any cell.
     pub fn insert_table(&mut self, rows: u16, cols: u16) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+T in viewing mode
+        // wrote a table into the document**, with the refusal counter at zero.
+        self.check_editable()?;
         let span = self
             .editor
             .insert_table(rows, cols, self.chrome.metrics.columns)?;
@@ -1273,7 +1285,7 @@ impl<'a> Session<'a> {
         self.counts = TextCounts::scan(&self.editor);
         self.tables_shape_dirty = true;
         self.enter_cell(span, 0, 0, 0)?;
-        self.after_edit(0)
+        self.after_edit(0, &mut None)
     }
 
     /// What the last paint did, from the painter's side. Phase 12.
@@ -4107,7 +4119,7 @@ impl<'a> Session<'a> {
                             let n = (len as usize).min(bytes.len());
                             self.counts.after_delete(&self.editor, at as usize, &bytes[..n]);
                         }
-                        self.after_edit(0)?;
+                        self.after_edit(0, &mut source.take())?;
                         self.stats.cuts += 1;
                     } else {
                         self.stats.clipboard_noops += 1;
@@ -4129,7 +4141,7 @@ impl<'a> Session<'a> {
                     let inserted = self.editor.yanked();
                     self.counts
                         .after_insert(&self.editor, at, &inserted[..n]);
-                    self.after_edit(n as u32)?;
+                    self.after_edit(n as u32, &mut source.take())?;
                     self.stats.pastes += 1;
                 } else {
                     self.stats.clipboard_noops += 1;
@@ -4155,8 +4167,34 @@ impl<'a> Session<'a> {
     /// document exactly as it was, with the selection still selected.
     fn fault_for_edit(
         &mut self,
-        source: Option<&mut dyn holonomy_text::LeafSource>,
+        source: &mut Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
+        self.check_editable()?;
+        if let Some(src) = source.as_deref_mut() {
+            self.editor.fault_at_caret(src)?;
+        }
+        Ok(())
+    }
+
+    /// **The read-only check, on its own, for a mutator that has no source.**
+    ///
+    /// # Why this is a second function rather than a flag
+    ///
+    /// `fault_for_edit` does two things: it refuses the edit in viewing mode, and it faults the
+    /// caret's leaf so the editor's leaves are there before anything is touched. **The second half
+    /// needs a source, and four mutators do not have one** — they are reached from the toolbar,
+    /// which is not a keystroke path.
+    ///
+    /// **And they were editing the document in viewing mode.** `insert_math`, `insert_image_bytes`,
+    /// `insert_table` and `style_selection` called `self.editor.insert_at(...)` and friends
+    /// directly, never reaching `fault_for_edit`, so the policy the toolbar's own Mode switcher
+    /// advertises — *"a viewing mode where typing is silently dropped"* — was not enforced on
+    /// them: **Ctrl+M in viewing mode wrote four bytes into the document**, and
+    /// `stats.edits_readonly_refused` stayed at zero, so the counter that exists to make refusals
+    /// visible did not see it.
+    ///
+    /// The check is the same one, in the same place, and it is now reachable without a source.
+    fn check_editable(&mut self) -> Result<(), SessionError> {
         // **The read-only check, and it is here rather than in twenty match arms.** Part 44: every
         // mutator in this file reaches this function -- `insert`, `backspace`, `delete_forward`, and
         // therefore every `Command` that edits -- so **one check here refuses typing, backspace,
@@ -4175,18 +4213,19 @@ impl<'a> Session<'a> {
             self.stats.edits_readonly_refused += 1;
             return Err(SessionError::ReadOnly);
         }
-        if let Some(src) = source {
-            self.editor.fault_at_caret(src)?;
-        }
         Ok(())
     }
 
     fn insert(
         &mut self,
         bytes: &[u8],
-        source: Option<&mut dyn holonomy_text::LeafSource>,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
-        self.fault_for_edit(source)?;
+        // **The source is reborrowed, not moved.** `fault_for_edit` takes it by value, and the
+        // manifest's re-measure needs it afterwards: on a container-backed document the resident-only
+        // reader cannot fault, and **a save evicts every leaf** -- so without the source the
+        // manifest froze after the first Ctrl+S and the formula was never drawn again.
+        self.fault_for_edit(&mut source)?;
         // **A selected range is replaced, not typed into.** Part 28.
         //
         // **This is the first thing typing does with a selection and the only reason a selection is
@@ -4231,7 +4270,7 @@ impl<'a> Session<'a> {
         if let Some(armed) = self.pending_style.filter(|_| !bytes.is_empty()) {
             self.editor
                 .style_range(at as u32, (at + bytes.len()) as u32, armed, 0)?;
-            self.after_edit(0)?;
+            self.after_edit(0, &mut source)?;
         }
         // **The armed colour, over the same range, and as a second edit.** Part 29.
         //
@@ -4242,9 +4281,9 @@ impl<'a> Session<'a> {
         if let Some(rgb) = self.pending_colour.filter(|_| !bytes.is_empty()) {
             self.editor
                 .style_range(at as u32, (at + bytes.len()) as u32, 0, rgb)?;
-            self.after_edit(0)?;
+            self.after_edit(0, &mut source)?;
         }
-        self.after_edit(bytes.len() as u32)
+        self.after_edit(bytes.len() as u32, &mut source)
     }
 
     /// Run `f` with the table the caret is in, or report that there is none.
@@ -4448,7 +4487,7 @@ impl<'a> Session<'a> {
         }
         self.editor.delete_at(start as u32, INDENT.len() as u32)?;
         self.counts.after_delete(&self.editor, start, INDENT);
-        self.after_edit(INDENT.len() as u32)
+        self.after_edit(INDENT.len() as u32, &mut None)
     }
 
     /// **Delete the selection, tell the counters about it, and report what went.** Part 28.
@@ -4506,15 +4545,17 @@ impl<'a> Session<'a> {
             &self.line_scratch[..n]
         };
         self.counts.after_delete(&self.editor, start, removed);
-        self.after_edit(len)?;
+        self.after_edit(len, &mut None)?;
         Ok(Some(len))
     }
 
     fn backspace(
         &mut self,
-        source: Option<&mut dyn holonomy_text::LeafSource>,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
-        self.fault_for_edit(source)?;
+        // **The source is reborrowed, not moved** — see `insert`: the manifest's re-measure needs it
+        // afterwards, because the resident-only reader cannot fault and a save evicts every leaf.
+        self.fault_for_edit(&mut source)?;
         // **A selection is deleted whole, before the "is there a byte before the caret" question.**
         // Part 28. The check below is about *one character*; with a selection the answer is the range,
         // and asking it first would mean Backspace with a selection anchored at byte 0 doing nothing at
@@ -4538,14 +4579,15 @@ impl<'a> Session<'a> {
         let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.backspace()?;
         self.counts.after_delete(&self.editor, at, &one[..n]);
-        self.after_edit(1)
+        self.after_edit(1, &mut source)
     }
 
     fn delete_forward(
         &mut self,
-        source: Option<&mut dyn holonomy_text::LeafSource>,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
-        self.fault_for_edit(source)?;
+        // **The source is reborrowed, not moved** — see `insert`.
+        self.fault_for_edit(&mut source)?;
         // **The same rule as `backspace`, and the same reason.** A Delete with a selection deletes
         // the selection, which is what every editor does and is the only behaviour that makes
         // "select, then press Delete" work without holding a different key.
@@ -4560,7 +4602,7 @@ impl<'a> Session<'a> {
         let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.delete_forward()?;
         self.counts.after_delete(&self.editor, at, &one[..n]);
-        self.after_edit(1)
+        self.after_edit(1, &mut source)
     }
 
     pub fn undo(&mut self) -> Result<(), SessionError> {
@@ -4579,7 +4621,7 @@ impl<'a> Session<'a> {
         match self.editor.undo() {
             Ok(_) => {
                 self.recount_counts();
-                self.after_edit(0)
+                self.after_edit(0, &mut None)
             }
             Err(EditorError::NothingToUndo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -4590,7 +4632,7 @@ impl<'a> Session<'a> {
         match self.editor.redo() {
             Ok(_) => {
                 self.recount_counts();
-                self.after_edit(0)
+                self.after_edit(0, &mut None)
             }
             Err(EditorError::NothingToRedo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -4750,6 +4792,10 @@ impl<'a> Session<'a> {
         italic: bool,
         colour: u32,
     ) -> Result<bool, SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **the toolbar's Bold button
+        // restyled the selected range in viewing mode**, with the refusal counter at zero.
+        self.check_editable()?;
         let Some(sel) = self.editor.selection() else {
             return Ok(false);
         };
@@ -4768,7 +4814,7 @@ impl<'a> Session<'a> {
         // because nothing could produce anything else; `TextIntervalSpan::color_rgb` had been in the
         // record since phase 4 with nothing to put in it.
         self.editor.style_range(sel.start, sel.end, flags, colour)?;
-        self.after_edit(0)?;
+        self.after_edit(0, &mut None)?;
         Ok(true)
     }
 
@@ -5089,7 +5135,11 @@ impl<'a> Session<'a> {
     /// `delete_selection` have all parked it. What is wanted is the *tail* of `caret_to`: re-read the
     /// column, re-read the line, scroll, damage. That is [`reconcile_caret`](Self::reconcile_caret),
     /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
-    fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
+    fn after_edit(
+        &mut self,
+        inserted: u32,
+        source: &mut Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
         self.stats.edits += 1;
         // **The caret's line before this edit, captured before `reconcile_caret` overwrites it.**
         // `state.caret_line` is a *view* of where the caret is, and it is kept current by
@@ -5138,7 +5188,16 @@ impl<'a> Session<'a> {
         // Synced here rather than lazily because a manifest that is stale about `span_total` would make
         // `publish_line_heights` skip a formula that exists, and the symptom would be a formula that
         // silently stops rendering.
-        self.sync_manifest();
+        //
+        // **The source comes along, because the manifest has to read the document.**
+        //
+        // The manifest's re-measure reads three sections of the document, and the resident-only
+        // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for any
+        // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
+        // the read failed, the section kept its stale weight, and the manifest froze: the formula
+        // was never drawn and the lines below it were never displaced. The faulting reader fetches
+        // what it needs, so the manifest tracks the document again.
+        self.sync_manifest(source);
         // And the status bar's totals, from the deltas the caller folded. O(1): this is a three-field
         // copy out of `TextCounts`, not a recount. See `publish_counts` for why the two maintained
         // quantities are published at their own points rather than together.
@@ -5251,11 +5310,21 @@ impl<'a> Session<'a> {
     /// **The rebuild branch is the only whole-document read on the keystroke path**, and it happens when a
     /// line appears or vanishes, because fixed-size sections shift. Same trade as `DocLines::sync`, in a
     /// second currency, and one keystroke in forty.
-    pub fn sync_manifest(&mut self) {
+    pub fn sync_manifest(&mut self, source: &mut Option<&mut dyn holonomy_text::LeafSource>) {
         // **No cast: `Editor::caret` already answers a `u32`.**
         let caret = self.editor.caret();
         let mut scratch = std::mem::take(&mut self.manifest_scratch);
-        let out = self.manifest.sync(&self.editor, caret, &mut scratch);
+        // **The editor is borrowed mutably, because the manifest may have to fault.**
+        //
+        // The manifest's re-measure reads three sections of the document, and the resident-only
+        // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for every
+        // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
+        // the read failed, the section kept its stale weight, and the manifest froze — the formula
+        // was never drawn and the lines below it were never displaced. With the source, the
+        // manifest faults what it needs and tracks the document again.
+        let out = self
+            .manifest
+            .sync(&mut self.editor, caret, source, &mut scratch);
         self.manifest_scratch = scratch;
         match out {
             crate::manifest::Sync::OneSection => self.stats.section_updates += 1,
@@ -5758,6 +5827,22 @@ impl<'a> Session<'a> {
         // `take_while` rather than `filter` because both lists ascend: once a run starts past this
         // line, no later run can belong to it.
         self.stats.span_queries += 1;
+        // **The page buffer's offsets and the document's offsets are two coordinate systems, and
+        // the runs live in the second one.**
+        //
+        // `spans` is the visible page's `(at, len)` pairs, and those `at`s are offsets into
+        // `line_scratch` — the page buffer, which starts at zero on every paint. The editor's
+        // span map, the selection and `pen_at` are all in *document* offsets, and the document
+        // offset of the page buffer's first byte is `line_begin(first)`.
+        //
+        // **So the query was made in the wrong coordinate system on every page but the first.**
+        // On page one the two agree; on page thirty the query asked for the document's bytes
+        // `[0, page_len)` — the *first* page's runs — and drew the visible line in the first
+        // page's styles. The selection had the same problem, and worse: `clip_to` compares the
+        // selection's document offsets against the page's, so on any page but the first it
+        // clipped to nothing and **the highlight was never drawn at all**.
+        let page_base = spans.first().map(|&(at, _)| at).unwrap_or(0);
+        let doc_base = self.lines.line_begin(first as usize) as u32;
         let page_runs = match (spans.first(), spans.last()) {
             // **The *last* line's end, and not the first line's start plus the last line's length.**
             // That was the first version, and it asked for a range barely past the first line — so no
@@ -5765,7 +5850,10 @@ impl<'a> Session<'a> {
             // "no differing pixels at all". A range built from the wrong two fields of a list is worse
             // than no hoist, because it looks correct.
             (Some(&(lo, _)), Some(&(hi_at, hi_len))) => {
-                self.editor.spans().runs_in(lo, hi_at + hi_len)
+                // **The document's range, which is the page's range translated.**
+                let doc_lo = doc_base;
+                let doc_hi = doc_base + (hi_at + hi_len - lo);
+                self.editor.spans().runs_in(doc_lo, doc_hi)
             }
             _ => Vec::new(),
         };
@@ -5811,12 +5899,21 @@ impl<'a> Session<'a> {
             // between would need a mid-line restart anyway, and the second scan is over at most one
             // line's bytes.
             if let Some(sel) = selection {
-                if let Some((lo, hi)) = sel.clip_to(at, at + len) {
+                // **The clip is in document offsets, and the line's document offset is what it
+                // is clipped against.**
+                //
+                // The selection is a range of the *document*; `at` is an offset into the *page
+                // buffer*. **On any page but the first the two are different numbers**, and
+                // `clip_to` compares them: `lo = max(2000, 0) = 2000`, `hi = min(2005, 10) =
+                // 10`, and `hi <= lo` means "no overlap" — **so the selection highlight was
+                // never drawn on any page but the first.**
+                let doc_at = doc_base + (at - page_base);
+                if let Some((lo, hi)) = sel.clip_to(doc_at, doc_at + len) {
                     // **The line's offset in the document, which `pen_at` needs** because `runs` is
                     // keyed on document offsets and `text` is a slice of the page buffer.
                     let doc_start = self.lines.line_begin(line as usize) as u32;
-                    let lo = (lo - at) as usize;
-                    let hi = (hi - at) as usize;
+                    let lo = (lo - doc_at) as usize;
+                    let hi = (hi - doc_at) as usize;
                     // **Two pens, not two column counts.** Part 33. `col0 * cell_w` was the grid and
                     // the caret is now at the pen, so a highlight placed on the grid would start up to
                     // a cell right of the caret at its left edge -- **the caret outside its own
@@ -5909,10 +6006,19 @@ impl<'a> Session<'a> {
             // **Four of part 24's gates went red at once, all reporting "no differing pixels at all",**
             // which is the most informative failure in this project: the style was still in the map, it
             // was simply never looked at.
+            // **The partition is in document offsets, because the runs are.**
+            //
+            // `page_runs` came from the editor's span map, which is keyed on document offsets, and
+            // this line's document offset is `doc_at`. **Comparing a document offset with a page
+            // offset is the bug this fixes**: on page one they coincide and everything is
+            // correct; on any other page the partition takes the wrong runs, so a styled line
+            // is drawn plain and a plain line is drawn in the style of whatever was at the same
+            // *page* offset in the document.
+            let doc_at = doc_base + (at - page_base);
             let mut runs = page_runs
                 .iter()
-                .skip_while(|(_, _, hi)| *hi <= at)
-                .take_while(|(_, lo, _)| *lo < at + shown_len)
+                .skip_while(|(_, _, hi)| *hi <= doc_at)
+                .take_while(|(_, lo, _)| *lo < doc_at + shown_len)
                 .map(|(s, lo, hi)| (*s, *lo, *hi))
                 .peekable();
             if runs.peek().is_none() {
@@ -5950,11 +6056,16 @@ impl<'a> Session<'a> {
                 // so this cannot happen today; it is a bound rather than a belief, because `seg` was
                 // truncated to the measure and a run clipped to a range the caller then shortened would
                 // otherwise index out of it.
-                let (lo, hi) = (lo.max(at).min(at + shown_len), hi.min(at + shown_len));
+                //
+                // **The clip is in document offsets**, like the runs themselves.
+                let (lo, hi) = (
+                    lo.max(doc_at).min(doc_at + shown_len),
+                    hi.min(doc_at + shown_len),
+                );
                 if hi <= lo {
                     continue;
                 }
-                let (lo, hi) = ((lo - at) as usize, (hi - at) as usize);
+                let (lo, hi) = ((lo - doc_at) as usize, (hi - doc_at) as usize);
                 // **Advance over the plain text before this run**, one run's worth of `REGULAR`.
                 if lo > cursor {
                     let gap = &seg[cursor..lo];
@@ -6733,7 +6844,7 @@ impl<'a> Session<'a> {
     /// binding for it would be a keymap change, and the keymap is already gated.
     pub fn toggle_bold(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
         self.editor.style_range(from, to, STYLE_BOLD, 0)?;
-        self.after_edit(0)
+        self.after_edit(0, &mut None)
     }
 }
 

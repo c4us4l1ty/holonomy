@@ -48,25 +48,48 @@ fn program() -> PathBuf {
     p.join("examples").join("phase8_census_session")
 }
 
-/// A writable directory for the child. Per-process, because libtest shares a pid across threads.
-fn scratch() -> PathBuf {
+/// A writable directory for one child. **Per run, not per process.**
+///
+/// # Why it is not per process
+///
+/// The first version was per *process*, on the reasoning that "libtest shares a pid across
+/// threads" — and that reasoning is right, and it is the reason the per-process directory was
+/// **wrong**: every test in this file therefore wrote its census's artifacts into the *same*
+/// directory, and each census opens them with `O_TRUNC`.
+///
+/// **So two censuses running at the same time truncate each other's files, and the test that
+/// checks the artifacts reads a file its sibling has just emptied.** That is a flaky test that
+/// fails for a reason that has nothing to do with the code under test, and it failed on this
+/// machine while the same test passed when run alone.
+///
+/// **Per run** is the fix: every census gets its own directory, and the caller that wants to
+/// inspect the artifacts is handed the directory its own census wrote.
+fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::var_os("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join(format!("holonomy-census-{}", std::process::id()));
+        .join(format!("holonomy-census-{}-{}", std::process::id(), tag));
     std::fs::create_dir_all(&dir).expect("scratch");
     dir
 }
 
+/// A counter that makes each census's directory unique.
+static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Run the census once, with `action` and an optional comma-separated `drop` list.
-fn census(action: &str, drop: &str) -> Output {
-    let dir = scratch();
-    Command::new(program())
+///
+/// **The directory is returned with the output**, because it is the directory *this* run wrote and
+/// no other run's.
+fn census(action: &str, drop: &str) -> (Output, PathBuf) {
+    let n = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = scratch(&format!("run{n}"));
+    let out = Command::new(program())
         .env("HOLONOMY_CENSUS_ACTION", action)
         .env("HOLONOMY_CENSUS_DROP", drop)
         .env("HOLONOMY_CENSUS_DIR", &dir)
         .output()
-        .unwrap_or_else(|e| panic!("spawn {}: {e}", program().display()))
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", program().display()));
+    (out, dir)
 }
 
 fn stderr_of(o: &Output) -> String {
@@ -96,7 +119,7 @@ fn ok(o: &Output) -> bool {
 
 #[test]
 fn the_real_session_loop_completes_under_the_shipped_allowlist() {
-    let out = census("trap", "");
+    let (out, _dir) = census("trap", "");
     let err = stderr_of(&out);
     assert_eq!(
         whoami(&out),
@@ -141,7 +164,7 @@ fn the_real_session_loop_also_completes_under_kill_process() {
     // in what happens to a listed one -- so a loop that completes under Trap must complete under
     // KillProcess too. Running both is what stops the census from passing because the handler is
     // lenient rather than because the table is right.
-    let out = census("kill-process", "");
+    let (out, _dir) = census("kill-process", "");
     assert!(
         ok(&out),
         "the loop did not complete under KILL_PROCESS.\nexit={:?}\n{}",
@@ -155,7 +178,7 @@ fn the_census_detects_an_entry_the_session_needs() {
     // `write` is issued many times over -- `eprintln!` in the boot report, the PPM, both exports --
     // so removing it must stop the run. If this ever passes, the census is not looking.
     for entry in ["write", "close"] {
-        let out = census("trap", entry);
+        let (out, _dir) = census("trap", entry);
         assert!(
             !ok(&out),
             "dropping `{entry}` from the allowlist did not stop the session, so the census cannot \
@@ -183,7 +206,7 @@ fn the_real_loop_needs_fewer_syscalls_than_the_table_grants() {
     // Asserted so that the next person to trim the table knows the trim is safe *today* and has to
     // re-measure rather than assume.
     for entry in ["lseek", "epoll_wait"] {
-        let out = census("trap", entry);
+        let (out, _dir) = census("trap", entry);
         assert!(
             ok(&out),
             "the loop appears to need `{entry}` now, which is a change from the Phase 8 \
@@ -198,7 +221,7 @@ fn the_real_loop_needs_fewer_syscalls_than_the_table_grants() {
 fn a_drop_that_matches_nothing_is_refused_rather_than_measured() {
     // A typo in a name would otherwise produce a *complete* table and a green result from a run
     // that removed nothing -- the harness would report success for a measurement it never performed.
-    let out = census("trap", "not_a_syscall_name");
+    let (out, _dir) = census("trap", "not_a_syscall_name");
     assert!(
         !ok(&out),
         "an unmatched drop was accepted:\n{}",
@@ -216,17 +239,17 @@ fn the_census_leaves_real_artifacts_behind() {
     // A census that completed without writing an HTML file, a PDF and a PPM has proven the loop does
     // not fault, and nothing about whether the sinks work. The exports are the sinks.
     //
-    // This runs its **own** census rather than reading whatever the other tests left behind. They run
-    // in parallel and share a pid, so the directory is shared too -- and a first version of this
-    // read files that a sibling test was in the middle of truncating, which failed intermittently
-    // for a reason that had nothing to do with the code under test.
-    let out = census("kill-process", "");
+    // **This runs its own census, and it reads the directory that census wrote.** The first version
+    // ran its own census and then read a *per-process* directory -- and every test in this file
+    // shares a pid, so every census wrote into the same directory with `O_TRUNC` and a sibling
+    // emptied the file this test was about to measure. **It failed on this machine, and passed
+    // when run alone**, which is the definition of a race. The directory is per run now.
+    let (out, dir) = census("kill-process", "");
     assert!(
         ok(&out),
         "the census did not complete:\n{}",
         stderr_of(&out)
     );
-    let dir = scratch();
     for name in ["census.html", "census.pdf", "census.ppm"] {
         let path = dir.join(name);
         let meta = std::fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));

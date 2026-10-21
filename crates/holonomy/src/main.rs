@@ -44,7 +44,6 @@ use holonomy_container::io::DirectFile;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
 use holonomy_export::Format;
-use holonomy_input::{EvdevSource, ScriptedInputSource};
 use holonomy_jail::{Action, AltStack, Enter, ALT_STACK_BYTES};
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_secure::SecureBlock;
@@ -78,6 +77,43 @@ struct SessionContext {
     /// session borrow it on demand avoids that without a self-referential-struct dependency. It is `None`
     /// until the passphrase is read.
     container_file: Option<holonomy_container::Wavefunction>,
+    /// **The input source, opened at boot.**
+    ///
+    /// **This field exists because the sealed path cannot open anything.**
+    ///
+    /// After `seccomp` the filter has no `openat`, so a path cannot become a descriptor — and a
+    /// session that reaches for one is `SIGSYS` and exit 137, which reads like a crash rather than
+    /// like a design rule. **The keyboard and the script were both being opened *after* the
+    /// filter**, inside the session driver, so the sealed product could not start its input loop
+    /// at all: the first `openat` killed the process.
+    ///
+    /// **So both are opened here, at stage 4**, which is the only place a path may become a
+    /// descriptor. The script is *read* at boot — its bytes are in memory before the filter goes
+    /// on — and the keyboard is *opened* at boot, with the descriptor handed to the session
+    /// rather than reopened.
+    input: BootInput,
+}
+
+/// **Where the session's input comes from, opened before the seal.**
+///
+/// **Two variants because the sealed path can have either, and the seal forbids choosing
+/// between them afterwards.** The script is a file read at boot; the keyboard is a device opened
+/// at boot.
+enum BootInput {
+    /// A scripted stream: the fixture's bytes, read at boot.
+    Script(holonomy_input::ScriptedInputSource),
+    /// The keyboard, opened at boot.
+    Evdev(holonomy_input::EvdevSource),
+}
+
+impl BootInput {
+    /// The source as the trait object the session takes.
+    fn as_source(&mut self) -> &mut dyn holonomy_input::InputSource {
+        match self {
+            Self::Script(s) => s,
+            Self::Evdev(e) => e,
+        }
+    }
 }
 
 impl SessionContext {
@@ -293,7 +329,15 @@ fn run() -> Result<(), Fail> {
         // to fetch and every byte is already in the rope.
         let mut bytes = holonomy::store::NoSource;
         s.repaint_all_with(&mut bytes).map_err(Fail::Session)?;
-        drive(&mut s, &args, &mut sinks, screenshot.as_mut(), &mut bytes)?;
+        // **The headless path is not sealed**, so the input is opened here rather than at boot.
+        let mut input = open_input(&args).map_err(io)?;
+        drive(
+            &mut s,
+            &mut sinks,
+            screenshot.as_mut(),
+            &mut bytes,
+            input.as_source(),
+        )?;
         return Ok(());
     }
 
@@ -339,6 +383,10 @@ fn run() -> Result<(), Fail> {
                 sinks: open_sinks(&args).expect("open the export sinks"),
                 screenshot: open_screenshot(&args).expect("open the screenshot"),
                 container_file: None,
+                // **The input, opened here, because here is the only place a path may become a
+                // descriptor.** The seal has no `openat`, so opening the keyboard afterwards is
+                // `SIGSYS` and exit 137.
+                input: open_input(&args).expect("open the input"),
             })
         })
         .map_err(Fail::Boot)?;
@@ -459,10 +507,10 @@ fn run() -> Result<(), Fail> {
             ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
             drive(
                 &mut ctx.session,
-                &args,
                 &mut ctx.sinks,
                 ctx.screenshot.as_mut(),
                 &mut bytes,
+                ctx.input.as_source(),
             )
             .unwrap_or_else(|e| {
                 eprintln!("holonomy: {e}");
@@ -551,10 +599,10 @@ fn run() -> Result<(), Fail> {
                 ctx.session.repaint_all_with(store).expect("the first paint");
                 drive(
                     &mut ctx.session,
-                    &args,
                     &mut ctx.sinks,
                     ctx.screenshot.as_mut(),
                     store,
+                    ctx.input.as_source(),
                 )
             }
             None => {
@@ -562,10 +610,10 @@ fn run() -> Result<(), Fail> {
                 ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
                 drive(
                     &mut ctx.session,
-                    &args,
                     &mut ctx.sinks,
                     ctx.screenshot.as_mut(),
                     &mut bytes,
+                    ctx.input.as_source(),
                 )
             }
         }
@@ -577,31 +625,54 @@ fn run() -> Result<(), Fail> {
     sealed.teardown_and_exit(-1);
 }
 
+/// **Open the session's input, at boot.**
+///
+/// # Why this exists at all
+///
+/// **The sealed path cannot open anything.** The seccomp filter has no `openat`, so a path
+/// cannot become a descriptor after the seal: reaching for one is `SIGSYS` and exit 137.
+///
+/// **The keyboard and the script were both being opened after the seal**, inside the session
+/// driver, so the sealed product's first act was to kill itself with a signal the shell reports
+/// as "Killed" and nothing else. The session never started.
+///
+/// So the input is opened here — before the filter — and handed in:
+///
+/// * **the script** is *read* at boot. Its bytes are in memory before the seal, and the sealed
+///   session decodes them from there.
+/// * **the keyboard** is *opened* at boot, and the descriptor is the one the session uses.
+///
+/// # Why the failure is at boot rather than at the session
+///
+/// A host with no `/dev/input/event0` cannot run the sealed product, and it should say so in a
+/// sentence rather than dying on a signal. **The boot fails with the path named**, which is the
+/// difference between "the keyboard is missing" and "Killed".
+fn open_input(args: &Args) -> std::io::Result<BootInput> {
+    match &args.script {
+        Some(path) => {
+            let script = std::fs::read(path)?;
+            Ok(BootInput::Script(holonomy_input::ScriptedInputSource::new(&script)))
+        }
+        None => Ok(BootInput::Evdev(
+            holonomy_input::EvdevSource::open(std::path::Path::new(EVDEV_NODE))
+                .map_err(|e| std::io::Error::other(e.to_string()))?,
+        )),
+    }
+}
+
 /// Run the session to completion and write the sinks.
 fn drive(
     s: &mut Session<'_>,
-    args: &Args,
     sinks: &mut [ExportSink],
     screenshot: Option<&mut File>,
     bytes: &mut dyn holonomy_text::LeafSource,
+    input: &mut dyn holonomy_input::InputSource,
 ) -> Result<(), Fail> {
-    let exit = match &args.script {
-        Some(path) => {
-            let script = std::fs::read(path).map_err(io)?;
-            let mut src = ScriptedInputSource::new(&script);
-            // **`run_with_io`, not `run_with`,** so **File > Export has somewhere to write.** The sinks
-            // were opened at boot because the jail has no `openat` on a user path; handing them to the
-            // loop is what turns a row that used to open and close a menu into an export.
-            s.run_with_io(bytes, &mut src, sinks)
-                .map_err(Fail::Session)?
-        }
-        None => {
-            let mut src =
-                EvdevSource::open(Path::new(EVDEV_NODE)).map_err(|e| Fail::Session(e.into()))?;
-            s.run_with_io(bytes, &mut src, sinks)
-                .map_err(Fail::Session)?
-        }
-    };
+    // **The input is handed in, not opened here.** The sealed path has no `openat`, so opening
+    // the keyboard or reading the script at this point is `SIGSYS` and exit 137.
+    let exit = s
+        .run_with_io(bytes, input, sinks)
+        .map_err(Fail::Session)?;
     eprintln!(
         "holonomy: {exit:?} after {} commands, {} edits, {} frames",
         s.stats.commands, s.stats.edits, s.stats.frames

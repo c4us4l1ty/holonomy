@@ -362,6 +362,26 @@ impl UndoStack {
     ///
     /// Removes it from the stack. The caller may re-push it for redo or drop it; this does not
     /// zeroize, because the bytes are handed out.
+    ///
+    /// # The head is rewound, and that is the whole of the fix
+    ///
+    /// **The arena is a ring, and the invariant that keeps the live entries' bytes disjoint is
+    /// "the live entries occupy one contiguous arc that ends at `arena_head`".** Every push grows
+    /// that arc at its end, and every eviction trims it at its front, so the invariant holds —
+    /// **except after a pop.**
+    ///
+    /// A pop removes the *newest* entry, whose bytes are the ones immediately before
+    /// `arena_head`. The old code freed them in the accounting (`arena_used -= len`) but left
+    /// `arena_head` where it was, so the arc had a **hole** in it: the free space was no longer
+    /// contiguous from `arena_head`, and the space check (`arena_used + bytes.len() <=
+    /// ARENA_BYTES`) counted the hole as free.
+    ///
+    /// **So the next push wrote over the oldest live entry's payload.** The bytes it overwrote
+    /// were that entry's *undo* bytes — so undoing it later re-inserted the wrong content, and
+    /// the document silently acquired a few thousand wrong characters.
+    ///
+    /// **Rewinding the head by the popped entry's length restores the arc**, and the free space
+    /// is contiguous again.
     pub fn pop_for_undo(&mut self) -> Result<UndoAction, UndoError> {
         if self.len == 0 {
             return Err(UndoError::Empty);
@@ -374,6 +394,13 @@ impl UndoStack {
         // contract forbids elsewhere in the crate.
         self.zeroize_entry(&entry);
         self.arena_used -= entry.len as usize;
+        // **Rewind the head by exactly what was freed.** The popped entry was the newest, so its
+        // bytes are the ones immediately before `arena_head`; moving the head back by its length
+        // puts the arc's end where the freed space begins. (A payload the size of the whole arena
+        // frees the whole arena, and the modulo leaves the head where it is — which is correct,
+        // because an empty arc may start anywhere.)
+        let freed = entry.len as usize % ARENA_BYTES;
+        self.arena_head = (self.arena_head + ARENA_BYTES - freed) % ARENA_BYTES;
         self.len -= 1;
         let kind = ActionKind::from_u8(entry.kind).unwrap_or(ActionKind::Insert);
         Ok(UndoAction {
@@ -459,6 +486,43 @@ impl UndoStack {
             "the live entries account for {total} bytes but the arena reports {}",
             self.arena_used
         );
+        // **And the live entries' byte ranges must not overlap.**
+        //
+        // The accounting above cannot see an overlap: two entries can sum to exactly
+        // `arena_used` and still share bytes. **That is not a theoretical overlap** — a pop used
+        // to leave a hole in the arc, so the next push wrote over the oldest live entry's
+        // payload, and the *sum* was still right. The document then acquired the wrong bytes
+        // when that entry was undone.
+        //
+        // So the ranges are compared. There are at most `UNDO_DEPTH` of them and this is
+        // test-only.
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for i in 0..self.len {
+            let entry = self.ring[(self.head + i) % UNDO_DEPTH];
+            let len = entry.len as usize;
+            if len == 0 {
+                continue;
+            }
+            let start = entry.arena_at as usize;
+            let end = (start + len) % ARENA_BYTES;
+            if end > start {
+                ranges.push((start, end));
+            } else {
+                // A wrapped range: it covers the end of the arena and the beginning of it, so
+                // it is two ranges.
+                ranges.push((start, ARENA_BYTES));
+                ranges.push((0, end));
+            }
+        }
+        for (i, a) in ranges.iter().enumerate() {
+            for b in &ranges[i + 1..] {
+                assert!(
+                    a.0 >= b.1 || b.0 >= a.1,
+                    "two live entries share arena bytes {a:?} and {b:?}: the arena's live region \
+                     is not one contiguous arc"
+                );
+            }
+        }
     }
 }
 
@@ -527,6 +591,55 @@ mod tests {
         assert_eq!(s.pop_for_undo().expect("b").bytes, b"two");
         assert_eq!(s.pop_for_undo().expect("a").bytes, b"one");
         assert!(s.pop_for_undo().is_err());
+    }
+
+    /// **A pop does not leave a hole the next push can write into.**
+    ///
+    /// # The bug
+    ///
+    /// The arena is a ring, and the invariant that keeps the live entries' bytes disjoint is
+    /// "the live entries occupy one contiguous arc ending at `arena_head`". A pop removes the
+    /// *newest* entry — whose bytes are the ones immediately before `arena_head` — and used to
+    /// free them in the accounting without moving the head.
+    ///
+    /// **So the arc had a hole in it, the space check counted the hole as free, and the next
+    /// push wrote over the oldest live entry's payload.** Those bytes are that entry's *undo*
+    /// bytes, so undoing it later re-inserted the wrong content: the document silently acquired
+    /// a few thousand wrong characters, with no error anywhere.
+    ///
+    /// # The shape of the trigger
+    ///
+    /// Two entries, a pop, and a third push big enough to wrap the ring's end — which is what
+    /// makes the write reach back over the oldest entry.
+    #[test]
+    fn a_pop_does_not_let_the_next_push_overwrite_a_live_entry() {
+        let mut s = UndoStack::new();
+        let first = vec![b'A'; 60_000];
+        let second = vec![b'B'; 5_000];
+        s.push_delete(0, &first).expect("the first action");
+        s.push_insert(0, &second).expect("the second action");
+        s.check_invariants();
+
+        // **Pop the newest.** The oldest entry's payload must survive.
+        let popped = s.pop_for_undo().expect("the second action");
+        assert_eq!(popped.bytes, second);
+        s.check_invariants();
+
+        // **And a third push that wraps the arena's end.**
+        let third = vec![b'C'; 5_000];
+        s.push_insert(0, &third).expect("the third action");
+        s.check_invariants();
+
+        // **The oldest entry is still exactly what it was.** The second action was popped above,
+        // so the stack now holds the first and the third.
+        let popped = s.pop_for_undo().expect("the third action");
+        assert_eq!(popped.bytes, third, "the third action is intact");
+        let popped = s.pop_for_undo().expect("the first action");
+        assert_eq!(
+            popped.bytes, first,
+            "the oldest action's payload was overwritten by a later push: the undo bytes were \
+             corrupted, so undoing this action would have restored the wrong bytes"
+        );
     }
 
     /// The headline requirement: exactly 500 entries, and the 501st evicts the 1st.

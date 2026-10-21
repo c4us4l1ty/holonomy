@@ -83,7 +83,7 @@
 //! word-at-a-time mask test. That regression and its fix are both recorded at `measure`.
 
 use holonomy_geometry::Fenwick;
-use holonomy_text::Editor;
+use holonomy_text::{Editor, LeafSource};
 
 /// A section is **one container chunk** of plaintext. Phase 13, item 2.
 ///
@@ -466,7 +466,13 @@ impl Manifest {
     /// measured `section_rebuilds / section_updates` ratio in `tests/session_manifest.rs` is what would show
     /// a regression here, and the gate asserts `a_newline_rebuilds_the_manifest_and_a_letter_does_not`
     /// because a *letter* rebuilding would mean the cheap path had stopped working.
-    pub fn sync(&mut self, editor: &Editor, caret: u32, scratch: &mut Vec<u8>) -> Sync {
+    pub fn sync(
+        &mut self,
+        editor: &mut Editor,
+        caret: u32,
+        source: &mut Option<&mut dyn LeafSource>,
+        scratch: &mut Vec<u8>,
+    ) -> Sync {
         if editor.text_len() != self.total_bytes() {
             // **The section count can have changed, and that is the only thing a length disagreement
             // means.** The last section absorbs every byte after the last cut, so a document that grows past
@@ -474,7 +480,22 @@ impl Manifest {
             // Rather than reason about "did it overflow", this asks the question that has an unambiguous
             // answer: does the manifest still tile the document?
             if let Some(need) = self.needs_rebuild() {
-                let Ok(text) = editor.text() else {
+                // **The whole document, faulted if a source is available.**
+                //
+                // `editor.text()` takes `&self` and therefore cannot fault: on a container-backed
+                // document it returns `LeafAbsent` for every leaf the resident window does not
+                // hold. **And the manifest froze after the first save** — a save evicts every leaf
+                // (`store::commit_document` ends with `evict_range(0, total)`), so the read failed,
+                // the section was not re-measured, and `span_total()` stayed at zero: the formula
+                // was never drawn and the lines below it were never displaced.
+                //
+                // **The rebuild is rare** (one keystroke in forty, the one that adds a line), and it
+                // is the one place a whole-document read is already the documented cost.
+                let text = match source.as_deref_mut() {
+                    Some(src) => editor.text_faulting(src).ok(),
+                    None => editor.text().ok(),
+                };
+                let Some(text) = text else {
                     return Sync::Unchanged;
                 };
                 let fresh = Self::from_text(&text);
@@ -491,13 +512,13 @@ impl Manifest {
         // content shift, and `k + 1`'s start is `prefix(k + 1)` — so both are stale. The last section is
         // stale too, because it absorbs whatever the document's length did. Two candidates were the second
         // version and it was wrong for every mid-document edit.
-        let mut changed = self.recompute_section(editor, caret_section, scratch);
+        let mut changed = self.recompute_section(editor, caret_section, source, scratch);
         let after = caret_section + 1;
         if after <= last {
-            changed |= self.recompute_section(editor, after, scratch);
+            changed |= self.recompute_section(editor, after, source, scratch);
         }
         if last != caret_section && last != after {
-            changed |= self.recompute_section(editor, last, scratch);
+            changed |= self.recompute_section(editor, last, source, scratch);
         }
         if changed {
             Sync::OneSection
@@ -547,7 +568,13 @@ impl Manifest {
     /// Returns `false` rather than panicking when the read fails, because a stale section is recoverable
     /// and a panic in the middle of a keystroke is not. FR-1.2's threat model treats an abort in the
     /// renderer as worse than a wrong scrollbar.
-    fn recompute_section(&mut self, editor: &Editor, i: usize, scratch: &mut Vec<u8>) -> bool {
+    fn recompute_section(
+        &mut self,
+        editor: &mut Editor,
+        i: usize,
+        source: &mut Option<&mut dyn LeafSource>,
+        scratch: &mut Vec<u8>,
+    ) -> bool {
         let start = self.bytes.prefix(i) as usize;
         // **No cast: `text_len` already answers a `usize`.** See the note on `doclines.rs`'s cast.
         let len = editor.text_len();
@@ -559,9 +586,22 @@ impl Manifest {
         let want = (SECTION_BYTES + 4).min(len - start);
         scratch.clear();
         scratch.resize(want, 0);
-        let Ok(got) = editor.read_into(start, scratch) else {
-            return false;
+        // **The faulting reader when a source is available.**
+        //
+        // The resident-only reader fails with `LeafAbsent` on any leaf the window does not hold,
+        // and **a save evicts every leaf** — so after the first Ctrl+S this read failed, the
+        // section kept its stale weight, and the manifest froze: `span_total()` stayed at zero and
+        // the emitters that ask it (`emit_math`, `emit_images`, `math_blocks_for`) skipped the
+        // document entirely. **A formula typed after a save was never drawn.**
+        //
+        // The faulting reader fetches the leaf it needs, so the manifest tracks the document again.
+        let got = match source.as_deref_mut() {
+            Some(src) => editor.read_into_faulting(src, start, scratch).unwrap_or(0),
+            None => editor.read_into(start, scratch).unwrap_or(0),
         };
+        if got == 0 {
+            return false;
+        }
         let window = &scratch[..got];
         let take = section_end(window);
         let fresh = measure(&window[..take]);
@@ -1009,8 +1049,8 @@ mod tests {
         let base: Vec<u8> = b"row\n".repeat(40_000);
         let mut e = editor_with(&base);
         let mut d = Manifest::from_text(&base);
-        assert_eq!(d.sync(&e, 0, &mut scratch), Sync::Unchanged);
-        assert_eq!(d.sync(&e, 80_000, &mut scratch), Sync::Unchanged);
+        assert_eq!(d.sync(&mut e, 0, &mut None, &mut scratch), Sync::Unchanged);
+        assert_eq!(d.sync(&mut e, 80_000, &mut None, &mut scratch), Sync::Unchanged);
 
         // **Appending a byte is a one-section update, not a rebuild and not `Unchanged`.** Three previous
         // versions of this function got it wrong and every one of them was caught by exactly this
@@ -1021,7 +1061,7 @@ mod tests {
         e.insert_at(caret, b"!", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
         assert_eq!(
-            d.sync(&e, caret, &mut scratch),
+            d.sync(&mut e, caret, &mut None, &mut scratch),
             Sync::OneSection,
             "a byte appended at the end belongs to the last section: one section's length changed and \
              nothing else did"
@@ -1035,7 +1075,7 @@ mod tests {
         // A letter in the middle of a line is also a one-section update, and does not move a boundary.
         e.insert_at(8, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
-        assert_eq!(d.sync(&e, 8, &mut scratch), Sync::OneSection);
+        assert_eq!(d.sync(&mut e, 8, &mut None, &mut scratch), Sync::OneSection);
         assert_eq!(d.total_bytes(), e.text_len());
         assert_eq!(
             d.section_of_byte(8),
@@ -1052,10 +1092,10 @@ mod tests {
         // 262,096 > 160,000. The test was measuring its own fixture: a document 2.4 sections long leaves
         // no room for a section-sized scratch to look small against it.
         let base: Vec<u8> = b"row\n".repeat(1_500_000);
-        let e = editor_with(&base);
+        let mut e = editor_with(&base);
         let mut d = Manifest::from_text(&base);
         let mut scratch = Vec::new();
-        d.sync(&e, 8, &mut scratch);
+        d.sync(&mut e, 8, &mut None, &mut scratch);
         assert_eq!(
             scratch.capacity(),
             SECTION_BYTES + 4,
@@ -1071,10 +1111,10 @@ mod tests {
         // And the same scratch for a document 6x smaller, which is the growth claim as a comparison
         // rather than a ratio -- the form that cannot be satisfied by a small fixture.
         let small: Vec<u8> = b"row\n".repeat(250_000);
-        let es = editor_with(&small);
+        let mut es = editor_with(&small);
         let mut ds = Manifest::from_text(&small);
         let mut scratch_small = Vec::new();
-        ds.sync(&es, 8, &mut scratch_small);
+        ds.sync(&mut es, 8, &mut None, &mut scratch_small);
         assert_eq!(
             scratch_small.capacity(),
             scratch.capacity(),
@@ -1096,14 +1136,14 @@ mod tests {
             e.insert_at(at, &add, holonomy_text::SpanPolicy::GrowIntoInsert)
                 .expect("room");
             text.extend_from_slice(&add);
-            d.sync(&e, at, &mut scratch);
+            d.sync(&mut e, at, &mut None, &mut scratch);
             assert_agrees(&d, &text, i);
         }
         // A byte near the start, which shifts every section's content.
         e.insert_at(3, b"Z", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
         text.insert(3, b'Z');
-        d.sync(&e, 3, &mut scratch);
+        d.sync(&mut e, 3, &mut None, &mut scratch);
         assert_agrees(&d, &text, 99);
     }
 
@@ -1124,7 +1164,7 @@ mod tests {
         text.extend_from_slice(b"prose\n");
         e.insert_at(0, b"prose\n", holonomy_text::SpanPolicy::GrowIntoInsert)
             .expect("room");
-        d.sync(&e, 0, &mut scratch);
+        d.sync(&mut e, 0, &mut None, &mut scratch);
         assert_eq!(d.span_total(), 0);
         // Two hundred insertions at offset 0, which shift every section's content every time.
         for i in 0..200 {
@@ -1132,7 +1172,7 @@ mod tests {
                 .expect("room");
             text.insert(0, b'x');
             assert_ne!(
-                d.sync(&e, 0, &mut scratch),
+                d.sync(&mut e, 0, &mut None, &mut scratch),
                 Sync::Rebuilt,
                 "keystroke {i} rebuilt the manifest: a letter shifts content but moves no boundary, and \
                  nothing about it can change the section count"
