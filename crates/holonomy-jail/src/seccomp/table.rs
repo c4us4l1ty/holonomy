@@ -68,7 +68,16 @@ pub const ALLOWLIST: &[Allowed] = &[
     Allowed { nr: libc::SYS_writev, name: "writev", why: "libc's writev path, reached by the aligned-buffer file helpers in io.rs" },
     Allowed { nr: libc::SYS_lseek, name: "lseek", why: "std::io::Seek on the container fd, used by both export paths" },
     Allowed { nr: libc::SYS_close, name: "close", why: "teardown of the boot-established descriptors, on the exit path only" },
-    Allowed { nr: libc::SYS_fcntl, name: "fcntl", why: "std::fs::File::set_len and dup, both reachable during teardown" },
+    // **`fcntl`, and `ftruncate` is NOT here.** The previous rationale for this entry said
+    // "std::fs::File::set_len and dup", and `File::set_len` is `ftruncate(2)` — which is in
+    // `BOOT_ONLY` and therefore refused by the filter. **The rationale is the audit trail this
+    // table is**: every entry says why it is kept, and a reason that names a syscall the filter
+    // forbids is a reason that invites somebody to add `ftruncate` back.
+    //
+    // The entry itself is right and is needed: `fcntl` is `F_GETFL`/`F_SETFL` on the evdev
+    // descriptors (`evdev.rs` forces `O_NONBLOCK`), and `F_DUPFD` is how a descriptor is
+    // duplicated during teardown.
+    Allowed { nr: libc::SYS_fcntl, name: "fcntl", why: "F_GETFL/F_SETFL on the evdev descriptors, and F_DUPFD during teardown" },
     Allowed { nr: libc::SYS_ioctl, name: "ioctl", why: "DRM_MODE_SET_DUMB, DRM_IOCTL_MODE_DESTROY_DUMB, evdev EVIOCGBIT" },
     Allowed { nr: libc::SYS_fsync, name: "fsync", why: "Wavefunction::commit flushes before the ring rotates" },
     // ---- event loop -----------------------------------------------------------------

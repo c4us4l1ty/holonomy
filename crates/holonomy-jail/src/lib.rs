@@ -460,10 +460,20 @@ impl<T> NetworkIsolated<T> {
         // plaintext argument rests on `dumpable == 0`. A filter that permits `prctl` cannot claim
         // its core-dump seal; it can only claim to have applied one. So `prctl` stays forbidden and
         // the answer is carried.
-        debug_assert!(
-            seccomp::new_privs_is_set(),
-            "PR_SET_NO_NEW_PRIVS returned success but the kernel disagrees"
-        );
+        //
+        // **And the answer is read, not assumed.** The `set` returned success, and this asks the
+        // kernel what it actually did. The old code put the read behind a `debug_assert!`, which
+        // is compiled out of a release build -- so the shipping binary never asked, and the boot
+        // banner printed a hard-coded `true` as though it were a measurement. **A security
+        // posture printed as a constant is a lie with a number in it.**
+        let no_new_privs = seccomp::new_privs_is_set();
+        if !no_new_privs {
+            // **Refused, not reported.** `PR_SET_NO_NEW_PRIVS` returned success and the kernel
+            // disagrees; the only thing that reads this flag is the filter's own installation,
+            // which would fail with `EPERM` and a message about the filter rather than about the
+            // privilege flag that is actually missing. Failing here names the real cause.
+            return Err(JailError::NoNewPrivs(libc::EINVAL));
+        }
         Ok(PrivilegesDropped {
             limits: self.limits,
             alt: self.alt,
@@ -472,6 +482,7 @@ impl<T> NetworkIsolated<T> {
             netns_evidence: self.netns_evidence,
             all_pages_locked: self.all_pages_locked,
             mlock_errno: self.mlock_errno,
+            no_new_privs,
         })
     }
 }
@@ -486,6 +497,11 @@ pub struct PrivilegesDropped<T> {
     netns_evidence: Option<(u64, u64)>,
     all_pages_locked: bool,
     mlock_errno: i32,
+    /// **The kernel's own answer, read at stage 7.**
+    ///
+    /// Carried rather than re-read because `prctl` is not in the filter — on purpose, since
+    /// `PR_SET_DUMPABLE` is a `prctl` and permitting it would undo the core-dump seal.
+    no_new_privs: bool,
 }
 
 impl<T> PrivilegesDropped<T> {
@@ -522,6 +538,7 @@ impl<T> PrivilegesDropped<T> {
             netns_evidence: self.netns_evidence,
             all_pages_locked: self.all_pages_locked,
             mlock_errno: self.mlock_errno,
+            no_new_privs: self.no_new_privs,
             filter: installed,
             teardown: TeardownPlan::new(),
         })
@@ -540,6 +557,8 @@ pub struct Sealed<T> {
     netns_evidence: Option<(u64, u64)>,
     all_pages_locked: bool,
     mlock_errno: i32,
+    /// The kernel's answer to `PR_GET_NO_NEW_PRIVS`, read at stage 7.
+    no_new_privs: bool,
     filter: Installed,
     teardown: TeardownPlan,
 }
@@ -593,7 +612,12 @@ impl<T> Sealed<T> {
             mlock_errno: self.mlock_errno,
             aslr: self.limits.aslr,
             // Carried from stage 7 rather than re-read: `prctl` is not in the filter, on purpose.
-            no_new_privs: true,
+            //
+            // **And it is the value the kernel gave at stage 7, not a constant.** It used to be
+            // the literal `true`, with the read-back behind a `debug_assert!` that a release
+            // build compiles out — so the boot banner printed a constant as though it were a
+            // measurement of the running process.
+            no_new_privs: self.no_new_privs,
         }
     }
 

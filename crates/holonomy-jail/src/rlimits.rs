@@ -37,6 +37,11 @@ pub struct Limits {
     /// `RLIMIT_CORE` before and after sealing. `Some(x)` is a hard limit in bytes.
     pub core_before: Option<u64>,
     /// `Some(x)` only if the process may still be dumped, i.e. sealing failed.
+    ///
+    /// **`None` means "the seal is in place", not "we do not know".** A failure to *read*
+    /// `RLIMIT_CORE` at all is reported as `Some(u64::MAX)` — the pessimistic direction: the
+    /// limit was never touched, so the process may still be dumped, and a report that said
+    /// "not dumped" would be a claim nobody checked.
     pub core_still_permitted: Option<u64>,
     /// `RLIMIT_MEMLOCK` soft limit before the bump.
     pub memlock_soft_before: Option<u64>,
@@ -108,16 +113,33 @@ fn setrlimit_bytes(resource: libc::c_int, soft: u64, hard: u64) -> bool {
 ///
 /// Never raises anything: a limit that is already 0 stays 0.
 pub fn seal_core_dumps(limits: &mut Limits) {
-    if let Some((soft, hard)) = getrlimit(libc::RLIMIT_CORE) {
-        limits.core_before = Some(soft);
-        if setrlimit_bytes(libc::RLIMIT_CORE, 0, 0) {
-            limits.core_still_permitted = None;
-        } else {
-            // Either the soft limit was already 0 and cannot be re-set to a lower value
-            // under some policies, or the hard limit is below 0 which is not expressible.
-            limits.core_still_permitted = getrlimit(libc::RLIMIT_CORE).map(|(s, _)| s);
+    match getrlimit(libc::RLIMIT_CORE) {
+        Some((soft, hard)) => {
+            limits.core_before = Some(soft);
+            if setrlimit_bytes(libc::RLIMIT_CORE, 0, 0) {
+                limits.core_still_permitted = None;
+            } else {
+                // Either the soft limit was already 0 and cannot be re-set to a lower value
+                // under some policies, or the hard limit is below 0 which is not expressible.
+                limits.core_still_permitted = getrlimit(libc::RLIMIT_CORE).map(|(s, _)| s);
+            }
+            let _ = hard;
         }
-        let _ = hard;
+        None => {
+            // **The read failed, so the seal was never attempted — and the report must say so.**
+            //
+            // This used to be `if let Some(..)`, which skipped the whole body when the read
+            // failed: no `setrlimit` was issued, `RLIMIT_CORE` was left exactly as it was, and
+            // `core_still_permitted` stayed `None` — the same value that means "the limit is
+            // zero and core dumps are impossible". **So a failure to read the limit was reported
+            // as a successful seal.** `None` here means "we do not know"; `Some(0)` means "we
+            // know, and it is zero".
+            //
+            // `getrlimit(RLIMIT_CORE)` cannot realistically fail on Linux for a valid resource,
+            // so this is a state the platform does not reach — which is exactly why the code
+            // should say what it means rather than leave it to the reader.
+            limits.core_still_permitted = Some(u64::MAX);
+        }
     }
 
     // SAFETY: `PR_SET_DUMPABLE` takes five `unsigned long`s and reads none of them.
@@ -127,7 +149,16 @@ pub fn seal_core_dumps(limits: &mut Limits) {
     // SAFETY: `PR_GET_DUMPABLE` writes one `int`.
     if limits.dumpable.is_some() {
         let rc = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
-        if rc != 0 {
+        if rc < 0 {
+            // **The read failed.**
+            //
+            // This used to store `Some(rc as u32)` — and `rc` is `-1` on failure, so `as u32`
+            // made that `Some(4294967295)`. **The field's contract is "the process's dumpable
+            // flag, if it is known", and `None` is what "not known" means.** A truncated error
+            // code stored as a dumpability value is not a value at all: it is a failure wearing
+            // the shape of an answer.
+            limits.dumpable = None;
+        } else {
             // The set succeeded but the read disagrees, which would mean the kernel ignored
             // us. Report that rather than assuming.
             limits.dumpable = Some(rc as u32);

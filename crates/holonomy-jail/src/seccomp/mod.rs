@@ -148,6 +148,18 @@ pub enum SeccompError {
     /// `SECCOMP_FILTER_FLAG_TSYNC` failed, which means a thread exists that the filter could
     /// not be applied to. The jail is single-threaded by design.
     ThreadOutOfSync(i32),
+    /// A syscall number in the table does not fit in the 32-bit field the filter compares it
+    /// against.
+    ///
+    /// **Its own variant, because the alternative was a silent truncation.** The comparison is
+    /// `BPF_JMP_JEQ_K` against a 32-bit constant, and `as u32` would have turned a number like
+    /// `0x1_0000_0000 | SYS_read` into `SYS_read` — **a filter that permits `read` because the
+    /// caller asked for a number that does not exist.** The production table has no such entry;
+    /// `Allowed` has public fields and `Program::build` is public API.
+    SyscallNumberOutOfRange {
+        /// The number that was offered.
+        nr: i64,
+    },
 }
 
 impl core::fmt::Display for SeccompError {
@@ -169,6 +181,10 @@ impl core::fmt::Display for SeccompError {
                 f,
                 "seccomp TSYNC failed (errno {e}); a second thread exists, which the jail \
                  forbids because the filter would not cover it"
+            ),
+            Self::SyscallNumberOutOfRange { nr } => write!(
+                f,
+                "syscall number {nr} does not fit the 32-bit field the filter compares against"
             ),
         }
     }
@@ -255,7 +271,15 @@ impl Program {
         push(&mut insns, &mut len, BPF_RET_K, 0, 0, kill)?;
 
         for entry in entries {
-            push(&mut insns, &mut len, BPF_JMP_JEQ_K, 0, 1, entry.nr as u32)?;
+            // **Checked, not cast.** `seccomp_data.nr` is a 32-bit field, so a number that does
+            // not fit one cannot be compared against it -- and `as u32` would silently truncate
+            // it, so `0x1_0000_0000 | SYS_read` would compile into a filter that permits
+            // `read`. The production table has no such entry, but `Allowed` has public fields and
+            // `Program::build` is public API.
+            let nr = u32::try_from(entry.nr).map_err(|_| SeccompError::SyscallNumberOutOfRange {
+                nr: entry.nr,
+            })?;
+            push(&mut insns, &mut len, BPF_JMP_JEQ_K, 0, 1, nr)?;
             push(&mut insns, &mut len, BPF_RET_K, 0, 0, allow)?;
         }
         push(&mut insns, &mut len, BPF_RET_K, 0, 0, deny)?;

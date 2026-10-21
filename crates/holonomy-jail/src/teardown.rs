@@ -498,6 +498,23 @@ impl NoiseRng {
 ///
 /// Returns the length rather than scanning for the newline, so the `write` cannot overrun the
 /// buffer if a future field were appended without updating this.
+///
+/// # No allocation, and that is the point
+///
+/// **This runs after the seccomp filter is installed, in the path that exists so that the
+/// plaintext is gone before the process is.** The module's own header says it: *"Teardown runs
+/// after the seccomp filter is installed, so it may not allocate, and it may not call anything
+/// that would."* The whole reason the plan is a fixed array of data-only actions rather than a
+/// `Vec<Box<dyn FnOnce()>>` is to keep the allocator out of the exit path.
+///
+/// **And `usize::to_string` allocates.** It is `malloc` and `free` — in the exit path, under
+/// `mlockall(MCL_CURRENT|MCL_FUTURE)`, where the page-lock budget may be exhausted and a
+/// `malloc` can fail. It was the last allocation in the teardown path and it was there to
+/// format two numbers.
+///
+/// **So the numbers are formatted by hand**, into the same stack buffer, with the same bounds
+/// check. `usize` is at most twenty decimal digits, and the buffer is ninety-six bytes, so
+/// there is room for both numbers and the fixed text.
 fn report_line(actions: usize, scrubbed: usize) -> ([u8; 96], usize) {
     let mut buf = [0u8; 96];
     let mut at = 0usize;
@@ -509,10 +526,33 @@ fn report_line(actions: usize, scrubbed: usize) -> ([u8; 96], usize) {
             }
         }
     };
+    // **Decimal, into a stack buffer, with no allocation.**
+    //
+    // The digits are produced least-significant first and written back to front, because the
+    // number's length is not known until it has been counted.
+    let push_number = |buf: &mut [u8; 96], at: &mut usize, mut value: usize| {
+        let mut digits = [0u8; 20];
+        let mut n = 0usize;
+        loop {
+            digits[n] = b'0' + (value % 10) as u8;
+            n += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        while n > 0 {
+            n -= 1;
+            if *at < buf.len() {
+                buf[*at] = digits[n];
+                *at += 1;
+            }
+        }
+    };
     push(&mut buf, &mut at, "holonomy-teardown actions=");
-    push(&mut buf, &mut at, &actions.to_string());
+    push_number(&mut buf, &mut at, actions);
     push(&mut buf, &mut at, " scrubbed=");
-    push(&mut buf, &mut at, &scrubbed.to_string());
+    push_number(&mut buf, &mut at, scrubbed);
     push(&mut buf, &mut at, " exit=0\n");
     (buf, at)
 }

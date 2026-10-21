@@ -111,6 +111,14 @@ pub enum RegisterError {
     /// `len == 0`, which every reader treats as *empty* -- so the mapping would look unregistered
     /// to the scrub and to `classify`, silently. `tests/guard_page.rs` asserts the refusal.
     EmptyPayload,
+    /// The payload does not lie inside the mapping it was registered with.
+    ///
+    /// **Refused rather than published.** A range that escapes its mapping is a range the scrub
+    /// would walk off the end of: `scrub_registry` would write zeroes past the payload and past
+    /// the mapping, and `classify` would answer "not registered" for an address inside it. The
+    /// check used to be a `debug_assert!`, which a release build compiles out — so the shipping
+    /// binary published ranges it had never validated.
+    RangeEscapesMapping,
 }
 
 impl core::fmt::Display for RegisterError {
@@ -122,6 +130,9 @@ impl core::fmt::Display for RegisterError {
                  unreachable by the tripwire scrub"
             ),
             Self::EmptyPayload => f.write_str("cannot register a zero-length payload"),
+            Self::RangeEscapesMapping => {
+                f.write_str("the payload does not lie inside the mapping it was registered with")
+            }
         }
     }
 }
@@ -184,10 +195,20 @@ pub fn register(
     if len == 0 {
         return Err(RegisterError::EmptyPayload);
     }
-    debug_assert!(
-        data >= base && data + len <= base + total,
-        "data region escapes its mapping"
-    );
+    // **The range is checked in a release build, not only in a debug one.**
+    //
+    // The check used to be a `debug_assert!`, which a release build compiles out — so a caller
+    // that passed an inconsistent range published it, and the two consumers of the range then
+    // disagreed about it: one wrapped (`base.wrapping_add(total)`) and the other overflowed
+    // (`data + len`, with `overflow-checks` on). **A range that panics in one place and wraps in
+    // another is not a range.**
+    //
+    // The arithmetic is checked rather than wrapped, and the comparison is done in the form that
+    // cannot overflow: `data >= base` and `data - base <= total - len`, with `total >= len`
+    // established first.
+    if data < base || total < len || data - base > total - len {
+        return Err(RegisterError::RangeEscapesMapping);
+    }
     for (index, slot) in REGISTRY.iter().enumerate() {
         if slot
             .len
@@ -324,9 +345,23 @@ pub fn classify(addr: usize) -> FaultSite {
         }
         let base = slot.base.load(Ordering::Relaxed);
         let total = slot.total.load(Ordering::Relaxed);
-        if addr >= base && addr < base.wrapping_add(total) {
+        // **Both bounds are checked the same way.**
+        //
+        // The mapping's end used to be `base.wrapping_add(total)` — a wrap — while the
+        // payload's end was `data + len` — an overflow, and the release profile panics on
+        // overflow. **A range that wraps in one place and panics in another is not a range.**
+        //
+        // `checked_add` returning `None` means the end is not representable, so the address
+        // cannot be inside it — the mapping is not there. Both ends now use the same rule.
+        let Some(mapping_end) = base.checked_add(total) else {
+            continue;
+        };
+        if addr >= base && addr < mapping_end {
             let data = slot.data.load(Ordering::Relaxed);
-            if addr >= data && addr < data + len {
+            let Some(data_end) = data.checked_add(len) else {
+                continue;
+            };
+            if addr >= data && addr < data_end {
                 return FaultSite::Data;
             }
             return FaultSite::Guard;
