@@ -1168,7 +1168,7 @@ impl<'a> Session<'a> {
         // will fail the same way, which is why `tests/session_counts.rs` drives all of them.
         self.counts.after_insert(&self.editor, at, b"$$$$");
         self.editor.caret_to(at + 2)?;
-        self.after_edit(4, &mut None)
+        self.after_edit(4)
     }
 
     /// Insert an image at the caret, from the built-in chart.
@@ -1220,7 +1220,7 @@ impl<'a> Session<'a> {
         // The *whole page* is invalidated, not one line: an image is hundreds of pixels tall and
         // `after_edit` damages `cell_h` by construction, which would leave the image's own rows stale.
         self.damage = self.chrome.full_damage();
-        self.after_edit(ANCHOR_BYTES.len() as u32, &mut None)
+        self.after_edit(ANCHOR_BYTES.len() as u32)
     }
 
     /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
@@ -1285,7 +1285,7 @@ impl<'a> Session<'a> {
         self.counts = TextCounts::scan(&self.editor);
         self.tables_shape_dirty = true;
         self.enter_cell(span, 0, 0, 0)?;
-        self.after_edit(0, &mut None)
+        self.after_edit(0)
     }
 
     /// What the last paint did, from the painter's side. Phase 12.
@@ -3382,7 +3382,22 @@ impl<'a> Session<'a> {
             if n == 0 {
                 break;
             }
-            let got = self.editor.read_into_faulting(source, at, &mut buf[..n])?;
+            // **A read that fails is a click that cannot be placed, not the end of the session.**
+            //
+            // This used to be `?`, which propagated a `SessionError` out of `click_page` and out of
+            // the session loop, so **one unreadable chunk ended the editor** -- the user clicked on
+            // a line whose bytes could not be fetched and the program exited.
+            //
+            // Every other read in the same click path degrades instead: `word_around` answers
+            // `Ok(None)` and `column_at_pen` answers `None`, and both say so in their own docs
+            // ("a double-click on a non-resident line places a caret rather than a word"). This one
+            // was the odd one out.
+            //
+            // **So a failed read places the caret at the line's start** -- which is a position, it
+            // is inside the document, and the user is still in the editor.
+            let Ok(got) = self.editor.read_into_faulting(source, at, &mut buf[..n]) else {
+                return Ok(at);
+            };
             if got == 0 {
                 break;
             }
@@ -4119,7 +4134,7 @@ impl<'a> Session<'a> {
                             let n = (len as usize).min(bytes.len());
                             self.counts.after_delete(&self.editor, at as usize, &bytes[..n]);
                         }
-                        self.after_edit(0, &mut source.take())?;
+                        self.after_edit(0)?;
                         self.stats.cuts += 1;
                     } else {
                         self.stats.clipboard_noops += 1;
@@ -4141,7 +4156,7 @@ impl<'a> Session<'a> {
                     let inserted = self.editor.yanked();
                     self.counts
                         .after_insert(&self.editor, at, &inserted[..n]);
-                    self.after_edit(n as u32, &mut source.take())?;
+                    self.after_edit(n as u32)?;
                     self.stats.pastes += 1;
                 } else {
                     self.stats.clipboard_noops += 1;
@@ -4270,7 +4285,7 @@ impl<'a> Session<'a> {
         if let Some(armed) = self.pending_style.filter(|_| !bytes.is_empty()) {
             self.editor
                 .style_range(at as u32, (at + bytes.len()) as u32, armed, 0)?;
-            self.after_edit(0, &mut source)?;
+            self.after_edit(0)?;
         }
         // **The armed colour, over the same range, and as a second edit.** Part 29.
         //
@@ -4281,9 +4296,9 @@ impl<'a> Session<'a> {
         if let Some(rgb) = self.pending_colour.filter(|_| !bytes.is_empty()) {
             self.editor
                 .style_range(at as u32, (at + bytes.len()) as u32, 0, rgb)?;
-            self.after_edit(0, &mut source)?;
+            self.after_edit(0)?;
         }
-        self.after_edit(bytes.len() as u32, &mut source)
+        self.after_edit(bytes.len() as u32)
     }
 
     /// Run `f` with the table the caret is in, or report that there is none.
@@ -4487,7 +4502,7 @@ impl<'a> Session<'a> {
         }
         self.editor.delete_at(start as u32, INDENT.len() as u32)?;
         self.counts.after_delete(&self.editor, start, INDENT);
-        self.after_edit(INDENT.len() as u32, &mut None)
+        self.after_edit(INDENT.len() as u32)
     }
 
     /// **Delete the selection, tell the counters about it, and report what went.** Part 28.
@@ -4545,7 +4560,7 @@ impl<'a> Session<'a> {
             &self.line_scratch[..n]
         };
         self.counts.after_delete(&self.editor, start, removed);
-        self.after_edit(len, &mut None)?;
+        self.after_edit(len)?;
         Ok(Some(len))
     }
 
@@ -4579,7 +4594,7 @@ impl<'a> Session<'a> {
         let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.backspace()?;
         self.counts.after_delete(&self.editor, at, &one[..n]);
-        self.after_edit(1, &mut source)
+        self.after_edit(1)
     }
 
     fn delete_forward(
@@ -4602,7 +4617,7 @@ impl<'a> Session<'a> {
         let n = self.editor.read_into(at, &mut one).unwrap_or(0);
         self.editor.delete_forward()?;
         self.counts.after_delete(&self.editor, at, &one[..n]);
-        self.after_edit(1, &mut source)
+        self.after_edit(1)
     }
 
     pub fn undo(&mut self) -> Result<(), SessionError> {
@@ -4621,7 +4636,7 @@ impl<'a> Session<'a> {
         match self.editor.undo() {
             Ok(_) => {
                 self.recount_counts();
-                self.after_edit(0, &mut None)
+                self.after_edit(0)
             }
             Err(EditorError::NothingToUndo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -4632,7 +4647,7 @@ impl<'a> Session<'a> {
         match self.editor.redo() {
             Ok(_) => {
                 self.recount_counts();
-                self.after_edit(0, &mut None)
+                self.after_edit(0)
             }
             Err(EditorError::NothingToRedo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -4814,7 +4829,7 @@ impl<'a> Session<'a> {
         // because nothing could produce anything else; `TextIntervalSpan::color_rgb` had been in the
         // record since phase 4 with nothing to put in it.
         self.editor.style_range(sel.start, sel.end, flags, colour)?;
-        self.after_edit(0, &mut None)?;
+        self.after_edit(0)?;
         Ok(true)
     }
 
@@ -5135,11 +5150,7 @@ impl<'a> Session<'a> {
     /// `delete_selection` have all parked it. What is wanted is the *tail* of `caret_to`: re-read the
     /// column, re-read the line, scroll, damage. That is [`reconcile_caret`](Self::reconcile_caret),
     /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
-    fn after_edit(
-        &mut self,
-        inserted: u32,
-        source: &mut Option<&mut dyn holonomy_text::LeafSource>,
-    ) -> Result<(), SessionError> {
+    fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
         // **The caret's line before this edit, captured before `reconcile_caret` overwrites it.**
         // `state.caret_line` is a *view* of where the caret is, and it is kept current by
@@ -5195,9 +5206,14 @@ impl<'a> Session<'a> {
         // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for any
         // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
         // the read failed, the section kept its stale weight, and the manifest froze: the formula
-        // was never drawn and the lines below it were never displaced. The faulting reader fetches
-        // what it needs, so the manifest tracks the document again.
-        self.sync_manifest(source);
+        // was never drawn and the lines below it were never displaced.
+        //
+        // **But the source is not used *here*.** A section is sixty-four kibibytes -- sixteen
+        // leaves -- and faulting them on the keystroke path would be a page-locked 4 KiB load per
+        // leaf per character, which does not fit in the 0.50 ms keystroke budget. So the keystroke
+        // path reads what is resident and marks the manifest stale if a section is not; **the paint
+        // path refreshes it**, where a fetch is already the price.
+        self.sync_manifest(&mut None);
         // And the status bar's totals, from the deltas the caller folded. O(1): this is a three-field
         // copy out of `TextCounts`, not a recount. See `publish_counts` for why the two maintained
         // quantities are published at their own points rather than together.
@@ -5320,8 +5336,13 @@ impl<'a> Session<'a> {
         // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for every
         // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
         // the read failed, the section kept its stale weight, and the manifest froze — the formula
-        // was never drawn and the lines below it were never displaced. With the source, the
-        // manifest faults what it needs and tracks the document again.
+        // was never drawn and the lines below it were never displaced.
+        //
+        // **The source is the caller's choice, and the keystroke path says no.** A section is 64 KiB
+        // — sixteen leaves — and a fetch per leaf per character does not fit in a 0.50 ms
+        // keystroke. So the keystroke path reads what is resident and, if a section is not
+        // resident, marks the manifest stale; the paint path refreshes it, where a fetch is
+        // already the price.
         let out = self
             .manifest
             .sync(&mut self.editor, caret, source, &mut scratch);
@@ -5429,6 +5450,20 @@ impl<'a> Session<'a> {
         // hoisted out of this function. `None` leaves the previous value, and `Caret::locate` falls
         // back to the grid, so a failed read costs a caret 10 px out rather than a frame.
         let _ = self.refresh_caret_pen(Some(&mut *source));
+        // **The manifest, refreshed if the keystroke path could not measure it.**
+        //
+        // The manifest answers *"does this document contain a formula, table or image?"*, and four
+        // emitters ask it before deciding whether to read the whole document. **The keystroke path
+        // does not fault** -- a section is sixteen leaves and a fetch per leaf per character does
+        // not fit in a 0.50 ms keystroke -- so after a save (which evicts every leaf) it could not
+        // re-measure, and the manifest said nothing about it.
+        //
+        // **The paint path is where the refresh belongs**: it has a source, and a frame that draws
+        // a formula reads the whole document anyway, so one more section read is noise there.
+        // Without it, **the formula was never drawn again after the first save.**
+        if self.manifest.is_stale() {
+            self.sync_manifest(&mut Some(&mut *source));
+        }
         self.sync_selection();
         let mut tree = self.chrome.tree(&self.state);
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
@@ -6493,8 +6528,22 @@ impl<'a> Session<'a> {
     ///
     /// Saturating at zero rather than refusing, because scrolling up past the first line is a thing a
     /// reader does, not an error.
+    ///
+    /// **And bounded at the other end, which it was not.** The wheel scrolls the page by `dy * 3`
+    /// lines per notch, and nothing stopped the total: on a short document, enough notches put
+    /// `scroll_line` past the last line, and the page emitter's `first >= last` guard then drew
+    /// **nothing at all** -- a blank page, with the only way out being a caret move.
+    ///
+    /// [`Session::scroll_to`] already clamped to the document (`line.min(total_lines - 1)`), so the
+    /// two scroll entry points disagreed about where the page may end. They agree now.
     pub fn scroll_by(&mut self, delta: i64) -> u32 {
-        let next = (self.state.scroll_line as i64 + delta).max(0) as u32;
+        // **The sum is computed in `i64` and clamped in `u32`, not the other way round.** The old
+        // code did `as u32` on an unclamped `i64`, so a `scroll_line` past `u32::MAX` wrapped to a
+        // small number and the page jumped to the top.
+        let last = self.state.total_lines.saturating_sub(1);
+        let next = (self.state.scroll_line as i64)
+            .saturating_add(delta)
+            .clamp(0, i64::from(last)) as u32;
         if next == self.state.scroll_line {
             return self.state.scroll_line;
         }
@@ -6844,7 +6893,7 @@ impl<'a> Session<'a> {
     /// binding for it would be a keymap change, and the keymap is already gated.
     pub fn toggle_bold(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
         self.editor.style_range(from, to, STYLE_BOLD, 0)?;
-        self.after_edit(0, &mut None)
+        self.after_edit(0)
     }
 }
 

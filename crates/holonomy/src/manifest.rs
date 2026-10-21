@@ -219,6 +219,8 @@ pub struct Manifest {
     /// The section size this manifest was built at. Reported rather than assumed, because a manifest
     /// built at 64 KiB and a document at 65,504 must not be reported as either.
     section_bytes: usize,
+    /// **Whether a re-measure could not read the document.** See [`Manifest::is_stale`].
+    stale: bool,
 }
 
 /// A section's byte range, plus the metrics it carries.
@@ -303,6 +305,7 @@ impl Manifest {
             bytes: Fenwick::from_weights(&bytes),
             spans: Fenwick::from_weights(&spans),
             section_bytes: SECTION_BYTES,
+            stale: false,
         }
     }
 
@@ -496,12 +499,14 @@ impl Manifest {
                     None => editor.text().ok(),
                 };
                 let Some(text) = text else {
+                    self.stale = true;
                     return Sync::Unchanged;
                 };
                 let fresh = Self::from_text(&text);
                 self.bytes = fresh.bytes;
                 self.spans = fresh.spans;
                 self.section_bytes = need;
+                self.stale = false;
                 return Sync::Rebuilt;
             }
         }
@@ -512,19 +517,54 @@ impl Manifest {
         // content shift, and `k + 1`'s start is `prefix(k + 1)` — so both are stale. The last section is
         // stale too, because it absorbs whatever the document's length did. Two candidates were the second
         // version and it was wrong for every mid-document edit.
-        let mut changed = self.recompute_section(editor, caret_section, source, scratch);
+        // **`None` means the section could not be read**, which is not the same as "unchanged".
+        let mut changed = false;
+        let mut read_all = true;
+        let mut take = |m: &mut Self, section: usize| match m.recompute_section(
+            editor,
+            section,
+            source,
+            scratch,
+        ) {
+            Some(c) => changed |= c,
+            None => read_all = false,
+        };
+        take(self, caret_section);
         let after = caret_section + 1;
         if after <= last {
-            changed |= self.recompute_section(editor, after, source, scratch);
+            take(self, after);
         }
         if last != caret_section && last != after {
-            changed |= self.recompute_section(editor, last, source, scratch);
+            take(self, last);
+        }
+        // **And the manifest is current again if every section it wanted was read.**
+        if read_all {
+            self.stale = false;
         }
         if changed {
             Sync::OneSection
         } else {
             Sync::Unchanged
         }
+    }
+
+    /// **Whether the manifest knows less than it should.**
+    ///
+    /// **Set when a re-measure could not read the document**, and cleared by one that could. A
+    /// `false` here means the manifest's numbers are current; a `true` means they are the last ones
+    /// that were *knowable*, and the section that could not be read is stale.
+    ///
+    /// **This is what makes the faulting read affordable.** The manifest re-measures three sections
+    /// of the document on every keystroke, and a section is 64 KiB — sixteen leaves. Faulting those
+    /// on the *keystroke* path would be a page-locked 4 KiB load per leaf per character, and the
+    /// keystroke budget is 0.50 ms for the whole turn. **So the keystroke path does not fault**: it
+    /// reads what is resident, and if a section is not resident it says so here.
+    ///
+    /// **The paint path then refreshes**, and the paint path already has a source and already
+    /// fetches: a frame that draws a formula reads the whole document. One more section read is
+    /// noise there, and it happens once rather than once per character.
+    pub fn is_stale(&self) -> bool {
+        self.stale
     }
 
     /// `Some(section_bytes)` when the document no longer fits the current section count, `None` when it does.
@@ -574,12 +614,12 @@ impl Manifest {
         i: usize,
         source: &mut Option<&mut dyn LeafSource>,
         scratch: &mut Vec<u8>,
-    ) -> bool {
+    ) -> Option<bool> {
         let start = self.bytes.prefix(i) as usize;
         // **No cast: `text_len` already answers a `usize`.** See the note on `doclines.rs`'s cast.
         let len = editor.text_len();
         if start >= len {
-            return false;
+            return Some(false);
         }
         // `SECTION_BYTES + 4`: the section, plus up to three bytes the character-boundary back-up may
         // need. A window shorter than `SECTION_BYTES` is the document's end, and `section_end` says so.
@@ -594,23 +634,33 @@ impl Manifest {
         // the emitters that ask it (`emit_math`, `emit_images`, `math_blocks_for`) skipped the
         // document entirely. **A formula typed after a save was never drawn.**
         //
-        // The faulting reader fetches the leaf it needs, so the manifest tracks the document again.
+        // The faulting reader fetches the leaf it needs, so the manifest tracks the document again
+        // — **and it is only used where a fetch is already the price**: the paint path, which
+        // already reads the whole document when the manifest says there is something to draw. The
+        // keystroke path passes no source, because a section is sixteen leaves and a fetch per
+        // leaf per character does not fit in a 0.50 ms keystroke.
         let got = match source.as_deref_mut() {
             Some(src) => editor.read_into_faulting(src, start, scratch).unwrap_or(0),
             None => editor.read_into(start, scratch).unwrap_or(0),
         };
         if got == 0 {
-            return false;
+            // **The section could not be read, so the manifest does not know what it holds.**
+            //
+            // The old code returned `false` and said nothing, so the manifest looked current while
+            // a section of it was not. `is_stale` is what the paint path asks before it trusts
+            // the numbers, and this is what makes the answer honest.
+            self.stale = true;
+            return None;
         }
         let window = &scratch[..got];
         let take = section_end(window);
         let fresh = measure(&window[..take]);
         if self.bytes.weight(i) == fresh.bytes && self.spans.weight(i) == fresh.spans {
-            return false;
+            return Some(false);
         }
         self.bytes.set(i, fresh.bytes);
         self.spans.set(i, fresh.spans);
-        true
+        Some(true)
     }
 }
 

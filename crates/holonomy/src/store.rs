@@ -452,19 +452,30 @@ impl<'c> SectionStore<'c> {
                 let entry = self.resident.get(&section).expect("listed from resident");
                 buf[..len].copy_from_slice(&entry.block.as_slice()[..len]);
             }
-            self.container
-                .write_chunk(chunk, &buf[..len])
-                .map_err(|_| StoreError::Read)?;
+            // **The staging copy is zeroed on every path out of here, including the failure one.**
+            //
+            // It held document plaintext a moment ago, and FR-1.2 requires that plaintext to be
+            // scrubbed rather than handed back to the allocator. The `?` used to skip both the
+            // `fill(0)` and the `self.scratch = buf`, so a write failure -- a full disk, an
+            // `O_DIRECT` error -- **dropped the section's plaintext into the heap unscrubbed** and
+            // left the scratch buffer empty, which breaks the "reused, not reallocated" invariant
+            // the next write depends on.
+            let result = self.container.write_chunk(chunk, &buf[..len]);
             // Zero the staging copy: it held document plaintext a moment ago and is about to be handed back.
             buf[..len].fill(0);
             self.scratch = buf;
-            written += SECTION_BYTES.min(len);
+            result.map_err(|_| StoreError::Read)?;            written += SECTION_BYTES.min(len);
             // Clear *after* the write succeeded.
             if let Some(entry) = self.resident.get_mut(&section) {
                 entry.dirty = false;
             }
         }
-        self.stats.commits += 1;
+        // **The counter counts commits that wrote something.** It used to be incremented
+        // unconditionally, so a second save of an unchanged document was indistinguishable from a
+        // real one -- and `SessionStats::committed` is documented as "commits that completed".
+        if written > 0 {
+            self.stats.commits += 1;
+        }
         Ok(written)
     }
 
@@ -588,13 +599,24 @@ pub fn open_document(
 
     // Fault in the first window, so the paint path has something to draw. `Session` owns no store, so
     // this is the only moment a store exists during the load -- and that is fine, see the type's docs.
-    let window = len.min(budget * SECTION_BYTES);
+    //
+    // **The window is computed with a checked multiply.** `budget` is a public parameter and
+    // `SECTION_BYTES` is 65,504, so `budget = usize::MAX / 32` overflowed -- and the release
+    // profile runs `overflow-checks = true`, so it was a panic rather than a wrap. The product
+    // passes four, so it was never reachable from there, but this is a `pub fn` and the crate's own
+    // convention is to use `checked_*` on caller-supplied numbers.
+    let window = len.min(budget.saturating_mul(SECTION_BYTES));
     if window > 0 {
         let mut store = SectionStore::new(&mut container, budget);
         let mut buf = vec![0u8; window];
-        editor
+        // **And the buffer is zeroed on the way out, whatever happens.** It holds document
+        // plaintext, and FR-1.2 requires it to be scrubbed rather than handed back to the
+        // allocator -- and the `?` used to skip the scrub on a failed read.
+        let result = editor
             .read_into_faulting(&mut store, 0, &mut buf)
-            .map_err(|_| StoreError::Read)?;
+            .map_err(|_| StoreError::Read);
+        buf.fill(0);
+        result?;
     }
     Ok(OpenedDocument { editor, container })
 }
@@ -919,32 +941,44 @@ pub fn commit_document(
     // *position in the sequence* was, and the cost of getting that wrong is a document that is subtly wrong
     // and says nothing.
     let mut buf = vec![0u8; total];
-    let mut lo = 0usize;
-    while lo < total {
-        let hi = (lo + SECTION_BYTES).min(total);
-        editor
-            .read_into_faulting(store, lo, &mut buf[lo..hi])
-            .map_err(|_| StoreError::Read)?;
-        lo = hi;
-    }
+    // **The whole document is in this buffer, in plaintext, and it is zeroed on every path out
+    // of here.**
+    //
+    // The `?` used to skip the `fill(0)` on a failed read or a failed write, so an I/O error --
+    // a full disk, an `O_DIRECT` failure -- **handed the entire document back to the allocator
+    // unscrubbed**, which FR-1.2 forbids. The buffer is wrapped so that the zeroing happens on
+    // the way out whatever the reason.
+    let result = (|| -> Result<usize, StoreError> {
+        let mut lo = 0usize;
+        while lo < total {
+            let hi = (lo + SECTION_BYTES).min(total);
+            editor
+                .read_into_faulting(store, lo, &mut buf[lo..hi])
+                .map_err(|_| StoreError::Read)?;
+            lo = hi;
+        }
 
-    // **And only now may the store be written.**
-    let mut written = 0usize;
-    let mut lo = 0usize;
-    while lo < total {
-        let hi = (lo + SECTION_BYTES).min(total);
-        // **Residency first, and explicitly.** The read loop above may never have called this store --
-        // the rope may already have held every byte, in which case nothing was loaded and
-        // `write_at` would patch nothing and report a commit that wrote 0 bytes.
-        store.ensure_resident((lo / SECTION_BYTES) as u32)?;
-        store.write_at(lo, &buf[lo..hi])?;
-        written += store.commit_dirty()?;
-        lo = hi;
-    }
+        // **And only now may the store be written.**
+        let mut written = 0usize;
+        let mut lo = 0usize;
+        while lo < total {
+            let hi = (lo + SECTION_BYTES).min(total);
+            // **Residency first, and explicitly.** The read loop above may never have called this store --
+            // the rope may already have held every byte, in which case nothing was loaded and
+            // `write_at` would patch nothing and report a commit that wrote 0 bytes.
+            store.ensure_resident((lo / SECTION_BYTES) as u32)?;
+            store.write_at(lo, &buf[lo..hi])?;
+            written += store.commit_dirty()?;
+            lo = hi;
+        }
+        Ok(written)
+    })();
 
     // **Zero the buffer**: it held the entire document in plaintext and is about to be handed back to the
     // allocator, where a later allocation could read it.
     buf.fill(0);
+
+    let written = result?;
 
     // **The store now holds this document, so the record describes no difference between them.**
     editor.forget_record();
