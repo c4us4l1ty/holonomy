@@ -144,11 +144,18 @@ impl InputEvent {
 /// caller is the point: a scripted stream and a real device differ in how much noise they carry, and
 /// the keymap must never see the difference.
 ///
-/// # Panics
+/// # The length is in the type, and that is the whole point
 ///
-/// If `bytes` is shorter than [`RECORD_BYTES`]. Callers slice, they do not check.
+/// This used to take a `&[u8]` and document a precondition — *"if `bytes` is shorter than
+/// [`RECORD_BYTES`] this panics; callers slice, they do not check"*. A convention is not a check:
+/// the function was `pub`, it was re-exported at the crate root, and a short slice was an
+/// index-out-of-bounds panic — and in a release build with `panic = "abort"` that is the death of
+/// the process.
+///
+/// **So the argument is a `&[u8; RECORD_BYTES]` and the compiler enforces what the comment used
+/// to ask for.** Every in-tree caller already had a `[u8; 24]` to hand.
 #[inline]
-pub fn decode(bytes: &[u8]) -> Option<InputEvent> {
+pub fn decode(bytes: &[u8; RECORD_BYTES]) -> Option<InputEvent> {
     let le = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let kind = le(OFF_TYPE);
     if kind != EV_KEY {

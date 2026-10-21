@@ -71,6 +71,51 @@ pub const BTN_MIDDLE: u16 = 0x112;
 /// `BTN_SIDE`, which is what most mice call the wheel click.
 pub const BTN_SIDE: u16 = 0x113;
 
+/// The last code in the mouse-button block, `BTN_TASK`.
+pub const BTN_MOUSE_LAST: u16 = 0x117;
+/// The first code in the joystick-button block, `BTN_TRIGGER`.
+pub const BTN_JOYSTICK_FIRST: u16 = 0x120;
+/// The last code in the joystick-button block, `BTN_THUMBR`.
+pub const BTN_JOYSTICK_LAST: u16 = 0x12f;
+/// The first code in the gamepad-button block, `BTN_SOUTH`.
+pub const BTN_GAMEPAD_FIRST: u16 = 0x130;
+/// The last code in the gamepad-button block, `BTN_THUMBR`.
+pub const BTN_GAMEPAD_LAST: u16 = 0x13f;
+/// The first code in the digitiser-button block, `BTN_TOOL_PEN`.
+pub const BTN_DIGI_FIRST: u16 = 0x140;
+/// The last code in the digitiser-button block, `BTN_TOOL_RUBBER`.
+pub const BTN_DIGI_LAST: u16 = 0x14f;
+/// The first code in the wheel-button block, `BTN_WHEEL`.
+pub const BTN_WHEEL_FIRST: u16 = 0x150;
+/// The last code in the wheel-button block, `BTN_WHEEL_MAX`.
+pub const BTN_WHEEL_LAST: u16 = 0x157;
+/// The first code in the "trigger happy" block, `BTN_TRIGGER_HAPPY`.
+pub const BTN_TRIGGER_HAPPY_FIRST: u16 = 0x2e0;
+/// The last code in the "trigger happy" block, `BTN_TRIGGER_HAPPY40`.
+pub const BTN_TRIGGER_HAPPY_LAST: u16 = 0x2e7;
+
+/// Whether a kernel event code is a **pointer button**.
+///
+/// **The evdev code space interleaves buttons and keys, so "at or above `BTN_LEFT`" is not the
+/// same question as "is a button".**
+///
+/// The buttons occupy `0x110..=0x117` (mouse), `0x120..=0x12f` (joystick), `0x130..=0x13f`
+/// (gamepad), `0x140..=0x14f` (digitiser), `0x150..=0x157` (wheel) and `0x2e0..=0x2e7` (trigger
+/// happy). **Between and above them are keys**: `KEY_OK` is 0x160, `KEY_SELECT` is 0x161, and the
+/// keyboard's extended block runs all the way to `KEY_MAX` = 0x2ff.
+///
+/// So a bound of "everything from `BTN_LEFT` up" classifies `KEY_OK` as a mouse button — and the
+/// record then never reaches the keymap at all: the keystroke is swallowed and re-delivered as a
+/// button press at the pointer's current position. **The button blocks are named, not inferred.**
+const fn is_button_code(code: u16) -> bool {
+    (code >= BTN_LEFT && code <= BTN_MOUSE_LAST)
+        || (code >= BTN_JOYSTICK_FIRST && code <= BTN_JOYSTICK_LAST)
+        || (code >= BTN_GAMEPAD_FIRST && code <= BTN_GAMEPAD_LAST)
+        || (code >= BTN_DIGI_FIRST && code <= BTN_DIGI_LAST)
+        || (code >= BTN_WHEEL_FIRST && code <= BTN_WHEEL_LAST)
+        || (code >= BTN_TRIGGER_HAPPY_FIRST && code <= BTN_TRIGGER_HAPPY_LAST)
+}
+
 /// A pointer button, numbered as the kernel numbers it.
 ///
 /// **Four variants and an `Other(u16)`.** The `Other` arm is what makes this total: a mouse with a
@@ -101,16 +146,23 @@ impl Button {
 
     /// This button from the kernel's code, or [`None`] for a code that is not a button at all.
     ///
-    /// **`>= BTN_LEFT` rather than a list.** The kernel numbers mouse buttons from `0x110` upward
-    /// contiguously, and a match on four codes would call `BTN_9` "not a button" — which would then
-    /// be dispatched as a *keystroke*, putting button 9's code through the keymap. **The bound is the
-    /// honest one**: everything above the keyboard range is a button.
+    /// **The button blocks are named, not "at or above `BTN_LEFT`".** The old bound said that
+    /// everything from 0x110 up is a button, and **the evdev code space interleaves buttons and
+    /// keys**: `KEY_OK` is 0x160, `KEY_SELECT` is 0x161, and the keyboard's extended block runs to
+    /// `KEY_MAX` = 0x2ff. So `KEY_OK` was classified as a mouse button — and because the
+    /// classification decides *which decoder the record goes to*, such a key never reached the
+    /// keymap at all: it was swallowed and re-delivered as a button press at the pointer's
+    /// current position.
+    ///
+    /// **The bound is still the honest one for the mouse**, which is why it is a list of blocks
+    /// rather than a list of four codes: a mouse with a thumb button reports `BTN_5`, and an
+    /// enum without it would either drop the button or panic.
     pub const fn from_code(code: u16) -> Option<Self> {
         match code {
             BTN_LEFT => Some(Button::Left),
             BTN_RIGHT => Some(Button::Right),
             BTN_MIDDLE => Some(Button::Middle),
-            c if c >= BTN_LEFT => Some(Button::Other(c)),
+            c if is_button_code(c) => Some(Button::Other(c)),
             _ => None,
         }
     }
@@ -182,10 +234,16 @@ impl Record {
 /// this type is here to resolve. So this function parses the fields itself rather than going through
 /// a filter that would throw away the half it wants.
 ///
-/// # Panics
+/// # The length is in the type
 ///
-/// If `bytes` is shorter than [`RECORD_BYTES`]. Callers slice; they do not check.
-pub fn decode_record(bytes: &[u8]) -> Record {
+/// This used to take a `&[u8]` and document a precondition — *"if `bytes` is shorter than
+/// [`RECORD_BYTES`] this panics; callers slice, they do not check"*. A convention is not a
+/// check: the function is `pub`, and a short slice was an index-out-of-bounds panic, which in a
+/// release build with `panic = "abort"` is the death of the process.
+///
+/// **So the argument is a `&[u8; RECORD_BYTES]`**, and the compiler enforces what the comment
+/// used to ask for. Every in-tree caller already had a `[u8; 24]` to hand.
+pub fn decode_record(bytes: &[u8; RECORD_BYTES]) -> Record {
     let le = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let le32 =
         |at: usize| i32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
@@ -440,18 +498,33 @@ impl Frame {
     /// **The fix is that an axis nobody accumulates into does not count as movement.** A frame with
     /// nothing in it is a frame with nothing in it, and reporting it as movement is how a no-op
     /// becomes an event.
+    /// **The accumulation saturates, and it has to.**
+    ///
+    /// `delta` comes from the kernel and the kernel does not clamp it: a `uinput` device, a
+    /// buggy driver or a malicious one can report any `i32`. **Two `REL_X` records in one frame
+    /// whose deltas sum past `i32::MAX` overflowed**, and the release profile has
+    /// `overflow-checks = true` — so this was an "attempt to add with overflow" panic, and
+    /// `panic = "abort"` turned it into the death of the process.
+    ///
+    /// **The sibling code path already knew this**: `source.rs` accumulates the pointer's
+    /// position with `saturating_add`. Only this function was missed.
+    ///
+    /// Saturating is the right answer rather than wrapping: a saturated delta is a pointer that
+    /// moved further than any screen is wide, and the caller clamps it to the panel anyway. A
+    /// wrapped delta is a pointer that moved *backwards* by two billion pixels, which is a
+    /// caret in the wrong place with no way to tell why.
     pub fn fold(&mut self, axis: u16, delta: i32) {
         match axis {
             REL_X => {
-                self.dx += delta;
+                self.dx = self.dx.saturating_add(delta);
                 self.moved = true;
             }
             REL_Y => {
-                self.dy += delta;
+                self.dy = self.dy.saturating_add(delta);
                 self.moved = true;
             }
             REL_WHEEL => {
-                self.wheel += delta;
+                self.wheel = self.wheel.saturating_add(delta);
                 self.moved = true;
             }
             // **`REL_HWHEEL` is dropped, on purpose.** The panel has no horizontal scrollbar --

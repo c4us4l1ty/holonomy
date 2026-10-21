@@ -378,8 +378,28 @@ impl Keymap {
             (KEY_DOWN, true) => Some(Command::SelectDown),
             (KEY_HOME, true) => Some(Command::SelectHome),
             (KEY_END, true) => Some(Command::SelectEnd),
-            (KEY_LEFTBRACE, false) | (KEY_UP, false) => Some(Command::Up),
-            (KEY_RIGHTBRACE, false) | (KEY_DOWN, false) => Some(Command::Down),
+            // **The braces are NOT the arrow keys.**
+            //
+            // This used to read `(KEY_LEFTBRACE, false) | (KEY_UP, false) => Some(Command::Up)`, on
+            // the premise that "on a US layout the arrow keys share scancodes with the braces".
+            //
+            // **They do not.** The premise was about the PC *XT* keyboard, where the arrow keys
+            // really did sit on the same physical keys as `Home` and the bracket pair, and it has
+            // been false for every keyboard since the AT. The kernel delivers distinct codes:
+            // `KEY_LEFTBRACE` is 26, `KEY_UP` is 103, and this project's own live X11 check
+            // (`crates/holonomy-x11/tests/live.rs`) records exactly that — `]` arrives as 27 and
+            // the up arrow as 103, on the ThinkPad the product targets.
+            //
+            // **So the mapping made `[` and `]` untypable**: the arrow arms matched first, the
+            // caret moved up and down, and the character never reached the document. `text_for`
+            // — the same type's other public method — said the key was `[`, so the two halves of
+            // the keymap disagreed about the same key, and `Command::Insert('[')` was unreachable
+            // in the entire crate.
+            //
+            // The braces now fall through to the character table below, which is where they
+            // belong: `[` and `]` are characters, and the arrow keys have their own codes.
+            (KEY_UP, false) => Some(Command::Up),
+            (KEY_DOWN, false) => Some(Command::Down),
             (KEY_LEFT, _) => Some(Command::Left),
             (KEY_RIGHT, _) => Some(Command::Right),
             (KEY_PAGEUP, _) => Some(Command::PageUp),
@@ -832,8 +852,16 @@ mod tests {
     }
 
     #[test]
-    fn shifted_arrow_keys_type_braces_instead_of_moving() {
-        // `{` is shift+`[`, which is the same physical key as the up arrow on a US layout.
+    fn the_braces_type_their_characters_and_the_arrows_move() {
+        // **`[` and `]` are characters, and the arrow keys have their own codes.**
+        //
+        // This used to assert the opposite — that an unshifted `[` moved the caret up — on the
+        // premise that the braces and the arrows share scancodes on a US layout. They did on the
+        // PC XT keyboard and have not since; the kernel delivers 26 for `[` and 103 for the up
+        // arrow, which is what this project's own live X11 check records.
+        //
+        // **The cost of the old mapping was that `[` and `]` could not be typed at all**: the
+        // navigation arms matched first, so the caret moved and the character was swallowed.
         let km = Keymap::us();
         assert_eq!(
             km.dispatch(InputEvent::press(KEY_LEFTBRACE), &shift()),
@@ -841,7 +869,24 @@ mod tests {
         );
         assert_eq!(
             km.dispatch(InputEvent::press(KEY_LEFTBRACE), &ModifierState::new()),
+            Some(Command::Insert('['))
+        );
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_RIGHTBRACE), &ModifierState::new()),
+            Some(Command::Insert(']'))
+        );
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_RIGHTBRACE), &shift()),
+            Some(Command::Insert('}'))
+        );
+        // And the arrows still move.
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_UP), &ModifierState::new()),
             Some(Command::Up)
+        );
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_DOWN), &ModifierState::new()),
+            Some(Command::Down)
         );
     }
 

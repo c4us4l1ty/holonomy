@@ -794,9 +794,11 @@ fn shift_tab_walks_back_and_stops_at_the_first_cell() {
         Some((0, 1)),
         "Shift+Tab goes back one cell"
     );
-    // `KEY_LEFT`, not `KEY_LEFTBRACE`: on a US layout the arrow keys share scancodes with the braces,
-    // and `Keymap` maps `KEY_LEFTBRACE` to **Up**. Using the wrong constant here looked like a broken
-    // navigation rule for a while.
+    // `KEY_LEFT`, and it is the only correct constant: the arrow keys have their own codes (103 for
+    // up, 105 for left), and the braces are 26 and 27. An earlier version of this comment claimed
+    // the arrow keys shared scancodes with the braces, which was true of the PC XT keyboard and has
+    // been false ever since; using `KEY_LEFTBRACE` here looked like a broken navigation rule for a
+    // while.
     press(&mut s, holonomy_input::KEY_LEFT).expect("Left");
     assert_eq!(
         s.active_cell().map(|c| (c.row, c.col)),

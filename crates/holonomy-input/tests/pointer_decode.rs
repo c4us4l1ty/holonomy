@@ -34,8 +34,8 @@
 
 use holonomy_input::event::{encode, InputEvent, EV_KEY, EV_REL, EV_SYN, RECORD_BYTES};
 use holonomy_input::pointer::{
-    decode_record, encode_record, encode_record_at, Button, Event, Record, BTN_LEFT, BTN_RIGHT,
-    REL_HWHEEL, REL_WHEEL, REL_X, REL_Y,
+    decode_record, encode_record, encode_record_at, Button, Event, Frame, Record, BTN_LEFT,
+    BTN_RIGHT, REL_HWHEEL, REL_WHEEL, REL_X, REL_Y,
 };
 use holonomy_input::{decode, InputSource, RecordDecoder, ScriptedInputSource};
 
@@ -240,8 +240,53 @@ fn a_button_code_is_not_a_key_code() {
     // offset is arithmetic in `x11key::x_button` rather than a table; this pins the result.
     assert_eq!(Button::from_code(BTN_LEFT), Some(Button::Left));
     assert_eq!(Button::from_code(BTN_RIGHT), Some(Button::Right));
-    assert_eq!(Button::from_code(0x200), Some(Button::Other(0x200)));
+    // **A button the crate has no name for is still a button.** `BTN_TRIGGER_HAPPY` is 0x2e0 — in
+    // the *second* button block, above the keyboard's extended range, which is why the bound is a
+    // list of blocks rather than one contiguous run.
+    assert_eq!(Button::from_code(0x2e0), Some(Button::Other(0x2e0)));
+    assert_eq!(Button::from_code(0x150), Some(Button::Other(0x150)));
     assert_eq!(Button::from_code(30), None, "KEY_A is not a button");
+    // **And a key above the mouse block is a key.**
+    //
+    // This used to be `Some(Button::Other(0x200))`, on the bound "everything from `BTN_LEFT` up is
+    // a button". **The evdev code space interleaves buttons and keys**: `KEY_OK` is 0x160 and the
+    // keyboard's extended block runs to `KEY_MAX` = 0x2ff. So 0x200 — `KEY_MICMUTE` — was
+    // classified as a mouse button, and because the classification decides which decoder the
+    // record goes to, such a key never reached the keymap at all.
+    assert_eq!(
+        Button::from_code(0x200),
+        None,
+        "0x200 is a keyboard code, not a mouse button"
+    );
+    assert_eq!(Button::from_code(0x160), None, "KEY_OK is not a button");
+}
+
+/// **A frame whose deltas overflow saturates instead of panicking.**
+///
+/// The kernel does not clamp a relative axis: a `uinput` device, a buggy driver or a malicious
+/// one can report any `i32`. **Two `REL_X` records in one frame whose deltas sum past
+/// `i32::MAX` overflowed**, and the release profile has `overflow-checks = true` — so this was
+/// an "attempt to add with overflow" panic, and `panic = "abort"` made it the death of the
+/// process.
+///
+/// Saturating is the right answer rather than wrapping: the caller clamps the pointer to the
+/// panel anyway, and a wrapped delta is a pointer that moved *backwards* by two billion pixels.
+#[test]
+fn a_frame_whose_deltas_overflow_saturates() {
+    let mut frame = Frame::default();
+    frame.fold(REL_X, i32::MAX);
+    frame.fold(REL_X, 1);
+    assert_eq!(frame.dx, i32::MAX, "the sum saturates rather than wrapping or panicking");
+
+    let mut frame = Frame::default();
+    frame.fold(REL_Y, i32::MIN);
+    frame.fold(REL_Y, -1);
+    assert_eq!(frame.dy, i32::MIN, "and the same at the other end of the range");
+
+    let mut frame = Frame::default();
+    frame.fold(REL_WHEEL, i32::MAX);
+    frame.fold(REL_WHEEL, 7);
+    assert_eq!(frame.wheel, i32::MAX);
 }
 
 /// **Motion past the left edge clamps at zero, and does not wrap.**
