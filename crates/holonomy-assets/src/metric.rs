@@ -534,9 +534,20 @@ impl MetricTable {
 
     /// Slice for one size, all styles, all codepoints. Used by tests that compare against a
     /// reference implementation and by the atlas consistency check.
+    ///
+    /// **Empty for an index that is not a size**, rather than a panic.
+    ///
+    /// The slice used to be `&self.metrics[start..start + CODEPOINTS * STYLE_COUNT]` with no
+    /// check, while [`get`](Self::get) — two functions above — checks its inputs carefully
+    /// because an unchecked multiply can wrap into a *valid-looking* index. **A public accessor
+    /// that panics on an out-of-range index is a trap with a documentation comment.**
     pub fn size_slice(&self, size_index: usize) -> &[GlyphMetric] {
+        if size_index >= self.sizes.len() {
+            return &[];
+        }
         let start = size_index * CODEPOINTS * STYLE_COUNT;
-        &self.metrics[start..start + CODEPOINTS * STYLE_COUNT]
+        let end = start + CODEPOINTS * STYLE_COUNT;
+        self.metrics.get(start..end).unwrap_or(&[])
     }
 }
 

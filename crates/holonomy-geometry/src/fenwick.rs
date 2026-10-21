@@ -352,9 +352,25 @@ impl Fenwick {
         for i in 1..=self.n {
             let parent = i + i.isolate_lowest_one();
             if parent <= self.n {
-                self.tree[parent] += self.tree[i];
+                // **Saturating, and the total is checked.**
+                //
+                // This used to be a plain `+=`, so a document whose total height passes
+                // `u32::MAX` overflowed here — and the release profile runs
+                // `overflow-checks = true` under `panic = "abort"`, so it was an abort, not a
+                // wrong pixel. `from_weights` detects the same condition and refuses the tree
+                // with a message; **this path did not**, because it is a different code path.
+                //
+                // Saturating keeps the arithmetic from trapping, and the check below keeps the
+                // tree's sums *exact* rather than merely non-panicking: a wrapped total makes
+                // `lower_bound` return nonsense rather than fail.
+                self.tree[parent] = self.tree[parent].saturating_add(self.tree[i]);
             }
         }
+        let sum: u64 = self.weights.iter().map(|&w| u64::from(w)).sum();
+        assert!(
+            sum <= u64::from(u32::MAX),
+            "total height {sum} exceeds u32::MAX; the tree's prefix sums would wrap"
+        );
     }
 }
 

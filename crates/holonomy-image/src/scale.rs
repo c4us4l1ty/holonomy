@@ -75,6 +75,23 @@ pub const FRAC: u32 = 8;
 /// One, in [`FRAC`] fixed point.
 pub const ONE: u32 = 1 << FRAC;
 
+/// **The ceiling on the scaler's intermediate buffer, in bytes.**
+///
+/// The intermediate is `dst_w × src_h × 4` — the source narrowed to the destination width, one
+/// row per source row. **It is not bounded by the source's size**, because the two axes are
+/// scaled independently: a source one pixel wide and 33,554,432 pixels tall is 128 MiB, and
+/// narrowing it to 640 pixels wide makes the intermediate **85 gigabytes**.
+///
+/// **The ceiling is the size of the largest source the decoder admits** — `MAX_PIXELS × 4`, so
+/// 128 MiB — which means every image the decoder accepts can still be scaled (an identity scale
+/// has an intermediate of exactly the source's size) and only a *shape* is refused.
+///
+/// The alternative, a strip-wise vertical pass, would scale every admitted image at any
+/// intermediate size; it is a real improvement and it is not implemented here, because the
+/// refusal is bounded, named and honest, and the alternative is a rewrite of the vertical
+/// kernel.
+pub const MAX_INTERMEDIATE_BYTES: u64 = crate::png::MAX_PIXELS * 4;
+
 /// A decoded RGBA image: `width` x `height`, 4 bytes per pixel, tightly packed, no row padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rgba {
@@ -323,7 +340,29 @@ pub fn resample_pixels(
     // would apply a downscale filter where none is needed.
     let src_stride = src_w as usize * 4;
     let mid_stride = dst_w as usize * 4;
-    let mut mid = vec![0u8; mid_stride * src_h as usize];
+    // **The intermediate is bounded, and the bound is checked before the allocation.**
+    //
+    // The intermediate is `dst_w × src_h × 4` bytes, and `MAX_PIXELS` admits a one-pixel-wide
+    // image 33,554,432 pixels tall: scaling that to 640 pixels wide asked for **85 gigabytes**,
+    // the allocation failed, and the process died. **A crafted PNG in a document should not be
+    // able to abort the editor.**
+    //
+    // The ceiling is the size of the largest *source* the decoder admits, so every image the
+    // decoder accepts can still be scaled — an identity scale of a 32-megapixel image has an
+    // intermediate of exactly the source's size — and only a *shape* is refused, not a size.
+    let mid_len = (mid_stride as u64)
+        .checked_mul(src_h as u64)
+        .ok_or(PngError::IntermediateTooLarge {
+            bytes: u64::MAX,
+            cap: MAX_INTERMEDIATE_BYTES,
+        })?;
+    if mid_len > MAX_INTERMEDIATE_BYTES {
+        return Err(PngError::IntermediateTooLarge {
+            bytes: mid_len,
+            cap: MAX_INTERMEDIATE_BYTES,
+        });
+    }
+    let mut mid = vec![0u8; mid_len as usize];
     if use_area(src_w, dst_w) {
         let xmap = axis_area_map(src_w, dst_w);
         for y in 0..src_h as usize {

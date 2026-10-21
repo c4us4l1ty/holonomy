@@ -356,6 +356,31 @@ fn a_long_footprint_does_not_overflow_the_accumulator() {
          is worse than the half-step it costs."
     );
 }
+/// **The scaler's intermediate buffer is bounded, and the refusal comes before the allocation.**
+///
+/// The intermediate is `dst_w × src_h × 4` bytes, and it is **not** bounded by the source's size:
+/// the two axes scale independently, so a source one pixel wide and 33,554,432 pixels tall is
+/// 128 MiB, and narrowing it to page-column width makes the intermediate **85 gigabytes**. The
+/// allocation failed and the process died.
+///
+/// The fixture here is tiny — the point is the *shape*, not the size. A one-pixel-wide source
+/// of a hundred rows, widened to four hundred thousand, asks for 160 MB of intermediate from a
+/// four-hundred-byte source.
+#[test]
+fn the_intermediate_buffer_is_bounded() {
+    let img = solid(1, 100, 255);
+    // 400,000 × 100 × 4 = 160,000,000 bytes, above the 128 MiB ceiling.
+    let mut out = vec![0u8; holonomy_image::scale::bytes_for(400_000, 100)];
+    let err = resample(&img, 400_000, 100, &mut out)
+        .expect_err("the intermediate must be refused, not allocated");
+    assert!(
+        matches!(err, holonomy_image::PngError::IntermediateTooLarge { .. }),
+        "expected the ceiling to be named, got {err:?}"
+    );
+    // And the refusal is *before* the allocation: the destination buffer is untouched.
+    assert!(out.iter().all(|&b| b == 0), "the destination was written");
+}
+
 /// **The longest footprint the decoder admits does not overflow the accumulator** — and this is the
 /// one that used to abort the process.
 ///

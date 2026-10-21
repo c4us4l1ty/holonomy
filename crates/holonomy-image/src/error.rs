@@ -78,6 +78,22 @@ pub enum PngError {
     },
     /// `IHDR` claimed zero width or height.
     ZeroDimension,
+    /// **The scaler's intermediate buffer would be larger than the ceiling.**
+    ///
+    /// The scaler works in two passes: it narrows every source row to the destination width,
+    /// then narrows the rows. **The intermediate is `dst_w × src_h × 4` bytes**, and
+    /// `MAX_PIXELS` admits a one-pixel-wide image 33,554,432 pixels tall — so scaling that to
+    /// 640 pixels wide asked for **85 gigabytes**, and the allocation failed, and the process
+    /// died.
+    ///
+    /// **The ceiling is the size of the largest source the decoder admits**, so every image the
+    /// decoder accepts can still be scaled, and only a *shape* — not a size — is refused.
+    IntermediateTooLarge {
+        /// Bytes the intermediate would have taken.
+        bytes: u64,
+        /// The ceiling.
+        cap: u64,
+    },
     /// `IHDR` claimed more pixels than [`crate::png::MAX_PIXELS`].
     ///
     /// Checked *before* the caller sizes a buffer from the header, because every caller allocates
@@ -198,6 +214,11 @@ impl fmt::Display for PngError {
                 write!(f, "IHDR payload is {have} bytes, needs {want}")
             }
             Self::ZeroDimension => f.write_str("IHDR declares a zero width or height"),
+            Self::IntermediateTooLarge { bytes, cap } => write!(
+                f,
+                "the scaler's intermediate buffer would need {bytes} bytes, above the {cap}-byte \
+                 ceiling"
+            ),
             Self::TooManyPixels { pixels, cap } => {
                 write!(f, "{pixels} pixels exceeds the {cap} ceiling")
             }

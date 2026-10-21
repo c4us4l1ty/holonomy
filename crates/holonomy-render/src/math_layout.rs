@@ -193,9 +193,18 @@ impl MathMetrics {
     ///
     /// `unsigned_abs` rather than `abs`, so `i64::MIN` does not overflow. `digits` has the same
     /// reason to avoid the negation and says so.
+    ///
+    /// **The sign is counted too.** `emit` draws the number with `format!("{v}")`, and a negative
+    /// number's `-` is a glyph in its own right — so a measure that ignored the sign reserved a
+    /// box one advance too narrow, and whatever followed the integer overlapped it. The bundled
+    /// parser cannot produce a negative `Int` (`-` is a separate `Symbol`), so this was latent
+    /// rather than reachable; it is reachable through the public enum.
     pub fn int_width(&self, v: i64) -> u32 {
-        let mut n = v.unsigned_abs();
         let mut width = 0u32;
+        if v < 0 {
+            width = width.saturating_add(self.adv(u32::from(b'-')));
+        }
+        let mut n = v.unsigned_abs();
         loop {
             let digit = u32::from(b'0') + (n % 10) as u32;
             width = width.saturating_add(self.adv(digit));

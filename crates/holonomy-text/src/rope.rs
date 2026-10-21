@@ -786,17 +786,39 @@ impl Rope {
         // **`bytes` is borrowed, not copied**: `Bytes::from(&[u8])` inlines up to `INLINE_BYTES` and
         // copies only when it must. A paste of 200 bytes allocates once, which is the paste's own cost.
         // **Recorded after the edit lands, not before** — for the same reason `insert_byte` now is.
-        // `insert_at_unrecorded` is fallible: `set_cursor(offset)` refuses an out-of-range offset, and
-        // `insert_byte_unrecorded` can fail mid-run on `GapSaturated`/`OutOfBounds`. Pushing first left
-        // a phantom `Edit::insert` behind on every refusal, and because `EditRecord` is a positional
-        // accumulator (`to_saved` subtracts each edit's delta walking backwards) that one phantom entry
-        // shifts the saved coordinate of every real edit after it — misrouting later write-backs and
-        // faults. The offset here is the *parameter*, an argument that does not move as the edit
-        // proceeds, so it is already the correct pre-edit coordinate and needs no separate capture.
-        // A partial run (some bytes inserted, then a mid-run failure) still records nothing, which is
-        // the honest answer: the paste as a whole did not happen, and no later replay should be told
-        // it did.
-        self.insert_at_unrecorded(offset, bytes)?;
+        // `set_cursor(offset)` refuses an out-of-range offset, and `insert_byte_unrecorded` can fail
+        // mid-run on `GapSaturated`/`OutOfBounds`. Pushing first left a phantom `Edit::insert` behind
+        // on every refusal, and because `EditRecord` is a positional accumulator (`to_saved` subtracts
+        // each edit's delta walking backwards) that one phantom entry shifts the saved coordinate of
+        // every real edit after it — misrouting later write-backs and faults. The offset here is the
+        // *parameter*, an argument that does not move as the edit proceeds, so it is already the
+        // correct pre-edit coordinate and needs no separate capture.
+        self.set_cursor(offset)?;
+        let mut landed = 0usize;
+        for &b in bytes {
+            if let Err(e) = self.insert_byte_unrecorded(b) {
+                // **The bytes that landed are recorded.**
+                //
+                // This is the half of the failure the old code got wrong. It recorded *nothing* on
+                // a mid-run failure, on the grounds that "the paste as a whole did not happen" —
+                // **but the bytes that did land are in the document.** The document grew by
+                // `landed` bytes, and `EditRecord` is a positional accumulator: an unaccounted
+                // growth shifts the *saved* coordinate of every later edit, silently misrouting
+                // the next write-back and the next fault.
+                //
+                // **So the partial insert is recorded as what it is**: an insert of the bytes
+                // that landed, at the offset they landed at. The caller still gets its error —
+                // the paste did fail — and the document and the record now agree about what the
+                // document contains.
+                if landed > 0 {
+                    self.record
+                        .push(crate::edit_record::Edit::insert(offset, &bytes[..landed]));
+                    self.note_edit_at_cursor();
+                }
+                return Err(e);
+            }
+            landed += 1;
+        }
         self.record
             .push(crate::edit_record::Edit::insert(offset, bytes));
         self.note_edit_at_cursor();
@@ -834,7 +856,15 @@ impl Rope {
     /// and `a_bulk_read_matches_the_byte_at_a_time_reader`; the change is gated on the output, not on
     /// a timing improvement.
     pub fn read_at(&self, offset: usize, len: usize, out: &mut [u8]) -> Result<(), RopeError> {
-        if offset + len > self.text_len() {
+        // **Checked, not `offset + len`.** The release profile runs `overflow-checks = true`, so
+        // an `offset` near `usize::MAX` and a large `len` **panicked** rather than returning the
+        // out-of-bounds error the function has for exactly this case. The check is the same
+        // question asked without the arithmetic that can trap.
+        let end = offset.checked_add(len).ok_or(RopeError::OutOfBounds {
+            offset,
+            text_len: self.text_len(),
+        })?;
+        if end > self.text_len() {
             return Err(RopeError::OutOfBounds {
                 offset,
                 text_len: self.text_len(),
@@ -905,7 +935,13 @@ impl Rope {
         len: usize,
         out: &mut [u8],
     ) -> Result<(), RopeError> {
-        if offset + len > self.text_len() {
+        // **Checked, not `offset + len`** — see [`read_at`](Self::read_at): the release profile
+        // runs `overflow-checks = true`, so the unchecked sum was a panic rather than an error.
+        let end = offset.checked_add(len).ok_or(RopeError::OutOfBounds {
+            offset,
+            text_len: self.text_len(),
+        })?;
+        if end > self.text_len() {
             return Err(RopeError::OutOfBounds {
                 offset,
                 text_len: self.text_len(),

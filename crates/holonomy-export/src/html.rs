@@ -307,73 +307,86 @@ fn emit_with_anchors<W: Write>(
     carry: &mut Vec<u8>,
     stats: &mut HtmlStats,
 ) -> Result<(), HtmlError> {
-    // **Complete a held-back anchor first.** The bytes the previous slice ended with are the prefix of an
-    // anchor whose rest is at the head of this one, and `find_anchor(bytes)` cannot see them -- so without
-    // this the third byte goes out as raw text and the export is invalid UTF-8. That is exactly what the
-    // first version did, and what `html_finds_an_image_whose_anchor_straddles_a_run_boundary` catches.
-    if !carry.is_empty() {
-        let mut head = [0u8; 3];
-        let clen = carry.len().min(3);
-        let take = (3 - clen).min(bytes.len());
-        head[..clen].copy_from_slice(&carry[..clen]);
-        head[clen..clen + take].copy_from_slice(&bytes[..take]);
-        if clen + take < 3 {
-            // Still short of three. Keep what arrived and emit nothing: the rest is in a later chunk.
+    // **A loop, and not a recursion.**
+    //
+    // This used to hand the rest of the slice to `emit_anchor`, which handed it back here: one
+    // stack frame per anchor. **An anchor is three bytes, so a 64 KiB chunk holds about 21,800 of
+    // them — 43,000 frames against an 8 MB main-thread stack.** A document with tens of thousands
+    // of images would have overflowed the stack rather than exported.
+    let mut rest = bytes;
+    loop {
+        // **Complete a held-back anchor first.** The bytes the previous slice ended with are the prefix of an
+        // anchor whose rest is at the head of this one, and `find_anchor(bytes)` cannot see them -- so without
+        // this the third byte goes out as raw text and the export is invalid UTF-8. That is exactly what the
+        // first version did, and what `html_finds_an_image_whose_anchor_straddles_a_run_boundary` catches.
+        if !carry.is_empty() {
+            let mut head = [0u8; 3];
+            let clen = carry.len().min(3);
+            let take = (3 - clen).min(rest.len());
+            head[..clen].copy_from_slice(&carry[..clen]);
+            head[clen..clen + take].copy_from_slice(&rest[..take]);
+            if clen + take < 3 {
+                // Still short of three. Keep what arrived and emit nothing: the rest is in a later chunk.
+                let mut out = std::mem::take(carry);
+                out.clear();
+                out.extend_from_slice(rest);
+                *carry = out;
+                return Ok(());
+            }
+            if head == ANCHOR_BYTES {
+                // **Discarded, not emitted.** The held-back bytes are the anchor's own prefix, and the
+                // anchor is about to be written in full -- emitting them first would put a bare `EF BF` in
+                // the output, which is what the first version did and what made this path produce invalid
+                // UTF-8 even though it found the anchor.
+                carry.clear();
+                emit_anchor(w, catalog, ordinal, stats)?;
+                rest = &rest[take..];
+                continue;
+            }
+            // Not an anchor after all: the held-back bytes were ordinary text.
+            emit_escaped(w, carry, stats)?;
+            carry.clear();
+        }
+
+        let (at, partial) = crate::asset::find_anchor(rest);
+        let Some(at) = at else {
+            // Hold back a partial anchor's lead bytes rather than emitting half a character. They are the
+            // next slice's problem, and `carry` is how the next slice learns about them.
+            let keep = rest.len().saturating_sub(partial);
             let mut out = std::mem::take(carry);
             out.clear();
-            out.extend_from_slice(bytes);
+            out.extend_from_slice(&rest[rest.len() - partial..]);
             *carry = out;
-            return Ok(());
+            return emit_escaped(w, &rest[..keep], stats);
+        };
+        if at > 0 {
+            emit_escaped(w, &rest[..at], stats)?;
         }
-        if head == ANCHOR_BYTES {
-            // **Discarded, not emitted.** The held-back bytes are the anchor's own prefix, and the
-            // anchor is about to be written in full -- emitting them first would put a bare `EF BF` in
-            // the output, which is what the first version did and what made this path produce invalid
-            // UTF-8 even though it found the anchor.
-            carry.clear();
-            return emit_anchor(w, &bytes[take..], catalog, ordinal, carry, stats);
-        }
-        // Not an anchor after all: the held-back bytes were ordinary text.
-        emit_escaped(w, carry, stats)?;
-        carry.clear();
+        // **The anchor's own three bytes are not counted as text.** The caller counts the
+        // *run's* byte range, `to - from`, and the anchor lives inside that range -- so the
+        // three bytes were counted once by the caller and again here. The reported "text bytes
+        // copied out of the document" was inflated by three bytes per image.
+        emit_anchor(w, catalog, ordinal, stats)?;
+        rest = &rest[at + ANCHOR_BYTES.len()..];
     }
-
-    let (at, partial) = crate::asset::find_anchor(bytes);
-    let Some(at) = at else {
-        // Hold back a partial anchor's lead bytes rather than emitting half a character. They are the
-        // next slice's problem, and `carry` is how the next slice learns about them.
-        let keep = bytes.len().saturating_sub(partial);
-        let mut out = std::mem::take(carry);
-        out.clear();
-        out.extend_from_slice(&bytes[bytes.len() - partial..]);
-        *carry = out;
-        return emit_escaped(w, &bytes[..keep], stats);
-    };
-    if at > 0 {
-        emit_escaped(w, &bytes[..at], stats)?;
-    }
-    emit_anchor(
-        w,
-        &bytes[at + ANCHOR_BYTES.len()..],
-        catalog,
-        ordinal,
-        carry,
-        stats,
-    )
 }
 
-/// Emit the picture for the next anchor, then whatever text follows it.
+/// Emit the picture for the next anchor.
 ///
 /// Split out of [`emit_with_anchors`] because two paths reach it -- a whole anchor inside one slice, and
 /// one completed from the previous slice's carry -- and the second has already consumed the first `take`
 /// bytes, so both must resume on the same remainder. Having it in one place means the image emission and
 /// the ordinal increment cannot happen once on one path and twice on the other.
+///
+/// **It does not recurse.** It used to: it emitted the picture and then called
+/// [`emit_with_anchors`] for the rest of the slice, so the stack grew by a frame per anchor. An
+/// anchor is three bytes, so a 64 KiB chunk holds about 21,800 of them -- **43,000 frames against
+/// an 8 MB main-thread stack**, and a stack overflow rather than an export. The walk is now a
+/// loop.
 fn emit_anchor<W: Write>(
     w: &mut Counted<W>,
-    rest: &[u8],
     catalog: &holonomy_text::AssetCatalog,
     ordinal: &mut usize,
-    carry: &mut Vec<u8>,
     stats: &mut HtmlStats,
 ) -> Result<(), HtmlError> {
     let mine = *ordinal;
@@ -398,8 +411,7 @@ fn emit_anchor<W: Write>(
             w.write_all(&tag)?;
         }
     }
-    stats.text_bytes += ANCHOR_BYTES.len() as u64;
-    emit_with_anchors(w, rest, catalog, ordinal, carry, stats)
+    Ok(())
 }
 
 /// Write `bytes` to `w`, escaping as it goes.
