@@ -403,10 +403,23 @@ pub fn build(
             // word: it has no glyph, no advance, and it wants the whole measure and a height derived
             // from its aspect ratio. Feeding it to the layouter as a 3-byte run would typeset U+FFFC's
             // replacement glyph if the font had one and a blank otherwise, so the split happens here.
-            for piece in pieces {
+            for (pi, piece) in pieces.iter().enumerate() {
                 if let Piece::Text(t) = piece {
+                    // **Where this piece ends decides whether the word in front of it is finished.**
+                    //
+                    // * **A picture follows** — the word is committed, because a picture is a hard
+                    //   block and the text in front of it has to be placed before it.
+                    // * **The run ends here** — the word is committed, because a style change is a
+                    //   formatting boundary.
+                    // * **Neither** — the piece ends at the 64 KiB chunk edge and the run continues
+                    //   into the next chunk. **The word stays open**, because a chunk boundary is
+                    //   not a formatting boundary: committing there broke the word in two, and the
+                    //   line could break inside it.
+                    let next_is_anchor = matches!(pieces.get(pi + 1), Some(Piece::Anchor));
+                    let run_ends_here = to >= end as usize;
+                    let boundary = next_is_anchor || run_ends_here;
                     let mut pending: Vec<u8> = t.to_vec();
-                    for line in layout.feed(&pending, font_name, metric, size, big, stats) {
+                    for line in layout.feed(&pending, font_name, metric, size, big, stats, boundary) {
                         if lines_on_page == lines_per_page(opts) || y < opts.margin {
                             pages.push(std::mem::replace(&mut current, Content::new()));
                             y = opts.page.height - opts.margin;
@@ -513,7 +526,7 @@ pub fn build(
     }
 
     // A trailing run with no newline still produced a line, via `finish`.
-    for line in layout.finish() {
+    for line in layout.finish(stats) {
         if lines_on_page == lines_per_page(opts) || y < opts.margin {
             pages.push(std::mem::replace(&mut current, Content::new()));
             y = opts.page.height - opts.margin;
@@ -801,6 +814,17 @@ struct Layouter<'a> {
     pending: Option<Pending>,
     /// Width of the spaces held back before [`Layouter::pending`].
     held_spaces: u32,
+    /// **The bytes of a character the last piece ended in the middle of.**
+    ///
+    /// **A piece is 64 KiB of the document, and a character can straddle the edge.** The
+    /// character used to be split: the lead byte was read as a one-byte character, `transcode`
+    /// could not decode it, and it became `?` — and the continuation bytes at the head of the
+    /// next piece each became a `?` as well. **One CJK character became three question marks,
+    /// silently, in the exported PDF.**
+    ///
+    /// So the incomplete character is held here and completed by the next piece. The bytes are
+    /// at most three, because a UTF-8 character is at most four bytes long.
+    utf8_carry: Vec<u8>,
 }
 
 /// The face a run of spaces with no word should be drawn in: the line's last face if it has one, else
@@ -831,6 +855,7 @@ impl<'a> Layouter<'a> {
             scale: 1.0,
             pending: None,
             held_spaces: 0,
+            utf8_carry: Vec::new(),
         }
     }
 
@@ -840,6 +865,21 @@ impl<'a> Layouter<'a> {
     }
 
     /// Feed one run's bytes, returning every line that completes.
+    ///
+    /// # `boundary` says whether the piece ends a formatting run
+    ///
+    /// **A piece is not a run.** The document is walked in 64 KiB pieces, and a run that crosses
+    /// a piece boundary is fed twice — the same run, the same face, two calls. The word open at
+    /// the end of the first call is still open in the second, and it must not be committed at the
+    /// piece edge: **a chunk boundary is not a formatting boundary.**
+    ///
+    /// It used to be treated as one. The word was committed at the end of every piece, so a word
+    /// straddling the 64 KiB boundary was broken in two — and if the tail did not fit in the
+    /// remaining measure, **the line broke inside the word**, which is the exact defect this
+    /// layouter exists to prevent.
+    ///
+    /// `boundary` is true at the end of a run and before a picture (a picture is a hard block, so
+    /// the word in front of it has to be placed first), and false at a piece edge inside a run.
     fn feed(
         &mut self,
         bytes: &[u8],
@@ -848,12 +888,28 @@ impl<'a> Layouter<'a> {
         size: f32,
         big: bool,
         stats: &mut PdfStats,
+        boundary: bool,
     ) -> Vec<Line> {
         let mut done = Vec::new();
         let limit = self.limit_mils(size);
+
+        // **The carry goes in front of this piece**, and it is the whole of the fix for a
+        // character that straddles a piece boundary: the bytes are completed here and nowhere
+        // else, so the character is decoded exactly once.
+        let mut joined: Vec<u8> = Vec::new();
+        let input: &[u8] = if self.utf8_carry.is_empty() {
+            bytes
+        } else {
+            joined.reserve(self.utf8_carry.len() + bytes.len());
+            joined.extend_from_slice(&self.utf8_carry);
+            joined.extend_from_slice(bytes);
+            self.utf8_carry.clear();
+            &joined
+        };
+
         let mut i = 0usize;
-        while i < bytes.len() {
-            match bytes[i] {
+        while i < input.len() {
+            match input[i] {
                 b'\n' => {
                     if let Some(l) = self.commit(stats, limit) {
                         done.push(l);
@@ -872,7 +928,7 @@ impl<'a> Layouter<'a> {
                     self.held_spaces = 0;
                     done.push(self.take());
                     i += 1;
-                    if bytes.get(i) == Some(&b'\n') {
+                    if input.get(i) == Some(&b'\n') {
                         i += 1;
                     }
                     continue;
@@ -900,8 +956,18 @@ impl<'a> Layouter<'a> {
                 _ => {}
             }
 
-            let n = utf8_len(bytes[i]);
-            let slice = &bytes[i..(i + n).min(bytes.len())];
+            let n = utf8_len(input[i]);
+            // **A character that runs past the end of this piece is carried, not decoded.**
+            //
+            // This used to slice the bytes up to the end of the piece and hand a half-character to
+            // `transcode`, which could not decode it and returned `?`. **One CJK character became
+            // three question marks** — the truncated one here, and the two continuation bytes at
+            // the head of the next piece, each read as a one-byte character.
+            if i + n > input.len() {
+                self.utf8_carry.extend_from_slice(&input[i..]);
+                break;
+            }
+            let slice = &input[i..i + n];
             let w = advance(metric, slice);
             let code = transcode(slice, stats);
             match &mut self.pending {
@@ -923,10 +989,17 @@ impl<'a> Layouter<'a> {
             }
             i += n;
         }
-        // The word open at the end of a run is committed here, not left dangling: a run boundary is a
-        // formatting boundary, and there is no reason for text to end mid-word because a style changed.
-        if let Some(l) = self.commit(stats, limit) {
-            done.push(l);
+        // The word open at the end of a **run** is committed here, not left dangling: a run
+        // boundary is a formatting boundary, and there is no reason for text to end mid-word
+        // because a style changed.
+        //
+        // **Only at a run boundary.** At a piece edge inside a run the word stays open, because a
+        // 64 KiB chunk boundary is not a formatting boundary — and committing there split the
+        // word, and the line could break inside it.
+        if boundary {
+            if let Some(l) = self.commit(stats, limit) {
+                done.push(l);
+            }
         }
         done
     }
@@ -1013,14 +1086,39 @@ impl<'a> Layouter<'a> {
     ///
     /// An empty line at the very end of a document that ended in a newline is *not* returned: a
     /// trailing newline ends the last line rather than starting a new one.
-    fn finish(self) -> Vec<Line> {
+    ///
+    /// # A character the document ended in the middle of
+    ///
+    /// The carry is flushed as a substitution: **the bytes are half a character, and there is
+    /// no more document to complete them with.** `?` is the honest answer — the same answer
+    /// `transcode` gives for any character WinAnsi cannot hold.
+    fn finish(mut self, stats: &mut PdfStats) -> Vec<Line> {
+        if !self.utf8_carry.is_empty() {
+            stats.substituted += 1;
+            self.utf8_carry.clear();
+        }
+        let mut out = Vec::new();
+        // **The word still open at the end of the document is placed here.**
+        //
+        // It used to be placed by the unconditional commit at the end of every `feed`. That
+        // commit is now conditional on a real formatting boundary, so a word that was still open
+        // when the document ended — which is every document that does not end in a newline — would
+        // never have been written at all.
+        if self.pending.is_some() {
+            let size = self.pending.as_ref().map(|p| p.size).unwrap_or(self.opts.font_size);
+            let limit = self.limit_mils(size);
+            if let Some(l) = self.commit(stats, limit) {
+                out.push(l);
+            }
+        }
         if self.segments.is_empty() && self.held_spaces == 0 {
-            Vec::new()
+            out
         } else {
-            vec![Line {
+            out.push(Line {
                 segments: self.segments,
                 scale: self.scale,
-            }]
+            });
+            out
         }
     }
 }
@@ -1162,14 +1260,115 @@ mod tests {
             opts.font_size,
             false,
             stats,
+            true,
         );
-        out.extend(l.finish());
+        out.extend(l.finish(stats));
         out
     }
 
+    /// **A word split across two pieces is one word.**
+    ///
+    /// The document is read in 64 KiB pieces and a formatting run can cross one, so the same word
+    /// arrives in two calls. **A piece boundary is not a formatting boundary**, and the word used
+    /// to be committed at the end of every piece: it was broken in two, and if the tail did not
+    /// fit in the remaining measure the line broke *inside* the word.
+    ///
+    /// The `boundary` flag is what distinguishes the two. It is false here, twice.
     #[test]
-    fn a_newline_ends_a_line() {
+    fn a_word_split_across_two_pieces_is_one_word() {
         let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"hel",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            false,
+        );
+        lines.extend(l.feed(
+            b"lo",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            false,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(lines.len(), 1, "one word, one line");
+        assert_eq!(text_of(&lines[0]), b"hello");
+    }
+
+    /// **And at a real boundary the word is still committed**, so the flag is not simply off.
+    #[test]
+    fn a_word_ends_at_a_boundary() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"one",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            true,
+        );
+        lines.extend(l.feed(
+            b" two",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            true,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(text_of(&lines[0]), b"one two");
+    }
+
+    /// **A character split across two pieces is one character.**
+    ///
+    /// The old code sliced the bytes to the end of the piece and handed a half-character to the
+    /// transcoder, which could not decode it and produced `?` — and the continuation bytes at the
+    /// head of the next piece each became a `?` too. **One character became three question
+    /// marks, silently.**
+    #[test]
+    fn a_character_split_across_two_pieces_is_one_character() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        // "é" is two bytes: 0xC3 0xA9. The piece ends between them.
+        let mut lines = l.feed(
+            b"a\xc3",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            false,
+        );
+        lines.extend(l.feed(
+            b"\xa9b",
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+            &mut stats,
+            false,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(stats.substituted, 0, "nothing was substituted");
+        // **`é` is in WinAnsi**, so it is one byte — 0xE9 — and not the two UTF-8 bytes. One
+        // character in, one character out: the old code put three `?` here.
+        assert_eq!(text_of(&lines[0]), b"a\xE9b");
+    }
+
+    #[test]
+    fn a_newline_ends_a_line() {        let opts = PdfOptions::default();
         let mut stats = PdfStats::default();
         let lines = feed_all(&opts, b"ab\ncd", &mut stats);
         assert_eq!(lines.len(), 2);
@@ -1320,9 +1519,17 @@ mod tests {
             (&b"code"[..], Faces::NAMES.code, BaseFont::Courier),
             (&b"()"[..], Faces::NAMES.code, BaseFont::Courier),
         ] {
-            lines.extend(l.feed(text, face, metric, opts.font_size, false, &mut stats));
+            lines.extend(l.feed(
+                text,
+                face,
+                metric,
+                opts.font_size,
+                false,
+                &mut stats,
+                true,
+            ));
         }
-        lines.extend(l.finish());
+        lines.extend(l.finish(&mut stats));
 
         assert_eq!(lines.len(), 1, "four runs must produce one line, not four");
         assert_eq!(text_of(&lines[0]), b"Bold words. code()");
@@ -1347,6 +1554,7 @@ mod tests {
             opts.font_size,
             false,
             &mut stats,
+            true,
         );
         lines.extend(l.feed(
             b"cd",
@@ -1355,8 +1563,9 @@ mod tests {
             opts.font_size,
             false,
             &mut stats,
+            true,
         ));
-        lines.extend(l.finish());
+        lines.extend(l.finish(&mut stats));
         assert_eq!(
             lines[0].segments.len(),
             1,
@@ -1377,8 +1586,9 @@ mod tests {
             opts.font_size * HEADER_SCALE,
             true,
             &mut stats,
+            true,
         );
-        lines.extend(l.finish());
+        lines.extend(l.finish(&mut stats));
         assert_eq!(lines[0].scale, HEADER_SCALE);
         assert_eq!(lines[0].segments[0].size, opts.font_size * HEADER_SCALE);
 
@@ -1399,6 +1609,7 @@ mod tests {
             opts.font_size * HEADER_SCALE,
             true,
             &mut stats,
+            true,
         );
         lines.extend(l.feed(
             b" body",
@@ -1407,8 +1618,9 @@ mod tests {
             opts.font_size,
             false,
             &mut stats,
+            true,
         ));
-        lines.extend(l.finish());
+        lines.extend(l.finish(&mut stats));
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0].segments.len(),

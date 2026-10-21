@@ -337,6 +337,82 @@ fn pdf_punctuation_and_numbers_survive() {
     );
 }
 
+/// **A character that straddles a chunk boundary is one character, not three question marks.**
+///
+/// The exporter reads the document in 64 KiB pieces, and a UTF-8 character can straddle the edge.
+/// The character used to be split: the lead byte was read as a one-byte character, `transcode`
+/// could not decode it and produced `?`, and the two continuation bytes at the head of the next
+/// piece each became a `?` as well.
+///
+/// **One CJK character became three question marks, silently, in the exported PDF.** The
+/// substitution counter said three, and nothing said where they came from.
+#[test]
+fn pdf_a_character_at_a_chunk_boundary_is_not_corrupted() {
+    // **Put a three-byte character exactly on the boundary.** The chunk is 64 KiB, so the
+    // character starts at 65535 and its last byte is the first byte of the next piece.
+    const CHUNK: usize = 64 * 1024;
+    let mut source = vec![b'a'; CHUNK - 1];
+    source.extend_from_slice("é".as_bytes()); // two bytes: the second lands on the boundary
+    source.extend_from_slice(b"tail");
+    let ed = Editor::from_text(&source).expect("load");
+
+    let mut stats = pdf::PdfStats::default();
+    let bytes = pdf::build(&ed, &PdfOptions::default(), &mut stats).expect("build");
+    let text = content::extract_text(&bytes).expect("parse");
+
+    // **`é` is in WinAnsi**, so it survives the export exactly.
+    assert!(
+        text.contains('é'),
+        "the character on the chunk boundary was corrupted: {:?}",
+        text.chars().skip(CHUNK - 3).take(8).collect::<String>()
+    );
+    assert!(
+        !text.contains('?'),
+        "a question mark means a character was substituted: {:?}",
+        text.chars().skip(CHUNK - 3).take(8).collect::<String>()
+    );
+    assert_eq!(stats.substituted, 0, "nothing had to be substituted");
+}
+
+/// **A word that straddles a chunk boundary is one word.**
+///
+/// The exporter's pieces are 64 KiB and a formatting run can cross one. The word open at the end
+/// of a piece used to be committed there, so a word straddling the boundary was broken in two —
+/// and if the tail did not fit in the remaining measure, **the line broke inside the word**, which
+/// is the exact defect the layouter exists to prevent.
+#[test]
+fn pdf_a_word_at_a_chunk_boundary_is_not_broken() {
+    const CHUNK: usize = 64 * 1024;
+    // **A word that starts just before the boundary and ends just after it**, with no space in it.
+    let mut source = vec![b'a'; CHUNK - 4];
+    source.extend_from_slice(b"word");
+    source.extend_from_slice(b" more text");
+    let ed = Editor::from_text(&source).expect("load");
+
+    // **A narrow measure**, so the line is nearly full where the boundary falls and the tail of
+    // the word genuinely does not fit. Without this the word would be split into two words that
+    // both happened to fit on the same line, and the text would come out the same either way —
+    // which is why the first version of this test could not fail.
+    let opts = PdfOptions {
+        page: pdf::PageSize {
+            width: 200.0,
+            height: 400.0,
+        },
+        ..PdfOptions::default()
+    };
+    let mut stats = pdf::PdfStats::default();
+    let bytes = pdf::build(&ed, &opts, &mut stats).expect("build");
+    let text = content::extract_text(&bytes).expect("parse");
+
+    // **The word is whole.** A word broken across two lines comes back as two words with a
+    // newline between them.
+    assert!(
+        !text.contains("wor\n") && !text.contains("\nd"),
+        "the word on the chunk boundary was broken across a line: {:?}",
+        &text[text.len().saturating_sub(40)..]
+    );
+}
+
 /// The styled document's *line breaks* are the document's, not the exporter's invention.
 #[test]
 fn pdf_line_structure_matches_the_document() {
