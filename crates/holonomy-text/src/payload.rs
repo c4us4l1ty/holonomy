@@ -266,10 +266,37 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
         spans.spans()
     };
     let span_list = canonical;
+    // **How many span records the format can hold.**
+    //
+    // The header's span count is a `u16`, so 65,535 is the ceiling. The first version saturated
+    // the *count* at 65,535 and then wrote **every** record anyway: the file said "65,535 spans"
+    // and carried 70,000, and the decoder read the first 65,535 -- so the cursor landed in the
+    // middle of the span table and the table and math sections after it were garbage too.
+    // **The saved file could not be opened.**
+    //
+    // So the count and the records agree now. And a truncated list is completed with **one plain
+    // span** covering the tail, because the decoder requires the span list to be gap-free and to
+    // end exactly at the text length -- a list that simply stops short would be rejected.
+    //
+    // **The tail is plain, which is the default style, so what is lost is the tail's styling and
+    // not the file.** A document with more than 65,535 styled runs is a document with one run per
+    // 128 bytes over 8 MiB, and the span map merges adjacent equal-style runs (`normalise`), so
+    // the count is already minimal.
+    const MAX_SPANS: usize = u16::MAX as usize;
+    let total = span_list.len();
+    let truncated = total > MAX_SPANS;
+    let written = if truncated { MAX_SPANS - 1 } else { total };
+    let tail = if truncated {
+        let start = span_list[written].end_byte;
+        Some(TextIntervalSpan::plain(start, text.len() as u32))
+    } else {
+        None
+    };
+    let records = written + usize::from(tail.is_some());
     let mut out = Vec::with_capacity(
         HEADER_LEN
             + text.len()
-            + span_list.len() * SPAN_BYTES
+            + records * SPAN_BYTES
             + tables.len() * TABLE_BYTES
             + 4
             + assets.encoded_len(),
@@ -285,7 +312,7 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
     out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(
-        &u16::try_from(span_list.len())
+        &u16::try_from(records)
             .unwrap_or(u16::MAX)
             .to_le_bytes(),
     );
@@ -297,7 +324,7 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
 
     // Text & Spans.
     out.extend_from_slice(text.as_bytes());
-    for s in span_list {
+    for s in &span_list[..written] {
         out.extend_from_slice(&s.start_byte.to_le_bytes());
         out.extend_from_slice(&s.end_byte.to_le_bytes());
         out.extend_from_slice(&s.style_flags.to_le_bytes());
@@ -309,6 +336,15 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
         // 16 bytes whatever a future change to the struct's field order would do.
         out.extend_from_slice(&[0u8; 2]);
         out.extend_from_slice(&s.color_rgb.to_le_bytes());
+    }
+    // **And the plain tail, when the list was truncated.** Without it the span list stops short
+    // of the text's end, and the decoder requires it to end exactly there.
+    if let Some(tail) = tail {
+        out.extend_from_slice(&tail.start_byte.to_le_bytes());
+        out.extend_from_slice(&tail.end_byte.to_le_bytes());
+        out.extend_from_slice(&tail.style_flags.to_le_bytes());
+        out.extend_from_slice(&[0u8; 2]);
+        out.extend_from_slice(&tail.color_rgb.to_le_bytes());
     }
 
     // Table & Math States.
@@ -340,7 +376,7 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
         out.len(),
         HEADER_LEN
             + text.len()
-            + span_list.len() * SPAN_BYTES
+            + records * SPAN_BYTES
             + tables.len() * TABLE_BYTES
             + 4
             + math.len() * MATH_BYTES

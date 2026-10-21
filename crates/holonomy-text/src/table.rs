@@ -102,6 +102,24 @@ pub enum TableError {
         /// Separators actually present in the range.
         found: u32,
     },
+    /// **The span's byte range is not inside the buffer it was resolved against.**
+    ///
+    /// **Distinct from [`StructureMismatch`](Self::StructureMismatch)**, which says "the range is
+    /// there, but the separators are not". This says the range is not there at all.
+    ///
+    /// **The difference matters, and it was a panic.** A one-by-one table's separator count is
+    /// *zero*, so a range that was missing from the buffer entirely was counted as "zero
+    /// separators found, as expected" and accepted -- the range check was folded into the
+    /// separator count, and it is vacuous exactly when the count is zero. The cell read then
+    /// sliced the buffer out of range and panicked, in a public API, on a span the API accepts.
+    RangeOutOfBounds {
+        /// The declared start.
+        start: u32,
+        /// The declared end.
+        end: u32,
+        /// The buffer's length.
+        text_len: u32,
+    },
 }
 
 impl std::fmt::Display for TableError {
@@ -132,6 +150,14 @@ impl std::fmt::Display for TableError {
             Self::StructureMismatch { expected, found } => write!(
                 f,
                 "the table span implies {expected} cell separators but the buffer has {found}"
+            ),
+            Self::RangeOutOfBounds {
+                start,
+                end,
+                text_len,
+            } => write!(
+                f,
+                "the table's range [{start}, {end}) is not inside the {text_len}-byte document"
             ),
             Self::OutOfRange {
                 row,
@@ -298,12 +324,23 @@ impl TableSpan {
     /// puts one separator at each row boundary too. That is deliberate -- it means a row-major walk
     /// does not need to know where rows begin.
     pub const fn separator_count(&self) -> u32 {
-        self.cell_count() - 1
+        // **Saturating, because a span with no cells has no separators and not "minus one".**
+        //
+        // `TableSpan`'s fields are public and the struct is not `#[non_exhaustive]`, so a span
+        // with `rows: 0` or `cols: 0` can be built without the constructor's validation -- and
+        // `cell_count() - 1` on it was an underflow, which in a release build is a panic.
+        self.cell_count().saturating_sub(1)
     }
 
     /// A cell coordinate, as `(row, col)`.
     pub const fn cell_rc(&self, index: u32) -> (u16, u16) {
         let cols = self.cols as u32;
+        // **A zero-column table divides by zero**, and the release profile's overflow checks do
+        // not help here: a division by zero is a panic whatever the profile says. The fields are
+        // public, so a zero-column span can be built without the constructor's validation.
+        if cols == 0 {
+            return (0, 0);
+        }
         ((index / cols) as u16, (index % cols) as u16)
     }
 
@@ -313,8 +350,17 @@ impl TableSpan {
     }
 
     /// The next cell, wrapping. Shift+Tab's counterpart is [`TableSpan::prev_cell`].
+    ///
+    /// **Total, and that is new.** The index is reduced into the table's range before it is
+    /// incremented, so an index of `u32::MAX` cannot overflow -- and the release profile runs
+    /// `overflow-checks = true`, so it *was* an abort. A table with no cells has no next cell, and
+    /// answers `0` rather than dividing by zero.
     pub fn next_cell(&self, index: u32) -> u32 {
-        (index + 1) % self.cell_count()
+        let n = self.cell_count();
+        if n == 0 {
+            return 0;
+        }
+        (index % n + 1) % n
     }
 
     /// The previous cell, wrapping backwards from 0 to the last cell.
@@ -322,9 +368,22 @@ impl TableSpan {
     /// `(index + count - 1) % count` rather than `(index - 1) % count`, because `u32` underflow on 0
     /// would panic in debug and wrap to `u32::MAX` in release -- two different answers for the same
     /// keystroke.
+    ///
+    /// **Total, and that is new.** The index is reduced into the table's range first, so neither
+    /// `index + count` nor `index - 1` can overflow -- the release profile runs
+    /// `overflow-checks = true`, so `prev_cell(u32::MAX)` was an abort. And a table with no cells
+    /// answers `0` rather than dividing by zero.
     pub fn prev_cell(&self, index: u32) -> u32 {
         let n = self.cell_count();
-        (index + n - 1) % n
+        if n == 0 {
+            return 0;
+        }
+        let i = index % n;
+        if i == 0 {
+            n - 1
+        } else {
+            i - 1
+        }
     }
 
     /// The table's style span, so it can live in a `SpanMap`-shaped collection.
@@ -405,9 +464,24 @@ impl<'a> ResolvedTable<'a> {
     /// every cell read. A span whose separators do not match is a bug at the point the table was
     /// created or edited, and reporting it lazily would put the error far from its cause.
     pub fn new(span: TableSpan, text: &'a [u8]) -> Result<Self, TableError> {
-        let found = text
+        // **The range is checked, and it is checked first.**
+        //
+        // The check used to be folded into the separator count: `text.get(start..end)` and a
+        // `map_or(0, ...)`, so a range that was *not in the buffer at all* counted as "zero
+        // separators found". **And a one-by-one table's separator count is zero** -- so the check
+        // was vacuous exactly in the case that then went on to slice the buffer out of range.
+        //
+        // The symptom was a panic in a public API: `ResolvedTable::new(span, b"short")` returned
+        // `Ok` for a span reaching to byte 200 of a five-byte buffer, and the first `cell_at` read
+        // indexed past the end.
+        let range = text
             .get(span.start_byte as usize..span.end_byte as usize)
-            .map_or(0, |s| s.iter().filter(|&&b| b == CELL_SEPARATOR).count());
+            .ok_or(TableError::RangeOutOfBounds {
+                start: span.start_byte,
+                end: span.end_byte,
+                text_len: u32::try_from(text.len()).unwrap_or(u32::MAX),
+            })?;
+        let found = range.iter().filter(|&&b| b == CELL_SEPARATOR).count();
         let expected = span.separator_count() as usize;
         if found != expected {
             return Err(TableError::StructureMismatch {

@@ -712,6 +712,48 @@ fn undoing_an_image_insert_takes_the_anchor_and_the_asset_together() {
     );
 }
 
+/// **Undoing a typed character must not consume the pending delete's stashed assets.**
+///
+/// # The bug
+///
+/// The stash of assets removed by a delete was a **single slot**, and `undo` took the whole slot at
+/// the top -- before it knew whether the action it was undoing was a delete or an insert. The
+/// insert arm never used it, so it was dropped on the floor.
+///
+/// **So the image was gone.** The sequence is ordinary: delete an image, type a character, undo
+/// twice. The first undo dropped the stashed PNG; the second put the anchor back with no asset to
+/// serve it, and the `Asset` holds a `Zeroizing<Vec<u8>>` -- so the picture was not even left in
+/// memory to recover.
+///
+/// The fix is the same shape as `style_undo`'s: **the stash is a stack with one entry per delete**,
+/// and only the undo of a *delete* pops it.
+#[test]
+fn undoing_a_typed_character_does_not_consume_a_pending_delete_s_stashed_image() {
+    let mut e = holonomy_text::Editor::from_text(b"Z").expect("text");
+    e.insert_image(1, &png(4, 4, [1, 1, 1])).expect("image");
+    assert_eq!(e.assets().len(), 1);
+    // Delete the anchor -- three bytes -- and the asset with it.
+    e.delete_at(1, 3).expect("delete the image");
+    assert_eq!(e.assets().len(), 0, "the asset went with the anchor");
+    // Now type a character on top of the deletion.
+    e.insert_at(1, b"x", SpanPolicy::Strict).expect("type");
+    // Undo the typing.
+    e.undo().expect("undo the typing");
+    // Undo the deletion: the anchor comes back, and so must its asset.
+    e.undo().expect("undo the deletion");
+    assert_eq!(
+        e.image_anchors().expect("anchors").len(),
+        1,
+        "the anchor is back"
+    );
+    assert_eq!(
+        e.assets().len(),
+        1,
+        "and so is its asset: the undo of a typed character must not have consumed the pending \
+         delete's stashed image, or the anchor serves nothing"
+    );
+}
+
 /// The invariant, as a function: entry `i` serves anchor `i`.
 ///
 /// Asserted after every step of a sequence that includes the operations which can break it. The failure

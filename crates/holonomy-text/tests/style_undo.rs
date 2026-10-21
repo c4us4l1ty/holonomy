@@ -137,6 +137,54 @@ fn a_styled_delete_after_a_plain_one_still_gets_its_styling_back() {
     );
 }
 
+/// **A delete that spans a styled run and a plain one must come back exactly as it was.**
+///
+/// # The bug
+///
+/// The style record holds only the *styled* sub-spans -- the plain ones are not stored, because
+/// storing them would double the record's size for no information. But the restore has to be
+/// exact, and the `GrowIntoInsert` before it gives the whole restored region the *preceding*
+/// run's style.
+///
+/// **So the plain half of a mixed region came back bold.** The record said "bold at 10..15" and
+/// said nothing about 5..10, and the guess filled it.
+///
+/// The record is sorted and non-overlapping, so the gaps between its runs are exactly the parts
+/// that were plain -- and they are restored as plain.
+#[test]
+fn a_delete_across_a_styled_and_a_plain_run_restores_both_exactly() {
+    let mut ed = Editor::from_text(b"AAAAABBBBBCCCCC").expect("load");
+    ed.style_range(0, 5, STYLE_BOLD, 0).expect("bold AAAAA");
+    ed.style_range(10, 15, STYLE_BOLD, 0).expect("bold CCCCC");
+    assert_eq!(flags(&ed, 0), STYLE_BOLD);
+    assert_eq!(flags(&ed, 7), 0, "the middle is plain");
+    assert_eq!(flags(&ed, 12), STYLE_BOLD);
+
+    // Delete the middle plain run *and* the bold run after it: the deleted region is mixed.
+    ed.delete_at(5, 10).expect("delete BBBBBCCCCC");
+    assert_eq!(text(&ed), "AAAAA");
+    assert_eq!(flags(&ed, 0), STYLE_BOLD);
+
+    ed.undo().expect("undo");
+    assert_eq!(text(&ed), "AAAAABBBBBCCCCC");
+    assert_eq!(
+        flags(&ed, 0),
+        STYLE_BOLD,
+        "the run before the deletion is untouched"
+    );
+    assert_eq!(
+        flags(&ed, 7),
+        0,
+        "the plain half came back bold: the record held only the styled sub-spans, and the \
+         GrowIntoInsert guess filled the gap between them"
+    );
+    assert_eq!(
+        flags(&ed, 12),
+        STYLE_BOLD,
+        "and the styled half came back plain, which is the other half of the same mistake"
+    );
+}
+
 /// Interleaving styled and plain deletes, checked at every step.
 #[test]
 fn interleaved_deletes_keep_their_own_styling() {

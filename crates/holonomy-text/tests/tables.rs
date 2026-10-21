@@ -370,6 +370,54 @@ fn undoing_a_table_insertion_removes_the_table() {
     ResolvedTable::new(restored, &text).expect("and it resolves against the restored bytes");
 }
 
+/// **Two undos and two redos restore the table map twice.**
+///
+/// # The bug
+///
+/// The pre-undo table map was a **single `Option`**, and the reasoning behind it was "redo is only
+/// valid immediately after an undo -- any new edit calls `drop_redo`".
+///
+/// **That reasoning was wrong, because `undo` does not call `drop_redo`.** So `undo, undo, redo,
+/// redo` is a perfectly legal sequence, and the second undo overwrote the first's map: the first
+/// redo restored it, and the second redo found nothing to restore.
+///
+/// **The table's separator bytes were then in the document with no `TableSpan` for them** -- so
+/// Tab navigation and the table renderer could no longer find the table, and the document had a
+/// table in it that the editor did not know about.
+///
+/// The fix is the same shape as `style_undo`'s: **one entry per undo**, so the pop pairs
+/// one-for-one with the push.
+#[test]
+fn two_undos_and_two_redos_restore_the_table_map_twice() {
+    let mut ed = editor(b"");
+    ed.insert_table(2, 2, MEASURE).expect("a 2x2 table");
+    // A second edit on top, so there are two undos to make.
+    ed.insert_at(0, b"hello", SpanPolicy::Strict).expect("a prefix");
+    assert_eq!(ed.tables().len(), 1, "one table");
+
+    ed.undo().expect("undo the prefix");
+    ed.undo().expect("undo the table");
+    assert_eq!(ed.tables().len(), 0, "the table's span is gone");
+
+    ed.redo().expect("redo the table");
+    assert_eq!(
+        ed.tables().len(),
+        1,
+        "the first redo restores the table map: the map is a stack with one entry per undo, so the \
+         pop pairs one-for-one with the push"
+    );
+    ed.redo().expect("redo the prefix");
+    assert_eq!(
+        ed.tables().len(),
+        1,
+        "and the second redo restores it too: with a single slot, the second undo overwrote the \
+         first's map and the second redo had nothing to restore"
+    );
+    let text = ed.text().expect("the document");
+    let restored = ed.tables().spans()[0];
+    ResolvedTable::new(restored, &text).expect("and it still resolves against the document");
+}
+
 /// Column widths divide the measure, and refuse when they cannot.
 ///
 /// The refusal matters as much as the division: a measure too narrow for `cols` columns plus their

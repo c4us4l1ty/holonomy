@@ -617,7 +617,27 @@ impl SpanMap {
         if len == 0 {
             return Ok(());
         }
-        let insert_end = offset + len;
+        // **Checked, not `offset + len`.**
+        //
+        // The release profile runs `overflow-checks = true` under `panic = "abort"`, so an
+        // `offset` of `1` and a `len` of `u32::MAX` was an *abort*, not an error -- in a public
+        // API, on a value the API accepts. The surrounding code is careful everywhere else
+        // (`TextIntervalSpan::len` uses `saturating_sub`, `AssetCatalog::anchors_in` uses
+        // `saturating_add`), so this was an inconsistency rather than a house style.
+        let insert_end = offset.checked_add(len).ok_or(SpanError::OutOfBounds {
+            offset: u64::from(offset) + u64::from(len),
+            text_len: self.text_len,
+        })?;
+        // **And the document's own length, for the same reason.** `self.text_len += len` at the end
+        // of this function was an unchecked add, so a document already near `u32::MAX` bytes
+        // overflowed there -- an abort in a public API, on a value the API accepts.
+        //
+        // **A document longer than 4 GiB is not representable in this map**, and saying so with an
+        // error is the honest answer: the map's coordinates are `u32`.
+        let new_text_len = self.text_len.checked_add(len).ok_or(SpanError::OutOfBounds {
+            offset: u64::from(self.text_len),
+            text_len: self.text_len,
+        })?;
 
         // The inserted region's own style, decided from the *pre-insertion* layout -- which is what the
         // user was looking at when they pressed the key. See `style_around`.
@@ -679,8 +699,13 @@ impl SpanMap {
 
             // The part after, shifted right by `len`.
             let right = if sp.end_byte > offset {
-                let from = sp.start_byte.max(offset) + len;
-                let to = sp.end_byte + len;
+                // **Saturating, because the shift is an add on a `u32` and the release profile
+                // aborts on overflow.** The check above guarantees `text_len + len` fits, and every
+                // span ends at or before `text_len`, so these cannot overflow in practice -- which
+                // is exactly why an unchecked add is a bug waiting for a caller that reaches here a
+                // different way.
+                let from = sp.start_byte.max(offset).saturating_add(len);
+                let to = sp.end_byte.saturating_add(len);
                 (to > from).then(|| TextIntervalSpan::styled(from, to, f, c))
             } else {
                 None
@@ -710,7 +735,7 @@ impl SpanMap {
             self.spans.insert(at, r);
         }
 
-        self.text_len += len;
+        self.text_len = new_text_len;
 
         // Add the new run unless a grown or existing span already covers it.
         //
@@ -769,17 +794,27 @@ impl SpanMap {
         offset: u32,
         len: u32,
     ) -> Result<Vec<TextIntervalSpan>, SpanError> {
-        if offset + len > self.text_len {
+        // **Checked, not `offset + len`.** The release profile runs `overflow-checks = true`
+        // under `panic = "abort"`, so an `offset` of `1` and a `len` of `u32::MAX` was an
+        // *abort* -- in a public API, on a value the API accepts. The out-of-bounds answer is
+        // right here: the range plainly is not inside the document.
+        let Some(delete_end) = offset.checked_add(len) else {
             return Err(SpanError::RangeOutOfBounds {
                 start: u64::from(offset),
-                end: u64::from(offset + len),
+                end: u64::from(offset) + u64::from(len),
+                text_len: self.text_len,
+            });
+        };
+        if delete_end > self.text_len {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(offset),
+                end: u64::from(delete_end),
                 text_len: self.text_len,
             });
         }
         if len == 0 {
             return Ok(Vec::new());
         }
-        let delete_end = offset + len;
 
         // Record the styling of the region about to go, clipped per span -- but only if any of it is
         // styled.
