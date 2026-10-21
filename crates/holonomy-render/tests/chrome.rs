@@ -1377,8 +1377,16 @@ fn the_chrome_paints_at_every_panel_size_without_drawing_outside_itself() {
     // **A state with everything switched on**, because the emitters this is about are the
     // conditional ones: the dirty dot only draws when the document is dirty, and an emitter that only
     // runs under a condition is an emitter no size sweep will ever reach.
+    //
+    // **`sealed: true` as well, and it is the sixth emitter this sweep was missing.** The
+    // `[SEALED]` badge is placed fourteen cells from the right edge of the title band with a bare
+    // subtraction, so a panel narrower than fourteen cells **underflowed** — a panic at
+    // `opt-level=0` and a panic in a release build with `overflow-checks` on. The sweep never saw
+    // it because the sealed badge is the only emitter that is conditional on `sealed`, and the
+    // sweep's state was dirty but not sealed.
     let state = ChromeState {
         dirty: true,
+        sealed: true,
         ..ChromeState::default()
     };
 

@@ -317,6 +317,19 @@ pub struct Placed {
 /// wants a different inset can pass one; this constant is what the project uses.
 pub const TOOLBAR_PAD: u32 = 8;
 
+/// **The title bar's right inset, in pixels.** The painter and the hit test must agree on it.
+///
+/// **It is a constant and not a literal at each of the three call sites because the two answers
+/// disagreed.** The painter placed the buttons with an inset of 12 and the hit test with an inset
+/// of 8, so every title-bar button was drawn four pixels to the left of where it was clicked:
+/// the leftmost four pixels of a button were dead, and the four pixels just to its right
+/// activated it.
+///
+/// **That is the exact failure this module exists to prevent** — "a widget is drawn in one place
+/// and pressed in another" — and it happened because the number was written twice and one of the
+/// two was wrong. One constant, three call sites, no drift.
+pub const TITLE_PAD: u32 = 12;
+
 pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
     let m = &l;
     let button = chrome_button(m);
@@ -759,7 +772,7 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
             .into_iter()
             .find(|p| p.tool == t)
             .map(|p| p.rect),
-        Hit::Title(b) => place_title(l, 12)
+        Hit::Title(b) => place_title(l, TITLE_PAD)
             .into_iter()
             .find(|(k, _)| *k == b)
             .map(|(_, r)| r),
@@ -871,7 +884,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
 
     // **Title bar first, then the menu bar, then the toolbar**: the bands do not overlap, so the order
     // is for readability rather than for correctness, and the tests assert that it does not matter.
-    for (btn, r) in &place_title(l, 8) {
+    for (btn, r) in &place_title(l, TITLE_PAD) {
         if at(r) {
             return Hit::Title(*btn);
         }

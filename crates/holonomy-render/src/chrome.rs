@@ -2116,7 +2116,16 @@ impl Chrome {
                 "[SEALED]",
                 Style::MONOSPACE,
                 colour::SEALED,
-                (l.title.right() - 14 * m.cell_w) as i32,
+                // **`saturating_sub`, and it is the sixth bare subtraction in this file.**
+                //
+                // The badge is eight characters, so it is placed fourteen cells from the right
+                // edge of the title band. **A panel narrower than fourteen cells underflows
+                // here** -- at `opt-level=0` that is a panic, and in a release build with
+                // `overflow-checks` on it is a panic too. The panel *can* be that narrow now
+                // that `for_size` takes the window's size rather than rounding up to
+                // `MIN_WIDTH`, and the badge is drawn only when the session is sealed -- which
+                // is why the size sweep never saw it: it paints a dirty, unsealed chrome.
+                l.title.right().saturating_sub(14 * m.cell_w) as i32,
             );
         }
 
@@ -2360,7 +2369,7 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         14 + crate::icons::SIZE as i32 + 10,
     );
 
-    for (btn, r) in crate::widgets::place_title(l, 12) {
+    for (btn, r) in crate::widgets::place_title(l, crate::widgets::TITLE_PAD) {
         let icon = match btn {
             crate::widgets::TitleButton::Star => crate::icons::IconId::Star,
             crate::widgets::TitleButton::Folder => crate::icons::IconId::Folder,

@@ -71,8 +71,17 @@ pub struct TableGrid {
     col_px: [u32; TableSpan::MAX_COLS],
     /// Left edge of each vertical border line, pixels. `cols + 1` entries are used.
     border_x: [u32; TableSpan::MAX_COLS + 1],
-    /// Top edge of each horizontal border line, pixels. `rows + 1` entries are used.
-    border_y: [u32; TableSpan::MAX_COLS + 1],
+    // **The horizontal border lines are arithmetic, not an array.**
+    //
+    // They used to be a `[u32; TableSpan::MAX_COLS + 1]` — nine entries, sized for *columns* —
+    // and they were indexed by *row*. `TableSpan` caps the columns at eight and puts no cap on
+    // the rows, so a table with nine rows indexed past the end of the array and **panicked**, in
+    // a release build, on a document the user had made by pressing Tab six times.
+    //
+    // **There is no array to overflow now**: the lines are `origin_y + i * pitch`, which is what
+    // the array was computing in the first place — see `border_y_at`. The vertical lines stay
+    // an array because their spacing depends on the column widths, which are not a constant
+    // step.
 }
 
 impl TableGrid {
@@ -99,7 +108,6 @@ impl TableGrid {
     ) -> Self {
         let mut col_px = [0u32; TableSpan::MAX_COLS];
         let mut border_x = [0u32; TableSpan::MAX_COLS + 1];
-        let mut border_y = [0u32; TableSpan::MAX_COLS + 1];
 
         for (i, &w) in span
             .col_widths
@@ -123,14 +131,6 @@ impl TableGrid {
                 == span.width_cells() * cell_w,
             "the recursion and width_cells() must agree; they are two spellings of one arithmetic"
         );
-        let pitch = border_h + row_h;
-        for (i, y) in border_y
-            .iter_mut()
-            .take(usize::from(span.rows) + 1)
-            .enumerate()
-        {
-            *y = origin_y + (i as u32) * pitch;
-        }
 
         Self {
             origin_x,
@@ -142,7 +142,6 @@ impl TableGrid {
             cols: span.cols,
             col_px,
             border_x,
-            border_y,
         }
     }
 
@@ -167,8 +166,15 @@ impl TableGrid {
     }
 
     /// Top edge of horizontal border line `i`, for `i <= rows`.
+    ///
+    /// **Arithmetic, so there is no row limit.** This used to read a nine-entry array that was
+    /// sized for the *columns*, and a table with nine rows read past the end of it.
+    ///
+    /// **Saturating, because a border line's position is a pixel coordinate and a coordinate
+    /// that has run off the panel is a coordinate to be clipped, not one to wrap.**
     pub const fn border_y_at(&self, i: u16) -> u32 {
-        self.border_y[i as usize]
+        self.origin_y
+            .saturating_add((i as u32).saturating_mul(self.row_pitch()))
     }
 
     /// The pixel rect of cell `(row, col)`'s **content**, padding and borders excluded.
@@ -181,7 +187,7 @@ impl TableGrid {
         // Vertically there is no *pad*: a cell's content fills the whole gap between two border
         // lines, and the horizontal padding is what separates content from the vertical rules.
         let x = self.border_x_at(col) + border + pad;
-        let y = self.border_y_at(row) + self.border_h;
+        let y = self.border_y_at(row).saturating_add(self.border_h);
         Some((x, y, self.col_px[col as usize], self.row_h))
     }
 
@@ -222,8 +228,8 @@ impl TableGrid {
             i += 1;
         }
         let mut j = 0usize;
-        while j <= self.rows as usize && j < TableSpan::MAX_COLS + 1 {
-            if !(self.border_y[j] - self.origin_y).is_multiple_of(self.row_pitch()) {
+        while j <= self.rows as usize {
+            if !(self.border_y_at(j as u16) - self.origin_y).is_multiple_of(self.row_pitch()) {
                 return false;
             }
             j += 1;
@@ -269,7 +275,7 @@ impl Iterator for BorderIter {
 
         if step < horizontal_items {
             let (r, k) = (step / per_row, step % per_row);
-            let y = g.border_y[r];
+            let y = g.border_y_at(r as u16);
             if k % 2 == 0 {
                 return Some(g.junction_at(r as u16, (k / 2) as u16, y));
             }
@@ -312,7 +318,7 @@ impl Iterator for BorderIter {
             codepoint: VERTICAL,
             len: 1,
             x: g.border_x[seg],
-            y: g.border_y[row] + g.border_h,
+            y: g.border_y_at(row as u16).saturating_add(g.border_h),
             width: g.cell_w,
             height: g.row_h,
         })
@@ -438,6 +444,55 @@ mod tests {
 
     fn span_4x3() -> TableSpan {
         TableSpan::new(4, 3, 4, 0, 0).expect("shape is legal")
+    }
+
+    /// **A table with more rows than columns does not panic.**
+    ///
+    /// The horizontal border lines used to live in a `[u32; TableSpan::MAX_COLS + 1]` — nine
+    /// entries, sized for the *columns* — and were indexed by the *row*. `TableSpan` caps the
+    /// columns at eight and puts no cap on the rows, so **the ninth row read past the end of the
+    /// array**: an index-out-of-bounds panic, in a release build, on a table the user had made by
+    /// pressing Tab six times in the bottom-right cell.
+    ///
+    /// The lines are arithmetic now, so the test is that a tall table lays out and paints, and
+    /// that its geometry is the geometry it claims.
+    #[test]
+    fn a_table_with_more_rows_than_columns_lays_out_and_paints() {
+        for rows in [8u16, 9, 12, 40, 300] {
+            let span = TableSpan::new(rows, 3, 4, 0, 0).expect("shape is legal");
+            let g = TableGrid::new(&span, 0, 0, 8, 18, 18);
+            // **The border lines are where they say they are.**
+            let pitch = g.row_pitch();
+            for r in 0..=rows {
+                assert_eq!(
+                    g.border_y_at(r),
+                    r as u32 * pitch,
+                    "row {r}'s border line is not {r} pitches down"
+                );
+            }
+            // **And every one of them is emitted.** A table that painted nine rows' worth of
+            // borders and then stopped would look almost right.
+            let horizontal = g
+                .borders()
+                .filter(|b| b.codepoint == HORIZONTAL || b.codepoint == 0x252C || b.codepoint == 0x2534)
+                .count();
+            assert!(
+                horizontal >= usize::from(rows) + 1,
+                "a {rows}-row table emitted only {horizontal} horizontal border runs"
+            );
+            // Every cell's content rect is inside the grid.
+            for r in 0..rows {
+                for c in 0..3u16 {
+                    let (x, y, w, h) = g.cell_content_rect(r, c).expect("cell exists");
+                    assert!(
+                        y + h <= g.border_y_at(r + 1) + g.border_h,
+                        "cell ({r}, {c}) runs into the border line below it"
+                    );
+                    assert!(w > 0 && h > 0, "cell ({r}, {c}) is empty");
+                    let _ = x;
+                }
+            }
+        }
     }
 
     #[test]

@@ -26,7 +26,9 @@
 //! | **and the panel is as wide as its widest row** | [`a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs`] |
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
-use holonomy_render::widgets::{hit, place_title, place_toolbar, Hit, TitleButton, TOOLBAR};
+use holonomy_render::widgets::{
+    hit, place_title, place_toolbar, Hit, TitleButton, TITLE_PAD, TOOLBAR,
+};
 
 fn layout() -> Layout {
     holonomy_render::Chrome::new(ChromeMetrics::DESKTOP).layout
@@ -68,7 +70,7 @@ fn every_widget_has_a_rect_inside_the_panel() {
             l.toolbar.bottom()
         );
     }
-    for (b, r) in place_title(&l, 8) {
+    for (b, r) in place_title(&l, TITLE_PAD) {
         assert!(
             r.x + r.width <= l.width && r.bottom() <= l.title.bottom(),
             "{b:?} runs off the title band"
@@ -104,8 +106,8 @@ fn no_two_widgets_overlap() {
         }
     }
     // And the title buttons too, plus that the title bar and the menu bar do not touch.
-    for (i, (ba, a)) in place_title(&l, 8).iter().enumerate() {
-        for (bb, b) in place_title(&l, 8).iter().skip(i + 1) {
+    for (i, (ba, a)) in place_title(&l, TITLE_PAD).iter().enumerate() {
+        for (bb, b) in place_title(&l, TITLE_PAD).iter().skip(i + 1) {
             assert!(
                 a.x + a.width <= b.x || b.x + b.width <= a.x,
                 "{ba:?} and {bb:?} overlap in the title bar"
@@ -142,7 +144,7 @@ fn hit_agrees_with_where_the_widget_was_drawn() {
             hit(&l, &st, cx, cy)
         );
     }
-    for (b, r) in place_title(&l, 8) {
+    for (b, r) in place_title(&l, TITLE_PAD) {
         let cx = (r.x + r.width / 2) as i32;
         let cy = (r.y + r.height / 2) as i32;
         assert_eq!(
@@ -151,6 +153,36 @@ fn hit_agrees_with_where_the_widget_was_drawn() {
             "the middle of {b:?} hits {:?}",
             hit(&l, &st, cx, cy)
         );
+    }
+}
+
+/// **Every pixel of a title-bar button is clickable, and no pixel outside one is.**
+///
+/// The middle-of-the-button check above passes even when the hit test and the painter disagree
+/// by a few pixels, because the middle of a 28-px button is still inside it either way. **They
+/// did disagree**: the painter used an inset of 12 and the hit test an inset of 8, so the left
+/// four pixels of every button were dead and the four pixels just to its right were live.
+///
+/// **So this walks the button's own edges.** The first pixel of the button must hit it, the
+/// last must hit it, and the pixel immediately to its right must not.
+#[test]
+fn every_pixel_of_a_title_button_is_clickable() {
+    let l = layout();
+    let st = state();
+    for (b, r) in place_title(&l, TITLE_PAD) {
+        for (x, y) in [
+            (r.x, r.y),
+            (r.right().saturating_sub(1), r.y),
+            (r.x, r.bottom().saturating_sub(1)),
+            (r.right().saturating_sub(1), r.bottom().saturating_sub(1)),
+        ] {
+            assert_eq!(
+                hit(&l, &st, x as i32, y as i32),
+                Hit::Title(b),
+                "the corner ({x}, {y}) of {b:?} does not hit it: the painter and the hit test \
+                 disagree about where the button is"
+            );
+        }
     }
 }
 
