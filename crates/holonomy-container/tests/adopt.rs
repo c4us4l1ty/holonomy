@@ -201,3 +201,79 @@ fn open_is_a_delegate_to_adopt() {
     }
     assert!(adopt_at > 0, "adopt must exist");
 }
+
+/// **A container that asks for an absurd VDF count is refused, and refused quickly.**
+///
+/// # The attack
+///
+/// The VDF's iteration count `T` is written into a **cleartext** page beside the salt, precisely so
+/// that a reader knows what the derivation will cost before it pays for it. **So the file chooses
+/// the length of the computation.** Anyone who can write the file — anyone who can hand the user
+/// a `.wavefunction` — can put `T = u64::MAX` there.
+///
+/// Before the ceiling, that was not an error. It was 584 billion years of Montgomery squarings:
+/// the unlock never returned, the CPU sat at 100 %, and the document could not be opened at all.
+/// **A file must not be able to hang the program that opens it.**
+///
+/// # What is asserted
+///
+/// The refusal, the *kind* of refusal (so a future "just clamp it" edit fails this test), and the
+/// fact that it costs a 4 KiB read rather than a 128 MiB Argon2 allocation — the check happens
+/// before the KDF, which is the whole point of checking it at the boundary.
+#[test]
+fn a_container_that_asks_for_an_absurd_vdf_count_is_refused() {
+    let path = make(40_000);
+
+    // **Rewrite the recorded count in place.** Offset 32, little-endian, eight bytes.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open rw");
+        f.seek(SeekFrom::Start(
+            holonomy_container::layout::VDF_ITERATIONS_OFFSET,
+        ))
+        .expect("seek");
+        f.write_all(&u64::MAX.to_le_bytes()).expect("write");
+    }
+
+    let started = std::time::Instant::now();
+    let err = Wavefunction::adopt(DirectFile::open(&path).expect("descriptor"), PASS, ITER)
+        .expect_err("an absurd iteration count must be refused, not obeyed");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            err,
+            holonomy_container::ContainerError::VdfIterationsTooLarge { .. }
+        ),
+        "expected the ceiling to be named, got {err:?}"
+    );
+    // **Fast.** The Argon2 stage alone is half a second and 128 MiB; a refusal that paid for it
+    // would still be a denial of service, just a smaller one. A second is a generous ceiling for
+    // "read one page and refuse".
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "the refusal took {elapsed:?}, so the KDF was paid before the count was checked"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The same ceiling applies to a count the *caller* asks for.** A caller that passes
+/// `u64::MAX` is asking for the same hang a hostile file would produce, and the check costs
+/// nothing.
+#[test]
+fn create_refuses_an_absurd_vdf_count() {
+    let path = scratch_dir().join(format!("vdf-ceiling-{}.wavefunction", unique()));
+    let err = Wavefunction::create(&path, PASS, "t", b"content", u64::MAX)
+        .expect_err("an absurd iteration count must be refused at create time");
+    assert!(
+        matches!(
+            err,
+            holonomy_container::ContainerError::VdfIterationsTooLarge { .. }
+        ),
+        "expected the ceiling to be named, got {err:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}

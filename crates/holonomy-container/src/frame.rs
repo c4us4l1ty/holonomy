@@ -108,6 +108,24 @@ pub enum FrameError {
         /// The count that was offered.
         found: u64,
     },
+    /// The frame claims more chunks than the container can hold.
+    ///
+    /// **The read-side twin of the cap `chunks_for` enforces at write time.** A frame is
+    /// authenticated data, so this is not an attack — it is a container whose header and body
+    /// disagree, or a writer that computed the count differently. **It matters because the
+    /// count is what every read path walks**: `read_content` loops over `1..chunk_count` and
+    /// allocates `content_len` bytes up front, so a frame claiming four billion chunks turns
+    /// an open into an unbounded read and an eight-gigabyte allocation.
+    ///
+    /// **The bound is the container's own capacity**: `S_MAX_PAYLOAD / CHUNK_SLOT` chunks,
+    /// which is the most a container can hold and more than a container written by this crate
+    /// ever uses.
+    ChunkCountTooLarge {
+        /// The count the frame claimed.
+        found: u64,
+        /// The most chunks the container can hold.
+        cap: u64,
+    },
 }
 
 impl core::fmt::Display for FrameError {
@@ -147,6 +165,9 @@ impl core::fmt::Display for FrameError {
             }
             Self::ChunkCountOverflow { found } => {
                 write!(f, "chunk count {found} does not fit the 32-bit field")
+            }
+            Self::ChunkCountTooLarge { found, cap } => {
+                write!(f, "chunk count {found} exceeds the {cap}-chunk container capacity")
             }
         }
     }
@@ -333,6 +354,23 @@ impl MasterFrame {
             return Err(FrameError::ContentLengthMismatch {
                 content_len,
                 implied: chunk_count,
+            });
+        }
+        // **The count must fit the container.**
+        //
+        // `chunks_for` refuses to *write* a container with more chunks than the payload cap
+        // allows, so this is the same bound applied on the way in — and it is applied here
+        // because the count is what every read path walks: `read_content` loops over
+        // `1..chunk_count` and allocates `content_len` bytes up front.
+        //
+        // **A frame is authenticated, so this is not an attack.** It is a header and a body
+        // that disagree, and the answer to that is to refuse the file rather than to walk off
+        // the end of the payload and into the chaff.
+        let cap = crate::layout::S_MAX_PAYLOAD / crate::layout::CHUNK_SLOT;
+        if chunk_count > cap {
+            return Err(FrameError::ChunkCountTooLarge {
+                found: chunk_count,
+                cap,
             });
         }
         if let Some(expected) = expected_chunks {

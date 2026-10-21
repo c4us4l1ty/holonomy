@@ -113,6 +113,21 @@ pub enum ContainerError {
         /// The index asked for.
         index: u64,
     },
+    /// **The container's recorded VDF iteration count is above the ceiling.** FR-4.4 / DoS.
+    ///
+    /// **A separate variant, because this is the one error in this enum that is about an attack rather
+    /// than about the file.** The iteration count is written in the clear beside the salt and read back
+    /// before any key exists, so the file chooses how long the unlock takes. A file that asks for
+    /// `u64::MAX` iterations is not a corrupt file; it is a file that hangs the program that opens it.
+    ///
+    /// **The refusal happens before the Argon2 stage**, so a hostile container costs one 4 KiB read and
+    /// nothing else — not 128 MiB of memory and not half a second of CPU.
+    VdfIterationsTooLarge {
+        /// What the container asked for.
+        requested: u64,
+        /// The ceiling.
+        cap: u64,
+    },
 }
 
 /// **The decoy document a duress passphrase mounts.** FR-4.9.
@@ -162,6 +177,10 @@ impl core::fmt::Display for ContainerError {
             Self::NoSuchChunk { index } => {
                 write!(f, "chunk {index} does not exist or is the master frame")
             }
+            Self::VdfIterationsTooLarge { requested, cap } => write!(
+                f,
+                "the container asks for {requested} VDF iterations, above the {cap}-iteration ceiling"
+            ),
         }
     }
 }
@@ -301,6 +320,22 @@ impl Wavefunction {
         Ok(salt)
     }
 
+    /// **Refuse an iteration count above the ceiling.**
+    ///
+    /// The count is either the caller's or the container's own recorded one, and the container's
+    /// is attacker-controlled. See [`ContainerError::VdfIterationsTooLarge`] and
+    /// [`holonomy_crypto::modulus::MAX_VDF_ITERATIONS`] for why.
+    fn check_vdf_iterations(iterations: u64) -> Result<(), ContainerError> {
+        let cap = holonomy_crypto::modulus::MAX_VDF_ITERATIONS;
+        if iterations > cap {
+            return Err(ContainerError::VdfIterationsTooLarge {
+                requested: iterations,
+                cap,
+            });
+        }
+        Ok(())
+    }
+
     /// Derive the root from a passphrase and a salt.
     fn derive(
         passphrase: &str,
@@ -376,6 +411,10 @@ impl Wavefunction {
         duress: Option<&DuressDecoy<'_>>,
         vdf_iterations: u64,
     ) -> Result<Self, ContainerError> {
+        // **The caller's count is checked too, not just the container's.** A caller that asks for
+        // `u64::MAX` iterations is asking for the same hang a hostile file would produce, and the
+        // check costs nothing.
+        Self::check_vdf_iterations(vdf_iterations)?;
         let salt = Self::fresh_salt()?;
         let (root, omega) = Self::derive(passphrase, &salt, vdf_iterations)?;
 
@@ -638,6 +677,18 @@ impl Wavefunction {
         } else {
             recorded_vdf
         };
+
+        // **The ceiling, checked here — at the boundary where the untrusted number enters.**
+        //
+        // This value came out of a file that anyone could write, and it is the length of a computation
+        // this build is about to perform. Without the check, `T = u64::MAX` is not a failure but a
+        // hang: the unlock never returns, the CPU is pinned at 100 % for as long as the user waits,
+        // and the document cannot be opened at all.
+        //
+        // **The check is here and not only in the KDF** so that the refusal costs one 4 KiB read
+        // instead of a 128 MiB Argon2 allocation and half a second of CPU. `holonomy-crypto` refuses
+        // the same number independently — this is the outer of two walls, not the only one.
+        Self::check_vdf_iterations(iterations)?;
 
         let (root, omega) = Self::derive(passphrase, &salt, iterations)?;
         let chaff = Chaff::new(&root.k_chaff);
@@ -1046,14 +1097,34 @@ impl Wavefunction {
     ///
     /// This is what the entropy gate runs over. It reads through `O_DIRECT` like everything
     /// else, so the gate measures the file as it really is rather than a buffered copy.
+    ///
+    /// # The range is checked, because this is a `pub` API with caller-supplied numbers
+    ///
+    /// `offset + len` was computed unchecked, and the release profile has `overflow-checks` on,
+    /// so an offset near `u64::MAX` **panicked** rather than returning an error. The range is also
+    /// refused when it runs past the end of the container, which bounds the allocation to 128 MiB
+    /// — a caller cannot ask for a gigabyte by asking for a gigabyte.
     pub fn read_raw(&self, offset: u64, len: usize) -> Result<Vec<u8>, ContainerError> {
+        let end = offset.checked_add(len as u64).ok_or_else(|| {
+            ContainerError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("offset {offset} plus {len} bytes is not representable"),
+            ))
+        })?;
+        if end > CONTAINER_SIZE {
+            return Err(ContainerError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{offset}..{end} is outside the {CONTAINER_SIZE}-byte container"),
+            )));
+        }
         let mut out = vec![0u8; len];
         let mut page = AlignedBuf::zeroed(IO_ALIGN as usize);
         let mut done = 0usize;
         while done < len {
             let want = (len - done).min(IO_ALIGN as usize);
             page.wipe();
-            self.file.read_exact_at(offset + done as u64, &mut page)?;
+            self.file
+                .read_exact_at(offset + done as u64, &mut page)?;
             out[done..done + want].copy_from_slice(&page.as_slice()[..want]);
             done += want;
         }

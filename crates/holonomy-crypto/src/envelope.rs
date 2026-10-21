@@ -525,6 +525,23 @@ pub fn derive_root(
         return Err(EnvelopeError::EmptyPassphrase);
     }
 
+    // **The ceiling, checked before the expensive stage rather than after it.**
+    //
+    // `modulus::sequential_squarings` refuses an absurd `T` too, and that is where the check
+    // belongs — it is the only thing that runs the loop. But this function runs Argon2id
+    // *first*, and Argon2id costs 128 MiB and half a second: refusing a hostile `T` after
+    // that would mean the denial of service still happened, only later.
+    //
+    // **And `T` is read from the container, in the clear, by whoever wrote the file.** See
+    // [`modulus::MAX_VDF_ITERATIONS`] for why that makes it an attacker-controlled number
+    // rather than a configuration value.
+    if vdf_iterations > modulus::MAX_VDF_ITERATIONS {
+        return Err(EnvelopeError::Vdf(VdfError::TooManyIterations {
+            requested: vdf_iterations,
+            cap: modulus::MAX_VDF_ITERATIONS,
+        }));
+    }
+
     let t = std::time::Instant::now();
     // **`?` and not a `match` that re-wraps `Err(e) => return Err(e)`.** The error type is the same
     // on both sides, so the `match` was four lines spelling `?` and one line of room for the two to

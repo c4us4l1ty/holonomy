@@ -68,10 +68,12 @@ fn scratch_path(name: &str) -> std::path::PathBuf {
 }
 
 fn temp_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "holonomy-ring-commit-{}-{name}.wavefunction",
-        std::process::id()
-    ))
+    // **The scratch directory beside the build output, not `std::env::temp_dir()`.**
+    //
+    // This used to build the path under `/tmp`, which is tmpfs on this host — and tmpfs does
+    // not support `O_DIRECT`, so every one of these tests failed at `open` with `EINVAL` on a
+    // filesystem that cannot do direct I/O at all. The failure says nothing about the ring.
+    scratch_path(name)
 }
 
 /// The exact sequence that returned ciphertext: commit, then read, on one handle.
@@ -224,6 +226,119 @@ fn a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry() {
             "sealed bytes that never reached the disk are left sitting in the slot"
         );
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A staged edit is not discarded by a rotation of the ring.**
+///
+/// # The bug
+///
+/// The ring has three slots and holds `[N−1, N, N+1]`. Rotating it evicts the slot that has
+/// fallen out of the window, and **the eviction cleared both of that slot's flags** — the
+/// `dirty` flag, which says "these bytes have changed and must be written", and the `resident`
+/// index, which says "these bytes belong to chunk `i`".
+///
+/// **So an edit that had been staged but not yet written back was silently thrown away.** The
+/// bytes were still sitting in the slot, but nothing would ever write them and nothing would
+/// ever say they were missing: the user would type, the file would save, and the edit would not
+/// be in it. `stage_blank` did the same thing to all three slots at once.
+///
+/// # The fix
+///
+/// **A slot with an uncommitted edit keeps both flags and its bytes.** The edit stays owed to
+/// the disk; the next [`commit`] writes it; and if the ring wants that slot's memory for a
+/// prefetch, it writes the edit out first rather than overwriting it.
+///
+/// # What is asserted
+///
+/// The state, not the bytes: after a rotation the ring still has an edit pending, and the slot
+/// still holds it. **The end-to-end proof — that the bytes reach the disk — is the commit's
+/// job, and this test is about the thing that would have stopped them getting there.**
+#[test]
+fn a_staged_edit_is_not_discarded_by_a_rotation() {
+    let mut ring = Ring::new(4).expect("three page-locked slots");
+    const STAGED: &[u8] = b"an edit that has not been written back yet";
+    ring.stage_plaintext(1, STAGED).expect("stage");
+    assert_eq!(ring.pending_count(), 1, "the staged edit should be pending");
+
+    // **Rotate forward far enough to evict the slot holding the edit.** One rotation evicts the
+    // slot *behind* the centre; two evicts the centre's own slot, which is where the staged
+    // edit is.
+    ring.advance();
+    ring.advance();
+    assert_eq!(
+        ring.pending_count(),
+        1,
+        "rotating the ring discarded an edit that had not been written back: the user would type, \
+         the file would save, and the edit would not be in it"
+    );
+
+    // And the same in the other direction.
+    ring.retreat();
+    ring.retreat();
+    assert_eq!(
+        ring.pending_count(),
+        1,
+        "rotating the ring backwards discarded an edit that had not been written back"
+    );
+}
+
+/// **Staging a second chunk does not throw away the first one's edit.**
+///
+/// `stage_blank` used to wipe **all three** slots, so staging chunk 2 destroyed a staged edit to
+/// chunk 1 that had not been written back. The fix gives the new centre a slot that has nothing
+/// pending in it, and leaves the pending one alone.
+///
+/// **The count is what makes this a test rather than an assertion about the code**: `has_dirty`
+/// would still be true after the old behaviour, because the *second* edit is pending — the two
+/// behaviours differ only in how many edits are still owed to the disk.
+#[test]
+fn staging_another_chunk_does_not_discard_a_staged_edit() {
+    let mut ring = Ring::new(4).expect("three page-locked slots");
+    const FIRST: &[u8] = b"the first staged edit";
+    const SECOND: &[u8] = b"the second staged edit";
+    ring.stage_plaintext(1, FIRST).expect("stage the first");
+    ring.stage_plaintext(2, SECOND).expect("stage the second");
+    assert_eq!(
+        ring.pending_count(),
+        2,
+        "staging a second chunk discarded the first chunk's pending edit"
+    );
+}
+
+/// **A failed commit leaves the edit pending rather than dropping it.** The retry has to be able
+/// to write the bytes that are still there.
+#[test]
+fn a_failed_commit_leaves_the_edit_pending() {
+    let path = scratch_path("pending");
+    let _ = std::fs::remove_file(&path);
+    let open = DirectFile::create_or_open(&path).expect("a container-shaped file");
+    let mut ring = Ring::new(4).expect("three page-locked slots");
+    const STAGED: &[u8] = b"an edit that has not reached the disk";
+    ring.stage_plaintext(1, STAGED).expect("stage");
+
+    // **Close the descriptor behind the handle's back** — the same trick as
+    // `a_commit_that_cannot_write_leaves_nothing_staged_for_a_retry`, and for the same reason:
+    // reaching an I/O error from a test otherwise needs a full filesystem.
+    //
+    // SAFETY: `stolen` is a live descriptor owned by `open`, and exactly one of the two owners
+    // closes it.
+    let stolen = open.as_raw();
+    let open = std::mem::ManuallyDrop::new(open);
+    drop(unsafe { std::fs::File::from_raw_fd(stolen) });
+
+    let err = ring
+        .commit(&open, 0, &[7u8; 32], &[9u8; 24])
+        .expect_err("a closed descriptor cannot be written to");
+    assert!(
+        matches!(err, holonomy_container::ring::RingError::Io(_)),
+        "expected the i/o error itself, got {err:?}"
+    );
+    assert!(
+        ring.has_dirty(),
+        "the commit failed before it sealed anything, so the edit must still be pending: a retry \
+         has to be able to write the bytes that are still in the slot"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

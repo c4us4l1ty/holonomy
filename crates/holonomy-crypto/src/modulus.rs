@@ -46,6 +46,40 @@ const N_PUB_HEX: &str = "c7970ceedcc3b0754490201a7aa613cd73911081c790f5f1a8726f4
 /// The VDF modulus: RSA-2048, a 2048-bit semiprime with unknown factors.
 pub const N_PUB: U2048 = from_hex_const(N_PUB_HEX);
 
+/// **The largest chain this build will run.** A ceiling on the VDF's iteration count.
+///
+/// # Why a ceiling at all
+///
+/// **Because `T` is written in the clear and read back before any key exists.** The container
+/// keeps the iteration count in a plaintext page beside the salt, precisely so that a reader
+/// knows what the derivation will cost before it pays for it — which means the file, and
+/// therefore anyone who can write the file, chooses how long the unlock takes.
+///
+/// Without a ceiling, `T = u64::MAX` is not an error: it is 584 billion years of squarings.
+/// The user is left holding a file that cannot be opened, the CPU is pinned at 100 % for as
+/// long as they wait, and the only remedy is to delete the document. **A file must not be able
+/// to hang the program that opens it.**
+///
+/// # Why this number, and not another
+///
+/// **The bound is a property of the hardware.** A 2048-bit Montgomery squaring is 32 limb
+/// products plus a 32-limb reduction — at least 64 multiplications, chained through the
+/// reduction, so no CPU on earth does it in less than roughly 100 ns. The unlock budget this
+/// project targets is 250 ms, so the largest `T` any honest container can hold is
+/// `250e6 / 100ns = 2.5e6`.
+///
+/// **This build measures 2,664 ns per squaring**, which is `T = 93,843`; a modern desktop CPU
+/// running the same code is perhaps 3× faster, so `T ≈ 300,000`. A million is therefore
+/// roughly 3× the fastest plausible honest container and a third of the unreachable
+/// hardware bound: **headroom for any real host, and a hard stop for a hostile file.**
+///
+/// **And the cost of the ceiling being wrong is bounded.** A container written by a host
+/// faster than 250 ns per squaring cannot be opened by this build — it fails with
+/// [`VdfError::TooManyIterations`] rather than hanging, and the message says which number was
+/// refused. The opposite error — a ceiling so low that a legitimate container is rejected —
+/// is the one worth avoiding, and this number is chosen with that in mind.
+pub const MAX_VDF_ITERATIONS: u64 = 1_000_000;
+
 /// The committed literal, exposed so the gate can assert the parsed constant still
 /// matches it rather than trusting the parser.
 pub const fn n_pub_hex() -> &'static str {
@@ -62,7 +96,6 @@ pub struct MontgomeryParams {
     /// `R^2 mod N`, for converting into Montgomery form.
     pub r2: U2048,
 }
-
 /// Derive the Montgomery parameters for [`N_PUB`].
 pub fn mont_params() -> MontgomeryParams {
     MontgomeryParams {
@@ -89,19 +122,44 @@ pub enum VdfError {
     /// measurement that never happened. A reader debugging a zero-iteration challenge would be sent to look
     /// at the seed.
     Uncalibrated,
+    /// The chain was asked for more iterations than [`MAX_VDF_ITERATIONS`].
+    ///
+    /// **Its own variant, and it is the one that stops a denial of service.**
+    ///
+    /// The iteration count `T` is written into the container in the clear, beside the salt, and
+    /// read back before the key exists — so a hostile file chooses the size of the computation
+    /// this build is about to perform. `T = u64::MAX` is 584 billion years of squarings, and the
+    /// unlock simply never returns: the user is holding a file that cannot be opened, and the
+    /// only way out is to delete it.
+    ///
+    /// **The cap is a property of the hardware, not a policy.** A 2048-bit Montgomery squaring is
+    /// at least 64 multiplications with a dependency chain through the reduction, so no CPU on
+    /// earth does it in less than roughly 100 ns; the budget this project targets is 250 ms, so
+    /// `T = 250e6 / 100ns = 2.5e6` is an unreachable upper bound for any honest container.
+    /// [`MAX_VDF_ITERATIONS`] is a third of that, which leaves an order of magnitude of headroom
+    /// over the fastest plausible host and still refuses a file that asks for a hang.
+    TooManyIterations {
+        /// What was asked for.
+        requested: u64,
+        /// The cap.
+        cap: u64,
+    },
 }
 
 impl core::fmt::Display for VdfError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let msg = match self {
-            Self::SeedNotCoprime => "seed is not coprime with N_pub (would degenerate)",
-            Self::ZeroSeed => "seed reduced to zero",
-            Self::ZeroIterations => "zero iterations",
-            Self::Uncalibrated => {
-                "the per-squaring cost is zero, so an iteration count cannot be derived from it"
-            }
-        };
-        f.write_str(msg)
+        match self {
+            Self::SeedNotCoprime => f.write_str("seed is not coprime with N_pub (would degenerate)"),
+            Self::ZeroSeed => f.write_str("seed reduced to zero"),
+            Self::ZeroIterations => f.write_str("zero iterations"),
+            Self::Uncalibrated => f.write_str(
+                "the per-squaring cost is zero, so an iteration count cannot be derived from it",
+            ),
+            Self::TooManyIterations { requested, cap } => write!(
+                f,
+                "{requested} iterations exceeds the {cap}-iteration ceiling for a VDF chain"
+            ),
+        }
     }
 }
 
@@ -123,9 +181,27 @@ pub fn seed_from_k_int(k_int: &[u8; 64]) -> U2048 {
 /// *is* the stored form of the square, so the loop has no per-step conversion and no
 /// allocation -- which matters because this is the one loop that must not stop for
 /// anything.
+///
+/// # The ceiling, and why it is here rather than in the caller
+///
+/// **`iterations` is attacker-reachable.** The container writes `T` into a cleartext page
+/// beside the salt and reads it back before any key exists, so a file chooses the length of
+/// this loop. Without a cap, a hostile file with `T = u64::MAX` does not fail -- it *hangs*,
+/// for centuries, holding the CPU and the 128 MiB the Argon2 stage already allocated.
+///
+/// The check is here rather than at the call sites because this is the only function that
+/// runs the loop: a cap enforced by a caller is a cap that a new caller can forget.
 pub fn sequential_squarings(seed: &U2048, iterations: u64) -> Result<U2048, VdfError> {
     if iterations == 0 {
         return Err(VdfError::ZeroIterations);
+    }
+    // **Refused before anything is computed.** The zero check above is free because the chain
+    // has not started; this one is equally free and stops the loop from starting at all.
+    if iterations > MAX_VDF_ITERATIONS {
+        return Err(VdfError::TooManyIterations {
+            requested: iterations,
+            cap: MAX_VDF_ITERATIONS,
+        });
     }
     let s = rem(seed, &N_PUB);
     if is_zero(&s) {

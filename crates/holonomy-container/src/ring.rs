@@ -64,6 +64,13 @@ pub enum RingError {
         /// How many chunks exist.
         chunks: u64,
     },
+    /// Every slot holds an edit that has not been written back yet.
+    ///
+    /// **Its own variant rather than a discarded edit.** The ring has three slots, and a slot
+    /// holding an uncommitted edit cannot be reused without writing that edit out first. Three
+    /// uncommitted edits at once is the only way to get here, and the answer is to commit — not
+    /// to drop one of them on the floor.
+    AllSlotsPending,
 }
 
 impl core::fmt::Display for RingError {
@@ -76,6 +83,9 @@ impl core::fmt::Display for RingError {
             }
             Self::OutOfRange { index, chunks } => {
                 write!(f, "chunk {index} out of range for {chunks} chunks")
+            }
+            Self::AllSlotsPending => {
+                f.write_str("all three ring slots hold edits that have not been written back")
             }
         }
     }
@@ -143,6 +153,29 @@ pub fn prev_tag_from_disk(
 }
 
 /// A three-slot window over the chunk stream.
+///
+/// # The slot invariant
+///
+/// **Every method that touches a slot's bytes updates its two flags, and nothing else may.**
+/// The invariant is:
+///
+/// | `dirty` | `resident` | the slot holds |
+/// |---|---|---|
+/// | `false` | `Some(i)` | the **plaintext** of chunk `i` |
+/// | `true` | `Some(i)` | the **edited** plaintext of chunk `i`, not yet written |
+/// | `false` | `None` | nothing — stale bytes, ciphertext, or zeroes |
+///
+/// A dirty slot **always** has a resident index, because "which chunk is this edit for?" is
+/// the question a write-back has to answer, and a dirty slot with no index is an edit that
+/// cannot be written and therefore cannot be kept.
+///
+/// **The whole point of the table is that no row is reachable by accident.** The bug this
+/// fixes was a slot that was neither: `advance` and `retreat` cleared `dirty` and `resident`
+/// together when they evicted a slot, so an edit that had not been written back was
+/// *silently discarded* — the bytes were still in the slot, but nothing would ever write
+/// them, and nothing would ever say they were missing. `stage_blank` did the same thing to
+/// all three slots at once. **The user would type, the file would save, and the edit would
+/// not be in it.**
 pub struct Ring {
     /// Exactly three, indexed 0..2 as described in the module docs. A `Vec` would allow the
     /// size to drift; an array cannot.
@@ -311,13 +344,33 @@ impl Ring {
         n_root: &[u8; 24],
     ) -> Result<(), RingError> {
         self.check_range(index)?;
+        // **A slot that holds an uncommitted edit is written back before it is reused.**
+        //
+        // The ring has three slots and a document being edited needs all three, so the slot a
+        // prefetch wants is often the slot an edit is sitting in. Overwriting it would drop the
+        // edit on the floor — the bytes would still be in the slot, but nothing would ever write
+        // them and nothing would ever say they were missing. **Writing them out first costs one
+        // 64 KiB `pwrite` and turns a silent data loss into a file that is correct.**
+        //
+        // The write can fail, and when it does the error propagates and the edit is *still*
+        // there: `flush_slot` clears the flags only once the bytes are on the disk.
+        if self.dirty[slot] {
+            self.flush_slot(slot, file, omega, k_enc, n_root)?;
+        }
         // Read straight into the slot: no bounce buffer, because the slot is already
         // 4096-aligned and 65,536 bytes long. This is the reuse that keeps the ring at
         // three buffers instead of four.
+        //
+        // **The flags are dropped *before* the read, not after.** The slot is about to hold
+        // something else, so it holds nothing that any other method may read as a chunk: a
+        // failed authentication below would otherwise leave a slot that claims to hold chunk
+        // `index` as plaintext while holding the ciphertext that failed to authenticate — and
+        // `neighbour` would hand that ciphertext back as document text.
+        self.resident[slot] = None;
+        self.dirty[slot] = false;
         file.read_exact_at(layout::chunk_offset(omega, index), &mut self.slots[slot])?;
         aead::open_chunk(k_enc, n_root, index, self.slots[slot].as_mut_slice())?;
         self.resident[slot] = Some(index);
-        self.dirty[slot] = false;
         Ok(())
     }
 
@@ -327,16 +380,32 @@ impl Ring {
     /// so seeking to it would fail authentication against whatever chaff happens to be there.
     /// Every slot is dropped rather than rotated, because after a growth the on-disk contents
     /// of the neighbouring slots are no longer a useful prefetch.
+    ///
+    /// # A slot holding an uncommitted edit is *not* dropped
+    ///
+    /// **This used to wipe all three slots and clear both flags on each of them**, which meant a
+    /// staged edit that had not been written back was silently destroyed — the ring would go on
+    /// to write a *different* chunk and report success, and the edit would simply not be in the
+    /// file. The user would type, the file would save, and the edit would not be in it.
+    ///
+    /// **So a slot with an uncommitted edit keeps both of its flags and its bytes**, and the new
+    /// centre is a slot that has nothing pending in it. The pending edit stays pending: it is
+    /// still owed to the disk, it is still written by the next [`commit`](Self::commit), and if
+    /// the ring wants that slot's memory for a prefetch it writes the edit out first (see
+    /// [`load_slot`](Self::load_slot)).
     pub fn stage_blank(&mut self, index: u64) -> Result<(), RingError> {
         self.check_range(index)?;
-        for slot in 0..RING_STAGES {
-            self.slots[slot].wipe();
-            self.resident[slot] = None;
-            self.dirty[slot] = false;
-        }
-        self.center_slot = 1;
+        // **The centre must be a slot with nothing pending in it.** A dirty slot holds an edit
+        // that has not reached the disk; reusing it would destroy that edit.
+        let Some(slot) = (0..RING_STAGES).find(|&s| !self.dirty[s]) else {
+            return Err(RingError::AllSlotsPending);
+        };
+        self.slots[slot].wipe();
+        self.resident[slot] = None;
+        self.dirty[slot] = false;
+        self.center_slot = slot;
         self.center = index;
-        self.resident[self.center_slot] = Some(index);
+        self.resident[slot] = Some(index);
         Ok(())
     }
 
@@ -374,20 +443,29 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
     Ok(())
 }
 
-/// Rotate the ring one chunk forward. The slot holding `center-1` becomes free.
+    /// Rotate the ring one chunk forward. The slot holding `center-1` becomes free.
+    ///
+    /// **A slot with an uncommitted edit is not freed.** It keeps its `dirty` flag, its resident
+    /// index and its bytes, so the edit is still owed to the disk and is still written by the
+    /// next [`commit`](Self::commit). **This used to clear both flags unconditionally**, which
+    /// discarded the edit: the bytes stayed in the slot and nothing would ever write them.
     pub fn advance(&mut self) {
         let prev = (self.center_slot + RING_STAGES - 1) % RING_STAGES;
-        self.resident[prev] = None;
-        self.dirty[prev] = false;
+        if !self.dirty[prev] {
+            self.resident[prev] = None;
+        }
         self.center_slot = (self.center_slot + 1) % RING_STAGES;
         self.center += 1;
     }
 
     /// Rotate the ring one chunk backward. The slot holding `center+1` becomes free.
+    ///
+    /// **The same rule as [`advance`](Self::advance): an uncommitted edit is not freed.**
     pub fn retreat(&mut self) {
         let next = (self.center_slot + 1) % RING_STAGES;
-        self.resident[next] = None;
-        self.dirty[next] = false;
+        if !self.dirty[next] {
+            self.resident[next] = None;
+        }
         self.center_slot = (self.center_slot + RING_STAGES - 1) % RING_STAGES;
         self.center = self.center.saturating_sub(1);
     }
@@ -400,7 +478,20 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
 
     /// Mutable plaintext of the centre chunk. Marks the slot dirty, so a later
     /// [`commit`](Self::commit) will write it back.
+    ///
+    /// # The centre must be resident, and that is the caller's job
+    ///
+    /// A slot that is not resident holds ciphertext (after a commit) or stale bytes, and
+    /// editing either produces a chunk that decrypts perfectly to garbage. **The ring cannot
+    /// check this** — it has no way to know what the caller meant — so it asserts it in debug
+    /// builds and the callers honour it: `seek` loads the centre, `stage_blank` and
+    /// `stage_plaintext` install it, and nothing else calls this.
     pub fn center_bytes_mut(&mut self) -> &mut [u8] {
+        debug_assert!(
+            self.resident[self.center_slot] == Some(self.center),
+            "the centre slot does not hold chunk {} as plaintext; editing it would write garbage",
+            self.center
+        );
         self.dirty[self.center_slot] = true;
         &mut self.slots[self.center_slot].as_mut_slice()[..CHUNK_PLAINTEXT]
     }
@@ -428,6 +519,16 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
         self.dirty.iter().any(|&d| d)
     }
 
+    /// **How many chunks have edits that have not been written back.**
+    ///
+    /// **Allocation-free, because the ring's whole budget is 192 KiB and nothing in it may
+    /// allocate after construction.** The count is enough to answer the question the ring
+    /// exists to keep honest — "is there an edit that is still owed to the disk?" — and it
+    /// distinguishes *one* pending edit from *two*, which `has_dirty` cannot.
+    pub fn pending_count(&self) -> usize {
+        self.dirty.iter().filter(|&&d| d).count()
+    }
+
     /// Re-seal and write back every dirty slot, then sync.
     ///
     /// Only dirty slots are written. On a keystroke that means one 65,536-byte
@@ -444,62 +545,94 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
             if !self.dirty[slot] {
                 continue;
             }
-            let Some(index) = self.resident[slot] else {
-                continue;
-            };
-            // The plaintext is already in `slot[..CHUNK_PLAINTEXT]`; sealing in place
-            // avoids a fourth 64 KiB buffer, which would break the 192 KiB ceiling.
-            //
-            // **The predecessor tag is read from the file, here, and not before the loop.**
-            //
-            // The slot's own tag region is not a source: a dirty slot reached by
-            // `center_bytes_mut` still carries the tag `load_slot` left there, but a dirty slot
-            // reached by `stage_plaintext` went through `stage_blank`, which wipes. Reading one
-            // and assuming the other is the kind of reasoning that is right until the day it is
-            // not. One `pread64` of 4 KiB against a 64 KiB write, taken from the authoritative
-            // copy, is what makes the nonce un-repeatable even across a failed write and a retry.
-            let prev_tag = prev_tag_from_disk(file, omega, index)?;
-            aead::seal_in_place(
-                k_enc,
-                n_root,
-                index,
-                &prev_tag,
-                CHUNK_PLAINTEXT,
-                self.slots[slot].as_mut_slice(),
-            )?;
-            // **The slot stops being resident when it is sealed, not when the write lands.**
-            //
-            // Sealing happened in place, so from this line on the slot holds ciphertext while
-            // `resident` would still be claiming it holds chunk `index` as plaintext. Both flags
-            // are therefore cleared *before* the write, which is the whole fix: they used to be
-            // cleared after it, so a `write_exact_at` that failed left a slot marked resident and
-            // dirty that held sealed bytes. Two things then followed from that one ordering, and
-            // the second is unrecoverable.
-            //
-            // `ensure_center_loaded` returns early when `resident[slot] == Some(center)`, so the
-            // next `read_content` handed the ciphertext back as document text. And because
-            // `dirty` was still set, a *retry* re-sealed that ciphertext and wrote the result as
-            // the chunk's plaintext — a chunk that had merely failed to save is now garbage, and
-            // nothing in the format can tell it from real content. That is why the flags are
-            // dropped first and the slot is wiped below rather than left holding sealed bytes
-            // for a retry to find: **the plaintext is already gone either way, so the honest
-            // state is "not resident", which forces the next read to re-fetch from the disk.**
-            self.dirty[slot] = false;
-            self.resident[slot] = None;
-            if let Err(e) = file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot])
-            {
-                // Wipe what was sealed but never stored, so no ciphertext derived from a live
-                // document key is left sitting in a slot that a later `stage_plaintext` could
-                // mistake for a blank.
-                self.slots[slot].wipe();
-                return Err(e.into());
+            if self.flush_slot(slot, file, omega, k_enc, n_root)? {
+                written += 1;
             }
-            written += 1;
         }
         if written > 0 {
             file.sync()?;
         }
         Ok(written)
+    }
+
+    /// **Seal one dirty slot and write it to disk.** Returns whether bytes reached the disk.
+    ///
+    /// # Why this is a separate function
+    ///
+    /// Because "write a dirty slot" is now needed in two places: by [`commit`](Self::commit), which
+    /// writes them all, and by [`load_slot`](Self::load_slot), which has to write one before it
+    /// reuses the slot's memory. **Two copies of a seal-and-write is two chances to get the
+    /// ordering wrong**, and the ordering is the whole safety property: see below.
+    ///
+    /// # The ordering, which is the safety property
+    ///
+    /// The plaintext is already in `slot[..CHUNK_PLAINTEXT]`; sealing in place avoids a fourth
+    /// 64 KiB buffer, which would break the 192 KiB ceiling.
+    ///
+    /// **The predecessor tag is read from the file, here, and not before the loop.**
+    ///
+    /// The slot's own tag region is not a source: a dirty slot reached by
+    /// `center_bytes_mut` still carries the tag `load_slot` left there, but a dirty slot
+    /// reached by `stage_plaintext` went through `stage_blank`, which wipes. Reading one
+    /// and assuming the other is the kind of reasoning that is right until the day it is
+    /// not. One `pread64` of 4 KiB against a 64 KiB write, taken from the authoritative
+    /// copy, is what makes the nonce un-repeatable even across a failed write and a retry.
+    ///
+    /// **The slot stops being resident when it is sealed, not when the write lands.**
+    ///
+    /// Sealing happened in place, so from that point on the slot holds ciphertext while
+    /// `resident` would still be claiming it holds chunk `index` as plaintext. Both flags
+    /// are therefore cleared *before* the write, which is the whole fix: they used to be
+    /// cleared after it, so a `write_exact_at` that failed left a slot marked resident and
+    /// dirty that held sealed bytes. Two things then followed from that one ordering, and
+    /// the second is unrecoverable.
+    ///
+    /// `ensure_center_loaded` returns early when `resident[slot] == Some(center)`, so the
+    /// next `read_content` handed the ciphertext back as document text. And because
+    /// `dirty` was still set, a *retry* re-sealed that ciphertext and wrote the result as
+    /// the chunk's plaintext — a chunk that had merely failed to save is now garbage, and
+    /// nothing in the format can tell it from real content. That is why the flags are
+    /// dropped first and the slot is wiped below rather than left holding sealed bytes
+    /// for a retry to find: **the plaintext is already gone either way, so the honest
+    /// state is "not resident", which forces the next read to re-fetch from the disk.**
+    ///
+    /// **A failure before the seal leaves the edit exactly where it was.** The predecessor
+    /// tag is read first, so a closed descriptor fails there — with the plaintext still in
+    /// the slot and the slot still dirty, which is the state a retry wants.
+    fn flush_slot(
+        &mut self,
+        slot: usize,
+        file: &DirectFile,
+        omega: u64,
+        k_enc: &[u8; 32],
+        n_root: &[u8; 24],
+    ) -> Result<bool, RingError> {
+        let Some(index) = self.resident[slot] else {
+            // **A dirty slot with no index cannot be written.** It cannot happen under the
+            // invariant, and the answer if it does is to drop the flag rather than leave a
+            // slot that a later commit would seal as somebody else's plaintext.
+            self.dirty[slot] = false;
+            return Ok(false);
+        };
+        let prev_tag = prev_tag_from_disk(file, omega, index)?;
+        aead::seal_in_place(
+            k_enc,
+            n_root,
+            index,
+            &prev_tag,
+            CHUNK_PLAINTEXT,
+            self.slots[slot].as_mut_slice(),
+        )?;
+        self.dirty[slot] = false;
+        self.resident[slot] = None;
+        if let Err(e) = file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot]) {
+            // Wipe what was sealed but never stored, so no ciphertext derived from a live
+            // document key is left sitting in a slot that a later `stage_plaintext` could
+            // mistake for a blank.
+            self.slots[slot].wipe();
+            return Err(e.into());
+        }
+        Ok(true)
     }
 
     /// Zero all three slots. Called before the ring is dropped so plaintext does not sit
