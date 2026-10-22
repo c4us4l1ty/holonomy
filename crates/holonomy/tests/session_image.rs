@@ -553,11 +553,47 @@ fn png_with_transparent_corner() -> Vec<u8> {
 
 #[test]
 fn an_image_outside_the_window_is_evicted_and_the_budget_holds() {
-    let (mut s, _) = with_image();
+    // **A document with enough pages below the image that the end is genuinely past it.**
+    //
+    // The first version of this test used `with_image()`, whose document is two lines, and it
+    // scrolled 200 lines "far past" the image. **It passed for the wrong reason, and then it
+    // passed for no reason at all** once `scroll_by` was bounded at the document's last line: on a
+    // two-line document, clamping the scroll and scrolling forever describe the *same*, so
+    // the image never left the window and the raster was never dropped.
+    //
+    // **Clamping the scroll was the fix for a real bug** -- an unbounded scroll wrote a blank page,
+    // because the page emitter's `first >= last` guard then drew nothing. So the clamp stays and
+    // the fixture grows.
+    //
+    // **And the window is a *page* window, not a line window.** `emit_images` keeps every raster on
+    // the visible page and one page either side, so the filler has to be several pages deep rather
+    // than merely longer than the viewport -- a document only one page past the image still holds
+    // it, by design, which is what the second attempt at this fixture got wrong.
+    let mut filler = Vec::new();
+    for i in 0..400u16 {
+        filler.extend_from_slice(format!("filler line {i}\n").as_bytes());
+    }
+    let editor = holonomy_text::Editor::from_text(&filler).expect("editor");
+    let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
+        holonomy_assets::build_atlas(&[16]).expect("atlas").0,
+    ));
+    let keep = Keep::sized((ChromeMetrics::DESKTOP.width, ChromeMetrics::DESKTOP.height));
+    let mut s = Session::new(
+        editor,
+        Painter::new(atlas, 0),
+        Box::new(keep.clone()),
+        ChromeMetrics::DESKTOP,
+    );
+    // **And the caret to the start, because `insert_image_bytes` inserts at the caret and the caret
+    // begins at the document's end.** The image has to be on the first page, or scrolling to the
+    // last never leaves it behind -- which is what the first attempt at this fixture got wrong.
+    s.caret_to(0).expect("the caret to the start");
+    s.insert_image_bytes(TEST_CHART_PNG).expect("insert");
     s.paint(None).expect("first paint");
-    assert_eq!(s.image_cache_len(), 1);
+    assert_eq!(s.image_cache_len(), 1, "the image is on the first page");
 
-    // Scroll far past it. The ±1 window drops the raster, and it is scrubbed on the way out.
+    // Scroll to the end of the document, which is now genuinely past the image. The ±1 window drops
+    // the raster, and it is scrubbed on the way out.
     for _ in 0..200 {
         s.scroll_by(1);
     }

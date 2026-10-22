@@ -794,8 +794,7 @@ impl Rope {
         // *parameter*, an argument that does not move as the edit proceeds, so it is already the
         // correct pre-edit coordinate and needs no separate capture.
         self.set_cursor(offset)?;
-        let mut landed = 0usize;
-        for &b in bytes {
+        for (landed, &b) in bytes.iter().enumerate() {
             if let Err(e) = self.insert_byte_unrecorded(b) {
                 // **The bytes that landed are recorded.**
                 //
@@ -817,7 +816,6 @@ impl Rope {
                 }
                 return Err(e);
             }
-            landed += 1;
         }
         self.record
             .push(crate::edit_record::Edit::insert(offset, bytes));
