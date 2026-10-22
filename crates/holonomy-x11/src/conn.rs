@@ -62,6 +62,21 @@ const GREETING_LEN: usize = 8;
 /// `first-event` it reported was the low byte of the sequence number.
 const REPLY_FIELDS: usize = 8;
 
+/// The most extra data a reply may carry, in bytes.
+///
+/// **A budget on the server's own word, because that word is the server's.** A reply's length field is
+/// a CARD32 in four-byte units, so it reaches sixteen gigabytes, and `read_packet` would size its
+/// buffer to it before reading a byte of it -- an allocator abort on an argument the caller handed
+/// over.
+///
+/// **Sized against the calls this crate makes.** The largest reply is `GetImage` of a rectangle the
+/// crate read back, which [`crate::window`](crate::window)'s own
+/// [`window::IMAGE_BUDGET_BYTES`](crate::window) bounds at 64 MiB for the same reason, plus
+/// `GetKeyboardMapping`, whose keysym table is under 8 KiB on this host. 64 MiB covers both and is
+/// two hundred and sixty thousand times below what the field alone would ask for. Anything above it
+/// is a server this client cannot talk to, and saying so is cheaper than an abort.
+const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
+
 /// Whether to log every request and every packet to stderr, set with `HOLONOMY_X11_TRACE=1`.
 ///
 /// This exists because a protocol client that is wrong is wrong *quietly*: a mistimed sequence number
@@ -384,7 +399,22 @@ impl Conn {
             )));
         }
 
-        let mut rest = vec![0u8; extra_words as usize * 4 - 8];
+        // **The additional data is at least the eight bytes of the header**, so the length is
+        // checked before it is used.
+        //
+        // `extra_words` is the server's own field and it is in 4-byte units: the eight bytes of
+        // the setup header are part of it. **Nothing guarantees it is at least two**, and the old
+        // `extra_words as usize * 4 - 8` underflowed on a server that answered `00 00` -- and the
+        // release profile runs `overflow-checks = true` under `panic = "abort"`, so an
+        // impersonating server on the socket killed the process.
+        let extra_bytes = (extra_words as usize).saturating_mul(4);
+        if extra_bytes < 8 {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply claims {extra_words} words of additional data, which is less than \
+                 the eight-byte header it is part of"
+            )));
+        }
+        let mut rest = vec![0u8; extra_bytes - 8];
         read_exact(&mut stream, &mut rest)?;
         let setup = Self::parse_setup(&rest)?;
 
@@ -457,6 +487,58 @@ impl Conn {
     /// 0xffff from `MIT-MAGIC-C` and a min-keycode of 1, which is how this crate's first version
     /// failed: `Rdr` panicked reading past the end of the packet.
     fn parse_setup(body: &[u8]) -> Result<Setup, ConnError> {
+        // **The setup's minimum length is checked before a single field is read.**
+        //
+        // `Rdr::take` panics when a field falls past the end, by design -- its own doc says so -- and
+        // that design is right for parse_setup: every length the parser needs here comes from *the same
+        // buffer it is parsing*. `vendor_len` and `nformats` are the server's own words, so a server
+        // that answers with a truncated setup, or that inflates one of those counts past what the
+        // buffer holds, would otherwise walk past the end and panic in the loop.
+        //
+        // The walk below is a fixed-size header of 32 bytes, then `vendor_len` rounded up to a
+        // multiple of four, then 8 bytes per pixmap format, then at least the 40 fixed bytes of one
+        // SCREEN. Checking the sum up front means the parser's every `bytes` and `skip` is already
+        // inside the buffer, which is the invariant `Rdr`'s panic assumes.
+        //
+        // The screen itself is not walked -- this client reads one screen's *fixed* fields and then
+        // stops, so only `formats` and the vendor string are bounded. A server with more than one
+        // screen has its extra screens in the tail, and nothing below reads them.
+        if body.len() < 32 + 40 {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply carries {} bytes, below the 72 the protocol's first screen requires",
+                body.len()
+            )));
+        }
+        let mut probe = Rdr::new(body);
+        probe.u32();
+        probe.u32();
+        probe.u32();
+        probe.u32();
+        let vendor_len = u32::from(probe.u16()) as usize;
+        let _max_request_words = u32::from(probe.u16());
+        let _screens = probe.u8();
+        let nformats = u32::from(probe.u8()) as usize;
+        let vendor_padded = vendor_len
+            .checked_add(3)
+            .map(|v| (v & !3) + 3)
+            .ok_or_else(|| {
+                ConnError::Unsupported("the setup's vendor length is out of range".into())
+            })?;
+        let body_needed = vendor_padded
+            .checked_add(nformats.checked_mul(8).ok_or_else(|| {
+                ConnError::Unsupported("the setup's format count is out of range".into())
+            })?)
+            .and_then(|v| v.checked_add(72))
+            .ok_or_else(|| {
+                ConnError::Unsupported("the setup's declared extents do not fit".into())
+            })?;
+        if body.len() < body_needed {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply declares {nformats} formats and a {vendor_len}-byte vendor string, \
+                 which needs {body_needed} bytes, but carries {}",
+                body.len()
+            )));
+        }
         let mut r = Rdr::new(body);
         let release = r.u32();
         let resource_id_base = r.u32();
@@ -880,7 +962,6 @@ impl Conn {
             return Ok(None);
         }
         if self.pending > 0 && !self.ensure(self.pending, deadline)? {
-            // A packet was started and not finished: some of it is buffered and the rest has not
             // arrived. Wait for the rest on the *next* call rather than treating this as "nothing to
             // read", which is the difference between waiting and spinning. Measured: with `pending`
             // ignored, every `next_event` returned immediately on a half-delivered event and the window
@@ -979,16 +1060,42 @@ impl Conn {
                 let _kind = r.u8();
                 let sequence = r.u16();
                 let extra = r.u32() as usize * 4;
-                // The 32-byte header is already consumed -- `self.rstart` moved past it above -- so
-                // what is still missing is the extra data alone. Asking for `want + extra` here is off
-                // by the size of the header for every reply, which is why a `GetKeyboardMapping` reply
-                // of 6,976 bytes was reported as short when all 6,976 of them had arrived.
-                if extra > 0 && !self.ensure(extra, deadline)? {
-                    // Also a short read, and also not a failure: the rest is in flight and the next read
-                    // will pick it up.
+                // **The extra length is bounded, because it is the server's own word.**
+                //
+                // The length field is a CARD32 in four-byte units, so it reaches sixteen gigabytes,
+                // and the reader sized its buffer to it *before* reading a byte of it -- a call to
+                // `Vec::extend_from_slice` against the allocator, which aborts on an argument the
+                // caller handed over. A reply above [`MAX_REPLY_BYTES`] is a server this client
+                // cannot talk to, and saying so is cheaper than the abort.
+                if extra > MAX_REPLY_BYTES {
+                    return Err(ConnError::Unsupported(format!(
+                        "the reply to sequence {sequence} claims {} bytes of extra data, above the \
+                         {} this client will buffer",
+                        extra, MAX_REPLY_BYTES
+                    )));
+                }
+                // **Give the header back.** The reader advanced `rstart` past this packet's 32 bytes
+                // *before* it knew how long the reply was, so `rstart` is rewound to the packet's
+                // first byte and the whole packet -- header and extra alike -- is what is waited for
+                // from there. `ensure` measures from `rstart`, so the two have to agree.
+                //
+                // **The buffer still holds the header**: `compact` only drains what has been
+                // consumed, and this call consumed none of it, so rewinding is arithmetic rather
+                // than a re-read.
+                //
+                // **And `pending` is the whole packet's length.** The version of this arm that left
+                // it cleared returned `Ok(None)` on a short read with `pending == 0`, so the next
+                // call read the reply's own extra data as a *packet type* -- a desynchronised
+                // stream, which this crate's own header calls the worst failure it has.
+                self.rstart -= want;
+                self.pending = want + extra;
+                if !self.ensure(self.pending, deadline)? {
+                    // Also not a failure: the rest is in flight and the next call picks it up, with
+                    // `rstart` back at the packet's start and `pending` naming all of it.
                     return Ok(None);
                 }
-                self.rstart += extra;
+                self.rstart += want + extra;
+                self.pending = 0;
                 // The whole packet, header and extra data. The first version took
                 // `rbuf[rstart - want - extra .. rstart - extra]`, which is the 32-byte header with the
                 // extra data cut off -- so `GetKeyboardMapping` decoded an empty keysym table and
@@ -1116,10 +1223,27 @@ impl Conn {
         // 5-word requests (`cargo run -p holonomy-x11 --example dump_lengths`): 3 words is refused,
         // 4 and 5 are accepted, so the name starts at offset 8 and the fixed part after the header is
         // four bytes rather than three.
+        // byte 1 is `unused`, then the name's length as a CARD8, then **three** unused bytes, then the
+        // name. The specification lists two unused bytes there, which puts the name at offset 7 -- and
+        // this server answers `BadLength` for that. Measured, by sending the same name in 3-, 4- and
+        // 5-word requests (`cargo run -p holonomy-x11 --example dump_lengths`): 3 words is refused,
+        // 4 and 5 are accepted, so the name starts at offset 8 and the fixed part after the header is
+        // four bytes rather than three.
+        //
+        // **And the length is checked, not truncated.** It is a CARD8 on the wire, and a `str` longer
+        // than 255 bytes would have written a wrapped count with the whole payload appended after it --
+        // a request whose header and body disagree in length, which is a desynchronised stream. Every
+        // extension this crate queries is `XTEST`-sized, so this is unreachable from the product; it is
+        // asserted here for the same reason the request ceiling is: **a bound that is only sometimes
+        // checked is the kind that gets skipped by the one caller who needed it.**
+        let len = u8::try_from(name.len()).map_err(|_| ConnError::Unsupported(format!(
+            "the extension name {name} is {} bytes and the protocol's own field for it is a CARD8",
+            name.len()
+        )))?;
         let seq = self.request(
             Req::new(op::QUERY_EXTENSION)
                 .second_byte(0)
-                .u8(name.len() as u8)
+                .u8(len)
                 .pad(3)
                 .bytes(name.as_bytes()),
         )?;
@@ -1155,9 +1279,32 @@ impl Conn {
         if per == 0 {
             return Ok(Vec::new());
         }
+        // **The reply is walked by how much of it arrived, not by how much was asked for.**
+        //
+        // `Rdr` panics when a field falls past the end of its buffer, and the old code handed it
+        // exactly the answer's shape: `[keycodes_min, keycodes_max]` came from the *setup*, and
+        // 32 + count * per * 4 is what the reply should hold if the server honoured the request.
+        //
+        // **A server that answers short breaks that agreement.** The protocol says the reply's length
+        // is what it is, so a `GetKeyboardMapping` that carries fewer keysyms than the request asked
+        // for leaves the parser reading past the buffer -- and the release profile runs
+        // `overflow-checks = true` under `panic = "abort"`, so one short answer killed the process
+        // rather than producing a partial table.
+        //
+        // **So the count is clamped to what the reply holds.** The allocation is bounded by the same
+        // number, which also keeps a short reply from reserving the *asked-for* capacity, and a reply
+        // with room for more than the request asked for is still read to the request's count -- that
+        // is the server's business, not something to walk into.
+        let payload = body.len().saturating_sub(32);
+        let readable = payload / (per * 4);
+        let wanted = count as usize;
+        // **The reply's own length wins when it is the shorter answer.** A reply with room for more
+        // keysyms than the request asked for is read to the request's count instead -- that is not
+        // something to walk into, and asking for what was asked for is what the setup said.
+        let keys = readable.min(wanted);
         let mut r = Rdr::new(&body[32..]);
-        let mut out = Vec::with_capacity(count as usize);
-        for _ in 0..count as usize {
+        let mut out = Vec::with_capacity(keys);
+        for _ in 0..keys {
             let mut syms = Vec::with_capacity(per);
             for _ in 0..per {
                 syms.push(r.u32());

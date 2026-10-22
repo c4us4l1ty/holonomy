@@ -115,8 +115,35 @@ pub enum WindowError {
         /// The height asked for.
         height: u16,
     },
+    /// A readback rectangle whose pixels do not fit in [`IMAGE_BUDGET_BYTES`].
+    ///
+    /// **Its own variant, part 36.** The rectangle's byte length was allocated unchecked -- both the
+    /// dimensions are `u16`, so 65535x65535 asked the allocator for seventeen terabytes and the
+    /// process died on an abort instead of reporting a rectangle it could not draw. The whole
+    /// rectangle is held at once because `GetImage` comes back in row-group chunks that are
+    /// *stitched*, and the caller's budget is what has to bound the rectangle, not the server's.
+    ImageTooLarge {
+        /// The rectangle's byte length.
+        wanted: usize,
+        /// The ceiling.
+        budget: usize,
+    },
+    /// An atom name longer than the protocol's own field for it.
+    ///
+    /// **Its own variant, part 36.** `InternAtom` carries the name's length in a CARD16, and the
+    /// request writer cast a `usize` into it. A name over 65,535 bytes would have written a *truncated*
+    /// length with the whole payload appended -- a request whose header disagrees with its body, which
+    /// the connection layer already treats as a desynchronised stream. Every name this crate interns
+    /// is `WM_PROTOCOLS`-sized, so this is unreachable from the product and asserted here for the
+    /// same reason the connection layer asserts its request ceiling: **a bound that is only sometimes
+    /// checked is the kind that gets skipped by the one caller who needed it.**
+    NameTooLong {
+        /// The name's length in bytes.
+        len: usize,
+        /// The protocol's ceiling.
+        limit: usize,
+    },
 }
-
 impl fmt::Display for WindowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -145,6 +172,15 @@ impl fmt::Display for WindowError {
             Self::ZeroSize { width, height } => {
                 write!(f, "cannot resize to {width}x{height}: a window has no zero dimension")
             }
+            Self::ImageTooLarge { wanted, budget } => write!(
+                f,
+                "a {wanted}-byte readback needs {wanted} bytes, above the {budget}-byte budget for a \
+                 single GetImage rectangle"
+            ),
+            Self::NameTooLong { len, limit } => write!(
+                f,
+                "an atom name of {len} bytes does not fit the protocol's {limit}-byte field"
+            ),
         }
     }
 }
@@ -531,12 +567,25 @@ impl Window {
     }
 
     /// `InternAtom`, resolving through the sync so the reply is in hand before it is used.
+    /// `InternAtom`, resolving through the sync so the reply is in hand before it is used.
     fn intern(conn: &mut Conn, name: &str) -> Result<u32, WindowError> {
         // byte 1 is `only-if-exists`; the request is 8 + name bytes, so a 12-byte name is 5 words.
+        //
+        // **The name's length is written as a CARD16, and it is checked rather than truncated.**
+        // The atom names this crate interns are `WM_PROTOCOLS`, `WM_DELETE_WINDOW` and the like, all
+        // far under 65,535 bytes -- but the field is the request's own, and a `str` longer than
+        // `u16::MAX` would have written its length as a *smaller number*, with the byte payload still
+        // appended: a request whose header said one thing and whose body another. That is a
+        // desynchronised stream, the failure this crate's connection layer already refuses to
+        // tolerate. `u16::try_from` says so instead.
+        let len = u16::try_from(name.len()).map_err(|_| WindowError::NameTooLong {
+            len: name.len(),
+            limit: u16::MAX as usize,
+        })?;
         let seq = conn.request(
             Req::new(op::INTERN_ATOM)
                 .second_byte(0) // create it if it does not exist
-                .u16(name.len() as u16)
+                .u16(len)
                 .u16(0)
                 .bytes(name.as_bytes()),
         )?;
@@ -1127,6 +1176,21 @@ struct ImageTarget {
 /// one fewer chunk of 18 rows at 1280 pixels.
 const HEADER_ALLOWANCE: usize = 64;
 
+/// The most pixels a single `GetImage` rectangle may hold, in bytes.
+///
+/// **A budget, not a protocol limit.** The X11 protocol bounds a rectangle only by its own `u16`
+/// dimensions, which reach seventeen terabytes -- and `get_image` holds the whole rectangle at once,
+/// because `GetImage` comes back in row-group chunks that are *stitched* into one buffer. So the
+/// bound has to be the client's, and it belongs here where the allocation is.
+///
+/// **Sized against the calls this crate makes.** The only readback this project does is a
+/// verification of what the server holds -- a pixmap the width and height a `Frame` was pushed at,
+/// which is the display's own size, 1280x800 = 4,096,000 bytes on this host. 64 MiB leaves room for
+/// a 32-bit frame at four thousand pixels a side, which is beyond any window this client creates and
+/// still two hundred and sixty thousand times below the seventeen terabytes the dimensions alone
+/// would ask for.
+const IMAGE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
 /// Push `pixels` into `target` at `(x, y)`, splitting along scanlines to stay under the ceiling.
 fn put_image(
     conn: &mut Conn,
@@ -1212,19 +1276,40 @@ fn get_image(
     height: u16,
 ) -> Result<Vec<u8>, WindowError> {
     let _ = target;
+    // **The rectangle is bounded before the allocation, not after.**
+    //
+    // Both dimensions are `u16`, so the product reaches seventeen terabytes -- and the allocator
+    // aborts on that, in a release profile, on an argument the caller passed in. A rectangle whose
+    // pixels do not fit the budget is a rectangle this client cannot draw, and saying so is cheaper
+    // than the abort.
     let limit = conn.request_limit();
     let row = width as usize * 4;
+    let wanted = row.saturating_mul(height as usize);
+    if wanted > IMAGE_BUDGET_BYTES {
+        return Err(WindowError::ImageTooLarge {
+            wanted,
+            budget: IMAGE_BUDGET_BYTES,
+        });
+    }
     let rows_per_chunk = (limit.saturating_sub(HEADER_ALLOWANCE) / row.max(1)).max(1);
-    let mut out = vec![0u8; row * height as usize];
-    let mut first = 0u16;
-    while first < height {
-        let rows = rows_per_chunk.min(height as usize - first as usize) as u16;
+    let mut out = vec![0u8; wanted];
+    let mut first: usize = 0;
+    while first < height as usize {
+        let rows = rows_per_chunk.min(height as usize - first) as u16;
+        // **The chunk's own `y` is computed in `i32` and clamped into `i16`.**
+        //
+        // The first version wrote `y + first as i16`: `y` is the request's own origin (below zero for
+        // a readback that starts above the window) and `first` is how many rows this call is past
+        // it, which on a tall rectangle after a few chunks reaches past `i16::MAX` -- **and the
+        // release profile runs `overflow-checks = true`, so the sixth chunk of a 32,768-row readback
+        // aborted**, on an argument the caller handed over.
+        let chunk_y = (i32::from(y) + first as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
         let seq = conn.request(
             Req::new(op::GET_IMAGE)
                 .second_byte(image::Z_PIXMAP)
                 .u32(target.drawable)
                 .i16(x)
-                .i16(y + first as i16)
+                .i16(chunk_y as i16)
                 .u16(width)
                 .u16(rows)
                 .u32(u32::MAX), // every plane
@@ -1242,10 +1327,10 @@ fn get_image(
         }
         for r in 0..rows as usize {
             let src = &pixels[r * row..(r + 1) * row];
-            let at = (first as usize + r) * row;
+            let at = (first + r) * row;
             out[at..at + row].copy_from_slice(src);
         }
-        first += rows;
+        first += rows as usize;
     }
     Ok(out)
 }

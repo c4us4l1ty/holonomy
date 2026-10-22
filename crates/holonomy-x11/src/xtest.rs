@@ -305,7 +305,17 @@ impl XTest {
 }
 
 /// Read the version out of an `XTestGetVersion` reply: `(client_major, client_minor)`.
+/// `XTESTGetVersion`'s `(major, minor)`, from its reply.
+///
+/// **`Rdr` panics past the end, so the length is checked here.** A short reply has no version in it,
+/// and `(0, 0)` is what a build without `XTEST` -- or a server that refused the request -- should
+/// look like to a caller deciding whether to use it. Returning zeros rather than unwrapping a slice
+/// makes a refusal and an absence indistinguishable, which is the honest answer: neither one is a
+/// version this client can use.
 pub fn version(reply: &[u8]) -> (u32, u32) {
+    if reply.len() < 20 {
+        return (0, 0);
+    }
     let mut r = Rdr::new(reply);
     r.skip(12);
     (r.u32(), r.u32())
@@ -317,6 +327,34 @@ pub fn version(reply: &[u8]) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A short reply is `(0, 0)`, not a panic.**
+    ///
+    /// `Rdr` panics when a field falls past the end of its buffer, and `version` read twenty bytes
+    /// out of whatever it was handed. A caller deciding whether `XTEST` is usable gets that reply
+    /// from the connection layer, which hands over *exactly* the size the protocol says the packet
+    /// is -- so the lengths agree for every real server.
+    ///
+    /// **But the check is here anyway**, because a build without `XTEST` answers
+    /// `QueryExtension` with a short reply, and the two cases have to look the same to the caller:
+    /// neither one is a version this client can use. Returning zeros says exactly that, and
+    /// unwrapping a slice out of a 19-byte buffer would say something else.
+    #[test]
+    fn a_short_reply_is_a_version_nobody_can_use_rather_than_a_panic() {
+        // A reply the protocol says is 20 bytes and a reply that is 19 bytes long.
+        let mut full = vec![0u8; 20];
+        full[12..16].copy_from_slice(&2u32.to_le_bytes());
+        full[16..20].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(version(&full), (2, 3), "the two u32s are at offsets 12 and 16");
+
+        for short in [0usize, 1, 8, 19] {
+            assert_eq!(
+                version(&vec![0u8; short]),
+                (0, 0),
+                "a {short}-byte reply has no version in it"
+            );
+        }
+    }
 
     /// The 36-byte layout: 4 header + type, detail, 2 pad, delay, root, 8 pad, x, y, 7 pad, device.
     #[test]
