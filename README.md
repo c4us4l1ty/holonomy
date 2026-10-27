@@ -6,7 +6,8 @@ itself, and once it has opened its container it cannot open anything else.
 
 The project is being built in phases, each one ending in a gate with recorded evidence. It is not
 finished. `PROJECT.md` is the build plan and the authority on scope; this file is the map.
-(cargo run --release --features desktop -- --window)
+
+cargo run --release --features desktop -- --window
 ---
 
 ## What it is
