@@ -125,12 +125,15 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
 /// **It was six, and part 46 removed `Comment`.** The count is in the type as well as the value, so
 /// dropping a tool from the list without dropping the array length is a compile error rather than a
 /// gate that quietly measures one fewer thing.
-const STILL_INERT: [Tool; 5] = [
+const STILL_INERT: [Tool; 8] = [
+    Tool::Search,
     Tool::Spellcheck,
     Tool::PaintFormat,
+    Tool::FontSize,
     Tool::Underline,
     Tool::Highlight,
     Tool::Link,
+    Tool::Comment,
 ];
 
 /// **Pressing every tool and counting the ones with nothing behind them.

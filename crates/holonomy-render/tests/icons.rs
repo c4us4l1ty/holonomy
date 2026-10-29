@@ -213,7 +213,7 @@ fn the_all_list_and_the_match_agree() {
     // failing on a number rather than on a missing reference.**
     assert_eq!(
         IconId::ALL.len(),
-        32,
+        34,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. Part 33 removed \
          `Print` and part 46 removed `Comment`, both rather than wired."

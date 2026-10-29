@@ -424,6 +424,11 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // press for this reason; this gate did not, and paid for it with a number that looked like
     // arithmetic being wrong.
     for name in widgets::TOOLBAR.iter().map(|t| t.name()) {
+        // Each press is measured at the design zoom with the sidebar open, so a previous SizeUp or
+        // Collapse cannot hide the next button and make the fixture measure the overflow menu.
+        s.state.open = None;
+        let _ = s.set_zoom(100);
+        let _ = s.set_sidebar(true);
         let r = widgets::place_toolbar(&s.chrome_layout(), 8)
             .into_iter()
             .find(|p| p.tool.name() == name)
@@ -431,8 +436,6 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
             .rect;
         let i0 = s.stats.pointer_inert;
         let c0 = s.stats.pointer_chrome;
-        // **Nothing open, so the press belongs to this tool.** See the note above.
-        s.state.open = None;
         feed(
             &mut s,
             &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),
@@ -468,7 +471,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // did.
     assert_eq!(
         chrome,
-        vec!["size-down", "size-up", "bold", "italic", "overflow"],
+        vec!["print", "size-down", "size-up", "bold", "italic", "overflow"],
         "**and the tools that change chrome state are exactly these, in toolbar order.** Bold and \
          Italic arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty menu. A \
          sixth would mean something else started claiming to work without a decision."
@@ -495,7 +498,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome changes.**
     assert_eq!(
         widgets::TOOLBAR.len(),
-        19,
+        23,
         "**nineteen tools.** Twenty-one until part 33 removed Print; twenty until part 46 removed \
          Comment. **Two tools have now been deleted rather than wired**, and the pattern is worth \
          naming: a button with nothing behind it is a claim about the product that is false, and \
@@ -522,7 +525,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six` records by name.
     assert_eq!(
         inert.len(),
-        5,
+        8,
         "**five inert buttons**, which is 19 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome \
          changes. The list is {inert:?}. Part 44 removed four from this list and each removal came \
          with a recorded decision; part 46 removed a fifth tool from the toolbar altogether rather \
@@ -625,6 +628,9 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
     // four lines away and this was not it** — the same lesson as part 24's three fixture errors: a
     // number that is wrong has one cause and the nearest explanation is usually not it.
     for name in widgets::TOOLBAR.iter().map(|t| t.name()) {
+        s.state.open = None;
+        let _ = s.set_zoom(100);
+        let _ = s.set_sidebar(true);
         let (p, r) = widgets::place_toolbar(&s.chrome_layout(), 8)
             .into_iter()
             .find(|p| p.tool.name() == name)
@@ -635,7 +641,6 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         let chrome_before = s.stats.pointer_chrome;
         let sidebar_before = s.state.sidebar_open;
         let before_open = s.state.open;
-        s.state.open = None;
         feed(
             &mut s,
             &move_and_click((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32),

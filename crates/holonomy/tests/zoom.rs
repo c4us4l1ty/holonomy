@@ -238,12 +238,12 @@ fn the_page_and_its_layout_do_depend_on_the_zoom() {
     let pa = a.chrome_layout().page;
     let pb = b.chrome_layout().page;
     assert_eq!(
-        pa.x + pa.width / 2,
-        pb.x + pb.width / 2,
-        "**and both pages are centred on the same axis** -- {} and {}. `Layout::new` subtracts the \
-         sidebar reservation before centring, and a wider page must not drift.",
-        pa.x + pa.width / 2,
-        pb.x + pb.width / 2
+        pa.x,
+        pb.x,
+        "**and both pages keep the same left edge** -- {} and {}. The Plan chrome keeps the sheet \
+         a fixed gutter past the document-tabs rail, so a wider page grows to the right.",
+        pa.x,
+        pb.x
     );
 }
 
@@ -427,7 +427,7 @@ fn l_page_width(s: &Session<'_>) -> u32 {
 /// The page's width **in cells** -- the measure -- which is what a zoom has to change.
 fn columns_at(s: &Session<'_>) -> u32 {
     let l = s.chrome_layout();
-    let pad = 2 * 48; // the page's horizontal padding, in pixels
+    let pad = 2 * s.chrome.metrics.page_pad; // the page's horizontal padding, in pixels
     (l.page.width.saturating_sub(pad)) / s.chrome.metrics.cell_w.max(1)
 }
 

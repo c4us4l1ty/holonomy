@@ -353,10 +353,12 @@ fn the_armed_button_draws_a_surface_where_an_unarmed_one_does_not() {
     park_pointer(&mut s);
     s.repaint_all().expect("paint");
 
-    // **The corner pixel of the button's rect**, where a glyph is not: the icon is centred and the fill
-    // is not. **A pixel rather than a label, because the fill draws no text** — which is why deleting
-    // `StyleFlags::SLOTS` did not break the chrome's label list.
-    let probe = |s: &Session<'_>, r: holonomy_render::DamageRect| s.frame().pixel(r.x + 1, r.y + 1);
+    // **A top-centre pixel of the button's rect**, where a glyph is not: the icon is centred and the
+    // fill is not. The Plan chrome's buttons are rounded, so the old corner pixel now lies outside the
+    // rounded surface; the top-centre pixel is inside it and still clear of the icon.
+    let probe = |s: &Session<'_>, r: holonomy_render::DamageRect| {
+        s.frame().pixel(r.x + r.width / 2, r.y + 1)
+    };
     let plain_bold = probe(&s, bold);
     let plain_italic = probe(&s, italic);
 

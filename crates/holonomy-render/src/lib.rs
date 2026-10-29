@@ -47,8 +47,8 @@ pub use math_layout::{
 };
 pub use table::{BorderIter, BorderRun, GridError, TableGrid};
 pub use tree::{
-    DocRun, Icon, Node, NodeKind, Raster, RasterSource, Rect, RepeatRun, Style, SurfaceTree, TextRun,
-    TextSource,
+    DocRun, Icon, Label, Node, NodeKind, Raster, RasterSource, Rect, RepeatRun, RoundRect, Style,
+    SurfaceTree, TextRun, TextSource,
 };
 // `Node::Image` carries an `AssetId` and `RasterSource::raster` is keyed by one, so a consumer of
 // either needs the type in scope. Re-exported here because `tree` is private and the alternative is
