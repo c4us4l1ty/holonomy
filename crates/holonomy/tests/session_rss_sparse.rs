@@ -181,6 +181,9 @@ fn the_maximum_document_opens_through_the_sparse_path() {
 /// 262,080-byte window, so their residency is identical and their difference is entirely the container's.
 #[test]
 fn the_marginal_cost_of_a_document_byte_falls_as_the_document_grows() {
+    if skip_without_an_optimised_build("the marginal RSS cost") {
+        return;
+    }
     let budget = DEFAULT_RESIDENT_SECTIONS;
     let mut readings = Vec::new();
     for len in [256 * 1024usize, 1024 * 1024, 4 * 1024 * 1024, MAX_DOCUMENT] {

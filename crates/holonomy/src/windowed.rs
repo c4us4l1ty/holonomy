@@ -82,12 +82,13 @@ impl std::fmt::Display for WindowedError {
 
 impl std::error::Error for WindowedError {}
 
-/// A quarter of the blink period: how long the loop waits for an event before giving up and ticking.
+/// One 60 Hz frame: how long the loop waits for an event before giving up and ticking.
 ///
-/// A blink period of 500 ms divided by four. The loop has no other timer, so this is also the loop's
-/// frame rate when nothing is happening: 4 wake-ups a second, no pixels, which is why the window costs
-/// nothing between keystrokes.
-pub const EVENT_WAIT: Duration = Duration::from_millis(Blink::DEFAULT_PERIOD as u64 / 4);
+/// `Blink` counts frames, so the idle tick has to arrive at the frame rate the blink period
+/// assumes. The old `DEFAULT_PERIOD / 4` was 7 ms (~143 wakes/s) and still advanced only one
+/// blink frame per wake, so it burned CPU without making the caret blink at the documented
+/// cadence. 16 ms is ~60 wakes/s, no pixels between keystrokes.
+pub const EVENT_WAIT: Duration = Duration::from_millis(16);
 
 /// Run a session in a window until Ctrl+Q, the window is closed, or the display goes away.
 ///

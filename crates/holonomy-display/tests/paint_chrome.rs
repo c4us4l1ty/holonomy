@@ -454,8 +454,8 @@ fn a_blink_cycle_repaints_exactly_the_caret_cell_each_time() {
         frames += 1;
     }
     assert_eq!(
-        repaints, 1,
-        "one second at a 30-frame period flips once, to visible"
+        repaints, 2,
+        "one second at a 30-frame period flips twice: visible -> hidden and hidden -> visible"
     );
     assert!(
         total_pixels <= cell_px * 8,

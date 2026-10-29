@@ -578,23 +578,14 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
     /// not. One `pread64` of 4 KiB against a 64 KiB write, taken from the authoritative
     /// copy, is what makes the nonce un-repeatable even across a failed write and a retry.
     ///
-    /// **The slot stops being resident when it is sealed, not when the write lands.**
+    /// **The slot stops being resident only when the write lands.**
     ///
-    /// Sealing happened in place, so from that point on the slot holds ciphertext while
-    /// `resident` would still be claiming it holds chunk `index` as plaintext. Both flags
-    /// are therefore cleared *before* the write, which is the whole fix: they used to be
-    /// cleared after it, so a `write_exact_at` that failed left a slot marked resident and
-    /// dirty that held sealed bytes. Two things then followed from that one ordering, and
-    /// the second is unrecoverable.
-    ///
-    /// `ensure_center_loaded` returns early when `resident[slot] == Some(center)`, so the
-    /// next `read_content` handed the ciphertext back as document text. And because
-    /// `dirty` was still set, a *retry* re-sealed that ciphertext and wrote the result as
-    /// the chunk's plaintext — a chunk that had merely failed to save is now garbage, and
-    /// nothing in the format can tell it from real content. That is why the flags are
-    /// dropped first and the slot is wiped below rather than left holding sealed bytes
-    /// for a retry to find: **the plaintext is already gone either way, so the honest
-    /// state is "not resident", which forces the next read to re-fetch from the disk.**
+    /// Sealing happens in place, so between `seal_in_place` and a successful write the slot
+    /// holds ciphertext. On success both flags are cleared and the next read re-fetches from
+    /// disk. On failure the ciphertext is opened back into plaintext *in the same slot* and
+    /// the dirty/resident flags are kept, so the edit survives for a retry. If recovery ever
+    /// fails, the slot is wiped and both flags are dropped rather than leaving sealed bytes
+    /// that a later commit could re-seal as document text.
     ///
     /// **A failure before the seal leaves the edit exactly where it was.** The predecessor
     /// tag is read first, so a closed descriptor fails there — with the plaintext still in
@@ -623,15 +614,21 @@ pub fn stage_plaintext(&mut self, index: u64, plaintext: &[u8]) -> Result<(), Ri
             CHUNK_PLAINTEXT,
             self.slots[slot].as_mut_slice(),
         )?;
-        self.dirty[slot] = false;
-        self.resident[slot] = None;
         if let Err(e) = file.write_exact_at(layout::chunk_offset(omega, index), &self.slots[slot]) {
-            // Wipe what was sealed but never stored, so no ciphertext derived from a live
-            // document key is left sitting in a slot that a later `stage_plaintext` could
-            // mistake for a blank.
-            self.slots[slot].wipe();
+            // **A failed write must not discard the edit.** The slot still holds the exact
+            // ciphertext we just produced, so `open_chunk` can decrypt it back into the same
+            // plaintext in place -- no fourth 64 KiB buffer, and the dirty/resident flags stay
+            // set for a retry. If that recovery ever fails, wipe and drop the flags rather than
+            // leave a slot that a later commit could re-seal as document text.
+            if aead::open_chunk(k_enc, n_root, index, self.slots[slot].as_mut_slice()).is_err() {
+                self.slots[slot].wipe();
+                self.dirty[slot] = false;
+                self.resident[slot] = None;
+            }
             return Err(e.into());
         }
+        self.dirty[slot] = false;
+        self.resident[slot] = None;
         Ok(true)
     }
 

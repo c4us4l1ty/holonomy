@@ -257,7 +257,7 @@ impl TeardownPlan {
                     unsafe {
                         libc::ioctl(
                             fd,
-                            DRM_IOCTL_MODE_DESTROY_DUMB as libc::c_int,
+                            DRM_IOCTL_MODE_DESTROY_DUMB as _,
                             &arg as *const DrmModeDestroyDumb as *mut libc::c_void,
                         );
                     }

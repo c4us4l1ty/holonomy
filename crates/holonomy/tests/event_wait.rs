@@ -37,9 +37,11 @@ use std::io::Write;
 use std::os::fd::RawFd;
 
 use holonomy::session::Session;
+use holonomy::store::NoSource;
+use holonomy::Exit;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
-use holonomy_input::{Event, InputError, InputSource, Wait};
+use holonomy_input::{Event, InputError, InputEvent, InputSource, KEY_A, Wait};
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_text::{Editor, SpanPolicy};
 
@@ -256,5 +258,48 @@ fn the_session_loop_waits_indefinitely_and_says_why() {
         "`Blink::DEFAULT_PERIOD` is 30 *frames* documented as 'half a second at 60 fps'. Driving the \
          blink on time needs 60 iterations a second, which is 0.12 % -- 120x the budget. The fix is \
          `CLOCK_MONOTONIC` (already allowlisted), not a faster loop."
+    );
+}
+/// A `Ready` with no event behind it is a spurious wake, not end-of-stream. The loop must tick
+/// and ask again; the next real keystroke still has to land.
+#[test]
+fn a_spurious_ready_does_not_end_the_session_before_the_next_key() {
+    struct SpuriousThenKey {
+        phase: u8,
+    }
+    impl InputSource for SpuriousThenKey {
+        fn describe(&self) -> &'static str {
+            "spurious Ready, then one key"
+        }
+        fn next_event(&mut self) -> Result<Option<Event>, InputError> {
+            if self.phase == 1 {
+                self.phase = 2;
+                Ok(Some(Event::Key(InputEvent::press(KEY_A))))
+            } else {
+                Ok(None)
+            }
+        }
+        fn wait(&mut self, _timeout_ms: i32) -> Result<Wait, InputError> {
+            if self.phase == 0 {
+                self.phase = 1;
+                Ok(Wait::Ready)
+            } else {
+                Ok(Wait::Ended)
+            }
+        }
+    }
+
+    let mut s = session();
+    let before = s.text_len();
+    let mut source = SpuriousThenKey { phase: 0 };
+    let mut sinks = [];
+    let exit = s
+        .run_with_io(&mut NoSource, &mut source, &mut sinks)
+        .expect("run");
+    assert_eq!(exit, Exit::StreamEnded);
+    assert_eq!(
+        s.text_len(),
+        before + 1,
+        "the key after the spurious wake was dropped"
     );
 }
