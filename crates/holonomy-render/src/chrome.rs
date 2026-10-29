@@ -42,7 +42,7 @@
 //!
 //! [`TextRun`]: crate::TextRun
 
-use crate::tree::{Rect, Style, SurfaceTree, TextRun};
+use crate::tree::{Label, Rect, RoundRect, Style, SurfaceTree, TextRun};
 use crate::DamageRect;
 
 // ---------------------------------------------------------------- the palette
@@ -54,41 +54,41 @@ use crate::DamageRect;
 /// "opaque" would be relying on a mask three crates away.
 pub mod colour {
     /// The panel behind everything.
-    pub const CHROME: u32 = 0xFF1E_1E22;
+    pub const CHROME: u32 = 0xFFF8_FAFD;
     /// The document page.
-    pub const PAGE: u32 = 0xFFFA_FAF8;
+    pub const PAGE: u32 = 0xFFFF_FFFF;
     /// A band that is one step lighter than the chrome: the toolbar and the status bar.
-    pub const BAND: u32 = 0xFF2A_2A30;
+    pub const BAND: u32 = 0xFFF8_FAFD;
     /// Rules, separators and box drawing.
-    pub const RULE: u32 = 0xFF5A_5A66;
+    pub const RULE: u32 = 0xFFC4_C7C5;
     /// A rule that is *incidental* -- a tick, a gutter marker.
-    pub const RULE_DIM: u32 = 0xFF3E_3E48;
+    pub const RULE_DIM: u32 = 0xFFE0_E0E0;
     /// Body text on the page.
-    pub const INK: u32 = 0xFF18_181C;
+    pub const INK: u32 = 0xFF1F_1F1F;
     /// Chrome text.
-    pub const INK_CHROME: u32 = 0xFFD8_D8E0;
+    pub const INK_CHROME: u32 = 0xFF44_4746;
     /// Chrome text that is inactive or merely informational.
-    pub const INK_DIM: u32 = 0xFF8A_8A96;
+    pub const INK_DIM: u32 = 0xFF74_7775;
     /// The text on a button: one step brighter than [`INK_CHROME`].
     ///
     /// **Separate from `INK_CHROME` so "this item is selected" is a colour rather than a rectangle.**
     /// The reference's open menu heading is the same weight and a slightly brighter ink inside the
     /// same pill, and a selected *item* inside a popup is the same again. Three states, two colours,
     /// and the third state is carried by the pill.
-    pub const INK_STRONG: u32 = 0xFFEA_EAF2;
+    pub const INK_STRONG: u32 = 0xFF1F_1F1F;
     /// The raised surface: the toolbar's pill, a button, a popup, a selected sidebar row.
     ///
     /// **One value for all four**, because they are the same surface at different sizes. Giving each
     /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
-    pub const PILL: u32 = 0xFF33_333C;
+    pub const PILL: u32 = 0xFFF0_F4F9;
     /// A hovered widget, one step above [`PILL`].
     ///
     /// **A separate value rather than `PILL_ACTIVE` reused for hover.** The two are one step apart on
     /// purpose: hover is "you are here" and press is "this is happening", and a menu item that looked
     /// the same either way would not tell you which of the two your click had reached.
-    pub const PILL_HOVER: u32 = 0xFF38_3845;
+    pub const PILL_HOVER: u32 = 0xFFE8_EAED;
     /// A held or selected widget, one step above [`PILL_HOVER`].
-    pub const PILL_ACTIVE: u32 = 0xFF42_4252;
+    pub const PILL_ACTIVE: u32 = 0xFFD3_E3FD;
     /// **The document's selected bytes, behind the text.** Part 28.
     ///
     /// **A light blue and not a darker grey, and that is the one deliberate departure from this
@@ -102,7 +102,7 @@ pub mod colour {
     /// contrast problem the moment the document's own colour changes, and the page background is
     /// white. At 0xFFC8_D9F0 the worst case is a document in near-black on near-white, which is
     /// legible at every selection the user can make.
-    pub const SELECTION: u32 = 0xFFC8_D9F0;
+    pub const SELECTION: u32 = 0xFFD3_E3FD;
     /// An open menu's panel, **lighter than everything it can be drawn over**.
     ///
     /// **This is the third surface and it needed its own value**, which the first version did not
@@ -110,7 +110,7 @@ pub mod colour {
     /// over the toolbar and the sidebar is then drawn in exactly the colour of both, and it reads as
     /// *floating text* rather than as a panel -- the items are legible and the menu is invisible.
     /// `a_popup_is_a_lighter_plane_than_anything_it_covers` is the gate, and it would have caught it.
-    pub const POPUP: u32 = 0xFF46_4654;
+    pub const POPUP: u32 = 0xFFFF_FFFF;
     /// **The one-pixel rim around a popup**, and the rule under the heading that opened it.
     ///
     /// **`POPUP_EDGE` and not `RULE`.** `RULE` is `0xFF5A_5A66` and the popup's own fill is
@@ -123,7 +123,7 @@ pub mod colour {
     /// digits `FF5E | 5E | 6E`. **Same value, and the only reason it matters is that a colour read at
     /// 3am is compared digit by digit against its neighbours**: one constant in twenty with a different
     /// shape is the one that gets misread.
-    pub const POPUP_EDGE: u32 = 0xFF_5E_5E_6E;
+    pub const POPUP_EDGE: u32 = 0xFFE0_E0E0;
     /// **A popup's drop shadow**, in pixels: the width of the two flat bands down and to the right.
     ///
     /// **Three, the same as the page's, and not a hairline.** The two are the same device — a flat
@@ -131,17 +131,28 @@ pub mod colour {
     /// this cell size reads as a slightly wrong edge rather than as depth.
     pub const POPUP_SHADOW: u32 = 3;
     /// The `[SEALED]` badge: the one thing on screen that is a security claim.
-    pub const SEALED: u32 = 0xFF5A_C88A;
+    pub const SEALED: u32 = 0xFF13_7333;
     /// Accent for a toolbar toggle that is on.
-    pub const ACTIVE: u32 = 0xFF7A_B4E8;
+    pub const ACTIVE: u32 = 0xFF0B_57D0;
     /// The caret.
-    pub const CARET: u32 = 0xFF30_3038;
+    pub const CARET: u32 = 0xFF1F_1F1F;
     /// The scrollbar track.
-    pub const TRACK: u32 = 0xFF24_242A;
+    pub const TRACK: u32 = 0xFFF8_FAFD;
     /// The scrollbar thumb.
-    pub const THUMB: u32 = 0xFF6A_6A78;
+    pub const THUMB: u32 = 0xFFDA_DCE0;
     /// The page's drop shadow, as a flat band. A real gradient would need `f32` alpha.
-    pub const SHADOW: u32 = 0xFF16_161A;
+    pub const SHADOW: u32 = 0xFFE0_E0E0;
+    /// Google blue, for the document mark and active accents.
+    pub const BLUE: u32 = 0xFF42_85F4;
+    /// The cyan Share/Export pill.
+    pub const SHARE_BG: u32 = 0xFFC2_E7FF;
+    /// Ink on the cyan pill.
+    pub const SHARE_INK: u32 = 0xFF00_4A77;
+    /// The blue Upgrade/Local pill.
+    pub const UPGRADE_BG: u32 = 0xFFD3_E3FD;
+    /// Ink on the blue pill and selected sidebar row.
+    pub const UPGRADE_INK: u32 = 0xFF08_42A0;
+
 }
 
 // ---------------------------------------------------------------- the runes
@@ -306,23 +317,23 @@ impl ChromeMetrics {
     pub const DESKTOP: ChromeMetrics = ChromeMetrics {
         width: 1280,
         height: 800,
-        title_h: 30,
-        menu_h: 22,
+        title_h: 40,
+        menu_h: 32,
         // **256, and the table above is the reason.** `with_type_scale` deliberately does *not* scale
         // `sidebar_w`, because it is a distance and not a type size -- so this is 256 px of a 1,600 px
         // window at every type size, which is 16 % at the default 16 ppem and 20 % at the 1,280 px
         // design width.
-        sidebar_w: 256,
-        button: 26,
+        sidebar_w: 280,
+        button: 36,
         tab_h: 0,
-        toolbar_h: 34,
-        ruler_h: 20,
-        status_h: 20,
+        toolbar_h: 56,
+        ruler_h: 28,
+        status_h: 24,
         cell_w: 8,
         cell_h: 18,
-        page_pad: 48,
+        page_pad: 56,
         scrollbar_w: 12,
-        shadow: 3,
+        shadow: 1,
         columns: 72,
         // **72, and NOT the 88 this field held before part 39 -- which reverses part 27.**
         //
@@ -881,6 +892,10 @@ impl Layout {
             // sidebar's width is still reserved** — a page that started under the sidebar would put
             // the ruler's zero over a panel.
             (sidebar_w, 0)
+        } else if sidebar_w > 0 && page_w.saturating_add(24) <= desk {
+            // The reference keeps the sheet close to the document-tabs rail, not centred in the desk.
+            let left = sidebar_w + 24;
+            (left, m.width.saturating_sub(left + page_w))
         } else {
             let left = sidebar_w + (desk - page_w) / 2;
             (left, m.width.saturating_sub(left + page_w))
@@ -918,10 +933,10 @@ impl Layout {
             page_h.saturating_sub(m.page_pad * 2),
         );
         let scrollbar = DamageRect::new(
-            page_x.saturating_add(page_w).saturating_add(m.shadow),
-            page_y,
+            m.width.saturating_sub(m.scrollbar_w).saturating_sub(8),
+            canvas_y,
             m.scrollbar_w,
-            page_h,
+            canvas_h,
         );
 
         // Every band is clamped into the panel. The `y` accumulations above are `saturating_add`, but
@@ -944,15 +959,15 @@ impl Layout {
         // the sidebar" and "is the sidebar drawn" cannot disagree -- which is the failure that put a
         // 208 px empty band on the left of a window whose sidebar was closed.
         let sidebar = DamageRect::new(0, canvas_y, sidebar_w, canvas_h);
-        let head = sidebar.height.min(40);
-        let doc_row_h = m.cell_h.saturating_add(14).max(24);
+        let head = 160u32;
+        let doc_row_h = m.cell_h.saturating_add(24).max(48);
         // **At least one row, always.** A sidebar with room for no rows cannot show a document, and
         // "the panel is too short" is a resize rather than a state, so the honest answer is one row
         // clipped rather than none.
-        let rows_visible = (sidebar.height.saturating_sub(head + 16) / doc_row_h).max(1);
-        let sidebar_back = DamageRect::new(sidebar.x + 8, sidebar.y + 8, 24, 24);
+        let rows_visible = (sidebar.height.saturating_sub(head) / doc_row_h).max(1);
+        let sidebar_back = DamageRect::new(sidebar.x + 24, sidebar.y + 24, 32, 32);
         let sidebar_new =
-            DamageRect::new(sidebar.right().saturating_sub(32), sidebar.y + 10, 24, 24);
+            DamageRect::new(sidebar.right().saturating_sub(48), sidebar.y + 100, 32, 32);
         Self {
             width: m.width,
             height: m.height,
@@ -1132,11 +1147,11 @@ impl Layout {
         if i as u32 >= self.sidebar_rows {
             return None;
         }
-        let head = self.sidebar.height.min(40);
+        let head = 160u32;
         Some(DamageRect::new(
-            self.sidebar.x + 8,
-            self.sidebar.y + head + 16 + (i as u32) * self.sidebar_row_h,
-            self.sidebar.width.saturating_sub(16),
+            self.sidebar.x + 16,
+            self.sidebar.y + head + (i as u32) * self.sidebar_row_h,
+            self.sidebar.width.saturating_sub(32),
             self.sidebar_row_h.saturating_sub(4),
         ))
     }
@@ -2063,7 +2078,7 @@ impl Chrome {
                             m,
                             l.ruler.y,
                             &n,
-                            Style::MONOSPACE,
+                            Style::REGULAR,
                             colour::INK_DIM,
                             (x + w / 2).saturating_sub(w / 2) as i32,
                         );
@@ -2110,7 +2125,7 @@ impl Chrome {
                 m,
                 l.title.y + m.title_h.saturating_sub(m.cell_h) / 2,
                 "[SEALED]",
-                Style::MONOSPACE,
+                Style::REGULAR,
                 colour::SEALED,
                 // **`saturating_sub`, and it is the sixth bare subtraction in this file.**
                 //
@@ -2137,7 +2152,7 @@ impl Chrome {
             m,
             l.status.y + l.status.height.saturating_sub(m.cell_h) / 2,
             &status,
-            Style::MONOSPACE,
+            Style::REGULAR,
             colour::INK_DIM,
             m.cell_w as i32,
         );
@@ -2205,6 +2220,15 @@ impl Chrome {
             l.page.height,
             colour::PAGE,
         ));
+        // A hairline border, as the reference's sheet has.
+        for (bx, by, bw, bh) in [
+            (l.page.x, l.page.y, l.page.width, 1),
+            (l.page.x, l.page.bottom().saturating_sub(1), l.page.width, 1),
+            (l.page.x, l.page.y, 1, l.page.height),
+            (l.page.right().saturating_sub(1), l.page.y, 1, l.page.height),
+        ] {
+            page.before.push(fill(bx as i32, by as i32, bw, bh, colour::RULE));
+        }
         // Scrollbar rail and thumb.
         page.before.push(fill(
             l.scrollbar.x as i32,
@@ -2214,11 +2238,12 @@ impl Chrome {
             colour::TRACK,
         ));
         let thumb = self.scroll_thumb(state);
-        page.before.push(fill(
-            thumb.x as i32,
+        page.before.push(rounded(
+            thumb.x as i32 + 2,
             thumb.y as i32,
-            thumb.width,
+            thumb.width.saturating_sub(4),
             thumb.height,
+            6,
             colour::THUMB,
         ));
         root.before.push(page);
@@ -2228,10 +2253,11 @@ impl Chrome {
         let mut overlay = SurfaceTree::group();
         if state.caret_visible {
             if let Some(caret) = Caret::locate(l, m, state) {
+                // A thin insertion caret, as the reference draws; the damage cell stays one cell.
                 overlay.before.push(fill(
                     caret.cell.x as i32,
                     caret.cell.y as i32,
-                    caret.cell.width,
+                    2,
                     caret.cell.height,
                     colour::CARET,
                 ));
@@ -2279,6 +2305,11 @@ pub const fn sidebar_reservation(open: bool) -> u32 {
 /// four billion pixels.
 fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
     SurfaceTree::leaf(crate::Node::Rect(Rect::new(x, y, width, height, colour)))
+}
+
+/// A rounded rectangle, as a tree node.
+fn rounded(x: i32, y: i32, width: u32, height: u32, radius: u32, colour: u32) -> SurfaceTree {
+    SurfaceTree::leaf(crate::Node::RoundRect(RoundRect::new(x, y, width, height, radius, colour)))
 }
 
 // ---------------------------------------------------------------- pointer state
@@ -2348,71 +2379,47 @@ fn state_fill(state: &ChromeState, h: crate::widgets::Hit) -> Option<u32> {
 /// whatever room is left rather than a fixed column. A fixed column is a fixed column that a long
 /// document name eventually overflows, and overflow at the left of a title bar truncates the mark.
 fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
-    into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::BAND));
-
-    // The app mark: a document icon, at the left, at the band's own size rather than the toolbar's.
+    into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::CHROME));
     let icon_y = l.title.y + m.title_h.saturating_sub(crate::icons::SIZE) / 2;
     into.push(SurfaceTree::leaf(crate::Node::Icon(
-        crate::icons::IconId::Doc.at(14, icon_y as i32, colour::INK_CHROME),
+        crate::icons::IconId::Doc.at(24, icon_y as i32, colour::BLUE),
     )));
-    push_text(
-        into,
-        m,
-        l.title.y + m.title_h.saturating_sub(m.cell_h) / 2,
-        &state.title,
-        Style::MONOSPACE,
-        colour::INK_CHROME,
-        14 + crate::icons::SIZE as i32 + 10,
-    );
+    let title_x = 24 + crate::icons::SIZE as i32 + 12;
+    let title_y = l.title.y + m.title_h.saturating_sub(m.cell_h) / 2;
+    // Keep a long document name clear of the star/folder/cloud group that follows it.
+    let left_group_x = m.cell_w.saturating_mul(32) as i32;
+    let title_cells = ((left_group_x - title_x - 8).max(0) as u32) / m.cell_w.max(1);
+    push_text(into, m, title_y, &fit_to_width(&state.title, m.cell_w, title_cells), Style::REGULAR, colour::INK, title_x);
 
     for (btn, r) in crate::widgets::place_title(l, crate::widgets::TITLE_PAD) {
-        let icon = match btn {
-            crate::widgets::TitleButton::Star => crate::icons::IconId::Star,
-            crate::widgets::TitleButton::Folder => crate::icons::IconId::Folder,
-            crate::widgets::TitleButton::Cloud => crate::icons::IconId::Cloud,
-            crate::widgets::TitleButton::History => crate::icons::IconId::History,
-            crate::widgets::TitleButton::Share => crate::icons::IconId::Lock,
-        };
-        // **Share is a button with a label**, so it is drawn as one; the rest are the icon alone,
-        // centred in their own box.
-        if let Some(c) = state_fill(state, crate::widgets::Hit::Title(btn)) {
-            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
-        }
-        // **Share is the one button that is an icon *and* a label, and they are laid out left to right.**
-        //
-        // The first version centred the lock in the button and then drew "Share" at a fixed offset
-        // from the left, so a 110 px button put the lock at x + 47 and the text at x + 30 -- the text
-        // started *before* the icon and ran through it. The fix is not a bigger offset, it is that a
-        // button with a label does not centre its icon: the icon goes where the label goes, and the
-        // label follows it. That is why this is a branch and not a constant.
-        if matches!(btn, crate::widgets::TitleButton::Share) {
-            into.push(fill(
-                r.x as i32,
-                r.y as i32,
-                r.width,
-                r.height,
-                colour::PILL,
-            ));
+        use crate::widgets::TitleButton as B;
+        let pill = matches!(btn, B::Share | B::Upgrade);
+        if pill {
+            let (bg, ink) = if btn == B::Share { (colour::SHARE_BG, colour::SHARE_INK) } else { (colour::UPGRADE_BG, colour::UPGRADE_INK) };
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, bg));
             let cy = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
-            let ix = r.x + m.cell_w / 2;
-            into.push(SurfaceTree::leaf(crate::Node::Icon(
-                crate::icons::IconId::Lock.at(
-                    ix as i32,
-                    r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
-                    colour::INK_CHROME,
-                ),
-            )));
-            push_text(
-                into,
-                m,
-                cy,
-                "Share",
-                Style::MONOSPACE,
-                colour::INK_CHROME,
-                ix as i32 + crate::icons::SIZE as i32 + m.cell_w as i32 / 2,
-            );
+            if btn == B::Share {
+                into.push(SurfaceTree::leaf(crate::Node::Icon(
+                    crate::icons::IconId::Lock.at(r.x as i32 + 12, r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2, ink),
+                )));
+                push_text(into, m, cy, "Export", Style::REGULAR, ink, r.x as i32 + 12 + crate::icons::SIZE as i32 + 6);
+            } else {
+                push_text(into, m, cy, "Local", Style::REGULAR, ink, r.x as i32 + 16);
+            }
             continue;
         }
+        if let Some(c) = state_fill(state, crate::widgets::Hit::Title(btn)) {
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
+        }
+        let icon = match btn {
+            B::Star => crate::icons::IconId::Star,
+            B::Folder => crate::icons::IconId::Folder,
+            B::Cloud => crate::icons::IconId::Cloud,
+            B::History => crate::icons::IconId::History,
+            B::Comments => crate::icons::IconId::Comment,
+            B::Sparkle => crate::icons::IconId::Sparkle,
+            B::Share | B::Upgrade => unreachable!(),
+        };
         let ix = r.x + (r.width.saturating_sub(crate::icons::SIZE)) / 2;
         into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
             ix as i32,
@@ -2440,22 +2447,16 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // is on it, because it stays filled after the pointer leaves -- and a heading that lost its
         // fill the moment the pointer left would tell the user the menu had closed.
         if open {
-            into.push(fill(
-                r.x as i32,
-                r.y as i32,
-                r.width,
-                r.height,
-                colour::PILL,
-            ));
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, 6, colour::PILL));
         } else if let Some(c) = state_fill(state, crate::widgets::Hit::Menu(i)) {
-            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, 6, c));
         }
         push_text(
             into,
             m,
             r.y + (r.height.saturating_sub(m.cell_h)) / 2,
             MENUS[i],
-            Style::MONOSPACE,
+            Style::REGULAR,
             if open {
                 colour::INK_STRONG
             } else {
@@ -2502,67 +2503,15 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     let x = pop.rect.x as i32;
     let y = pop.rect.y as i32;
 
-    into.push(fill(x, y, pop.rect.width, pop.rect.height, colour::POPUP));
-    // **The shadow, and the border, and they are why the popup reads as floating.**
-    //
-    // The shadow is two flat bands rather than a ramp, for the reason the page's is: alpha is masked
-    // off in `Frame` and a gradient would need `f32`. It is drawn **before** the panel and **inside**
-    // the panel's own rectangle, because a popup near the right or bottom edge has nowhere outside
-    // itself to put a shadow and a shadow that falls off the panel would be a shadow on the desktop.
-    into.push(fill(
-        x,
-        // **`POPUP_SHADOW as i32` and not a plain `POPUP_SHADOW`.** The shadow band's height is a
-        // `u32` constant and the expression below it is `i32` arithmetic; the cast is the conversion,
-        // and `saturating_sub` is what keeps a panel near the top of the window from wrapping.
-        (y + pop.rect.height as i32).saturating_sub(colour::POPUP_SHADOW as i32),
-        pop.rect.width,
-        colour::POPUP_SHADOW,
-        colour::SHADOW,
-    ));
-    into.push(fill(
-        (x + pop.rect.width as i32).saturating_sub(colour::POPUP_SHADOW as i32),
-        y,
-        colour::POPUP_SHADOW,
-        pop.rect.height,
-        colour::SHADOW,
-    ));
-    // A one-pixel rim on three sides. **Not a full outline:** the rule under the heading is the fourth
-    // side, and it is drawn next in `POPUP_EDGE` so the panel does not read as a box with a lid.
-    for (rx, ry, rw, rh) in [
-        (x, y, pop.rect.width, 1),
-        (x, y, 1, pop.rect.height),
-        (
-            x + pop.rect.width as i32 - 1,
-            y,
-            1,
-            pop.rect.height,
-        ),
-    ] {
-        into.push(fill(rx, ry, rw, rh, colour::POPUP_EDGE));
-    }
-    // The rule under the heading, which is what makes a popup read as *belonging to* that heading
-    // rather than as a floating panel.
-    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
-        x,
-        y + 1,
-        pop.rect.width,
-        1,
-        colour::POPUP_EDGE,
-    ))));
-
+    into.push(rounded(x + 2, y + 3, pop.rect.width, pop.rect.height, 8, colour::SHADOW));
+    into.push(rounded(x, y, pop.rect.width, pop.rect.height, 8, colour::POPUP));
     for (i, it) in items.iter().enumerate() {
         let Some(row) = pop.rows.get(i) else { break };
         // **Hover and press come from the session, not from a re-hit-test here.** The painter does not
         // know where the pointer is -- it is told. A painter that re-derived the hit would be a second
         // hit test, which is the thing that has just been removed.
         if row_is_live(state, pop.open, i) {
-            into.push(fill(
-                row.x as i32,
-                row.y as i32,
-                row.width,
-                row.height,
-                colour::PILL_ACTIVE,
-            ));
+            into.push(rounded(row.x as i32 + 4, row.y as i32, row.width.saturating_sub(8), row.height, 6, colour::PILL_HOVER));
         }
         let cy = row.y + (row.height.saturating_sub(m.cell_h)) / 2;
         let icon_y = row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2;
@@ -2575,7 +2524,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         // zoom dropdown in the reference's screenshot has a tick on its current value.**
         if it.checked {
             into.push(SurfaceTree::leaf(crate::Node::Icon(
-                crate::icons::IconId::Check.at(x + pad as i32, icon_y, colour::INK_STRONG),
+                crate::icons::IconId::Check.at(x + pad as i32, icon_y, colour::ACTIVE),
             )));
         }
         // **Then the icon, one column right of where the tick would be**, so a row with a tick and an
@@ -2625,12 +2574,8 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                 m.cell_w,
                 label_cells,
             ),
-            Style::MONOSPACE,
-            if it.checked {
-                colour::INK_STRONG
-            } else {
-                colour::INK_CHROME
-            },
+            Style::REGULAR,
+            colour::INK,
             label_x,
         );
         // **The accelerator, right-aligned, because the reference puts it there** and a reader looking
@@ -2642,7 +2587,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                     m,
                     cy,
                     acc,
-                    Style::MONOSPACE,
+                    Style::REGULAR,
                     colour::INK_DIM,
                     // The same fault as the dirty-dot, in the popup's accelerator column: a popup
                     // narrower than its own padding plus one character of text underflows. **Both are
@@ -2692,21 +2637,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         l.width.saturating_sub(16),
         l.toolbar.height.saturating_sub(6),
     );
-    into.push(fill(
-        pill.x as i32,
-        pill.y as i32,
-        pill.width,
-        pill.height,
-        colour::PILL,
-    ));
-    // Subtle border around toolbar pill for clean, modern appearance matching reference design
-    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
-        pill.x as i32,
-        pill.y as i32,
-        pill.width,
-        1,
-        colour::PILL_HOVER,
-    ))));
+    into.push(rounded(pill.x as i32, pill.y as i32, pill.width, pill.height, pill.height / 2, colour::PILL));
 
     let mut prev_separated = false;
     for p in crate::widgets::place_toolbar(l, crate::widgets::TOOLBAR_PAD) {
@@ -2743,13 +2674,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // which is the point of the state surface -- it is behind the thing it is a state of. Drawing
         // it after would put a rectangle over the icon and make a hovered button look pressed-in.
         if let Some(c) = state_fill(state, crate::widgets::Hit::Tool(p.tool)) {
-            into.push(fill(
-                p.rect.x as i32,
-                p.rect.y as i32,
-                p.rect.width,
-                p.rect.height,
-                c,
-            ));
+            into.push(rounded(p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 8, c));
         }
 
         // **An armed toggle, drawn between the hover surface and the glyph.** Part 25.
@@ -2772,13 +2697,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // point: the state is the document's, not the pointer's.
         if let Some(slot) = crate::chrome::StyleFlags::slot_for(p.tool) {
             if state.styles.get(slot) {
-                into.push(fill(
-                    p.rect.x as i32,
-                    p.rect.y as i32,
-                    p.rect.width,
-                    p.rect.height,
-                    colour::PILL_ACTIVE,
-                ));
+                into.push(rounded(p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 8, colour::PILL_ACTIVE));
             }
         }
 
@@ -2811,21 +2730,30 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 m,
                 p.rect.y + (p.rect.height.saturating_sub(m.cell_h)) / 2,
                 &p.tool.label(state),
-                Style::MONOSPACE,
+                Style::REGULAR,
                 colour::INK_CHROME,
                 // **`ih` and not `ih as i32`.** The icon size is cast to `i32` once, on the line that
                 // binds it, because every use here is `i32` arithmetic on a `u32` rectangle -- and a
                 // cast repeated at four call sites is four places to keep in step.
                 ix + ih + 4,
             );
-            // The chevron that says "this opens a popup".
-            into.push(SurfaceTree::leaf(crate::Node::Icon(
-                crate::icons::IconId::ChevronDown.at(
-                    p.rect.right() as i32 - ih - 4,
-                    iy,
-                    colour::INK_DIM,
-                ),
-            )));
+            // The chevron that says "this opens a popup". The font-size box is a value, not a menu.
+            if p.tool.has_dropdown() {
+                into.push(SurfaceTree::leaf(crate::Node::Icon(
+                    crate::icons::IconId::ChevronDown.at(
+                        p.rect.right() as i32 - ih - 4,
+                        iy,
+                        colour::INK_DIM,
+                    ),
+                )));
+            } else {
+                into.push(SurfaceTree::leaf(crate::Node::RoundRect(crate::RoundRect::new(
+                    p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 6, colour::PAGE,
+                ))));
+                // redraw label over the box
+                push_text(into, m, p.rect.y + (p.rect.height.saturating_sub(m.cell_h)) / 2,
+                    &p.tool.label(state), Style::REGULAR, colour::INK, ix + ih + 4);
+            }
         } else if p.tool == crate::widgets::Tool::Overflow {
             // **Part 44: `Overflow`'s chevron is drawn only when there is something in the menu.**
             //
@@ -2853,126 +2781,51 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
 /// The sidebar: a back arrow, a heading, a "+", and one row per document.
 fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
-    into.push(fill(
-        0,
-        l.sidebar.y as i32,
-        l.sidebar.width,
-        l.sidebar.height,
-        colour::BAND,
-    ));
-    // The sidebar's right edge.
-    into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
-        l.sidebar.right() as i32 - 1,
-        l.sidebar.y as i32,
-        1,
-        l.sidebar.height,
-        colour::RULE_DIM,
-    ))));
-
+    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height, colour::CHROME));
     into.push(SurfaceTree::leaf(crate::Node::Icon(
         crate::icons::IconId::ArrowLeft.at(
-            l.sidebar_back.x as i32 + 4,
-            l.sidebar_back.y as i32 + 4,
+            l.sidebar_back.x as i32 + 8,
+            l.sidebar_back.y as i32 + 8,
             colour::INK_CHROME,
         ),
     )));
-    // **CORRECTION, part 36: this is the one that was visible.** `"Document tabs"` is 13 characters
-    // and the space from the arrow to the page's edge is about 11 cells, so at 20 ppem the word `tabs`
-    // was **drawn underneath the page**, which is emitted after the sidebar. At 16 ppem it just fitted,
-    // which is the whole of why this survived part 32.
-    push_text(
-        into,
-        m,
-        l.sidebar_back.y,
-        &fit_to_width(
-            "Document tabs",
-            m.cell_w,
-            cells_left_of(l.page.x, l.sidebar_back.right() as i32 + 8, m.cell_w),
-        ),
-        Style::BOLD,
-        colour::INK_CHROME,
-        l.sidebar_back.right() as i32 + 8,
-    );
+    let head_y = l.sidebar_new.y + (l.sidebar_new.height.saturating_sub(m.cell_h)) / 2;
+    push_text(into, m, head_y, "Document tabs", Style::REGULAR, colour::INK, l.sidebar.x as i32 + 40);
     into.push(SurfaceTree::leaf(crate::Node::Icon(
         crate::icons::IconId::Plus.at(
-            l.sidebar_new.x as i32 + 4,
-            l.sidebar_new.y as i32 + 4,
+            l.sidebar_new.x as i32 + 8,
+            l.sidebar_new.y as i32 + 8,
             colour::INK_CHROME,
         ),
     )));
 
     for i in 0..l.sidebar_rows as usize {
-        let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else {
-            break;
-        };
+        let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else { break };
         let active = i == state.active_doc;
-        // **Active outranks hovered, for the same reason an open menu heading does.** The active row
-        // is filled whether or not the pointer is on it; hovering *another* row shows that it is
-        // there, which is the one piece of information a sidebar needs to offer.
         if active {
-            into.push(fill(
-                r.x as i32,
-                r.y as i32,
-                r.width,
-                r.height,
-                colour::PILL_ACTIVE,
-            ));
-            // Left accent border on active tab for clear selection visibility, matching Plan reference
-            into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
-                r.x as i32,
-                r.y as i32,
-                3,
-                r.height,
-                colour::ACTIVE,
-            ))));
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, colour::UPGRADE_BG));
         } else if let Some(c) = state_fill(state, crate::widgets::Hit::Doc(i)) {
-            into.push(fill(r.x as i32, r.y as i32, r.width, r.height, c));
+            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
         }
+        let ink = if active { colour::UPGRADE_INK } else { colour::INK_CHROME };
         into.push(SurfaceTree::leaf(crate::Node::Icon(
             crate::icons::IconId::Doc.at(
-                r.x as i32 + 8,
+                r.x as i32 + 16,
                 r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
-                colour::INK_CHROME,
+                ink,
             ),
         )));
         let ty = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
-        let tx = r.x as i32 + 8 + crate::icons::SIZE as i32 + 8;
-        // **CORRECTION, part 36: the title is cut to the sidebar, and it was not.**
-        //
-        // **`with_type_scale` deliberately does not scale [`sidebar_w`]** -- 208 px is a distance, not a
-        // type size, and part 32's argument for leaving it is the right one. **The consequence was not
-        // accounted for**: the label is drawn at the scaled cell while the rail it lives in is still
-        // 208 px, so at 20 ppem "Document title" ran past the sidebar and **underneath the page**, which
-        // is drawn after it.
-        //
-        // **Visible in a dump of the running window** as `← Document t|` with the page over the rest.
-        // Nothing clips the chrome's own text -- `Painter::doc_text` clips the *document*, and the
-        // sidebar row is a `TextRun` -- so the only fix is to not emit the part that does not fit.
-        // Separate rows with a subtle line for clean layout, matching reference design
-        if !active && i < l.sidebar_rows as usize - 1 {
-            into.push(SurfaceTree::leaf(crate::Node::Rect(crate::Rect::new(
-                r.x as i32,
-                (r.y + r.height) as i32 - 1,
-                r.width,
-                1,
-                colour::RULE_DIM,
-            ))));
-        }
-        push_text(
-            into,
-            m,
-            ty,
+        let tx = r.x as i32 + 16 + crate::icons::SIZE as i32 + 10;
+        push_text(into, m, ty,
             &fit_to_width(title, m.cell_w, cells_left_of(r.right(), tx, m.cell_w)),
-            Style::MONOSPACE,
-            colour::INK_CHROME,
-            tx,
-        );
+            Style::REGULAR, ink, tx);
         if active {
             into.push(SurfaceTree::leaf(crate::Node::Icon(
                 crate::icons::IconId::Overflow.at(
-                    r.right() as i32 - crate::icons::SIZE as i32 - 8,
+                    r.right() as i32 - crate::icons::SIZE as i32 - 12,
                     r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
-                    colour::INK_DIM,
+                    ink,
                 ),
             )));
         }
@@ -2994,11 +2847,11 @@ fn fit_to_width(s: &str, cell_w: u32, max_cells: u32) -> String {
     if s.chars().count() as u32 <= max_cells {
         return s.to_string();
     }
-    // **One cell is always kept for the ellipsis**, so a cut name is visibly cut rather than silently
-    // ending where the eye cannot tell that it ended.
-    let keep = if max_cells > 1 { max_cells - 1 } else { max_cells };
+    // A cut name is visibly cut. ASCII dots are used because the embedded atlas has no U+2026,
+    // and a missing-glyph box in a document title would be worse than a plain truncation marker.
+    let (keep, marker) = if max_cells >= 3 { (max_cells - 3, "...") } else { (max_cells.saturating_sub(1), ".") };
     let mut out: String = s.chars().take(keep as usize).collect();
-    out.push('\u{2026}');
+    out.push_str(marker);
     let _ = cell_w;
     out
 }
@@ -3083,14 +2936,8 @@ fn push_text(
     colour: u32,
     x: i32,
 ) {
-    let origin = x.max(0) as u32;
-    for run in ascending_runs(text) {
-        if run.len == 0 {
-            continue;
-        }
-        let rx = origin + run.char_offset * m.cell_w;
-        into.push(SurfaceTree::leaf(crate::Node::Text(TextRun::new(
-            rx as i32, y as i32, run.first, run.len, style, 0, colour,
-        ))));
-    }
+    let _ = m;
+    into.push(SurfaceTree::leaf(crate::Node::Label(Label::new(
+        x, y as i32, text, style, 0, colour,
+    ))));
 }

@@ -2677,6 +2677,9 @@ impl<'a> Session<'a> {
                 self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
                 match tool {
+                    Tool::Print => {
+                        self.apply_action(holonomy_render::menus::Action::Export)?;
+                    }
                     Tool::Collapse => {
                         self.set_sidebar(!self.state.sidebar_open);
                     }
@@ -2715,7 +2718,9 @@ impl<'a> Session<'a> {
             Hit::Title(btn) => {
                 self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                if let Some(cmd) = title_command(btn) {
+                if btn == widgets::TitleButton::Share {
+                    self.apply_action(holonomy_render::menus::Action::Export)?;
+                } else if let Some(cmd) = title_command(btn) {
                     self.run_clicked(cmd)?;
                 } else {
                     self.stats.pointer_inert += 1;

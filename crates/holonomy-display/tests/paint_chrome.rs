@@ -383,7 +383,7 @@ fn the_caret_is_actually_drawn_into_the_frame() {
         !d.is_empty(),
         "toggling the caret changed nothing, so the caret is not being drawn"
     );
-    // And the difference is confined to the caret's cell.
+    // And the difference is the thin insertion caret: 2 px wide, one cell tall.
     let only = DamageRect::new(
         d.first.expect("a difference").0,
         d.first.expect("a difference").1,
@@ -393,7 +393,7 @@ fn the_caret_is_actually_drawn_into_the_frame() {
     let _ = only;
     assert_eq!(
         d.differing,
-        u64::from(caret.width) * u64::from(caret.height)
+        2 * u64::from(caret.height)
     );
 }
 
@@ -443,11 +443,11 @@ fn a_blink_cycle_repaints_exactly_the_caret_cell_each_time() {
             .expect("paint");
         total_pixels += stats.pixels;
         repaints += 1;
-        // A repaint draws every node that *intersects* the cell, clipped to it. Two do: the panel
-        // background and the caret itself. So the bound is a small multiple of the cell rather than
-        // the cell exactly -- what matters is that it is nowhere near a frame.
+        // A repaint draws every node that *intersects* the cell, clipped to it: the page, its border,
+        // any nearby glyph run, and the caret itself. The bound is a small multiple of the caret cell
+        // rather than the cell exactly -- what matters is that it is nowhere near a frame.
         assert!(
-            stats.pixels <= cell_px * 4,
+            stats.pixels <= cell_px * 8,
             "a repaint wrote {} pixels for a {cell_px}-px cell",
             stats.pixels
         );
@@ -517,4 +517,17 @@ fn the_separators_are_drawn_from_the_table_and_not_from_the_font() {
         stats.box_glyphs > 4,
         "the rules should draw with no atlas: {stats:?}"
     );
+}
+
+
+#[test]
+fn a_round_rect_fills_its_centre_and_leaves_its_corners() {
+    use holonomy_render::{Node, RoundRect, SurfaceTree};
+    let mut f = frame();
+    let tree = SurfaceTree::leaf(Node::RoundRect(RoundRect::new(0, 0, 32, 32, 8, 0xFFFF_FFFF)));
+    Painter::without_atlas(0).paint(&mut f, &tree, None).expect("paint");
+    assert_eq!(f.pixel(16, 16), 0x00FF_FFFF, "the centre is filled");
+    assert_eq!(f.pixel(16, 0), 0x00FF_FFFF, "the top centre is filled");
+    assert_eq!(f.pixel(0, 0), 0x0000_0000, "the rounded corner is not");
+    assert_eq!(f.pixel(31, 31), 0x0000_0000, "and neither is the opposite corner");
 }

@@ -37,10 +37,14 @@ use crate::DamageRect;
 /// What a toolbar button is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
+    /// Search the document.
+    Search,
     /// Undo.
     Undo,
     /// Redo.
     Redo,
+    /// Print / export PDF.
+    Print,
     /// Spellcheck.
     Spellcheck,
     /// Format painter.
@@ -55,6 +59,8 @@ pub enum Tool {
     SizeDown,
     /// Increase the size.
     SizeUp,
+    /// The font-size box.
+    FontSize,
     /// Bold.
     Bold,
     /// Italic.
@@ -67,6 +73,8 @@ pub enum Tool {
     Highlight,
     /// Link.
     Link,
+    /// Comment.
+    Comment,
     /// Image.
     Image,
     /// Overflow: the rest of the toolbar.
@@ -86,8 +94,10 @@ impl Tool {
     /// is either the text or a lie about the text.
     pub const fn icon(self) -> Option<IconId> {
         match self {
+            Tool::Search => Some(IconId::Search),
             Tool::Undo => Some(IconId::Undo),
             Tool::Redo => Some(IconId::Redo),
+            Tool::Print => Some(IconId::Print),
             Tool::Spellcheck => Some(IconId::Spellcheck),
             Tool::PaintFormat => Some(IconId::PaintFormat),
             Tool::SizeDown => Some(IconId::Minus),
@@ -98,11 +108,12 @@ impl Tool {
             Tool::TextColour => Some(IconId::TextColour),
             Tool::Highlight => Some(IconId::Highlight),
             Tool::Link => Some(IconId::Link),
+            Tool::Comment => Some(IconId::Comment),
             Tool::Image => Some(IconId::Image),
             Tool::Overflow => Some(IconId::Overflow),
             Tool::Mode => Some(IconId::Pen),
             Tool::Collapse => Some(IconId::ChevronUp),
-            Tool::Zoom | Tool::Style | Tool::Font => None,
+            Tool::Zoom | Tool::Style | Tool::Font | Tool::FontSize => None,
         }
     }
 
@@ -112,7 +123,7 @@ impl Tool {
     /// branches on this and then draws `label`, and if the two could differ the painter would reserve
     /// space for a label it does not draw or draw one it did not reserve.
     pub const fn has_label(self) -> bool {
-        matches!(self, Tool::Zoom | Tool::Style | Tool::Font)
+        matches!(self, Tool::Zoom | Tool::Style | Tool::Font | Tool::FontSize)
     }
 
     /// This tool's label, if it has one.
@@ -125,7 +136,8 @@ impl Tool {
         match self {
             Tool::Zoom => state.zoom_label(),
             Tool::Style => state.style_name().to_string(),
-            Tool::Font => state.font_label(),
+            Tool::Font => state.font_name().to_string(),
+            Tool::FontSize => ChromeState::FONT_SIZE.to_string(),
             // **An empty `String` rather than a panic.** `label` is called from the painter inside a
             // `match` that has already established `has_label`, so this arm is unreachable in the
             // paint path; it is here because `label` is a total function over `Tool` and a total
@@ -138,8 +150,10 @@ impl Tool {
     /// A name for the status bar, a log line, and the tests' failure messages.
     pub const fn name(self) -> &'static str {
         match self {
+            Tool::Search => "search",
             Tool::Undo => "undo",
             Tool::Redo => "redo",
+            Tool::Print => "print",
             Tool::Spellcheck => "spellcheck",
             Tool::PaintFormat => "paint-format",
             Tool::Zoom => "zoom",
@@ -147,12 +161,14 @@ impl Tool {
             Tool::Font => "font",
             Tool::SizeDown => "size-down",
             Tool::SizeUp => "size-up",
+            Tool::FontSize => "font-size",
             Tool::Bold => "bold",
             Tool::Italic => "italic",
             Tool::Underline => "underline",
             Tool::TextColour => "text-colour",
             Tool::Highlight => "highlight",
             Tool::Link => "link",
+            Tool::Comment => "comment",
             Tool::Image => "image",
             Tool::Overflow => "overflow",
             Tool::Mode => "mode",
@@ -222,7 +238,8 @@ impl Tool {
         match self {
             Tool::Zoom => 4,
             Tool::Style => 11,
-            Tool::Font => 13,
+            Tool::Font => 10,
+            Tool::FontSize => 2,
             _ => 0,
         }
     }
@@ -257,7 +274,7 @@ impl Tool {
     pub const fn separated(self) -> bool {
         matches!(
             self,
-            Tool::Zoom | Tool::Bold | Tool::Link | Tool::Mode | Tool::Collapse
+            Tool::Print | Tool::Zoom | Tool::Bold | Tool::Link | Tool::Mode | Tool::Collapse
         )
     }
 }
@@ -268,14 +285,17 @@ impl Tool {
 /// built at runtime, so the order is fixed at compile time and the only way to change it is to change
 /// the source. That is the point.
 pub const TOOLBAR: &[Tool] = &[
+    Tool::Search,
     Tool::Undo,
     Tool::Redo,
+    Tool::Print,
     Tool::Spellcheck,
     Tool::PaintFormat,
     Tool::Zoom,
     Tool::Style,
     Tool::Font,
     Tool::SizeDown,
+    Tool::FontSize,
     Tool::SizeUp,
     Tool::Bold,
     Tool::Italic,
@@ -283,6 +303,7 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::TextColour,
     Tool::Highlight,
     Tool::Link,
+    Tool::Comment,
     Tool::Image,
     Tool::Overflow,
     Tool::Mode,
@@ -832,24 +853,37 @@ pub enum TitleButton {
     Cloud,
     /// Version history.
     History,
-    /// Share.
+    /// Share / export.
     Share,
+    /// Upgrade / local badge.
+    Upgrade,
+    /// Comments.
+    Comments,
+    /// Sparkle.
+    Sparkle,
 }
 
 /// Lay the title bar's buttons out, right-anchored.
 pub fn place_title(l: &Layout, pad: u32) -> Vec<(TitleButton, DamageRect)> {
-    let b = l.title.height.saturating_sub(8).min(28);
+    let b = l.title.height.saturating_sub(8).min(32);
     let y = l.title.y + (l.title.height - b) / 2;
     let mut out = Vec::new();
+    // Left group: star, folder, cloud, just after the document title.
+    let mut x = l.cell_w.saturating_mul(18);
+    for btn in [TitleButton::Star, TitleButton::Folder, TitleButton::Cloud] {
+        out.push((btn, DamageRect::new(x, y, b, b)));
+        x = x.saturating_add(b + 4);
+    }
+    // Right group: sparkle, upgrade, share, comments, history.
     let mut x = l.title.right().saturating_sub(pad);
     for (btn, w) in [
-        (TitleButton::Share, b * 5),
+        (TitleButton::Sparkle, b),
+        (TitleButton::Upgrade, b * 4),
+        (TitleButton::Share, b * 4),
+        (TitleButton::Comments, b),
         (TitleButton::History, b),
-        (TitleButton::Cloud, b),
-        (TitleButton::Folder, b),
-        (TitleButton::Star, b),
     ] {
-        x = x.saturating_sub(w);
+        x = x.saturating_sub(w + 4);
         out.push((btn, DamageRect::new(x, y, w, b)));
     }
     out

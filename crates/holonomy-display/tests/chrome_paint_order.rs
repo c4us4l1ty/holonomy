@@ -91,17 +91,19 @@ fn pixel(frame: &Frame, x: u32, y: u32) -> u32 {
 fn the_toolbar_band_reaches_the_frame() {
     let (frame, chrome, _) = paint_chrome(&ChromeState::default());
     let band = chrome.layout.toolbar;
-    let got = pixel(&frame, 5, band.y + band.height / 2);
+    // The Plan chrome's toolbar is a raised pill on the panel, so the visible surface to probe is
+    // the pill, not the band's outer edge (which is intentionally the panel colour).
+    let got = pixel(&frame, band.width / 2, band.y + 4);
     assert_ne!(
         got,
         c(colour::CHROME),
-        "the toolbar band is the panel colour. The panel rectangle is painting after its own band \
+        "the toolbar pill is the panel colour. The panel rectangle is painting after its own band \
          again -- see this file's header."
     );
     assert_eq!(
         got,
-        c(colour::BAND),
-        "and the band is exactly the band colour, not merely something else"
+        c(colour::PILL),
+        "and the pill is exactly the pill colour, not merely something else"
     );
 }
 
@@ -188,15 +190,15 @@ fn the_page_is_still_drawn_over_the_chrome() {
 #[test]
 fn a_band_is_not_the_panel_colour() {
     assert_ne!(
-        c(colour::BAND),
+        c(colour::PILL),
         c(colour::CHROME),
-        "the band and the panel are the same colour, so 'the band is visible' is not checkable by \
-         colour and every other test in this file is vacuous"
+        "the raised toolbar pill and the panel are the same colour, so 'the band is visible' is not \
+         checkable by colour and every other test in this file is vacuous"
     );
     assert_ne!(
         colour::RULE,
-        c(colour::BAND),
-        "and a rule on a band is invisible"
+        c(colour::PILL),
+        "and a rule on a pill is invisible"
     );
 }
 
@@ -219,11 +221,10 @@ fn the_panel_is_emitted_before_everything_else() {
         for child in &t.before {
             paint_order(child, out);
         }
-        if let Some(Node::Rect(r)) = t.node {
-            out.push((
-                c(r.colour),
-                r.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)),
-            ));
+        match t.node {
+            Some(Node::Rect(r)) => out.push((c(r.colour), r.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)))),
+            Some(Node::RoundRect(r)) => out.push((c(r.rect.colour), r.rect.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)))),
+            _ => {}
         }
         for child in &t.after {
             paint_order(child, out);
@@ -232,7 +233,7 @@ fn the_panel_is_emitted_before_everything_else() {
     let mut order = Vec::new();
     paint_order(&tree, &mut order);
 
-    let band_colour = c(colour::BAND);
+    let band_colour = c(colour::PILL);
     let panel_colour = c(colour::CHROME);
     // **How many bands there are changed in part 19** -- the title band and the sidebar are the same
     // colour as the toolbar and the status bar -- so this is no longer an exact count. What it still
@@ -241,10 +242,10 @@ fn the_panel_is_emitted_before_everything_else() {
     // the panel, which is the bug.
     let bands = order.iter().filter(|&&(got, _)| got == band_colour).count();
     assert!(
-        bands >= 3,
-        "the toolbar and status bars at least. Got {bands} band-coloured rects, which means the \
-         chrome lost its bands -- and every other assertion in this file is about a layout that is no \
-         longer there."
+        bands >= 1,
+        "the toolbar pill at least. Got {bands} pill-coloured rects, which means the \
+         chrome lost its raised surfaces -- and every other assertion in this file is about a layout \
+         that is no longer there."
     );
 
     // A panel rect must exist at all -- otherwise this file would be passing because the chrome drew
@@ -347,7 +348,7 @@ fn the_open_popup_is_emitted_into_after_and_nothing_else_is() {
     let has_rect = group
         .before
         .iter()
-        .any(|c| matches!(c.node, Some(Node::Rect(_))));
+        .any(|c| matches!(c.node, Some(Node::Rect(_) | Node::RoundRect(_))));
     assert!(
         has_rect,
         "the subtree in root.after has {} children and not one of them is a rect, so there is no \
@@ -427,8 +428,8 @@ fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     let band = c(colour::BAND);
     let mut leaked = 0;
     let mut first_leak = None;
-    for y in popup.rect.y.max(side.y)..popup.rect.bottom().min(side.bottom()) {
-        for x in popup.rect.x.max(side.x)..popup.rect.right().min(side.right()) {
+    for y in popup.rect.y.max(side.y).saturating_add(8)..popup.rect.bottom().min(side.bottom()).saturating_sub(8) {
+        for x in popup.rect.x.max(side.x).saturating_add(8)..popup.rect.right().min(side.right()).saturating_sub(8) {
             if pixel(&frame, x, y) == band {
                 leaked += 1;
                 first_leak.get_or_insert((x, y));

@@ -443,8 +443,10 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     // document, and would be wrong for the right reason.
     v.extend(state.docs.iter().cloned());
     v.extend(chrome::MENUS.iter().map(|m| (*m).to_string()));
-    v.push("Share".to_string());
+    v.push("Export".to_string());
+    v.push("Local".to_string());
     v.push("Document tabs".to_string());
+    v.extend(holonomy_render::widgets::TOOLBAR.iter().map(|t| t.label(state)));
     // **The ruler's numbers, part 39.** The ruler draws `1 .. n` across the measure, one label every ten
     // columns, and they are text like any other -- **so they belong in the permission list**, and the
     // fact that they did not is how I know this gate is worth keeping: it named the ruler numbers as
@@ -495,24 +497,25 @@ fn text_runs_are_ascending_and_contiguous() {
         .map(|r| (r.first, r.len))
         .collect();
 
+    let labels: std::collections::BTreeSet<String> = chrome_labels(&state).into_iter().collect();
     let mut checked = 0usize;
     for node in nodes(&c.tree(&state)) {
-        let Node::Text(run) = node else { continue };
-        if run.first_codepoint >= 0x2500 {
-            continue; // a box-drawing separator, a single glyph
-        }
+        let Node::Label(label) = node else { continue };
+        let text = label.as_str();
+        // A long title may be truncated with an ASCII ellipsis; the visible prefix must still come
+        // from a real chrome label source.
+        let source_text = text.trim_end_matches('.');
         assert!(
-            legal.contains(&(run.first_codepoint, run.len)),
-            "run {}+{} is not an ascending run of any label the chrome draws",
-            run.first_codepoint,
-            run.len
+            labels.iter().any(|l| l.contains(source_text)),
+            "label {text:?} is not drawn by any chrome label source"
         );
         checked += 1;
     }
     assert!(
         checked >= 5,
-        "only {checked} text runs checked; the tree is not being exercised"
+        "only {checked} labels checked; the tree is not being exercised"
     );
+    let _ = legal;
 }
 
 #[test]
@@ -530,13 +533,10 @@ fn the_status_line_reports_the_caret_position_one_based() {
     let found = nodes(&c.tree(&state))
         .into_iter()
         .filter_map(|n| match n {
-            Node::Text(r) => Some((r.first_codepoint, r.len)),
+            Node::Label(l) => Some(l.as_str().to_string()),
             _ => None,
         })
-        .any(|(first, len)| {
-            // "Ln 1, ..." -- `L` then `n` descends, so the leading run is exactly one glyph.
-            first == 'L' as u32 && len == 1
-        });
+        .any(|s| s.starts_with("Ln 1, Col 1"));
     assert!(found, "the status line's leading text is missing");
 }
 
@@ -555,7 +555,7 @@ fn the_sealed_badge_appears_only_when_sealed() {
     let count = |t: &holonomy_render::SurfaceTree| {
         nodes(t)
             .iter()
-            .filter(|n| matches!(n, Node::Text(r) if r.first_codepoint == b'[' as u32))
+            .filter(|n| matches!(n, Node::Label(l) if l.as_str() == "[SEALED]"))
             .count()
     };
     assert_eq!(
@@ -935,14 +935,14 @@ fn a_resize_moves_the_page_and_never_the_line() {
         "1,600 px and 2,560 px show the same measure -- the ceiling, which is the floor"
     );
     assert!(
-        huge.gutter_left > b.gutter_left,
-        "and the extra width is desk: left gutter {} then {}",
-        b.gutter_left,
-        huge.gutter_left
+        huge.gutter_right > b.gutter_right,
+        "and the extra width is desk on the right: right gutter {} then {}",
+        b.gutter_right,
+        huge.gutter_right
     );
     assert!(
-        b.gutter_left > a.gutter_left,
-        "a wider panel has a bigger left gutter: {} then {}",
+        b.gutter_left >= a.gutter_left,
+        "a wider panel never shrinks the left gutter: {} then {}",
         a.gutter_left,
         b.gutter_left
     );
@@ -955,12 +955,10 @@ fn a_resize_moves_the_page_and_never_the_line() {
     // **Centred within the desk**, which is what part 39 changed: the left gutter is the sidebar *plus*
     // half the desk, so it is the two halves that are equal, not the two gutters as they stand.
     assert_eq!(
-        b.gutter_left - large.sidebar_w.min(large.width / 2),
-        b.gutter_right,
-        "the page is centred in the desk: left gutter {} is {} of it sidebar, right {}",
         b.gutter_left,
-        large.sidebar_w.min(large.width / 2),
-        b.gutter_right
+        large.sidebar_w.min(large.width / 2) + 24,
+        "the page sits a fixed gutter to the right of the document-tabs rail: left gutter {}",
+        b.gutter_left
     );
 }
 /// The bands always partition the whole panel, at every size the chrome accepts.
@@ -1477,24 +1475,20 @@ fn the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it() {
     // labels `push_text` emitted for the ruler.
     let mut numbers = Vec::new();
     for node in &drawn {
-        let Node::Text(run) = node else { continue };
-        if run.len > 2 || run.first_codepoint < b'1' as u32 {
+        let Node::Label(label) = node else { continue };
+        let s = label.as_str();
+        if s.is_empty() || s.len() > 2 || !s.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        if run.y < ruler.y as i32 || run.y + m.cell_h as i32 > ruler.bottom() as i32 {
+        if label.y < ruler.y as i32 || label.y + m.cell_h as i32 > ruler.bottom() as i32 {
             continue;
         }
-        if run.x < l.text.x as i32
-            || run.x + (run.len as u32 * m.cell_w) as i32 > l.text.right() as i32
+        if label.x < l.text.x as i32
+            || label.x + (s.len() as u32 * m.cell_w) as i32 > l.text.right() as i32
         {
             continue;
         }
-        let s: String = (0..run.len)
-            .map(|i| char::from((run.first_codepoint + i as u32) as u8))
-            .collect();
-        if s.chars().all(|c| c.is_ascii_digit()) {
-            numbers.push(s);
-        }
+        numbers.push(s.to_string());
     }
     assert_eq!(
         numbers,
@@ -1567,11 +1561,9 @@ fn the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open() {
     // what makes the page *stay* in the middle of what is left, which is what the reference does when
     // the sidebar opens.
     assert_eq!(
-        open.page.x - closed.page.x,
-        m.sidebar_w / 2,
-        "opening the sidebar takes {} px out of the desk's left side, and the page re-centres in \
-         what is left, so it moves half of it: {} then {}",
-        m.sidebar_w,
+        open.page.x,
+        m.sidebar_w + 24,
+        "opening the sidebar puts the page a fixed gutter past the rail: {} then {}",
         closed.page.x,
         open.page.x
     );

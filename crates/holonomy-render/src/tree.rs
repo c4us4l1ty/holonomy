@@ -452,11 +452,96 @@ impl RepeatRun {
     }
 }
 
+/// A filled rectangle with rounded corners.
+///
+/// The radius is clamped to half the shorter side by the painter, so a pill is just a
+/// `RoundRect` whose radius is large. Integer scanline fill; no float geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoundRect {
+    /// The bounding box.
+    pub rect: Rect,
+    /// Corner radius in pixels.
+    pub radius: u32,
+}
+
+impl RoundRect {
+    /// A rounded rect.
+    pub fn new(x: i32, y: i32, width: u32, height: u32, radius: u32, colour: u32) -> Self {
+        Self { rect: Rect::new(x, y, width, height, colour), radius }
+    }
+}
+
+/// A short proportional chrome label.
+///
+/// Chrome labels are not document text: they have no rope offset and must paint even when
+/// the frame has no [`TextSource`]. The bytes are inline so `Node` stays `Copy` and the tree
+/// owns its labels. Bounds are conservative (one cell per byte) because the render crate does
+/// not own the atlas; the painter advances by the real glyph metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Label {
+    /// Left edge of the line box.
+    pub x: i32,
+    /// Top of the line box.
+    pub y: i32,
+    /// Inline UTF-8 bytes.
+    pub bytes: [u8; Self::MAX_BYTES],
+    /// Number of valid bytes in `bytes`.
+    pub len: u8,
+    /// Face style.
+    pub style: Style,
+    /// Atlas size index; 0 is the chrome size.
+    pub size: u8,
+    /// Packed 0xAARRGGBB.
+    pub colour: u32,
+}
+
+impl Label {
+    /// Longest label the chrome emits. Longer titles are truncated on a codepoint boundary.
+    pub const MAX_BYTES: usize = 96;
+
+    /// Build a label, truncating `text` to [`Self::MAX_BYTES`] on a UTF-8 boundary.
+    pub fn new(x: i32, y: i32, text: &str, style: Style, size: u8, colour: u32) -> Self {
+        let mut end = text.len().min(Self::MAX_BYTES);
+        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+        let mut bytes = [0u8; Self::MAX_BYTES];
+        bytes[..end].copy_from_slice(&text.as_bytes()[..end]);
+        Self { x, y, bytes, len: end as u8, style, size, colour }
+    }
+
+    /// Valid byte count, clamped to the inline buffer even for a hand-built label.
+    /// A NUL terminates the label: the unused tail of the inline buffer is zero padding.
+    pub fn byte_len(&self) -> usize {
+        let max = usize::from(self.len).min(Self::MAX_BYTES);
+        self.bytes[..max].iter().position(|&b| b == 0).unwrap_or(max)
+    }
+
+    /// The label as a string slice.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.byte_len()]).unwrap_or("")
+    }
+
+    /// Conservative bounds: one cell per byte, one line box tall.
+    pub fn bounds(&self, advance: u32, line_height: u32) -> Option<DamageRect> {
+        let len = self.byte_len();
+        if len == 0 || advance == 0 { return None; }
+        Some(DamageRect::new(
+            self.x.max(0) as u32,
+            self.y.max(0) as u32,
+            (len as u32).saturating_mul(advance),
+            line_height.max(1),
+        ))
+    }
+}
+
 /// One thing to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Node {
     /// A filled rectangle.
     Rect(Rect),
+    /// A filled rectangle with rounded corners. Plan UI pills and popups.
+    RoundRect(RoundRect),
+    /// A proportional chrome label, decoded from inline UTF-8 bytes.
+    Label(Label),
     /// A run of glyphs.
     Text(TextRun),
     /// **One codepoint, repeated.** See [`RepeatRun`] for why a rule is not a [`TextRun`].
@@ -506,6 +591,8 @@ impl Node {
     ) -> Option<DamageRect> {
         let raw = match self {
             Node::Rect(r) => r.bounds(),
+            Node::RoundRect(r) => r.rect.bounds(),
+            Node::Label(l) => l.bounds(advance, line_height),
             Node::Text(t) => t.bounds(line_height, advance),
             Node::Repeat(t) => t.bounds(line_height, advance),
             Node::DocText(t) => t.bounds(line_height, advance),
@@ -521,7 +608,8 @@ impl Node {
     /// The node's kind, for the renderer's dispatch.
     pub fn kind(&self) -> NodeKind {
         match self {
-            Node::Rect(_) => NodeKind::Rect,
+            Node::Rect(_) | Node::RoundRect(_) => NodeKind::Rect,
+            Node::Label(_) => NodeKind::Text,
             Node::Text(_) | Node::Repeat(_) => NodeKind::Text,
             Node::DocText(_) => NodeKind::Text,
             Node::Icon(_) => NodeKind::Icon,
@@ -1012,4 +1100,37 @@ mod tests {
             "a run over the maximum must not be constructible"
         );
     }
+
+    #[test]
+    fn a_label_truncates_on_a_utf8_boundary_and_bounds_itself() {
+        // The cut lands inside a two-byte codepoint, so the whole codepoint is dropped.
+        let long = format!("{}é", "a".repeat(Label::MAX_BYTES - 1));
+        let l = Label::new(3, 4, &long, Style::REGULAR, 0, BLACK);
+        assert_eq!(l.len as usize, Label::MAX_BYTES - 1, "truncated to a whole codepoint");
+        assert_eq!(l.as_str(), "a".repeat(Label::MAX_BYTES - 1));
+        let b = l.bounds(8, 20).expect("non-empty");
+        assert_eq!((b.x, b.y), (3, 4));
+        assert_eq!(b.width, u32::from(l.len) * 8);
+        assert_eq!(b.height, 20);
+        assert!(Label::new(0, 0, "", Style::REGULAR, 0, BLACK).bounds(8, 20).is_none());
+    }
+
+    #[test]
+    fn a_hand_built_label_cannot_claim_more_bytes_than_it_owns() {
+        let mut l = Label::new(0, 0, "ok", Style::REGULAR, 0, BLACK);
+        l.len = u8::MAX;
+        assert_eq!(l.byte_len(), 2, "the zero padding is not label text");
+        assert_eq!(l.as_str(), "ok");
+        assert!(l.bounds(8, 20).is_some());
+    }
+
+    #[test]
+    fn a_round_rect_is_a_rect_kind_with_rect_bounds() {
+        let r = RoundRect::new(1, 2, 30, 10, 5, WHITE);
+        let n = Node::RoundRect(r);
+        assert_eq!(n.kind(), NodeKind::Rect);
+        let b = n.bounds(20, 8, None).expect("non-empty");
+        assert_eq!((b.x, b.y, b.width, b.height), (1, 2, 30, 10));
+    }
+
 }

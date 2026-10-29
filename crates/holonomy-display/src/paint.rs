@@ -43,7 +43,8 @@ use holonomy_assets::metric;
 use holonomy_assets::payload::Style as AtlasStyle;
 
 use holonomy_render::{
-    AssetId, DamageRect, DocRun, Node, RasterSource, Rect, SurfaceTree, TextRun, TextSource,
+    AssetId, DamageRect, DocRun, Label, Node, RasterSource, Rect, RoundRect, SurfaceTree, TextRun,
+    TextSource,
 };
 
 use crate::frame::{Frame, FrameError};
@@ -382,6 +383,8 @@ impl<'a> Painter<'a> {
                 );
                 self.scratch.stats.rects += 1;
             }
+            Node::RoundRect(r) => self.round_rect(frame, r, damage),
+            Node::Label(l) => self.label(frame, l, damage),
             Node::Text(run) => self.text(frame, run, damage),
             // **The same blit, with the codepoint held still.** `text` walks `first_codepoint + k`;
             // a repeat is `first_codepoint` at every `k`. One function rather than two, because the
@@ -391,6 +394,87 @@ impl<'a> Painter<'a> {
             Node::DocText(run) => self.doc_text(frame, run, damage, text),
             Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
             Node::Icon(icon) => self.icon(frame, &icon, damage),
+        }
+    }
+
+    /// Fill a rounded rectangle by integer scanlines.
+    fn round_rect(&mut self, frame: &mut Frame, r: RoundRect, damage: Option<DamageRect>) {
+        let rect = DamageRect::new(r.rect.x.max(0) as u32, r.rect.y.max(0) as u32, r.rect.width, r.rect.height);
+        if !intersects(rect, damage) { self.scratch.stats.rects_skipped += 1; return; }
+        let fill = match damage { Some(d) => rect.clip(&d), None => rect };
+        let rad = r.radius.min(r.rect.width / 2).min(r.rect.height / 2);
+        let mut pixels = 0u64;
+        for y in fill.y..fill.bottom() {
+            let dy = if y < rect.y + rad { rect.y + rad - y }
+                     else if y >= rect.bottom().saturating_sub(rad) { y + 1 - (rect.bottom() - rad) }
+                     else { 0 };
+            let inset = if dy == 0 { 0 } else {
+                let d = dy.saturating_sub(1);
+                let r2 = u64::from(rad) * u64::from(rad);
+                let d2 = u64::from(d) * u64::from(d);
+                rad - isqrt(r2.saturating_sub(d2)) as u32
+            };
+            let x0 = fill.x.max(rect.x + inset);
+            let x1 = fill.right().min(rect.right().saturating_sub(inset));
+            if x1 > x0 { pixels += frame.fill_rect(x0 as i64, y as i64, x1 - x0, 1, r.rect.colour); }
+        }
+        self.scratch.stats.pixels += pixels;
+        self.scratch.stats.rects += 1;
+    }
+
+    /// Draw a proportional chrome label from inline bytes.
+    fn label(&mut self, frame: &mut Frame, l: Label, damage: Option<DamageRect>) {
+        let len = l.byte_len();
+        if len == 0 { return; }
+        let cell_w = self.cell_width();
+        let cell_h = self.cell_height();
+        let bytes = &l.bytes[..len];
+        let whole = DamageRect::new(l.x.max(0) as u32, l.y.max(0) as u32,
+            (len as u32).saturating_mul(cell_w), cell_h);
+        if !intersects(whole, damage) {
+            self.scratch.stats.glyphs_skipped += self.count_codepoints(bytes);
+            return;
+        }
+        let Some(atlas) = self.atlas else {
+            self.scratch.stats.missing += self.count_codepoints(bytes);
+            return;
+        };
+        let size = self.atlas_size();
+        let style = atlas_style(l.style);
+        let ascent = i32::from(self.vertical(l.style, size).0);
+        let coverage = atlas.coverage();
+        let mut pen = l.x;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let (c, used) = match std::str::from_utf8(&bytes[at..]) {
+                Ok(s) => match s.chars().next() { Some(c) => (c, c.len_utf8()), None => break },
+                Err(e) => {
+                    self.scratch.stats.missing += 1;
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        let s = std::str::from_utf8(&bytes[at..at + valid]).unwrap();
+                        match s.chars().next() { Some(c) => (c, c.len_utf8()), None => break }
+                    } else { ('\u{FFFD}', e.error_len().unwrap_or(1)) }
+                }
+            };
+            at += used;
+            let m = atlas.metric(u32::from(c), style, size);
+            if m.is_blank() {
+                if m.advance_x > 0 { pen += i32::from(m.advance_x); }
+                else { pen += cell_w as i32; self.scratch.stats.missing += 1; }
+                continue;
+            }
+            blit_coverage(&mut self.scratch, frame,
+                pen + i32::from(m.bearing_x), l.y + ascent - i32::from(m.bearing_y),
+                u32::from(m.width), u32::from(m.height), l.colour,
+                |row, dst| {
+                    let y = usize::from(m.atlas_y) + row;
+                    let sx = usize::from(m.atlas_x);
+                    let base = y * metric::ATLAS_STRIDE + sx;
+                    for (i, out) in dst.iter_mut().enumerate() { *out = coverage.get(base + i).copied().unwrap_or(0); }
+                });
+            self.scratch.stats.glyphs += 1;
+            pen += self.advance_of(u32::from(c), l.style) as i32;
         }
     }
 
@@ -1228,6 +1312,15 @@ fn atlas_style(style: holonomy_render::Style) -> AtlasStyle {
         x if x == holonomy_render::Style::MATH.0 => AtlasStyle::Math,
         _ => AtlasStyle::Regular,
     }
+}
+
+/// Integer square root (floor), for rounded-rect scanlines.
+fn isqrt(n: u64) -> u64 {
+    if n == 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x { x = y; y = (x + n / x) / 2; }
+    x
 }
 
 /// Whether `rect` intersects `damage`; no damage rect means "everything".

@@ -730,6 +730,46 @@ pub mod mask {
         b"................",
         b"................",
     ]);
+
+    /// Print: a page over a tray.
+    pub static PRINT: [u64; 16] = pack(&[
+        b"................",
+        b"....########....",
+        b"....#......#....",
+        b"....#......#....",
+        b"..############..",
+        b"..#..........#..",
+        b"..#..........#..",
+        b"..#..........#..",
+        b"..############..",
+        b"....#......#....",
+        b"....#......#....",
+        b"....#......#....",
+        b"....########....",
+        b"................",
+        b"................",
+        b"................",
+    ]);
+
+    /// Comment: a speech bubble with a plus.
+    pub static COMMENT: [u64; 16] = pack(&[
+        b"................",
+        b"..############..",
+        b"..#..........#..",
+        b"..#..........#..",
+        b"..#....##....#..",
+        b"..#....##....#..",
+        b"..#..######..#..",
+        b"..#....##....#..",
+        b"..#....##....#..",
+        b"..#..........#..",
+        b"..############..",
+        b"..#...##........",
+        b"..#..##.........",
+        b"..###...........",
+        b"................",
+        b"................",
+    ]);
 }
 
 /// Every icon, by name.
@@ -805,6 +845,10 @@ pub enum IconId {
     Search,
     /// Pen.
     Pen,
+    /// Print.
+    Print,
+    /// Comment.
+    Comment,
 }
 
 impl IconId {
@@ -842,6 +886,8 @@ impl IconId {
         IconId::Tab,
         IconId::Search,
         IconId::Pen,
+        IconId::Print,
+        IconId::Comment,
     ];
 
     /// The mask for this icon, and its edge in pixels.
@@ -884,6 +930,8 @@ impl IconId {
             IconId::Tab => &mask::TAB,
             IconId::Search => &mask::SEARCH,
             IconId::Pen => &mask::PEN,
+            IconId::Print => &mask::PRINT,
+            IconId::Comment => &mask::COMMENT,
         }
     }
 

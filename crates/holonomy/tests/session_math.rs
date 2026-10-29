@@ -391,7 +391,7 @@ fn a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model() {
     // puts blue at 0xF8 - 220 * 202/226 = 0x33 rather than the caret's 0x38. A flat fill and a blend
     // of those two colours meet nowhere.
     const CANVAS: u32 = 0x0000_0000;
-    const PAGE: u32 = 0x00FA_FAF8;
+    const PAGE: u32 = holonomy_render::chrome::colour::PAGE & 0x00FF_FFFF;
     let caret_fill = holonomy_render::chrome::colour::CARET & 0x00FF_FFFF;
     let m = real.chrome().metrics;
     let text_x = real.chrome().layout.text.x;
@@ -497,7 +497,7 @@ fn a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width() {
     assert_eq!(s.stats.math_compiled, 1, "`\\sum` should have compiled");
 
     const CANVAS: u32 = 0x0000_0000;
-    const PAGE: u32 = 0x00FA_FAF8;
+    const PAGE: u32 = holonomy_render::chrome::colour::PAGE & 0x00FF_FFFF;
     let caret_fill = holonomy_render::chrome::colour::CARET & 0x00FF_FFFF;
     let cell_h = s.chrome().metrics.cell_h;
     let text_x = s.chrome().layout.text.x;
