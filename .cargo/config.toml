@@ -1,5 +1,5 @@
-# Holonomy H1 builds bare silicon. There is no gnu target in the intended workflow:
-# linking against glibc would drag in NSS, dlopen and the dynamic loader, all of which
+# Holonomy H1 ships bare silicon. The product target is static musl: linking the
+# editor against glibc would drag in NSS, dlopen and the dynamic loader, all of which
 # are prohibited by the Zero-Compositor Invariant (Plan.md Part 4 §1).
 #
 # Scope warning: this file is discovered by walking up from the working directory, so a
@@ -14,8 +14,19 @@ target = "x86_64-unknown-linux-musl"
 # rustc ships self-contained crt objects and libc.a for this target, so no external
 # musl-gcc is required. rust-lld is selected explicitly because it is what the
 # self-contained linking expects and it produces the `statically linked` ELF header
-# the Phase 0 gate asserts.
+# the Phase 0 gate asserts. rustc resolves this name inside its own sysroot; it does
+# not need a `rust-lld` executable on PATH.
 linker = "rust-lld"
+
+# Cargo still links host-side helpers (build scripts / proc macros) for the host
+# triple even when the product target is musl. Use the system C compiler by absolute
+# path so a stale `cc` wrapper earlier in PATH -- for example one pointing at a removed
+# /tmp/zig/zig -- cannot break `cargo run` / `cargo test`. This does not make the
+# shipping artifact glibc-linked: the product target above remains static musl.
+# Override with CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER if the system compiler
+# lives elsewhere.
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/cc"
 
 [net]
 offline = false
