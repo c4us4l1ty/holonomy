@@ -112,7 +112,11 @@ impl From<VdfError> for EnvelopeError {
 /// `Drop` is written out rather than derived from `ZeroizeOnDrop` so the test build can
 /// observe the bytes *after* zeroization and prove the drop path really scrubs rather than
 /// merely claiming to.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// `PartialEq` is written out rather than derived for the same class of reason: the derived
+/// impl short-circuits at the first differing byte, which makes `==` over key material a
+/// timing oracle. The manual impl below compares every byte unconditionally.
+#[derive(Clone)]
 pub struct RootMaterial {
     /// Content cipher key for XChaCha20-Poly1305.
     pub k_enc: [u8; 32],
@@ -153,8 +157,14 @@ impl RootMaterial {
     }
 
     /// Flatten back to the 96-byte OKM layout.
-    pub fn to_okm(&self) -> [u8; OKM_LEN] {
-        let mut okm = [0u8; OKM_LEN];
+    ///
+    /// Returns [`Zeroizing`] rather than a bare array: this copy holds all four root keys at
+    /// once, and a caller that forgets to scrub it would leave them on the stack or heap
+    /// after the `RootMaterial` itself was conscientiously wiped. The wrapper makes the copy
+    /// self-cleaning on every path out of the caller, which is the same standard
+    /// [`argon2id_k_int`] holds its own intermediates to.
+    pub fn to_okm(&self) -> Zeroizing<[u8; OKM_LEN]> {
+        let mut okm = Zeroizing::new([0u8; OKM_LEN]);
         okm[0..32].copy_from_slice(&self.k_enc);
         okm[32..64].copy_from_slice(&self.k_chaff);
         okm[64..72].copy_from_slice(&self.omega.to_le_bytes());
@@ -162,6 +172,39 @@ impl RootMaterial {
         okm
     }
 }
+
+/// Constant-time equality, byte for byte, with no short circuit.
+///
+/// The derived `PartialEq` compares field by field and returns at the first mismatch, so the
+/// time `==` takes is a function of *where* two keys diverge — a timing oracle over key
+/// material. This impl folds every byte of every field into one accumulator and compares the
+/// accumulator once at the end, so the running time is independent of the contents. (Used by
+/// the gates to assert derivation determinism; nothing on the unlock path compares roots.)
+impl PartialEq for RootMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff: u8 = 0;
+        for (a, b) in self.k_enc.iter().zip(other.k_enc.iter()) {
+            diff |= a ^ b;
+        }
+        for (a, b) in self.k_chaff.iter().zip(other.k_chaff.iter()) {
+            diff |= a ^ b;
+        }
+        for (a, b) in self
+            .omega
+            .to_le_bytes()
+            .iter()
+            .zip(other.omega.to_le_bytes().iter())
+        {
+            diff |= a ^ b;
+        }
+        for (a, b) in self.n_root.iter().zip(other.n_root.iter()) {
+            diff |= a ^ b;
+        }
+        diff == 0
+    }
+}
+
+impl Eq for RootMaterial {}
 
 /// `secrecy` requires the payload to implement `Zeroize`, and `Drop` calls through the
 /// trait rather than an inherent method so there is exactly one scrub implementation.

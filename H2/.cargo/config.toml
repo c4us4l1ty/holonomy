@@ -1,0 +1,9 @@
+# H2 builds against glibc (Tauri / webkit2gtk), and must NOT inherit the root
+# workspace's `[build] target = x86_64-unknown-linux-musl`: Cargo discovers
+# `.cargo/config.toml` by walking up from the working directory, so without this
+# file any `cargo` invocation inside H2/ would silently switch to musl and fail.
+#
+# This file ends that walk-up hazard structurally instead of asking people to
+# remember a `--target` override.
+[build]
+target = "x86_64-unknown-linux-gnu"

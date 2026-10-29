@@ -123,7 +123,7 @@ fn hkdf_output_is_96_bytes_and_splits_as_specified() {
     // Omega is little-endian per PRD FR-2.3.3's Read_U64_LE.
     assert_eq!(m.omega, u64::from_le_bytes(okm[64..72].try_into().unwrap()));
     assert_eq!(m.n_root, okm[72..96]);
-    assert_eq!(m.to_okm(), okm, "round-trip must be lossless");
+    assert_eq!(*m.to_okm(), okm, "round-trip must be lossless");
 }
 
 /// Omega byte order is pinned directly rather than only through the round trip, because
