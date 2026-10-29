@@ -126,6 +126,7 @@ impl Action {
             Action::SelectAll => "select-all",
             Action::DocumentStart => "document-start",
             Action::DocumentEnd => "document-end",
+            Action::New => "new-document",
             Action::Save => "save",
             Action::InsertTable => "insert-table",
             Action::InsertImage => "insert-image",
@@ -275,7 +276,10 @@ const fn accel(label: &'static str, acc: &'static str) -> Item {
 /// rather than a compile error — which is why [`items_for`] takes a `usize` and returns an empty slice
 /// rather than indexing.
 const FILE: &[Item] = &[
-    plain("New"),
+    // **Wired as of the font/new-document pass.** This was `plain("New")` — a row that drew and
+    // did nothing — while `Session::adopt_document` sat one crate over as the supported way to
+    // put a document into a session. The row now asks for exactly that.
+    act("New", Action::New),
     plain("Open"),
     sub("Import", IconId::Folder),
     // **The save, and it was the one row the File menu was missing.**
@@ -444,18 +448,26 @@ pub const STYLES: &[&str] = &[
 
 /// The fonts the font dropdown offers, in the order it shows them.
 ///
-/// **Every one of them is a name, not a claim that the face is loaded.** The body face is the one the
-/// atlas was built with; the rest are here because the reference's dropdown lists a family and a
-/// dropdown of one entry is not a dropdown. Choosing one that is not loaded has no effect on the
-/// pixels, and `Action::SetFont` changing `font_index` without changing the atlas is stated in the
-/// session's handler rather than implied here.
-pub const FONTS: &[&str] = &[
-    "Inter",
-    "Inter Display",
-    "Roboto Mono",
-    "Georgia",
-    "IBM Plex Mono",
-];
+/// **Every entry is a family the atlas actually packs, and choosing one changes the page.** This
+/// list used to carry five names of which four were never loaded — the dropdown was scenery, and
+/// `Action::SetFont` recorded an index that moved nothing. A control that looks like Google Docs'
+/// font menu and does nothing is worse than a shorter menu that works, so the list is now exactly
+/// the two body-capable families in the payload: Inter (regular, bold and italic faces) and
+/// JetBrains Mono (regular). The session's `doc_style` is where the index becomes a face, and its
+/// `SetFont` arm repaints the page when the face changes.
+///
+/// **Growing this list is an atlas question, not a list question.** A new family means a new face
+/// in the payload (`tools/build_font_payload.py`), a new row in the metric tables, and binary-size
+/// budget — which is why the four decorative names were removed rather than wired.
+pub const FONTS: &[&str] = &["Inter", "JetBrains Mono"];
+
+/// The row of [`FONTS`] that selects JetBrains Mono, the one alternative body face.
+///
+/// **A named constant because two places must agree on it**: `dropdown_items` builds the row from
+/// the list's order, and the session's `doc_style` maps the chosen index to the Monospace atlas
+/// face. A bare `1` in the session would be a second spelling of this list's order, wrong the day
+/// a family is inserted above it.
+pub const MONO_FONT_INDEX: usize = 1;
 
 /// The zoom levels the zoom dropdown offers: **a label and a value together**.
 ///

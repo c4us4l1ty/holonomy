@@ -189,6 +189,10 @@ fn every_action_is_routed_or_accounted_for() {
         Action::SetStyle(0),
         Action::SetFont(0),
         Action::Export,
+        // **`New` is handled, not routed, for the same structural reason as `Export`**: it does
+        // not edit the document, it replaces it, and `adopt_document` is reachable only from the
+        // session.
+        Action::New,
     ];
     for a in handled_by_session {
         assert_eq!(
@@ -249,6 +253,7 @@ fn every_action_has_a_name() {
         Action::SelectAll,
         Action::DocumentStart,
         Action::DocumentEnd,
+        Action::New,
         Action::Save,
         Action::InsertTable,
         Action::InsertImage,
@@ -298,8 +303,8 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 13,
-        "the thirteen rows that mean something: Undo, Redo, **Cut**, **Copy**, **Paste**, \
+        with_action, 14,
+        "the fourteen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
          Select all, Save, Export, Close, Insert > Image, Insert > Table, and Format > Bold and \
          Format > Italic. Adding one changes this number."
     );
@@ -331,17 +336,21 @@ fn every_wired_menu_item_carries_an_action() {
     // event from one that shows as `47 -> 46` because a row was added. Asserting the *pair* is what
     // keeps them distinguishable.
     //
+    // * **`File > New` was wired on the row that was already there.** `plain("New")` became
+    //   `act("New", Action::New)` — the same shape as Export: the unwired count alone moved,
+    //   **43/56 -> 42/56**, because `Session::adopt_document` had existed as the one supported way
+    //   to put a document into a session and no row could reach it.
+    //
     // **A gate that prints the list is what made these safe to get right.** The list is printed because
     // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
     // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (43, 56),
-        "**43 unwired of 56 menu items** in the eight headings. Three of the rows that had always \
-         drawn and done nothing -- Edit > Cut, Copy and Paste -- now carry an action; nothing was \
-         added or removed, so the unwired count alone moved, by three. The list is printed because \
-         \"everything is wired\" is not true here: what matters is that the count is stable and the \
-         rows are named. Got: {without:?}"
+        (42, 56),
+        "**42 unwired of 56 menu items** in the eight headings. File > New now carries an action; \
+         nothing was added or removed, so the unwired count alone moved, by one. The list is \
+         printed because \"everything is wired\" is not true here: what matters is that the count \
+         is stable and the rows are named. Got: {without:?}"
     );
 }
 
@@ -520,7 +529,9 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
     // names would have to be returned as a borrow of the state and could not be `'static`.
     assert_eq!(menus::STYLES.len(), 7);
-    assert_eq!(menus::FONTS.len(), 5);
+    // **Two, and both loaded.** The list used to be five names of which four had no face in the
+    // atlas; the dropdown is now exactly the families `Session::doc_style` can actually draw.
+    assert_eq!(menus::FONTS.len(), 2);
     // An index past the end falls back rather than panicking: a state loaded from a file written by a
     // build with more styles should not take the session down.
     // **Both indices in one initializer, because the two assertions are one property.** A state

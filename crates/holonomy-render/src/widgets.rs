@@ -226,7 +226,9 @@ impl Tool {
     /// **Measured against the labels themselves:** `Zoom` shows `zoom_label()`, whose widest value is
     /// `"400%"` at 4 codepoints; `Style` shows [`ChromeState::style_name`], whose longest entry in
     /// [`STYLES`](crate::menus::STYLES) is `"Normal text"` at 11; `Font` shows `font_label()`, whose
-    /// longest entry in [`FONTS`](crate::menus::FONTS) is `"IBM Plex Mono"` at 13.
+    /// longest entry in [`FONTS`](crate::menus::FONTS) is `"JetBrains Mono"` at 14 — longer than the
+    /// 10 cells the button holds, exactly as the previous list's `"IBM Plex Mono"` was, and fitted
+    /// the same way every over-long label is.
     ///
     /// **The old numbers did not fit at 16 ppem either** — 76 px is 7.6 cells of an 11-character label
     /// — and part 32's 24 ppem made it a visible overlap: two toolbar items drawn on top of each other,
