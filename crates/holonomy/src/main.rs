@@ -236,7 +236,14 @@ fn passphrase() -> Result<String, Fail> {
 }
 
 fn run() -> Result<(), Fail> {
-    let args = Args::parse(std::env::args().skip(1)).map_err(Fail::Usage)?;
+    let args = match Args::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(ParseError::Help) => {
+            println!("{}", Args::USAGE);
+            return Ok(());
+        }
+        Err(e) => return Err(Fail::Usage(e)),
+    };
 
     if args.dry_run {
         print_plan(&args);

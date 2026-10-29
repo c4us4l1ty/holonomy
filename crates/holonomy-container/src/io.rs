@@ -31,7 +31,7 @@ use crate::layout::{self, IO_ALIGN};
 /// **Two backings, and the choice is about what the bytes are rather than about speed.**
 ///
 /// * [`Heap`](Backing::Heap) — `alloc_zeroed` with an explicit alignment. Plain, unremappable,
-///   unscrubbed by anything but [`AlignedBuf::wipe`], and eligible for the core dump.
+///   scrubbed by [`AlignedBuf::wipe`] and again before deallocation, and eligible for the core dump.
 /// * [`Secure`](Backing::Secure) — a [`SecureBlock`]: `mmap`, page-locked, `MADV_DONTDUMP`,
 ///   `MADV_DONTFORK`, and a `PROT_NONE` guard page above and below.
 ///
@@ -124,9 +124,13 @@ impl AlignedBuf {
         self.len
     }
 
-    /// Always false; exists so clippy does not fire on `len()` without `is_empty()`.
+    /// Whether the buffer has zero length.
+    ///
+    /// The constructors refuse zero length, so this is always false for a live value; it is
+    /// still defined from `len` rather than hard-coded so the accessor cannot drift from the
+    /// invariant if a future constructor relaxes it.
     pub fn is_empty(&self) -> bool {
-        false
+        self.len == 0
     }
 
     /// **Whether this buffer is page-locked**, guard-bounded and dump-suppressed.
@@ -149,12 +153,24 @@ impl AlignedBuf {
     /// **A `SecureBlock` is scrubbed again on release**, so this is about the window between the
     /// last use and the free rather than about the free itself.
     pub fn wipe(&mut self) {
-        self.as_mut_slice().fill(0);
+        // **Volatile, because a dead store to a buffer about to be freed is exactly the store an
+        // optimizer is allowed to remove.** `fill(0)` on a slice is not a scrub guarantee once the
+        // backing is deallocated immediately afterwards; `write_volatile` is.
+        let ptr = self.as_ptr() as *mut u8;
+        for i in 0..self.len {
+            // SAFETY: both backings hold exactly `len` initialized bytes, and `i < len`.
+            unsafe { ptr.add(i).write_volatile(0) };
+        }
     }
 }
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
+        // A heap scratch buffer can hold plaintext for a pread/decrypt. Scrub it before handing the
+        // pages back to the allocator; the secure backing scrubs itself in `SecureBlock::drop`.
+        if matches!(self.backing, Backing::Heap { .. }) {
+            self.wipe();
+        }
         // SAFETY: `ptr`/`layout` are the pair returned by `alloc_zeroed` via
         // `from_size_align`, so this is the matching `dealloc`. The `Secure` arm needs none:
         // `SecureBlock::drop` scrubs and then `munmap`s, in that order.
