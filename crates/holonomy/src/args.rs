@@ -176,6 +176,8 @@ pub enum ParseError {
         /// The format.
         format: Format,
     },
+    /// Help was requested. This is not a usage error: print the usage text and exit successfully.
+    Help,
 }
 
 impl std::fmt::Display for ParseError {
@@ -208,6 +210,7 @@ impl std::fmt::Display for ParseError {
                     format.extension()
                 )
             }
+            Self::Help => write!(f, "help requested"),
         }
     }
 }
@@ -300,11 +303,7 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 "--window" => out.window = true,
                 "--display" => out.display = Some(value()?),
                 "--dry-run" => out.dry_run = true,
-                "--help" | "-h" => {
-                    return Err(ParseError::Unknown {
-                        flag: "help".into(),
-                    })
-                }
+                "--help" | "-h" => return Err(ParseError::Help),
                 other => {
                     // A bare path is not accepted: `--container` is required, and a silent
                     // positional would be ambiguous with it.
@@ -518,4 +517,10 @@ mod tests {
         }
     }
 
+    #[test]
+    fn help_is_a_successful_request_not_an_unknown_flag() {
+        for flag in ["--help", "-h"] {
+            assert!(matches!(Args::parse([flag]), Err(ParseError::Help)));
+        }
+    }
 }

@@ -120,8 +120,10 @@ impl EvdevSource {
         // SAFETY: the caller's contract says `fd` is valid, open and readable, and ownership
         // transfers here.
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        // **Best effort, and `None` is a real answer here.** See the field's docs: `open` — the
-        // sealed path — propagates, and this constructor cannot.
+        // **Fail closed in `wait`, not by pretending to have waited.** `open` propagates epoll
+        // failure at construction; this unsafe constructor cannot return `Result`, so it records
+        // the absence and `wait` reports an error rather than returning `Ready` forever. A quiet
+        // keyboard must not become a 100% CPU spin just because epoll could not be established.
         let epoll = match Epoll::create() {
             Ok(ep) => match ep.register(file.as_raw_fd()) {
                 Ok(()) => Some(ep),
@@ -221,17 +223,17 @@ impl InputSource for EvdevSource {
             return Ok(Wait::Ready);
         }
         let Some(epoll) = self.epoll.as_ref() else {
-            // No epoll instance (see the field's docs): degrade to the old behaviour rather than
-            // pretend to have waited. The loop spins; it does not hang and it does not exit.
-            return Ok(Wait::Ready);
+            // No epoll instance: report a read failure rather than `Ready`. `Ready` here made the
+            // session loop spin at full CPU on an adopted descriptor that could not be waited on.
+            return Err(InputError::Read(libc::EIO));
         };
         let mut events = [libc::epoll_event {
             events: libc::EPOLLIN as u32,
             u64: 0,
         }; 1];
         // SAFETY: `epoll` is a live epoll descriptor owned by this value; `events` is a one-element
-        // array whose length is passed; a negative timeout blocks indefinitely, which is not what
-        // any caller passes.
+        // array whose length is passed. A negative timeout blocks indefinitely; the sealed session
+        // deliberately passes `-1` so an idle keyboard costs no wakeups.
         let n = unsafe { libc::epoll_wait(epoll.as_raw_fd(), events.as_mut_ptr(), 1, timeout_ms) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
@@ -489,5 +491,32 @@ mod tests {
         for want in &evs {
             assert_eq!(src.next_event().expect("read"), Some(Event::Key(*want)));
         }
+    }
+    #[test]
+    fn adopted_descriptor_without_epoll_fails_closed() {
+        use std::os::fd::IntoRawFd;
+
+        // Regular files cannot be registered with epoll on Linux (EPERM). That gives a
+        // deterministic way to exercise the adopted-fd path where `epoll` is absent.
+        let path = std::env::temp_dir().join(format!(
+            "holonomy-evdev-no-epoll-{}.tmp",
+            std::process::id()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .expect("open scratch file");
+        let fd = file.into_raw_fd();
+        // SAFETY: `fd` is fresh, open, readable, and ownership passes to the source exactly once.
+        let mut src = unsafe { EvdevSource::from_raw_fd(fd) };
+        let err = src
+            .wait(0)
+            .expect_err("a descriptor that cannot be epoll-waited must not report Ready");
+        assert!(matches!(err, InputError::Read(_)));
+        drop(src);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -1610,13 +1610,10 @@ impl Editor {
     ///
     /// ## The length limit, and why there is one
     ///
-    /// The buffer cannot grow — [`Editor::yank`] is reserved once and this never reallocates — so a
-    /// paste larger than the buffer is **truncated to what fits rather than refused**. A refusal would
-    /// be the more honest answer, and it is the worse product: the user gets nothing at all for a
-    /// keystroke that looked like it worked.
-    ///
-    /// The truncation is **reported** rather than silent, because a paste that quietly dropped half a
-    /// document is the failure mode this whole project is written against. `session.rs` counts it.
+    /// The yank buffer is fixed-capacity: [`Editor::copy_range`] clamps a copied range to that
+    /// capacity, and `paste` inserts what was actually captured. This method does not reallocate the
+    /// yank buffer and does not silently truncate it further; if the document insert itself is
+    /// refused, the error is returned and the yank buffer is restored intact.
     pub fn paste(&mut self) -> Result<usize, EditorError> {
         let at = self.caret();
         if self.yank.is_empty() {
