@@ -2990,9 +2990,7 @@ impl<'a> Session<'a> {
                     .spans()
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
-                    .map_or(holonomy_render::Style::REGULAR, |sp| {
-                        holonomy_render::Style(sp.atlas_style())
-                    });
+                    .map_or(self.body_style(), |sp| self.doc_style(sp.atlas_style()));
                 // **One scalar at a time, because the boundary is per glyph.** A chunk-wide advance
                 // would give the click the whole chunk's midpoint, which is not a column.
                 let len = scalar_len(&buf[from..n]).min(n - from);
@@ -3294,9 +3292,7 @@ impl<'a> Session<'a> {
                     .spans()
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
-                    .map_or(holonomy_render::Style::REGULAR, |sp| {
-                        holonomy_render::Style(sp.atlas_style())
-                    });
+                    .map_or(self.body_style(), |sp| self.doc_style(sp.atlas_style()));
                 // **To the end of this run, or to the end of the chunk, whichever comes first.**
                 let to = n.min((run_end - at) as usize).max(from + 1);
                 pen = pen.saturating_add(pen_of(&self.painter, &buf[from..to], style));
@@ -3660,14 +3656,42 @@ impl<'a> Session<'a> {
                 self.stats.pointer_chrome += 1;
             }
             Action::SetFont(i) => {
+                let before = self.state.font_index;
                 self.state.font_index =
                     usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
-                // **The face is recorded and nothing else happens.** §2.2.1 builds the atlas from one
-                // body face, so choosing another name changes the toolbar's label and not one pixel of
-                // the page. Saying so here rather than in the renderer is deliberate: the renderer
-                // draws the choice, and the session admits what it costs.
-                self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Font)));
+                // **The face applies now.** This arm used to record the index and admit that
+                // nothing else happened, because `FONTS` listed families the atlas never packed.
+                // The list now carries only loaded faces and [`doc_style`](Self::doc_style) maps
+                // the choice onto every document paint and measurement site — so a change of face
+                // moves every glyph on the page, and the honest damage for that is all of it.
+                // Re-choosing the current face still moves only the dropdown's label.
+                if self.state.font_index != before {
+                    self.damage = self.chrome.full_damage();
+                } else {
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Font)));
+                }
                 self.stats.pointer_chrome += 1;
+            }
+            // **`File > New`: replace the document with a fresh, empty one.**
+            //
+            // Through [`adopt_document`](Self::adopt_document), which its own doc names "the only
+            // supported way to put a document in here" — the editor, the geometry, the manifest
+            // and the counts move together, and the full repaint is taken inside it. **No file is
+            // touched**: the sealed path has no `openat` to name one, and the in-memory buffer is
+            // simply replaced. The undo history goes with the document, which is what `New` means.
+            Action::New => {
+                if self
+                    .adopt_document(Editor::new(), &mut crate::store::NoSource)
+                    .is_err()
+                {
+                    // **Unreachable for an empty in-memory editor — there is nothing to fault —
+                    // and counted rather than unwrapped if that ever stops being true.** A `New`
+                    // that panicked would take the whole session down to decline a blank page.
+                    self.stats.pointer_inert += 1;
+                } else {
+                    self.state.title = "untitled".to_string();
+                    self.stats.pointer_chrome += 1;
+                }
             }
             other => {
                 if let Some(cmd) = action_command(other) {
@@ -3760,13 +3784,39 @@ impl<'a> Session<'a> {
         (usize::from(index) < sizes).then_some(index)
     }
 
+    /// **The atlas face document text draws and measures with, honouring the font dropdown.**
+    ///
+    /// `raw` is [`atlas_style`](holonomy_text::TextIntervalSpan::atlas_style)'s answer — 0 regular,
+    /// 1 bold, 2 italic, 3 code — or `0` for unstyled text. With Inter selected this is the
+    /// identity. With JetBrains Mono selected (`menus::MONO_FONT_INDEX`), face 0 becomes the
+    /// Monospace face; bold and italic keep Inter's faces, because no mono bold or italic is
+    /// packed, and code spans are Monospace already.
+    ///
+    /// **Every document paint *and* measurement site answers "which face" here.** The caret
+    /// column, the click-to-column midpoint rule, the selection highlight ([`pen_at`]) and the
+    /// emitted runs all route through this function or take its answer as a parameter — which is
+    /// what keeps the pen and the pixels in the same face when the dropdown changes. A paint that
+    /// switched and a measurement that did not would put the caret in Inter's columns over
+    /// Mono's glyphs, the exact class of disagreement part 31 and part 33 existed to end.
+    fn doc_style(&self, raw: u8) -> holonomy_render::Style {
+        if raw == 0 && self.state.font_index == holonomy_render::menus::MONO_FONT_INDEX {
+            holonomy_render::Style::MONOSPACE
+        } else {
+            holonomy_render::Style(raw)
+        }
+    }
+
+    /// [`doc_style`](Self::doc_style) for unstyled text: the body face itself.
+    fn body_style(&self) -> holonomy_render::Style {
+        self.doc_style(0)
+    }
+
     /// **Re-derive the chrome's type metrics from the painter's current size.** Part 43.
     ///
     /// **A private function rather than three lines inline in `set_zoom`,** because the same three
     /// lines run in `Session::new` and a second copy of "the cell comes from the face" is a second
     /// thing to keep in step with part 32's derivation.
-    fn apply_type_scale(&mut self) {
-        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
+    fn apply_type_scale(&mut self) {        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
         // is the tallest face *over every size in the atlas*, so with `[16, 20]` it answers 20 ppem's
         // pitch whatever is being drawn -- and a session at 100 % would space 16 ppem glyphs on 20 ppem
         // leading, which reads as double-spaced text at 100 % and as a zoom that changed nothing.
@@ -5960,8 +6010,10 @@ impl<'a> Session<'a> {
                     // a cell right of the caret at its left edge -- **the caret outside its own
                     // highlight**, which is the defect the caret fix would otherwise have made worse
                     // rather than better.
-                    let pen0 = pen_at(&self.painter, text, doc_start, lo, &page_runs);
-                    let pen1 = pen_at(&self.painter, text, doc_start, hi, &page_runs);
+                    let pen0 =
+                        pen_at(&self.painter, text, doc_start, lo, &page_runs, self.body_style());
+                    let pen1 =
+                        pen_at(&self.painter, text, doc_start, hi, &page_runs, self.body_style());
                     // **`shown` is the measure, and the highlight stops there too.** A line longer
                     // than the page is clipped by `codepoints_upto`, and a highlight running past the
                     // edge of the text would be a blue band over the page margin — which is not a
@@ -5979,6 +6031,7 @@ impl<'a> Session<'a> {
                         doc_start,
                         shown,
                         &page_runs,
+                        self.body_style(),
                     ));
                     if pen1 > pen0 {
                         push_rect(
@@ -6069,7 +6122,7 @@ impl<'a> Session<'a> {
                         y as i32,
                         at,
                         shown_len,
-                        holonomy_render::Style::REGULAR,
+                        self.body_style(),
                         0,
                         ink,
                     ))));
@@ -6116,10 +6169,10 @@ impl<'a> Session<'a> {
                         y,
                         at + cursor as u32,
                         gap.len() as u32,
-                        holonomy_render::Style::REGULAR,
+                        self.body_style(),
                         ink,
                     );
-                    pen_x += pen_of(&self.painter, gap, holonomy_render::Style::REGULAR);
+                    pen_x += pen_of(&self.painter, gap, self.body_style());
                     cursor = lo;
                 }
                 let run = &seg[cursor..hi];
@@ -6134,17 +6187,13 @@ impl<'a> Session<'a> {
                         y,
                         at + cursor as u32,
                         run.len() as u32,
-                        holonomy_render::Style(span.atlas_style()),
+                        self.doc_style(span.atlas_style()),
                         span_ink(&span, ink),
                     );
                     // **The run's own face, not `REGULAR`.** A bold glyph advances differently from a
                     // plain one, and measuring the gap with the wrong face is the same class of error as
                     // the grid was -- a second place where the position and the painting disagree.
-                    pen_x += pen_of(
-                        &self.painter,
-                        run,
-                        holonomy_render::Style(span.atlas_style()),
-                    );
+                    pen_x += pen_of(&self.painter, run, self.doc_style(span.atlas_style()));
                     cursor = hi;
                 }
             }
@@ -6159,7 +6208,7 @@ impl<'a> Session<'a> {
                     y,
                     at + cursor as u32,
                     tail.len() as u32,
-                    holonomy_render::Style::REGULAR,
+                    self.body_style(),
                     ink,
                 );
             }
@@ -7386,12 +7435,21 @@ fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) ->
 /// one line's bytes. The paint path's allocation invariant is asserted by `tests/session_no_alloc.rs`
 /// for the edit path and is explicitly out of scope for paint, but a function on this path has no
 /// business allocating when a walk answers it.
+/// ## `body` is the unstyled face, passed in rather than assumed
+///
+/// This measured every unstyled stretch in `REGULAR`, which was correct while `REGULAR` was the
+/// only face a plain byte could draw in. The font dropdown ended that: `Session::doc_style`
+/// decides the body face now, and a free function cannot ask it — so the caller passes
+/// `Session::body_style()` and this applies the same rule `doc_style` does (a face-0 span is
+/// body text too; bold, italic and code keep their own faces). A highlight measured in Inter
+/// over a page painted in Mono would be part 33's defect reintroduced from the other side.
 fn pen_at(
     painter: &Painter<'_>,
     text: &[u8],
     line_start: u32,
     at: usize,
     runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
+    body: holonomy_render::Style,
 ) -> u32 {
     let at = at.min(text.len());
     let mut pen = 0u32;
@@ -7410,29 +7468,25 @@ fn pen_at(
             continue;
         }
         if lo > cursor {
-            pen = pen.saturating_add(pen_of(
-                painter,
-                &text[cursor..lo],
-                holonomy_render::Style::REGULAR,
-            ));
+            pen = pen.saturating_add(pen_of(painter, &text[cursor..lo], body));
         }
         let end = hi.min(at);
-        pen = pen.saturating_add(pen_of(
-            painter,
-            &text[lo..end],
-            holonomy_render::Style(span.atlas_style()),
-        ));
+        // **The same mapping `Session::doc_style` applies**: a span whose flags collapse to face 0
+        // (a colour-only span) is body text and follows the dropdown; bold, italic and code carry
+        // their own faces.
+        let span_style = if span.atlas_style() == 0 {
+            body
+        } else {
+            holonomy_render::Style(span.atlas_style())
+        };
+        pen = pen.saturating_add(pen_of(painter, &text[lo..end], span_style));
         cursor = end;
         if cursor >= at {
             return pen;
         }
     }
     if cursor < at {
-        pen = pen.saturating_add(pen_of(
-            painter,
-            &text[cursor..at],
-            holonomy_render::Style::REGULAR,
-        ));
+        pen = pen.saturating_add(pen_of(painter, &text[cursor..at], body));
     }
     pen
 }
@@ -7716,6 +7770,12 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // rather than leaving it to be discovered as a dead row. It has no meaning without a document
         // list and a multi-document model, neither of which exists.
         Action::Close => return None,
+        // **No `Command` for this one either, and the same shape as `Export`.** A new document is
+        // not a keystroke the editor applies — it *replaces* the editor, and the only function
+        // allowed to do that is `Session::adopt_document`, which `apply_action` reaches directly.
+        // Routing it through a `Command` would hand the keymap a variant whose meaning is "discard
+        // the document", which no chord asks for in this build.
+        Action::New => return None,
         Action::SetZoom(_)
         | Action::SetStyle(_)
         | Action::SetFont(_)
