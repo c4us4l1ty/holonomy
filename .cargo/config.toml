@@ -19,14 +19,16 @@ target = "x86_64-unknown-linux-musl"
 linker = "rust-lld"
 
 # Cargo still links host-side helpers (build scripts / proc macros) for the host
-# triple even when the product target is musl. Use the system C compiler by absolute
-# path so a stale `cc` wrapper earlier in PATH -- for example one pointing at a removed
-# /tmp/zig/zig -- cannot break `cargo run` / `cargo test`. This does not make the
-# shipping artifact glibc-linked: the product target above remains static musl.
-# Override with CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER if the system compiler
-# lives elsewhere.
+# triple even when the product target is musl. This machine ships no system C
+# compiler (/usr/bin/cc does not exist), so host helpers are linked through the
+# persistent `cc` wrapper at /home/von/.local/bin/cc, which execs zig cc from
+# /home/von/.local/opt (kept out of /tmp so reboots cannot wipe it). Absolute path
+# so a stale `cc` wrapper earlier in PATH cannot break `cargo run` / `cargo test`.
+# This does not make the shipping artifact glibc-linked: the product target above
+# remains static musl. Override with CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+# if the compiler lives elsewhere.
 [target.x86_64-unknown-linux-gnu]
-linker = "/usr/bin/cc"
+linker = "/home/von/.local/bin/cc"
 
 [net]
 offline = false
