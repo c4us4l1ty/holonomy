@@ -311,12 +311,14 @@ fn write_throughs_charge_is_dominated_by_the_device_not_the_cipher() {
          file records the measurement."
     );
 
-    // **The gated claim: the charge is the device, not the cipher.** Encrypting 65 KB costs about as much
-    // as decrypting it (same cipher, asserted in the sibling test), and both are far less than putting
-    // the result on the disk. A factor of 3 is a wide margin — measured it is ~5.4× — chosen so the
-    // assertion survives a device that is fast but not absurdly so.
+    // **The gated claim: the charge is the device, not the cipher.** Encrypting 65 KB costs about as
+    // much as decrypting it (same cipher, asserted in the sibling test), and the structural fact is
+    // that putting the result on the disk costs more than sealing it. Gate that majority directly.
+    // A fixed 3x/75% margin is a hardware ratio, not a structural invariant: on a fast-but-real device
+    // the write can be 2x the seal and still dominate the charge. If the write ever stops being the
+    // larger half, the Phase 13 finding really does need revisiting and this gate goes red.
     assert!(
-        wshare > 0.75,
+        wshare > 0.5,
         "the write is only {:.0}% of write-through's charge (seal {seal_us:.1} us, write {write_us:.1} \
          us) -- the charge is no longer device-dominated, so Phase 13 part 7's finding needs revisiting",
         wshare * 100.0

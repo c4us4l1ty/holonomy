@@ -300,3 +300,33 @@ fn the_desktop_build_is_still_static_and_under_the_ceiling() {
     );
     assert_static_pie(&path, "the desktop build");
 }
+
+/// The product is static musl, but Cargo still links host build helpers for the host
+/// triple. A stale `cc` wrapper on PATH must not be able to break the build before the
+/// musl target is reached. The repository therefore pins the host GNU linker to the
+/// system compiler by absolute path, while the musl product linker stays `rust-lld`.
+#[test]
+fn host_linker_configuration_bypasses_a_stale_path_cc() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.cargo/config.toml");
+    let config = std::fs::read_to_string(&path).expect("read workspace cargo config");
+
+    fn section<'a>(config: &'a str, header: &str) -> &'a str {
+        let start = config.find(header).expect("cargo config section exists");
+        let rest = &config[start + header.len()..];
+        let end = rest.find("\n[").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    let musl = section(&config, "[target.x86_64-unknown-linux-musl]");
+    assert!(
+        musl.contains("linker = \"rust-lld\""),
+        "the static-musl product target must keep using rustc's bundled linker"
+    );
+
+    let host = section(&config, "[target.x86_64-unknown-linux-gnu]");
+    assert!(
+        host.contains("linker = \"/usr/bin/cc\""),
+        "host build helpers must not resolve `cc` through PATH: {host}"
+    );
+}

@@ -54,6 +54,12 @@ cargo run --release --target x86_64-unknown-linux-musl -p holonomy -- --headless
 cargo run --release --features desktop -p holonomy -- --window
 ```
 
+The shipping target is static musl and uses rustc's bundled `rust-lld`. Cargo still links a few
+host-side build helpers for the host triple; the workspace config pins those to `/usr/bin/cc` so a
+stale `cc` wrapper on `PATH` (for example one pointing at a removed `/tmp/zig/zig`) cannot break the
+build. If your system C compiler is not at `/usr/bin/cc`, install one or override
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER`. This does not change the static-musl product artifact.
+
 The live X11 gates need a display and must run single-threaded, because two tests fighting over the
 keyboard focus defeat each other:
 
