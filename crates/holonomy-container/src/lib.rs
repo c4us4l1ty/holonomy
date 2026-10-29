@@ -910,9 +910,22 @@ impl Wavefunction {
                 .commit(&self.file, self.omega, &self.root.k_enc, &self.root.n_root)?;
         }
 
+        self.ring.chunks = chunk_count;
         self.frame.content_len = content.len() as u64;
         self.frame.chunk_count = chunk_count;
         self.rewrite_master_frame()?;
+        if chunk_count < old_chunks {
+            // **A shrink must not leave the freed tail readable as authenticated ciphertext.**
+            // The master frame no longer points at those chunks, but their tags still verify
+            // under the live key. Overwrite them with fresh chaff after the frame is durable.
+            fill_chaff(
+                &self.file,
+                &self.chaff,
+                layout::chunk_offset(self.omega, chunk_count),
+                layout::chunk_offset(self.omega, old_chunks),
+            )?;
+            self.ring.wipe();
+        }
         Ok(())
     }
 
@@ -930,14 +943,12 @@ impl Wavefunction {
     /// are written back before they are evicted. So growth writes no document bytes at all, which is what makes
     /// it cheap enough to be called from an eviction.
     ///
-    /// ## Shrinking leaves the freed chunks on disk
+    /// ## Shrinking re-chaffs the freed chunks
     ///
-    /// Lowering `content_len` and `chunk_count` makes the trailing chunks **unreachable** — the ring refuses to
-    /// seek past `chunk_count`, and `chunk_content_offset` returns `None` for them — so they can no longer be
-    /// read as document content by this build. They are not *erased*, though: the bytes are ciphertext under a
-    /// key that exists, so an attacker with the key could recover them. **This matches what
-    /// [`write_content`](Self::write_content) already does on a shrink**, so it is not a new leak, but it is a
-    /// real one and re-chaffing the freed region is the fix that neither path currently applies.
+    /// Lowering `content_len` and `chunk_count` makes the trailing chunks unreachable, but
+    /// unreachable is not erased: their tags still verify under the live key. After the new
+    /// master frame is durable, the freed region is overwritten with fresh chaff and the ring
+    /// is wiped, so neither the disk nor the locked slots retain the old tail.
     pub fn set_content_len(&mut self, len: usize) -> Result<(), ContainerError> {
         let chunk_count = chunks_for(len as u64).map_err(|_| ContainerError::PayloadTooLarge {
             requested: len as u64,
@@ -954,6 +965,11 @@ impl Wavefunction {
         }
 
         let old_chunks = self.frame.chunk_count;
+        if chunk_count < old_chunks {
+            // Flush pending edits before the frame stops pointing at the old tail; the freed
+            // chunks are overwritten with chaff after the new frame is durable.
+            self.commit()?;
+        }
         // **The ring's bound is `ring.chunks`, and this is the only caller that left it behind.**
         //
         // `Ring::check_range` refuses any index at or past `ring.chunks`, and `ring.chunks` is
@@ -991,7 +1007,17 @@ impl Wavefunction {
         }
         self.frame.content_len = len as u64;
         self.frame.chunk_count = chunk_count;
-        self.rewrite_master_frame()
+        self.rewrite_master_frame()?;
+        if chunk_count < old_chunks {
+            fill_chaff(
+                &self.file,
+                &self.chaff,
+                layout::chunk_offset(self.omega, chunk_count),
+                layout::chunk_offset(self.omega, old_chunks),
+            )?;
+            self.ring.wipe();
+        }
+        Ok(())
     }
 
     /// Re-seal and write chunk 0 from the in-memory frame.

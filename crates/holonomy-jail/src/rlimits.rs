@@ -64,9 +64,14 @@ pub struct Limits {
 ///
 /// `RLIM_INFINITY` is reported as `u64::MAX` rather than `RLIM_INFINITY`, because the
 /// interesting comparison is against a byte count and `RLIM_INFINITY` is not one.
-/// `RLIMIT_*` selectors are plain `c_int` constants; `libc` has no named type for them on
-/// musl, so the parameter is `c_int` rather than a `libc` alias that only exists on glibc.
-pub fn getrlimit(resource: libc::c_int) -> Option<(u64, u64)> {
+/// The selector type differs between musl (`c_int`) and glibc (`c_uint`). Use the
+/// target's own type rather than forcing one libc's ABI onto the other.
+#[cfg(target_env = "gnu")]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(target_env = "gnu"))]
+type RlimitResource = libc::c_int;
+
+pub fn getrlimit(resource: RlimitResource) -> Option<(u64, u64)> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -89,7 +94,7 @@ pub fn getrlimit(resource: libc::c_int) -> Option<(u64, u64)> {
     ))
 }
 
-fn setrlimit_bytes(resource: libc::c_int, soft: u64, hard: u64) -> bool {
+fn setrlimit_bytes(resource: RlimitResource, soft: u64, hard: u64) -> bool {
     let to_raw = |v: u64| {
         if v == u64::MAX {
             libc::RLIM_INFINITY

@@ -1701,14 +1701,10 @@ impl Blink {
         if self.visible() == before {
             return None;
         }
-        // Only a transition *to visible* dirties anything, because only the drawn state differs from
-        // the undrawn one. A visible -> hidden flip changes nothing on screen: the cell was already
-        // repainted with the page behind it.
-        if self.visible() {
-            caret
-        } else {
-            None
-        }
+        // **Both transitions dirty the caret cell.** Hiding has to repaint the page behind
+        // the caret; returning `None` there left the previous caret pixels on screen until
+        // some unrelated edit happened to repaint that cell.
+        caret
     }
 
     /// The phase after `frame` frames, without advancing.

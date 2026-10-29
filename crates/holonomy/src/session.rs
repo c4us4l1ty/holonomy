@@ -1957,26 +1957,27 @@ impl<'a> Session<'a> {
     /// # The three cases
     ///
     /// * an event — returned;
-    /// * nothing, and the source **can wait** — `wait` blocks up to [`EVENT_WAIT_MS`], and the loop
-    ///   ticks (the blink may be due) and comes back;
+    /// * nothing, and the source **can wait** — `wait` blocks up to [`EVENT_WAIT_MS`], the loop
+    ///   ticks (the blink may be due), and then asks the source again;
     /// * nothing, and the source says it is over — `None`.
     fn next_or_wait(
         &mut self,
         source: &mut dyn InputSource,
         bytes: &mut dyn holonomy_text::LeafSource,
     ) -> Result<Option<holonomy_input::Event>, SessionError> {
-        if let Some(event) = source.next_event().map_err(session_io)? {
-            return Ok(Some(event));
-        }
-        match source.wait(Self::EVENT_WAIT_MS).map_err(session_io)? {
-            holonomy_input::Wait::Ended => Ok(None),
-            holonomy_input::Wait::Ready => {
-                // **A spurious wake-up, or a signal.** `wait` only returns without a descriptor
-                // being ready on `EINTR` or a timeout, and with [`EVENT_WAIT_MS`] negative there is
-                // no timeout — so this is a signal, and the tick is the right answer to one: the
-                // signal may have invalidated damage the last paint recorded.
-                self.tick_with(bytes)?;
-                Ok(None)
+        loop {
+            if let Some(event) = source.next_event().map_err(session_io)? {
+                return Ok(Some(event));
+            }
+            match source.wait(Self::EVENT_WAIT_MS).map_err(session_io)? {
+                holonomy_input::Wait::Ended => return Ok(None),
+                holonomy_input::Wait::Ready => {
+                    // **A spurious wake-up, a signal, or a timeout.** `Ready` means "call
+                    // `next_event` again", not "the stream ended". Returning `None` here made
+                    // `run_with_io` exit on the first `EINTR`/timeout even though the device was
+                    // still open. Tick for the blink/damage, then keep waiting.
+                    self.tick_with(bytes)?;
+                }
             }
         }
     }

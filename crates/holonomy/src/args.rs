@@ -284,7 +284,17 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                     out.height = parse_u32(&flag, &value()?)?;
                     out.sized = true;
                 }
-                "--ppem" => out.ppem = parse_u32(&flag, &value()?)? as u16,
+                "--ppem" => {
+                    let ppem = parse_u32(&flag, &value()?)?;
+                    // Range-check before narrowing: `65546 as u16` is 10, which used to
+                    // smuggle an out-of-range value past the atlas clamp below.
+                    out.ppem = u16::try_from(ppem).map_err(|_| ParseError::OutOfRange {
+                        flag: "ppem".into(),
+                        value: ppem,
+                        min: 10,
+                        max: 26,
+                    })?;
+                }
                 "--zoom" => out.zoom = parse_u32(&flag, &value()?)?,
                 "--headless" => out.headless = true,
                 "--window" => out.window = true,
@@ -304,17 +314,15 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 }
             }
         }
-        if out.width == 0 || out.height == 0 {
-            return Err(ParseError::OutOfRange {
-                flag: if out.width == 0 { "width" } else { "height" }.into(),
-                value: if out.width == 0 {
-                    out.width
-                } else {
-                    out.height
-                },
-                min: 1,
-                max: 7680,
-            });
+        for (flag, value) in [("width", out.width), ("height", out.height)] {
+            if !(1..=7680).contains(&value) {
+                return Err(ParseError::OutOfRange {
+                    flag: flag.into(),
+                    value,
+                    min: 1,
+                    max: 7680,
+                });
+            }
         }
         // **The atlas's own ceiling, measured.** At 28 ppem `build_atlas` returns `AtlasFull`:
         // `need: 406,068, have: 458,752`. 26 is the largest size that fits, and the range is clamped
@@ -492,4 +500,22 @@ mod tests {
         assert!(a.headless && a.dry_run);
         assert_eq!(a.width, 800);
     }
+    #[test]
+    fn ppem_is_range_checked_before_narrowing_to_u16() {
+        // 65546 as u16 == 10, which used to pass the atlas clamp.
+        for value in ["65536", "65546", "4294967295"] {
+            let err = Args::parse(["--container", "x", "--ppem", value]).unwrap_err();
+            assert!(matches!(err, ParseError::OutOfRange { ref flag, .. } if flag == "ppem"));
+        }
+        assert_eq!(Args::parse(["--container", "x", "--ppem", "26"]).unwrap().ppem, 26);
+    }
+
+    #[test]
+    fn width_and_height_reject_values_above_the_documented_ceiling() {
+        for flag in ["--width", "--height"] {
+            let err = Args::parse(["--container", "x", flag, "7681"]).unwrap_err();
+            assert!(matches!(err, ParseError::OutOfRange { min: 1, max: 7680, .. }));
+        }
+    }
+
 }

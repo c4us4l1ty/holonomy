@@ -147,7 +147,7 @@ impl Fenwick {
             // overflow: every node's value is a sum of a subset of the weights, all non-negative,
             // and their total is bounded by `u32::MAX` because `build` refuses to overflow.
             self.tree[j] = self.tree[j].wrapping_add(effective as u32);
-            j += j.isolate_lowest_one();
+            j += j & j.wrapping_neg();
         }
     }
 
@@ -183,7 +183,7 @@ impl Fenwick {
         let mut j = i.min(self.n);
         while j > 0 {
             sum = sum.saturating_add(self.tree[j]);
-            j -= j.isolate_lowest_one();
+            j -= j & j.wrapping_neg();
         }
         sum
     }
@@ -350,7 +350,7 @@ impl Fenwick {
             self.tree[i + 1] = *w;
         }
         for i in 1..=self.n {
-            let parent = i + i.isolate_lowest_one();
+            let parent = i + (i & i.wrapping_neg());
             if parent <= self.n {
                 // **Saturating, and the total is checked.**
                 //

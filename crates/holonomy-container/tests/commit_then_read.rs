@@ -44,8 +44,8 @@
 use std::os::fd::FromRawFd;
 
 use holonomy_container::io::DirectFile;
-use holonomy_container::ring::Ring;
-use holonomy_container::Wavefunction;
+use holonomy_container::ring::{Ring, RingError};
+use holonomy_container::{layout, layout::CHUNK_PLAINTEXT, Wavefunction};
 
 /// A shared passphrase and a deliberately tiny VDF count: this test is about the ring, not about
 /// the delay function, and the container's own constants are the ones that matter.
@@ -376,5 +376,89 @@ fn a_document_spanning_the_whole_ring_reads_back_after_a_commit() {
     );
 
     drop(container);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A write that fails after sealing must leave the edit retryable, not wipe it.
+#[test]
+fn a_failed_write_keeps_the_plaintext_for_a_retry() {
+    use std::ffi::CString;
+
+    let path = temp_path("failed-write-rollback");
+    let _ = std::fs::remove_file(&path);
+    let open = DirectFile::create_or_open(&path).expect("open");
+    let mut ring = Ring::new(4).expect("three page-locked slots");
+    ring.stage_plaintext(1, STAGED).expect("stage");
+
+    // Swap the descriptor for a read-only one: `prev_tag_from_disk` still succeeds, then
+    // `pwrite` fails with EBADF. This exercises the post-seal error path, not the pre-seal one.
+    let saved = unsafe { libc::dup(open.as_raw()) };
+    assert!(saved >= 0, "dup");
+    let cpath = CString::new(path.to_str().expect("utf8 path")).expect("cstring");
+    let ro = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY) };
+    assert!(ro >= 0, "open read-only");
+    assert_eq!(unsafe { libc::dup2(ro, open.as_raw()) }, open.as_raw());
+    unsafe { libc::close(ro) };
+
+    const K_ENC: [u8; 32] = [7; 32];
+    const N_ROOT: [u8; 24] = [9; 24];
+    const STAGED: &[u8] = b"an edit that must survive a failed pwrite";
+    let err = ring
+        .commit(&open, 0, &K_ENC, &N_ROOT)
+        .expect_err("a read-only descriptor cannot pwrite");
+    assert!(matches!(err, RingError::Io(_)));
+    assert!(ring.has_dirty(), "the failed commit dropped the edit");
+    assert_eq!(&ring.center_bytes()[..STAGED.len()], STAGED);
+
+    // Restore the writable descriptor and retry; the same edit must now land.
+    assert_eq!(unsafe { libc::dup2(saved, open.as_raw()) }, open.as_raw());
+    unsafe { libc::close(saved) };
+    ring.commit(&open, 0, &K_ENC, &N_ROOT).expect("retry");
+    assert!(!ring.has_dirty());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Shrinking must re-chaff the freed tail on both length-changing paths.
+#[test]
+fn shrinking_re_chaffs_the_freed_tail() {
+    let path = temp_path("shrink-chaff");
+    let _ = std::fs::remove_file(&path);
+    let big = vec![b'x'; CHUNK_PLAINTEXT * 2 + 10];
+    let mut w = Wavefunction::create(&path, PASSPHRASE, "t", &big, VDF_ITERATIONS).expect("create");
+    let omega = w.omega();
+    let old = w.frame().chunk_count;
+
+    w.set_content_len(CHUNK_PLAINTEXT).expect("shrink via set_content_len");
+    let new = w.frame().chunk_count;
+    assert!(new < old);
+    assert!(
+        w.region_is_chaff(
+            layout::chunk_offset(omega, new),
+            (layout::chunk_offset(omega, old) - layout::chunk_offset(omega, new)) as usize,
+        )
+        .expect("region_is_chaff"),
+        "set_content_len left the freed tail as authenticated ciphertext"
+    );
+    let read = w.read_content().expect("read");
+    assert_eq!(read.len(), CHUNK_PLAINTEXT);
+    assert!(read.iter().all(|&b| b == b'x'), "set_content_len must keep the retained prefix");
+
+    w.write_content(&big).expect("regrow");
+    let old = w.frame().chunk_count;
+    w.write_content(&big[..CHUNK_PLAINTEXT]).expect("shrink via write_content");
+    let new = w.frame().chunk_count;
+    assert!(new < old);
+    assert!(
+        w.region_is_chaff(
+            layout::chunk_offset(omega, new),
+            (layout::chunk_offset(omega, old) - layout::chunk_offset(omega, new)) as usize,
+        )
+        .expect("region_is_chaff"),
+        "write_content left the freed tail as authenticated ciphertext"
+    );
+    let read = w.read_content().expect("read");
+    assert_eq!(read.len(), CHUNK_PLAINTEXT);
+    assert!(read.iter().all(|&b| b == b'x'), "write_content must keep the retained prefix");
+    drop(w);
     let _ = std::fs::remove_file(&path);
 }

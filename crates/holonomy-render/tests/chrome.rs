@@ -744,24 +744,26 @@ fn the_blink_invalidates_only_the_caret_cell() {
 }
 
 #[test]
-fn hiding_the_caret_dirties_nothing_because_nothing_changed() {
-    // A visible -> hidden flip changes no pixel: the cell was already painted with the page behind
-    // it. So only the transition *to* visible reports damage, and a frame-driven test that counted
-    // both directions would see twice the flips and repaint for nothing.
+fn hiding_the_caret_dirties_the_cell_it_erases() {
+    // A visible -> hidden flip has to repaint the page behind the caret. Returning `None`
+    // there left the old caret pixels on screen until an unrelated edit repainted the cell.
     let caret = DamageRect::new(10, 20, 8, 18);
     let mut blink = Blink::new(2);
     let mut on_flips = 0;
     let mut off_flips = 0;
     for _ in 0..40 {
         let before = blink.visible();
-        match blink.advance(Some(caret)) {
-            Some(_) if before => off_flips += 1,
-            Some(_) => on_flips += 1,
-            None => {}
+        if let Some(rect) = blink.advance(Some(caret)) {
+            assert_eq!(rect, caret);
+            if before {
+                off_flips += 1;
+            } else {
+                on_flips += 1;
+            }
         }
     }
     assert!(on_flips > 0);
-    assert_eq!(off_flips, 0, "a hide must not dirty the cell");
+    assert!(off_flips > 0, "a hide must dirty the cell it erases");
 }
 
 #[test]
