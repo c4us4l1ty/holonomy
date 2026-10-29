@@ -1,4 +1,7 @@
-# Holonomy — status
+# Holonomy H2 — status (SUPERSEDED)
+
+> **This stack is superseded and kept as reference only.** The live project is the
+> bare-silicon H1 stack at the repository root — see [`../README.md`](../README.md).
 
 A word processor that stays responsive on documents of 2000+ pages, by rendering
 only the sections near the caret and resolving scroll geometry in Rust.

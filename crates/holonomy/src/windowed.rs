@@ -219,6 +219,17 @@ pub fn run(
     args: &Args,
     metrics: ChromeMetrics,
 ) -> Result<Exit, WindowedError> {
+    // **Said once, at startup, because the symptom reads as the product's fault.** A debug build of
+    // a software rasteriser is ~30x slower than the release build on the paint path, and the report
+    // it produces is "I click a button and it takes almost a whole second to respond" — filed
+    // against the UI, not against the profile that built it. `--release` is in every run command
+    // the README shows; this is for the invocation that forgot it. (For measuring a *release*
+    // build's latency, HOLONOMY_WINDOW_TRACE=1 prints per-click milliseconds.)
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "holonomy: THIS IS A DEBUG BUILD — painting is unoptimised and clicks will lag. \
+         Run with --release: cargo run --release --features desktop -p holonomy -- --window"
+    );
     let (w, h) = if args.sized {
         (metrics.width, metrics.height)
     } else {

@@ -7,8 +7,10 @@ itself, and once it has opened its container it cannot open anything else.
 The project is being built in phases, each one ending in a gate with recorded evidence. It is not
 finished. `PROJECT.md` is the build plan and the authority on scope; this file is the map.
 
-cargo run --release --features desktop -- --window
----
+```sh
+# Quick start: a real window on a desktop, for development.
+cargo run --release --features desktop -p holonomy -- --window
+```
 
 ## What it is
 
@@ -54,11 +56,19 @@ cargo run --release --target x86_64-unknown-linux-musl -p holonomy -- --headless
 cargo run --release --features desktop -p holonomy -- --window
 ```
 
-The shipping target is static musl and uses rustc's bundled `rust-lld`. Cargo still links a few
-host-side build helpers for the host triple; the workspace config pins those to `/usr/bin/cc` so a
-stale `cc` wrapper on `PATH` (for example one pointing at a removed `/tmp/zig/zig`) cannot break the
-build. If your system C compiler is not at `/usr/bin/cc`, install one or override
-`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER`. This does not change the static-musl product artifact.
+The shipping target is static musl and uses rustc's bundled `rust-lld`, so no external C toolchain
+touches the product artifact. Cargo still links a few host-side build helpers (build scripts, proc
+macros) for the *host* triple, and those use your platform's default `cc`. If your machine has no
+system `cc`, or a broken wrapper shadows it on `PATH`, point Cargo at a working one with
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/path/to/cc` (or the equivalent `[target]` section in
+your untracked `~/.cargo/config.toml`). The tracked `.cargo/config.toml` deliberately pins nothing
+host-specific, so a fresh clone builds on any machine with a C compiler installed.
+
+**If the developer window feels sluggish — clicks taking close to a second — you are almost
+certainly running a debug build.** The renderer is a software rasteriser; without `--release` it is
+~30x slower on the paint path. The window now prints a warning at startup when built in debug. To
+measure a release build's real latency, run with `HOLONOMY_WINDOW_TRACE=1`, which prints
+per-click/per-keystroke milliseconds alongside the damage and pixel counts.
 
 The live X11 gates need a display and must run single-threaded, because two tests fighting over the
 keyboard focus defeat each other:
@@ -66,6 +76,24 @@ keyboard focus defeat each other:
 ```sh
 HOLONOMY_X11_LIVE=1 cargo test -p holonomy-x11 --test live -- --test-threads=1
 ```
+
+## Running the tests
+
+The suite has four tiers, and knowing which one you are in saves a failed first run:
+
+1. **Fast unit and integration tests** — everything not named below. `cargo test --workspace
+   --release` runs them all; most finish in seconds.
+2. **Slow container gates** (`holonomy-container`). Every `Wavefunction::create` writes 128 MiB
+   through `O_DIRECT` and every open runs Argon2id at 128 MiB, so run these with
+   `--test-threads=2` or they fight over memory. Scratch files go next to the build output, not
+   `/tmp`, because tmpfs rejects `O_DIRECT` — keep `target/` on a real filesystem (ext4/btrfs/xfs).
+3. **Release-artifact gates** (`holonomy/tests/release_artifact.rs`). Only meaningful under
+   `--release`; in a debug run they skip with an explanation rather than measuring the wrong binary.
+4. **Live X11 gates** — opt-in via `HOLONOMY_X11_LIVE=1`, need a display, single-threaded (above).
+
+Several gates assert wall-clock latency (`session_latency.rs`, `write_through_cost.rs`,
+`holonomy-text/tests/latency.rs`); on a loaded or throttled machine those can fail without anything
+being wrong with the code. Re-run them on a quiet host before treating a failure as real.
 
 ## Layout
 
@@ -483,4 +511,12 @@ resident, so typing past the window does not yet work. See `PROJECT.md` §7.
 
 ## Licence
 
-Unlicensed and unpublished. `publish = false`.
+All rights reserved: this repository is intentionally unlicensed (`license = "UNLICENSED"`,
+`publish = false`) and there is deliberately no `LICENSE` file — absence of one is the statement,
+not an oversight. No permission is granted to use, copy, modify or distribute this code.
+
+The bundled fonts are not ours and carry their own licences, which ship beside them in
+`assets/fonts/`: Inter (OFL 1.1, `Inter-LICENSE.txt`), JetBrains Mono (OFL 1.1,
+`JetBrainsMono-OFL.txt`) and Noto Sans Math (OFL 1.1, `NotoSansMath-OFL.txt`). The OFL requires the
+licence text to accompany the fonts, including when they are embedded in the release binary's
+compressed payload.

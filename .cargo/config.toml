@@ -19,16 +19,23 @@ target = "x86_64-unknown-linux-musl"
 linker = "rust-lld"
 
 # Cargo still links host-side helpers (build scripts / proc macros) for the host
-# triple even when the product target is musl. This machine ships no system C
-# compiler (/usr/bin/cc does not exist), so host helpers are linked through the
-# persistent `cc` wrapper at /home/von/.local/bin/cc, which execs zig cc from
-# /home/von/.local/opt (kept out of /tmp so reboots cannot wipe it). Absolute path
-# so a stale `cc` wrapper earlier in PATH cannot break `cargo run` / `cargo test`.
-# This does not make the shipping artifact glibc-linked: the product target above
-# remains static musl. Override with CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
-# if the compiler lives elsewhere.
-[target.x86_64-unknown-linux-gnu]
-linker = "/home/von/.local/bin/cc"
+# triple even when the product target is musl, so the host triple needs a working
+# C-compatible linker driver. That is the platform default (`cc`) and is NOT pinned
+# here: a tracked config that names an absolute path only one machine has breaks
+# `cargo build` for every other clone at the first proc macro.
+#
+# If your machine has no system `cc` (or a broken wrapper earlier in PATH), point
+# Cargo at yours without touching this tracked file, either per-shell:
+#
+#   export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/path/to/your/cc
+#
+# or persistently in the *untracked* user config `~/.cargo/config.toml`:
+#
+#   [target.x86_64-unknown-linux-gnu]
+#   linker = "/path/to/your/cc"
+#
+# None of this changes the shipping artifact: the product target above remains
+# static musl, linked by rust-lld out of the rustc sysroot.
 
 [net]
 offline = false
