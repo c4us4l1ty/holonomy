@@ -303,18 +303,18 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 16,
-        "the sixteen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
-         Select all, Save, Export, **Open**, **Import**, Close, Insert > Image, Insert > Table, and \
-         Format > Bold and Format > Italic. Adding one changes this number."
+        with_action, 17,
+        "the seventeen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
+         Select all, Save, Export, **Open**, **Import**, Close, Insert > Image, Insert > Table, \
+         Insert > Equation, and Format > Bold and Format > Italic. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
     // is stable and visible.
-    // **40 of 56, and it was 47 of 55 before the save gained a row.**
+    // **40 of 57, and it was 47 of 55 before the save gained a row.**
     //
-    // **This gate has now been through five edits and they are not all the same shape**, which is worth
-    // stating plainly — because two of them moved the same number for opposite reasons:
+    // **This gate has now been through six edits and they are not all the same shape**, which is worth
+    // stating plainly — because three of them moved the same number for opposite reasons:
     //
     // * **Part 25 added two wired rows** (Bold and Italic in Format) rather than converting two
     //   unwired ones, so the unwired count did not move and the *total* went 54 -> 56. **The first
@@ -347,16 +347,26 @@ fn every_wired_menu_item_carries_an_action() {
     //   it was a `sub(…)` header — a row whose chevron opened a submenu that has no renderer, so it
     //   drew as a header and did nothing. **42/56 -> 40/56, the unwired count alone**, and the total
     //   did not move.
+    // * **`Insert > Equation` is a *new* row, and that is the shape that matters.** `act` was used,
+    //   not `plain`, and the row was added rather than converted: `Action::InsertMath` was the third
+    //   of the three `Action` variants that appeared only in their own `name()` arm, routed from the
+    //   keyboard as `Ctrl-M` and reachable by no menu and no popup. `DocumentStart` and `DocumentEnd`
+    //   are the other two and they are *not* being given rows — see the note at the row in
+    //   `menus.rs`. **40/56 -> 40/57: the total alone**, and the unwired count does not move, because
+    //   a wired row was added rather than an unwired row being wired. **That is the distinguishing
+    //   pair again, from the third direction** — the save and export edits moved the unwired count and
+    //   left the total; this one moves the total and leaves the unwired count.
     //
     // **A gate that prints the list is what made these safe to get right.** The list is printed because
     // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
     // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (40, 56),
-        "**40 unwired of 56 menu items** in the eight headings. File > Open and File > Import now carry actions; \
-         the rows were already there and nothing was added or removed, so the unwired count alone \
-         moved, by two. The list is \
+        (40, 57),
+        "**40 unwired of 57 menu items** in the eight headings. File > Open and File > Import now carry \
+         actions and Insert > Equation is a new wired row; the two Open/Import rows were already there \
+         and nothing was added or removed there, so the unwired count alone moved by two, and Equation \
+         adds one wired row so the total alone moves by one. The list is \
          printed because \"everything is wired\" is not true here: what matters is that the count \
          is stable and the rows are named. Got: {without:?}"
     );
