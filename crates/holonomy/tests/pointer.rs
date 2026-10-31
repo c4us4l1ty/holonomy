@@ -369,11 +369,12 @@ fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     //
     // * **it used `Tool::Bold`**, until part 25 armed a style from Bold and Bold became a button with
     //   something behind it;
-    // * **it used `Tool::Print`**, which part 33 removed rather than wire up — **a button that does
-    //   nothing and never will is a lie about the product, and removing it is cheaper and more honest
-    //   than inventing a print backend to make a gate pass**;
-    // * **so it is `Tool::Spellcheck`**, which is inert for the same reason Print was and is still
-    //   there because a spellchecker is a real feature someone will want, unlike a printer in a
+    // * **it used `Tool::Print`**, which is still on the toolbar and wired to `Action::Export` — so
+    //   it does the one thing a print button does. **An earlier version of this note said part 33
+    //   removed it rather than wiring it up, and that is not what the code does**: the button was
+    //   given a job rather than taken off the bar.
+    // * **so it is `Tool::Spellcheck`**, which is inert because a spellchecker needs a dictionary the
+    //   512 KiB atlas budget cannot hold — a real feature someone will want, unlike a printer in a
     //   sandboxed text editor that cannot open a file dialog.
     let bold = widgets::place_toolbar(&l, 8)
         .into_iter()
@@ -492,20 +493,20 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     //
     // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
     // reason the comment above gives: opening a popup has applied nothing yet.
-    // **Ten, and it was eleven until part 33.** `Tool::Print` was removed rather than wired up -- a
-    // button that does nothing and never will is a lie about the product, and a print backend is not
-    // something to invent to keep a number unchanged. **The arithmetic follows: 20 tools now, so 20
-    // minus 3 commands, 1 toggle, 4 dropdowns and 2 chrome changes.**
+    // **Eight, and it has been eight since part 44.** Nothing has left this list since. Part 33's
+    // `Tool::Print` was given `Action::Export` to do rather than taken off the toolbar, and part 46's
+    // `Tool::Comment` was intended to go but never did -- it is still there and still inert.
+    // **The arithmetic follows: 23 tools, so 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
+    // 6 chrome changes and 8 inert leaves nothing unaccounted for.**
     assert_eq!(
         widgets::TOOLBAR.len(),
         23,
-        "**nineteen tools.** Twenty-one until part 33 removed Print; twenty until part 46 removed \
-         Comment. **Two tools have now been deleted rather than wired**, and the pattern is worth \
-         naming: a button with nothing behind it is a claim about the product that is false, and \
-         removing it costs one line of layout while wiring it costs a model. The count is asserted \
+        "**twenty-three tools.** Neither of the two deletions an earlier part claimed actually \
+         landed: `Tool::Print` is still here and wired to `Action::Export`, and `Tool::Comment` is \
+         still here and inert -- part 46 intended to remove it and did not. The count is asserted \
          separately so that the inert arithmetic below cannot be quietly wrong on both sides."
     );
-    // **Five, and it was ten until part 44.** Four buttons left the inert list, each with a decision
+    // **Eight.** Four buttons left the inert list in part 44, each with a decision
     // behind it:
     //
     // | left | part | what it is now |
@@ -514,22 +515,25 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // | `mode` | 44 | a two-row switcher -- **a fifth dropdown** |
     // | `overflow` | 44 | a menu of the tools that did not fit |
     //
-    // **The arithmetic, restated: 20 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome changes.**
+    // **The arithmetic, restated: 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 chrome
+    // changes leaves the 8 above.**
     // Two of those five are new categories this part created rather than new members of an old one --
     // `mode` made the dropdown count five, and `overflow` is a chrome change that changes nothing at
     // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
     //
-    // **The list in the message is the evidence.** It is [`spellcheck`, `paint-format`, `underline`,
-    // `highlight`, `link`, `comment`], and every one of the six is either a model this program does
-    // not have (a dictionary, a URL, an annotation store) or painter work on body-text runs that
-    // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six` records by name.
+    // **The list in the message is the evidence.** It is [`search`, `spellcheck`, `paint-format`,
+    // `font-size`, `underline`, `highlight`, `link`, `comment`] -- eight, not six -- and every one of
+    // them is either a model this program does not have (a search query, a dictionary, a format
+    // model, a size list the atlas can back, a URL, an annotation store) or a run-level flag the
+    // document does not carry. `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_eight`
+    // records them by name, with a reason for each.
     assert_eq!(
         inert.len(),
         8,
-        "**five inert buttons**, which is 19 minus 3 commands, 1 toggle, 5 dropdowns and 5 chrome \
-         changes. The list is {inert:?}. Part 44 removed four from this list and each removal came \
-         with a recorded decision; part 46 removed a fifth tool from the toolbar altogether rather \
-         than leave a button that will never work."
+        "**eight inert buttons**, which is 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 \
+         chrome changes. The list is {inert:?}. Part 44 removed four from this list and each removal \
+         came with a recorded decision; **part 46 intended to remove a fifth from the toolbar \
+         altogether and the removal never landed**, so `Comment` is still here and still inert."
     );
 }
 
