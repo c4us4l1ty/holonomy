@@ -347,9 +347,11 @@ const FILE: &[Item] = &[
     //
     // `Session::export` has been implemented and gated since Phase 8 and the only routes to it were
     // the `--export-html` / `--export-pdf` command-line flags and the end of the session — so a user
-    // clicking **File > Export** got a menu that opened and a row that closed it again. Unlike
-    // **Print**, which part 33 removed because *no* backend existed, **the backend is here**: this is
-    // the row failing to reach it, which is a wiring defect rather than a missing feature.
+    // clicking **File > Export** got a menu that opened and a row that closed it again. **`Print` is
+    // the contrast, and it is worth naming correctly:** it was not removed for want of a backend --
+    // it was wired to this same `Action::Export`, which is the one thing a print button does. **The
+    // backend is here in both cases**, so what was missing was the row reaching it: a wiring defect
+    // rather than a missing feature.
     //
     // **It writes to the sinks opened at boot, not to a path the user picks.** The jail's measured
     // seccomp allowlist has no `openat` on a user path, so an interactive file dialog is not

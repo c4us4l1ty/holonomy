@@ -189,34 +189,36 @@ fn no_two_icons_share_a_mask() {
 /// covered. So `ALL` is checked against the enum's own discriminants.
 #[test]
 fn the_all_list_and_the_match_agree() {
-    // **33, not 34: part 33 removed `IconId::Print`.** The icon existed only for the toolbar's Print
-    // button, and that button was removed rather than wired up -- a button that does nothing and
-    // never will is a lie about the product, and inventing a print backend to keep a gate green
-    // would be the more expensive lie. **The mask, the enum variant and the `ALL` entry went
-    // together**, which is what this gate is for: had any one of them stayed, it would have said so.
-    // ## 32, and that is two icons fewer than it was
+    // **34, and neither of the two deletions a previous part claimed is actually in the code.**
     //
-    // **Part 33 removed `Print`**: the icon existed only for a toolbar button that was removed
-    // rather than wired up, because a button that does nothing and never will is a lie about the
-    // product, and inventing a print backend to keep a gate green would be the more expensive lie.
+    // **Part 33 was written as though `IconId::Print` had been removed** -- "the mask, the enum
+    // variant and the `ALL` entry went together" -- and part 46 was written as though
+    // `IconId::Comment` had been removed the same way. **Neither deletion landed.** `IconId::Print`
+    // and `IconId::Comment` are both still in `ALL`, `mask::PRINT` and `mask::COMMENT` both still
+    // resolve, `Tool::Print` and `Tool::Comment` are both still in `TOOLBAR`, and
+    // `TitleButton::Comments` is still a variant.
     //
-    // **Part 46 removed `Comment`, on the same reasoning applied earlier.** `Tool::Comment` needed
-    // an annotation store -- a list, an anchor range, an author, and anchors that move when the text
-    // before them is edited -- and this program has no reason to want one. **`IconId::Comment`,
-    // `mask::COMMENT`, `Tool::Comment` and `TitleButton::Comments` went together**, and the two
-    // removed toolbar buttons are now `Print` and `Comment`, both of which would have needed a model
-    // nobody has asked for.
+    // **The number below is the one the code produces, and it was written against the code rather
+    // than against the plan** -- which is why it says 34 and not 32. The prose around it was not,
+    // and a reader who trusted it would look for an icon that is still there.
     //
-    // **Deleting rather than disabling is the pattern worth keeping.** Both removals cost one line of
-    // layout and saved a button that lied, and in both cases the mask, the enum variant and the `ALL`
-    // entry had to go together -- **which is exactly what this gate is for, and it said so by
-    // failing on a number rather than on a missing reference.**
+    // **`Print` was resolved by wiring it, not by deleting it.** `Tool::Print` reaches
+    // `Action::Export`, so the button does the one thing a print button does. That is the cheaper
+    // end of the same argument: a button that does nothing is a lie about the product, and this one
+    // was given something to do rather than taken off the bar.
+    //
+    // **`Comment` is the one still standing.** It has no annotation store -- no list, no anchor
+    // range, no author, and no way for an anchor to move when the text before it is edited -- so it
+    // is inert, and by this project's own standard *a button that will never work is a lie about the
+    // product*. **It is left here and named rather than deleted on the strength of a comment**,
+    // because removing a toolbar button is a product decision and this file is a gate. The count to
+    // change if that decision is made is 34 -> 33.
     assert_eq!(
         IconId::ALL.len(),
         34,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. Part 33 removed \
-         `Print` and part 46 removed `Comment`, both rather than wired."
+         **Neither removal a previous part claimed actually landed**: `IconId::Print` and `IconId::Comment` are both still in this list, `Tool::Print` is wired to `Action::Export`, and `Tool::Comment` is still inert on the toolbar."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.
