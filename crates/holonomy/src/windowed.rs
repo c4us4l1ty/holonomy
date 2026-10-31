@@ -313,9 +313,73 @@ pub fn run(
         eprintln!("holonomy: first frame written to {}", path.to_string_lossy());
     }
 
+    // **Part 45: the two File rows that need a path, and the one place a path can come from.**
+    //
+    // **The window has no file dialog, and the sealed product has neither a dialog nor the `openat` to
+    // use one.** So `File > Open` and `File > Import` are requests the session makes and the *driver*
+    // answers — and the driver answers them by reading a path from the terminal this window was started
+    // in. That is a developer window's mechanism and not a product's, and it is written here rather
+    // than implied by the row.
+    //
+    // **The reader is a thread, because the window must keep painting while the path is typed.** A
+    // blocking read on the event loop's thread would freeze the caret's blink and every repaint for as
+    // long as the user is typing, which reads as a hang rather than as a prompt. Paths are sent as they
+    // arrive and taken with `try_recv`, so the window never waits.
+    //
+    // **It exits on EOF or an error**, which is what a closed terminal or a redirected-from-a-file
+    // stdin does; a window started with no terminal simply never gets a path.
+    let passphrase = std::env::var("HOLONOMY_PASSPHRASE").unwrap_or_default();
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let path = line.trim();
+                    if !path.is_empty() {
+                        let _ = open_tx.send(std::path::PathBuf::from(path));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     let start = Instant::now();
     let mut events = 0u64;
+    // **A requested open, and the path it is waiting for.** The session asks; this window answers.
+    // Neither step blocks — the prompt is printed on the iteration the request arrived and the path is
+    // taken from the reader when it lands — so a path typed slowly costs the window nothing.
+    let mut awaiting: Option<holonomy_render::menus::Action> = None;
     loop {
+        if awaiting.is_none() {
+            if let Some(action) = session.take_open_request() {
+                eprint!("holonomy: open path: ");
+                awaiting = Some(action);
+            }
+        }
+        if let Ok(path) = open_rx.try_recv() {
+            if let Some(action) = awaiting.take() {
+                // **`Import` adds to the list and `Open` replaces the painted document**, and both are
+                // refused by the session under the seal — so reaching here means the developer window is
+                // running, which is the only place a path can be typed.
+                match action {
+                    holonomy_render::menus::Action::Import => {
+                        if let Err(e) = session.import_path(&path, &passphrase) {
+                            eprintln!("holonomy: {e}");
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = session.open_path(&path, &passphrase) {
+                            eprintln!("holonomy: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
         // One event, with a bound. The borrow of the session ends at the end of this block, so the
         // session is free again for the dispatch below.
         let event = {

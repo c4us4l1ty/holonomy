@@ -455,6 +455,18 @@ pub struct Session<'a> {
     /// **Read access is unchanged**, because a dozen gates and the export path read it and none of them
     /// can corrupt the session by looking.
     editor: Editor,
+    /// **Every other document this session has open, in the order it was parked.** See
+    /// [`ParkedDocument`]. **Empty in every build until part 45**, and the document a session starts
+    /// with is `editor`, not an entry here.
+    parked: Vec<ParkedDocument>,
+    /// **A `File > Open` or `File > Import` waiting for a path, and which of the two it was.**
+    ///
+    /// **A request rather than an opening, for the same reason the export is one:** the path is
+    /// something the *window driver* has and the session does not — the sealed jail has no `openat`
+    /// and the developer window has no file dialog, so the row can only ask. `Session::apply_action`
+    /// stores the action here and `Session::take_open_request` hands it back to the driver, which is
+    /// the one place that can turn it into a path.
+    open_request: Option<holonomy_render::menus::Action>,
     /// The style flags armed at the caret, or 0 for none. **Part 25.**
     ///
     /// **A field and not a zero-width span**, because `SpanMap::style_range` returns `Ok(())` for
@@ -815,6 +827,32 @@ pub struct Session<'a> {
     math_source: Vec<u8>,
 }
 
+/// A document this session has open but is not painting.
+///
+/// # Why the list exists, and what is *not* in it
+///
+/// **[`Session::editor`] is the document on the page; this is every other document the session has.**
+/// The sidebar draws a row per document and the File menu has three rows that act on the list, and
+/// neither works if the session can only ever hold one.
+///
+/// **Every entry is fully resident, and that is what makes parking safe.** [`Session::adopt_document`]
+/// reads the whole document once through [`holonomy_text::Editor::text_faulting`], which faults every
+/// leaf in, so a document that has been adopted needs no container to be adopted again:
+/// [`Session::close_active`] and [`Session::switch_document`] re-adopt a parked editor over
+/// [`crate::store::NoSource`] and cannot miss.
+///
+/// **A document that had *not* been adopted would need its container, and a container cannot live
+/// here.** The sealed path's is borrowed by the paint path's store, which lives outside the session
+/// (`SessionContext::container_file` in `main.rs`), and the developer window is the same story. **So
+/// the rule is the one the code already follows: a document is parked only after it has been
+/// adopted, and nothing here ever parks a skeleton.**
+pub struct ParkedDocument {
+    /// The document. Fully resident; see the type's docs.
+    editor: holonomy_text::Editor,
+    /// Its title, for the sidebar.
+    title: String,
+}
+
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
     pub fn new(
@@ -1021,6 +1059,11 @@ impl<'a> Session<'a> {
             .collect();
         let mut s = Self {
             editor,
+            // **No second document yet.** A session starts with the one it was built over; `New`,
+            // `Open` and `Import` are what put entries here.
+            parked: Vec::new(),
+            // **Nothing asked for a path yet.**
+            open_request: None,
             // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
             // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
             pending_style: None,
@@ -1735,9 +1778,161 @@ impl<'a> Session<'a> {
             return;
         }
         self.state.title = name.to_string();
-        self.state.docs = vec![name.to_string()];
-        self.state.active_doc = 0;
+        // **The list is the one document this names.** `set_document` is *\"the session has exactly one
+        // document and it is called this\"*, which is what a driver says at startup and what
+        // `the_title_and_the_one_document_row_are_the_same_fact` holds. A parked document has no name
+        // to keep here, so it goes with the list rather than being renamed underneath it.
+        self.parked.clear();
+        self.sync_docs();
         self.invalidate(self.chrome.full_damage());
+    }
+
+    /// **Rebuild the sidebar's list from the painted document and the parked ones.**
+    ///
+    /// **The painted document is row 0 and the parked ones follow, in the order they were parked.**
+    /// That is one fact — *what is open, in what order* — written in one place, because a title bar
+    /// naming one document over a rail naming another is the defect part 39 recorded.
+    fn sync_docs(&mut self) {
+        self.state.docs.clear();
+        self.state.docs.push(self.state.title.clone());
+        for d in &self.parked {
+            self.state.docs.push(d.title.clone());
+        }
+        self.state.active_doc = 0;
+    }
+
+    /// How many documents this session has open, the painted one included.
+    #[must_use]
+    pub fn document_count(&self) -> usize {
+        self.parked.len() + 1
+    }
+
+    /// **Park the document this session is painting and adopt `editor` in its place.**
+    ///
+    /// **The one supported way to change which document is on the page.** `Session::editor` is private
+    /// and [`adopt_document`](Self::adopt_document) is the only function allowed to write it, so a
+    /// caller cannot leave the geometry, the manifest and the counts describing the *previous*
+    /// document — the defect part 16 fixed, and the reason this is a method rather than a field write.
+    ///
+    /// **The document being replaced is parked, not dropped**: it is still open, and the sidebar has a
+    /// row for it.
+    fn adopt_new(&mut self, editor: Editor, title: String) {
+        let parked = std::mem::replace(&mut self.editor, Editor::new());
+        self.parked.push(ParkedDocument {
+            editor: parked,
+            title: self.state.title.clone(),
+        });
+        // A blank editor has no leaves to fault, so this cannot fail; the result is dropped rather than
+        // unwrapped because a `New` that panicked would take the whole session down to open a blank page.
+        let _ = self.adopt_document(editor, &mut crate::store::NoSource);
+        self.state.title = title;
+        self.sync_docs();
+    }
+
+    /// **Close the document this session is painting.**
+    ///
+    /// **The most recently parked document becomes the painted one; with none parked, the session
+    /// continues with a fresh blank.** That is what closing the last document means, and it is the
+    /// document `New` would have opened — so a session never ends up with nothing to paint.
+    fn close_active(&mut self) {
+        match self.parked.pop() {
+            Some(doc) => {
+                // The document being closed leaves with its editor. It is fully resident, so it needs
+                // nothing else, and dropping the editor is the whole of the close.
+                let _ = std::mem::replace(&mut self.editor, Editor::new());
+                let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
+                self.state.title = doc.title;
+            }
+            None => {
+                let _ = self.adopt_document(Editor::new(), &mut crate::store::NoSource);
+                self.state.title = "untitled".to_string();
+            }
+        }
+        self.sync_docs();
+    }
+
+    /// **Switch the painted document to the parked one at `index`.**
+    ///
+    /// **`index` is an index into the sidebar's list, not into [`parked`](Self::parked)**: row 0 is the
+    /// document already painted and the rows after it are the parked ones in order. **A request for
+    /// row 0 is not an error** and does nothing, which is what a second click on the active row is.
+    ///
+    /// **The document being switched away from is parked, not dropped** — switching is not closing.
+    /// It takes the place in the list the new document vacated, so the other rows keep their order.
+    fn switch_document(&mut self, index: usize) {
+        if index == 0 || index > self.parked.len() {
+            return;
+        }
+        // Row `index` is parked entry `index - 1`: row 0 is the painted document.
+        let Some(doc) = self.parked.remove(index - 1) else {
+            return;
+        };
+        let current = std::mem::replace(&mut self.editor, Editor::new());
+        self.parked.insert(
+            index - 1,
+            ParkedDocument {
+                editor: current,
+                title: self.state.title.clone(),
+            },
+        );
+        let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
+        self.state.title = doc.title;
+        self.sync_docs();
+    }
+
+    /// **Take a pending `File > Open` / `File > Import`, so a driver can act on it.**
+    ///
+    /// **A driver call, not a session one.** The session can ask for a path to be opened but cannot
+    /// supply one — the sealed jail has no `openat` and the developer window has no file dialog. The
+    /// window driver is the one place that can turn this into a path, so it is the one that calls this
+    /// and then [`open_path`](Self::open_path) or [`import_path`](Self::import_path).
+    #[must_use]
+    pub fn take_open_request(&mut self) -> Option<holonomy_render::menus::Action> {
+        self.open_request.take()
+    }
+
+    /// **Open the container at `path` and make it the painted document.**
+    ///
+    /// # The developer window only
+    ///
+    /// **The caller checks `ChromeState::sealed` before this is reached, and `apply_action` does.**
+    /// The jail's seccomp filter has no `openat` on a user path, so an open under the seal is `SIGSYS`
+    /// and exit 137; the row is refused by name rather than letting that happen.
+    ///
+    /// # The document is read whole, and the container is dropped
+    ///
+    /// **[`crate::store::open_resident`] faults every leaf before this returns**, so the editor is
+    /// fully resident and needs no container — which is what lets the developer window keep painting
+    /// through `NoSource` and what makes the document parkable like any other. **The cost is that a
+    /// document larger than memory cannot be opened here**; the sealed path's sparse load is the
+    /// product's, and the developer window is not the product.
+    pub fn open_path(&mut self, path: &std::path::Path, passphrase: &str) -> Result<(), SessionError> {
+        let (editor, title) = crate::store::open_resident(path, passphrase).map_err(|_| {
+            SessionError::Sink(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "could not open the container",
+            ))
+        })?;
+        self.adopt_new(editor, title);
+        Ok(())
+    }
+
+    /// **Open the container at `path` and add it to the list, leaving the painted document alone.**
+    ///
+    /// **`Import`, and the one difference from [`open_path`](Self::open_path).** The new document is
+    /// parked rather than adopted, so the document on the page does not move — which is what makes the
+    /// row a way to accumulate documents rather than a way to switch to one.
+    pub fn import_path(&mut self, path: &std::path::Path, passphrase: &str) -> Result<(), SessionError> {
+        let (editor, title) = crate::store::open_resident(path, passphrase).map_err(|_| {
+            SessionError::Sink(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "could not open the container",
+            ))
+        })?;
+        self.parked.push(ParkedDocument { editor, title });
+        self.sync_docs();
+        self.invalidate(self.chrome.full_damage());
+        Ok(())
     }
 
     /// Open or close the document-tabs sidebar, and re-lay the chrome for it.
@@ -2727,35 +2922,33 @@ impl<'a> Session<'a> {
                 }
             }
             Hit::Doc(index) => {
-                // **Switching is a state change, not a command.** There is no `Command::OpenDocument`
-                // because there is one document: `state.docs` is a list of *titles* the sidebar draws,
-                // and part 19 was explicit that the models are not here. So the row is highlighted,
-                // the active index moves, and `Session::adopt_document` is still the only way a
-                // document gets in. **A second click on the already-active row is not an error** and
-                // does nothing.
+                // **Switching is a state change, not a command, and as of part 45 it is a real
+                // switch.** There is still no `Command::OpenDocument` — a document is not opened from
+                // a row, it is already in the session's list and the row names it — and
+                // [`switch_document`](Self::switch_document) is what adopts the named one, through the
+                // same [`adopt_document`](Self::adopt_document) every other path uses.
                 //
-                // **Two rows are damaged — the one that was active and the one that now is.** The
-                // fill is the only thing that moves, and a row that loses its fill and is not
-                // repainted is a row that stays selected.
+                // **Row 0 is the document already painted**, so clicking it is not an error and does
+                // nothing, which is the same promise the row made when the list held one entry.
+                //
+                // **Nothing is counted.** This is a state change, not a command, and the arm was
+                // uncounted before the list existed; a switch also takes the full repaint it needs
+                // inside `adopt_document`, so there is no partial damage to account for here.
                 self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                let l = self.chrome.layout;
-                let mut rect = DamageRect::EMPTY;
-                for i in [self.state.active_doc, index] {
-                    if let Some(r) = l.sidebar_doc(i) {
-                        rect = rect.union(&r);
-                    }
+                if index == 0 || index > self.parked.len() {
+                    return Ok(());
                 }
-                self.state.active_doc = index;
-                self.invalidate(rect);
+                self.switch_document(index);
             }
             Hit::NewDoc => {
                 self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
-                // **Counted, not faked.** `state.docs` is a list of titles and there is nowhere to put
-                // a new one; inventing an "Untitled 2" row with no document behind it would make the
-                // sidebar lie about what is open.
-                self.stats.pointer_inert += 1;
+                // **The same request `File > New` makes, through the same arm**, so a document opened
+                // from the rail and one opened from the menu are the same document — and the one that
+                // was open is parked rather than dropped, which is what keeps the rail's rows honest
+                // about what is open.
+                self.apply_action(holonomy_render::menus::Action::New)?;
             }
             Hit::SidebarBack => {
                 self.invalidate_popup_change(self.state.open);
@@ -3672,24 +3865,48 @@ impl<'a> Session<'a> {
                 }
                 self.stats.pointer_chrome += 1;
             }
-            // **`File > New`: replace the document with a fresh, empty one.**
+            // **`File > New`: open a fresh, empty document and keep the one that was open.**
             //
-            // Through [`adopt_document`](Self::adopt_document), which its own doc names "the only
-            // supported way to put a document in here" — the editor, the geometry, the manifest
-            // and the counts move together, and the full repaint is taken inside it. **No file is
-            // touched**: the sealed path has no `openat` to name one, and the in-memory buffer is
-            // simply replaced. The undo history goes with the document, which is what `New` means.
+            // Through [`adopt_new`](Self::adopt_new), which parks the document being replaced and
+            // adopts the blank through [`adopt_document`](Self::adopt_document) — the editor, the
+            // geometry, the manifest and the counts move together, and the full repaint is taken inside
+            // it. **No file is touched**: the sealed path has no `openat` to name one, and the
+            // in-memory buffer is simply replaced. The undo history goes with the document, which is
+            // what `New` means.
+            //
+            // **Part 45 changed what happens to the document being replaced.** It was dropped; it is
+            // now parked, because the sidebar has a row for it and `Close` and the row itself are what
+            // make it reachable again.
             Action::New => {
-                if self
-                    .adopt_document(Editor::new(), &mut crate::store::NoSource)
-                    .is_err()
-                {
-                    // **Unreachable for an empty in-memory editor — there is nothing to fault —
-                    // and counted rather than unwrapped if that ever stops being true.** A `New`
-                    // that panicked would take the whole session down to decline a blank page.
+                self.adopt_new(Editor::new(), "untitled".to_string());
+                self.stats.pointer_chrome += 1;
+            }
+            // **`File > Close`: the painted document leaves the list.**
+            //
+            // **Not an `openat`, so it is legal under the seal — and it never leaves the session with
+            // nothing to paint.** [`close_active`](Self::close_active) switches to the most recently
+            // parked document, or opens a blank when there is none, so a window cannot end up with no
+            // document at all.
+            Action::Close => {
+                self.close_active();
+                self.stats.pointer_chrome += 1;
+            }
+            // **`File > Open` and `File > Import`: ask the driver for a path.**
+            //
+            // **Neither opens anything here, and the reason is the same for both.** The session can
+            // ask for a path to be opened but cannot supply one: the sealed jail has no `openat` on a
+            // user path, and the developer window has no file dialog. **Under the seal the row is
+            // refused by name** — the `openat` would be `SIGSYS` and exit 137, which is a menu row that
+            // kills the process — and counted as inert, which is what a gate reads.
+            //
+            // **Outside the seal the row is a request, not an opening.** The driver is the one place
+            // that can turn it into a path; it calls [`take_open_request`](Self::take_open_request) and
+            // then [`open_path`](Self::open_path) or [`import_path`](Self::import_path).
+            Action::Open | Action::Import => {
+                if self.state.sealed {
                     self.stats.pointer_inert += 1;
                 } else {
-                    self.state.title = "untitled".to_string();
+                    self.open_request = Some(action);
                     self.stats.pointer_chrome += 1;
                 }
             }
@@ -7766,9 +7983,11 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // below. **There is no `Ctrl+E`**, because a binding that rewrites two files on disk belongs to
         // a keystroke a user can decline, and this build does not have one.
         Action::Export => return None,
-        // **The one row with no action in this build**, listed so the compiler says so when it is added
-        // rather than leaving it to be discovered as a dead row. It has no meaning without a document
-        // list and a multi-document model, neither of which exists.
+        // **No `Command` for this one either, and the same shape as `Export`.** Closing a document is
+        // not a keystroke the editor applies — it changes *which* document the session paints, and the
+        // only function allowed to do that is `Session::adopt_document`. **It was the one row with no
+        // action in this build** and is no longer: part 45 gave the session a document list, and `Close`
+        // now reaches `Session::close_active` from `apply_action`.
         Action::Close => return None,
         // **No `Command` for this one either, and the same shape as `Export`.** A new document is
         // not a keystroke the editor applies — it *replaces* the editor, and the only function
@@ -7776,6 +7995,13 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // Routing it through a `Command` would hand the keymap a variant whose meaning is "discard
         // the document", which no chord asks for in this build.
         Action::New => return None,
+        // **And the same for the two rows that need a path.** `Open` and `Import` are not keystrokes
+        // at all: the session can ask for a path to be opened but cannot supply one, so the row is a
+        // request the *window driver* answers — `apply_action` stores it, the driver calls
+        // `Session::take_open_request` and then `Session::open_path`. **There is no chord**, because a
+        // binding that opens an arbitrary file is exactly what the sealed jail cannot do and what the
+        // developer window should not do silently.
+        Action::Open | Action::Import => return None,
         Action::SetZoom(_)
         | Action::SetStyle(_)
         | Action::SetFont(_)

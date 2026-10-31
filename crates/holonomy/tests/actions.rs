@@ -193,6 +193,13 @@ fn every_action_is_routed_or_accounted_for() {
         // not edit the document, it replaces it, and `adopt_document` is reachable only from the
         // session.
         Action::New,
+        // **Part 45: three more, and `Close` is the one that used to be the single unwired row.**
+        // `Close` changes which document is painted, and `Open`/`Import` ask for a path. None of the
+        // three is a keystroke the editor applies — they change what the session is painting — so
+        // none of them is a command, and all three reach their effect from `apply_action`.
+        Action::Close,
+        Action::Open,
+        Action::Import,
     ];
     for a in handled_by_session {
         assert_eq!(
@@ -226,18 +233,11 @@ fn every_action_is_routed_or_accounted_for() {
     for a in routed {
         assert!(action_command(a).is_some(), "{} should route", a.name());
     }
-    // **The one that is deliberately not wired**, named so it is not mistaken for an oversight.
-    //
-    // `Close` has no meaning without a document list and a multi-document model, neither of which
-    // exists — `store::open_document` opens one container and `ChromeState` has one `title`.
-    // **Stated as the one action it is, and not as a loop over a one-element list.** The loop was a
-    // shape left from when this list had three entries; a reader has to check whether the others
-    // were moved out, and a loop over one thing says "list" where there is a single claim.
-    assert_eq!(
-        action_command(Action::Close),
-        None,
-        "Close is not wired in this build and pointer_inert is where that shows up"
-    );
+    // **No unwired row is left to be mistaken for an oversight.** `Close`, `Open` and `Import` were
+    // the rows with no meaning before part 45 — `Close` had no document list to close from, and the
+    // two that need a path had nowhere to get one. **All three are handled by `apply_action` now**
+    // and are listed in `handled_by_session` above, which is what keeps the two lists honest: a
+    // fourth one added to `apply_action` and not to that list fails.
 }
 
 /// **Every action has a name, and no two share one.**
@@ -303,15 +303,15 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 14,
-        "the fourteen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
-         Select all, Save, Export, Close, Insert > Image, Insert > Table, and Format > Bold and \
-         Format > Italic. Adding one changes this number."
+        with_action, 16,
+        "the sixteen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
+         Select all, Save, Export, **Open**, **Import**, Close, Insert > Image, Insert > Table, and \
+         Format > Bold and Format > Italic. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
     // is stable and visible.
-    // **46 of 56, and it was 47 of 55 before the save gained a row.**
+    // **40 of 56, and it was 47 of 55 before the save gained a row.**
     //
     // **This gate has now been through five edits and they are not all the same shape**, which is worth
     // stating plainly — because two of them moved the same number for opposite reasons:
@@ -340,15 +340,23 @@ fn every_wired_menu_item_carries_an_action() {
     //   `act("New", Action::New)` — the same shape as Export: the unwired count alone moved,
     //   **43/56 -> 42/56**, because `Session::adopt_document` had existed as the one supported way
     //   to put a document into a session and no row could reach it.
+    // * **`File > Open` and `File > Import` were wired on the rows that were already there**,
+    //   `plain("Open")` and `sub("Import", …)` becoming `act("Open", Action::Open)` and
+    //   `act("Import", Action::Import)`. **The same shape as New and Export, twice over**: the rows
+    //   existed, the variants existed, and neither could be reached. `Import` is worth naming because
+    //   it was a `sub(…)` header — a row whose chevron opened a submenu that has no renderer, so it
+    //   drew as a header and did nothing. **42/56 -> 40/56, the unwired count alone**, and the total
+    //   did not move.
     //
     // **A gate that prints the list is what made these safe to get right.** The list is printed because
     // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
     // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (42, 56),
-        "**42 unwired of 56 menu items** in the eight headings. File > New now carries an action; \
-         nothing was added or removed, so the unwired count alone moved, by one. The list is \
+        (40, 56),
+        "**40 unwired of 56 menu items** in the eight headings. File > Open and File > Import now carry actions; \
+         the rows were already there and nothing was added or removed, so the unwired count alone \
+         moved, by two. The list is \
          printed because \"everything is wired\" is not true here: what matters is that the count \
          is stable and the rows are named. Got: {without:?}"
     );

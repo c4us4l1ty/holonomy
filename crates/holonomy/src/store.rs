@@ -621,6 +621,54 @@ pub fn open_document(
     Ok(OpenedDocument { editor, container })
 }
 
+/// Open the container at `path` and return a **fully resident** editor and its title.
+///
+/// # What this is for, and what it costs
+///
+/// **The developer window's `File > Open` and `File > Import`.** [`open_document`] is the product's
+/// open: it returns a *skeleton* editor whose leaves beyond the first window are absent, and the
+/// paint path faults them through a store that outlives the call. **That shape needs the container to
+/// live somewhere the session can reach, and in the developer window there is nowhere for it to
+/// live** — the session paints through `NoSource`, and a `SectionStore` borrows the container it reads
+/// from.
+///
+/// **So this reads the whole document and drops the container.** `text_faulting` faults every leaf,
+/// which is what `Session::adopt_document` does anyway, and after that the editor is fully resident and
+/// needs nothing. **The cost is real and is the reason this is not the product's open**: a document
+/// larger than memory cannot be opened here, and the container is closed rather than kept open for
+/// write-back. The sealed path's sparse load is the product's; this is the developer window's, and the
+/// two are not the same tool.
+///
+/// # The title
+///
+/// **The path's file stem, and `untitled` when the path has none.** The same rule `windowed.rs` uses
+/// for `--container`, so a document opened from the menu and one the window was launched on are titled
+/// the same way.
+pub fn open_resident(
+    path: &std::path::Path,
+    passphrase: &str,
+) -> Result<(holonomy_text::Editor, String), StoreError> {
+    let file = holonomy_container::io::DirectFile::create_or_open(path).map_err(|_| StoreError::Read)?;
+    let mut opened = open_document(
+        file,
+        passphrase,
+        holonomy_crypto::envelope::VDF_ITERATIONS,
+        DEFAULT_RESIDENT_SECTIONS,
+    )?;
+    let title = path
+        .file_stem()
+        .map_or_else(|| "untitled".to_string(), |s| s.to_string_lossy().into_owned());
+    // **The whole document, faulted, and the scratch scrubbed.** The bytes are plaintext and the
+    // `Vec` is about to leave this frame; `text_faulting` returns it rather than filling a caller's
+    // buffer, so the caller is the one that has to wipe it.
+    let mut store = SectionStore::new(&mut opened.container, DEFAULT_RESIDENT_SECTIONS);
+    let mut text = opened.editor.text_faulting(&mut store).map_err(|_| StoreError::Read)?;
+    text.fill(0);
+    // The container is dropped with `opened`, and the editor leaves fully resident.
+    drop(store);
+    Ok((opened.editor, title))
+}
+
 impl SectionStore<'_> {
     /// Make `section` resident, so a following [`write_at`](Self::write_at) can patch it.
     ///
