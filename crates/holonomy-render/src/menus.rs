@@ -420,6 +420,25 @@ const INSERT: &[Item] = &[
     sub("Chart", IconId::History),
     sub("Bookmark", IconId::Bookmark),
     sub("Symbols", IconId::Sparkle),
+    // **The row part 24 gave the keyboard and part 26 gave the menu.** `Action::InsertMath` routed
+    // through `Ctrl-M` and through the `InsertMath` hotkey command, and *nothing else* reached it:
+    // no menu row and no popup row carried it, so a user who did not know the accelerator had no way
+    // to insert an equation at all. That is the `Action::Save` shape -- a capability the menus had a
+    // home for and did not occupy -- so it gets the same treatment: one `act` row, which is why this
+    // is an `act` and not a `plain`. **The label is the reference's** (`Insert > Equation`), and the
+    // position is the reference's too, directly under `Symbols`, because the two are the same kind of
+    // entry and a user looking for one finds the other here.
+    //
+    // **`DocumentStart` and `DocumentEnd` are deliberately not given rows.** They are the other two
+    // `Action` variants that appeared only in their own `name()` arm, and they are *not* the same
+    // shape: the capability they carry is "place the caret at the first or last line", and a
+    // pointer-only user reaches that capability every time they click on the page. `InsertMath`
+    // inserts something that otherwise does not exist; these two move the caret somewhere the user can
+    // already reach by clicking. The reference has no menu row for either, and adding one would be
+    // inventing a navigation menu the product does not have rather than repairing a defect. **A row
+    // that adds a menu the reference lacks is not a wiring fix.** They stay keyboard-only, and this
+    // comment is where that decision is recorded so the next reader does not "fix" it by hand.
+    act("Equation", Action::InsertMath),
     sub("Tab", IconId::Tab),
     plain("Horizontal line"),
     sub("Break", IconId::Rule),
