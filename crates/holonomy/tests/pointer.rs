@@ -579,18 +579,37 @@ fn moving_off_a_button_clears_its_highlight() {
     assert_eq!(s.state.hover, None, "and it is not hovered any more");
 }
 
-/// **Clicking a sidebar row makes it active.**
+/// **Clicking a sidebar row makes it the document on the page.**
 ///
 /// **The sidebar is the case that gets forgotten**, because it is a band *and* a list, and a hit test
 /// that stops at "the sidebar" makes every document unreachable. `tests/widgets.rs` asserts the rows
 /// are hit; this asserts that hitting one does something.
+///
+/// **Part 45 changed what "does something" means, and the assertion moved with it.** The row used to
+/// move a highlight: `active_doc` became the index that was clicked, and the one document on the page
+/// stayed where it was. There is now a document behind every row, so clicking one *adopts* it — the
+/// title bar changes, and the clicked row becomes row 0, because the painted document is always row 0
+/// (`Session::sync_docs` writes the list that way).
+///
+/// **The documents are built through the session's own API rather than by writing `state.docs`.** That
+/// is the change that matters: `docs` is now an *output* of the list, rebuilt by `sync_docs`, so a test
+/// that writes it directly is testing a state the session cannot produce. **The old fixture did exactly
+/// that, and it is why the old assertion could not survive the model change** — it set three rows up by
+/// hand with nothing behind them, and a row with nothing behind it has nothing to adopt.
 #[test]
 fn clicking_a_sidebar_row_makes_it_active() {
     let mut s = session("x");
-    s.state.docs = vec!["one".into(), "two".into(), "three".into()];
-    s.state.active_doc = 0;
+    s.set_document("one");
+    s.apply_action(holonomy_render::menus::Action::New).expect("new");
+    s.apply_action(holonomy_render::menus::Action::New).expect("new again");
+    assert_eq!(
+        s.state.docs,
+        vec!["untitled".to_string(), "one".to_string(), "untitled".to_string()],
+        "the rail has three rows, and row 1 is the one this clicks"
+    );
+
     let l = s.chrome_layout();
-    let row = l.sidebar_doc(2).expect("the sidebar has a third row");
+    let row = l.sidebar_doc(1).expect("the sidebar has a second row");
 
     feed(
         &mut s,
@@ -599,7 +618,15 @@ fn clicking_a_sidebar_row_makes_it_active() {
             (row.y + row.height / 2) as i32,
         ),
     );
-    assert_eq!(s.state.active_doc, 2);
+    assert_eq!(
+        s.state.title, "one",
+        "**the document behind row 1 is now the one on the page.**"
+    );
+    assert_eq!(
+        s.state.active_doc, 0,
+        "**and the painted document is always row 0.** `sync_docs` puts it there, so a highlight on any \
+         other row would be a highlight on a document that is not on the page."
+    );
 }
 
 /// **Every tool that has a command is reachable by clicking it, and the count is stated.**
