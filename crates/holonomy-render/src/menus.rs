@@ -60,6 +60,41 @@ pub enum Action {
     DocumentStart,
     /// Jump to the last line.
     DocumentEnd,
+    /// **Start a new, empty document and make it the one this session paints.**
+    ///
+    /// **A variant and not a `Command`, for the same reason [`Action::Export`] is one:** the row does
+    /// not edit the document, it *replaces* it, and the only function allowed to do that is
+    /// `Session::adopt_document` — which lives one crate over and is reached directly from
+    /// `Session::apply_action`. Routing it through the keymap would hand the chord table a meaning
+    /// (\"discard the document\") that no chord asks for in this build.
+    ///
+    /// **Added in the font/new-document pass, and it was the one variant the enum was missing.** The row
+    /// had been `plain(\"New\")` for its whole life — drawn, and doing nothing — while
+    /// `Session::adopt_document` sat one crate over as the supported way to put a document into a
+    /// session. Wiring the row is one arm in `apply_action`; this variant is what makes the row compile.
+    /// **The tree did not build without it**, because `act(\"New\", Action::New)` and the `name()` arm
+    /// below both name a variant that did not exist.
+    New,
+    /// **Open a container from a path and make it the document this session paints.** Part 45.
+    ///
+    /// **The developer window only, and the reason is the seal.** The jail's seccomp filter has no
+    /// `openat` on a user path, so reaching for one after the seal is `SIGSYS` and exit 137 — a menu
+    /// row that kills the process is worse than a row that does nothing, so `Session::apply_action`
+    /// refuses it by name when `ChromeState::sealed` is set and counts it as inert instead.
+    ///
+    /// **A path has to come from somewhere, and there is no file dialog.** The sealed product has
+    /// neither the dialog nor the `openat`; the developer window has the `openat` and no dialog. So
+    /// the row asks the session to *request* an open, and the window driver — the one place that can
+    /// read a path — supplies it. See `Session::take_open_request`.
+    Open,
+    /// **Open a container from a path and add it to the document list, leaving the open document
+    /// where it is.** Part 45.
+    ///
+    /// **`Open` and `Import` differ in one thing: which document is active afterwards.** Both need a
+    /// path from the driver, both are refused under the seal, and both are one `Session` call apart
+    /// from `Open` — which is why they are two variants rather than a payload, and why the request
+    /// carries the action rather than a boolean.
+    Import,
     /// Commit the in-memory rings to the container.
     Save,
     /// Insert a table at the caret.
@@ -127,6 +162,8 @@ impl Action {
             Action::DocumentStart => "document-start",
             Action::DocumentEnd => "document-end",
             Action::New => "new-document",
+            Action::Open => "open",
+            Action::Import => "import",
             Action::Save => "save",
             Action::InsertTable => "insert-table",
             Action::InsertImage => "insert-image",
@@ -280,8 +317,19 @@ const FILE: &[Item] = &[
     // did nothing — while `Session::adopt_document` sat one crate over as the supported way to
     // put a document into a session. The row now asks for exactly that.
     act("New", Action::New),
-    plain("Open"),
-    sub("Import", IconId::Folder),
+    // **`Open` and `Import`, and both were rows that drew and did nothing.**
+    //
+    // `Open` was `plain("Open")` — a row with no action behind it at all — and `Import` was a
+    // `sub(..)` with a chevron and no submenu to open, which is the reference's single most
+    // confusing affordance. **Both now carry an action, and both are refused under the seal**
+    // (`Session::apply_action` counts them as inert rather than letting `openat` kill the process).
+    // What they do in the developer window is [`Session::open_path`](crate::session::Session::open_path)
+    // — reached through the driver, which is the only place a path can come from.
+    //
+    // **The menu's row count does not move**, so the wiring gate's total is unchanged and only the
+    // wired/unwired split does: two rows leave the unwired list.
+    act("Open", Action::Open),
+    act("Import", Action::Import),
     // **The save, and it was the one row the File menu was missing.**
     //
     // `Action::Save` has existed since the `Action` enum replaced a label match (part 21) and
