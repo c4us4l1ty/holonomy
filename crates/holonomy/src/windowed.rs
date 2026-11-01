@@ -242,7 +242,7 @@ pub fn run(
         }
     }
     let (mut min_keycode, mut mapping) = window_of(&mut session)?.keyboard_mapping().map_err(WindowedError::Desktop)?;
-    sync_form(&mut session, form.as_ref());
+    sync_form(&mut session, form.as_ref())?;
     session.repaint_all().map_err(WindowedError::Session)?;
     let start = Instant::now();
     let mut events = 0u64;
@@ -264,7 +264,6 @@ pub fn run(
                 let _ = session.paste_internal();
             }
         }
-        if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
         if vault.is_some() && form.is_none() {
             if session.take_save_request() || (session.has_unsaved_documents() && last_edit.elapsed() >= Duration::from_millis(800)) {
                 save(&mut vault, &mut session);
@@ -292,7 +291,7 @@ pub fn run(
                         form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
                     }
                 }
-                sync_form(&mut session, form.as_ref());
+                sync_form(&mut session, form.as_ref())?;
             }
         }
         let event = { let desktop = window_of(&mut session)?; desktop.next_event(EVENT_WAIT).map_err(WindowedError::Desktop)? };
@@ -315,19 +314,19 @@ pub fn run(
                 let ch = x11key::layout_char(&mapping, min_keycode, keycode, state);
                 let fed = if state & (4 | 8) == 0 { composer.feed(sym, ch) } else { composer.reset(); Fed::Pass };
                 if let Some(f) = form.as_mut() {
-                    if matches!(fed, Fed::Pending) { sync_form(&mut session, Some(f)); continue; }
+                    if matches!(fed, Fed::Pending) { continue; }
                     let text = match &fed { Fed::Text(t) => Some(t.as_str()), _ => None };
                     let outcome = f.key(keycode, state, text);
                     match outcome {
-                        KeyOutcome::Changed => sync_form(&mut session, Some(f)),
-                        KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        KeyOutcome::Changed => sync_form(&mut session, Some(f))?,
+                        KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None)?; }
                         KeyOutcome::Submit => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); last_edit = Instant::now(); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
-                            sync_form(&mut session, form.as_ref());
+                            sync_form(&mut session, form.as_ref())?;
                             if vault.is_none() {
                                 let _ = window_of(&mut session)?.clear_clipboard();
                                 composer.reset();
@@ -366,17 +365,17 @@ pub fn run(
                     let l = holonomy_render::Layout::new(&session.chrome_metrics());
                     let view = f.view();
                     match holonomy_render::dialog::hit(&l, &view, event_x as i32, event_y as i32) {
-                        holonomy_render::dialog::Hit::Field(i) => { f.focus = i; sync_form(&mut session, Some(f)); }
-                        holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f)); }
+                        holonomy_render::dialog::Hit::Field(i) => { f.focus = i; sync_form(&mut session, Some(f))?; }
+                        holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f))?; }
                         holonomy_render::dialog::Hit::Confirm => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
-                            sync_form(&mut session, form.as_ref());
+                            sync_form(&mut session, form.as_ref())?;
                         }
-                        holonomy_render::dialog::Hit::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        holonomy_render::dialog::Hit::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None)?; }
                         _ => {}
                     }
                     continue;
@@ -414,7 +413,16 @@ pub fn run(
     }
 }
 
-fn sync_form(session: &mut Session<'_>, form: Option<&Form>) { session.set_dialog(form.map(Form::view)); }
+/// Push the form into the session and paint it now.
+///
+/// The tick is the point: a modal edit invalidates only the dialog panel, and waiting for the next
+/// 16 ms event timeout to drain that damage is the difference between a caret that moves with the
+/// key and one that lags behind it. `set_dialog` is a no-op for an unchanged view, so this is cheap
+/// to call after every form mutation.
+fn sync_form(session: &mut Session<'_>, form: Option<&Form>) -> Result<(), WindowedError> {
+    session.set_dialog(form.map(Form::view));
+    session.tick().map_err(WindowedError::Session)
+}
 fn save(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>) -> bool {
     let Some(v) = vault.as_mut() else { return true; };
     match v.save(session) { Ok(()) => { session.set_notice(Some("Saved".into())); true } Err(e) => { session.set_notice(Some(format!("Save failed: {e}"))); false } }
@@ -463,7 +471,7 @@ impl Form {
             FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
         };
         let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
-        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
+        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { holonomy_render::dialog::MASK.to_string().repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
         holonomy_render::dialog::DialogView { title: title.into(), message: message.into(), fields, focus: self.focus, error: self.error.clone(), confirm: confirm.into(), cancel: cancel.map(str::to_string), choices: self.choices.clone(), choice: self.choice }
     }
     fn key(&mut self, keycode: u8, state: u16, text: Option<&str>) -> KeyOutcome {

@@ -511,8 +511,12 @@ impl Desktop {
     }
 
     pub fn focus(&mut self) -> Result<(), DesktopError> {
+        // A click arrives only after the window is mapped, so this must not wait for a fresh
+        // `MapNotify` (the initial-map path in `open` still uses `Window::focus`). Waiting here was
+        // the per-click stall: the event had already been consumed, so the helper timed out and
+        // drained queued keystrokes before the caret could move.
         self.window
-            .focus(&mut self.conn)
+            .focus_now(&mut self.conn)
             .map(|_| ())
             .map_err(DesktopError::Window)
     }

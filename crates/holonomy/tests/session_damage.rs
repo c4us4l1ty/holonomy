@@ -658,3 +658,61 @@ fn a_caret_that_moves_line_damages_the_line_it_left() {
         "typing inside line 1 must still damage exactly one row, not two: {d:?}"
     );
 }
+
+/// **A modal dialog does not repaint the window on every loop pass.**
+///
+/// The windowed driver used to call `set_dialog` every iteration, and `set_dialog` unconditionally
+/// invalidated `full_damage()`. While a form was open that forced a full-window repaint at the
+/// event-wait cadence — the FR-3.4 prohibition, reached through the modal path instead of the editor.
+#[test]
+fn an_unchanged_dialog_is_a_no_op_and_a_changed_one_damages_only_the_panel() {
+    use holonomy_render::dialog::{DialogView, Field};
+
+    let mut s = session();
+    let full = holonomy_render::DamageRect::new(0, 0, s.frame_size().0, s.frame_size().1);
+    let view = DialogView {
+        title: "Unlock".into(),
+        message: "Enter one passphrase.".into(),
+        fields: vec![Field { label: "Passphrase".into(), value: "***".into(), secret: true }],
+        focus: 0,
+        error: None,
+        confirm: "Unlock".into(),
+        cancel: Some("Quit".into()),
+        choices: vec![],
+        choice: 0,
+    };
+
+    // Appearing touches the whole window: the scrim covers it.
+    s.set_dialog(Some(view.clone()));
+    assert_eq!(s.damage(), full);
+    s.tick().expect("paint the dialog");
+    let frames_after_open = s.stats.frames;
+
+    // Re-syncing the identical view must not damage or paint anything.
+    s.set_dialog(Some(view.clone()));
+    assert_eq!(s.damage(), holonomy_render::DamageRect::EMPTY);
+    s.tick().expect("idle tick");
+    assert_eq!(s.stats.frames, frames_after_open, "an unchanged dialog repainted the window");
+
+    // A keystroke in the field damages the panel union, not the panel.
+    let mut edited = view.clone();
+    edited.fields[0].value = "****".into();
+    s.set_dialog(Some(edited.clone()));
+    let d = s.damage();
+    assert!(!d.is_empty());
+    assert!(
+        u64::from(d.width) * u64::from(d.height)
+            < u64::from(full.width) * u64::from(full.height),
+        "a modal keystroke damaged {d:?}, the whole {}x{} frame",
+        full.width,
+        full.height
+    );
+    let panel = holonomy_render::dialog::geometry(&s.chrome_layout(), &edited).panel;
+    assert!(d.x <= panel.x && d.y <= panel.y);
+    assert!(d.right() >= panel.right() && d.bottom() >= panel.bottom());
+    s.tick().expect("paint the edit");
+
+    // Dismissing touches the whole window again, because the scrim goes away.
+    s.set_dialog(None);
+    assert_eq!(s.damage(), full);
+}

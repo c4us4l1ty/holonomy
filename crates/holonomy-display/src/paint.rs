@@ -423,11 +423,17 @@ impl<'a> Painter<'a> {
     }
 
     /// Draw a proportional chrome label from inline bytes.
+    ///
+    /// `Label::size` is an explicit atlas size index; 0 means "the painter's current chrome size".
+    /// Dialogs use this to draw at the larger boot size without changing the document's zoom or the
+    /// chrome grid. The index is clamped to the sizes the atlas actually holds, so a one-size atlas
+    /// still draws every label instead of asking for a size that was never rasterised.
     fn label(&mut self, frame: &mut Frame, l: Label, damage: Option<DamageRect>) {
         let len = l.byte_len();
         if len == 0 { return; }
-        let cell_w = self.cell_width();
-        let cell_h = self.cell_height();
+        let size = self.label_size(l.size);
+        let cell_w = self.cell_width_at(size);
+        let cell_h = self.cell_height_at(size);
         let bytes = &l.bytes[..len];
         let whole = DamageRect::new(l.x.max(0) as u32, l.y.max(0) as u32,
             (len as u32).saturating_mul(cell_w), cell_h);
@@ -439,7 +445,6 @@ impl<'a> Painter<'a> {
             self.scratch.stats.missing += self.count_codepoints(bytes);
             return;
         };
-        let size = self.atlas_size();
         let style = atlas_style(l.style);
         let ascent = i32::from(self.vertical(l.style, size).0);
         let coverage = atlas.coverage();
@@ -474,7 +479,9 @@ impl<'a> Painter<'a> {
                     for (i, out) in dst.iter_mut().enumerate() { *out = coverage.get(base + i).copied().unwrap_or(0); }
                 });
             self.scratch.stats.glyphs += 1;
-            pen += self.advance_of(u32::from(c), l.style) as i32;
+            // The metric already belongs to `size`; `advance_of` would re-read the painter's
+            // current chrome size and space a larger dialog label as if it were the small one.
+            pen += i32::from(m.advance_x).max(1);
         }
     }
 
@@ -967,6 +974,46 @@ impl<'a> Painter<'a> {
             .copied()
             .or_else(|| atlas.sizes().first().copied())
             .unwrap_or(16)
+    }
+
+    /// The pixel size a [`Label`] asks for. Index 0 is the painter's current chrome size; any other
+    /// index is an explicit atlas size, clamped to the last one the atlas holds. A dialog can ask for
+    /// the larger boot size on a two-size atlas and still fall back to the only size on a one-size
+    /// atlas, instead of looking up a size that was never rasterised and drawing nothing.
+    fn label_size(&self, index: u8) -> u16 {
+        if index == 0 {
+            return self.atlas_size();
+        }
+        let Some(atlas) = self.atlas else { return 16 };
+        atlas
+            .sizes()
+            .get(usize::from(index))
+            .copied()
+            .or_else(|| atlas.sizes().last().copied())
+            .unwrap_or_else(|| self.atlas_size())
+    }
+
+    /// The monospace advance at an explicit pixel size, for label bounds and missing-glyph fallback.
+    fn cell_width_at(&self, size: u16) -> u32 {
+        self.atlas.map_or(8, |atlas| {
+            u32::from(
+                atlas
+                    .metric(
+                        b'm' as u32,
+                        atlas_style(holonomy_render::Style::MONOSPACE),
+                        size,
+                    )
+                    .advance_x,
+            )
+            .max(1)
+        })
+    }
+
+    /// The line box at an explicit pixel size. `Atlas::line_pitch` is the max over every size, which
+    /// would over-space a small label on a two-size atlas; `line_pitch_at` is the size's own pitch.
+    fn cell_height_at(&self, size: u16) -> u32 {
+        self.atlas
+            .map_or(18, |a| u32::from(a.line_pitch_at(size)).max(18))
     }
 
     /// **The chrome's cell width: the monospace face's advance at the atlas size.**
