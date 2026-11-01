@@ -801,7 +801,7 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
             .map(|(_, r)| r),
         Hit::Menu(i) => crate::chrome::menu_boxes(l).1.get(i).copied(),
         Hit::MenuItem { open, row } => popup(l, state, Some(open))?.rows.get(row).copied(),
-        Hit::Doc(i) => l.sidebar_doc(i),
+        Hit::Doc(i) | Hit::DocMenu(i) => l.sidebar_doc(i),
         Hit::NewDoc => state.sidebar_open.then_some(l.sidebar_new),
         Hit::SidebarBack => state.sidebar_open.then_some(l.sidebar_back),
         // **A widget that is not drawn has no rect.** `Page` is the body text -- a hover there would
@@ -831,6 +831,8 @@ pub enum Hit {
     Title(TitleButton),
     /// A document in the sidebar, by index.
     Doc(usize),
+    /// The active document row's overflow button.
+    DocMenu(usize),
     /// The "+" in the sidebar's header.
     NewDoc,
     /// The sidebar's back arrow.
@@ -956,6 +958,9 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
         for i in 0..l.sidebar_rows as usize {
             if let Some(r) = l.sidebar_doc(i) {
+                if i == state.active_doc && x >= r.right() as i32 - 32 && r.contains(x, y) {
+                    return Hit::DocMenu(i);
+                }
                 if r.contains(x, y) {
                     return Hit::Doc(i);
                 }

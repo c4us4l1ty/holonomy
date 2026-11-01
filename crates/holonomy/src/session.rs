@@ -459,6 +459,11 @@ pub struct Session<'a> {
     /// [`ParkedDocument`]. **Empty in every build until part 45**, and the document a session starts
     /// with is `editor`, not an entry here.
     parked: Vec<ParkedDocument>,
+    active_id: u64,
+    managed_documents: bool,
+    document_request: Option<DocumentRequest>,
+    notice: Option<String>,
+    dialog: Option<holonomy_render::dialog::DialogView>,
     /// **A `File > Open` or `File > Import` waiting for a path, and which of the two it was.**
     ///
     /// **A request rather than an opening, for the same reason the export is one:** the path is
@@ -846,12 +851,33 @@ pub struct Session<'a> {
 /// (`SessionContext::container_file` in `main.rs`), and the developer window is the same story. **So
 /// the rule is the one the code already follows: a document is parked only after it has been
 /// adopted, and nothing here ever parks a skeleton.**
-pub struct ParkedDocument {
-    /// The document. Fully resident; see the type's docs.
-    editor: holonomy_text::Editor,
-    /// Its title, for the sidebar.
-    title: String,
+fn mode_index(mode: holonomy_render::menus::ViewMode) -> u8 {
+    match mode { holonomy_render::menus::ViewMode::Editing => 0, holonomy_render::menus::ViewMode::Viewing => 1, holonomy_render::menus::ViewMode::Layout => 2 }
 }
+fn view_mode(index: u8) -> holonomy_render::menus::ViewMode {
+    match index { 1 => holonomy_render::menus::ViewMode::Viewing, 2 => holonomy_render::menus::ViewMode::Layout, _ => holonomy_render::menus::ViewMode::Editing }
+}
+
+pub struct ParkedDocument {
+    editor: holonomy_text::Editor,
+    title: String,
+    id: u64,
+    dirty: bool,
+    font_index: usize,
+    style_index: usize,
+    mode: holonomy_render::menus::ViewMode,
+}
+
+/// A complete resident document, including its full HDOC payload rather than flattened text.
+#[derive(Clone)]
+pub struct DocumentSnapshot {
+    pub id: u64, pub title: String, pub payload: Vec<u8>, pub caret: u32,
+    pub dirty: bool, pub font_index: usize, pub style_index: usize, pub mode: u8,
+}
+
+/// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentRequest { New, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
 
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
@@ -902,6 +928,17 @@ impl<'a> Session<'a> {
         text.fill(0);
 
         self.editor = editor;
+        self.state.dirty = false;
+        self.state.font_index = 0;
+        self.state.style_index = 0;
+        self.mode = holonomy_render::menus::ViewMode::Editing;
+        self.state.mode_index = 0;
+        self.state.selection = None;
+        self.state.caret_line = 0;
+        self.state.caret_column = 0;
+        self.pending_style = None;
+        self.pending_colour = None;
+        self.active_cell = None;
         self.state.words = self.counts.words;
         self.state.total_lines = self.counts.lines();
         self.state.bytes = self.editor.text_len() as u32;
@@ -1062,6 +1099,7 @@ impl<'a> Session<'a> {
             // **No second document yet.** A session starts with the one it was built over; `New`,
             // `Open` and `Import` are what put entries here.
             parked: Vec::new(),
+            active_id: 0, managed_documents: false, document_request: None, notice: None, dialog: None,
             // **Nothing asked for a path yet.**
             open_request: None,
             // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
@@ -1816,11 +1854,69 @@ impl<'a> Session<'a> {
     ///
     /// **The document being replaced is parked, not dropped**: it is still open, and the sidebar has a
     /// row for it.
+    pub fn set_managed_documents(&mut self, managed: bool) { self.managed_documents = managed; }
+    pub fn take_document_request(&mut self) -> Option<DocumentRequest> { self.document_request.take() }
+    pub fn take_save_request(&mut self) -> bool { std::mem::take(&mut self.save_requested) }
+    pub fn set_notice(&mut self, notice: Option<String>) { self.notice = notice; self.state.notice = self.notice.clone(); self.invalidate_status_bar(); }
+    pub fn set_dialog(&mut self, dialog: Option<holonomy_render::dialog::DialogView>) { self.dialog = dialog; self.invalidate(self.chrome.full_damage()); }
+    pub fn clear_image_cache(&mut self) { self.images.clear(); }
+    pub fn active_document_id(&self) -> u64 { self.active_id }
+    pub fn has_unsaved_documents(&self) -> bool { self.state.dirty || self.parked.iter().any(|d| d.dirty) }
+    pub fn mark_documents_saved(&mut self) {
+        self.state.dirty = false; for d in &mut self.parked { d.dirty = false; } self.invalidate_status_bar();
+    }
+    pub fn document_snapshots(&mut self) -> Result<Vec<DocumentSnapshot>, holonomy_text::EditorError> {
+        let mut out = Vec::with_capacity(self.parked.len() + usize::from(self.active_id != 0));
+        if self.active_id != 0 {
+            out.push(DocumentSnapshot { id: self.active_id, title: self.state.title.clone(), payload: self.editor.payload()?, caret: self.editor.caret(), dirty: self.state.dirty, font_index: self.state.font_index, style_index: self.state.style_index, mode: self.state.mode_index as u8 });
+        }
+        for d in &mut self.parked {
+            if d.id == 0 { continue; }
+            out.push(DocumentSnapshot { id: d.id, title: d.title.clone(), payload: d.editor.payload()?, caret: d.editor.caret(), dirty: d.dirty, font_index: d.font_index, style_index: d.style_index, mode: mode_index(d.mode) as u8 });
+        }
+        Ok(out)
+    }
+    pub fn create_document(&mut self, id: u64, title: String) { self.adopt_new(Editor::new(), title); self.active_id = id; self.state.dirty = true; }
+    pub fn rename_document(&mut self, title: String) { self.state.title = title; self.state.dirty = true; self.sync_docs(); self.invalidate(self.chrome.full_damage()); }
+    pub fn open_stored_document(&mut self, id: u64, title: String, payload: &[u8], caret: u32) -> Result<(), SessionError> {
+        if self.active_id == id { return Ok(()); }
+        if let Some(i) = self.parked.iter().position(|d| d.id == id) { self.switch_document(i + 1); return Ok(()); }
+        let mut editor = Editor::from_payload(payload)?; editor.caret_to(caret as usize)?;
+        self.adopt_new(editor, title); self.active_id = id; self.reconcile_caret()?; Ok(())
+    }
+    pub fn close_document(&mut self, id: u64) {
+        if self.active_id == id { self.close_active(); } else { self.parked.retain(|d| d.id != id); self.sync_docs(); }
+    }
+    pub fn remove_document(&mut self, id: u64) { self.close_document(id); }
+    pub fn replace_documents(&mut self, docs: Vec<DocumentSnapshot>) -> Result<(), SessionError> {
+        self.parked.clear(); self.images.clear();
+        let mut iter = docs.into_iter();
+        let (editor, title, id, dirty, font, style, mode) = match iter.next() {
+            Some(d) => { let mut e = Editor::from_payload(&d.payload)?; e.caret_to(d.caret as usize)?; (e, d.title, d.id, d.dirty, d.font_index, d.style_index, d.mode) },
+            None => (Editor::new(), "No document".into(), 0, false, 0, 0, 0),
+        };
+        self.adopt_document(editor, &mut crate::store::NoSource)?;
+        self.state.title = title; self.active_id = id; self.state.dirty = dirty;
+        self.state.font_index = font; self.state.style_index = style; self.state.mode_index = mode; self.mode = view_mode(mode);
+        for d in iter {
+            self.parked.push(ParkedDocument { editor: Editor::from_payload(&d.payload)?, title: d.title, id: d.id, dirty: d.dirty, font_index: d.font_index, style_index: d.style_index, mode: view_mode(d.mode) });
+        }
+        self.sync_docs(); self.reconcile_caret()?; self.invalidate(self.chrome.full_damage()); Ok(())
+    }
+    pub fn reset_modifiers(&mut self) { self.mods = ModifierState::new(); }
+    pub fn sync_modifiers(&mut self, mods: ModifierState) { self.mods = mods; }
+    pub fn insert_text(&mut self, text: &str) -> Result<(), SessionError> {
+        for c in text.chars() { self.apply_with(Command::Insert(c), Some(&mut crate::store::NoSource))?; }
+        self.tick(0); Ok(())
+    }
+
     fn adopt_new(&mut self, editor: Editor, title: String) {
         let parked = std::mem::replace(&mut self.editor, Editor::new());
         self.parked.push(ParkedDocument {
             editor: parked,
             title: self.state.title.clone(),
+            id: self.active_id, dirty: self.state.dirty, font_index: self.state.font_index,
+            style_index: self.state.style_index, mode: self.mode,
         });
         // A blank editor has no leaves to fault, so this cannot fail; the result is dropped rather than
         // unwrapped because a `New` that panicked would take the whole session down to open a blank page.
@@ -1842,10 +1938,14 @@ impl<'a> Session<'a> {
                 let _ = std::mem::replace(&mut self.editor, Editor::new());
                 let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
                 self.state.title = doc.title;
+                self.active_id = doc.id; self.state.dirty = doc.dirty;
+                self.state.font_index = doc.font_index; self.state.style_index = doc.style_index;
+                self.mode = doc.mode; self.state.mode_index = mode_index(doc.mode);
             }
             None => {
                 let _ = self.adopt_document(Editor::new(), &mut crate::store::NoSource);
                 self.state.title = "untitled".to_string();
+                self.active_id = 0;
             }
         }
         self.sync_docs();
@@ -1859,24 +1959,28 @@ impl<'a> Session<'a> {
     ///
     /// **The document being switched away from is parked, not dropped** — switching is not closing.
     /// It takes the place in the list the new document vacated, so the other rows keep their order.
+    pub fn switch_document_public(&mut self, index: usize) { self.switch_document(index); }
     fn switch_document(&mut self, index: usize) {
         if index == 0 || index > self.parked.len() {
             return;
         }
         // Row `index` is parked entry `index - 1`: row 0 is the painted document.
-        let Some(doc) = self.parked.remove(index - 1) else {
-            return;
-        };
+        let doc = self.parked.remove(index - 1);
         let current = std::mem::replace(&mut self.editor, Editor::new());
         self.parked.insert(
             index - 1,
             ParkedDocument {
                 editor: current,
                 title: self.state.title.clone(),
+                id: self.active_id, dirty: self.state.dirty, font_index: self.state.font_index,
+                style_index: self.state.style_index, mode: self.mode,
             },
         );
         let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
         self.state.title = doc.title;
+        self.active_id = doc.id; self.state.dirty = doc.dirty;
+        self.state.font_index = doc.font_index; self.state.style_index = doc.style_index;
+        self.mode = doc.mode; self.state.mode_index = mode_index(doc.mode);
         self.sync_docs();
     }
 
@@ -2941,6 +3045,10 @@ impl<'a> Session<'a> {
                 }
                 self.switch_document(index);
             }
+            widgets::Hit::DocMenu(index) => {
+                if self.managed_documents { self.document_request = Some(DocumentRequest::DocumentMenu(index)); }
+                self.stats.pointer_chrome += 1;
+            }
             Hit::NewDoc => {
                 self.invalidate_popup_change(self.state.open);
                 self.state.open = None;
@@ -3708,6 +3816,18 @@ impl<'a> Session<'a> {
     ) -> Result<(), SessionError> {
         use holonomy_render::menus::Action;
         use widgets::Tool;
+        if self.managed_documents {
+            let request = match action {
+                Action::New => Some(DocumentRequest::New), Action::Close => Some(DocumentRequest::Close),
+                Action::Rename => Some(DocumentRequest::Rename), Action::Delete => Some(DocumentRequest::Delete),
+                Action::Lock => Some(DocumentRequest::Lock), Action::Open => Some(DocumentRequest::OpenContainer),
+                Action::Import => Some(DocumentRequest::ImportText), _ => None,
+            };
+            if let Some(request) = request {
+                self.document_request = Some(request); self.state.open = None;
+                self.invalidate(self.chrome.full_damage()); return Ok(());
+            }
+        }
         match action {
             Action::Export => {
                 // **A request, like the save, and for the same structural reason**: the sinks are in
@@ -4171,9 +4291,8 @@ impl<'a> Session<'a> {
         //
         // `mem::take` before the work, so a commit that fails leaves the document dirty and the next
         // `Ctrl+S` a fresh attempt rather than a retry of one that has already failed.
-        if self.save_requested {
-            self.save_requested = false;
-            self.commit_to(bytes);
+        if self.save_requested && !self.managed_documents {
+            self.save_requested = false; self.commit_to(bytes);
         }
         Ok(None)
     }
@@ -4436,6 +4555,7 @@ impl<'a> Session<'a> {
                 }
             }
             Command::Hotkey(Hotkey::DocumentStart) => self.caret_to(0)?,
+            Command::Hotkey(Hotkey::SelectAll) => { let end = self.editor.text_len() as usize; self.select_at(0, end as u32)?; }
             Command::Hotkey(Hotkey::DocumentEnd) => self.caret_to(self.editor.text_len())?,
             _ => {
                 self.stats.unhandled += 1;
@@ -5764,6 +5884,9 @@ impl<'a> Session<'a> {
         // **The page buffer is the text source**, and it is a field borrow rather than a `&self` borrow,
         // so `&mut self.frame` and `&self.images` are live at the same time. `PageText` is a one-field
         // wrapper over a slice; see its docs for why the trait exists at all.
+        if let Some(dialog) = &self.dialog {
+            holonomy_render::dialog::push_tree(&mut tree, &self.chrome.layout, dialog);
+        }
         let stats = {
             let page = PageText(&self.line_scratch[..self.page_used]);
             self.painter.paint_with(
@@ -7951,7 +8074,7 @@ fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_
 /// carry a `label` with it, which is the coupling being removed.
 ///
 /// **The `None`s are the honest remainder.** `Close` has no action in this build, and
-/// `SelectAll` maps to `DocumentEnd` because there is no selection to make. `SetZoom`, `SetStyle`
+/// `SelectAll` selects the whole document. `SetZoom`, `SetStyle`
 /// and `SetFont` never reach here — `Session::apply_action` handles those first, because they change
 /// chrome state rather than issuing a document command.
 pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy_input::Command> {
@@ -7960,7 +8083,8 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
     Some(match action {
         Action::Undo => Command::Hotkey(Hotkey::Undo),
         Action::Redo => Command::Hotkey(Hotkey::Redo),
-        Action::SelectAll | Action::DocumentEnd => Command::Hotkey(Hotkey::DocumentEnd),
+        Action::SelectAll => Command::Hotkey(Hotkey::SelectAll),
+        Action::DocumentEnd => Command::Hotkey(Hotkey::DocumentEnd),
         Action::DocumentStart => Command::Hotkey(Hotkey::DocumentStart),
         Action::InsertTable => Command::Hotkey(Hotkey::InsertTable),
         Action::InsertImage => Command::Hotkey(Hotkey::InsertImage),

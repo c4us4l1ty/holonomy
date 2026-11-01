@@ -105,6 +105,9 @@ pub enum Action {
     InsertMath,
     /// Close the document.
     Close,
+    Rename,
+    Delete,
+    Lock,
     /// **Write the document to every sink opened at boot.**
     ///
     /// **To the sinks, and not to a path the user names.** The jail's measured seccomp allowlist has no
@@ -359,6 +362,9 @@ const FILE: &[Item] = &[
     act("Export", Action::Export),
     accel("Page setup", "Ctrl+P"),
     act("Close", Action::Close),
+    act("Rename", Action::Rename),
+    act("Delete…", Action::Delete),
+    act("Lock", Action::Lock),
     sub("Extensions", IconId::Sparkle),
 ];
 

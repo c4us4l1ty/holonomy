@@ -134,6 +134,8 @@ pub enum Hotkey {
     DocumentStart,
     /// Ctrl+End.
     DocumentEnd,
+    /// Ctrl+A: select the entire document.
+    SelectAll,
     /// Ctrl+I. Insert an image at the caret.
     ///
     /// A hotkey rather than a [`Command`] because it carries no payload: the *bytes* come from
@@ -347,6 +349,7 @@ impl Keymap {
                 KEY_Z if !mods.shift() && !mods.alt() => Some(Hotkey::Undo),
                 KEY_Y if !mods.shift() && !mods.alt() => Some(Hotkey::Redo),
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
+                KEY_A if !mods.shift() && !mods.alt() => Some(Hotkey::SelectAll),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),

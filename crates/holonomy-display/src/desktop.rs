@@ -399,6 +399,12 @@ impl Desktop {
 
     /// Take the keyboard focus. A click handler calls this, because a window manager may take the focus
     /// back at any time -- measured on GNOME, which answers `SetInputFocus` and then sends `FocusOut`.
+    /// The server's current keycode→keysym table, for layout-aware text entry.
+    pub fn keyboard_mapping(&mut self) -> Result<(u8, Vec<Vec<u32>>), DesktopError> {
+        let map = self.conn.keyboard_mapping().map_err(DesktopError::Connect)?;
+        Ok((self.conn.setup().min_keycode, map))
+    }
+
     pub fn focus(&mut self) -> Result<(), DesktopError> {
         self.window
             .focus(&mut self.conn)

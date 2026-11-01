@@ -1510,6 +1510,8 @@ pub struct ChromeState {
     pub bytes: u32,
     /// Whether there are unsaved edits.
     pub dirty: bool,
+    /// Persistent desktop save/auth error, shown instead of transient statistics.
+    pub notice: Option<String>,
     /// First visible text line of the document.
     pub scroll_line: u32,
     /// Total text lines.
@@ -1589,6 +1591,7 @@ impl Default for ChromeState {
             words: 0,
             bytes: 0,
             dirty: false,
+            notice: None,
             scroll_line: 0,
             total_lines: 1,
             styles: StyleFlags::default(),
@@ -2140,13 +2143,13 @@ impl Chrome {
             );
         }
 
-        let status = format!(
+        let status = state.notice.clone().unwrap_or_else(|| format!(
             "Ln {}, Col {}  {} words  {} B",
             state.caret_line + 1,
             state.caret_column + 1,
             state.words,
             state.bytes
-        );
+        ));
         push_text(
             &mut chrome.before,
             m,
