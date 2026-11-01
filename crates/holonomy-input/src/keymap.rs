@@ -723,9 +723,9 @@ mod tests {
         // decision rather than as a record of an unfinished one.
         //
         // The property the test still asserts is the one it was written for: **an unbound combo
-        // produces nothing, and in particular does not type the letter.** That is why `KEY_A` is still
+        // produces nothing, and in particular does not type the letter.** That is why `KEY_B` is still
         // here and `KEY_C` is not.
-        for code in [KEY_A, KEY_1, KEY_SPACE, KEY_ESC] {
+        for code in [KEY_B, KEY_1, KEY_SPACE, KEY_ESC] {
             assert_eq!(
                 km.dispatch(InputEvent::press(code), &c),
                 None,
@@ -1074,5 +1074,17 @@ mod tests {
                 assert!(hi.is_ascii(), "code {code} -> {hi:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod select_all_tests {
+    use super::*;
+    #[test]
+    fn ctrl_a_selects_all_and_does_not_type() {
+        let km = Keymap::us();
+        let mut c = ModifierState::new();
+        c.update(KEY_LEFTCTRL, 1);
+        assert_eq!(km.dispatch(InputEvent::press(KEY_A), &c), Some(Command::Hotkey(Hotkey::SelectAll)));
     }
 }
