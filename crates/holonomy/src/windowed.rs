@@ -246,7 +246,14 @@ pub fn run(
     let start = Instant::now();
     let mut events = 0u64;
     let mut last_edit = Instant::now();
+    let mut was_dirty = false;
     loop {
+        let dirty = session.has_unsaved_documents();
+        if dirty && !was_dirty {
+            last_edit = Instant::now();
+            if session.state.notice.as_deref() == Some("Saved") { session.set_notice(None); }
+        }
+        was_dirty = dirty;
         if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
         if vault.is_some() && form.is_none() {
             if session.take_save_request() || (session.has_unsaved_documents() && last_edit.elapsed() >= Duration::from_millis(800)) {
