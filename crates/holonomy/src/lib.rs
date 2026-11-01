@@ -23,5 +23,9 @@ pub mod store;
 #[cfg(feature = "desktop")]
 pub mod windowed;
 
+/// Encrypted multi-document payload and the desktop vault lifecycle.
+#[cfg(feature = "desktop")]
+pub mod vault;
+
 pub use args::{Args, ExportTarget, ParseError};
 pub use session::{Exit, ExportSink, Session, SessionError, SessionStats, TEST_CHART_PNG};

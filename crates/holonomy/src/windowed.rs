@@ -57,7 +57,7 @@ use holonomy_render::chrome::{Blink, ChromeMetrics};
 use holonomy_text::Editor;
 
 use crate::args::Args;
-use crate::session::{Exit, Session};
+use crate::session::{DocumentRequest, Exit, Session};
 
 /// Why the window could not be driven.
 #[derive(Debug)]
@@ -219,351 +219,283 @@ pub fn run(
     args: &Args,
     metrics: ChromeMetrics,
 ) -> Result<Exit, WindowedError> {
-    // **Said once, at startup, because the symptom reads as the product's fault.** A debug build of
-    // a software rasteriser is ~30x slower than the release build on the paint path, and the report
-    // it produces is "I click a button and it takes almost a whole second to respond" — filed
-    // against the UI, not against the profile that built it. `--release` is in every run command
-    // the README shows; this is for the invocation that forgot it. (For measuring a *release*
-    // build's latency, HOLONOMY_WINDOW_TRACE=1 prints per-click milliseconds.)
     #[cfg(debug_assertions)]
-    eprintln!(
-        "holonomy: THIS IS A DEBUG BUILD — painting is unoptimised and clicks will lag. \
-         Run with --release: cargo run --release --features desktop -p holonomy -- --window"
-    );
-    let (w, h) = if args.sized {
-        (metrics.width, metrics.height)
-    } else {
-        opening_size(
-            Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000)),
-            None,
-        )
+    eprintln!("holonomy: debug build — use --release for responsive painting");
+    let (w, h) = if args.sized { (metrics.width, metrics.height) } else {
+        opening_size(Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000)), None)
     };
-    let metrics = ChromeMetrics {
-        width: w,
-        height: h,
-        ..metrics
-    };
-    let desktop =
-        Desktop::open(args.display.as_deref(), w, h, "Holonomy").map_err(WindowedError::Desktop)?;
-    // **The screen size is printed too, and it is in this line for a reason.**
-    //
-    // A bug report of *"the window is way too small"* cannot be settled from the window's size alone.
-    // The window is what the app asked for *after* reading the screen, so a window smaller than
-    // `90%` of the screen means one of three things — `screen_size` reported wrong, the window
-    // manager constrained the request, or the screenshot was scaled — and **they have three different
-    // fixes**. The line below carries both numbers so that one run distinguishes them, which is the
-    // measurement that `bugs/1.png` could not supply: a screenshot has no absolute scale in it.
-    let asked = (w, h);
-    let screen = Desktop::screen_size(args.display.as_deref());
-    eprintln!(
-        "holonomy: window {:#x} is {}x{}, opening on {} (asked {}x{}, screen {:?}, \
-         {} of the screen)",
-        desktop.window_id(),
-        desktop.width(),
-        desktop.height(),
-        desktop.describe(),
-        asked.0,
-        asked.1,
-        screen,
-        match screen {
-            Some((sw, sh)) if sw > 0 && sh > 0 => format!(
-                "{}% x {}%",
-                100 * desktop.width() as u32 / sw,
-                100 * desktop.height() as u32 / sh
-            ),
-            _ => "unknown".to_string(),
-        }
-    );
-
-    let mut session = Session::new(
-        Editor::new(),
-        Painter::new(atlas, 0),
-        Box::new(desktop),
-        metrics,
-    );
-    // **A zoom this atlas cannot do is reported, not clamped.** Part 43: `set_zoom` returns
-    // `Result` because "125 % drawn under a '200 %' label" is a lie the label is uniquely positioned
-    // to tell, and `--zoom` is exactly where such a lie would arrive from.
-    if let Err(e) = session.set_zoom(args.zoom) {
-        eprintln!("holonomy: {e}");
-        eprintln!("holonomy: continuing at 100 %");
-    }
-    // **The document's name, in the title bar and in the sidebar.**
-    //
-    // **Part 39: the window said `untitled` and the sidebar said nothing at all**, whatever the user
-    // passed. `--container notes.wavefunction` is a real path the app opens, and its name belongs on the
-    // screen; `file_stem` and not the whole path because a title bar is not a place for `/home/…`.
-    // The default is the same string `ChromeState::default` carries, so a window with no `--container`
-    // looks exactly as it did.
-    let name = args
-        .container
-        .as_deref()
-        .and_then(|p| p.file_stem())
-        .map_or_else(|| "untitled".to_string(), |s| s.to_string_lossy().into_owned());
-    session.set_document(&name);
-    session.repaint_all().map_err(WindowedError::Session)?;
-
-    // **Part 36: dump the first frame, because "the viewport is too small" is not a number.** A layout
-    // can be measured and still be wrong, and four of this part's claims were only settled by looking
-    // at the pixels. Off unless named; a path, because `HOLONOMY_WINDOW_TRACE` is already the flag for
-    // "tell me what the driver is doing" and this is the other half of it -- "show me what it drew".
-    if let Some(path) = std::env::var_os("HOLONOMY_WINDOW_PPM") {
-        let mut f = std::fs::File::create(&path).expect("create the dump");
-        session.frame().to_ppm(&mut f).expect("write the dump");
-        eprintln!("holonomy: first frame written to {}", path.to_string_lossy());
-    }
-
-    // **Part 45: the two File rows that need a path, and the one place a path can come from.**
-    //
-    // **The window has no file dialog, and the sealed product has neither a dialog nor the `openat` to
-    // use one.** So `File > Open` and `File > Import` are requests the session makes and the *driver*
-    // answers — and the driver answers them by reading a path from the terminal this window was started
-    // in. That is a developer window's mechanism and not a product's, and it is written here rather
-    // than implied by the row.
-    //
-    // **The reader is a thread, because the window must keep painting while the path is typed.** A
-    // blocking read on the event loop's thread would freeze the caret's blink and every repaint for as
-    // long as the user is typing, which reads as a hang rather than as a prompt. Paths are sent as they
-    // arrive and taken with `try_recv`, so the window never waits.
-    //
-    // **It exits on EOF or an error**, which is what a closed terminal or a redirected-from-a-file
-    // stdin does; a window started with no terminal simply never gets a path.
-    let passphrase = std::env::var("HOLONOMY_PASSPHRASE").unwrap_or_default();
-    let (open_tx, open_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let path = line.trim();
-                    if !path.is_empty() {
-                        let _ = open_tx.send(std::path::PathBuf::from(path));
-                    }
-                }
-                Err(_) => break,
+    let metrics = ChromeMetrics { width: w, height: h, ..metrics };
+    let desktop = Desktop::open(args.display.as_deref(), w, h, "Holonomy").map_err(WindowedError::Desktop)?;
+    let mut session = Session::new(Editor::new(), Painter::new(atlas, 0), Box::new(desktop), metrics);
+    session.set_managed_documents(true);
+    if let Err(e) = session.set_zoom(args.zoom) { eprintln!("holonomy: {e}"); }
+    let path = args.container.clone().unwrap_or_else(|| std::path::PathBuf::from("holonomy.wavefunction"));
+    let mut vault: Option<crate::vault::Vault> = None;
+    let mut form: Option<Form> = Some(if path.exists() { Form::unlock(path.clone()) } else { Form::setup(path.clone()) });
+    if let Ok(pass) = std::env::var("HOLONOMY_PASSPHRASE") {
+        if !pass.is_empty() && path.exists() {
+            match crate::vault::Vault::open(&path, &pass, holonomy_crypto::envelope::VDF_ITERATIONS) {
+                Ok(v) => { v.load_all(&mut session).map_err(|e| WindowedError::Session(crate::session::SessionError::Sink(std::io::Error::other(e.to_string()))))?; vault = Some(v); form = None; }
+                Err(e) => { if let Some(f) = form.as_mut() { f.error = Some(e.to_string()); } }
             }
         }
-    });
-
+    }
+    let (mut min_keycode, mut mapping) = window_of(&mut session)?.keyboard_mapping().map_err(WindowedError::Desktop)?;
+    sync_form(&mut session, form.as_ref());
+    session.repaint_all().map_err(WindowedError::Session)?;
     let start = Instant::now();
     let mut events = 0u64;
-    // **A requested open, and the path it is waiting for.** The session asks; this window answers.
-    // Neither step blocks — the prompt is printed on the iteration the request arrived and the path is
-    // taken from the reader when it lands — so a path typed slowly costs the window nothing.
-    let mut awaiting: Option<holonomy_render::menus::Action> = None;
+    let mut last_edit = Instant::now();
+    let mut was_dirty = false;
     loop {
-        if awaiting.is_none() {
-            if let Some(action) = session.take_open_request() {
-                eprint!("holonomy: open path: ");
-                awaiting = Some(action);
-            }
+        let dirty = session.has_unsaved_documents();
+        if dirty && !was_dirty {
+            last_edit = Instant::now();
+            if session.state.notice.as_deref() == Some("Saved") { session.set_notice(None); }
         }
-        if let Ok(path) = open_rx.try_recv() {
-            if let Some(action) = awaiting.take() {
-                // **`Import` adds to the list and `Open` replaces the painted document**, and both are
-                // refused by the session under the seal — so reaching here means the developer window is
-                // running, which is the only place a path can be typed.
-                match action {
-                    holonomy_render::menus::Action::Import => {
-                        if let Err(e) = session.import_path(&path, &passphrase) {
-                            eprintln!("holonomy: {e}");
-                        }
+        was_dirty = dirty;
+        if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
+        if vault.is_some() && form.is_none() {
+            if session.take_save_request() || (session.has_unsaved_documents() && last_edit.elapsed() >= Duration::from_millis(800)) {
+                save(&mut vault, &mut session);
+            }
+            if let Some(req) = session.take_document_request() {
+                match req {
+                    DocumentRequest::New => { form = Some(Form::new_doc()); }
+                    DocumentRequest::Rename => { form = Some(Form::rename(session.state.title.clone())); }
+                    DocumentRequest::Delete => { form = Some(Form::delete(session.state.title.clone(), session.active_document_id())); }
+                    DocumentRequest::Close => {
+                        if save(&mut vault, &mut session) { let id = session.active_document_id(); session.close_document(id); session.set_notice(Some("Document closed. File > Open lists saved documents.".into())); }
                     }
-                    _ => {
-                        if let Err(e) = session.open_path(&path, &passphrase) {
-                            eprintln!("holonomy: {e}");
-                        }
+                    DocumentRequest::Lock => {
+                        if save(&mut vault, &mut session) { let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p)); }
+                    }
+                    DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
+                    DocumentRequest::ImportText => { form = Some(Form::import()); }
+                    DocumentRequest::DocumentMenu(i) => {
+                        session.switch_document_public(i);
+                        form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
                     }
                 }
+                sync_form(&mut session, form.as_ref());
             }
         }
-
-        // One event, with a bound. The borrow of the session ends at the end of this block, so the
-        // session is free again for the dispatch below.
-        let event = {
-            let desktop = window_of(&mut session)?;
-            match desktop
-                .next_event(EVENT_WAIT)
-                .map_err(WindowedError::Desktop)?
-            {
-                None => None,
-                Some(ev) => {
-                    events += 1;
-                    Some(ev)
-                }
-            }
+        let event = { let desktop = window_of(&mut session)?; desktop.next_event(EVENT_WAIT).map_err(WindowedError::Desktop)? };
+        let Some(ev) = event else {
+            session.tick().map_err(WindowedError::Session)?; continue;
         };
-
-        match event {
-            None => {
-                // Nothing happened. `tick` blinks if it is due and paints nothing if it is not.
-                session.tick().map_err(WindowedError::Session)?;
+        events += 1;
+        if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() { eprintln!("event {ev:?}"); }
+        match ev {
+            holonomy_x11::Event::KeyPress { keycode, state, .. } => {
+                session.sync_modifiers(x11key::modifier_state(state));
+                let ch = x11key::layout_char(&mapping, min_keycode, keycode, state);
+                if let Some(f) = form.as_mut() {
+                    let outcome = f.key(keycode, state, ch);
+                    match outcome {
+                        KeyOutcome::Changed => sync_form(&mut session, Some(f)),
+                        KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        KeyOutcome::Submit => {
+                            let f = form.take().unwrap();
+                            match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
+                                Ok(next) => { form = next; session.set_notice(None); last_edit = Instant::now(); }
+                                Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
+                            }
+                            sync_form(&mut session, form.as_ref());
+                        }
+                    }
+                    continue;
+                }
+                if vault.is_none() { continue; }
+                if state & (4 | 8) == 0 {
+                    if let Some(c) = ch { session.insert_text(&c.to_string()).map_err(WindowedError::Session)?; last_edit = Instant::now(); continue; }
+                }
+                if let Some(key) = x11key::key_event(&ev) {
+                    if let Some(Exit::Quit) = session.handle_event(key).map_err(WindowedError::Session)? {
+                        if save(&mut vault, &mut session) { report(&session, events, start); return Ok(Exit::Quit); }
+                        session.set_notice(Some("Save failed — not quitting. Fix the error and try again.".into()));
+                    }
+                    if session.has_unsaved_documents() { last_edit = Instant::now(); }
+                }
             }
-            Some(ev) => {
-                // **Every event's code, under the trace flag, and this is a diagnosis tool.**
-                //
-                // **Added in part 34 because the resize defect could not be located by reading the
-                // code**: `Session::resize`, `Layout::for_size`, `Desktop::resize` and
-                // `Event::decode` were each correct in isolation and the application still did not
-                // resize. **The only question that settled it was "does a `ConfigureNotify` arrive at
-                // all",** and answering that needs the event stream, not another reading of the source.
-                //
-                // **`{:?}` on the whole event rather than a code number**, because a bare `22` is a
-                // claim and `ConfigureNotify { width: 1600, height: 1000 }` is the measurement.
-                if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
-                    eprintln!("event {ev:?}");
-                }
-                match ev {
-                    // A key. The whole point.
-                    ev @ (holonomy_x11::Event::KeyPress { .. }
-                    | holonomy_x11::Event::KeyRelease { .. }) => {
-                        if let Some(key) = x11key::key_event(&ev) {
-                            if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
-                                eprintln!("dispatch {key:?}");
+            holonomy_x11::Event::KeyRelease { state, .. } => {
+                session.sync_modifiers(x11key::modifier_state(state));
+                if form.is_none() { if let Some(key) = x11key::key_event(&ev) { session.handle_event(key).map_err(WindowedError::Session)?; } }
+            }
+            holonomy_x11::Event::ConfigureNotify { width, height } => {
+                if session.resize(width as u32, height as u32).map_err(WindowedError::Session)? { session.repaint_all().map_err(WindowedError::Session)?; }
+            }
+            holonomy_x11::Event::Expose { .. } => { session.repaint_all().map_err(WindowedError::Session)?; }
+            holonomy_x11::Event::ButtonPress { button, event_x, event_y, .. } => {
+                window_of(&mut session)?.focus().map_err(WindowedError::Desktop)?;
+                if button != 1 { continue; }
+                if let Some(f) = form.as_mut() {
+                    let l = holonomy_render::Layout::new(&session.chrome_metrics());
+                    let view = f.view();
+                    match holonomy_render::dialog::hit(&l, &view, event_x as i32, event_y as i32) {
+                        holonomy_render::dialog::Hit::Field(i) => { f.focus = i; sync_form(&mut session, Some(f)); }
+                        holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f)); }
+                        holonomy_render::dialog::Hit::Confirm => {
+                            let f = form.take().unwrap();
+                            match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
+                                Ok(next) => { form = next; session.set_notice(None); }
+                                Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
-                            // Nothing else: the key goes to the session, which folds the modifier
-                            // state and dispatches. Keeping the trace here rather than inside the
-                            // session means it cannot change what the session does.
-                            if let Some(exit) =
-                                session.handle_event(key).map_err(WindowedError::Session)?
-                            {
-                                report(&session, events, start);
-                                return Ok(exit);
-                            }
+                            sync_form(&mut session, form.as_ref());
                         }
+                        holonomy_render::dialog::Hit::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        _ => {}
                     }
-                    // The window changed size.
-                    //
-                    // Two halves, in this order: the backend first, because the frame it presents into
-                    // is checked against its size and a paint at the old size would be refused. A drag
-                    // delivers one of these per intermediate size, so this runs continuously while a
-                    // window is being dragged rather than once at the end.
-                    holonomy_x11::Event::ConfigureNotify { width, height } => {
-                        // One call, because the order -- backend first, then the frame -- is the
-                        // session's business and not the driver's. A drag delivers one of these per
-                        // intermediate size, so this is a per-frame cost while a window is moving.
-                        let changed = session
-                            .resize(width as u32, height as u32)
-                            .map_err(WindowedError::Session)?;
-                        // **The four numbers that decide whether a resize happened, printed under the
-                        // same flag as the event stream.**
-                        //
-                        // **`ConfigureNotify { width: 900, height: 700 }` is a claim about the server.**
-                        // Whether the *session* believed it is a different question, and it was being
-                        // answered by looking at a screenshot: a window that is 900 px wide and still
-                        // showing the chrome for 1,600 is indistinguishable from one that resized and
-                        // repainted wrongly. `Session::resize` returning `false` is the whole difference
-                        // between those two, and nothing in the trace said so.
-                        if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
-                            let f = session.frame_size();
-                            let m = session.chrome_metrics();
-                            eprintln!(
-                                "resize: server {width}x{height}, changed {changed}, frame {}x{}, \
-                                 metrics {}x{}, cell {}x{}, sidebar {}",
-                                f.0,
-                                f.1,
-                                m.width,
-                                m.height,
-                                m.cell_w,
-                                m.cell_h,
-                                m.sidebar_w
-                            );
-                        }
-                        if changed {
-                            session.repaint_all().map_err(WindowedError::Session)?;
-                        }
-                    }
-                    // The window is on screen and the server does not know what is where. Repaint all of
-                    // it: this is the server saying "this region is undefined", and the only honest
-                    // answer is the whole frame.
-                    holonomy_x11::Event::Expose { .. } => {
-                        session.repaint_all().map_err(WindowedError::Session)?;
-                    }
-                    // A click is a request for the keyboard, and a window manager is entitled to take
-                    // the focus back at any time -- measured on GNOME, which answers `SetInputFocus` and
-                    // then sends `FocusOut`.
-                    //
-                    // **The press is handled as well as focused, and in this order.** The first version
-                    // matched `ButtonPress` and only took the focus, so every click in a window was a
-                    // click that did nothing: the driver had the event, the session had the routing,
-                    // and the arm that matched the event chose neither. **Focus first** because a
-                    // window manager's `FocusOut` round trip must not delay the click's own paint --
-                    // but handle it in the same arm, because an arm that *matches* an event and then
-                    // declines to act on it is the shape of this bug.
-                    holonomy_x11::Event::ButtonPress { .. } => {
-                        window_of(&mut session)?
-                            .focus()
-                            .map_err(WindowedError::Desktop)?;
-                        let Some(p) = x11key::pointer_event(&ev) else {
-                            continue;
-                        };
-                        // **The same measurement as a motion, and the one that matters most:** "the
-                        // buttons lag" is about a *click*, and a click's latency is this interval.
-                        let at = if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
-                            Some(Instant::now())
-                        } else {
-                            None
-                        };
-                        session
-                            .handle_pointer(&mut crate::store::NoSource, p)
-                            .map_err(WindowedError::Session)?;
-                        if let Some(at) = at {
-                            eprintln!(
-                                "press: {:.1} ms, damage {:?}, {} px, {} glyphs",
-                                at.elapsed().as_secs_f64() * 1e3,
-                                session.last_damage(),
-                                session.paint_stats().pixels,
-                                session.paint_stats().glyphs,
-                            );
-                        }
-                    }
-                    // Motion, release and the wheel: routed, never focused on, never interpreted here.
-                    //
-                    // **`x11key::pointer_event` is the only place X's button numbering and X's
-                    // "buttons 4 and 5 are the wheel" convention are translated.** The driver sees a
-                    // `PointerEvent` or `None` and knows nothing about either convention, which is what
-                    // makes it the same code the scripted path runs.
-                    ev @ (holonomy_x11::Event::ButtonRelease { .. }
-                    | holonomy_x11::Event::MotionNotify { .. }) => {
-                        let Some(p) = x11key::pointer_event(&ev) else {
-                            continue;
-                        };
-                        // **The pointer's own latency, printed under the same flag as the events.**
-                        //
-                        // *"The buttons lag" is the report; a frame count cannot answer it, because a
-                        // slow frame and a fast frame paint the same number of times.** This is the
-                        // interval from "the server handed us the event" to "the frame went out on the
-                        // socket", which is the whole of what the user waits for — the session's
-                        // dispatch, the chrome tree, the raster, and the `PutImage`.
-                        let at = if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() {
-                            Some(Instant::now())
-                        } else {
-                            None
-                        };
-                        session
-                            .handle_pointer(&mut crate::store::NoSource, p)
-                            .map_err(WindowedError::Session)?;
-                        if let Some(at) = at {
-                            eprintln!(
-                                "pointer: {:.1} ms, damage {:?}, {} px, {} glyphs",
-                                at.elapsed().as_secs_f64() * 1e3,
-                                session.last_damage(),
-                                session.paint_stats().pixels,
-                                session.paint_stats().glyphs,
-                            );
-                        }
-                    }
-                    // The title bar's close button, forwarded as `WM_DELETE_WINDOW`.
-                    holonomy_x11::Event::ClientMessage { data1, .. }
-                        if data1 == WM_DELETE_WINDOW =>
-                    {
-                        report(&session, events, start);
-                        return Ok(Exit::Quit);
-                    }
-                    _ => {}
+                    continue;
                 }
+                if vault.is_some() {
+                    if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; }
+                }
+            }
+            ev @ (holonomy_x11::Event::ButtonRelease { .. } | holonomy_x11::Event::MotionNotify { .. }) => {
+                if form.is_none() && vault.is_some() { if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; } }
+            }
+            holonomy_x11::Event::ClientMessage { data1, .. } if data1 == WM_DELETE_WINDOW => {
+                if vault.is_none() || save(&mut vault, &mut session) { report(&session, events, start); return Ok(Exit::Quit); }
+                session.set_notice(Some("Save failed — window kept open so your edits are not lost.".into()));
+            }
+            holonomy_x11::Event::Other { code: 10 } => session.reset_modifiers(),
+            holonomy_x11::Event::Other { code: 34 } => {
+                if let Ok((min, map)) = window_of(&mut session)?.keyboard_mapping() { min_keycode = min; mapping = map; }
+                session.reset_modifiers();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sync_form(session: &mut Session<'_>, form: Option<&Form>) { session.set_dialog(form.map(Form::view)); }
+fn save(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>) -> bool {
+    let Some(v) = vault.as_mut() else { return true; };
+    match v.save(session) { Ok(()) => { session.set_notice(Some("Saved".into())); true } Err(e) => { session.set_notice(Some(format!("Save failed: {e}"))); false } }
+}
+fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _path: &std::path::Path) {
+    *vault = None;
+    let _ = session.replace_documents(Vec::new());
+    session.clear_image_cache();
+    session.reset_modifiers();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, DocMenu }
+#[derive(Clone)]
+struct Form {
+    kind: FormKind, path: std::path::PathBuf, values: Vec<zeroize::Zeroizing<String>>,
+    focus: usize, choice: usize, choices: Vec<String>, ids: Vec<u64>, error: Option<String>, target_id: u64,
+}
+enum KeyOutcome { Changed, Cancel, Submit }
+impl Form {
+    fn base(kind: FormKind, path: std::path::PathBuf, n: usize) -> Self { Self { kind, path, values: (0..n).map(|_| zeroize::Zeroizing::new(String::new())).collect(), focus: 0, choice: 0, choices: Vec::new(), ids: Vec::new(), error: None, target_id: 0 } }
+    fn setup(path: std::path::PathBuf) -> Self { Self::base(FormKind::Setup, path, 4) }
+    fn unlock(path: std::path::PathBuf) -> Self { Self::base(FormKind::Unlock, path, 1) }
+    fn new_doc() -> Self { let mut f = Self::base(FormKind::New, "".into(), 1); f.values[0].push_str("Untitled"); f }
+    fn rename(title: String) -> Self { let mut f = Self::base(FormKind::Rename, "".into(), 1); f.values[0].push_str(&title); f }
+    fn delete(title: String, id: u64) -> Self { let mut f = Self::base(FormKind::Delete, "".into(), 0); f.choices = vec![format!("Delete '{title}' permanently")]; f.target_id = id; f }
+    fn import() -> Self { Self::base(FormKind::Import, "".into(), 1) }
+    fn open(vault: &Option<crate::vault::Vault>, _session: &Session<'_>) -> Self {
+        let mut f = Self::base(FormKind::Open, "".into(), 1);
+        if let Some(v) = vault { for d in v.documents() { f.choices.push(d.title.clone()); f.ids.push(d.id); } }
+        f.choices.push("Open another container…".into()); f.focus = 0; f
+    }
+    fn doc_menu(title: String, id: u64) -> Self { let mut f = Self::base(FormKind::DocMenu, "".into(), 0); f.choices = vec!["Rename".into(), "Delete…".into(), "Close".into()]; f.target_id = id; f.values.push(zeroize::Zeroizing::new(title)); f }
+    fn view(&self) -> holonomy_render::dialog::DialogView {
+        let (title, message, labels, secrets, confirm, cancel) = match self.kind {
+            FormKind::Setup => ("Set up top-secret space", "Step 1 of 2. This passphrase opens your private documents.", vec!["Top-secret passphrase", "Confirm top-secret"], vec![true,true], "Next", Some("Quit")),
+            FormKind::SetupNormal => ("Set up normal space", "Step 2 of 2. A different passphrase opens everyday documents.", vec!["Normal passphrase", "Confirm normal"], vec![true,true], "Create", Some("Quit")),
+            FormKind::Unlock => ("Unlock", "Enter one passphrase. Only its own documents are mounted.", vec!["Passphrase"], vec![true], "Unlock", Some("Quit")),
+            FormKind::New => ("New document", "Stored encrypted in the currently unlocked space.", vec!["Title"], vec![false], "Create", Some("Cancel")),
+            FormKind::Rename => ("Rename document", "The title is encrypted with the document.", vec!["Title"], vec![false], "Rename", Some("Cancel")),
+            FormKind::Delete => ("Delete document", "This rewrites the encrypted vault and cannot be undone.", vec![], vec![], "Delete", Some("Cancel")),
+            FormKind::Open => ("Open", "Choose a saved document, or open another container.", vec!["Other container path (optional)"], vec![false], "Open", Some("Cancel")),
+            FormKind::OpenPath => ("Open container", "The current vault is saved and locked before switching.", vec!["Container path"], vec![false], "Next", Some("Cancel")),
+            FormKind::Import => ("Import text", "Import a UTF-8 text file into this unlocked space.", vec!["File path"], vec![false], "Import", Some("Cancel")),
+            FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
+        };
+        let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
+        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
+        holonomy_render::dialog::DialogView { title: title.into(), message: message.into(), fields, focus: self.focus, error: self.error.clone(), confirm: confirm.into(), cancel: cancel.map(str::to_string), choices: self.choices.clone(), choice: self.choice }
+    }
+    fn key(&mut self, keycode: u8, state: u16, ch: Option<char>) -> KeyOutcome {
+        let code = keycode.saturating_sub(8);
+        let value_index = self.focus + if self.kind == FormKind::SetupNormal { 2 } else { 0 };
+        match code {
+            1 => return KeyOutcome::Cancel,
+            15 => { let n = match self.kind { FormKind::Setup | FormKind::SetupNormal => 2, _ => self.values.len().max(1) }; self.focus = if state & 1 != 0 { (self.focus + n - 1) % n } else { (self.focus + 1) % n }; return KeyOutcome::Changed; }
+            28 | 96 => return KeyOutcome::Submit,
+            103 if !self.choices.is_empty() => { self.choice = self.choice.saturating_sub(1); return KeyOutcome::Changed; }
+            108 if !self.choices.is_empty() => { self.choice = (self.choice + 1).min(self.choices.len()-1); return KeyOutcome::Changed; }
+            14 => { if let Some(v) = self.values.get_mut(value_index) { v.pop(); } return KeyOutcome::Changed; }
+            _ => {}
+        }
+        if state & (4|8) == 0 { if let Some(c) = ch { if let Some(v) = self.values.get_mut(value_index) { if v.len() < 4096 { v.push(c); } } return KeyOutcome::Changed; } }
+        KeyOutcome::Changed
+    }
+    fn submit(self, vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, vdf: u64) -> Result<Option<Form>, String> {
+        let val = |i: usize| self.values.get(i).map(|s| s.as_str()).unwrap_or("");
+        match self.kind {
+            FormKind::Setup => {
+                if val(0).is_empty() { return Err("Enter a passphrase.".into()); }
+                if val(0) != val(1) { return Err("The passphrases do not match.".into()); }
+                let mut next = self; next.kind = FormKind::SetupNormal; next.focus = 0; next.error = None; Ok(Some(next))
+            }
+            FormKind::SetupNormal => {
+                crate::vault::Vault::create(&self.path, val(0), val(1), val(2), val(3), vdf).map_err(|e| e.to_string())?;
+                Ok(Some(Form::unlock(self.path)))
+            }
+            FormKind::Unlock => {
+                let v = crate::vault::Vault::open(&self.path, val(0), vdf).map_err(|e| e.to_string())?;
+                v.load_all(session).map_err(|e| e.to_string())?; *vault = Some(v); Ok(None)
+            }
+            FormKind::New => {
+                let title = val(0).trim().to_string(); if title.is_empty() || title.chars().count() > 128 || title.chars().any(char::is_control) { return Err("Enter a title of 1–128 characters.".into()); }
+                let Some(v) = vault.as_mut() else { return Err("Unlock first.".into()); };
+                let id = v.next_id(); session.create_document(id, title);
+                if !save(vault, session) { return Err("Document created in memory but not saved; retry Ctrl+S.".into()); }
+                Ok(None)
+            }
+            FormKind::Rename => {
+                let title = val(0).trim().to_string(); if title.is_empty() || title.chars().count() > 128 || title.chars().any(char::is_control) { return Err("Enter a title of 1–128 characters.".into()); }
+                session.rename_document(title); save(vault, session); Ok(None)
+            }
+            FormKind::Delete => {
+                let Some(v) = vault.as_mut() else { return Err("Unlock first.".into()); };
+                v.delete(session, self.target_id).map_err(|e| e.to_string())?; session.set_notice(Some("Document deleted.".into())); Ok(None)
+            }
+            FormKind::Import => {
+                let p = val(0).trim(); if p.is_empty() { return Err("Enter a file path.".into()); }
+                let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| "Import expects UTF-8 text.".to_string())?;
+                let Some(v) = vault.as_mut() else { return Err("Unlock first.".into()); };
+                let id = v.next_id(); let title = std::path::Path::new(p).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Imported".into());
+                session.create_document(id, title); session.insert_text(text).map_err(|e| e.to_string())?; save(vault, session); Ok(None)
+            }
+            FormKind::Open => {
+                let p = val(0).trim();
+                if !p.is_empty() {
+                    if !save(vault, session) { return Err("Save failed; current vault kept open.".into()); }
+                    let path = std::path::PathBuf::from(p); lock(vault, session, &path); return Ok(Some(Form::unlock(path)));
+                }
+                if self.choice < self.ids.len() {
+                    let id = self.ids[self.choice]; let v = vault.as_ref().ok_or("Unlock first.")?;
+                    let d = v.documents().iter().find(|d| d.id == id).ok_or("Document missing.")?;
+                    session.open_stored_document(d.id, d.title.clone(), &d.payload, d.caret).map_err(|e| e.to_string())?; return Ok(None);
+                }
+                let mut f = Form::base(FormKind::OpenPath, "".into(), 1); f.values[0].push_str("holonomy.wavefunction"); Ok(Some(f))
+            }
+            FormKind::OpenPath => {
+                let p = val(0).trim(); if p.is_empty() { return Err("Enter a container path.".into()); }
+                if !save(vault, session) { return Err("Save failed; current vault kept open.".into()); }
+                let path = std::path::PathBuf::from(p); lock(vault, session, &path); Ok(Some(if path.exists() { Form::unlock(path) } else { Form::setup(path) }))
+            }
+            FormKind::DocMenu => match self.choice {
+                0 => Ok(Some(Form::rename(self.values[0].to_string()))),
+                1 => Ok(Some(Form::delete(self.values[0].to_string(), self.target_id))),
+                _ => { if save(vault, session) { session.close_document(self.target_id); } Ok(None) }
             }
         }
     }

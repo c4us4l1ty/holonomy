@@ -134,6 +134,8 @@ pub enum Hotkey {
     DocumentStart,
     /// Ctrl+End.
     DocumentEnd,
+    /// Ctrl+A: select the entire document.
+    SelectAll,
     /// Ctrl+I. Insert an image at the caret.
     ///
     /// A hotkey rather than a [`Command`] because it carries no payload: the *bytes* come from
@@ -347,6 +349,7 @@ impl Keymap {
                 KEY_Z if !mods.shift() && !mods.alt() => Some(Hotkey::Undo),
                 KEY_Y if !mods.shift() && !mods.alt() => Some(Hotkey::Redo),
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
+                KEY_A if !mods.shift() && !mods.alt() => Some(Hotkey::SelectAll),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
@@ -720,9 +723,9 @@ mod tests {
         // decision rather than as a record of an unfinished one.
         //
         // The property the test still asserts is the one it was written for: **an unbound combo
-        // produces nothing, and in particular does not type the letter.** That is why `KEY_A` is still
+        // produces nothing, and in particular does not type the letter.** That is why `KEY_B` is still
         // here and `KEY_C` is not.
-        for code in [KEY_A, KEY_1, KEY_SPACE, KEY_ESC] {
+        for code in [KEY_B, KEY_1, KEY_SPACE, KEY_ESC] {
             assert_eq!(
                 km.dispatch(InputEvent::press(code), &c),
                 None,
@@ -1071,5 +1074,17 @@ mod tests {
                 assert!(hi.is_ascii(), "code {code} -> {hi:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod select_all_tests {
+    use super::*;
+    #[test]
+    fn ctrl_a_selects_all_and_does_not_type() {
+        let km = Keymap::us();
+        let mut c = ModifierState::new();
+        c.update(KEY_LEFTCTRL, 1);
+        assert_eq!(km.dispatch(InputEvent::press(KEY_A), &c), Some(Command::Hotkey(Hotkey::SelectAll)));
     }
 }
