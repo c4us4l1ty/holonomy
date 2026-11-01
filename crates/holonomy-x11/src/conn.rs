@@ -1397,6 +1397,9 @@ fn holonomy_x11_event_name(code: u8) -> Option<&'static str> {
         proto::event::CONFIGURE_NOTIFY => "ConfigureNotify",
         proto::event::PROPERTY_NOTIFY => "PropertyNotify",
         proto::event::CLIENT_MESSAGE => "ClientMessage",
+        proto::event::SELECTION_CLEAR => "SelectionClear",
+        proto::event::SELECTION_REQUEST => "SelectionRequest",
+        proto::event::SELECTION_NOTIFY => "SelectionNotify",
         6 => "MotionNotify",
         _ => return None,
     })

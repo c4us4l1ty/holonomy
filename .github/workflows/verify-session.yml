@@ -1,0 +1,50 @@
+# Temporary verification for the usability follow-up branch. Removed before merge.
+name: Verify session branch
+on:
+  push:
+    branches: ['arena/5795f57a-holonomy']
+permissions:
+  contents: read
+concurrency:
+  group: verify-session-5795
+  cancel-in-progress: true
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-musl
+      - name: Check default target
+        shell: bash
+        run: |
+          if ! cargo check --workspace --all-targets > /tmp/check.log 2>&1; then
+            tail -60 /tmp/check.log
+            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=[l for l in s.splitlines() if l.startswith("error")]; print("::error::"+("\n".join(lines)[-3500:]).replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi
+      - name: Check desktop target
+        shell: bash
+        run: |
+          if ! cargo check --workspace --all-targets --features holonomy/desktop > /tmp/check.log 2>&1; then
+            tail -60 /tmp/check.log
+            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=[l for l in s.splitlines() if l.startswith("error")]; print("::error::"+("\n".join(lines)[-3500:]).replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi
+      - name: Release tests
+        shell: bash
+        run: |
+          if ! cargo test --workspace --release -- --test-threads=1 > /tmp/test.log 2>&1; then
+            python3 -c 'from pathlib import Path; s=Path("/tmp/test.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("FAILED","panicked","failures:","error","test result:","left:","right:","assertion"))]; s="\n".join(keep)[-3500:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi
+      - name: Desktop tests
+        shell: bash
+        run: |
+          if ! (cargo test -p holonomy --features desktop --release -- --test-threads=2 && cargo test -p holonomy-input --features desktop --release && cargo test -p holonomy-x11 --release && cargo test -p holonomy-display --features desktop --release) > /tmp/test.log 2>&1; then
+            python3 -c 'from pathlib import Path; s=Path("/tmp/test.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("FAILED","panicked","failures:","error","test result:","left:","right:","assertion"))]; s="\n".join(keep)[-3500:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi

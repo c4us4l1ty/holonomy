@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 use holonomy_assets::atlas::Atlas;
 use holonomy_display::paint::Painter;
 use holonomy_display::{Desktop, Scanout};
+use holonomy_input::compose::{Composer, Fed};
 use holonomy_input::x11key;
 use holonomy_render::chrome::{Blink, ChromeMetrics};
 use holonomy_text::Editor;
@@ -247,6 +248,9 @@ pub fn run(
     let mut events = 0u64;
     let mut last_edit = Instant::now();
     let mut was_dirty = false;
+    let mut composer = Composer::new();
+    let mut clipboard_gen = session.clipboard_generation();
+    let mut pending_paste: Option<Instant> = None;
     loop {
         let dirty = session.has_unsaved_documents();
         if dirty && !was_dirty {
@@ -254,6 +258,12 @@ pub fn run(
             if session.state.notice.as_deref() == Some("Saved") { session.set_notice(None); }
         }
         was_dirty = dirty;
+        if let Some(t) = pending_paste {
+            if t.elapsed() >= Duration::from_millis(700) {
+                pending_paste = None;
+                let _ = session.paste_internal();
+            }
+        }
         if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
         if vault.is_some() && form.is_none() {
             if session.take_save_request() || (session.has_unsaved_documents() && last_edit.elapsed() >= Duration::from_millis(800)) {
@@ -268,7 +278,12 @@ pub fn run(
                         if save(&mut vault, &mut session) { let id = session.active_document_id(); session.close_document(id); session.set_notice(Some("Document closed. File > Open lists saved documents.".into())); }
                     }
                     DocumentRequest::Lock => {
-                        if save(&mut vault, &mut session) { let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p)); }
+                        if save(&mut vault, &mut session) {
+                            let _ = window_of(&mut session)?.clear_clipboard();
+                            composer.reset();
+                            session.clear_clipboard();
+                            let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p));
+                        }
                     }
                     DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
                     DocumentRequest::ImportText => { form = Some(Form::import()); }
@@ -286,12 +301,23 @@ pub fn run(
         };
         events += 1;
         if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() { eprintln!("event {ev:?}"); }
+        if let Some(bytes) = window_of(&mut session)?.handle_clipboard_event(&ev).map_err(WindowedError::Desktop)? {
+            if pending_paste.take().is_some() {
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    if !text.is_empty() { session.insert_text(text).map_err(WindowedError::Session)?; last_edit = Instant::now(); }
+                }
+            }
+        }
         match ev {
             holonomy_x11::Event::KeyPress { keycode, state, .. } => {
                 session.sync_modifiers(x11key::modifier_state(state));
+                let sym = x11key::layout_keysym(&mapping, min_keycode, keycode, state).unwrap_or(0);
                 let ch = x11key::layout_char(&mapping, min_keycode, keycode, state);
+                let fed = if state & (4 | 8) == 0 { composer.feed(sym, ch) } else { composer.reset(); Fed::Pass };
                 if let Some(f) = form.as_mut() {
-                    let outcome = f.key(keycode, state, ch);
+                    if matches!(fed, Fed::Pending) { sync_form(&mut session, Some(f)); continue; }
+                    let text = match &fed { Fed::Text(t) => Some(t.as_str()), _ => None };
+                    let outcome = f.key(keycode, state, text);
                     match outcome {
                         KeyOutcome::Changed => sync_form(&mut session, Some(f)),
                         KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
@@ -302,17 +328,24 @@ pub fn run(
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
                             sync_form(&mut session, form.as_ref());
+                            if vault.is_none() {
+                                let _ = window_of(&mut session)?.clear_clipboard();
+                                composer.reset();
+                                session.clear_clipboard();
+                            }
                         }
                     }
                     continue;
                 }
                 if vault.is_none() { continue; }
-                if state & (4 | 8) == 0 {
-                    if let Some(c) = ch { session.insert_text(&c.to_string()).map_err(WindowedError::Session)?; last_edit = Instant::now(); continue; }
+                match fed {
+                    Fed::Text(text) => { session.insert_text(&text).map_err(WindowedError::Session)?; last_edit = Instant::now(); continue; }
+                    Fed::Pending => continue,
+                    Fed::Pass => {}
                 }
                 if let Some(key) = x11key::key_event(&ev) {
                     if let Some(Exit::Quit) = session.handle_event(key).map_err(WindowedError::Session)? {
-                        if save(&mut vault, &mut session) { report(&session, events, start); return Ok(Exit::Quit); }
+                        if save(&mut vault, &mut session) { let _ = window_of(&mut session)?.clear_clipboard(); report(&session, events, start); return Ok(Exit::Quit); }
                         session.set_notice(Some("Save failed — not quitting. Fix the error and try again.".into()));
                     }
                     if session.has_unsaved_documents() { last_edit = Instant::now(); }
@@ -356,7 +389,7 @@ pub fn run(
                 if form.is_none() && vault.is_some() { if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; } }
             }
             holonomy_x11::Event::ClientMessage { data1, .. } if data1 == WM_DELETE_WINDOW => {
-                if vault.is_none() || save(&mut vault, &mut session) { report(&session, events, start); return Ok(Exit::Quit); }
+                if vault.is_none() || save(&mut vault, &mut session) { let _ = window_of(&mut session)?.clear_clipboard(); report(&session, events, start); return Ok(Exit::Quit); }
                 session.set_notice(Some("Save failed — window kept open so your edits are not lost.".into()));
             }
             holonomy_x11::Event::Other { code: 10 } => session.reset_modifiers(),
@@ -365,6 +398,18 @@ pub fn run(
                 session.reset_modifiers();
             }
             _ => {}
+        }
+        let gen = session.clipboard_generation();
+        if gen != clipboard_gen {
+            clipboard_gen = gen;
+            let bytes = session.clipboard_bytes().to_vec();
+            let desktop = window_of(&mut session)?;
+            if bytes.is_empty() { desktop.clear_clipboard().map_err(WindowedError::Desktop)?; }
+            else { desktop.publish_clipboard(&bytes).map_err(WindowedError::Desktop)?; }
+        }
+        if session.take_paste_request() {
+            pending_paste = Some(Instant::now());
+            window_of(&mut session)?.request_clipboard().map_err(WindowedError::Desktop)?;
         }
     }
 }
@@ -377,6 +422,7 @@ fn save(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>) -> b
 fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _path: &std::path::Path) {
     *vault = None;
     let _ = session.replace_documents(Vec::new());
+    session.clear_clipboard();
     session.clear_image_cache();
     session.reset_modifiers();
 }
@@ -420,7 +466,7 @@ impl Form {
         let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
         holonomy_render::dialog::DialogView { title: title.into(), message: message.into(), fields, focus: self.focus, error: self.error.clone(), confirm: confirm.into(), cancel: cancel.map(str::to_string), choices: self.choices.clone(), choice: self.choice }
     }
-    fn key(&mut self, keycode: u8, state: u16, ch: Option<char>) -> KeyOutcome {
+    fn key(&mut self, keycode: u8, state: u16, text: Option<&str>) -> KeyOutcome {
         let code = keycode.saturating_sub(8);
         let value_index = self.focus + if self.kind == FormKind::SetupNormal { 2 } else { 0 };
         match code {
@@ -432,7 +478,7 @@ impl Form {
             14 => { if let Some(v) = self.values.get_mut(value_index) { v.pop(); } return KeyOutcome::Changed; }
             _ => {}
         }
-        if state & (4|8) == 0 { if let Some(c) = ch { if let Some(v) = self.values.get_mut(value_index) { if v.len() < 4096 { v.push(c); } } return KeyOutcome::Changed; } }
+        if state & (4|8) == 0 { if let Some(t) = text { if let Some(v) = self.values.get_mut(value_index) { if v.len() < 4096 { v.push_str(t); } } return KeyOutcome::Changed; } }
         KeyOutcome::Changed
     }
     fn submit(self, vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, vdf: u64) -> Result<Option<Form>, String> {

@@ -191,7 +191,9 @@ impl Action {
             // already on the row** -- `Item::label` is `tool.name()` -- so a gate that wants to know
             // which row it is holding already has it, and a slug that repeated it would be a second
             // spelling to keep in step.
-            Action::SelectTool(_) => "select-tool",
+            Action::WordCount => "word-count",
+        Action::KeyboardShortcuts => "keyboard-shortcuts",
+        Action::SelectTool(_) => "select-tool",
         }
     }
 }
@@ -318,183 +320,55 @@ const fn accel(label: &'static str, acc: &'static str) -> Item {
 /// place a rename can silently break, and the failure would be `index out of bounds` at paint time
 /// rather than a compile error — which is why [`items_for`] takes a `usize` and returns an empty slice
 /// rather than indexing.
+// Menu cleanup: rows that named cloud/add-on/voice/translation features are removed rather than
+// drawn as inert affordances. The sealed product has no network, add-on runtime, or spell service.
 const FILE: &[Item] = &[
-    // **Wired as of the font/new-document pass.** This was `plain("New")` — a row that drew and
-    // did nothing — while `Session::adopt_document` sat one crate over as the supported way to
-    // put a document into a session. The row now asks for exactly that.
     act("New", Action::New),
-    // **`Open` and `Import`, and both were rows that drew and did nothing.**
-    //
-    // `Open` was `plain("Open")` — a row with no action behind it at all — and `Import` was a
-    // `sub(..)` with a chevron and no submenu to open, which is the reference's single most
-    // confusing affordance. **Both now carry an action, and both are refused under the seal**
-    // (`Session::apply_action` counts them as inert rather than letting `openat` kill the process).
-    // What they do in the developer window is [`Session::open_path`](crate::session::Session::open_path)
-    // — reached through the driver, which is the only place a path can come from.
-    //
-    // **The menu's row count does not move**, so the wiring gate's total is unchanged and only the
-    // wired/unwired split does: two rows leave the unwired list.
     act("Open", Action::Open),
     act("Import", Action::Import),
-    // **The save, and it was the one row the File menu was missing.**
-    //
-    // `Action::Save` has existed since the `Action` enum replaced a label match (part 21) and
-    // `action_command` has always known what it means — but **no row carried it**, so the variant was
-    // reachable from nowhere. `Ctrl+S` reached the commit through the keymap and the title bar's Cloud
-    // button reached it through `title_command`, and a keyboard-less user had no route at all.
-    //
-    // `item_count_matches_the_file_menu` asserts this list's length, so the row is counted rather than
-    // merely present.
-    Item {
-        accelerator: Some("Ctrl+S"),
-        ..act("Save", Action::Save)
-    },
-    // **Export, and the row that was drawn and did nothing.**
-    //
-    // `Session::export` has been implemented and gated since Phase 8 and the only routes to it were
-    // the `--export-html` / `--export-pdf` command-line flags and the end of the session — so a user
-    // clicking **File > Export** got a menu that opened and a row that closed it again. **`Print` is
-    // the contrast, and it is worth naming correctly:** it was not removed for want of a backend --
-    // it was wired to this same `Action::Export`, which is the one thing a print button does. **The
-    // backend is here in both cases**, so what was missing was the row reaching it: a wiring defect
-    // rather than a missing feature.
-    //
-    // **It writes to the sinks opened at boot, not to a path the user picks.** The jail's measured
-    // seccomp allowlist has no `openat` on a user path, so an interactive file dialog is not
-    // available; `--export-html out.html` at boot is what chooses the destination.
+    Item { accelerator: Some("Ctrl+S"), ..act("Save", Action::Save) },
     act("Export", Action::Export),
-    accel("Page setup", "Ctrl+P"),
     act("Close", Action::Close),
     act("Rename", Action::Rename),
     act("Delete…", Action::Delete),
     act("Lock", Action::Lock),
-    sub("Extensions", IconId::Sparkle),
 ];
 
 const EDIT: &[Item] = &[
-    Item {
-        accelerator: Some("Ctrl+Z"),
-        ..act("Undo", Action::Undo)
-    },
-    Item {
-        accelerator: Some("Ctrl+Y"),
-        ..act("Redo", Action::Redo)
-    },
-    // **Cut, Copy and Paste, which were three rows that opened a menu and closed it again.**
-    //
-    // The backend is `Editor`'s yank buffer and it is *internal*: there is no X selection on the
-    // sealed path, no `openat` to spool to a file and no network for a remote clipboard, so this is
-    // the only meaning `Copy` can have that is reachable from every build. `release_artifact.rs`
-    // asserts the sealed binary contains no X11 client, which is what makes that a fact rather than
-    // a preference.
-    Item {
-        accelerator: Some("Ctrl+X"),
-        ..act("Cut", Action::Cut)
-    },
-    Item {
-        accelerator: Some("Ctrl+C"),
-        ..act("Copy", Action::Copy)
-    },
-    Item {
-        accelerator: Some("Ctrl+V"),
-        ..act("Paste", Action::Paste)
-    },
+    Item { accelerator: Some("Ctrl+Z"), ..act("Undo", Action::Undo) },
+    Item { accelerator: Some("Ctrl+Y"), ..act("Redo", Action::Redo) },
+    Item { accelerator: Some("Ctrl+X"), ..act("Cut", Action::Cut) },
+    Item { accelerator: Some("Ctrl+C"), ..act("Copy", Action::Copy) },
+    Item { accelerator: Some("Ctrl+V"), ..act("Paste", Action::Paste) },
     act("Select all", Action::SelectAll),
-    accel("Find", "Ctrl+F"),
-    accel("Spelling and grammar", "Ctrl+X"),
 ];
 
 const VIEW: &[Item] = &[
     sub("Mode", IconId::Pen),
-    plain("Ruler"),
     sub("Zoom", IconId::Search),
-    sub("Appearance", IconId::Sparkle),
-    sub("Layout", IconId::Table),
-    sub("Toolbars", IconId::Rule),
 ];
 
 const INSERT: &[Item] = &[
-    Item {
-        action: Some(Action::InsertImage),
-        ..sub("Image", IconId::Image)
-    },
-    Item {
-        action: Some(Action::InsertTable),
-        ..sub("Table", IconId::Table)
-    },
-    sub("Building blocks", IconId::Doc),
-    sub("Smart chips", IconId::Sparkle),
-    accel("Link", "Ctrl+K"),
-    sub("Drawing", IconId::Pen),
-    sub("Chart", IconId::History),
-    sub("Bookmark", IconId::Bookmark),
-    sub("Symbols", IconId::Sparkle),
-    // **The row part 24 gave the keyboard and part 26 gave the menu.** `Action::InsertMath` routed
-    // through `Ctrl-M` and through the `InsertMath` hotkey command, and *nothing else* reached it:
-    // no menu row and no popup row carried it, so a user who did not know the accelerator had no way
-    // to insert an equation at all. That is the `Action::Save` shape -- a capability the menus had a
-    // home for and did not occupy -- so it gets the same treatment: one `act` row, which is why this
-    // is an `act` and not a `plain`. **The label is the reference's** (`Insert > Equation`), and the
-    // position is the reference's too, directly under `Symbols`, because the two are the same kind of
-    // entry and a user looking for one finds the other here.
-    //
-    // **`DocumentStart` and `DocumentEnd` are deliberately not given rows.** They are the other two
-    // `Action` variants that appeared only in their own `name()` arm, and they are *not* the same
-    // shape: the capability they carry is "place the caret at the first or last line", and a
-    // pointer-only user reaches that capability every time they click on the page. `InsertMath`
-    // inserts something that otherwise does not exist; these two move the caret somewhere the user can
-    // already reach by clicking. The reference has no menu row for either, and adding one would be
-    // inventing a navigation menu the product does not have rather than repairing a defect. **A row
-    // that adds a menu the reference lacks is not a wiring fix.** They stay keyboard-only, and this
-    // comment is where that decision is recorded so the next reader does not "fix" it by hand.
+    Item { action: Some(Action::InsertImage), ..sub("Image", IconId::Image) },
+    Item { action: Some(Action::InsertTable), ..sub("Table", IconId::Table) },
     act("Equation", Action::InsertMath),
-    sub("Tab", IconId::Tab),
-    plain("Horizontal line"),
-    sub("Break", IconId::Rule),
-    sub("Page elements", IconId::Doc),
 ];
 
 const FORMAT: &[Item] = &[
-    sub("Text", IconId::Bold),
     act("Bold", Action::ToggleBold),
     act("Italic", Action::ToggleItalic),
-    plain("Paragraph"),
-    plain("Lists"),
-    Item {
-        accelerator: Some("Ctrl+\\"),
-        ..plain("Clear formatting")
-    },
-    plain("Theme"),
-    sub("Align", IconId::Rule),
 ];
 
 const TOOLS: &[Item] = &[
-    accel("Spelling and grammar", "Ctrl+X"),
-    accel("Word count", "Ctrl+Shift+G"),
-    plain("Voice typing"),
-    plain("Translate"),
-    sub("Extension", IconId::Sparkle),
-];
-
-const EXTENSIONS: &[Item] = &[
-    sub("Add-ons", IconId::Sparkle),
-    plain("Available for you"),
-    plain("Manage add-ons"),
-    plain("Updates"),
+    Item { accelerator: Some("Ctrl+Shift+G"), ..act("Word count", Action::WordCount) },
 ];
 
 const HELP: &[Item] = &[
-    sub("Search the menus", IconId::Search),
-    plain("Keyboard shortcuts"),
-    plain("Help documentation"),
-    plain("Report a problem"),
+    act("Keyboard shortcuts", Action::KeyboardShortcuts),
 ];
 
 /// Every menu, in [`MENUS`](crate::chrome::MENUS) order.
-///
-/// **The one place the eight are kept in step**, and `every_heading_has_items` is the assertion that
-/// checks it.
-pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, EXTENSIONS, HELP];
+pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, HELP];
 
 /// The items for heading `index`, or an empty slice.
 ///

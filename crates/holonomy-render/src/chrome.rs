@@ -1784,7 +1784,6 @@ pub const MENUS: &[&str] = &[
     "Insert",
     "Format",
     "Tools",
-    "Extensions",
     "Help",
 ];
 

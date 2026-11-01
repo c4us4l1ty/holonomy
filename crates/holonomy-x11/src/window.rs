@@ -596,6 +596,153 @@ impl Window {
         Ok(r.u32())
     }
 
+    /// Resolve an atom name for a caller that owns the connection (the desktop clipboard).
+    pub fn intern_atom(conn: &mut Conn, name: &str) -> Result<u32, WindowError> {
+        Self::intern(conn, name)
+    }
+
+    /// `SetSelectionOwner`: claim or release a selection such as `CLIPBOARD`.
+    pub fn set_selection_owner(
+        &self,
+        conn: &mut Conn,
+        owner: u32,
+        selection: u32,
+        time: u32,
+    ) -> Result<(), WindowError> {
+        conn.request(
+            Req::new(op::SET_SELECTION_OWNER)
+                .second_byte(0)
+                .u32(owner)
+                .u32(selection)
+                .u32(time),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        Ok(())
+    }
+
+    /// `ConvertSelection`: ask the current owner to write a target into a property.
+    pub fn convert_selection(
+        &self,
+        conn: &mut Conn,
+        requestor: u32,
+        selection: u32,
+        target: u32,
+        property: u32,
+        time: u32,
+    ) -> Result<(), WindowError> {
+        conn.request(
+            Req::new(op::CONVERT_SELECTION)
+                .second_byte(0)
+                .u32(requestor)
+                .u32(selection)
+                .u32(target)
+                .u32(property)
+                .u32(time),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        Ok(())
+    }
+
+    /// `ChangeProperty` in Replace mode, for selection replies and small properties.
+    pub fn change_property_bytes(
+        &self,
+        conn: &mut Conn,
+        window: u32,
+        property: u32,
+        ty: u32,
+        format: u8,
+        data: &[u8],
+    ) -> Result<(), WindowError> {
+        let unit = match format { 8 => 1usize, 16 => 2, 32 => 4, _ => return Err(WindowError::Conn(ConnError::Unsupported(format!("property format {format}")))) };
+        if data.len() % unit != 0 {
+            return Err(WindowError::ShortBuffer { have: data.len(), need: data.len() + unit - data.len() % unit });
+        }
+        let len = u32::try_from(data.len() / unit).map_err(|_| WindowError::Conn(ConnError::Unsupported("property too large".into())))?;
+        conn.request(
+            Req::new(op::CHANGE_PROPERTY)
+                .second_byte(0)
+                .u32(window)
+                .u32(property)
+                .u32(ty)
+                .u8(format)
+                .u8(0)
+                .u16(0)
+                .u32(len)
+                .bytes(data),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        Ok(())
+    }
+
+    /// `GetProperty`, bounded. Returns `(type, format, bytes)` or `None` when the property is absent.
+    pub fn get_property_bytes(
+        &self,
+        conn: &mut Conn,
+        window: u32,
+        property: u32,
+        max_bytes: u32,
+        delete: bool,
+    ) -> Result<Option<(u32, u8, Vec<u8>)>, WindowError> {
+        let long_length = (max_bytes.saturating_add(3)) / 4;
+        let seq = conn.request(
+            Req::new(op::GET_PROPERTY)
+                .second_byte(u8::from(delete))
+                .u32(window)
+                .u32(property)
+                .u32(0) // AnyPropertyType
+                .u32(0)
+                .u32(long_length),
+        )?;
+        conn.flush()?;
+        let body = conn.reply(seq)?;
+        if body.len() < 32 { return Err(WindowError::ShortReply("GetProperty")); }
+        let format = body[1];
+        let mut r = Rdr::new(&body);
+        r.skip(8);
+        let ty = r.u32();
+        let _bytes_after = r.u32();
+        let value_len = r.u32() as usize;
+        if ty == 0 { return Ok(None); }
+        let unit = match format { 8 => 1usize, 16 => 2, 32 => 4, _ => return Ok(None) };
+        let data = &body[32..];
+        let take = (value_len.saturating_mul(unit)).min(data.len());
+        Ok(Some((ty, format, data[..take].to_vec())))
+    }
+
+    /// Send a `SelectionNotify` event to the requestor.
+    pub fn send_selection_notify(
+        &self,
+        conn: &mut Conn,
+        requestor: u32,
+        selection: u32,
+        target: u32,
+        property: u32,
+        time: u32,
+    ) -> Result<(), WindowError> {
+        conn.request(
+            Req::new(op::SEND_EVENT)
+                .second_byte(0)
+                .u32(requestor)
+                .u32(0)
+                .u8(proto::event::SELECTION_NOTIFY)
+                .u8(0)
+                .u16(0)
+                .u32(time)
+                .u32(requestor)
+                .u32(selection)
+                .u32(target)
+                .u32(property)
+                .u32(0)
+                .u32(0),
+        )?;
+        conn.sync()?;
+        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        Ok(())
+    }
+
     /// This window's resource id.
     pub fn id(&self) -> u32 {
         self.id

@@ -39,6 +39,26 @@ use std::time::Duration;
 
 use holonomy_x11::{Conn, Event, Window};
 
+/// The desktop clipboard is bounded like the editor's yank buffer. Larger external selections are
+/// read only up to this cap; the app never spools clipboard data to disk.
+const CLIPBOARD_CAP: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct ClipboardAtoms {
+    clipboard: u32,
+    utf8: u32,
+    targets: u32,
+    property: u32,
+}
+
+fn scrub_bytes(buf: &mut Vec<u8>) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid aligned mutable reference into `buf`.
+        unsafe { std::ptr::write_volatile(b, 0); }
+    }
+    buf.clear();
+}
+
 use crate::frame::{Frame, FrameError};
 use crate::Scanout;
 
@@ -128,6 +148,8 @@ pub struct Desktop {
     /// Frames pushed, and how many of those were damage-only.
     full_frames: u64,
     events: VecDeque<Event>,
+    clipboard: Vec<u8>,
+    clipboard_atoms: Option<ClipboardAtoms>,
 }
 
 impl Desktop {
@@ -213,6 +235,8 @@ impl Desktop {
             scratch: Vec::new(),
             full_frames: 0,
             events: VecDeque::with_capacity(64),
+            clipboard: Vec::new(),
+            clipboard_atoms: None,
         };
         // The first paint has no damage behind it, so the whole window is sent once here rather than
         // being left to whatever damage the first real event produces.
@@ -403,6 +427,87 @@ impl Desktop {
     pub fn keyboard_mapping(&mut self) -> Result<(u8, Vec<Vec<u32>>), DesktopError> {
         let map = self.conn.keyboard_mapping().map_err(DesktopError::Connect)?;
         Ok((self.conn.setup().min_keycode, map))
+    }
+
+    fn clipboard_atoms(&mut self) -> Result<ClipboardAtoms, DesktopError> {
+        if let Some(a) = self.clipboard_atoms { return Ok(a); }
+        let clipboard = Window::intern_atom(&mut self.conn, "CLIPBOARD").map_err(DesktopError::Window)?;
+        let utf8 = Window::intern_atom(&mut self.conn, "UTF8_STRING").map_err(DesktopError::Window)?;
+        let targets = Window::intern_atom(&mut self.conn, "TARGETS").map_err(DesktopError::Window)?;
+        let property = Window::intern_atom(&mut self.conn, "HOLONOMY_CLIPBOARD").map_err(DesktopError::Window)?;
+        let a = ClipboardAtoms { clipboard, utf8, targets, property };
+        self.clipboard_atoms = Some(a);
+        Ok(a)
+    }
+
+    /// Publish text to the X11 CLIPBOARD selection. The app owns the data only while it is running;
+    /// locking or quitting releases the selection and scrubs the local copy.
+    pub fn publish_clipboard(&mut self, bytes: &[u8]) -> Result<(), DesktopError> {
+        let a = self.clipboard_atoms()?;
+        let take = bytes.len().min(CLIPBOARD_CAP);
+        self.window.set_selection_owner(&mut self.conn, self.window.id(), a.clipboard, 0).map_err(DesktopError::Window)?;
+        scrub_bytes(&mut self.clipboard);
+        self.clipboard.extend_from_slice(&bytes[..take]);
+        Ok(())
+    }
+
+    /// Release the CLIPBOARD selection and scrub the local copy.
+    pub fn clear_clipboard(&mut self) -> Result<(), DesktopError> {
+        scrub_bytes(&mut self.clipboard);
+        if let Some(a) = self.clipboard_atoms {
+            self.window.set_selection_owner(&mut self.conn, 0, a.clipboard, 0).map_err(DesktopError::Window)?;
+        }
+        Ok(())
+    }
+
+    /// Ask the current CLIPBOARD owner for UTF-8 text. The reply arrives as `SelectionNotify`.
+    pub fn request_clipboard(&mut self) -> Result<(), DesktopError> {
+        let a = self.clipboard_atoms()?;
+        self.window.convert_selection(&mut self.conn, self.window.id(), a.clipboard, a.utf8, a.property, 0).map_err(DesktopError::Window)
+    }
+
+    /// Handle selection events. Returns `Some(bytes)` when a requested paste arrived.
+    pub fn handle_clipboard_event(&mut self, ev: &Event) -> Result<Option<Vec<u8>>, DesktopError> {
+        let Some(a) = self.clipboard_atoms else { return Ok(None); };
+        match ev {
+            Event::SelectionRequest { time, owner, requestor, selection, target, property }
+                if *selection == a.clipboard && *owner == self.window.id() =>
+            {
+                let prop = if *property == 0 { *target } else { *property };
+                if *target == a.targets {
+                    let mut data = Vec::with_capacity(12);
+                    for atom in [a.targets, a.utf8, holonomy_x11::proto::atom::STRING] {
+                        data.extend_from_slice(&atom.to_le_bytes());
+                    }
+                    self.window.change_property_bytes(&mut self.conn, *requestor, prop, holonomy_x11::proto::atom::ATOM, 32, &data).map_err(DesktopError::Window)?;
+                    self.window.send_selection_notify(&mut self.conn, *requestor, *selection, *target, prop, *time).map_err(DesktopError::Window)?;
+                } else if *target == a.utf8 || *target == holonomy_x11::proto::atom::STRING {
+                    let data = self.clipboard.clone();
+                    self.window.change_property_bytes(&mut self.conn, *requestor, prop, *target, 8, &data).map_err(DesktopError::Window)?;
+                    self.window.send_selection_notify(&mut self.conn, *requestor, *selection, *target, prop, *time).map_err(DesktopError::Window)?;
+                } else {
+                    self.window.send_selection_notify(&mut self.conn, *requestor, *selection, *target, 0, *time).map_err(DesktopError::Window)?;
+                }
+                Ok(None)
+            }
+            Event::SelectionNotify { requestor, selection, target, property, .. }
+                if *requestor == self.window.id() && *selection == a.clipboard =>
+            {
+                if *property == 0 || *target == 0 { return Ok(None); }
+                let got = self.window.get_property_bytes(&mut self.conn, self.window.id(), *property, CLIPBOARD_CAP as u32, true).map_err(DesktopError::Window)?;
+                match got {
+                    Some((_ty, 8, bytes)) => Ok(Some(bytes)),
+                    _ => Ok(None),
+                }
+            }
+            Event::SelectionClear { owner, selection, .. }
+                if *owner == self.window.id() && *selection == a.clipboard =>
+            {
+                scrub_bytes(&mut self.clipboard);
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
     }
 
     pub fn focus(&mut self) -> Result<(), DesktopError> {

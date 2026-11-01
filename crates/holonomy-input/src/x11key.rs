@@ -294,20 +294,28 @@ mod tests {
     }
 }
 
-/// Translate a key through the X server's layout table. `state` is the X modifier mask.
-/// This is text entry, not shortcut dispatch: shortcuts remain physical-key based.
-pub fn layout_char(mapping: &[Vec<u32>], min_keycode: u8, keycode: u8, state: u16) -> Option<char> {
+/// The X keysym selected by the server's layout table, before character interpretation.
+///
+/// Dead keys and `Multi_key` are returned as their keysyms so the desktop composer can see them;
+/// `layout_char` intentionally reports `None` for those.
+pub fn layout_keysym(mapping: &[Vec<u32>], min_keycode: u8, keycode: u8, state: u16) -> Option<u32> {
     let row = mapping.get(keycode.checked_sub(min_keycode)? as usize)?;
     if row.is_empty() { return None; }
     let shift = state & 1 != 0;
-    let caps = state & 2 != 0;
     let altgr = state & 128 != 0;
     let level = match (altgr, shift) { (true, false) => 2, (true, true) => 3, (false, true) => 1, _ => 0 };
-    let sym = row.get(level).copied().filter(|&s| s != 0).or_else(|| row.get(level & 1).copied()).unwrap_or(row[0]);
+    Some(row.get(level).copied().filter(|&s| s != 0).or_else(|| row.get(level & 1).copied()).unwrap_or(row[0]))
+}
+
+/// Translate a key through the X server's layout table. `state` is the X modifier mask.
+/// This is text entry, not shortcut dispatch: shortcuts remain physical-key based.
+pub fn layout_char(mapping: &[Vec<u32>], min_keycode: u8, keycode: u8, state: u16) -> Option<char> {
+    let sym = layout_keysym(mapping, min_keycode, keycode, state)?;
+    let shift = state & 1 != 0;
+    let caps = state & 2 != 0;
     let mut c = match sym {
         0x0100_0000..=0x0110_FFFF => char::from_u32(sym & 0x00FF_FFFF)?,
         0x20..=0x7e | 0xa0..=0xff => char::from_u32(sym)?,
-        0xff08 => return None, // Backspace etc. are commands.
         _ => return None,
     };
     if caps && c.is_alphabetic() {

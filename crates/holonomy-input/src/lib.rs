@@ -29,10 +29,9 @@
 //!
 //! # A note on what is deliberately absent
 //!
-//! No `unicode-normalization` dependency. On the one layout implemented here every output is ASCII,
-//! so normalization is the identity function; adding it would be a dependency and a runtime cost
-//! against no change in behaviour. The module docs on [`keymap`] say where it would go and what would
-//! change when a non-ASCII layout lands.
+The sealed path has no `unicode-normalization` dependency. The optional `desktop` feature pulls it in
+for [`compose`], where dead keys produce base-plus-mark sequences that are normalized to NFC before
+they reach the editor.
 //!
 //! # What this crate does not know
 //!
@@ -47,6 +46,8 @@ pub mod keymap;
 pub mod modifiers;
 pub mod pointer;
 pub mod source;
+#[cfg(feature = "desktop")]
+pub mod compose;
 #[cfg(feature = "desktop")]
 pub mod x11key;
 
