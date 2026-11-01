@@ -32,6 +32,14 @@ jobs:
             exit 1
           fi
       - name: Release tests
-        run: cargo test --workspace --release -- --test-threads=2
+        run: |
+          if ! cargo test --workspace --release -- --test-threads=2 > /tmp/test.log 2>&1; then
+            python3 -c 'from pathlib import Path; s=Path("/tmp/test.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("FAILED","panicked","failures:","error","test result:"))]; s="\n".join(keep)[-3500:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi
       - name: Desktop tests
-        run: cargo test -p holonomy --features desktop --release -- --test-threads=2
+        run: |
+          if ! cargo test -p holonomy --features desktop --release -- --test-threads=2 > /tmp/test.log 2>&1; then
+            python3 -c 'from pathlib import Path; s=Path("/tmp/test.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("FAILED","panicked","failures:","error","test result:"))]; s="\n".join(keep)[-3500:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            exit 1
+          fi
