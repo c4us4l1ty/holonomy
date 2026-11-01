@@ -240,7 +240,7 @@ pub fn run(
             }
         }
     }
-    let (min_keycode, mut mapping) = window_of(&mut session)?.keyboard_mapping().map_err(WindowedError::Desktop)?;
+    let (mut min_keycode, mut mapping) = window_of(&mut session)?.keyboard_mapping().map_err(WindowedError::Desktop)?;
     sync_form(&mut session, form.as_ref());
     session.repaint_all().map_err(WindowedError::Session)?;
     let start = Instant::now();
@@ -290,7 +290,7 @@ pub fn run(
                         KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
                         KeyOutcome::Submit => {
                             let f = form.take().unwrap();
-                            match f.submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
+                            match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); last_edit = Instant::now(); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
@@ -330,7 +330,7 @@ pub fn run(
                         holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f)); }
                         holonomy_render::dialog::Hit::Confirm => {
                             let f = form.take().unwrap();
-                            match f.submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
+                            match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
@@ -376,6 +376,7 @@ fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _pat
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, DocMenu }
+#[derive(Clone)]
 struct Form {
     kind: FormKind, path: std::path::PathBuf, values: Vec<zeroize::Zeroizing<String>>,
     focus: usize, choice: usize, choices: Vec<String>, ids: Vec<u64>, error: Option<String>, target_id: u64,
