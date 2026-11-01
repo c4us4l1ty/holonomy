@@ -43,7 +43,7 @@ use holonomy_x11::{Conn, Event, Window};
 /// read only up to this cap; the app never spools clipboard data to disk.
 const CLIPBOARD_CAP: usize = 4096;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct ClipboardAtoms {
     clipboard: u32,
     utf8: u32,
