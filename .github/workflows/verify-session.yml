@@ -5,6 +5,9 @@ on:
     branches: ['arena/10a94257-holonomy']
 permissions:
   contents: read
+concurrency:
+  group: verify-session
+  cancel-in-progress: true
 jobs:
   rust:
     runs-on: ubuntu-24.04

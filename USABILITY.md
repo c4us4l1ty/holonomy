@@ -1,0 +1,29 @@
+# Desktop usability repair — PRD / Plan trace
+
+The authoritative product target is still the bare-silicon build (`Plan/Plan.md` Part 4). The
+`desktop` feature is the existing developer window used to exercise the same editor, renderer and
+container without DRM/evdev privileges. This repair makes that window usable; it does not replace the
+sealed boot path or claim the X11 window satisfies the Zero-X11 invariant.
+
+| User-facing feature | PRD / Plan clause | Implementation | Verification |
+|---|---|---|---|
+| Two passphrases | FR-4.9; Plan Part 4 duress amendment | Setup asks for `P_A` (top-secret/primary) and a different `P_B` (normal/decoy). Unlock asks for one passphrase and mounts only the payload that passphrase authenticates. The UI does not label which payload opened. | `vault.rs` creates both payloads; `two_passphrases_mount_isolated_multi_document_bundles_and_deletion_persists` opens each side and checks titles/body stay isolated. |
+| Multiple documents per space | FR-4.1 fixed-size deniable container; FR-4.9 isolation | One encrypted `HVAULT1` bundle per payload carries ids, titles, caret positions and full HDOC documents. No per-document cleartext files or title/count metadata outside AEAD. | bundle round-trip and cross-passphrase reopen tests. |
+| Create / rename | Plan UI sidebar `+` and active-row overflow | In-window title dialogs; sidebar `+`, File > New/Rename and row overflow. New documents are saved into the mounted bundle, not parked only in RAM. | managed lifecycle test; vault create/save/reopen test. |
+| Delete | FR-4.9 decoy must not alter primary; deterministic storage | Confirmation dialog; smaller bundle is authenticated-written before the resident editor is removed. Freed payload tail is re-chaffed by `Wavefunction::write_content`. | deletion persists across reopen in the isolation test. |
+| Edit / save | FR-1 text model; FR-3.4 damage; FR-4.7/4.8 streaming container | Desktop typing uses the X server keysym layout for Unicode text and physical shortcuts for commands. Ctrl+A now selects all. Explicit Ctrl+S/File > Save and 800 ms autosave debounce write the whole bundle through the container API. Save errors stay visible and block lock/quit/close. | select-all regression; existing editor/render/store gates; vault formatted-payload round trip. |
+| Open / close / lock | FR-4.9 one mounted payload; Plan File menu | Open lists saved documents in the current space and can switch to another container after saving/locking. Close saves and removes the resident tab but keeps the encrypted document for Open. Lock saves, drops keys/editors/image cache and returns to unlock. | managed lifecycle request test; vault reopen tests. |
+| Legacy documents | compatibility, not a new PRD format | Existing raw UTF-8 and HDOC payloads open as one document and are upgraded to the encrypted bundle on next save. | legacy path in `Vault::open`; existing HDOC gates. |
+| Bare-silicon boot | FR-3, FR-5; PROJECT execution order | Default non-desktop build and sealed `main` path are unchanged. Desktop-only vault/dialog code is feature-gated. | default and desktop `cargo check --workspace --all-targets`; default release tests. |
+
+## Known PRD gaps not silently claimed as fixed
+
+- FR-4.9 dummy modification timestamps remain unimplemented, exactly as recorded in Plan Part 4.
+  The single container has one filesystem mtime; adding a decoy-visible timestamp would be a format
+  decision, not a UI shortcut.
+- The desktop window is not the FR-3 DRM/KMS product surface and does not satisfy Zero-X11. It is a
+  development/usability harness for the same session model.
+- FR-5.4 periodic RAM scrambling and the full measured seccomp profile are outside this repair.
+- Container writes are authenticated per chunk but not a crash-atomic multi-chunk transaction. A
+  power loss during a bundle rewrite can still require the existing container recovery story; the UI
+  keeps edits resident and reports write errors rather than pretending a failed save succeeded.
