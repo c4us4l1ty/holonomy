@@ -852,10 +852,10 @@ pub struct Session<'a> {
 /// the rule is the one the code already follows: a document is parked only after it has been
 /// adopted, and nothing here ever parks a skeleton.**
 fn mode_index(mode: holonomy_render::menus::ViewMode) -> u8 {
-    match mode { holonomy_render::menus::ViewMode::Editing => 0, holonomy_render::menus::ViewMode::Viewing => 1, holonomy_render::menus::ViewMode::PageLayout => 2 }
+    match mode { holonomy_render::menus::ViewMode::Editing => 0, holonomy_render::menus::ViewMode::Viewing => 1 }
 }
 fn view_mode(index: u8) -> holonomy_render::menus::ViewMode {
-    match index { 1 => holonomy_render::menus::ViewMode::Viewing, 2 => holonomy_render::menus::ViewMode::PageLayout, _ => holonomy_render::menus::ViewMode::Editing }
+    match index { 1 => holonomy_render::menus::ViewMode::Viewing, _ => holonomy_render::menus::ViewMode::Editing }
 }
 
 pub struct ParkedDocument {
