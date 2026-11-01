@@ -27,3 +27,18 @@ sealed boot path or claim the X11 window satisfies the Zero-X11 invariant.
 - Container writes are authenticated per chunk but not a crash-atomic multi-chunk transaction. A
   power loss during a bundle rewrite can still require the existing container recovery story; the UI
   keeps edits resident and reports write errors rather than pretending a failed save succeeded.
+
+## Verification
+
+GitHub Actions run `41294039611` on commit `8afadbc` passed:
+
+- `cargo check --workspace --all-targets` (default static-musl target)
+- `cargo check --workspace --all-targets --features holonomy/desktop`
+- `cargo test --workspace --release -- --test-threads=1`
+- `cargo test -p holonomy --features desktop --release -- --test-threads=2`
+
+The release sweep is serialized because hosted runners cap `RLIMIT_MEMLOCK` near the rope's locked-leaf
+working set; parallel unrelated tests can otherwise exhaust it. The boot-evidence gate now distinguishes
+"could not read `/proc/self/ns/net`" from "not isolated" instead of panicking on a hosted runner.
+
+The temporary `verify-session.yml` workflow used to obtain this evidence is removed before merge.
