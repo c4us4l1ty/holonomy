@@ -9,7 +9,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use holonomy_container::{Wavefunction, S_MAX_PAYLOAD};
+use holonomy_container::Wavefunction;
+use holonomy_container::layout::S_MAX_PAYLOAD;
 use holonomy_text::Editor;
 use zeroize::Zeroize;
 

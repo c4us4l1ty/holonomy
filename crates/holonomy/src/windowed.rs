@@ -231,7 +231,7 @@ pub fn run(
     if let Err(e) = session.set_zoom(args.zoom) { eprintln!("holonomy: {e}"); }
     let path = args.container.clone().unwrap_or_else(|| std::path::PathBuf::from("holonomy.wavefunction"));
     let mut vault: Option<crate::vault::Vault> = None;
-    let mut form = if path.exists() { Form::unlock(path.clone()) } else { Form::setup(path.clone()) };
+    let mut form: Option<Form> = Some(if path.exists() { Form::unlock(path.clone()) } else { Form::setup(path.clone()) });
     if let Ok(pass) = std::env::var("HOLONOMY_PASSPHRASE") {
         if !pass.is_empty() && path.exists() {
             match crate::vault::Vault::open(&path, &pass, holonomy_crypto::envelope::VDF_ITERATIONS) {

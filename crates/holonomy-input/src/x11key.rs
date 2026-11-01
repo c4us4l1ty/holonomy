@@ -246,6 +246,7 @@ mod tests {
                 button: 1,
                 event_x: 0,
                 event_y: 0,
+                time: 0,
             },
             // **The position the decoder used to throw away.** `ButtonRelease` grew `event_x` and
             // `event_y` when a release had to be routed (see `proto.rs`), and this table was left
@@ -257,6 +258,7 @@ mod tests {
                 button: 1,
                 event_x: 4096,
                 event_y: 4096,
+                time: 0,
             },
             Event::ClientMessage {
                 type_atom: 0,
