@@ -33,7 +33,6 @@ jobs:
             exit 1
           fi
       - name: Release tests
-        if: false # temporarily disabled while the desktop artifact size is corrected
         shell: bash
         run: |
           if ! cargo test --workspace --release -- --test-threads=1 > /tmp/test.log 2>&1; then

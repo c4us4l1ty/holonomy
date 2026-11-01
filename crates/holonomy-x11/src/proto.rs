@@ -986,6 +986,24 @@ mod tests {
     use super::*;
     use super::{Event, Rdr};
 
+    fn put32(buf: &mut [u8; 32], off: usize, v: u32) { buf[off..off + 4].copy_from_slice(&v.to_le_bytes()); }
+
+    #[test]
+    fn selection_events_decode_from_the_wire() {
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_REQUEST;
+        put32(&mut b, 4, 100); put32(&mut b, 8, 1); put32(&mut b, 12, 2); put32(&mut b, 16, 3); put32(&mut b, 20, 4); put32(&mut b, 24, 5);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionRequest { time: 100, owner: 1, requestor: 2, selection: 3, target: 4, property: 5 }));
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_NOTIFY;
+        put32(&mut b, 4, 101); put32(&mut b, 8, 2); put32(&mut b, 12, 3); put32(&mut b, 16, 4); put32(&mut b, 20, 5);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionNotify { time: 101, requestor: 2, selection: 3, target: 4, property: 5 }));
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_CLEAR;
+        put32(&mut b, 4, 102); put32(&mut b, 8, 1); put32(&mut b, 12, 3);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionClear { time: 102, owner: 1, selection: 3 }));
+    }
+
     /// The length field is in words and counts the header. A client that writes the byte count here
     /// has every subsequent request interpreted at the wrong offset, which on a busy display looks
     /// like the server "ignoring" the last few requests.

@@ -42,3 +42,17 @@ working set; parallel unrelated tests can otherwise exhaust it. The boot-evidenc
 "could not read `/proc/self/ns/net`" from "not isolated" instead of panicking on a hosted runner.
 
 The temporary `verify-session.yml` workflow used to obtain this evidence is removed before merge.
+
+## Follow-up: everyday usability (item 2)
+
+- **System clipboard (desktop only):** Copy/Cut publishes UTF-8 to the X11 `CLIPBOARD` selection;
+  Paste requests the current selection and falls back to the internal yank buffer if no owner answers.
+  Locking, switching container, and quitting release the selection and scrub the local copy. The app
+  does not spool clipboard data to disk. Clipboard managers outside the app may still retain what the
+  user copied; that is an OS-level caveat, not a vault leak.
+- **Compose / dead keys:** the desktop driver now feeds X keysyms through a small composer for common
+  Latin dead keys and `Multi_key` sequences. It uses a compact precomposed table to stay under the
+  2 MiB binary ceiling. Native XIM/IME preedit is still not implemented.
+- **Menu cleanup:** inert cloud/add-on/voice/translation rows were removed, the Extensions heading was
+  dropped, and local Word count / Keyboard shortcuts rows were wired. The remaining unwired rows are
+  the View > Mode/Zoom submenu headers.
