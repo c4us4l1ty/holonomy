@@ -20,7 +20,11 @@ jobs:
         run: |
           check() {
             if ! "$@" > /tmp/check.log 2>&1; then
-              python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text()[-3500:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A")); exit(1)'
+              python3 -c 'from pathlib import Path; import re
+s=Path("/tmp/check.log").read_text()
+s=re.sub(r"\x1b\[[0-9;]*m","",s)
+s="\n".join(line for line in s.splitlines() if not any(x in line for x in ("Checking","Compiling","Downloading","Downloaded","Updating","Locking")))
+s=s[:3500]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A")); exit(1)'
             fi
           }
           check cargo check --workspace --all-targets

@@ -1895,7 +1895,7 @@ impl<'a> Session<'a> {
             Some(d) => { let mut e = Editor::from_payload(&d.payload)?; e.caret_to(d.caret as usize)?; (e, d.title, d.id, d.dirty, d.font_index, d.style_index, d.mode) },
             None => (Editor::new(), "No document".into(), 0, false, 0, 0, 0),
         };
-        self.adopt_document(editor, &mut crate::store::NoSource)?;
+        self.adopt_document(editor, &mut crate::store::NoSource).map_err(|_| SessionError::Sink(std::io::Error::other("could not adopt document")))?;
         self.state.title = title; self.active_id = id; self.state.dirty = dirty;
         self.state.font_index = font; self.state.style_index = style; self.state.mode_index = mode; self.mode = view_mode(mode);
         for d in iter {
@@ -1907,7 +1907,7 @@ impl<'a> Session<'a> {
     pub fn sync_modifiers(&mut self, mods: ModifierState) { self.mods = mods; }
     pub fn insert_text(&mut self, text: &str) -> Result<(), SessionError> {
         for c in text.chars() { self.apply_with(Command::Insert(c), Some(&mut crate::store::NoSource))?; }
-        self.tick(0); Ok(())
+        self.tick()?; Ok(())
     }
 
     fn adopt_new(&mut self, editor: Editor, title: String) {
@@ -2033,7 +2033,7 @@ impl<'a> Session<'a> {
                 "could not open the container",
             ))
         })?;
-        self.parked.push(ParkedDocument { editor, title });
+        self.parked.push(ParkedDocument { editor, title, id: 0, dirty: false, font_index: 0, style_index: 0, mode: holonomy_render::menus::ViewMode::Editing });
         self.sync_docs();
         self.invalidate(self.chrome.full_damage());
         Ok(())
@@ -8112,7 +8112,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // only function allowed to do that is `Session::adopt_document`. **It was the one row with no
         // action in this build** and is no longer: part 45 gave the session a document list, and `Close`
         // now reaches `Session::close_active` from `apply_action`.
-        Action::Close => return None,
+        Action::Close | Action::Rename | Action::Delete | Action::Lock => return None,
         // **No `Command` for this one either, and the same shape as `Export`.** A new document is
         // not a keystroke the editor applies — it *replaces* the editor, and the only function
         // allowed to do that is `Session::adopt_document`, which `apply_action` reaches directly.
