@@ -314,5 +314,8 @@ fn product_linker_is_pinned_and_host_linker_is_portable() {
     let end = rest.find("\n[").unwrap_or(rest.len());
     let musl = &rest[..end];
     assert!(musl.contains("linker = \"rust-lld\""), "the static-musl product target must keep using rustc's bundled linker");
-    assert!(!config.contains("[target.x86_64-unknown-linux-gnu]"), "the tracked config must not pin a host-only absolute linker path");
+    // The comment block above the net section *shows* this header as an example for the untracked
+    // user config; only a real (non-comment) section would actually pin the linker.
+    let host_pinned = config.lines().any(|l| l.trim() == "[target.x86_64-unknown-linux-gnu]");
+    assert!(!host_pinned, "the tracked config must not pin a host-only absolute linker path");
 }
