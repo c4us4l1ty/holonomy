@@ -43,3 +43,18 @@ fn select_all_selects_instead_of_moving_to_the_end() {
     let sel = s.editor().selection().expect("selection");
     assert_eq!((sel.start, sel.end), (0, 11));
 }
+
+#[test]
+fn managed_clipboard_publishes_and_system_paste_is_a_request() {
+    let mut s = session();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "One".into(), payload: Editor::from_text(b"copy me").unwrap().payload().unwrap(), caret: 7, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    s.apply_action(Action::SelectAll).unwrap();
+    let before = s.clipboard_generation();
+    s.apply_action(Action::Copy).unwrap();
+    assert!(s.clipboard_generation() > before);
+    assert_eq!(s.clipboard_bytes(), b"copy me");
+    s.apply_action(Action::Paste).unwrap();
+    assert!(s.take_paste_request(), "managed paste asks the window driver for the X selection");
+    s.clear_clipboard();
+    assert_eq!(s.clipboard_len(), 0);
+}

@@ -74,6 +74,9 @@ impl Composer {
             return Fed::Pending;
         }
         if let Some(mark) = self.dead.take() {
+            if c == ' ' {
+                return Fed::Text(standalone_mark(mark).to_string());
+            }
             return Fed::Text(combined(c, mark));
         }
         Fed::Text(c.to_string())
@@ -85,6 +88,25 @@ fn combined(base: char, mark: char) -> String {
     s.push(base);
     s.push(mark);
     s.nfc().collect()
+}
+
+fn standalone_mark(mark: char) -> char {
+    match mark {
+        '\u{0300}' => '`',
+        '\u{0301}' => '´',
+        '\u{0302}' => '^',
+        '\u{0303}' => '~',
+        '\u{0304}' => '¯',
+        '\u{0306}' => '˘',
+        '\u{0307}' => '˙',
+        '\u{0308}' => '¨',
+        '\u{030a}' => '°',
+        '\u{030b}' => '˝',
+        '\u{030c}' => 'ˇ',
+        '\u{0327}' => '¸',
+        '\u{0328}' => '˛',
+        _ => mark,
+    }
 }
 
 fn dead_mark(keysym: u32) -> Option<(char, char)> {
@@ -109,6 +131,22 @@ fn dead_mark(keysym: u32) -> Option<(char, char)> {
 fn compose_try(seq: &[char]) -> Option<String> {
     if seq.len() == 2 {
         let (a, b) = (seq[0], seq[1]);
+        if let Some(text) = match (a, b) {
+            ('<', '<') => Some('«'.into()),
+            ('>', '>') => Some('»'.into()),
+            ('!', '!') => Some('¡'.into()),
+            ('?', '?') => Some('¿'.into()),
+            ('-', '-') => Some('–'.into()),
+            ('.', '.') => Some('…'.into()),
+            ('a', 'e') => Some('æ'.into()),
+            ('A', 'E') => Some('Æ'.into()),
+            ('o', 'e') => Some('œ'.into()),
+            ('O', 'E') => Some('Œ'.into()),
+            ('s', 's') => Some('ß'.into()),
+            _ => None,
+        } {
+            return Some(text);
+        }
         if let Some(mark) = match a {
             '\'' => Some('\u{0301}'),
             '`' => Some('\u{0300}'),
@@ -125,20 +163,6 @@ fn compose_try(seq: &[char]) -> Option<String> {
         } {
             return Some(combined(b, mark));
         }
-        return match (a, b) {
-            ('<', '<') => Some('«'.into()),
-            ('>', '>') => Some('»'.into()),
-            ('!', '!') => Some('¡'.into()),
-            ('?', '?') => Some('¿'.into()),
-            ('-', '-') => Some('–'.into()),
-            ('.', '.') => Some('…'.into()),
-            ('a', 'e') => Some('æ'.into()),
-            ('A', 'E') => Some('Æ'.into()),
-            ('o', 'e') => Some('œ'.into()),
-            ('O', 'E') => Some('Œ'.into()),
-            ('s', 's') => Some('ß'.into()),
-            _ => None,
-        };
     }
     None
 }
