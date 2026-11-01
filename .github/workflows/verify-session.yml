@@ -18,12 +18,16 @@ jobs:
           components: rustfmt, clippy
       - name: Check default target
         run: |
-          set -o pipefail
-          cargo check --workspace --all-targets --message-format=short 2>&1 | tail -60
+          if ! cargo check --workspace --all-targets --message-format=short > /tmp/check.log 2>&1; then
+            grep -E 'error|warning' /tmp/check.log | head -40
+            exit 1
+          fi
       - name: Check desktop target
         run: |
-          set -o pipefail
-          cargo check --workspace --all-targets --features holonomy/desktop --message-format=short 2>&1 | tail -60
+          if ! cargo check --workspace --all-targets --features holonomy/desktop --message-format=short > /tmp/check.log 2>&1; then
+            grep -E 'error|warning' /tmp/check.log | head -40
+            exit 1
+          fi
       - name: Release tests
         run: cargo test --workspace --release -- --test-threads=2
       - name: Desktop tests
