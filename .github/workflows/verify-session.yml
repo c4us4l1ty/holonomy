@@ -18,8 +18,13 @@ jobs:
           components: rustfmt, clippy
       - name: Check desktop and default targets
         run: |
-          cargo check --workspace --all-targets
-          cargo check --workspace --all-targets --features holonomy/desktop
+          check() {
+            if ! "$@" > /tmp/check.log 2>&1; then
+              python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text()[-18000:]; print("::error::"+s.replace("%","%25").replace("\r","%0D").replace("\n","%0A")); exit(1)'
+            fi
+          }
+          check cargo check --workspace --all-targets
+          check cargo check --workspace --all-targets --features holonomy/desktop
       - name: Release tests
         run: cargo test --workspace --release -- --test-threads=2
       - name: Desktop tests
