@@ -318,6 +318,7 @@ dependencies = [
  "holonomy-jail",
  "holonomy-x11",
  "libc",
+ "unicode-normalization",
 ]
 
 [[package]]
