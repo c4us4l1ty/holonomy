@@ -198,6 +198,9 @@ fn every_action_is_routed_or_accounted_for() {
         // three is a keystroke the editor applies — they change what the session is painting — so
         // none of them is a command, and all three reach their effect from `apply_action`.
         Action::Close,
+        Action::Rename,
+        Action::Delete,
+        Action::Lock,
         Action::Open,
         Action::Import,
     ];
@@ -259,6 +262,9 @@ fn every_action_has_a_name() {
         Action::InsertImage,
         Action::InsertMath,
         Action::Close,
+        Action::Rename,
+        Action::Delete,
+        Action::Lock,
         Action::Export,
         Action::SetZoom(100),
         Action::SetStyle(0),
@@ -303,10 +309,8 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 17,
-        "the seventeen rows that mean something: New, Undo, Redo, **Cut**, **Copy**, **Paste**, \
-         Select all, Save, Export, **Open**, **Import**, Close, Insert > Image, Insert > Table, \
-         Insert > Equation, and Format > Bold and Format > Italic. Adding one changes this number."
+        with_action, 20,
+        "the twenty wired rows, including the desktop lifecycle rows Rename, Delete and Lock. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
@@ -362,8 +366,8 @@ fn every_wired_menu_item_carries_an_action() {
     // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (40, 57),
-        "**40 unwired of 57 menu items** in the eight headings. File > Open and File > Import now carry \
+        (40, 60),
+        "**40 unwired of 60 menu items** in the eight headings. File > Open and File > Import now carry \
          actions and Insert > Equation is a new wired row; the two Open/Import rows were already there \
          and nothing was added or removed there, so the unwired count alone moved by two, and Equation \
          adds one wired row so the total alone moves by one. The list is \
