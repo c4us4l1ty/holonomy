@@ -20,7 +20,7 @@ fn session() -> Session<'static> {
 #[test]
 fn managed_lifecycle_waits_for_the_driver_and_preserves_dirty_state_per_document() {
     let mut s = session();
-    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "One".into(), payload: Editor::from_text(b"first").unwrap().payload().unwrap(), caret: 0, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "One".into(), payload: Editor::from_text(b"first").unwrap().payload().unwrap(), caret: 5, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
     s.insert_text("!").unwrap();
     assert!(s.has_unsaved_documents());
     s.create_document(2, "Two".into());
