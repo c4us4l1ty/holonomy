@@ -15,7 +15,7 @@ publish.workspace = true
 [features]
 # The developer window. Off by default: it pulls in an X11 client, and the sealed boot chain has no use
 # for one -- the production input path is `evdev`.
-desktop = ["dep:holonomy-x11", "dep:unicode-normalization"]
+desktop = ["dep:holonomy-x11"]
 
 [dependencies]
 holonomy-jail = { path = "../holonomy-jail" }
@@ -23,5 +23,3 @@ holonomy-jail = { path = "../holonomy-jail" }
 # speak any protocol.
 holonomy-x11 = { path = "../holonomy-x11", optional = true }
 libc = "0.2"
-# Desktop-only compose normalization; the sealed evdev path does not link it.
-unicode-normalization = { version = "0.1", optional = true }

@@ -29,9 +29,8 @@
 //!
 //! # A note on what is deliberately absent
 //!
-//! The sealed path has no `unicode-normalization` dependency. The optional `desktop` feature pulls it
-//! in for [`compose`], where dead keys produce base-plus-mark sequences that are normalized to NFC
-//! before they reach the editor.
+//! The sealed path has no normalization dependency. The desktop [`compose`] module uses a compact
+//! precomposed-Latin table and falls back to base-plus-combining-mark for unsupported pairs.
 //!
 //! # What this crate does not know
 //!
