@@ -83,11 +83,15 @@ impl Vault {
 
     /// Create a new file without ever adopting or truncating an unrelated existing file.
     pub fn create(path: &Path, primary: &str, primary_confirm: &str, decoy: &str, decoy_confirm: &str, vdf: u64) -> Result<(), VaultError> {
+        let pa = holonomy_crypto::envelope::normalize_passphrase(primary);
+        let pb = holonomy_crypto::envelope::normalize_passphrase(decoy);
         for (a, b) in [(primary, primary_confirm), (decoy, decoy_confirm)] {
-            if a.is_empty() { return Err(VaultError::EmptyPassphrase); }
-            if a != b { return Err(VaultError::ConfirmationMismatch); }
+            let na = holonomy_crypto::envelope::normalize_passphrase(a);
+            let nb = holonomy_crypto::envelope::normalize_passphrase(b);
+            if na.is_empty() { return Err(VaultError::EmptyPassphrase); }
+            if na != nb { return Err(VaultError::ConfirmationMismatch); }
         }
-        if primary == decoy { return Err(VaultError::PassphrasesMatch); }
+        if pa == pb { return Err(VaultError::PassphrasesMatch); }
         let initial = encode_bundle(2, &[StoredDocument { id: 1, title: "Untitled".into(), payload: Editor::new().payload().map_err(VaultError::Editor)?, caret: 0 }])?;
         // Reserve exclusively before the container layer opens the path. A failed setup removes only
         // a file this call created, never a pre-existing user file.
