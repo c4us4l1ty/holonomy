@@ -226,6 +226,7 @@ pub struct Item {
 }
 
 /// Build an item with no icon, no accelerator and no action.
+#[allow(dead_code)]
 const fn plain(label: &'static str) -> Item {
     Item {
         label,
@@ -303,6 +304,7 @@ const fn sub(label: &'static str, icon: IconId) -> Item {
 }
 
 /// Build an item with an accelerator.
+#[allow(dead_code)]
 const fn accel(label: &'static str, acc: &'static str) -> Item {
     Item {
         label,

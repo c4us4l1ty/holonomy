@@ -22,16 +22,14 @@ jobs:
         shell: bash
         run: |
           if ! cargo check --workspace --all-targets > /tmp/check.log 2>&1; then
-            tail -60 /tmp/check.log
-            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=[l for l in s.splitlines() if l.startswith("error")]; print("::error::"+("\n".join(lines)[-3500:]).replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("error","warning: unused","-->","expected","not found","cannot","unresolved"))]; out="\n".join(keep)[-3500:] or s[-3500:]; print("::error::"+out.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
             exit 1
           fi
       - name: Check desktop target
         shell: bash
         run: |
           if ! cargo check --workspace --all-targets --features holonomy/desktop > /tmp/check.log 2>&1; then
-            tail -60 /tmp/check.log
-            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=[l for l in s.splitlines() if l.startswith("error")]; print("::error::"+("\n".join(lines)[-3500:]).replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
+            python3 -c 'from pathlib import Path; s=Path("/tmp/check.log").read_text(); lines=s.splitlines(); keep=[l for l in lines if any(x in l for x in ("error","warning: unused","-->","expected","not found","cannot","unresolved"))]; out="\n".join(keep)[-3500:] or s[-3500:]; print("::error::"+out.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))'
             exit 1
           fi
       - name: Release tests
