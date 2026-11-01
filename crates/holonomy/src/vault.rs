@@ -100,7 +100,7 @@ impl Vault {
             // Ω is uniformly random. Two small initial payloads can still collide; retry with a
             // fresh salt rather than presenting a rare, unactionable setup failure to the user.
             for attempt in 0..16 {
-                match Wavefunction::create_with_duress(path, "Documents", &initial, primary, decoy, vdf) {
+                match Wavefunction::create_with_duress(path, primary, "Documents", &initial, Some(&holonomy_container::DuressDecoy { passphrase: decoy, title: "Documents", content: &initial }), vdf) {
                     Ok(_) => return Ok(()),
                     Err(holonomy_container::ContainerError::DuressOverlap { .. }) if attempt < 15 => continue,
                     Err(e) => return Err(e.into()),
@@ -114,9 +114,8 @@ impl Vault {
 
     pub fn open(path: &Path, passphrase: &str, vdf: u64) -> Result<Self, VaultError> {
         if passphrase.is_empty() { return Err(VaultError::EmptyPassphrase); }
-        let container = Wavefunction::open(path, "Documents", passphrase, vdf)?;
-        let mut bytes = vec![0u8; container.content_len() as usize];
-        container.read_content(0, &mut bytes)?;
+        let mut container = Wavefunction::open(path, passphrase, vdf)?;
+        let mut bytes = container.read_content()?;
         let (documents, next_id) = if bytes.starts_with(MAGIC) {
             decode_bundle(&bytes)?
         } else {
