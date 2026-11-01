@@ -1640,6 +1640,15 @@ impl Editor {
         &self.yank
     }
 
+    /// Scrub and empty the yank buffer without releasing its reserved capacity.
+    pub fn clear_yank(&mut self) {
+        for b in self.yank.iter_mut() {
+            // SAFETY: `b` is a valid aligned mutable reference into `self.yank`.
+            unsafe { core::ptr::write_volatile(b, 0); }
+        }
+        self.yank.clear();
+    }
+
     /// Copy `[at, at+len)` into the yank buffer.
     ///
     /// **One read, and the buffer is truncated to what that read produced.** The first version read

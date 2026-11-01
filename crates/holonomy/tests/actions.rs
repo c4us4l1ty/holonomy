@@ -203,6 +203,8 @@ fn every_action_is_routed_or_accounted_for() {
         Action::Lock,
         Action::Open,
         Action::Import,
+        Action::WordCount,
+        Action::KeyboardShortcuts,
     ];
     for a in handled_by_session {
         assert_eq!(
@@ -272,6 +274,8 @@ fn every_action_has_a_name() {
         Action::SetColour(0),
         Action::ToggleBold,
         Action::ToggleItalic,
+        Action::WordCount,
+        Action::KeyboardShortcuts,
     ];
     let mut seen = std::collections::BTreeSet::new();
     for a in all {
@@ -309,8 +313,8 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 20,
-        "the twenty wired rows, including the desktop lifecycle rows Rename, Delete and Lock. Adding one changes this number."
+        with_action, 22,
+        "the wired rows after the menu cleanup: lifecycle rows plus Word count and Keyboard shortcuts. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
@@ -366,13 +370,9 @@ fn every_wired_menu_item_carries_an_action() {
     // matters is that the count is stable and the rows are named. Got: {without:?}
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (40, 60),
-        "**40 unwired of 60 menu items** in the eight headings. File > Open and File > Import now carry \
-         actions and Insert > Equation is a new wired row; the two Open/Import rows were already there \
-         and nothing was added or removed there, so the unwired count alone moved by two, and Equation \
-         adds one wired row so the total alone moves by one. The list is \
-         printed because \"everything is wired\" is not true here: what matters is that the count \
-         is stable and the rows are named. Got: {without:?}"
+        (2, 24),
+        "**2 unwired of 24 menu items** in the seven headings after out-of-scope cloud/add-on rows were \
+         removed. The remaining unwired rows are the View > Mode/Zoom submenu headers. Got: {without:?}"
     );
 }
 

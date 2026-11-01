@@ -472,6 +472,10 @@ pub struct Session<'a> {
     /// stores the action here and `Session::take_open_request` hands it back to the driver, which is
     /// the one place that can turn it into a path.
     open_request: Option<holonomy_render::menus::Action>,
+    /// Bumped whenever the internal yank buffer changes, so the desktop driver can publish it to X11.
+    clipboard_generation: u64,
+    /// A managed desktop paste is answered by the window driver from the X selection.
+    paste_request: bool,
     /// The style flags armed at the caret, or 0 for none. **Part 25.**
     ///
     /// **A field and not a zero-width span**, because `SpanMap::style_range` returns `Ok(())` for
@@ -1102,6 +1106,8 @@ impl<'a> Session<'a> {
             active_id: 0, managed_documents: false, document_request: None, notice: None, dialog: None,
             // **Nothing asked for a path yet.**
             open_request: None,
+            clipboard_generation: 0,
+            paste_request: false,
             // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
             // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
             pending_style: None,
@@ -1487,6 +1493,28 @@ impl<'a> Session<'a> {
     pub fn clipboard_len(&self) -> usize {
         self.editor.yanked().len()
     }
+
+    /// The current internal clipboard bytes, for the desktop driver to publish.
+    pub fn clipboard_bytes(&self) -> &[u8] { self.editor.yanked() }
+
+    /// Changes whenever copy/cut replaces the internal clipboard.
+    pub fn clipboard_generation(&self) -> u64 { self.clipboard_generation }
+
+    /// Take a pending system-paste request (managed desktop only).
+    pub fn take_paste_request(&mut self) -> bool { std::mem::take(&mut self.paste_request) }
+
+    /// Paste the internal yank buffer even in managed mode; used as the fallback when no X selection
+    /// answers a system paste.
+    pub fn paste_internal(&mut self) -> Result<(), SessionError> {
+        let managed = self.managed_documents;
+        self.managed_documents = false;
+        let r = self.apply_with(Command::Hotkey(Hotkey::Paste), Some(&mut crate::store::NoSource));
+        self.managed_documents = managed;
+        r
+    }
+
+    /// Scrub the internal clipboard. The desktop driver also releases the X selection.
+    pub fn clear_clipboard(&mut self) { self.editor.clear_yank(); }
 
     /// The editor, mutably — for a gate that needs to drive the document directly.
     ///
@@ -3829,6 +3857,14 @@ impl<'a> Session<'a> {
             }
         }
         match action {
+            Action::WordCount => {
+                self.set_notice(Some(format!("{} words · {} lines", self.state.words, self.state.total_lines)));
+                return Ok(());
+            }
+            Action::KeyboardShortcuts => {
+                self.set_notice(Some("Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
+                return Ok(());
+            }
             Action::Export => {
                 // **A request, like the save, and for the same structural reason**: the sinks are in
                 // `SessionContext` and are not reachable from `&mut self`. `run_with_io` holds both.
@@ -4508,6 +4544,7 @@ impl<'a> Session<'a> {
             Command::Hotkey(Hotkey::Copy) => {
                 if self.editor.copy_selection()? {
                     self.stats.copies += 1;
+                    self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
                 } else {
                     self.stats.clipboard_noops += 1;
                 }
@@ -4528,11 +4565,16 @@ impl<'a> Session<'a> {
                         }
                         self.after_edit(0)?;
                         self.stats.cuts += 1;
+                        self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
                     } else {
                         self.stats.clipboard_noops += 1;
                     }
                 }
             Command::Hotkey(Hotkey::Paste) => {
+                if self.managed_documents {
+                    self.paste_request = true;
+                    return Ok(());
+                }
                 let at = self.editor.caret() as usize;
                 let n = self.editor.paste()?;
                 if n > 0 {
@@ -8140,6 +8182,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // **Arming a style is a chrome-state change, not a command** -- the same shape as the three
         // above, and `Session::apply_action` handles it before this function is reached.
         Action::ToggleBold | Action::ToggleItalic => return None,
+        Action::WordCount | Action::KeyboardShortcuts => return None,
     })
 }
 

@@ -421,18 +421,17 @@ fn the_menu_headings_are_measured_not_tabulated() {
         menu_width("View", CELL) < menu_width("Format", CELL),
         "and a four-letter heading is narrower than a six-letter one"
     );
-    // **And the longest heading really is the one that sets the menu bar's width.** `Extensions` is
-    // ten characters, and a menu bar that ran out of panel before its last heading would push `Help`
-    // off screen -- which `every_widget_has_a_rect_inside_the_panel` cannot see, because that test is
-    // about the toolbar and the title bar.
+    // **And the longest heading really is the one that sets the menu bar's width.** After the
+    // out-of-scope Extensions heading was removed, `Insert` and `Format` are the longest at six
+    // characters.
     assert_eq!(
-        menu_width("Extensions", CELL),
+        menu_width("Insert", CELL),
         MENUS
             .iter()
             .map(|m| menu_width(m, CELL))
             .max()
             .expect("there are menus"),
-        "Extensions is the longest heading, so it is the widest box"
+        "Insert/Format are the longest headings, so they are the widest boxes"
     );
     // **The first version of this test asserted `edit < file` and `edit == file` on consecutive
     // lines.** It was a drafting artefact and it is worth keeping the note, because the contradiction

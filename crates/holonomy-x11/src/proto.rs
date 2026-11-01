@@ -35,6 +35,14 @@ pub mod op {
     pub const CHANGE_PROPERTY: u8 = 18;
     /// GetProperty.
     pub const GET_PROPERTY: u8 = 20;
+    /// DeleteProperty.
+    pub const DELETE_PROPERTY: u8 = 19;
+    /// SetSelectionOwner.
+    pub const SET_SELECTION_OWNER: u8 = 22;
+    /// GetSelectionOwner.
+    pub const GET_SELECTION_OWNER: u8 = 23;
+    /// ConvertSelection.
+    pub const CONVERT_SELECTION: u8 = 24;
     /// SetInputFocus.
     pub const SET_INPUT_FOCUS: u8 = 42;
     /// GetInputFocus. Also this crate's sync point: it is the shortest request that replies.
@@ -97,6 +105,12 @@ pub mod event {
     pub const MOTION_NOTIFY: u8 = 6;
     /// ClientMessage.
     pub const CLIENT_MESSAGE: u8 = 33;
+    /// SelectionClear.
+    pub const SELECTION_CLEAR: u8 = 29;
+    /// SelectionRequest.
+    pub const SELECTION_REQUEST: u8 = 30;
+    /// SelectionNotify.
+    pub const SELECTION_NOTIFY: u8 = 31;
     /// Any event with this bit set was sent by a client with `SendEvent`, not by the server.
     pub const SEND_EVENT_FLAG: u8 = 0x80;
 }
@@ -683,6 +697,43 @@ pub enum Event {
         /// The second field: the timestamp, or 0.
         data1: u32,
     },
+    /// Another client took ownership of a selection this window owned.
+    SelectionClear {
+        /// Server time.
+        time: u32,
+        /// The window that lost ownership.
+        owner: u32,
+        /// The selection atom.
+        selection: u32,
+    },
+    /// A client asks the selection owner for a target.
+    SelectionRequest {
+        /// Server time.
+        time: u32,
+        /// The current owner.
+        owner: u32,
+        /// The window that should receive the reply event.
+        requestor: u32,
+        /// The selection atom.
+        selection: u32,
+        /// The requested target atom.
+        target: u32,
+        /// The property to write, or 0 for an obsolete client.
+        property: u32,
+    },
+    /// The owner answered a ConvertSelection request.
+    SelectionNotify {
+        /// Server time.
+        time: u32,
+        /// The window that asked.
+        requestor: u32,
+        /// The selection atom.
+        selection: u32,
+        /// The target atom, or 0 on failure.
+        target: u32,
+        /// The property holding the data, or 0 on failure.
+        property: u32,
+    },
     /// An event this crate does not decode, kept so a caller can log the code instead of the stream
     /// silently losing it.
     Other {
@@ -896,6 +947,35 @@ impl Event {
                 let data1 = r.u32();
                 Self::ClientMessage { type_atom, data1 }
             }
+            event::SELECTION_CLEAR => {
+                let _unused = r.u8();
+                let _seq = r.u16();
+                let time = r.u32();
+                let owner = r.u32();
+                let selection = r.u32();
+                Self::SelectionClear { time, owner, selection }
+            }
+            event::SELECTION_REQUEST => {
+                let _unused = r.u8();
+                let _seq = r.u16();
+                let time = r.u32();
+                let owner = r.u32();
+                let requestor = r.u32();
+                let selection = r.u32();
+                let target = r.u32();
+                let property = r.u32();
+                Self::SelectionRequest { time, owner, requestor, selection, target, property }
+            }
+            event::SELECTION_NOTIFY => {
+                let _unused = r.u8();
+                let _seq = r.u16();
+                let time = r.u32();
+                let requestor = r.u32();
+                let selection = r.u32();
+                let target = r.u32();
+                let property = r.u32();
+                Self::SelectionNotify { time, requestor, selection, target, property }
+            }
             other => Self::Other { code: other },
         })
     }
@@ -905,6 +985,24 @@ impl Event {
 mod tests {
     use super::*;
     use super::{Event, Rdr};
+
+    fn put32(buf: &mut [u8; 32], off: usize, v: u32) { buf[off..off + 4].copy_from_slice(&v.to_le_bytes()); }
+
+    #[test]
+    fn selection_events_decode_from_the_wire() {
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_REQUEST;
+        put32(&mut b, 4, 100); put32(&mut b, 8, 1); put32(&mut b, 12, 2); put32(&mut b, 16, 3); put32(&mut b, 20, 4); put32(&mut b, 24, 5);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionRequest { time: 100, owner: 1, requestor: 2, selection: 3, target: 4, property: 5 }));
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_NOTIFY;
+        put32(&mut b, 4, 101); put32(&mut b, 8, 2); put32(&mut b, 12, 3); put32(&mut b, 16, 4); put32(&mut b, 20, 5);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionNotify { time: 101, requestor: 2, selection: 3, target: 4, property: 5 }));
+        let mut b = [0u8; 32];
+        b[0] = event::SELECTION_CLEAR;
+        put32(&mut b, 4, 102); put32(&mut b, 8, 1); put32(&mut b, 12, 3);
+        assert_eq!(Event::decode(&b), Some(Event::SelectionClear { time: 102, owner: 1, selection: 3 }));
+    }
 
     /// The length field is in words and counts the header. A client that writes the byte count here
     /// has every subsequent request interpreted at the wrong offset, which on a busy display looks
