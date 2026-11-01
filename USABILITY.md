@@ -60,3 +60,38 @@ wire-decoding gate, compose tests, managed clipboard request gate, and the 2 MiB
 - **Menu cleanup:** inert cloud/add-on/voice/translation rows were removed, the Extensions heading was
   dropped, and local Word count / Keyboard shortcuts rows were wired. The remaining unwired rows are
   the View > Mode/Zoom submenu headers.
+
+## Follow-up: modal usability from a fresh-clone run (item 3)
+
+A release/optimized run on the user's machine showed four defects in the unlock/setup dialog. They
+are fixed without changing the two-passphrase model, the container format, or the sealed boot path.
+
+- **Visible passphrase mask.** The mask was U+2022 BULLET, which is outside the FR-2.3 atlas coverage
+  (ASCII + Latin-1 + the existing math/box windows). `Painter::label` advances over a missing glyph
+  without blitting, so typing changed the value and drew nothing. The mask is now ASCII `*`
+  (`dialog::MASK`), masked once by the driver and again by the renderer. A pixel-level gate paints the
+  dialog through the real atlas and asserts the field has visible ink and `PaintStats::missing == 0`.
+- **Readable, well-spaced dialogs.** `dialog::geometry` is responsive instead of a fixed 620 px panel
+  with 34 px fields and 100x36 buttons. The panel scales with the window, padding/rows/buttons scale
+  with the chrome's measured cell, and a normal desktop window asks for the larger boot atlas size.
+  `Painter::label` now honours `Label::size` (clamped to the sizes the atlas holds) instead of ignoring
+  it, so dialog type can be larger without raising global `--ppem` or shrinking the document viewport.
+  Long values keep the caret inside the field; long labels clip with an ASCII ellipsis; choice lists
+  scroll to keep the selection visible. Gates cover minimum and large window sizes.
+- **Immediate pointer focus.** `ButtonPress` used `Window::focus`, which waits for a *new* `MapNotify`
+  and drains events. On an already-mapped window the event was long consumed, so every click burned the
+  500 ms timeout and could eat queued input. Clicks now use `Window::focus_now` (issue `SetInputFocus`
+  immediately, leave the event queue alone); the bounded map wait remains only for the initial focus in
+  `Desktop::open`.
+- **No full-window redraw while a form is open.** `Session::set_dialog` is a no-op for an unchanged
+  view, damages only the union of the old/new panel while a dialog stays open, and takes full damage
+  only when the scrim appears/disappears. The driver no longer re-syncs the form every loop iteration;
+  it ticks immediately after a form edit/focus change so the caret moves with the key instead of waiting
+  for the next 16 ms event timeout. A session gate asserts an unchanged dialog does not repaint and a
+  modal keystroke damages less than the full frame.
+
+Verification: GitHub Actions run `41324506992` on commit `28ad4a6` passed the default and desktop
+`cargo check --workspace --all-targets`, the full release sweep (`--test-threads=1`), and the
+desktop-feature tests, including the new dialog geometry/paint gates and the 2 MiB artifact ceiling.
+No live interactive X11 usability test was run (`HOLONOMY_X11_LIVE=1` remains unset); the evidence is
+the automated gates plus the user's reproduced release-build symptoms.
