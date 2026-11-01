@@ -323,7 +323,8 @@ fn at(
     let probe = |conn: &mut Conn, xtest: &XTest, rx: i16, ry: i16| -> Result<(i32, i32), Box<dyn std::error::Error>> {
         xtest.move_pointer(conn, root, rx, ry)?;
         std::thread::sleep(Duration::from_millis(15));
-        let ((prx, pry, px, py), _) = window.pointer_position(conn)?;
+        let (pos, _) = window.pointer_position(conn)?;
+        let (prx, pry, px, py) = (pos.root_x, pos.root_y, pos.win_x, pos.win_y);
         println!(
             "uidrive: probe root ({rx},{ry}) -> server root ({prx},{pry}), window ({px},{py})"
         );
@@ -346,7 +347,8 @@ fn at(
     for attempt in 1..=AIM_ATTEMPTS {
         xtest.move_pointer(conn, root, ax, ay)?;
         std::thread::sleep(Duration::from_millis(15));
-        let ((_rx, _ry, px, py), _) = window.pointer_position(conn)?;
+        let (pos, _) = window.pointer_position(conn)?;
+        let (px, py) = (pos.win_x, pos.win_y);
         seen = (i32::from(px), i32::from(py));
         // **Within `AIM_TOLERANCE`, not exactly.**
         //
