@@ -101,7 +101,16 @@ impl Vault {
             // fresh salt rather than presenting a rare, unactionable setup failure to the user.
             for attempt in 0..16 {
                 match Wavefunction::create_with_duress(path, primary, "Documents", &initial, Some(&holonomy_container::DuressDecoy { passphrase: decoy, title: "Documents", content: &initial }), vdf) {
-                    Ok(_) => return Ok(()),
+                    Ok(wf) => {
+                        // FR-4.9 is about future writes too, not just the initial bytes. Reserve a
+                        // full 8 MiB growth range for each payload so saving a normal document can
+                        // never grow into the top-secret payload (or vice versa).
+                        let omega_a = wf.omega();
+                        drop(wf);
+                        let b = Wavefunction::open(path, decoy, vdf)?;
+                        if omega_a.abs_diff(b.omega()) >= S_MAX_PAYLOAD { return Ok(()); }
+                        continue;
+                    }
                     Err(holonomy_container::ContainerError::DuressOverlap { .. }) if attempt < 15 => continue,
                     Err(e) => return Err(e.into()),
                 }
