@@ -41,7 +41,7 @@ pub fn hit(l: &Layout, d: &DialogView, x: i32, y: i32) -> Hit {
     }
     Hit::None
 }
-fn label(out:&mut Vec<Node>, x:u32,y:u32,s:&str,colour:u32) {
+fn label(out:&mut Vec<SurfaceTree>, x:u32,y:u32,s:&str,colour:u32) {
     out.push(SurfaceTree::leaf(Node::Label(Label::new(x as i32,y as i32,s,Style::REGULAR,0,colour))));
 }
 pub fn push_tree(tree:&mut SurfaceTree,l:&Layout,d:&DialogView) {
