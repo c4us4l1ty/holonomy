@@ -28,7 +28,7 @@ fn managed_lifecycle_waits_for_the_driver_and_preserves_dirty_state_per_document
     s.switch_document_public(1);
     assert_eq!(s.state.title, "One");
     assert!(s.state.dirty, "parking a dirty document must not clean it");
-    assert_eq!(s.text().unwrap(), b"first!");
+    assert_eq!(s.text().unwrap(), b"first!", "active id {} title {:?}", s.active_document_id(), s.state.title);
     s.apply_action(Action::Delete).unwrap();
     assert_eq!(s.take_document_request(), Some(DocumentRequest::Delete));
     assert_eq!(s.document_count(), 2, "delete is not performed before confirmation and durable save");
