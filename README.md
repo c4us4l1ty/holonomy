@@ -1,6 +1,6 @@
 # Holonomy
 
-A local-first encrypted document editor that runs on bare silicon. No compositor, no display server,
+A local-first **encrypted** document editor that runs on bare silicon. No compositor, no display server,
 no runtime configuration files: the binary is statically linked, it draws to a DRM/KMS framebuffer
 itself, and once it has opened its container it cannot open anything else.
 
