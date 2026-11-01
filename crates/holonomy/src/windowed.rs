@@ -483,7 +483,7 @@ impl Form {
             FormKind::OpenPath => {
                 let p = val(0).trim(); if p.is_empty() { return Err("Enter a container path.".into()); }
                 if !save(vault, session) { return Err("Save failed; current vault kept open.".into()); }
-                let path = std::path::PathBuf::from(p); lock(vault, session, &path); Ok(Some(Form::unlock(path)))
+                let path = std::path::PathBuf::from(p); lock(vault, session, &path); Ok(Some(if path.exists() { Form::unlock(path) } else { Form::setup(path) }))
             }
             FormKind::DocMenu => match self.choice {
                 0 => Ok(Some(Form::rename(self.values[0].to_string()))),

@@ -13,18 +13,22 @@ pub struct DialogView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit { Field(usize), Confirm, Cancel, Choice(usize), None }
 #[derive(Debug, Clone, Copy)]
-pub struct Geometry { pub panel: DamageRect, pub fields: usize, pub row_h: u32, pub confirm: DamageRect, pub cancel: DamageRect }
+pub struct Geometry { pub panel: DamageRect, pub fields: usize, pub row_h: u32, pub confirm: DamageRect, pub cancel: DamageRect, pub choice_start: usize, pub visible_choices: usize }
 pub fn geometry(l: &Layout, d: &DialogView) -> Geometry {
     let w = l.width.min(620).max(280);
     let row_h = 52;
-    let h = (150 + (d.fields.len() + d.choices.len().min(6)) as u32 * row_h + if d.error.is_some() { 28 } else { 0 }).min(l.height.saturating_sub(16)).max(180);
+    let wanted_rows = d.fields.len() + d.choices.len().min(6);
+    let h = (150 + wanted_rows as u32 * row_h + if d.error.is_some() { 28 } else { 0 }).min(l.height.saturating_sub(16)).max(180);
+    let available_rows = (h.saturating_sub(150) / row_h) as usize;
+    let visible_choices = d.choices.len().min(available_rows.saturating_sub(d.fields.len()));
+    let choice_start = d.choice.saturating_sub(visible_choices.saturating_sub(1));
     let x = (l.width.saturating_sub(w)) / 2;
     let y = (l.height.saturating_sub(h)) / 2;
     let panel = DamageRect::new(x,y,w,h);
     let by = y + h - 52;
     let cancel = DamageRect::new(x + w - 224, by, 100, 36);
     let confirm = DamageRect::new(x + w - 116, by, 100, 36);
-    Geometry { panel, fields: d.fields.len(), row_h, confirm, cancel }
+    Geometry { panel, fields: d.fields.len(), row_h, confirm, cancel, choice_start, visible_choices }
 }
 pub fn hit(l: &Layout, d: &DialogView, x: i32, y: i32) -> Hit {
     let g = geometry(l,d);
@@ -35,9 +39,9 @@ pub fn hit(l: &Layout, d: &DialogView, x: i32, y: i32) -> Hit {
         if r.contains(x,y) { return Hit::Field(i); }
     }
     let start = g.panel.y + 92 + d.fields.len() as u32 * g.row_h;
-    for i in 0..d.choices.len().min(6) {
+    for i in 0..g.visible_choices {
         let r = DamageRect::new(g.panel.x+20,start+i as u32*g.row_h,g.panel.width-40,34);
-        if r.contains(x,y) { return Hit::Choice(i); }
+        if r.contains(x,y) { return Hit::Choice(g.choice_start + i); }
     }
     Hit::None
 }
@@ -61,11 +65,12 @@ pub fn push_tree(tree:&mut SurfaceTree,l:&Layout,d:&DialogView) {
         if i==d.focus { let cx=p.x+28+value.chars().count() as u32*8; tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(cx as i32,y as i32+22,2,18,0xFF7AA2F7)))); }
     }
     let start=p.y+92+d.fields.len() as u32*g.row_h;
-    for i in 0..d.choices.len().min(6) {
+    for i in 0..g.visible_choices {
+        let idx=g.choice_start+i;
         let y=start+i as u32*g.row_h;
-        let colour=if i==d.choice {0xFF3B6FD4} else {0xFF3A424E};
+        let colour=if idx==d.choice {0xFF3B6FD4} else {0xFF3A424E};
         tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(p.x as i32+20,y as i32,p.width-40,34,colour))));
-        label(&mut tree.before,p.x+28,y+8,&d.choices[i],0xFFFFFFFF);
+        label(&mut tree.before,p.x+28,y+8,&d.choices[idx],0xFFFFFFFF);
     }
     if let Some(e)=&d.error { label(&mut tree.before,p.x+20,p.y+p.height-82,e,0xFFFF8A8A); }
     for (r,text,primary) in [(g.confirm,d.confirm.as_str(),true),(g.cancel,d.cancel.as_deref().unwrap_or(""),false)] {
