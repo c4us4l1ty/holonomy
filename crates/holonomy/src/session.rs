@@ -1886,7 +1886,29 @@ impl<'a> Session<'a> {
     pub fn take_document_request(&mut self) -> Option<DocumentRequest> { self.document_request.take() }
     pub fn take_save_request(&mut self) -> bool { std::mem::take(&mut self.save_requested) }
     pub fn set_notice(&mut self, notice: Option<String>) { self.notice = notice; self.state.notice = self.notice.clone(); self.invalidate_status_bar(); }
-    pub fn set_dialog(&mut self, dialog: Option<holonomy_render::dialog::DialogView>) { self.dialog = dialog; self.invalidate(self.chrome.full_damage()); }
+    /// Show, update, or dismiss the modal dialog.
+    ///
+    /// Damage is scoped to what actually changed. An identical view is a no-op, so a driver that
+    /// re-syncs the form every loop iteration does not repaint the window at the event-wait cadence.
+    /// While a dialog stays open, only the union of the old and new panel rects is stale (the scrim
+    /// behind it is unchanged); appearing or disappearing touches the whole window because the scrim
+    /// covers it. This is FR-3.4's "no full-screen redraw during typing" applied to modal input.
+    pub fn set_dialog(&mut self, dialog: Option<holonomy_render::dialog::DialogView>) {
+        if self.dialog == dialog {
+            return;
+        }
+        let damage = match (&self.dialog, &dialog) {
+            (Some(old), Some(new)) => {
+                let layout = self.chrome.layout;
+                let a = holonomy_render::dialog::geometry(&layout, old).panel;
+                let b = holonomy_render::dialog::geometry(&layout, new).panel;
+                a.union(&b)
+            }
+            _ => self.chrome.full_damage(),
+        };
+        self.dialog = dialog;
+        self.invalidate(damage);
+    }
     pub fn clear_image_cache(&mut self) { self.images.clear(); }
     pub fn active_document_id(&self) -> u64 { self.active_id }
     pub fn has_unsaved_documents(&self) -> bool { self.state.dirty || self.parked.iter().any(|d| d.dirty) }
