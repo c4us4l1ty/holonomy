@@ -43,6 +43,10 @@ working set; parallel unrelated tests can otherwise exhaust it. The boot-evidenc
 
 The temporary `verify-session.yml` workflow used to obtain this evidence is removed before merge.
 
+Follow-up verification: GitHub Actions run `41311676953` on commit `92752de` passed the default and
+desktop checks, the full release sweep, and the desktop-feature tests (including the X11 selection
+wire-decoding gate, compose tests, managed clipboard request gate, and the 2 MiB artifact ceiling).
+
 ## Follow-up: everyday usability (item 2)
 
 - **System clipboard (desktop only):** Copy/Cut publishes UTF-8 to the X11 `CLIPBOARD` selection;
