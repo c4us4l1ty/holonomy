@@ -246,7 +246,6 @@ pub fn run(
     let start = Instant::now();
     let mut events = 0u64;
     let mut last_edit = Instant::now();
-    let mut quit_after_save = false;
     loop {
         if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
         if vault.is_some() && form.is_none() {
@@ -262,7 +261,7 @@ pub fn run(
                         if save(&mut vault, &mut session) { let id = session.active_document_id(); session.close_document(id); session.set_notice(Some("Document closed. File > Open lists saved documents.".into())); }
                     }
                     DocumentRequest::Lock => {
-                        if save(&mut vault, &mut session) { lock(&mut vault, &mut session, &path); form = Some(Form::unlock(path.clone())); }
+                        if save(&mut vault, &mut session) { let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p)); }
                     }
                     DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
                     DocumentRequest::ImportText => { form = Some(Form::import()); }
@@ -276,7 +275,6 @@ pub fn run(
         }
         let event = { let desktop = window_of(&mut session)?; desktop.next_event(EVENT_WAIT).map_err(WindowedError::Desktop)? };
         let Some(ev) = event else {
-            if quit_after_save && vault.is_some() && !session.has_unsaved_documents() { report(&session, events, start); return Ok(Exit::Quit); }
             session.tick().map_err(WindowedError::Session)?; continue;
         };
         events += 1;
@@ -377,7 +375,7 @@ fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _pat
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FormKind { Setup, Unlock, New, Rename, Delete, Open, Import, DocMenu }
+enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, DocMenu }
 struct Form {
     kind: FormKind, path: std::path::PathBuf, values: Vec<zeroize::Zeroizing<String>>,
     focus: usize, choice: usize, choices: Vec<String>, ids: Vec<u64>, error: Option<String>, target_id: u64,
@@ -399,36 +397,45 @@ impl Form {
     fn doc_menu(title: String, id: u64) -> Self { let mut f = Self::base(FormKind::DocMenu, "".into(), 0); f.choices = vec!["Rename".into(), "Delete…".into(), "Close".into()]; f.target_id = id; f.values.push(zeroize::Zeroizing::new(title)); f }
     fn view(&self) -> holonomy_render::dialog::DialogView {
         let (title, message, labels, secrets, confirm, cancel) = match self.kind {
-            FormKind::Setup => ("Set up your vault", "Two isolated spaces. Keep both passphrases safe.", vec!["Top-secret passphrase", "Confirm top-secret", "Normal passphrase", "Confirm normal"], vec![true,true,true,true], "Create", Some("Quit")),
+            FormKind::Setup => ("Set up top-secret space", "Step 1 of 2. This passphrase opens your private documents.", vec!["Top-secret passphrase", "Confirm top-secret"], vec![true,true], "Next", Some("Quit")),
+            FormKind::SetupNormal => ("Set up normal space", "Step 2 of 2. A different passphrase opens everyday documents.", vec!["Normal passphrase", "Confirm normal"], vec![true,true], "Create", Some("Quit")),
             FormKind::Unlock => ("Unlock", "Enter one passphrase. Only its own documents are mounted.", vec!["Passphrase"], vec![true], "Unlock", Some("Quit")),
             FormKind::New => ("New document", "Stored encrypted in the currently unlocked space.", vec!["Title"], vec![false], "Create", Some("Cancel")),
             FormKind::Rename => ("Rename document", "The title is encrypted with the document.", vec!["Title"], vec![false], "Rename", Some("Cancel")),
             FormKind::Delete => ("Delete document", "This rewrites the encrypted vault and cannot be undone.", vec![], vec![], "Delete", Some("Cancel")),
-            FormKind::Open => ("Open", "Choose a saved document, or enter another container path.", vec!["Other container path (optional)"], vec![false], "Open", Some("Cancel")),
+            FormKind::Open => ("Open", "Choose a saved document, or open another container.", vec!["Other container path (optional)"], vec![false], "Open", Some("Cancel")),
+            FormKind::OpenPath => ("Open container", "The current vault is saved and locked before switching.", vec!["Container path"], vec![false], "Next", Some("Cancel")),
             FormKind::Import => ("Import text", "Import a UTF-8 text file into this unlocked space.", vec!["File path"], vec![false], "Import", Some("Cancel")),
             FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
         };
-        let fields = labels.iter().enumerate().map(|(i,label)| holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(i).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(i).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] }).collect();
+        let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
+        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
         holonomy_render::dialog::DialogView { title: title.into(), message: message.into(), fields, focus: self.focus, error: self.error.clone(), confirm: confirm.into(), cancel: cancel.map(str::to_string), choices: self.choices.clone(), choice: self.choice }
     }
     fn key(&mut self, keycode: u8, state: u16, ch: Option<char>) -> KeyOutcome {
         let code = keycode.saturating_sub(8);
+        let value_index = self.focus + if self.kind == FormKind::SetupNormal { 2 } else { 0 };
         match code {
             1 => return KeyOutcome::Cancel,
-            15 => { let n = self.values.len().max(1); self.focus = if state & 1 != 0 { (self.focus + n - 1) % n } else { (self.focus + 1) % n }; return KeyOutcome::Changed; }
+            15 => { let n = match self.kind { FormKind::Setup | FormKind::SetupNormal => 2, _ => self.values.len().max(1) }; self.focus = if state & 1 != 0 { (self.focus + n - 1) % n } else { (self.focus + 1) % n }; return KeyOutcome::Changed; }
             28 | 96 => return KeyOutcome::Submit,
             103 if !self.choices.is_empty() => { self.choice = self.choice.saturating_sub(1); return KeyOutcome::Changed; }
             108 if !self.choices.is_empty() => { self.choice = (self.choice + 1).min(self.choices.len()-1); return KeyOutcome::Changed; }
-            14 => { if let Some(v) = self.values.get_mut(self.focus) { v.pop(); } return KeyOutcome::Changed; }
+            14 => { if let Some(v) = self.values.get_mut(value_index) { v.pop(); } return KeyOutcome::Changed; }
             _ => {}
         }
-        if state & (4|8) == 0 { if let Some(c) = ch { if let Some(v) = self.values.get_mut(self.focus) { if v.len() < 4096 { v.push(c); } } return KeyOutcome::Changed; } }
+        if state & (4|8) == 0 { if let Some(c) = ch { if let Some(v) = self.values.get_mut(value_index) { if v.len() < 4096 { v.push(c); } } return KeyOutcome::Changed; } }
         KeyOutcome::Changed
     }
     fn submit(self, vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, vdf: u64) -> Result<Option<Form>, String> {
         let val = |i: usize| self.values.get(i).map(|s| s.as_str()).unwrap_or("");
         match self.kind {
             FormKind::Setup => {
+                if val(0).is_empty() { return Err("Enter a passphrase.".into()); }
+                if val(0) != val(1) { return Err("The passphrases do not match.".into()); }
+                let mut next = self; next.kind = FormKind::SetupNormal; next.focus = 0; next.error = None; Ok(Some(next))
+            }
+            FormKind::SetupNormal => {
                 crate::vault::Vault::create(&self.path, val(0), val(1), val(2), val(3), vdf).map_err(|e| e.to_string())?;
                 Ok(Some(Form::unlock(self.path)))
             }
@@ -470,7 +477,12 @@ impl Form {
                     let d = v.documents().iter().find(|d| d.id == id).ok_or("Document missing.")?;
                     session.open_stored_document(d.id, d.title.clone(), &d.payload, d.caret).map_err(|e| e.to_string())?; return Ok(None);
                 }
-                Ok(Some(Form::unlock(std::path::PathBuf::from("holonomy.wavefunction"))))
+                let mut f = Form::base(FormKind::OpenPath, "".into(), 1); f.values[0].push_str("holonomy.wavefunction"); Ok(Some(f))
+            }
+            FormKind::OpenPath => {
+                let p = val(0).trim(); if p.is_empty() { return Err("Enter a container path.".into()); }
+                if !save(vault, session) { return Err("Save failed; current vault kept open.".into()); }
+                let path = std::path::PathBuf::from(p); lock(vault, session, &path); Ok(Some(Form::unlock(path)))
             }
             FormKind::DocMenu => match self.choice {
                 0 => Ok(Some(Form::rename(self.values[0].to_string()))),
