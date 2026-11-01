@@ -144,6 +144,10 @@ pub enum Action {
     ToggleItalic,
     /// **Switch to the mode at this index in [`MODES`].** Part 44.
     SetMode(u8),
+    /// Show the current word/line count in the status notice.
+    WordCount,
+    /// Show the local keyboard shortcut summary.
+    KeyboardShortcuts,
     /// **Run the toolbar tool named by this row.** Part 44.
     ///
     /// **A `Tool` in an `Action`, and the dependency runs the right way.** `holonomy-render` owns
@@ -192,7 +196,7 @@ impl Action {
             // which row it is holding already has it, and a slug that repeated it would be a second
             // spelling to keep in step.
             Action::WordCount => "word-count",
-        Action::KeyboardShortcuts => "keyboard-shortcuts",
+            Action::KeyboardShortcuts => "keyboard-shortcuts",
         Action::SelectTool(_) => "select-tool",
         }
     }
