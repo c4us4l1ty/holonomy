@@ -58,7 +58,7 @@ pub fn push_tree(tree:&mut SurfaceTree,l:&Layout,d:&DialogView) {
         tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(p.x as i32+21,y as i32+17,p.width-42,32,0xFF11151B))));
         let value=if f.secret {"•".repeat(f.value.chars().count())} else {f.value.clone()};
         label(&mut tree.before,p.x+28,y+24,&value,0xFFF2F4F8);
-        if i==d.focus { let cx=p.x+28+value.chars().count() as u32*8; tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(cx as i32,y as i32+22,2,18,0xFF7AA2F7))); }
+        if i==d.focus { let cx=p.x+28+value.chars().count() as u32*8; tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(cx as i32,y as i32+22,2,18,0xFF7AA2F7)))); }
     }
     let start=p.y+92+d.fields.len() as u32*g.row_h;
     for i in 0..d.choices.len().min(6) {
