@@ -1,10 +1,10 @@
 [1m[92m   Compiling[0m holonomy-x11 v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-x11)
-[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
-[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
 [1m[92m   Compiling[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
-[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
-[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
+[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
 [1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
 [1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
 [1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
 [1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
@@ -26,7 +26,7 @@
 [1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
 [1m[92m   Compiling[0m holonomy-secure v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-secure)
 [1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 14.90s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 15.73s
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy-5fce5060e0a23e01)
 
 running 54 tests
@@ -82,10 +82,10 @@ test manifest::word_at_a_time_tests::the_anchor_constant_matches_the_text_crates
 test manifest::tests::a_manifest_costs_eight_bytes_a_section ... ok
 test store::tests::a_resident_section_is_page_locked ... ok
 test manifest::tests::a_letter_is_one_section_update_and_a_nothing_is_unchanged ... ok
-test manifest::tests::a_keystroke_measures_three_sections_not_the_document ... ok
 test store::tests::a_new_store_holds_nothing_and_has_no_victim ... ok
+test manifest::tests::a_keystroke_measures_three_sections_not_the_document ... ok
 
-test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
 
 [1m[92m     Running[0m unittests src/main.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy-5c7983beb305b2d3)
 
@@ -101,14 +101,14 @@ test every_action_is_routed_or_accounted_for ... ok
 test every_action_has_a_name ... ok
 test every_wired_menu_item_carries_an_action ... ok
 test renaming_a_label_does_not_change_what_a_row_does ... ok
-test the_file_menu_rows_reach_their_actions ... ok
 test exporting_with_no_sinks_writes_nothing_and_is_not_an_error ... ok
 test the_toolbar_labels_are_borrows_not_allocations ... ok
 test the_two_dropdown_lists_agree ... ok
+test the_file_menu_rows_reach_their_actions ... ok
 test only_one_popup_is_open_at_a_time ... ok
 test a_dropdown_ticks_the_current_value_and_applies_a_new_one ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
 
 [1m[92m     Running[0m tests/armed_style.rs (target/x86_64-unknown-linux-musl/debug/deps/armed_style-a07cb9c4b2f62d72)
 
@@ -126,13 +126,13 @@ failures:
 
 ---- the_armed_toggle_fills_its_own_button_and_nothing_else stdout ----
 
-thread 'the_armed_toggle_fills_its_own_button_and_nothing_else' (6204) panicked at crates/holonomy/tests/armed_style.rs:512:5:
+thread 'the_armed_toggle_fills_its_own_button_and_nothing_else' (6373) panicked at crates/holonomy/tests/armed_style.rs:512:5:
 arming Bold changed 600 pixel(s) outside its own button, at [(881, 80), (882, 80), (883, 80), (884, 80), (885, 80), (886, 80), (887, 80), (888, 80), (889, 80), (890, 80), (891, 80), (881, 81), (882, 81), (883, 81), (884, 81), (885, 81), (886, 81), (887, 81), (888, 81), (889, 81), (890, 81), (891, 81), (892, 81), (893, 81), (881, 82), (882, 82), (883, 82), (884, 82), (885, 82), (886, 82), (887, 82), (888, 82), (889, 82), (890, 82), (891, 82), (892, 82), (893, 82), (894, 82), (881, 83), (882, 83), (883, 83), (884, 83), (885, 83), (886, 83), (887, 83), (888, 83), (889, 83), (890, 83), (891, 83), (892, 83), (893, 83), (894, 83), (881, 84), (882, 84), (883, 84), (884, 84), (885, 84), (886, 84), (887, 84), (888, 84), (889, 84), (890, 84), (891, 84), (892, 84), (893, 84), (894, 84), (895, 84), (881, 85), (882, 85), (883, 85), (884, 85), (885, 85), (886, 85), (887, 85), (888, 85), (889, 85), (890, 85), (891, 85), (892, 85), (893, 85), (894, 85), (895, 85), (881, 86), (882, 86), (883, 86), (884, 86), (885, 86), (886, 86), (887, 86), (888, 86), (889, 86), (890, 86), (891, 86), (892, 86), (893, 86), (894, 86), (895, 86), (881, 87), (882, 87), (883, 87), (884, 87), (885, 87), (886, 87), (887, 87), (888, 87), (889, 87), (890, 87), (891, 87), (892, 87), (893, 87), (894, 87), (895, 87), (896, 87), (881, 88), (882, 88), (883, 88), (884, 88), (885, 88), (886, 88), (887, 88), (888, 88), (889, 88), (890, 88), (891, 88), (892, 88), (893, 88), (894, 88), (895, 88), (896, 88), (881, 89), (882, 89), (883, 89), (884, 89), (885, 89), (886, 89), (887, 89), (888, 89), (889, 89), (890, 89), (891, 89), (892, 89), (893, 89), (894, 89), (895, 89), (896, 89), (881, 90), (882, 90), (883, 90), (884, 90), (885, 90), (886, 90), (887, 90), (888, 90), (889, 90), (890, 90), (891, 90), (892, 90), (893, 90), (894, 90), (895, 90), (896, 90), (881, 91), (882, 91), (883, 91), (884, 91), (885, 91), (886, 91), (887, 91), (888, 91), (889, 91), (890, 91), (891, 91), (892, 91), (893, 91), (894, 91), (895, 91), (896, 91), (881, 92), (882, 92), (883, 92), (884, 92), (885, 92), (886, 92), (887, 92), (888, 92), (889, 92), (890, 92), (891, 92), (892, 92), (893, 92), (894, 92), (895, 92), (896, 92), (881, 93), (882, 93), (883, 93), (884, 93), (885, 93), (886, 93), (887, 93), (888, 93), (889, 93), (890, 93), (891, 93), (892, 93), (893, 93), (894, 93), (895, 93), (896, 93), (882, 94), (883, 94), (884, 94), (885, 94), (886, 94), (887, 94), (888, 94), (889, 94), (890, 94), (891, 94), (892, 94), (893, 94), (894, 94), (895, 94), (896, 94), (882, 95), (883, 95), (884, 95), (885, 95), (886, 95), (887, 95), (888, 95), (889, 95), (890, 95), (891, 95), (892, 95), (893, 95), (894, 95), (895, 95), (896, 95), (882, 96), (883, 96), (884, 96), (885, 96), (886, 96), (887, 96), (888, 96), (889, 96), (890, 96), (891, 96), (892, 96), (893, 96), (894, 96), (895, 96), (896, 96), (882, 97), (883, 97), (884, 97), (885, 97), (886, 97), (887, 97), (888, 97), (889, 97), (890, 97), (891, 97), (892, 97), (893, 97), (894, 97), (895, 97), (896, 97), (882, 98), (883, 98), (884, 98), (885, 98), (886, 98), (887, 98), (888, 98), (889, 98), (890, 98), (891, 98), (892, 98), (893, 98), (894, 98), (895, 98), (896, 98), (881, 99), (882, 99), (883, 99), (884, 99), (885, 99), (886, 99), (887, 99), (888, 99), (889, 99), (890, 99), (891, 99), (892, 99), (893, 99), (894, 99), (895, 99), (896, 99), (881, 100), (882, 100), (883, 100), (884, 100), (885, 100), (886, 100), (887, 100), (888, 100), (889, 100), (890, 100), (891, 100), (892, 100), (893, 100), (894, 100), (895, 100), (896, 100), (882, 101), (883, 101), (884, 101), (885, 101), (886, 101), (887, 101), (888, 101), (889, 101), (890, 101), (891, 101), (892, 101), (893, 101), (894, 101), (895, 101), (896, 101), (882, 102), (883, 102), (884, 102), (885, 102), (886, 102), (887, 102), (888, 102), (889, 102), (890, 102), (891, 102), (892, 102), (893, 102), (894, 102), (895, 102), (896, 102), (882, 103), (883, 103), (884, 103), (885, 103), (886, 103), (887, 103), (888, 103), (889, 103), (890, 103), (891, 103), (892, 103), (893, 103), (894, 103), (895, 103), (896, 103), (882, 104), (883, 104), (884, 104), (885, 104), (886, 104), (887, 104), (888, 104), (889, 104), (890, 104), (891, 104), (892, 104), (893, 104), (894, 104), (895, 104), (896, 104), (882, 105), (883, 105), (884, 105), (885, 105), (886, 105), (887, 105), (888, 105), (889, 105), (890, 105), (891, 105), (892, 105), (893, 105), (894, 105), (895, 105), (896, 105), (881, 106), (882, 106), (883, 106), (884, 106), (885, 106), (886, 106), (887, 106), (888, 106), (889, 106), (890, 106), (891, 106), (892, 106), (893, 106), (894, 106), (895, 106), (896, 106), (881, 107), (882, 107), (883, 107), (884, 107), (885, 107), (886, 107), (887, 107), (888, 107), (889, 107), (890, 107), (891, 107), (892, 107), (893, 107), (894, 107), (895, 107), (896, 107), (881, 108), (882, 108), (883, 108), (884, 108), (885, 108), (886, 108), (887, 108), (888, 108), (889, 108), (890, 108), (891, 108), (892, 108), (893, 108), (894, 108), (895, 108), (896, 108), (881, 109), (882, 109), (883, 109), (884, 109), (885, 109), (886, 109), (887, 109), (888, 109), (889, 109), (890, 109), (891, 109), (892, 109), (893, 109), (894, 109), (895, 109), (896, 109), (881, 110), (882, 110), (883, 110), (884, 110), (885, 110), (886, 110), (887, 110), (888, 110), (889, 110), (890, 110), (891, 110), (892, 110), (893, 110), (894, 110), (895, 110), (896, 110), (881, 111), (882, 111), (883, 111), (884, 111), (885, 111), (886, 111), (887, 111), (888, 111), (889, 111), (890, 111), (891, 111), (892, 111), (893, 111), (894, 111), (895, 111), (896, 111), (881, 112), (882, 112), (883, 112), (884, 112), (885, 112), (886, 112), (887, 112), (888, 112), (889, 112), (890, 112), (891, 112), (892, 112), (893, 112), (894, 112), (895, 112), (896, 112), (881, 113), (882, 113), (883, 113), (884, 113), (885, 113), (886, 113), (887, 113), (888, 113), (889, 113), (890, 113), (891, 113), (892, 113), (893, 113), (894, 113), (895, 113), (881, 114), (882, 114), (883, 114), (884, 114), (885, 114), (886, 114), (887, 114), (888, 114), (889, 114), (890, 114), (891, 114), (892, 114), (893, 114), (894, 114), (895, 114), (881, 115), (882, 115), (883, 115), (884, 115), (885, 115), (886, 115), (887, 115), (888, 115), (889, 115), (890, 115), (891, 115), (892, 115), (893, 115), (894, 115), (895, 115), (881, 116), (882, 116), (883, 116), (884, 116), (885, 116), (886, 116), (887, 116), (888, 116), (889, 116), (890, 116), (891, 116), (892, 116), (893, 116), (894, 116), (881, 117), (882, 117), (883, 117), (884, 117), (885, 117), (886, 117), (887, 117), (888, 117), (889, 117), (890, 117), (891, 117), (892, 117), (893, 117), (894, 117), (881, 118), (882, 118), (883, 118), (884, 118), (885, 118), (886, 118), (887, 118), (888, 118), (889, 118), (890, 118), (891, 118), (892, 118), (893, 118), (881, 119), (882, 119), (883, 119), (884, 119), (885, 119), (886, 119), (887, 119), (888, 119), (889, 119), (890, 119), (891, 119)] -- the first Some((881, 80))
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- the_model_and_the_chrome_agree_after_every_transition stdout ----
 
-thread 'the_model_and_the_chrome_agree_after_every_transition' (6206) panicked at crates/holonomy/tests/armed_style.rs:302:5:
+thread 'the_model_and_the_chrome_agree_after_every_transition' (6375) panicked at crates/holonomy/tests/armed_style.rs:302:5:
 assertion `left == right` failed: the walk visited only [(true, false, false), (false, false, false), (false, true, false), (false, true, true), (true, true, true), (true, false, true)] -- all eight of (bold, italic, underline) combinations must be reachable, because the claim being checked is about three independent bits
   left: 6
  right: 8
@@ -142,7 +142,7 @@ failures:
     the_armed_toggle_fills_its_own_button_and_nothing_else
     the_model_and_the_chrome_agree_after_every_transition
 
-test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test armed_style`
 [1m[92m     Running[0m tests/atlas_plan.rs (target/x86_64-unknown-linux-musl/debug/deps/atlas_plan-e433da150d8364fd)
@@ -156,7 +156,7 @@ test a_refusal_names_the_numbers_and_the_flag ... ok
 test the_pair_boundary_is_where_the_documentation_says ... ok
 test every_legal_ppem_builds_an_atlas ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.36s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.48s
 
 [1m[92m     Running[0m tests/caret_column.rs (target/x86_64-unknown-linux-musl/debug/deps/caret_column-0036cdf5fdaa2088)
 
@@ -170,7 +170,7 @@ test a_session_opened_on_a_document_reconciles_its_caret ... ok
 test a_click_and_the_drawn_cell_agree_in_both_directions ... ok
 test a_paint_over_a_sparse_document_puts_the_caret_right ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.61s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.68s
 
 [1m[92m     Running[0m tests/caret_line_moves.rs (target/x86_64-unknown-linux-musl/debug/deps/caret_line_moves-8cb8196a0a058655)
 
@@ -187,39 +187,39 @@ test the_census_binary_exists_where_the_test_expects_it ... ok
 test a_drop_that_matches_nothing_is_refused_rather_than_measured ... ok
 test the_real_session_loop_also_completes_under_kill_process ... ok
 test the_census_leaves_real_artifacts_behind ... ok
-test the_census_detects_an_entry_the_session_needs ... ok
 test the_real_loop_needs_fewer_syscalls_than_the_table_grants ... ok
+test the_census_detects_an_entry_the_session_needs ... ok
 test the_real_session_loop_completes_under_the_shipped_allowlist ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
 
 [1m[92m     Running[0m tests/click_count.rs (target/x86_64-unknown-linux-musl/debug/deps/click_count-fd20a554daf9420b)
 
 running 8 tests
 test a_double_click_on_an_unreadable_line_places_a_caret ... ok
 test a_double_click_on_a_space_selects_nothing ... ok
-test a_double_click_selects_the_word_under_it ... ok
 test a_fourth_click_is_a_single_click_again ... ok
+test a_double_click_selects_the_word_under_it ... ok
 test three_separate_clicks_are_three_carets_and_no_selection ... ok
 test the_window_edge_is_inclusive ... ok
-test a_click_elsewhere_starts_a_new_gesture_however_fast ... ok
 test a_triple_click_selects_the_line_and_not_its_newline ... ok
+test a_click_elsewhere_starts_a_new_gesture_however_fast ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
 
 [1m[92m     Running[0m tests/clipboard.rs (target/x86_64-unknown-linux-musl/debug/deps/clipboard-be87b594f420d595)
 
 running 8 tests
-test copy_leaves_the_selection_alone ... ok
 test a_clipboard_key_with_nothing_selected_is_a_no_op_not_an_error ... ok
+test copy_leaves_the_selection_alone ... ok
 test a_paste_allocates_no_more_than_a_typed_character ... ok
 test cut_removes_the_selection_and_undo_restores_it_in_one_step ... ok
 test the_clipboard_is_reachable_without_any_platform_support ... ok
 test the_edit_menu_rows_reach_the_same_keys ... ok
-test an_oversized_paste_is_truncated_and_counted ... ok
 test paste_updates_the_word_count_and_lands_in_the_undo_stack ... ok
+test an_oversized_paste_is_truncated_and_counted ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 
 [1m[92m     Running[0m tests/commit_path.rs (target/x86_64-unknown-linux-musl/debug/deps/commit_path-55ec65a286ed8390)
 
@@ -230,7 +230,7 @@ test an_edit_survives_a_round_trip_through_the_file ... ok
 test a_commit_repairs_a_shift_the_disk_would_otherwise_keep ... ok
 test the_commit_reports_what_it_actually_wrote ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 83.72s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 89.13s
 
 [1m[92m     Running[0m tests/decorations.rs (target/x86_64-unknown-linux-musl/debug/deps/decorations-c7e11fab662327de)
 
@@ -240,8 +240,8 @@ test a_heading_draws_at_the_larger_atlas_size ... ok
 test a_headings_underline_is_where_a_headings_baseline_is ... FAILED
 test a_decoration_is_not_a_face ... ok
 test a_rule_follows_the_baseline_its_glyphs_were_drawn_on ... FAILED
-test a_struck_run_draws_a_rule_through_its_glyphs ... ok
 test a_subscript_moves_its_run_down_the_screen ... FAILED
+test a_struck_run_draws_a_rule_through_its_glyphs ... ok
 test a_superscript_moves_its_run_up_the_screen ... FAILED
 test an_underlined_run_draws_a_rule_below_its_glyphs ... FAILED
 test clearing_stops_at_the_end_of_the_last_selected_paragraph ... ok
@@ -254,35 +254,35 @@ failures:
 
 ---- a_heading_line_reserves_the_heading_s_height stdout ----
 
-thread 'a_heading_line_reserves_the_heading_s_height' (6296) panicked at crates/holonomy/tests/decorations.rs:797:5:
+thread 'a_heading_line_reserves_the_heading_s_height' (6461) panicked at crates/holonomy/tests/decorations.rs:797:5:
 **the heading's line is not taller than a body line**: 30 px against 30 px. `LineHeights::pitch` is `ChromeMetrics::cell_h`, so something has to publish the difference between the two atlas sizes and nothing does.
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- a_headings_underline_is_where_a_headings_baseline_is stdout ----
 
-thread 'a_headings_underline_is_where_a_headings_baseline_is' (6297) panicked at crates/holonomy/tests/decorations.rs:657:5:
+thread 'a_headings_underline_is_where_a_headings_baseline_is' (6462) panicked at crates/holonomy/tests/decorations.rs:657:5:
 **the rule must be below the heading's glyphs**: the heading's lowest ink is 316 and the \
          underlined one's is 316. A rule that came out at or above it was resolved against the body \
          size instead of the heading's, which puts it through the letters
 
 ---- a_rule_follows_the_baseline_its_glyphs_were_drawn_on stdout ----
 
-thread 'a_rule_follows_the_baseline_its_glyphs_were_drawn_on' (6298) panicked at crates/holonomy/tests/decorations.rs:739:5:
+thread 'a_rule_follows_the_baseline_its_glyphs_were_drawn_on' (6463) panicked at crates/holonomy/tests/decorations.rs:739:5:
 **the first word must be the raised one**: its ink starts at 199 and the flat word's at 199. If the shift did not happen, this gate is comparing two words that are the same and proves nothing about where their rules went.
 
 ---- a_subscript_moves_its_run_down_the_screen stdout ----
 
-thread 'a_subscript_moves_its_run_down_the_screen' (6300) panicked at crates/holonomy/tests/decorations.rs:348:5:
+thread 'a_subscript_moves_its_run_down_the_screen' (6465) panicked at crates/holonomy/tests/decorations.rs:348:5:
 **a subscript sinks**: the lowest ink was 273 and is 273
 
 ---- a_superscript_moves_its_run_up_the_screen stdout ----
 
-thread 'a_superscript_moves_its_run_up_the_screen' (6301) panicked at crates/holonomy/tests/decorations.rs:321:5:
+thread 'a_superscript_moves_its_run_up_the_screen' (6466) panicked at crates/holonomy/tests/decorations.rs:321:5:
 **a superscript rises**: the top of the ink was 199 and is 199, so the glyphs did not move up
 
 ---- an_underlined_run_draws_a_rule_below_its_glyphs stdout ----
 
-thread 'an_underlined_run_draws_a_rule_below_its_glyphs' (6302) panicked at crates/holonomy/tests/decorations.rs:227:5:
+thread 'an_underlined_run_draws_a_rule_below_its_glyphs' (6467) panicked at crates/holonomy/tests/decorations.rs:227:5:
 **the rule must be under the glyphs**: the lowest ink was 273 plain and is 273 underlined, \
          so no rule was drawn below the descenders
 
@@ -295,7 +295,7 @@ failures:
     a_superscript_moves_its_run_up_the_screen
     an_underlined_run_draws_a_rule_below_its_glyphs
 
-test result: FAILED. 8 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+test result: FAILED. 8 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test decorations`
 [1m[92m     Running[0m tests/desktop_documents.rs (target/x86_64-unknown-linux-musl/debug/deps/desktop_documents-2017116c4b1e7db9)
@@ -315,7 +315,7 @@ test the_two_path_rows_are_refused_under_the_seal ... ok
 test clicking_a_rail_row_switches_the_painted_document ... ok
 test the_rail_lists_every_document_in_order ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
 [1m[92m     Running[0m tests/edge_scroll.rs (target/x86_64-unknown-linux-musl/debug/deps/edge_scroll-9ca67c719a7070f5)
 
@@ -327,7 +327,7 @@ test the_selection_follows_the_scroll_not_the_row_that_left ... ok
 test scroll_is_per_motion_event_and_a_quiet_pointer_does_not_scroll ... ok
 test an_auto_scroll_accelerates_with_depth ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
 
 [1m[92m     Running[0m tests/event_wait.rs (target/x86_64-unknown-linux-musl/debug/deps/event_wait-871a3abd0b8e065c)
 
@@ -355,50 +355,50 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 [1m[92m     Running[0m tests/grid_vs_glyphs.rs (target/x86_64-unknown-linux-musl/debug/deps/grid_vs_glyphs-0f0a7911d29d0129)
 
 running 4 tests
-test cell_width_is_the_monospace_advance_it_claims_to_be ... ok
 test forty_identical_glyphs_fit_inside_forty_cells ... ok
-test the_caret_is_at_the_pen_and_not_where_the_grid_would_put_it ... ok
+test cell_width_is_the_monospace_advance_it_claims_to_be ... ok
 test the_error_changes_sign_with_the_letters ... ok
+test the_caret_is_at_the_pen_and_not_where_the_grid_would_put_it ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
 
 [1m[92m     Running[0m tests/live_keys.rs (target/x86_64-unknown-linux-musl/debug/deps/live_keys-7a2196cd5e69f8aa)
 
 running 9 tests
-test end_goes_to_the_end_of_the_carets_line_not_the_document ... ok
 test end_lands_after_the_last_character_not_on_the_next_line ... ok
 test end_on_a_final_line_without_a_newline_is_not_one_short ... ok
+test end_goes_to_the_end_of_the_carets_line_not_the_document ... ok
 test home_goes_to_the_start_of_the_carets_line_not_the_document ... ok
 test page_down_moves_the_caret_by_a_screenful ... ok
 test escape_dismisses_an_open_menu ... ok
-test repeated_page_downs_lose_no_line ... ok
 test the_fixture_does_not_hide_the_bug_it_tests_for ... ok
+test repeated_page_downs_lose_no_line ... ok
 test the_shift_variants_agree_with_the_ones_they_extend ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 
 [1m[92m     Running[0m tests/paragraph_formatting.rs (target/x86_64-unknown-linux-musl/debug/deps/paragraph_formatting-9aeec15cf3d52cde)
 
 running 11 tests
 test colour_and_inline_styles_do_not_erase_each_other ... ok
-test empty_paragraph_preset_affects_new_text ... ok
 test armed_bold_and_colour_are_both_applied ... ok
+test empty_paragraph_preset_affects_new_text ... ok
 test enter_at_the_end_of_a_heading_starts_normal_text ... ok
 test heading_applies_to_the_current_paragraph_and_survives_payload_roundtrip ... ok
 test bold_toolbar_button_formats_the_selection ... ok
 test selection_styles_whole_paragraphs_without_capturing_the_next_one ... ok
 test inline_toggle_does_not_discard_an_armed_heading ... ok
-test undo_and_redo_formatting_leave_text_intact ... ok
 test viewing_mode_refuses_paragraph_formatting ... ok
+test undo_and_redo_formatting_leave_text_intact ... ok
 test keyboard_bold_uses_the_same_selection_and_undo_path ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 
 [1m[92m     Running[0m tests/pointer.rs (target/x86_64-unknown-linux-musl/debug/deps/pointer-5e0b1bc4525cb073)
 
 running 12 tests
-test a_button_with_nothing_behind_it_is_counted_not_faked ... ok
 test a_click_on_a_menu_heading_opens_that_menu ... ok
+test a_button_with_nothing_behind_it_is_counted_not_faked ... ok
 test a_click_on_a_popup_row_dismisses_the_menu ... ok
 test an_open_menu_swallows_a_click_on_the_toolbar_below_it ... ok
 test a_second_click_on_the_same_heading_closes_it ... ok
@@ -414,7 +414,7 @@ failures:
 
 ---- every_tool_that_has_a_command_is_routed_through_it stdout ----
 
-thread 'every_tool_that_has_a_command_is_routed_through_it' (6374) panicked at crates/holonomy/tests/pointer.rs:722:9:
+thread 'every_tool_that_has_a_command_is_routed_through_it' (6540) panicked at crates/holonomy/tests/pointer.rs:722:9:
 assertion `left == right` failed: link must fire a command, be counted inert, toggle the sidebar, open a dropdown, or change the chrome -- exactly once. Got 0 fired, 0 inert, 0 toggled, 0 opened, 0 chrome.
   left: 0
  right: 1
@@ -422,7 +422,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- bold_and_italic_left_the_inert_set_and_nothing_else_did stdout ----
 
-thread 'bold_and_italic_left_the_inert_set_and_nothing_else_did' (6371) panicked at crates/holonomy/tests/pointer.rs:474:5:
+thread 'bold_and_italic_left_the_inert_set_and_nothing_else_did' (6537) panicked at crates/holonomy/tests/pointer.rs:474:5:
 assertion `left == right` failed: **and the tools that change chrome state are exactly these, in toolbar order.** Bold, Italic and Underline arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty menu. A seventh would mean something else started claiming to work without a decision.
   left: ["print", "size-down", "size-up", "bold", "italic", "underline"]
  right: ["print", "size-down", "size-up", "bold", "italic", "underline", "overflow"]
@@ -432,7 +432,7 @@ failures:
     bold_and_italic_left_the_inert_set_and_nothing_else_did
     every_tool_that_has_a_command_is_routed_through_it
 
-test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test pointer`
 [1m[92m     Running[0m tests/release_artifact.rs (target/x86_64-unknown-linux-musl/debug/deps/release_artifact-e843f22851e679cf)
@@ -443,7 +443,7 @@ test the_release_binary_is_under_the_ceiling ... ok
 test the_binary_is_static_pie ... ok
 test the_default_release_binary_carries_no_x11_client ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
 
 [1m[92m     Running[0m tests/selection.rs (target/x86_64-unknown-linux-musl/debug/deps/selection-1c259897c5ab15ae)
 
@@ -456,8 +456,8 @@ test a_selection_is_an_anchor_and_a_caret ... ok
 test shift_arrow_grows_the_selection_a_character_at_a_time ... ok
 test a_drag_from_press_to_motion_selects_a_range ... ok
 test a_selection_draws_a_highlight_where_its_bytes_are ... ok
-test typing_replaces_the_selection_rather_than_inserting_into_it ... ok
 test the_newline_cell_is_highlighted_on_purpose ... ok
+test typing_replaces_the_selection_rather_than_inserting_into_it ... ok
 test shift_click_grows_the_selection_rather_than_replacing_it ... ok
 test a_selection_highlight_stops_at_the_end_of_its_bytes ... ok
 
@@ -477,15 +477,15 @@ test ctrl_t_then_tab_through_a_three_by_three_appends_a_row ... ok
 test shift_tab_walks_back_and_stops_at_the_first_cell ... ok
 test a_full_session_types_edits_undoes_exports_and_leaves_the_container_intact ... ok
 test tab_outside_a_table_indents_and_shift_tab_takes_it_back ... ok
-test the_caret_is_the_only_thing_that_moves_between_frames ... ok
 test a_scripted_session_produces_a_byte_identical_frame_every_time ... ok
+test the_caret_is_the_only_thing_that_moves_between_frames ... ok
 test typing_in_a_cell_damages_that_cell_and_not_the_table ... ok
 
 failures:
 
 ---- a_rendered_table_puts_every_border_on_the_cell_grid_exactly stdout ----
 
-thread 'a_rendered_table_puts_every_border_on_the_cell_grid_exactly' (6397) panicked at crates/holonomy/tests/session.rs:951:9:
+thread 'a_rendered_table_puts_every_border_on_the_cell_grid_exactly' (6564) panicked at crates/holonomy/tests/session.rs:951:9:
 assertion `left == right` failed: vertical border 0 is at x=420, which is not a multiple of the 8 px cell
   left: 4
  right: 0
@@ -495,27 +495,27 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     a_rendered_table_puts_every_border_on_the_cell_grid_exactly
 
-test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test session`
 [1m[92m     Running[0m tests/session_body_text.rs (target/x86_64-unknown-linux-musl/debug/deps/session_body_text-29742393a3a4d85e)
 
 running 13 tests
 test a_glyph_advances_by_its_own_width_not_the_grid ... ok
-test a_crlf_line_end_does_not_draw_a_carriage_return ... ok
 test a_line_longer_than_the_measure_is_cut_and_the_remainder_is_not_drawn ... ok
+test a_crlf_line_end_does_not_draw_a_carriage_return ... ok
 test a_multibyte_character_is_never_split_across_the_measure ... ok
 test a_document_frame_is_distinguishable_from_a_blank_page ... ok
 test each_line_becomes_one_run_at_its_own_row ... ok
-test scrolling_moves_the_ink_to_the_row_the_geometry_says ... ok
 test body_text_lands_in_the_text_column ... ok
 test a_space_advances_the_pen_rather_than_stacking_glyphs ... ok
+test scrolling_moves_the_ink_to_the_row_the_geometry_says ... ok
 test the_documents_own_words_are_on_the_page ... ok
-test the_body_text_buffer_is_a_page_not_a_document ... ok
 test the_body_text_emitter_reads_one_page_and_not_the_document ... ok
+test the_body_text_buffer_is_a_page_not_a_document ... ok
 test a_paint_over_a_big_document_costs_what_a_small_one_does ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
 
 [1m[92m     Running[0m tests/session_damage.rs (target/x86_64-unknown-linux-musl/debug/deps/session_damage-3c7faf38764eea3f)
 
@@ -533,7 +533,7 @@ test the_sidebar_flag_and_its_reservation_agree_after_every_change ... ok
 test typing_repaints_the_status_bar_and_a_hover_does_not ... ok
 test the_word_count_on_the_status_bar_counts_the_document ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
 
 [1m[92m     Running[0m tests/session_image.rs (target/x86_64-unknown-linux-musl/debug/deps/session_image-94165fa99501ba04)
 
@@ -541,8 +541,8 @@ running 15 tests
 test a_bare_i_is_still_the_letter_i ... ok
 test a_paint_with_no_raster_source_counts_every_image_as_missing ... ok
 test a_transparent_pixel_does_not_paint_over_the_page ... ok
-test a_paint_decodes_the_image_to_page_column_width_and_not_to_native ... ok
 test a_node_image_is_emitted_and_the_painter_blits_it ... ok
+test a_paint_decodes_the_image_to_page_column_width_and_not_to_native ... ok
 test line_heights_merge_two_blocks_on_one_line_rather_than_overwriting ... ok
 test the_anchor_is_a_uffc_and_the_catalog_holds_the_png ... ok
 test ctrl_i_reaches_the_image_code_through_the_real_keymap ... ok
@@ -550,24 +550,24 @@ test an_image_survives_a_scrolling_repaint_with_its_pixels_intact ... ok
 test the_painters_image_counters_are_what_a_session_frame_records ... ok
 test the_whole_payload_round_trips_with_an_image_in_it ... ok
 test an_image_outside_the_window_is_evicted_and_the_budget_holds ... ok
-test the_image_lands_at_the_pixels_the_layout_said_it_would ... ok
 test the_raster_is_a_resample_and_not_a_decimation ... ok
+test the_image_lands_at_the_pixels_the_layout_said_it_would ... ok
 test three_images_at_the_column_width_all_fit_in_the_budget ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s
 
 [1m[92m     Running[0m tests/session_join.rs (target/x86_64-unknown-linux-musl/debug/deps/session_join-bf4415e39ed22273)
 
 running 7 tests
-test a_missing_section_is_opaque_rather_than_specific ... ok
-test leaf_and_section_boundaries_do_not_tile_and_that_is_pinned ... ok
 test a_leaf_straddling_a_section_boundary_is_correct ... ok
-test the_fixture_is_big_enough_to_exercise_more_than_one_section ... ok
+test leaf_and_section_boundaries_do_not_tile_and_that_is_pinned ... ok
 test a_fully_evicted_rope_reads_the_document_back_out_of_a_container ... ok
+test a_missing_section_is_opaque_rather_than_specific ... ok
+test the_fixture_is_big_enough_to_exercise_more_than_one_section ... ok
 test fetching_reuses_its_buffer ... ok
 test reading_a_sparse_rope_keeps_residency_bounded ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.62s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 72.16s
 
 [1m[92m     Running[0m tests/session_latency.rs (target/x86_64-unknown-linux-musl/debug/deps/session_latency-fa7997966e8c5150)
 
@@ -576,7 +576,7 @@ test print_where_a_keystrokes_time_goes ... ignored, diagnostic; prints where a 
 test an_edit_at_document_scale_stays_within_the_keystroke_budget ... ok
 test a_paint_does_not_get_more_expensive_as_the_document_does ... ok
 
-test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.09s
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.14s
 
 [1m[92m     Running[0m tests/session_manifest.rs (target/x86_64-unknown-linux-musl/debug/deps/session_manifest-ee35259fcd41bdff)
 
@@ -591,7 +591,7 @@ test the_manifest_agrees_with_a_scan_of_the_document_it_describes ... ok
 test the_manifest_costs_eight_bytes_a_section_against_the_document ... ok
 test no_keystroke_rebuilds_the_manifest_including_a_newline ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
 
 [1m[92m     Running[0m tests/session_math.rs (target/x86_64-unknown-linux-musl/debug/deps/session_math-a7b71ae5a7751144)
 
@@ -601,40 +601,40 @@ test a_formula_taller_than_a_line_pushes_the_lines_below_it_down ... ok
 test a_compiled_fraction_draws_its_bar_as_a_procedural_fill ... ok
 test a_glyph_wider_than_the_text_cell_is_blitted_at_its_own_width ... ok
 test the_keymap_binds_ctrl_m_to_insert_math ... ok
-test the_session_reports_the_latex_of_the_formula_the_caret_is_in ... ok
-test a_formula_compiles_only_when_the_caret_is_outside_it ... ok
 test ctrl_m_inserts_a_formula_with_the_caret_inside_it ... ok
+test a_formula_compiles_only_when_the_caret_is_outside_it ... ok
+test the_session_reports_the_latex_of_the_formula_the_caret_is_in ... ok
 test an_unparseable_formula_falls_back_to_raw_latex_and_says_so ... ok
 test typing_inside_a_formula_does_not_reallocate_the_run_buffer ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
 [1m[92m     Running[0m tests/session_no_alloc.rs (target/x86_64-unknown-linux-musl/debug/deps/session_no_alloc-5420d0754b2d42c1)
 
 running 7 tests
 test print_one_keystrokes_allocation_sizes ... ignored, diagnostic; prints allocation sizes for one keystroke
 test alloc_probe_child ... ok
+test the_probe_typed_every_key_and_the_document_grew ... ok
 test the_paint_path_still_allocates_and_phase_12_owns_that ... ok
 test the_chunked_word_count_survives_a_chunk_boundary ... ok
-test the_probe_typed_every_key_and_the_document_grew ... ok
-test typing_through_a_session_allocates_nothing ... ok
 test the_line_geometry_tracks_the_document_across_every_kind_of_edit ... ok
+test typing_through_a_session_allocates_nothing ... ok
 
-test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.07s
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.18s
 
 [1m[92m     Running[0m tests/session_open_document.rs (target/x86_64-unknown-linux-musl/debug/deps/session_open_document-1ca2eed7e6094a09)
 
 running 8 tests
+test text_past_the_first_window_is_drawn_not_counted ... ok
 test a_wrong_passphrase_opens_nothing ... ok
 test an_opened_document_paints_its_text ... ok
-test text_past_the_first_window_is_drawn_not_counted ... ok
 test residency_is_a_window_and_not_the_document ... ok
 test the_opened_document_is_the_containers_text ... ok
 test the_first_window_is_smaller_than_the_document ... ok
 test the_last_page_paints_too ... ok
 test the_opened_document_knows_its_whole_length_before_reading ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 85.18s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 93.25s
 
 [1m[92m     Running[0m tests/session_rss.rs (target/x86_64-unknown-linux-musl/debug/deps/session_rss-8026740af20da969)
 
@@ -646,7 +646,7 @@ test the_document_costs_its_bytes_plus_seven_percent_of_lock ... ok
 test every_consumer_of_the_memory_budget_is_accounted_for ... ok
 test the_line_geometry_costs_what_phase_11_budgeted ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.38s
 
 [1m[92m     Running[0m tests/session_rss_sparse.rs (target/x86_64-unknown-linux-musl/debug/deps/session_rss_sparse-81f2940efc05f6e4)
 
@@ -658,33 +658,33 @@ test the_sparse_path_is_cheaper_than_the_resident_path ... ok
 test the_maximum_document_opens_through_the_sparse_path ... ok
 test sparse_rss_is_inside_the_sixteen_mib_budget ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.10s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.32s
 
 [1m[92m     Running[0m tests/session_save.rs (target/x86_64-unknown-linux-musl/debug/deps/session_save-192bbee4f4675d9f)
 
 running 7 tests
 test editing_marks_the_document_unsaved_and_saving_clears_it ... ok
-test a_failed_commit_leaves_the_document_marked_unsaved ... ok
 test saving_a_session_with_no_container_is_not_an_error ... ok
-test a_second_save_of_an_unchanged_document_leaves_the_bytes_alone ... ok
+test a_failed_commit_leaves_the_document_marked_unsaved ... ok
 test ctrl_s_writes_the_edited_document_to_the_container ... ok
+test a_second_save_of_an_unchanged_document_leaves_the_bytes_alone ... ok
 test the_file_menu_save_row_saves_like_the_key ... ok
 test the_driver_saves_unsaved_work_before_it_exports ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 83.26s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 85.64s
 
 [1m[92m     Running[0m tests/session_store.rs (target/x86_64-unknown-linux-musl/debug/deps/session_store-23a1c6cb6b6be910)
 
 running 7 tests
-test a_section_already_resident_is_not_read_again ... ok
 test a_budget_of_zero_holds_nothing_and_still_returns_bytes ... ok
+test a_section_already_resident_is_not_read_again ... ok
 test every_eviction_released_memory ... ok
 test a_document_far_larger_than_the_budget_reads_correctly ... ok
 test evict_all_empties_the_store_immediately ... ok
 test the_victim_is_the_least_recently_used_section ... ok
 test the_resident_set_never_exceeds_its_budget ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.05s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 82.58s
 
 [1m[92m     Running[0m tests/span_query.rs (target/x86_64-unknown-linux-musl/debug/deps/span_query-6127adb60013564a)
 
@@ -694,7 +694,7 @@ test the_query_count_does_not_grow_with_the_page ... ok
 test one_span_query_serves_the_whole_page ... ok
 test a_styled_line_past_the_first_still_draws_bold ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
 
 [1m[92m     Running[0m tests/studio_sample.rs (target/x86_64-unknown-linux-musl/debug/deps/studio_sample-1b3de12e10ee8eed)
 
@@ -709,13 +709,13 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 7 tests
 test an_unstyled_document_takes_the_single_run_path ... ok
 test a_styled_run_in_the_middle_keeps_the_tail_after_it ... ok
-test every_styled_byte_was_drawn_in_the_bold_face ... ok
 test italic_resolves_to_a_different_atlas_style_than_bold ... ok
-test runs_are_positioned_by_the_pen_not_by_bytes ... ok
+test every_styled_byte_was_drawn_in_the_bold_face ... ok
 test only_the_styled_row_changes ... ok
+test runs_are_positioned_by_the_pen_not_by_bytes ... ok
 test the_plain_bytes_of_a_styled_row_are_unchanged ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
 
 [1m[92m     Running[0m tests/text_colour.rs (target/x86_64-unknown-linux-musl/debug/deps/text_colour-2e844186dd0c27a8)
 
@@ -726,18 +726,18 @@ test a_repaint_is_idempotent ... ok
 test a_colour_is_taken_back_by_one_undo ... ok
 test an_uncoloured_document_is_unchanged_by_a_colour_nobody_asked_for ... ok
 test a_run_boundary_does_not_move_the_text_after_it ... ok
-test two_colours_on_one_line_are_two_runs_and_two_colours ... ok
 test the_colour_lands_on_the_run_and_not_on_its_neighbours ... ok
+test two_colours_on_one_line_are_two_runs_and_two_colours ... ok
 test typing_into_an_empty_document_puts_ink_on_the_page ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
 
 [1m[92m     Running[0m tests/toolbar_wiring.rs (target/x86_64-unknown-linux-musl/debug/deps/toolbar_wiring-997b64c913201788)
 
 running 9 tests
 test an_out_of_range_mode_index_falls_back ... ok
-test the_overflow_menu_lists_the_tools_that_did_not_fit ... ok
 test an_overflow_button_with_nothing_hidden_opens_nothing ... FAILED
+test the_overflow_menu_lists_the_tools_that_did_not_fit ... ok
 test the_mode_button_opens_a_two_row_menu ... ok
 test viewing_mode_refuses_every_edit_and_counts_it ... ok
 test the_size_buttons_clamp_rather_than_wrapping ... ok
@@ -749,13 +749,13 @@ failures:
 
 ---- an_overflow_button_with_nothing_hidden_opens_nothing stdout ----
 
-thread 'an_overflow_button_with_nothing_hidden_opens_nothing' (6682) panicked at crates/holonomy/tests/toolbar_wiring.rs:344:5:
+thread 'an_overflow_button_with_nothing_hidden_opens_nothing' (6903) panicked at crates/holonomy/tests/toolbar_wiring.rs:344:5:
 **a 1,280 px panel hides nothing**, or this gate is measuring nothing
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- every_tool_that_is_not_wired_is_one_of_the_six stdout ----
 
-thread 'every_tool_that_is_not_wired_is_one_of_the_six' (6683) panicked at crates/holonomy/tests/toolbar_wiring.rs:218:5:
+thread 'every_tool_that_is_not_wired_is_one_of_the_six' (6904) panicked at crates/holonomy/tests/toolbar_wiring.rs:218:5:
 assertion `left == right` failed: **["search", "spellcheck", "paint-format", "font-size", "highlight"] are inert, and the list is ["search", "spellcheck", "paint-format", "font-size", "highlight", "link"].** Part 39 said ten; part 44 wired SizeUp, SizeDown, Overflow and Mode; the count went eight -> seven when `Comment` was removed rather than wired, and seven -> six when `Underline` was. A tool that has started working and is still named here is a gate asserting a defect is present, which is worse than no gate at all.
   left: ["search", "spellcheck", "paint-format", "font-size", "highlight"]
  right: ["search", "spellcheck", "paint-format", "font-size", "highlight", "link"]
@@ -787,17 +787,17 @@ test find_and_replace_all_are_bounded_and_undoable ... ok
 test alignment_roundtrips_and_does_not_erase_inline_style ... ok
 test lists_toggle_and_continue ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
 
 [1m[92m     Running[0m tests/wordcraft_ribbon.rs (target/x86_64-unknown-linux-musl/debug/deps/wordcraft_ribbon-207c18ab30503e3a)
 
 running 8 tests
 test narrow_ribbon_overflows_instead_of_drawing_dead_buttons ... ok
-test every_group_caption_is_inside_the_ribbon ... ok
 test every_ribbon_label_fits_inside_its_button ... ok
 test ribbon_tabs_do_not_touch_and_never_clip_their_labels ... ok
-test the_quick_access_row_fits_its_labels ... ok
 test no_two_ribbon_buttons_overlap ... ok
+test every_group_caption_is_inside_the_ribbon ... ok
+test the_quick_access_row_fits_its_labels ... ok
 test the_home_tab_fits_the_window_the_product_opens ... ok
 test ribbon_buttons_and_hits_share_geometry ... ok
 
@@ -809,7 +809,7 @@ running 2 tests
 test the_record_does_repair_what_write_back_cannot ... ok
 test write_back_cannot_repair_a_shift ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.60s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.08s
 
 [1m[92m     Running[0m tests/zoom.rs (target/x86_64-unknown-linux-musl/debug/deps/zoom-597ebcced5be5dd9)
 
@@ -817,11 +817,11 @@ running 10 tests
 test a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped ... ok
 test the_page_and_its_layout_do_depend_on_the_zoom ... FAILED
 test the_row_pitch_follows_the_zoom_and_not_the_tallest_size ... ok
-test the_page_is_not_pixel_identical_across_a_zoom ... ok
 test the_zoom_keys_are_decoded_and_dropped ... ok
+test the_page_is_not_pixel_identical_across_a_zoom ... ok
 test the_zoom_label_follows_the_number ... ok
-test zoom_round_trips_without_growing_the_chrome ... ok
 test the_type_grows_when_the_zoom_grows ... ok
+test zoom_round_trips_without_growing_the_chrome ... ok
 test the_zoom_label_fits_its_button_at_both_ends_of_the_clamp ... ok
 test an_image_is_not_resampled_by_the_zoom ... ok
 
@@ -829,7 +829,7 @@ failures:
 
 ---- the_page_and_its_layout_do_depend_on_the_zoom stdout ----
 
-thread 'the_page_and_its_layout_do_depend_on_the_zoom' (6713) panicked at crates/holonomy/tests/zoom.rs:243:5:
+thread 'the_page_and_its_layout_do_depend_on_the_zoom' (6943) panicked at crates/holonomy/tests/zoom.rs:243:5:
 assertion `left == right` failed: **and both pages keep the same left edge** -- 364 and 340. The Plan chrome keeps the sheet a fixed gutter past the document-tabs rail, so a wider page grows to the right.
   left: 364
  right: 340
@@ -839,7 +839,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     the_page_and_its_layout_do_depend_on_the_zoom
 
-test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test zoom`
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_assets-9ce2606c2315d043)
@@ -916,15 +916,15 @@ test skyline::tests::fit_and_occupy_agree ... ok
 test atlas::tests::atlas_fits_two_sizes ... ok
 test skyline::tests::invariants_hold_under_a_long_packing_run ... ok
 
-test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
 
 [1m[92m     Running[0m tests/glyph_pad.rs (target/x86_64-unknown-linux-musl/debug/deps/glyph_pad-5ae14b27284ee036)
 
 running 2 tests
-test a_glyphs_ink_sits_near_the_middle_of_its_cell ... ok
 test no_glyphs_ink_runs_into_the_last_row_of_its_own_cell ... ok
+test a_glyphs_ink_sits_near_the_middle_of_its_cell ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
 
 [1m[92m     Running[0m tests/phase4_gate.rs (target/x86_64-unknown-linux-musl/debug/deps/phase4_gate-33831f5cc87e377d)
 
@@ -948,7 +948,7 @@ test no_font_outline_survives_the_one_time_pass ... ok
 test rasterisation_is_deterministic ... ok
 test boot_to_ready_is_under_the_budget ... ok
 
-test result: ok. 17 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.16s
+test result: ok. 17 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.23s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_container-c25dd8d77f725421)
 
@@ -960,10 +960,10 @@ test aead::tests::a_chunk_moved_to_another_index_does_not_open ... ok
 test aead::tests::matches_an_independent_vector ... ok
 test aead::tests::an_identical_rewrite_still_moves_the_nonce ... ok
 test aead::tests::a_re_seal_of_one_index_does_not_reuse_the_nonce ... ok
-test aead::tests::any_single_bit_flip_is_detected ... ok
-test aead::tests::matches_an_independent_vector_at_index_five ... ok
 test aead::tests::nonce_derivation_is_as_documented ... ok
+test aead::tests::any_single_bit_flip_is_detected ... ok
 test aead::tests::over_long_plaintext_is_refused ... ok
+test aead::tests::matches_an_independent_vector_at_index_five ... ok
 test aead::tests::no_two_chunk_indices_share_a_nonce ... ok
 test aead::tests::rewriting_the_predecessor_tag_fails_to_open ... ok
 test aead::tests::unfilled_slot_bytes_are_not_zero ... ok
@@ -976,7 +976,7 @@ test chaff::tests::debug_redacts_the_key ... ok
 test chaff::tests::different_keys_give_different_bytes ... ok
 test chaff::tests::fill_is_deterministic ... ok
 test aead::tests::wrong_key_fails_ambiguously ... ok
-test aead::tests::wrong_nonce_root_fails ... ok
+test chaff::tests::fill_overwrites_rather_than_xors ... ok
 test chaff::tests::matches_the_independent_reference_at_several_offsets ... ok
 test chaff::tests::matches_the_independent_reference_at_the_last_page ... ok
 test chaff::tests::partial_fills_agree_with_one_big_fill ... ok
@@ -988,7 +988,6 @@ test chaff::tests::unaligned_offsets_are_rejected ... ok
 test frame::tests::a_frame_from_a_different_container_is_refused ... ok
 test frame::tests::a_future_version_is_refused_rather_than_guessed_at ... ok
 test frame::tests::a_non_utf8_title_is_refused ... ok
-test chaff::tests::fill_overwrites_rather_than_xors ... ok
 test frame::tests::a_truncated_buffer_is_refused ... ok
 test frame::tests::an_over_long_title_is_refused_on_encode ... ok
 test frame::tests::bad_magic_is_rejected ... ok
@@ -1000,6 +999,7 @@ test frame::tests::nonzero_reserved_bytes_are_refused ... ok
 test frame::tests::round_trips ... ok
 test frame::tests::round_trips_with_kdf_params_and_a_unicode_title ... ok
 test frame::tests::title_cap_boundary ... ok
+test aead::tests::wrong_nonce_root_fails ... ok
 test chaff::tests::keystream_looks_uniform ... ok
 test aead::tests::seal_then_open_round_trips ... ok
 test gate::a_flipped_bit_in_the_payload_is_detected ... ok
@@ -1007,17 +1007,18 @@ test gate::a_container_opens_with_its_own_vdf_count_and_not_the_callers ... ok
 test gate::a_container_without_a_recorded_vdf_count_falls_back_to_the_callers ... ok
 test gate::a_second_passphrase_resolves_a_different_offset ... ok
 test gate::debug_redacts_the_root ... ok
-test gate::a_wrong_passphrase_is_rejected ... ok
 test gate::an_empty_document_is_one_chunk ... ok
+test gate::a_wrong_passphrase_is_rejected ... ok
 test gate::duress::an_overlapping_decoy_is_refused_rather_than_merged ... ok
 test gate::create_write_read_round_trip ... ok
 test gate::duress::a_duress_passphrase_mounts_the_decoy ... ok
 test gate::opening_a_missing_file_does_not_create_it ... ok
 test gate::opening_a_non_container_fails ... ok
 test gate::duress::a_duress_payload_does_not_change_the_container_size ... ok
-test gate::duress::neither_passphrase_reads_the_others_document ... ok
 test gate::duress::writing_the_decoy_changes_no_bit_at_the_primary_offset ... ok
+test gate::duress::neither_passphrase_reads_the_others_document ... ok
 test gate::the_region_before_omega_is_chaff_and_the_payload_is_not ... ok
+test gate::the_container_passes_the_entropy_gate has been running for over 60 seconds
 test gate::the_container_passes_the_entropy_gate ... ok
 test gate::the_document_can_grow_and_shrink has been running for over 60 seconds
 test gate::the_file_is_exactly_128_mib_whatever_the_content has been running for over 60 seconds
@@ -1031,7 +1032,7 @@ test io::tests::debug_does_not_dump_contents ... ok
 test io::tests::direct_write_then_read ... ok
 test io::tests::open_rejects_a_wrong_sized_file ... ok
 test io::tests::unaligned_offsets_are_refused_by_name ... ok
-test gate::the_salt_is_at_fixed_offset_zero ... ok
+test io::tests::whole_container_can_be_written_and_verified ... ok
 test layout::tests::chunk_offsets_are_contiguous_and_in_range ... ok
 test layout::tests::chunk_slot_carries_its_own_tag ... ok
 test layout::tests::chunks_for_accounts_for_the_master_frame ... ok
@@ -1072,11 +1073,11 @@ test sp800_22::tests::structured_data_is_rejected ... ok
 test sp800_22::tests::the_entropy_floor_is_valid_at_the_container_size ... ok
 test sp800_22::tests::the_forward_and_reverse_cusums_are_different_statistics ... ok
 test sp800_22::tests::the_monte_carlo_region_covers_two_pi ... ok
-test io::tests::whole_container_can_be_written_and_verified ... ok
+test gate::the_salt_is_at_fixed_offset_zero ... ok
 test gate::the_title_round_trips ... ok
 test gate::the_file_is_exactly_128_mib_whatever_the_content ... ok
 
-test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 255.30s
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 291.28s
 
 [1m[92m     Running[0m tests/adopt.rs (target/x86_64-unknown-linux-musl/debug/deps/adopt-b0fa605ff47fa272)
 
@@ -1085,27 +1086,27 @@ test a_container_that_asks_for_an_absurd_vdf_count_is_refused ... ok
 test adopt_still_detects_a_flipped_bit ... ok
 test create_refuses_an_absurd_vdf_count ... ok
 test open_is_a_delegate_to_adopt ... ok
-test adopt_and_open_read_the_same_document ... ok
 test adopt_still_refuses_a_wrong_passphrase ... ok
+test adopt_and_open_read_the_same_document ... ok
 test adopt_works_on_a_descriptor_from_create_or_open ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.47s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 68.75s
 
 [1m[92m     Running[0m tests/chunk_read.rs (target/x86_64-unknown-linux-musl/debug/deps/chunk_read-6d29136e7bc3d098)
 
 running 10 tests
+test chunks_read_the_same_in_any_order ... ok
 test an_index_past_the_end_is_refused_rather_than_guessed ... ok
 test chunk_content_offset_is_the_offset_chunks_are_read_at ... ok
-test chunks_read_the_same_in_any_order ... ok
 test a_windowed_walk_allocates_one_chunk_not_the_document ... ok
 test every_chunk_reads_back_byte_exact ... ok
 test growing_a_document_across_a_chunk_boundary_saves ... ok
-test the_formats_maximum_document_is_reachable_chunk_by_chunk ... ok
 test the_first_payload_byte_is_where_the_frame_says_it_is ... ok
+test the_formats_maximum_document_is_reachable_chunk_by_chunk ... ok
 test the_master_frame_is_not_readable_as_content ... ok
 test the_last_chunk_is_short_and_says_so ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 104.49s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 119.75s
 
 [1m[92m     Running[0m tests/commit_then_read.rs (target/x86_64-unknown-linux-musl/debug/deps/commit_then_read-23c56083c42f2f24)
 
@@ -1121,7 +1122,7 @@ test shrinking_re_chaffs_the_freed_tail ... ok
 test a_fresh_handle_still_sees_the_committed_plaintext ... ok
 test two_commits_with_a_read_between_stay_plaintext ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 58.02s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 60.49s
 
 [1m[92m     Running[0m tests/resident_memory.rs (target/x86_64-unknown-linux-musl/debug/deps/resident_memory-d0a503ecb2731d72)
 
@@ -1132,7 +1133,7 @@ test the_allocator_is_actually_installed ... ok
 test the_container_on_disk_is_128_mib has been running for over 60 seconds
 test the_container_on_disk_is_128_mib ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 84.67s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 84.78s
 
 [1m[92m     Running[0m tests/write_through_cost.rs (target/x86_64-unknown-linux-musl/debug/deps/write_through_cost-3c13ccd904d9b22b)
 
@@ -1151,21 +1152,21 @@ test bignum::tests::add_and_sub_are_inverse ... ok
 test bignum::tests::le_bytes_roundtrip ... ok
 test bignum::tests::hex_roundtrips ... ok
 test bignum::tests::mont_n0inv_is_the_negated_inverse ... ok
-test bignum::tests::gcd_matches_python ... ok
 test bignum::tests::mont_r2_and_n0inv_match_python ... ok
+test bignum::tests::gcd_matches_python ... ok
 test bignum::tests::montgomery_product_matches_python ... ok
 test bignum::tests::montgomery_roundtrips ... ok
 test bignum::tests::mod_u64_agrees_with_rem ... ok
-test bignum::tests::rem_matches_python ... ok
 test bignum::tests::pow_mod_matches_python ... ok
-test envelope::tests::argon2_parameters_are_the_measured_ones ... ok
+test bignum::tests::rem_matches_python ... ok
 test bignum::tests::shl_and_shr_agree_with_the_single_bit_primitives ... ok
+test envelope::tests::argon2_parameters_are_the_measured_ones ... ok
 test bignum::tests::pow_mod_agrees_with_naive_repeated_squaring ... ok
 test envelope::tests::argon2id_rejects_bad_salt_length ... ok
 test bignum::tests::fermat_holds_for_the_test_modulus ... ok
 test envelope::tests::debug_redacts_key_material ... ok
-test envelope::tests::argon2id_is_applied_to_normalised_input ... ok
 test envelope::tests::argon2id_is_deterministic ... ok
+test envelope::tests::argon2id_is_applied_to_normalised_input ... ok
 test envelope::tests::derive_root_end_to_end ... ok
 test envelope::tests::argon2id_separates_inputs ... ok
 test envelope::tests::empty_passphrase_is_rejected ... ok
@@ -1178,25 +1179,25 @@ test envelope::tests::drop_scrubs_the_root_material ... ok
 test envelope::tests::derive_root_is_deterministic ... ok
 test envelope::tests::the_scrub_does_not_depend_on_the_derivation_having_succeeded ... ok
 test envelope::tests::the_scrub_is_callable_on_a_buffer_the_test_owns ... ok
-test envelope::tests::secret_box_debug_is_opaque ... ok
+test envelope::tests::vdf_stage_is_actually_executed ... ok
 test modulus::tests::byte_encodings_roundtrip ... ok
 test modulus::tests::calibrate_ns_per_squaring ... ignored, timing, not correctness; run explicitly
-test envelope::tests::vdf_stage_is_actually_executed ... ok
 test modulus::tests::chain_is_deterministic ... ok
+test envelope::tests::secret_box_debug_is_opaque ... ok
 test modulus::tests::chain_of_64_matches_python ... ok
 test modulus::tests::chain_of_64_matches_python_for_a_full_width_seed ... ok
+test modulus::tests::chain_of_1000_matches_python ... ok
 test modulus::tests::degenerate_seeds_are_rejected ... ok
-test modulus::tests::each_iteration_is_exactly_one_squaring ... ok
 test modulus::tests::montgomery_roundtrips_against_n_pub ... ok
 test modulus::tests::n_pub_digits_are_pinned ... ok
 test modulus::tests::n_pub_is_the_committed_2048_bit_constant ... ok
 test modulus::tests::seed_from_k_int_is_little_endian_and_zero_extended ... ok
-test modulus::tests::chain_of_1000_matches_python ... ok
 test modulus::tests::seeds_are_reduced_before_the_coprimality_check ... ok
+test modulus::tests::each_iteration_is_exactly_one_squaring ... ok
 test envelope::tests::the_argon2_working_memory_is_scrubbed ... ok
 test envelope::tests::derive_root_separates_every_input ... ok
 
-test result: ok. 48 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 27.72s
+test result: ok. 48 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 32.83s
 
 [1m[92m     Running[0m unittests src/bin/vdf_calibrate.rs (target/x86_64-unknown-linux-musl/debug/deps/vdf_calibrate-f17490e1452fe140)
 
@@ -1209,7 +1210,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 1 test
 test the_passphrase_is_not_left_in_freed_heap_on_any_path_out ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.11s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.67s
 
 [1m[92m     Running[0m tests/vdf_budget.rs (target/x86_64-unknown-linux-musl/debug/deps/vdf_budget-56fcaf4e6ff30f27)
 
@@ -1229,9 +1230,9 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 31 tests
 test drm::tests::a_frame_of_the_wrong_size_is_caught_before_the_absence ... ok
 test drm::tests::errno_names_cover_the_ones_a_drm_path_hits ... ok
+test drm::tests::present_reports_its_absence_rather_than_pretending ... ok
 test drm::tests::the_frame_format_is_the_dumb_buffers_format ... ok
 test drm::tests::the_ioctl_numbers_come_from_the_one_verified_copy ... ok
-test drm::tests::present_reports_its_absence_rather_than_pretending ... ok
 test drm::tests::the_not_built_message_names_the_alternative ... ok
 test drm::tests::the_struct_layouts_are_the_kernels ... ok
 test frame::tests::a_new_frame_is_the_fill ... ok
@@ -1252,8 +1253,8 @@ test frame::tests::ppm_orders_green_and_blue_correctly_too ... ok
 test frame::tests::rows_are_slices_of_the_frame ... ok
 test frame::tests::the_alpha_byte_of_the_fill_is_masked_off ... ok
 test headless::tests::a_frame_of_the_wrong_size_is_refused ... ok
-test headless::tests::a_new_scanout_is_black_and_the_right_size ... ok
 test headless::tests::a_dump_to_a_file_and_a_dump_to_a_path_agree ... ok
+test headless::tests::a_new_scanout_is_black_and_the_right_size ... ok
 test headless::tests::presenting_keeps_the_frame_and_counts_it ... ok
 test headless::tests::the_dump_follows_the_last_present_not_the_first ... ok
 test headless::tests::the_dump_is_a_p6_ppm_of_the_last_frame ... ok
@@ -1267,8 +1268,8 @@ running 7 tests
 test a_band_is_not_the_panel_colour ... ok
 test the_panel_is_emitted_before_everything_else ... ok
 test the_open_popup_is_emitted_into_after_and_nothing_else_is ... ok
-test the_page_is_still_drawn_over_the_chrome ... ok
 test the_toolbar_band_reaches_the_frame ... ok
+test the_page_is_still_drawn_over_the_chrome ... ok
 test the_open_popup_is_visible_where_it_hangs_over_the_sidebar ... ok
 test the_title_reaches_the_frame ... ok
 
@@ -1289,16 +1290,16 @@ running 2 tests
 test an_explicit_label_size_draws_larger_than_the_chrome_size ... ok
 test the_secret_mask_paints_ink_and_missing_no_glyphs ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
 
 [1m[92m     Running[0m tests/paint_chrome.rs (target/x86_64-unknown-linux-musl/debug/deps/paint_chrome-17daa062dd1544d2)
 
 running 14 tests
 test a_painter_without_an_atlas_still_draws_the_chrome_and_counts_the_text ... ok
 test a_round_rect_fills_its_centre_and_leaves_its_corners ... ok
+test a_damage_rect_outside_everything_paints_nothing ... ok
 test a_blink_cycle_repaints_exactly_the_caret_cell_each_time ... ok
 test a_frame_of_the_wrong_size_is_refused_by_the_scanout_not_the_painter ... ok
-test a_damage_rect_outside_everything_paints_nothing ... ok
 test the_atlas_builds_and_covers_the_chromes_glyphs ... ok
 test painting_a_small_damage_rect_writes_fewer_pixels ... ok
 test painting_the_same_tree_twice_gives_the_same_frame ... ok
@@ -1313,13 +1314,13 @@ failures:
 
 ---- the_chrome_paints_without_missing_a_single_glyph stdout ----
 
-thread 'the_chrome_paints_without_missing_a_single_glyph' (7167) panicked at crates/holonomy-display/tests/paint_chrome.rs:79:5:
+thread 'the_chrome_paints_without_missing_a_single_glyph' (7415) panicked at crates/holonomy-display/tests/paint_chrome.rs:79:5:
 the separators should be drawn: PaintStats { rects: 68, rules: 0, rects_skipped: 0, glyphs: 115, glyphs_skipped: 0, box_glyphs: 0, missing: 0, doc_glyphs: 0, runs_missing: 0, runs_truncated: 0, resampled: 0, images_missing: 0, image_pixels: 0, pixels: 1862644 }
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- the_separators_are_drawn_from_the_table_and_not_from_the_font stdout ----
 
-thread 'the_separators_are_drawn_from_the_table_and_not_from_the_font' (7170) panicked at crates/holonomy-display/tests/paint_chrome.rs:531:5:
+thread 'the_separators_are_drawn_from_the_table_and_not_from_the_font' (7418) panicked at crates/holonomy-display/tests/paint_chrome.rs:531:5:
 the rules should draw with no atlas: PaintStats { rects: 68, rules: 0, rects_skipped: 0, glyphs: 0, glyphs_skipped: 0, box_glyphs: 0, missing: 109, doc_glyphs: 0, runs_missing: 0, runs_truncated: 0, resampled: 0, images_missing: 0, image_pixels: 0, pixels: 1848777 }
 
 
@@ -1327,7 +1328,7 @@ failures:
     the_chrome_paints_without_missing_a_single_glyph
     the_separators_are_drawn_from_the_table_and_not_from_the_font
 
-test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy-display --test paint_chrome`
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_export-ec19746479525479)
@@ -1347,9 +1348,9 @@ test html::tests::a_utf8_document_survives_escape_and_unescape ... ok
 test html::tests::escaping_expansion_matches_what_is_written ... ok
 test html::tests::every_escaped_form_is_a_recognised_entity ... ok
 test html::tests::the_five_markup_characters_become_exactly_the_expected_entities ... ok
+test fonts::tests::winansi_is_a_bijection_over_its_range ... ok
 test html::tests::unescaped_bytes_pass_through ... ok
 test html::tests::utf8_survives_escaping_intact ... ok
-test fonts::tests::winansi_is_a_bijection_over_its_range ... ok
 test pdf::tests::a_bare_newline_yields_an_empty_line ... ok
 test html::tests::the_open_and_close_orders_are_exact_mirrors ... ok
 test pdf::tests::a_break_between_two_words_is_counted_once ... ok
@@ -1383,7 +1384,7 @@ failures:
 
 ---- pdf::tests::a_decoration_change_splits_the_segment stdout ----
 
-thread 'pdf::tests::a_decoration_change_splits_the_segment' (7193) panicked at crates/holonomy-export/src/pdf.rs:2177:9:
+thread 'pdf::tests::a_decoration_change_splits_the_segment' (7441) panicked at crates/holonomy-export/src/pdf.rs:2177:9:
 assertion `left == right` failed: the raised run cannot share a Tf with the plain one
   left: 1
  right: 2
@@ -1402,10 +1403,10 @@ running 19 tests
 test tests::a_bare_ampersand_is_not_consumed ... ok
 test tests::a_line_of_runs_at_one_y_joins_into_one_line ... ok
 test tests::a_name_between_two_operands_does_not_discard_them ... ok
+test tests::an_empty_stream_gives_empty_text ... ok
 test tests::backslashes_are_the_case_that_matters ... ok
 test tests::base_fonts_are_read_by_name_not_by_substring ... ok
 test tests::bt_resets_the_line_matrix ... ok
-test tests::an_empty_stream_gives_empty_text ... ok
 test tests::comments_are_skipped ... ok
 test tests::html_helpers_round_trip ... ok
 test tests::nested_parentheses_in_a_string_survive ... ok
@@ -1425,9 +1426,9 @@ test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 49 tests
 test a_held_space_is_shown_at_the_size_of_the_run_it_came_from ... FAILED
-test both_formats_carry_the_same_text ... ok
-test a_space_inside_a_code_run_is_one_space ... ok
 test content::tests::a_bare_ampersand_is_not_consumed ... ok
+test a_space_inside_a_code_run_is_one_space ... ok
+test both_formats_carry_the_same_text ... ok
 test content::tests::a_line_of_runs_at_one_y_joins_into_one_line ... ok
 test content::tests::a_name_between_two_operands_does_not_discard_them ... ok
 test content::tests::an_empty_stream_gives_empty_text ... ok
@@ -1453,9 +1454,9 @@ test html_escapes_every_markup_character ... ok
 test html_nests_a_decoration_inside_bold ... ok
 test html_nests_and_closes_in_the_right_order ... ok
 test html_run_transitions_do_not_leak_style ... ok
+test html_applies_the_decorations_as_their_own_elements ... ok
 test html_stripping_the_tags_gives_the_document_back ... ok
 test html_the_document_is_well_formed ... ok
-test html_applies_the_decorations_as_their_own_elements ... ok
 test pdf_a_plain_ascii_document_round_trips ... ok
 test pdf_a_wide_measure_takes_a_whole_paragraph_on_one_line ... ok
 test pdf_a_long_document_paginates ... ok
@@ -1468,23 +1469,23 @@ test pdf_line_structure_matches_the_document ... ok
 test pdf_punctuation_and_numbers_survive ... ok
 test pdf_reports_what_it_could_not_encode ... ok
 test pdf_text_extracts_to_the_source ... ok
-test pdf_wrapping_costs_exactly_the_spaces_at_the_breaks ... ok
 test pdf_wrapping_preserves_reading_order ... ok
+test pdf_wrapping_costs_exactly_the_spaces_at_the_breaks ... ok
 test the_dispatcher_writes_both_formats ... ok
-test pdf_a_character_at_a_chunk_boundary_is_not_corrupted ... ok
 test pdf_a_word_at_a_chunk_boundary_is_not_broken ... ok
+test pdf_a_character_at_a_chunk_boundary_is_not_corrupted ... ok
 
 failures:
 
 ---- a_held_space_is_shown_at_the_size_of_the_run_it_came_from stdout ----
 
-thread 'a_held_space_is_shown_at_the_size_of_the_run_it_came_from' (7238) panicked at crates/holonomy-export/tests/export.rs:782:5:
+thread 'a_held_space_is_shown_at_the_size_of_the_run_it_came_from' (7486) panicked at crates/holonomy-export/tests/export.rs:782:5:
 **the held space never reached the stream as its own `Tj`**, so this gate has nothing to measure. The tokens are ["BT", "54", "738", "Td", "/F1", "14.85", "Tf", "0", "Ts", "(Head", ")", "Tj", "/F1", "11", "Tf", "0", "Ts", "(tail)", "Tj", "ET"]
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- pdf_carries_the_decorations_without_changing_the_text stdout ----
 
-thread 'pdf_carries_the_decorations_without_changing_the_text' (7277) panicked at crates/holonomy-export/tests/export.rs:393:5:
+thread 'pdf_carries_the_decorations_without_changing_the_text' (7525) panicked at crates/holonomy-export/tests/export.rs:393:5:
 assertion `left == right` failed
   left: "E=mc2 and more"
  right: "E=mc2 and more\n"
@@ -1494,31 +1495,31 @@ failures:
     a_held_space_is_shown_at_the_size_of_the_run_it_came_from
     pdf_carries_the_decorations_without_changing_the_text
 
-test result: FAILED. 47 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: FAILED. 47 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy-export --test export`
 [1m[92m     Running[0m tests/image_export.rs (target/x86_64-unknown-linux-musl/debug/deps/image_export-5ee42fb2f36657f8)
 
 running 17 tests
 test a_decoded_png_comes_back_byte_identical ... ok
-test a_standalone_html_document_with_an_image_is_well_formed ... ok
 test an_export_of_a_document_with_no_images_is_byte_identical_to_before ... ok
+test a_standalone_html_document_with_an_image_is_well_formed ... ok
 test base64_matches_rfc_4648s_vectors ... ok
 test a_document_with_several_images_exports_all_of_them ... ok
 test html_carries_the_png_verbatim_as_a_data_uri ... ok
+test base64_length_is_exact_so_a_buffer_can_be_sized ... ok
 test html_finds_an_image_whose_anchor_straddles_a_run_boundary ... ok
 test html_keeps_the_text_around_the_image ... ok
-test base64_length_is_exact_so_a_buffer_can_be_sized ... ok
 test html_reports_an_anchor_with_no_asset_rather_than_dropping_it ... ok
 test html_reports_the_four_thirds_inflation_of_base64 ... ok
 test neither_exporter_can_reach_the_iceberg_cache ... ok
-test pdf_reports_an_anchor_with_no_asset_and_still_reserves_the_space ... ok
 test pdf_finds_an_image_whose_anchor_straddles_a_run_boundary ... ok
 test pdf_image_samples_are_the_decoded_pixels_flated ... ok
+test pdf_reports_an_anchor_with_no_asset_and_still_reserves_the_space ... ok
 test pdf_writes_an_image_xobject_with_device_rgb_samples ... ok
 test pdf_reserves_vertical_space_so_text_after_an_image_does_not_draw_through_it ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_geometry-c162c19d58a2e0c8)
 
@@ -1551,15 +1552,15 @@ test lines::tests::a_mixed_style_document_has_per_line_heights ... ok
 test lines::tests::a_newline_grows_the_document_by_one_line ... ok
 test lines::tests::a_resize_that_changes_nothing_is_free ... ok
 test lines::tests::byte_offsets_and_line_lengths_are_a_second_inverse_pair ... ok
-test fenwick::tests::lower_bound_agrees_with_prefix_at_every_boundary ... ok
 test lines::tests::changing_one_line_height_moves_only_the_lines_below_it ... ok
 test lines::tests::damage_rects_union_to_the_smallest_covering_rect ... ok
+test fenwick::tests::lower_bound_agrees_with_prefix_at_every_boundary ... ok
 test lines::tests::two_keystrokes_on_one_line_damage_it_once ... ok
-test lines::tests::total_height_is_the_sum_of_the_line_boxes ... ok
 test lines::tests::uniform_lengths_build_matches_incremental_weights ... ok
+test lines::tests::total_height_is_the_sum_of_the_line_boxes ... ok
 test lines::tests::y_of_and_line_at_are_exact_inverses ... ok
 
-test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
 [1m[92m     Running[0m tests/h2_port.rs (target/x86_64-unknown-linux-musl/debug/deps/h2_port-db86cdbe1f46b15c)
 
@@ -1575,8 +1576,8 @@ test fenwick_add_matches_rebuild ... ok
 test fenwick_add_matches_rebuild_covers_fractional_deltas ... ok
 test fenwick_lower_bound_finds_the_containing_weight ... ok
 test fenwick_lower_bound_handles_a_zero_weight ... ok
-test geometry_is_empty_safe ... ok
 test fenwick_prefix_matches_a_naive_sum ... ok
+test geometry_is_empty_safe ... ok
 test geometry_line_at_inverts_the_offset ... ok
 test inserting_and_removing_keeps_the_tree_consistent ... ok
 test line_metrics_survive_a_structural_change ... ok
@@ -1588,7 +1589,7 @@ test deterministic_heights_need_no_estimation ... ok
 test prefix_and_lower_bound_are_exact_inverses_at_sixty_thousand_lines ... ok
 test a_newline_keystroke_on_a_sixty_thousand_line_document_stays_in_budget ... ok
 
-test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.51s
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.69s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_image-8f42fdcad7551754)
 
@@ -1602,22 +1603,22 @@ running 8 tests
 test a_hard_edge_survives_a_reduction_as_an_intermediate_value ... ok
 test an_exact_integer_ratio_covers_every_source_pixel ... ok
 test below_the_threshold_the_bytes_are_exactly_what_they_were ... ok
-test the_footprints_tile_the_source_without_gaps_or_overlap ... ok
 test a_long_footprint_does_not_overflow_the_accumulator ... ok
+test the_footprints_tile_the_source_without_gaps_or_overlap ... ok
 test the_two_axes_pick_their_filters_independently ... ok
 test the_intermediate_buffer_is_bounded ... ok
 test the_longest_admitted_footprint_does_not_overflow_the_accumulator ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.18s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.96s
 
 [1m[92m     Running[0m tests/decode.rs (target/x86_64-unknown-linux-musl/debug/deps/decode-9ba2788d6512f45c)
 
 running 10 tests
 test a_palette_image_expands_through_its_plte ... ok
 test all_five_scanline_filters_are_undone ... ok
-test a_palette_image_takes_alpha_from_trns_and_is_opaque_past_its_end ... ok
 test an_idat_split_across_four_chunks_decodes_identically ... ok
 test an_interlaced_image_is_refused_by_name ... ok
+test a_palette_image_takes_alpha_from_trns_and_is_opaque_past_its_end ... ok
 test ancillary_chunks_are_skipped_and_the_pixels_are_unchanged ... ok
 test greyscale_alpha_keeps_its_alpha_and_replicates_the_grey ... ok
 test greyscale_is_replicated_into_rgb_and_is_opaque ... ok
@@ -1635,8 +1636,8 @@ test an_exact_integer_ratio_makes_axis_map_decimate ... ok
 test and_the_product_ratio_is_handed_to_the_area_filter ... ok
 test every_evicted_raster_is_scrubbed_to_zero_before_it_is_released ... ok
 test a_resample_is_bit_identical_across_runs ... ok
-test a_scroll_from_page_one_to_fifty_never_exceeds_eight_mib ... ok
 test eviction_is_a_plus_or_minus_one_page_window ... ok
+test a_scroll_from_page_one_to_fifty_never_exceeds_eight_mib ... ok
 test the_default_budget_is_eight_mib_and_holds_nine_page_column_rasters ... ok
 test the_fixed_point_products_cannot_overflow_a_u16_lane ... ok
 test the_sample_map_uses_pixel_centres_not_left_edges ... ok
@@ -1645,16 +1646,16 @@ test every_image_is_a_downscale_and_the_scaler_runs_on_all_of_them ... ok
 test resampling_to_the_same_size_changes_nothing ... ok
 test decoded_raster_memory_never_exceeds_the_budget ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_input-4b0b4ecd7280d689)
 
 running 66 tests
-test evdev::tests::a_closed_device_is_ENODEV_not_a_silent_end ... ok
 test evdev::tests::a_buffered_record_is_not_read_again ... ok
+test evdev::tests::a_closed_device_is_ENODEV_not_a_silent_end ... ok
 test evdev::tests::a_short_read_is_carried_across_calls ... ok
-test evdev::tests::adopted_descriptor_without_epoll_fails_closed ... ok
 test evdev::tests::an_idle_device_reports_no_event_rather_than_blocking ... ok
+test evdev::tests::adopted_descriptor_without_epoll_fails_closed ... ok
 test evdev::tests::events_arrive_from_a_descriptor ... ok
 test evdev::tests::from_raw_fd_forces_non_blocking ... ok
 test evdev::tests::several_events_in_one_read_come_back_in_order ... ok
@@ -1698,15 +1699,15 @@ test modifiers::tests::autorepeat_while_held_is_a_no_op ... ok
 test modifiers::tests::caps_lock_ignores_autorepeat ... ok
 test modifiers::tests::caps_lock_latches_across_the_key_going_up ... ok
 test modifiers::tests::reset_forgets_everything ... ok
+test keymap::tests::the_layout_is_ascii_only ... ok
 test modifiers::tests::starts_all_up ... ok
 test modifiers::tests::the_two_alts_are_independent ... ok
 test modifiers::tests::the_two_ctrs_are_independent ... ok
 test modifiers::tests::the_two_shifts_are_independent ... ok
 test modifiers::tests::update_through_an_event_matches_update_through_a_code ... ok
-test source::tests::a_partial_record_is_held_until_the_rest_arrives ... ok
 test source::tests::a_long_scripted_stream_is_complete ... ok
+test source::tests::a_partial_record_is_held_until_the_rest_arrives ... ok
 test source::tests::a_partial_record_split_across_many_pushes ... ok
-test keymap::tests::the_layout_is_ascii_only ... ok
 test source::tests::a_record_decodes ... ok
 test source::tests::a_truncated_fixture_is_reported_rather_than_silently_ending ... ok
 test source::tests::an_empty_fixture_ends_immediately ... ok
@@ -1752,8 +1753,8 @@ test editing_keys_produce_no_text ... ok
 test releasing_ctrl_returns_to_letters ... ok
 test shift_covers_only_what_needs_it ... ok
 test the_fixture_is_the_kernels_record_size ... ok
-test syn_separators_do_not_change_a_single_command ... ok
 test the_formatting_chords_fire_and_type_nothing ... ok
+test syn_separators_do_not_change_a_single_command ... ok
 test a_paragraph_survives_the_pipeline ... ok
 test the_pipeline_is_deterministic ... ok
 
@@ -1785,22 +1786,22 @@ test seccomp::tests::no_test_in_this_crate_has_installed_a_filter ... ok
 test seccomp::tests::prologue_rejects_a_foreign_architecture ... ok
 test seccomp::tests::prologue_rejects_the_x32_abi ... ok
 test seccomp::tests::the_default_filter_fits_the_instruction_budget ... ok
+test seccomp::tests::the_program_is_bounded_rather_than_truncating ... ok
 test teardown::tests::a_zero_length_noise_range_is_refused ... ok
 test teardown::tests::actions_are_recorded_in_order ... ok
 test teardown::tests::plans_are_bounded_and_report_it ... ok
-test seccomp::tests::the_program_is_bounded_rather_than_truncating ... ok
 test teardown::tests::the_dumb_buffer_action_carries_its_handle ... ok
 test teardown::tests::the_dumb_buffer_ioctl_matches_the_kernel_header ... ok
 test teardown::tests::the_teardown_report_line_is_well_formed_and_exact_length ... ok
-test teardown::tests::scrub_on_fault_classifies_a_heap_range_as_data ... ok
 test tests::mlockall_reports_errno_rather_than_a_bool ... ok
+test teardown::tests::scrub_on_fault_classifies_a_heap_range_as_data ... ok
 test tests::stage_types_carry_the_session_context_through ... ok
 test tests::the_boot_chain_has_no_shortcut ... ok
 test tripwire::tests::a_runtime_installed_stack_is_present_and_is_not_the_one_we_want ... ok
 test tripwire::tests::hex_of_zero_is_a_single_digit ... ok
 test tripwire::tests::report_buf_formats_without_allocating ... ok
-test tripwire::tests::report_buf_truncates_instead_of_overflowing ... ok
 test tripwire::tests::the_success_path_is_exercised_only_in_a_subprocess ... ok
+test tripwire::tests::report_buf_truncates_instead_of_overflowing ... ok
 test teardown::tests::the_noise_prng_has_no_short_cycle ... ok
 test rlimits::tests::unmapping_releases_the_page_lock_charge ... ok
 
@@ -1817,25 +1818,25 @@ test no_filter_is_installed_in_this_process ... ok
 test the_allowlist_is_well_formed ... ok
 test the_boot_chain_refuses_a_stack_that_is_not_registered ... ok
 test the_census_scratch_is_not_tmp ... ok
+test the_census_finds_a_syscall_the_allowlist_is_missing ... ok
 test an_unlisted_syscall_kills_the_process ... ok
 test the_boot_sequence_reports_its_evidence ... ok
 test the_kdf_cannot_run_after_mlockall_but_the_session_can ... ok
-test the_census_finds_a_syscall_the_allowlist_is_missing ... ok
-test the_teardown_runs_and_reports_before_exiting ... ok
-test the_page_lock_ceiling_is_reported_honestly ... ok
 test the_session_completes_under_kill_process ... ok
+test the_page_lock_ceiling_is_reported_honestly ... ok
+test the_teardown_runs_and_reports_before_exiting ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 71.66s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 82.84s
 
 [1m[92m     Running[0m tests/guard_page.rs (target/x86_64-unknown-linux-musl/debug/deps/guard_page-1384eb48363704ed)
 
 running 8 tests
 test probe ... ok
 test a_null_dereference_is_scrubbed_and_exits_137_too ... ok
-test a_one_byte_overrun_past_the_high_guard_page_exits_137 ... ok
-test the_registry_refuses_a_zero_length_payload ... ok
 test a_one_byte_underflow_into_the_low_guard_page_exits_137 ... ok
+test the_registry_refuses_a_zero_length_payload ... ok
 test tripwire_install_refuses_a_stack_that_is_not_the_registered_one ... ok
+test a_one_byte_overrun_past_the_high_guard_page_exits_137 ... ok
 test the_siginfo_layout_the_tripwire_assumes_is_the_kernel_s ... ok
 test the_core_dump_gate_is_differential_and_all_three_cases_agree ... ok
 
@@ -1866,43 +1867,43 @@ test damage::tests::union_near_the_coordinate_limit_does_not_wrap ... ok
 test damage::tests::union_with_an_empty_rect_is_the_other_rect ... ok
 test home::tests::compact_library_keeps_search_and_cards_available ... ok
 test home::tests::controls_match_their_drawn_geometry ... ok
-test home::tests::library_tree_never_embeds_document_runs ... ok
 test home::tests::all_matching_documents_are_reachable_by_pages ... ok
+test home::tests::library_tree_never_embeds_document_runs ... ok
 test home::tests::search_and_hit_use_original_vault_index ... ok
+test home::tests::pages_and_small_windows_are_safe ... ok
 test table::tests::a_cell_outside_the_table_has_no_rect ... ok
 test table::tests::a_one_by_one_table_still_produces_a_closed_box ... ok
 test table::tests::a_table_too_wide_for_the_measure_is_refused_before_any_pixels_are_computed ... ok
-test home::tests::pages_and_small_windows_are_safe ... ok
-test table::tests::a_table_with_more_rows_than_columns_lays_out_and_paints ... ok
 test table::tests::adjacent_borders_are_exactly_one_cell_plus_padding_plus_content_apart ... ok
 test table::tests::border_coordinates_are_whole_numbers_of_cells_from_the_origin ... ok
 test table::tests::every_cell_content_rect_sits_inside_its_borders ... ok
 test table::tests::every_junction_is_in_the_verified_table ... ok
+test table::tests::a_table_with_more_rows_than_columns_lays_out_and_paints ... ok
 test table::tests::junctions_carry_both_arms_so_corners_meet ... ok
 test table::tests::the_border_iterator_terminates_and_is_not_empty ... ok
-test table::tests::the_height_is_one_more_row_than_the_table_has ... ok
 test table::tests::the_ten_runes_a_table_uses_are_the_ones_the_specification_names ... ok
-test home::tests::every_visible_hit_target_stays_inside_the_window ... ok
 test table::tests::the_total_width_is_the_spans_width_in_cells_times_the_cell_width ... ok
 test tree::tests::a_full_panel_damage_draws_everything ... ok
 test tree::tests::a_hand_built_label_cannot_claim_more_bytes_than_it_owns ... ok
-test tree::tests::a_label_truncates_on_a_utf8_boundary_and_bounds_itself ... ok
 test tree::tests::a_keystroke_visits_a_handful_of_nodes ... ok
+test tree::tests::a_label_truncates_on_a_utf8_boundary_and_bounds_itself ... ok
+test table::tests::the_height_is_one_more_row_than_the_table_has ... ok
 test tree::tests::a_node_outside_the_damage_is_not_returned ... ok
-test tree::tests::a_rect_scrolled_off_the_top_has_no_bounds ... ok
 test tree::tests::a_query_returns_only_what_the_damage_rect_touches ... ok
+test tree::tests::a_rect_scrolled_off_the_top_has_no_bounds ... ok
+test tree::tests::a_round_rect_is_a_rect_kind_with_rect_bounds ... ok
 test tree::tests::a_shifted_run_reaches_above_or_below_its_line_box ... ok
 test tree::tests::a_text_run_bounds_its_line_box ... ok
 test tree::tests::a_text_run_longer_than_the_maximum_is_refused ... ok
-test tree::tests::a_tree_bounds_covers_every_node ... ok
-test tree::tests::a_round_rect_is_a_rect_kind_with_rect_bounds ... ok
 test tree::tests::a_zero_sized_node_has_no_bounds ... ok
+test tree::tests::a_tree_bounds_covers_every_node ... ok
 test tree::tests::an_empty_tree_draws_nothing ... ok
 test tree::tests::an_icon_mask_is_not_mirrored ... ok
-test tree::tests::an_icon_mask_is_read_most_significant_bit_leftmost ... ok
 test tree::tests::an_icon_read_outside_its_bounds_is_clear ... ok
+test tree::tests::an_icon_mask_is_read_most_significant_bit_leftmost ... ok
 test tree::tests::draw_order_is_before_then_self_then_after ... ok
 test tree::tests::every_returned_node_is_clipped_to_the_damage_rect ... ok
+test home::tests::every_visible_hit_target_stays_inside_the_window ... ok
 
 test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
@@ -1911,59 +1912,59 @@ test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 running 57 tests
 test a_caret_past_the_measure_is_absent ... ok
 test a_caret_scrolled_out_of_view_is_absent_not_clamped ... ok
-test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
 test a_page_wider_than_the_panel_is_clipped_not_wrapped ... ok
-test a_panel_smaller_than_its_bands_degrades_instead_of_wrapping ... ok
+test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
 test a_long_label_splits_into_runs_within_the_run_length_limit ... ok
-test a_resize_keeps_the_type_scale_and_not_just_the_panel ... ok
 test a_panel_smaller_than_the_chrome_lays_out_at_its_own_size ... ok
-test a_resize_moves_the_page_and_never_the_line ... FAILED
-test a_short_canvas_scrolls_the_first_line_into_view ... ok
+test a_panel_smaller_than_its_bands_degrades_instead_of_wrapping ... ok
+test a_resize_keeps_the_type_scale_and_not_just_the_panel ... ok
 test a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row ... ok
+test a_short_canvas_scrolls_the_first_line_into_view ... ok
+test a_resize_moves_the_page_and_never_the_line ... FAILED
 test a_zero_period_would_divide_by_zero_and_is_clamped ... ok
+test a_toolbar_separator_is_inset_from_the_pill_not_from_the_button ... ok
 test an_off_screen_caret_blinks_without_dirtying_anything ... ok
 test an_empty_string_produces_no_runs ... ok
 test ascending_runs_splits_prose_because_prose_is_not_ascending ... ok
-test a_toolbar_separator_is_inset_from_the_pill_not_from_the_button ... ok
+test desktop_page_capacity_does_not_depend_on_window_height ... ok
 test desktop_page_rows_share_one_mapping_for_caret_and_hit_testing ... ok
 test desktop_sheets_stack_with_a_gap_and_scroll_without_losing_the_previous_page ... ok
 test desktop_wheel_and_pointer_can_use_the_next_sheet ... ok
-test desktop_page_capacity_does_not_depend_on_window_height ... ok
 test every_rune_is_in_the_verified_table ... ok
 test desktop_workspace_is_a_sheet_with_a_shadow_on_a_flat_panel ... ok
 test hiding_the_caret_dirties_the_cell_it_erases ... ok
-test paged_blocks_start_on_their_anchor_and_displace_only_following_rows ... ok
 test many_pages_render_a_viewport_bounded_number_of_sheets ... ok
+test paged_blocks_start_on_their_anchor_and_displace_only_following_rows ... ok
 test larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons ... ok
 test the_bands_cover_the_panel_exactly_once ... ok
 test the_bands_partition_the_panel_at_any_size ... ok
 test the_bands_stack_with_no_gap_and_no_overlap ... ok
 test the_blink_invalidates_only_the_caret_cell ... ok
+test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
 test the_blink_is_a_square_wave_with_the_stated_period ... ok
 test the_block_runes_are_absent_so_the_chrome_does_not_use_them ... ok
 test the_caret_is_exactly_one_cell ... ok
-test the_caret_sits_on_its_column_and_row ... ok
 test text_runs_are_ascending_and_contiguous ... ok
+test the_caret_sits_on_its_column_and_row ... ok
 test the_design_page_column_is_576_px_and_says_so ... ok
-test the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window ... ok
 test the_next_flip_is_when_the_phase_changes ... ok
-test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
+test the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window ... ok
 test the_page_is_centred_and_the_gutters_sum_to_the_panel ... ok
-test the_only_band_rule_is_the_toolbar_s_underside ... ok
 test the_paged_chrome_tree_paints_separate_visible_sheets ... ok
+test the_only_band_rule_is_the_toolbar_s_underside ... ok
 test the_scroll_thumb_fills_the_rail_when_everything_is_visible ... ok
+test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_scroll_thumb_moves_down_as_the_view_scrolls ... ok
 test the_scroll_thumb_never_vanishes ... ok
-test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_scrollbar_is_right_of_the_page_and_inside_the_canvas ... ok
 test the_sidebar_has_a_right_edge_in_both_views ... ok
 test the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open ... FAILED
+test the_status_line_reports_the_caret_position_one_based ... ok
 test the_sealed_badge_appears_only_when_sealed ... ok
 test the_text_column_sits_inside_the_page_with_its_padding ... ok
-test the_status_line_reports_the_caret_position_one_based ... ok
 test the_toolbar_bands_are_tall_enough_for_the_type_they_hold ... ok
-test the_toolbar_band_is_filled_in_both_views ... ok
 test the_tree_is_built_for_the_state_and_covers_every_band ... ok
+test the_toolbar_band_is_filled_in_both_views ... ok
 test no_chrome_box_ever_lands_outside_its_panel ... ok
 test the_chrome_paints_at_every_panel_size_without_drawing_outside_itself ... ok
 
@@ -1971,7 +1972,7 @@ failures:
 
 ---- a_resize_moves_the_page_and_never_the_line stdout ----
 
-thread 'a_resize_moves_the_page_and_never_the_line' (7673) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
+thread 'a_resize_moves_the_page_and_never_the_line' (7922) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
 assertion `left == right` failed: the page sits a fixed gutter to the right of the document-tabs rail: left gutter 596
   left: 596
  right: 304
@@ -1979,7 +1980,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open stdout ----
 
-thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (7716) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
+thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (7965) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
 assertion `left == right` failed: opening the sidebar puts the page a fixed gutter past the rail: 296 then 436
   left: 436
  right: 304
@@ -1989,7 +1990,7 @@ failures:
     a_resize_moves_the_page_and_never_the_line
     the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open
 
-test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy-render --test chrome`
 [1m[92m     Running[0m tests/dialog.rs (target/x86_64-unknown-linux-musl/debug/deps/dialog-c14f79ac94da6bc0)
@@ -1997,8 +1998,8 @@ test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out;
 running 5 tests
 test a_large_window_gets_a_roomier_panel_and_larger_type ... ok
 test choices_scroll_to_keep_the_selection_visible ... ok
-test dialog_buttons_and_fields_are_hit_testable_at_minimum_window_size ... ok
 test a_long_secret_keeps_the_caret_inside_the_field ... ok
+test dialog_buttons_and_fields_are_hit_testable_at_minimum_window_size ... ok
 test secret_fields_never_put_plaintext_in_the_render_tree ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -2008,10 +2009,10 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 8 tests
 test a_horizontal_rule_is_one_wide_row_and_not_an_outline ... ok
 test a_plus_crosses_the_box_in_both_axes ... ok
+test coverage_is_false_outside_the_mask ... ok
 test every_icon_is_sixteen_square_and_not_empty ... ok
 test no_icon_is_mostly_ink ... ok
 test packing_is_most_significant_bit_leftmost ... ok
-test coverage_is_false_outside_the_mask ... ok
 test no_two_icons_share_a_mask ... ok
 test the_all_list_and_the_match_agree ... ok
 
@@ -2034,15 +2035,15 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 11 tests
 test a_parse_error_carries_an_offset_and_recovers_the_command_name ... ok
 test a_subscript_sits_beside_the_superscript_not_under_it ... ok
-test an_integer_literal_is_one_cell_per_digit ... ok
 test a_superscript_rises_from_the_baseline_not_from_the_top ... ok
+test an_integer_literal_is_one_cell_per_digit ... ok
 test every_symbol_the_grammar_names_resolves_to_a_codepoint ... ok
 test the_fraction_bar_spans_the_wider_child_plus_padding ... ok
-test laying_out_a_formula_allocates_nothing ... ok
-test nesting_is_bounded_rather_than_overflowing_the_stack ... ok
 test the_quadratic_formula_parses_into_the_shape_it_is_written_in ... ok
 test the_quadratic_formulas_box_is_hand_computable ... ok
+test nesting_is_bounded_rather_than_overflowing_the_stack ... ok
 test the_radical_is_a_tick_and_an_overline_and_no_glyphs ... ok
+test laying_out_a_formula_allocates_nothing ... ok
 
 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -2059,27 +2060,27 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 16 tests
 test a_popup_is_a_lighter_plane_than_anything_it_covers ... ok
-test a_point_on_no_widget_hits_nothing ... ok
 test a_point_on_a_seam_belongs_to_exactly_one_widget ... FAILED
+test a_point_on_no_widget_hits_nothing ... ok
 test a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn ... ok
 test every_menu_heading_is_hit_testable_at_its_own_centre ... ok
-test every_pixel_of_a_title_button_is_clickable ... ok
-test a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window ... ok
-test a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs ... ok
 test every_widget_has_a_rect_inside_the_panel ... ok
+test every_pixel_of_a_title_button_is_clickable ... ok
+test a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs ... ok
+test a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window ... ok
 test no_two_widgets_overlap ... ok
 test hit_agrees_with_where_the_widget_was_drawn ... ok
+test the_bands_themselves_are_not_widgets ... ok
 test the_menu_headings_are_measured_not_tabulated ... ok
 test the_right_hand_group_reserves_the_gaps_it_draws ... ok
-test the_bands_themselves_are_not_widgets ... ok
-test the_toolbar_dividers_are_the_reference_s_seven ... ok
 test the_title_bar_draws_only_buttons_that_do_something ... ok
+test the_toolbar_dividers_are_the_reference_s_seven ... ok
 
 failures:
 
 ---- a_point_on_a_seam_belongs_to_exactly_one_widget stdout ----
 
-thread 'a_point_on_a_seam_belongs_to_exactly_one_widget' (7761) panicked at crates/holonomy-render/tests/widgets.rs:235:9:
+thread 'a_point_on_a_seam_belongs_to_exactly_one_widget' (8010) panicked at crates/holonomy-render/tests/widgets.rs:235:9:
 assertion `left == right` failed: the seam between undo and redo should belong to the right-hand one
   left: Tool(Undo)
  right: Tool(Redo)
@@ -2097,10 +2098,10 @@ test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;
 running 18 tests
 test a_byte_belongs_to_exactly_one_row_and_needs_no_flag ... ok
 test a_continuation_is_anything_but_its_lines_first_row ... ok
-test a_line_that_fits_is_one_row ... ok
-test a_lines_rows_tile_it_exactly ... ok
 test a_leading_space_does_not_produce_an_empty_row ... ok
 test a_line_of_only_spaces_is_one_row_that_uses_cells ... ok
+test a_line_that_fits_is_one_row ... ok
+test a_lines_rows_tile_it_exactly ... ok
 test a_long_word_wraps_at_the_measure ... ok
 test a_multi_byte_codepoint_is_never_split_across_two_rows ... ok
 test a_row_mixes_word_wrap_and_multi_byte_codepoints ... ok
@@ -2120,107 +2121,103 @@ test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 12 tests
 test tests::a_zero_length_block_is_refused_under_either_policy ... ok
-test tests::a_block_reports_the_policy_it_was_built_with ... ok
 test tests::allocate_reports_exact_length_and_accounts_for_guards ... ok
+test tests::a_block_reports_the_policy_it_was_built_with ... ok
 test tests::an_unlocked_block_still_scrubs_and_still_registers ... ok
-test tests::data_region_is_readable ... ok
 test tests::debug_does_not_leak_contents ... ok
-
-thread 'tests::reading_past_the_mapping_is_not_reliably_a_fault' (7809) has overflowed its stack
-fatal runtime error: stack overflow, aborting
-test tests::page_size_is_plausible ... ok
 test tests::length_is_honoured_when_not_page_aligned ... ok
-test tests::write_read_back_and_scrub ... ok
+test tests::page_size_is_plausible ... ok
+test tests::data_region_is_readable ... ok
 test tests::zero_length_is_rejected ... ok
 test tests::reading_past_the_mapping_is_not_reliably_a_fault ... ok
+test tests::write_read_back_and_scrub ... ok
 test tests::guard_pages_fault_on_both_sides ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
 
 [1m[92m     Running[0m tests/allocation_failure.rs (target/x86_64-unknown-linux-musl/debug/deps/allocation_failure-0dbcfc2f3fbeb190)
 
 running 3 tests
 test a_refused_allocation_leaves_the_process_able_to_allocate_again ... ok
-test ordinary_allocation_is_unaffected ... ok
 test allocating_after_the_page_lock_limit_is_exhausted_returns_an_error_and_does_not_crash ... ok
+test ordinary_allocation_is_unaffected ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
 [1m[92m     Running[0m tests/lock_policy.rs (target/x86_64-unknown-linux-musl/debug/deps/lock_policy-45079194a9771cb8)
 
 running 4 tests
 test an_unlocked_block_is_still_a_guarded_mapping ... ok
-test the_lock_policies_differ_only_in_whether_mlock_is_called ... ok
 test a_page_locked_block_is_refused_once_the_budget_is_gone ... ok
 test an_unlocked_block_still_allocates_once_the_budget_is_gone ... ok
+test the_lock_policies_differ_only_in_whether_mlock_is_called ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_text-fad789991b422f38)
 
 running 107 tests
-test editor::tests::a_delete_past_the_end_is_refused_without_touching_anything ... ok
 test editor::tests::backspace_deletes_the_byte_before_the_caret ... ok
-test editor::tests::a_mid_character_offset_is_refused ... ok
+test editor::tests::a_delete_past_the_end_is_refused_without_touching_anything ... ok
 test editor::tests::an_empty_editor_is_consistent ... ok
-test editor::tests::insert_and_delete_round_trip_through_all_three_structures ... ok
 test editor::tests::edits_around_a_styled_region_keep_the_spans_tiling_the_text ... ok
-test editor::tests::five_hundred_undo_operations ... ok
+test editor::tests::a_mid_character_offset_is_refused ... ok
+test editor::tests::insert_and_delete_round_trip_through_all_three_structures ... ok
+test editor::tests::spans_stay_consistent_across_a_leaf_split ... ok
 test editor::tests::typing_keeps_the_span_map_a_single_plain_run ... ok
 test editor::tests::undo_of_an_insert_removes_exactly_those_bytes ... ok
-test editor::tests::spans_stay_consistent_across_a_leaf_split ... ok
 test editor::tests::undo_restores_bytes_and_styling ... ok
-test leaf::tests::a_bulk_delete_refuses_to_cross_the_leaf_start ... ok
 test editor::tests::undo_with_nothing_recorded_is_an_error_not_a_panic ... ok
+test leaf::tests::a_bulk_delete_refuses_to_cross_the_leaf_start ... ok
 test leaf::tests::a_fresh_leaf_does_not_need_splitting ... ok
 test leaf::tests::a_fresh_leaf_is_empty_with_its_gap_open_at_the_front ... ok
 test leaf::tests::a_gap_offset_inside_a_character_is_refused ... ok
 test leaf::tests::delete_at_the_start_of_a_leaf_is_refused ... ok
 test leaf::tests::delete_byte_scrubs_the_byte_it_removes ... ok
+test editor::tests::five_hundred_undo_operations ... ok
 test leaf::tests::drop_scrubs_before_unmapping ... ok
 test leaf::tests::insert_at_a_saturated_gap_is_refused_rather_than_wrapping ... ok
 test leaf::tests::insert_byte_writes_into_the_gap_and_nothing_else ... ok
+test leaf::tests::moving_the_gap_leaves_the_buffer_content_alone ... ok
 test leaf::tests::scrub_destroys_the_text_and_reopens_the_gap ... ok
 test leaf::tests::set_gap_offset_preserves_the_text_exactly ... ok
-test leaf::tests::the_node_is_one_cacheline_aligned_block ... ok
 test math_span::tests::a_balanced_pair_is_one_span ... ok
+test leaf::tests::the_node_is_one_cacheline_aligned_block ... ok
 test math_span::tests::a_single_dollar_is_not_a_delimiter ... ok
 test math_span::tests::a_span_ends_when_its_line_does_even_with_text_after_it ... ok
 test math_span::tests::an_unpaired_delimiter_runs_to_the_end_of_its_line ... ok
 test math_span::tests::deleting_the_closing_delimiter_leaves_the_formula_editable ... ok
 test math_span::tests::the_caret_position_ctrl_m_leaves_counts_as_inside ... ok
 test math_span::tests::two_spans_on_one_line_are_separate ... ok
-test leaf::tests::moving_the_gap_leaves_the_buffer_content_alone ... ok
 test rope::tests::a_bulk_read_reports_a_short_read_past_the_end ... ok
-test rope::tests::a_bulk_read_matches_the_byte_at_a_time_reader ... ok
 test rope::tests::a_cursor_inside_a_multibyte_character_is_refused ... ok
+test rope::tests::a_bulk_read_matches_the_byte_at_a_time_reader ... ok
 test rope::tests::a_split_does_not_move_the_cursor ... ok
 test rope::tests::a_split_gives_both_children_gap_target_of_headroom ... ok
-test editor::tests::invariants_hold_under_a_random_edit_sequence ... ok
 test rope::tests::an_empty_rope_accepts_the_first_keystroke ... ok
 test rope::tests::available_sums_every_leaf_gap ... ok
+test rope::tests::a_loaded_document_packs_its_leaves_full ... ok
 test rope::tests::deleting_at_the_start_of_the_document_is_refused ... ok
 test rope::tests::deletion_scrubs_every_leaf ... ok
 test rope::tests::gap_minimum_is_the_split_threshold_and_is_sane ... ok
 test rope::tests::insert_and_delete_round_trip ... ok
 test rope::tests::reading_across_a_leaf_boundary_returns_the_right_bytes ... ok
-test rope::tests::a_loaded_document_packs_its_leaves_full ... ok
+test rope::tests::splitting_mid_text_preserves_the_document ... ok
 test rope::tests::text_longer_than_one_leaf_survives_a_split ... ok
 test rope::tests::deleting_a_whole_multi_leaf_document_leaves_no_fragments ... ok
 test span::tests::a_delete_across_a_style_boundary_keeps_the_map_gap_free ... ok
 test span::tests::a_delete_collapses_boundaries_inside_the_removed_range ... ok
+test rope::tests::the_cursor_can_be_moved_anywhere_in_a_multi_leaf_document ... ok
 test span::tests::a_delete_returns_the_removed_regions_styling ... ok
 test span::tests::a_delete_that_joins_two_identical_runs_merges_them ... ok
 test span::tests::a_new_map_is_gap_free_and_plain ... ok
-test rope::tests::the_cursor_can_be_moved_anywhere_in_a_multi_leaf_document ... ok
 test span::tests::a_u16_colour_would_not_be_sixteen_bytes ... ok
 test span::tests::adjacent_identical_spans_merge ... ok
 test span::tests::an_insert_inside_a_run_splits_it ... ok
 test span::tests::an_insert_shifts_boundaries_past_the_edit_point ... ok
 test span::tests::clear_range_makes_text_plain ... ok
-test span::tests::flags_map_onto_the_atlas_faces ... ok
-test rope::tests::splitting_mid_text_preserves_the_document ... ok
 test span::tests::deleting_a_whole_span_removes_it ... ok
+test span::tests::flags_map_onto_the_atlas_faces ... ok
 test span::tests::out_of_range_edits_are_refused ... ok
 test span::tests::reset_and_uniform_replace_the_whole_map ... ok
 test span::tests::runs_in_returns_clipped_pieces ... ok
@@ -2246,19 +2243,20 @@ test table::tests::the_separator_is_outside_the_atlas_text_window ... ok
 test table::tests::the_span_grows_on_insert_and_shrinks_on_delete_without_going_negative ... ok
 test table::tests::width_is_content_plus_padding_plus_borders ... ok
 test table::tests::zero_extent_is_refused ... ok
+test editor::tests::invariants_hold_under_a_random_edit_sequence ... ok
 test span::tests::invariants_survive_a_random_edit_sequence ... ok
-test undo::tests::a_delete_records_what_was_there ... ok
 test undo::tests::a_long_action_evicts_only_as_many_short_ones_as_it_must ... ok
+test undo::tests::a_delete_records_what_was_there ... ok
 test undo::tests::a_new_stack_is_empty_and_pre_allocated ... ok
 test undo::tests::a_pop_does_not_let_the_next_push_overwrite_a_live_entry ... ok
 test undo::tests::a_payload_that_wraps_the_arena_end_round_trips ... ok
 test undo::tests::a_popped_actions_bytes_are_scrubbed ... ok
 test undo::tests::a_zero_length_action_is_legal ... ok
 test undo::tests::actions_come_off_newest_first ... ok
-test undo::tests::an_insert_records_its_offset_and_bytes ... ok
 test undo::tests::an_evicted_actions_bytes_are_scrubbed ... ok
-test undo::tests::clear_leaves_no_plaintext_anywhere_in_the_arena ... ok
+test undo::tests::an_insert_records_its_offset_and_bytes ... ok
 test undo::tests::an_oversized_action_is_refused_rather_than_evicting_everything ... ok
+test undo::tests::clear_leaves_no_plaintext_anywhere_in_the_arena ... ok
 test undo::tests::clear_scrubs_everything ... ok
 test undo::tests::five_hundred_undo_and_redo_operations ... ok
 test undo::tests::peek_does_not_consume_and_needs_no_allocation_for_the_header ... ok
@@ -2267,7 +2265,7 @@ test editor::tests::spans_stay_consistent_across_a_leaf_merge ... ok
 test undo::tests::a_burst_far_past_the_depth_keeps_only_the_newest_five_hundred ... ok
 test undo::tests::invariants_hold_under_a_mixed_workload ... ok
 
-test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.76s
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.47s
 
 [1m[92m     Running[0m tests/asset_payload.rs (target/x86_64-unknown-linux-musl/debug/deps/asset_payload-2f6269f7dd1294c6)
 
@@ -2278,12 +2276,12 @@ test a_png_that_is_not_a_png_is_refused ... ok
 test a_span_map_that_is_not_sorted_or_gap_free_is_refused ... ok
 test a_spliced_id_is_refused_rather_than_honoured ... ok
 test a_document_with_no_images_round_trips_byte_for_byte ... ok
-test a_payload_after_any_of_those_sequences_still_round_trips ... ok
 test a_table_record_that_cannot_describe_a_table_is_refused ... ok
 test an_absurd_count_is_refused_before_anything_is_allocated ... ok
+test a_payload_after_any_of_those_sequences_still_round_trips ... ok
 test a_spliced_payload_is_refused_rather_than_shown_as_the_wrong_image ... ok
-test an_empty_catalog_is_exactly_four_bytes_of_zero ... ok
 test an_anchor_slides_when_text_is_inserted_in_front_of_it ... ok
+test an_empty_catalog_is_exactly_four_bytes_of_zero ... ok
 test an_anchor_is_three_bytes_and_is_found_where_it_was_put ... ok
 test catalog_entry_size_is_forty_bytes_plus_its_png ... ok
 test an_image_inserted_in_the_middle_is_served_its_own_picture ... ok
@@ -2292,18 +2290,18 @@ test non_utf8_text_is_refused_rather_than_lossy_decoded ... ok
 test stored_dimensions_must_match_the_pngs_ihdr ... ok
 test styling_and_tables_survive_a_round_trip ... ok
 test anchors_and_catalog_entries_stay_in_step_through_many_inserts ... ok
-test images_survive_a_round_trip_and_keep_their_content_addresses ... ok
 test the_payload_starts_with_the_sixteen_byte_doc_header ... ok
 test the_same_png_twice_is_two_entries_sharing_one_address ... ok
+test images_survive_a_round_trip_and_keep_their_content_addresses ... ok
 test typing_past_an_anchor_does_not_disturb_the_pairing ... ok
-test undo_then_redo_keeps_every_anchor_paired ... ok
 test undoing_a_deletion_of_an_anchor_puts_the_picture_back ... ok
 test the_catalog_is_the_last_section_and_reads_to_end_of_input ... ok
+test undo_then_redo_keeps_every_anchor_paired ... ok
 test undoing_a_typed_character_does_not_consume_a_pending_delete_s_stashed_image ... ok
 test undoing_an_image_insert_takes_the_anchor_and_the_asset_together ... ok
 test a_payload_truncated_anywhere_is_refused ... ok
 
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.16s
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s
 
 [1m[92m     Running[0m tests/edit_record.rs (target/x86_64-unknown-linux-musl/debug/deps/edit_record-e15ac70cd0feddbd)
 
@@ -2315,8 +2313,8 @@ test an_edit_after_a_later_one_is_still_seen ... ok
 test an_insertion_anchored_inside_a_deleted_region_is_still_reproduced ... ok
 test an_insertion_anchored_inside_typed_text_is_reproduced ... ok
 test compaction_drops_only_wholly_earlier_edits ... ok
-test overlapping_edits_do_not_break_the_translation ... ok
 test replay_refuses_a_short_fetch ... ok
+test overlapping_edits_do_not_break_the_translation ... ok
 test replay_agrees_with_to_saved_at_every_offset ... ok
 test saved_runs_are_maximal_and_contiguous_in_both_systems ... ok
 test the_record_carries_what_undo_needs ... ok
@@ -2343,8 +2341,8 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 4 tests
 test a_read_of_a_resident_document_never_faults ... ok
-test the_same_read_is_correct_as_well_as_cheap ... ok
 test an_edit_far_away_leaves_this_leaf_byte_for_byte_intact ... ok
+test the_same_read_is_correct_as_well_as_cheap ... ok
 test the_cost_of_a_read_does_not_grow_with_the_edit_count ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
@@ -2359,7 +2357,7 @@ test the_decoration_bits_round_trip_through_format_undo ... ok
 test undo_redo_interleaves_formatting_typing_and_deletion ... ok
 test oversize_format_record_is_refused_before_mutation ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
 
 [1m[92m     Running[0m tests/latency.rs (target/x86_64-unknown-linux-musl/debug/deps/latency-1f472f21dff0be03)
 
@@ -2378,15 +2376,15 @@ test a_keystroke_costs_the_same_in_a_big_document_as_in_a_small_one ... ok
 test typing_is_far_under_the_per_keystroke_budget ... ok
 test a_full_document_read_is_bounded_by_bandwidth_not_by_per_byte_dispatch ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.56s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.19s
 
 [1m[92m     Running[0m tests/multibyte_undo.rs (target/x86_64-unknown-linux-musl/debug/deps/multibyte_undo-9046f5f54e15c652)
 
 running 9 tests
-test undo_removes_a_four_byte_run ... ok
-test a_multi_byte_character_survives_typing_around_it ... ok
 test redo_after_undo_restores_a_multi_byte_run ... ok
 test a_multi_byte_run_leaves_no_stale_bytes_or_length_drift ... ok
+test a_multi_byte_character_survives_typing_around_it ... ok
+test undo_removes_a_four_byte_run ... ok
 test undo_removes_a_multi_byte_run_from_the_middle_of_a_document ... ok
 test undo_removes_a_one_byte_run ... ok
 test undo_removes_a_three_byte_run ... ok
@@ -2400,16 +2398,16 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 10 tests
 test alloc_probe_child ... ok
 test deleted_text_does_not_survive_in_any_leaf ... ok
-test a_burst_round_trips_byte_for_byte ... ok
 test a_leaf_absorbs_3840_keystrokes_before_splitting ... ok
+test a_burst_round_trips_byte_for_byte ... ok
 test the_undo_stack_allocates_once_at_construction ... ok
-test a_keystroke_is_o1_except_at_a_leaf_boundary ... ok
 test deleting_allocates_only_at_leaf_merges ... ok
-test typing_a_burst_allocates_nothing ... ok
+test a_keystroke_is_o1_except_at_a_leaf_boundary ... ok
 test plain_deletion_through_the_editor_allocates_nothing_per_delete ... ok
+test typing_a_burst_allocates_nothing ... ok
 test typing_through_the_editor_allocates_nothing ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
 
 [1m[92m     Running[0m tests/skeleton_editor.rs (target/x86_64-unknown-linux-musl/debug/deps/skeleton_editor-43ac302ef28d328e)
 
@@ -2422,20 +2420,20 @@ test a_skeleton_editor_knows_its_length_before_reading_anything ... ok
 test a_faulted_in_leaf_reads_and_edits_like_a_resident_one ... ok
 test a_skeleton_editor_peaks_below_a_from_text_editor ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
 
 [1m[92m     Running[0m tests/skeleton_load.rs (target/x86_64-unknown-linux-musl/debug/deps/skeleton_load-3674021f43abfb0f)
 
 running 7 tests
 test a_skeleton_rope_holds_no_bytes ... ok
-test peak_child ... ok
 test an_empty_document_is_one_absent_leaf ... ok
+test peak_child ... ok
 test the_spine_knows_the_document_without_holding_it ... ok
 test the_spine_is_proportional_to_leaves_and_pays_no_more_than_a_resident_leaf ... ok
 test a_skeleton_rope_reads_identically_through_a_source ... ok
 test the_peak_is_a_function_of_leaves_not_of_the_document ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
 
 [1m[92m     Running[0m tests/span_table_sparse.rs (target/x86_64-unknown-linux-musl/debug/deps/span_table_sparse-06d6e1e355d87b94)
 
@@ -2447,22 +2445,22 @@ test the_span_table_is_where_the_layout_says_it_is ... ok
 test the_sparse_path_and_the_whole_payload_path_agree ... ok
 test the_span_table_costs_runs_not_document_bytes ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
 [1m[92m     Running[0m tests/sparse_rope.rs (target/x86_64-unknown-linux-musl/debug/deps/sparse_rope-4082d6755f0cfe89)
 
 running 9 tests
-test editing_an_absent_leaf_is_refused_not_applied ... ok
 test a_short_source_is_refused_rather_than_zero_filled ... ok
+test editing_an_absent_leaf_is_refused_not_applied ... ok
 test a_faulting_read_recovers_an_evicted_leaf ... ok
 test evicting_an_absent_leaf_twice_is_an_error ... ok
-test every_byte_of_a_sparse_rope_reads_identically ... ok
 test evicting_a_leaf_does_not_change_the_document_length ... ok
+test every_byte_of_a_sparse_rope_reads_identically ... ok
 test read_at_refuses_an_absent_leaf_and_names_it ... ok
-test offsets_are_identical_before_and_after_eviction ... ok
 test the_scrub_audit_refuses_an_absent_leaf ... ok
+test offsets_are_identical_before_and_after_eviction ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
 [1m[92m     Running[0m tests/sparse_style.rs (target/x86_64-unknown-linux-musl/debug/deps/sparse_style-7cac7bc78a6a352a)
 
@@ -2482,16 +2480,16 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 12 tests
 test a_plain_delete_against_a_bold_run_restores_plain ... ok
-test a_fresh_edit_drops_the_redo_branch ... ok
-test a_delete_across_a_styled_and_a_plain_run_restores_both_exactly ... ok
 test a_plain_delete_does_not_restore_an_earlier_deletess_styling ... ok
+test a_delete_across_a_styled_and_a_plain_run_restores_both_exactly ... ok
+test a_fresh_edit_drops_the_redo_branch ... ok
 test a_refused_edit_leaves_the_redo_branch_intact ... ok
-test a_styled_delete_after_a_plain_one_still_gets_its_styling_back ... ok
 test an_insert_between_two_deletes_does_not_shift_the_pairing ... ok
+test a_styled_delete_after_a_plain_one_still_gets_its_styling_back ... ok
 test clear_history_drops_redo_as_well ... ok
-test redo_of_a_delete_does_not_disturb_the_undo_pairing ... ok
 test redo_replaces_the_redo_branch ... ok
 test interleaved_deletes_keep_their_own_styling ... ok
+test redo_of_a_delete_does_not_disturb_the_undo_pairing ... ok
 test the_style_record_stays_paired_past_its_bound ... ok
 
 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
@@ -2503,12 +2501,12 @@ test an_empty_table_is_exactly_one_separator_fewer_than_it_has_cells ... ok
 test column_widths_divide_the_measure_and_refuse_when_they_cannot ... ok
 test tab_and_shift_tab_are_two_commands ... ok
 test a_control_t_inserts_a_three_by_three_table ... ok
-test arrows_cross_cells_and_clamp_to_a_ragged_cell ... ok
 test shift_tab_walks_back_and_stops_at_the_first_cell ... ok
+test arrows_cross_cells_and_clamp_to_a_ragged_cell ... ok
 test tab_walks_cells_and_appends_a_row_at_the_bottom_right ... ok
+test table_spans_follow_the_bytes_around_them ... ok
 test two_undos_and_two_redos_restore_the_table_map_twice ... ok
 test undoing_a_table_insertion_removes_the_table ... ok
-test table_spans_follow_the_bytes_around_them ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
@@ -2523,15 +2521,15 @@ test a_committed_document_reads_back_byte_for_byte ... ok
 test ten_edits_across_the_document_all_survive_a_commit ... ok
 test a_deletion_survives_a_commit_and_the_length_shrinks ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
 
 [1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/debug/deps/holonomy_x11-5f71c581baa22d80)
 
 running 34 tests
 test auth::tests::a_missing_file_names_its_path ... ok
-test auth::tests::a_truncated_record_is_refused_with_the_offset ... ok
-test auth::tests::a_file_without_a_usable_cookie_says_so ... ok
 test auth::tests::a_cookie_is_matched_against_the_display_being_opened ... ok
+test auth::tests::a_file_without_a_usable_cookie_says_so ... ok
+test auth::tests::a_truncated_record_is_refused_with_the_offset ... ok
 test auth::tests::lengths_are_read_big_endian ... ok
 test auth::tests::the_format_this_host_writes_parses ... ok
 test proto::tests::a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire ... ok
@@ -2539,8 +2537,8 @@ test proto::tests::a_configure_notify_reads_the_size_from_the_wire ... ok
 test proto::tests::a_key_press_decodes_to_its_keycode_and_state ... ok
 test proto::tests::a_key_press_reads_the_keycode_and_the_coordinates_from_the_wire ... ok
 test proto::tests::a_motion_reads_the_coordinates_from_the_wire ... ok
-test proto::tests::a_request_with_a_field_in_byte_one_keeps_the_sequence_number_out_of_it ... ok
 test proto::tests::a_reader_past_the_end_panics_instead_of_inventing_a_value - should panic ... ok
+test proto::tests::a_request_with_a_field_in_byte_one_keeps_the_sequence_number_out_of_it ... ok
 test proto::tests::an_expose_decodes_its_rectangle ... ok
 test proto::tests::an_expose_reads_its_rectangle_from_the_wire ... ok
 test proto::tests::an_extension_request_puts_its_minor_opcode_in_the_sequence_slot ... ok
@@ -2585,8 +2583,8 @@ test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 [1m[92m     Running[0m tests/window_size.rs (target/x86_64-unknown-linux-musl/debug/deps/window_size-3909e8342d573207)
 
 running 4 tests
-test a_window_opens_at_its_size_and_resizes_to_another ... ignored, needs an X display; run with --ignored
 test a_flag_is_set_only_when_the_field_it_names_is_written ... ok
+test a_window_opens_at_its_size_and_resizes_to_another ... ignored, needs an X display; run with --ignored
 test a_psize_flag_never_names_a_zero_size ... ok
 test the_size_hints_offsets_are_the_protocols ... ok
 
