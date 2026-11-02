@@ -447,21 +447,34 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         .fold(SEPARATOR, |acc, &t| {
             acc.saturating_add(t.width(button, m.cell_w))
         });
+    // **Both ends of this budget moved with `TOOLBAR_INSET`, and forgetting that was a real overlap.**
+    //
+    // The right-hand group now starts `pad + TOOLBAR_INSET` in from the right edge instead of `pad`,
+    // so its left edge — and therefore the limit the left group must stop before — is that much
+    // further left. Reserving only `pad` would let the left group run `TOOLBAR_INSET` pixels *into*
+    // the right-hand group on a narrow panel, which is the part-44 overlap defect (a press on
+    // `Overflow` resolving to `Style`) reappearing at 13 px instead of 100.
+    //
+    // **And the floor is the left group's own start, not `pad`**, for the same reason in the other
+    // direction: a limit below where the first tool begins would drop every tool for a panel too
+    // narrow to hold the row, when the honest answer is to draw what fits and let `Overflow` take the
+    // rest.
+    let edge = pad.saturating_add(TOOLBAR_INSET);
     let left_limit = m
         .width
-        .saturating_sub(pad)
+        .saturating_sub(edge)
         .saturating_sub(right_w)
-        // **The right-hand group never starts before `pad`,** so a panel narrower than the group
+        // **The right-hand group never starts before `edge`,** so a panel narrower than the group
         // plus its own inset cannot produce a negative budget — and `saturating_sub` here is what
         // makes `x >= left_limit` true for every remaining tool rather than a wrap.
-        .max(pad);
+        .max(edge);
 
     // Left group.
     //
     // **`pad + TOOLBAR_INSET`**, because `pad` alone is the pill's rim and not where a button goes —
     // see `TOOLBAR_PAD`. The first icon was flush against the pill's rounded corner, which at a
     // stadium radius of half the height is a corner that reaches 25 px in.
-    let mut x = pad.saturating_add(TOOLBAR_INSET);
+    let mut x = edge;
     for p in out.iter_mut() {
         // **`Overflow` is in the right-hand group too, and that is a correction.** Part 44: it was
         // laid out with the left group, and the left group's rule is *"a tool with no room left gets
