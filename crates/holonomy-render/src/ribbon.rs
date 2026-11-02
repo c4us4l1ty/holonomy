@@ -462,13 +462,32 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
         let small: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
         let large: Vec<_> = items.iter().filter(|i| i.3).copied().collect();
         let rows = if small.len() > 5 { 2 } else { 1 };
-        let cols = small.len().div_ceil(rows.max(1));
         let small_w = if tab == 1 && *name == "Font" { 82 } else { 76 };
+        // **The width of a button, in one place.** This is a closure and not a `sum` because the
+        // group's width and the buttons inside it must be the same arithmetic -- and they were not.
+        //
+        // The sum used `cols * small_w` (one row's worth of the small width) while the loop below
+        // makes every `Font` button **150 px**, not `small_w`. So the Font group measured 344 px and
+        // drew 384: its SizeUp button ran 40 px past the end of the group and the next group's Bold
+        // was laid out on top of it. `widgets::hit` then answered **"Italic" with
+        // `Ribbon(SelectTool(Font))`**, because the Font group's button was the last one drawn over
+        // that pixel -- which is the one symptom of an overlap that a user would ever notice: a click
+        // that runs the tool next door.
+        let small_bw = |action: Action| {
+            if action == Action::SelectTool(crate::widgets::Tool::Font) {
+                150
+            } else {
+                small_w
+            }
+        };
         let w = large
             .iter()
             .map(|i| if i.2.is_none() { 92 } else { 68 })
             .sum::<u32>()
-            + cols as u32 * small_w
+            + small
+                .iter()
+                .map(|(a, _, _, _)| small_bw(*a))
+                .sum::<u32>()
             + 16;
         let gr = DamageRect::new(x.min(l.width), top, w.min(l.width.saturating_sub(x)), h);
         groups.push(Group {
@@ -494,13 +513,7 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
         }
         for (i, (action, label, icon, _)) in small.iter().copied().enumerate() {
             let row = i % rows;
-            let bw = if action == Action::SelectTool(crate::widgets::Tool::Font) {
-                150
-            } else if rows == 1 {
-                small_w
-            } else {
-                small_w
-            };
+            let bw = small_bw(action);
             let by = top + 3 + row as u32 * 29;
             let r = if bx + bw <= limit {
                 DamageRect::new(bx, by, bw, 27)
