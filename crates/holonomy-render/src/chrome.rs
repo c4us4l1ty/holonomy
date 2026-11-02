@@ -3216,11 +3216,9 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         // icon and a row with only an icon have their *labels* in the same place.
         let icon_x = x + pad as i32 + 2 * m.cell_w as i32;
         if let Some(icon) = it.icon {
-            into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
-                icon_x,
-                icon_y,
-                popup_ink,
-            ))));
+            into.push(SurfaceTree::leaf(crate::Node::Icon(
+                icon.at(icon_x, icon_y, popup_ink),
+            )));
         }
         // **The label starts in column 4 and stops short of the accelerator.**
         //
@@ -3269,7 +3267,11 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                     cy,
                     acc,
                     Style::REGULAR,
-                    if state.ribbon { pal.dim } else { colour::INK_DIM },
+                    if state.ribbon {
+                        pal.dim
+                    } else {
+                        colour::INK_DIM
+                    },
                     // The same fault as the dirty-dot, in the popup's accelerator column: a popup
                     // narrower than its own padding plus one character of text underflows. **Both are
                     // `saturating_sub` now**, and both were found by a gate that paints at 1x1
