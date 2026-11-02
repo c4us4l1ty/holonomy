@@ -715,6 +715,86 @@ fn a_space_inside_a_code_run_is_one_space() {
     );
 }
 
+/// **A held space is shown at the size of the run it came from, not the body size.**
+///
+/// # The second half of the held-space defect
+///
+/// `a_space_inside_a_code_run_is_one_space` catches the *metric* half: a space measured in Helvetica and
+/// drawn in Courier is half the width it claims, so the width converts to two spaces. **The size is the
+/// other half and it is invisible in the extracted text**, because `"a b"` extracts as `"a b"` at 11 pt
+/// and at 14.85 pt. What changes is where the *pen* is: a space pushed at the body size inside a run of
+/// heading-size words is narrower than the space the reader lays out, so the exporter's line breaking and
+/// the reader's disagree from that point on -- a line that ends one word later than the file says.
+///
+/// # What is measured, and why the stream and not the segments
+///
+/// **The `Tf` in force where the space's own `Tj` is shown.** A segment carries its size into the content
+/// stream, so the operator is the whole claim, and reading it out of the decoded stream means this is
+/// asserting the file's answer rather than the layouter's internal one.
+#[test]
+fn a_held_space_is_shown_at_the_size_of_the_run_it_came_from() {
+    // **The space at byte 4 is inside the heading run** (0..5), which is the case that matters: the space
+    // is what *ends* the heading's word, so it is a heading space, and the word after it is not.
+    let mut ed = Editor::from_text(b"Head tail\n").expect("load");
+    ed.style_range(0, 5, STYLE_HEADER, 0).expect("heading");
+    assert_eq!(
+        ed.style_at(4).style_flags & STYLE_HEADER,
+        STYLE_HEADER,
+        "the fixture must put the space inside the heading run, or there is nothing here to measure"
+    );
+    // **The heading must not be bold.** `Faces::for_span` gives a bold heading `HelveticaBold`, and a bold
+    // run is a different face *and* a different metric -- which would leave this gate measuring a size in
+    // a run whose width was computed from another table. Asserting the flags keeps the fixture to the one
+    // variable the gate is about: the size.
+    assert_eq!(
+        ed.style_at(0).style_flags & STYLE_BOLD,
+        0,
+        "the heading face must be the regular one, so the only difference between the words is size"
+    );
+
+    let opts = PdfOptions::default();
+    let mut stats = pdf::PdfStats::default();
+    let bytes = pdf::build(&ed, &opts, &mut stats).expect("build");
+    let streams = content::content_streams(&bytes).expect("streams");
+    let ops: String = streams
+        .iter()
+        .map(|(_, data)| String::from_utf8_lossy(data).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tokens: Vec<&str> = ops.split_whitespace().collect();
+
+    let heading_size = opts.font_size * pdf::HEADER_SCALE;
+    // **A one-space string is a held space**, and nothing else in this document can produce one: the two
+    // words contain no spaces of their own. `Str` writes an all-ASCII string literally, so the operand is
+    // the three-character token `( )`.
+    let space_sizes: Vec<Option<f32>> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| **t == "Tj" && i.checked_sub(1).is_some_and(|j| tokens[j] == "( )"))
+        .map(|(i, _)| {
+            tokens[..i]
+                .windows(3)
+                .rev()
+                .find(|w| w[2] == "Tf")
+                .and_then(|w| w[1].parse::<f32>().ok())
+        })
+        .collect();
+    assert!(
+        !space_sizes.is_empty(),
+        "**the held space never reached the stream as its own `Tj`**, so this gate has nothing to \
+         measure. The tokens are {tokens:?}"
+    );
+    for size in &space_sizes {
+        assert_eq!(
+            *size,
+            Some(heading_size),
+            "**the space was shown at {size:?} and the run it was typed in is {heading_size} pt.** A \
+             space at the body size is narrower than the one the reader lays out, so every line after \
+             it breaks in a different place than the file says it does."
+        );
+    }
+}
+
 /// A run wider than the measure overflows and is *counted*, not silently clipped.
 #[test]
 fn pdf_a_wide_measure_takes_a_whole_paragraph_on_one_line() {
