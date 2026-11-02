@@ -5851,8 +5851,17 @@ impl<'a> Session<'a> {
         {
             let start = self.line_start(at);
             let end = self.line_end_offset(at);
-            let line = String::from_utf8_lossy(&self.editor.text().unwrap_or_default()[start..end])
-                .into_owned();
+            // **`get`, not an index, because the offsets are *cached* geometry and the bytes are not.**
+            // `line_end_offset` answers from `DocLines`, which knows where the line is; this needs
+            // where the text is. A line tree that is one edit behind the rope -- which is exactly what
+            // a page-break insertion can leave behind, since a page break is a run of newlines that
+            // grows the document under the tree -- makes `end` past the end, and the slice *panicked*.
+            // An empty prefix is the honest answer for a line the cache cannot place: it continues no
+            // list, which leaves the newline a newline.
+            let line = match self.editor.text() {
+                Ok(text) => String::from_utf8_lossy(text.get(start..end).unwrap_or_default()).into_owned(),
+                Err(_) => String::new(),
+            };
             let t = line.trim_start();
             let indent = &line[..line.len() - t.len()];
             if t == "-" || t == "*" || t.chars().all(|c| c.is_ascii_digit()) && t.ends_with('.') {

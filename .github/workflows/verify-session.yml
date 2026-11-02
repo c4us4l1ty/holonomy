@@ -59,7 +59,7 @@ jobs:
           {
             grep -aE '^(running|test result|failures:)' /tmp/test.log
             grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/test.log
-            grep -aE 'panicked at|^thread |^  (left|right):' /tmp/test.log
+            grep -aA3 'panicked at' /tmp/test.log
           } | uniq > ci-test.log || true
           tail -n 200 /tmp/check.log > ci-check.log || true
       - name: Publish diagnostics
@@ -67,9 +67,17 @@ jobs:
         run: |-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f ci-test.log ci-check.log
-          git commit -m "ci: publish diagnostics" || true
-          git push origin HEAD:arena/ca2b02bd-holonomy || true
+          # **Rebase and retry, because both jobs publish in the same run.**
+          # The first version pushed once and the loser of the race lost its log, so the
+          # baseline of a failing build was the one file that never arrived.
+          for attempt in 1 2 3 4 5; do
+            git add -f ci-test.log ci-check.log
+            git commit -m "ci: publish diagnostics" || true
+            if git pull --rebase -q origin arena/ca2b02bd-holonomy && git push -q origin HEAD:arena/ca2b02bd-holonomy; then
+              break
+            fi
+            sleep 5
+          done
   # **The baseline, so "red" can be told apart from "newly red".** `main` carries its own
   # suites and its own gates; a branch is judged by the difference, not by an absolute zero
   # nobody has reached.
@@ -99,13 +107,21 @@ jobs:
           {
             grep -aE '^(running|test result|failures:)' /tmp/base.log
             grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/base.log
-            grep -aE 'panicked at|^thread |^  (left|right):' /tmp/base.log
+            grep -aA3 'panicked at' /tmp/base.log
           } | uniq > ci-baseline.log || true
       - name: Publish baseline
         if: always()
         run: |-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f ci-baseline.log
-          git commit -m "ci: publish main baseline" || true
-          git push origin HEAD:arena/ca2b02bd-holonomy || true
+          # **Rebase and retry, because both jobs publish in the same run.**
+          # The first version pushed once and the loser of the race lost its log, so the
+          # baseline of a failing build was the one file that never arrived.
+          for attempt in 1 2 3 4 5; do
+            git add -f ci-baseline.log
+            git commit -m "ci: publish main baseline" || true
+            if git pull --rebase -q origin arena/ca2b02bd-holonomy && git push -q origin HEAD:arena/ca2b02bd-holonomy; then
+              break
+            fi
+            sleep 5
+          done

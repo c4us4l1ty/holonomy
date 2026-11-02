@@ -216,7 +216,7 @@ impl Tool {
     ///
     /// **Measured against the labels themselves:** `Zoom` shows `zoom_label()`, whose widest value is
     /// `"400%"` at 4 codepoints; `Style` shows [`ChromeState::style_name`], whose longest entry in
-    /// [`STYLES`](crate::menus::STYLES) is `"Normal text"` at 11; `Font` shows `font_label()`, whose
+    /// [`STYLES`](crate::menus::STYLES) is `"Normal"` at 11; `Font` shows `font_label()`, whose
     /// longest entry in [`FONTS`](crate::menus::FONTS) is `"JetBrains Mono"` at 14 — longer than the
     /// 10 cells the button holds, exactly as the previous list's `"IBM Plex Mono"` was, and fitted
     /// the same way every over-long label is.
@@ -669,7 +669,11 @@ impl ChromeState {
         crate::menus::STYLES
             .get(self.style_index)
             .copied()
-            .unwrap_or("Normal text")
+            // **The fallback is `STYLES[0]`, spelled out, and it used to be the old name of it.**
+            // It said `"Normal text"` -- the label `STYLES[0]` carried before the six-style list
+            // renamed it to `"Normal"` -- so an out-of-range index fell back to a name no entry in
+            // the list has. Two strings that must stay equal and no compiler keeping them so.
+            .unwrap_or("Normal")
     }
 
     /// **The current mode's name.** Part 44. See [`style_name`](Self::style_name).
