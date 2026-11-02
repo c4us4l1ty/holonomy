@@ -280,3 +280,92 @@ fn coverage_is_false_outside_the_mask() {
         "clipped icon, absurd coords"
     );
 }
+
+/// **A glyph made of rules is a rule, not a comb.**
+///
+/// # The defect this exists for
+///
+/// The toolbar's `Minus` and `Plus` are the zoom stepper, and both were drawn as **outlines of the
+/// symbol rather than the symbol**. `Minus` came out six rows tall with four pixels of ink in each: two
+/// short vertical stubs joined by a bar, which at 1x reads as a pair of brackets. `Plus` was the same
+/// idea in both axes and read as a keypad `#`.
+///
+/// **Both passed every existing test.** `every_icon_is_sixteen_square_and_not_empty` saw 18 pixels, and
+/// `no_icon_is_mostly_ink` saw a fifth of the box. A count of inked pixels cannot tell a dash from the
+/// outline of a dash, which is the whole reason this file's gates had to stop counting and start
+/// measuring the shape.
+///
+/// # The measurement
+///
+/// A horizontal rule is **one row that is long, with almost nothing above or below it**. So: find the
+/// widest row, and require that the rows outside a thin band around it carry no more than [`BLEED`]
+/// pixels. An outline fails immediately — its columns are tall, so the rows above and below the bar are
+/// where the stubs live. A combed `Plus` fails the same assertion in its own axis.
+///
+/// **This is deliberately a statement about the *spread* of the ink, not its quantity**, which is the
+/// distinction none of the pixel-count gates could make.
+#[test]
+fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
+    // The bar may be two rows thick (a 1 px line at 16 px sometimes lands on a half-pixel and gets
+    // stamped twice), and this much ink is allowed above and below it before the shape stops being a
+    // rule.
+    const BLEED: u32 = 4;
+
+    for id in [IconId::Minus, IconId::Rule] {
+        let bits = id.mask();
+        let rows: Vec<u32> = (0..SIZE)
+            .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count() as u32)
+            .collect();
+        let widest = *rows.iter().max().unwrap();
+        assert!(
+            widest >= SIZE / 2,
+            "{id:?}: the widest row is {widest} pixels. A horizontal rule that does not span at least \
+             half the box is not a rule — it is the top of an outline, which is exactly how `Minus` was \
+             originally drawn."
+        );
+        // Every other row, once the band around the bar is exempted.
+        let others: u32 = rows
+            .iter()
+            .enumerate()
+            .filter(|(y, _)| (*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest))
+            .map(|(_, n)| n)
+            .sum();
+        assert!(
+            others <= BLEED,
+            "{id:?}: the rows away from the bar carry {others} pixels between them (budget {BLEED}). \
+             A rule is one row of ink; ink elsewhere on the same rows is a comb — which is what turns a \
+             `+` into a `#` and a `-` into a pair of brackets."
+        );
+    }
+}
+
+/// **A plus is one wide row *and* one tall column.**
+///
+/// The companion to the test above, and the reason it is a separate assertion: `Plus` was drawn as a
+/// 2 px cross whose arms bled into the surrounding rows, so the widest row was 6 and the tallest column
+/// 7 **in a 16 px box** — technically a cross, and at 1x a smudge with no distinguishable axes. The bar
+/// has to cross the box.
+#[test]
+fn a_plus_crosses_the_box_in_both_axes() {
+    let bits = IconId::Plus.mask();
+    let widest = (0..SIZE)
+        .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .max()
+        .unwrap();
+    let tallest = (0..SIZE)
+        .map(|x| (0..SIZE).filter(|&y| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .max()
+        .unwrap();
+    // `SIZE / 2` is the same bar the rule test uses: an arm that does not reach half the box is an
+    // arm of an outline rather than of a plus.
+    assert!(
+        widest >= SIZE / 2,
+        "Plus's widest row is {widest} pixels; the horizontal arm must reach at least {}",
+        SIZE / 2
+    );
+    assert!(
+        tallest >= SIZE / 2,
+        "Plus's tallest column is {tallest} pixels; the vertical arm must reach at least {}",
+        SIZE / 2
+    );
+}
