@@ -1078,6 +1078,110 @@ impl Layout {
         }
     }
 
+    // Desktop print-like view: pages have a stable height derived from their width rather than
+    // from the viewport height. Only visible pages and rows are materialized during painting.
+    const PAGE_GAP: u32 = 24;
+    const DESK_TOP: u32 = 16;
+
+    pub fn page_height(&self) -> u32 {
+        (self.page.width.saturating_mul(11) / 9).max(self.cell_h.max(1))
+    }
+
+    pub fn page_padding(&self) -> u32 {
+        self.text.x.saturating_sub(self.page.x).min(self.page_height() / 3)
+    }
+
+    pub fn page_rows(&self) -> u32 {
+        self.page_height().saturating_sub(self.page_padding().saturating_mul(2))
+            .checked_div(self.cell_h.max(1)).unwrap_or(0).max(1)
+    }
+
+    pub fn page_count(&self, total_lines: u32) -> u32 {
+        total_lines.max(1).div_ceil(self.page_rows())
+    }
+
+    fn row_document_y(&self, line: u32) -> u64 {
+        let rows = self.page_rows();
+        u64::from(line / rows) * u64::from(self.page_height() + Self::PAGE_GAP)
+            + u64::from(self.page_padding()) + u64::from(line % rows) * u64::from(self.cell_h.max(1))
+    }
+
+    fn scroll_pixels(&self, first: u32) -> u64 {
+        if first == 0 && self.canvas.height >= Self::DESK_TOP.saturating_add(self.page_padding()).saturating_add(self.cell_h) {
+            0
+        } else {
+            self.row_document_y(first) + u64::from(Self::DESK_TOP)
+        }
+    }
+
+    /// Screen y of a row, ignoring block height; negative/offscreen values remain signed.
+    pub fn paged_row_y(&self, first: u32, line: u32) -> i64 {
+        i64::from(self.canvas.y) + i64::from(Self::DESK_TOP)
+            + self.row_document_y(line) as i64 - self.scroll_pixels(first) as i64
+    }
+
+    /// The screen y shared by body text, caret, selection and block anchors.
+    pub fn row_y(&self, state: &ChromeState, line: u32) -> Option<u32> {
+        let row = line.checked_sub(state.scroll_line)?;
+        if !state.paged { return self.text.y.checked_add(state.line_heights.y(row)); }
+        let extra = state.line_heights.y(row).saturating_sub(row.saturating_mul(state.line_heights.pitch));
+        let y = self.paged_row_y(state.scroll_line, line) + i64::from(extra);
+        if y < i64::from(self.canvas.y) || y + i64::from(self.cell_h) > i64::from(self.canvas.bottom()) { return None; }
+        u32::try_from(y).ok()
+    }
+
+    /// Upper bound on rows that could intersect the viewport, independent of page count.
+    pub fn visible_end(&self, state: &ChromeState) -> u32 {
+        let rows = if state.paged { self.canvas.height / self.cell_h.max(1) + 2 } else { self.rows };
+        state.scroll_line.saturating_add(rows).min(state.total_lines)
+    }
+
+    /// Number of full text rows visible from the current scroll position.
+    pub fn visible_rows(&self, state: &ChromeState) -> u32 {
+        if !state.paged { return self.rows.max(1); }
+        let first = state.scroll_line.min(state.total_lines.saturating_sub(1));
+        let (mut lo, mut hi) = (first, state.total_lines);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.paged_row_y(first, mid) + i64::from(self.cell_h) <= i64::from(self.canvas.bottom()) {
+                lo = mid + 1;
+            } else { hi = mid; }
+        }
+        lo.saturating_sub(first).max(1)
+    }
+
+    /// Clip one physical sheet to the canvas. Geometry uses u64 for long documents.
+    pub fn visible_page(&self, state: &ChromeState, page: u32) -> Option<DamageRect> {
+        if page >= self.page_count(state.total_lines) { return None; }
+        let y = i64::from(self.canvas.y) + i64::from(Self::DESK_TOP)
+            + i64::from(page) * i64::from(self.page_height() + Self::PAGE_GAP)
+            - self.scroll_pixels(state.scroll_line) as i64;
+        let top = y.max(i64::from(self.canvas.y));
+        let bottom = (y + i64::from(self.page_height())).min(i64::from(self.canvas.bottom()));
+        if bottom <= top { return None; }
+        Some(DamageRect::new(self.page.x, top as u32, self.page.width, (bottom - top) as u32))
+    }
+
+    pub fn page_at(&self, state: &ChromeState, x: i32, y: i32) -> Option<u32> {
+        if !self.canvas.contains(x, y) || x < self.page.x as i32 || x >= self.page.right() as i32 { return None; }
+        let doc_y = i64::from(y) - i64::from(self.canvas.y) - i64::from(Self::DESK_TOP)
+            + self.scroll_pixels(state.scroll_line) as i64;
+        if doc_y < 0 { return None; }
+        let stride = i64::from(self.page_height() + Self::PAGE_GAP);
+        let page = (doc_y / stride) as u32;
+        (page < self.page_count(state.total_lines) && doc_y % stride < i64::from(self.page_height())).then_some(page)
+    }
+
+    fn paged_row_at(&self, state: &ChromeState, y: i32) -> u32 {
+        let doc_y = (i64::from(y) - i64::from(self.canvas.y) - i64::from(Self::DESK_TOP)
+            + self.scroll_pixels(state.scroll_line) as i64).max(0) as u64;
+        let stride = u64::from(self.page_height() + Self::PAGE_GAP);
+        let page = (doc_y / stride).min(u64::from(self.page_count(state.total_lines) - 1));
+        let within = (doc_y % stride).saturating_sub(u64::from(self.page_padding()));
+        let row = (within / u64::from(self.cell_h.max(1))).min(u64::from(self.page_rows() - 1));
+        ((page * u64::from(self.page_rows()) + row).min(u64::from(state.total_lines.saturating_sub(1)))) as u32
+    }
+
     /// The document position a click at `(x, y)` lands on, if it landed on the page.
     ///
     /// # This is the inverse of [`Caret::locate`], and it has to agree with it exactly
@@ -1099,6 +1203,10 @@ impl Layout {
     /// would make the left third of the page unclickable.
     #[must_use]
     pub fn caret_at(&self, state: &ChromeState, x: i32, y: i32) -> Option<(u32, u32)> {
+        if state.paged {
+            self.page_at(state, x, y)?;
+            return Some((self.paged_row_at(state, y), self.column_at(x)));
+        }
         if !self.page.contains(x, y) {
             return None;
         }
@@ -1182,6 +1290,11 @@ impl Layout {
     /// same clamp twice**, and the test that says so is `a_drag_past_the_right_edge_clamps_to_the_line_end`.
     #[must_use]
     pub fn caret_at_drag(&self, state: &ChromeState, x: i32, y: i32) -> Option<(u32, u32)> {
+        if state.paged {
+            if self.canvas.height == 0 { return None; }
+            let y = y.clamp(self.canvas.y as i32, self.canvas.bottom().saturating_sub(1) as i32);
+            return Some((self.paged_row_at(state, y), self.column_at(x)));
+        }
         if !self.canvas.contains(x, y) {
             // **Outside the canvas entirely** -- above the page or below the window. **The last
             // visible row, not `None`:** a drag that leaves the window upward means "to the top",
@@ -1599,7 +1712,7 @@ pub struct ChromeState {
     pub scroll_line: u32,
     /// Total text lines.
     pub total_lines: u32,
-    /// The desktop presents visual rows as viewport-sized pages.
+    /// The desktop presents indexed visual rows on vertically stacked sheets.
     pub paged: bool,
     /// Which style toggles are on.
     pub styles: StyleFlags,
@@ -1735,8 +1848,8 @@ impl Caret {
         // `row * cell_h` plus whatever extras the model carries at or before this line, rather than
         // the uniform product. With no tables the extras are empty and this is the old expression, so
         // the caret is in the same place it always was.
-        let y = layout.text.y.checked_add(state.line_heights.y(row))?;
-        if row >= layout.rows || if state.paged {
+        let y = layout.row_y(state, state.caret_line)?;
+        if (!state.paged && row >= layout.rows) || if state.paged {
             state.caret_column > layout.cells_per_row(m.cell_w) as u32
         } else {
             state.caret_column >= m.columns
@@ -2053,13 +2166,14 @@ impl Chrome {
         let rail = self.layout.scrollbar;
         let track = rail.height;
         let total = state.total_lines.max(state.scroll_line + 1).max(1);
-        let visible = self.layout.rows.max(1);
+        let visible = self.layout.visible_rows(state);
         let (thumb_h, offset) = if total <= visible {
             (track, 0)
         } else {
             let h = (track * visible / total).max(Self::MIN_THUMB.min(track));
             let span = track.saturating_sub(h);
-            (h, span * state.scroll_line / (total - visible).max(1))
+            let last_scroll = if state.paged { total.saturating_sub(1) } else { total - visible };
+            (h, (u64::from(span) * u64::from(state.scroll_line.min(last_scroll)) / u64::from(last_scroll.max(1))) as u32)
         };
         DamageRect::new(rail.x, rail.y + offset, rail.width, thumb_h)
     }
@@ -2309,9 +2423,9 @@ impl Chrome {
         // is a *transient* and is drawn after the counters, separated from them — so `Saved` appears
         // beside `Ln 1, Col 1  0 words  0 B` instead of instead of it.
         let counters = if state.paged {
-            let rows = l.rows.max(1);
-            format!("View {} / {}  Ln {}, Col {}  {} words  {} B",
-                state.scroll_line / rows + 1, state.total_lines.max(1).div_ceil(rows),
+            let rows = l.page_rows();
+            format!("Page {} / {}  Ln {}, Col {}  {} words  {} B",
+                state.scroll_line / rows + 1, l.page_count(state.total_lines),
                 state.caret_line + 1, state.caret_column + 1, state.words, state.bytes)
         } else {
             format!("Ln {}, Col {}  {} words  {} B", state.caret_line + 1,
@@ -2408,6 +2522,28 @@ impl Chrome {
         // **A shadow is below and to the right of what casts it.** The bands go first, so the sheet is
         // painted over any part of them it covers; the clip at the rect's own edge is what keeps them
         // from leaving the canvas, which `no_chrome_box_ever_lands_outside_its_panel` sweeps for.
+        if state.paged {
+            let first_page = state.scroll_line / l.page_rows();
+            // At most viewport-height / (page height + gap) + two partial sheets.
+            let limit = (l.canvas.height / l.page_height().max(1)).saturating_add(3);
+            for index in first_page.saturating_sub(1)..first_page.saturating_add(limit) {
+                let Some(sheet) = l.visible_page(state, index) else { continue; };
+                page.before.push(fill(sheet.x as i32, sheet.y as i32, sheet.width, sheet.height, colour::PAGE));
+                // Side borders remain visible on partial sheets. Horizontal borders are clipped
+                // by the sheet itself; the gap still separates consecutive pages.
+                for x in [sheet.x, sheet.right().saturating_sub(1)] {
+                    page.before.push(fill(x as i32, sheet.y as i32, 1, sheet.height, colour::RULE));
+                }
+                let full_top = i64::from(l.canvas.y) + i64::from(Layout::DESK_TOP)
+                    + i64::from(index) * i64::from(l.page_height() + Layout::PAGE_GAP)
+                    - l.scroll_pixels(state.scroll_line) as i64;
+                for y in [full_top, full_top + i64::from(l.page_height()) - 1] {
+                    if y >= i64::from(l.canvas.y) && y < i64::from(l.canvas.bottom()) {
+                        page.before.push(fill(sheet.x as i32, y as i32, sheet.width, 1, colour::RULE));
+                    }
+                }
+            }
+        } else {
         let shadow = m.shadow.min(l.page.width).min(l.page.height);
         // A band across the BOTTOM: same x as the sheet, starting one pixel past its bottom edge.
         if let Some(y) = l.page.bottom().checked_add(1) {
@@ -2456,6 +2592,7 @@ impl Chrome {
             (l.page.right().saturating_sub(1), l.page.y, 1, l.page.height),
         ] {
             page.before.push(fill(bx as i32, by as i32, bw, bh, colour::RULE));
+        }
         }
         // Scrollbar rail and thumb.
         page.before.push(fill(

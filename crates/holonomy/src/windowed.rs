@@ -546,7 +546,16 @@ pub fn run(
             holonomy_x11::Event::Expose { .. } => { session.repaint_all().map_err(WindowedError::Session)?; }
             holonomy_x11::Event::ButtonPress { button, event_x, event_y, .. } => {
                 window_of(&mut session)?.focus().map_err(WindowedError::Desktop)?;
-                if button != 1 { continue; }
+                if button != 1 {
+                    // X11 sends wheel notches as buttons 4 and 5. Forward them only to an
+                    // open document; dialogs and the library do not scroll the document.
+                    if matches!(button, 4 | 5) && form.is_none() && session.home().is_none() && vault.is_some() {
+                        if let Some(p) = x11key::pointer_event(&ev) {
+                            session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(f) = form.as_mut() {
                     let l = holonomy_render::Layout::new(&session.chrome_metrics());
                     let view = f.view();
