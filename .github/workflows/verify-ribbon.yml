@@ -3,6 +3,8 @@ on:
   push:
     branches: ['arena/ed487bd8-holonomy']
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -45,4 +47,4 @@ jobs:
           git config user.email "ci@example.invalid"
           git add -f ci-logs
           git commit --allow-empty -m "ci: verification logs [skip ci]" || true
-          git push || true
+          git push 2>&1 | tail -5
