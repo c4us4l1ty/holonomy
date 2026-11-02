@@ -1125,7 +1125,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     }
 
     if state.ribbon {
-        if state.open == Some(Open::RibbonOverflow) && overflow_rect(l).contains(x, y) {
+        if state.open == Some(Open::RibbonOverflow) && crate::ribbon::overflow_rect(l).contains(x, y) {
             return Hit::Tool(Tool::Overflow);
         }
         for (a, r) in crate::ribbon::qat(l) {
