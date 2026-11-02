@@ -34,6 +34,7 @@
 
 use crate::error::{PngError, Result};
 use crate::png::{self, Chunks, Header};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Decode `input` as a whole PNG file, writing `width * height * 4` bytes of RGBA into `dst`.
 ///
@@ -64,7 +65,7 @@ pub fn decode(input: &[u8], dst: &mut [u8]) -> Result<Header> {
     let row_len = stride + 1;
     let raw_len = row_len * header.height as usize;
 
-    let mut raw = inflate(&chunks, raw_len)?;
+    let mut raw = Zeroizing::new(inflate(&chunks, raw_len)?);
     if raw.len() != raw_len {
         return Err(PngError::UnexpectedDataLength {
             want: raw_len,
@@ -98,7 +99,7 @@ pub fn decoded_len(header: &Header) -> usize {
 fn inflate(chunks: &Chunks<'_>, expect: usize) -> Result<Vec<u8>> {
     // One `IDAT` is the common case for a hand-written file and needs no join. More than one is the
     // common case for a real encoder, and the join is mandatory there.
-    let joined: Vec<u8> = if chunks.idat.len() == 1 {
+    let joined: Zeroizing<Vec<u8>> = Zeroizing::new(if chunks.idat.len() == 1 {
         chunks.idat[0].to_vec()
     } else {
         let mut v = Vec::with_capacity(chunks.idat_len);
@@ -106,20 +107,22 @@ fn inflate(chunks: &Chunks<'_>, expect: usize) -> Result<Vec<u8>> {
             v.extend_from_slice(part);
         }
         v
-    };
+    });
 
     // The *bounded* helper, not the one-shot one. `decompress_to_vec_zlib` sizes its output from the
     // stream, so a crafted `IHDR`+stream that inflates to a gigabyte is allocated before the length
     // check that would have refused it. `_with_limit` caps the output at `expect` -- the exact byte
     // count the `IHDR` implies -- so the bound sits at the allocation instead of after it. That
     // ordering is the whole reason this is not a one-liner.
-    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&joined, expect).map_err(|e| {
+    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&joined, expect).map_err(|mut e| {
+        let output_len = e.output.len();
+        e.output.zeroize();
         // A stream that filled the cap is a *length* problem and gets the length error, because
         // that is what a caller can act on; everything else is a malformed stream.
         if e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput {
             PngError::UnexpectedDataLength {
                 want: expect,
-                got: e.output.len(),
+                got: output_len,
             }
         } else {
             PngError::Inflate

@@ -12,6 +12,7 @@ publish.workspace = true
 # §2.9.1 budgets the whole decoder at 60 KiB of binary; `png` proper is 80-120 KiB with
 # `flate2` and `crc32fast` dragged in, which is both over budget and harder to defend.
 miniz_oxide = "0.9"
+zeroize = "1.9"
 # The cache holds rasters in `SecureBlock`s, which is what lets an eviction *prove* the pixels are
 # gone rather than merely drop them. Phase 9C uses `LockPolicy::Unlocked` for these.
 holonomy-secure = { path = "../holonomy-secure" }

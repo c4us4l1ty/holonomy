@@ -173,3 +173,19 @@ chrome and margins. On screens at least 1800 by 1000 pixels, a sufficiently larg
 starts at 125% when the two-size atlas is available. This is a screen-resolution heuristic, not DPI
 detection; use the zoom menu or `--zoom 100` to select the smaller view. An explicit `--zoom` or
 `--ppem` is never overridden. Startup falls back to 100% if the atlas has only one size.
+
+## Follow-up: inserted blocks (partial)
+
+The managed desktop now asks for a PNG path instead of inserting the test chart, and asks for table
+size (1–10 rows, 1–8 columns, at least two cells). PNG imports are limited to 16 MiB encoded and
+16 MiB decoded and are validated before insertion. Equations and images inserted from the managed
+editor are separated from surrounding prose; table rules and cell text use their actual geometry and
+UTF-8. WordCraft's table-size and picture workflows informed the UI, but its egui canvas and block
+model cannot be transplanted into Holonomy's native renderer.
+
+This is not complete block pagination. Existing documents with multiple objects or prose on the same
+logical line can still overlap or hide text. Blocks near sheet boundaries, oversized images, multiline
+cells, table editing at the final cell, scroll/selection, and undo of multi-step image insertion still
+need a shared block-aware pagination and edit model. The current change corrects the anchor offset and
+some hit testing, but does not make blocks fit or split across sheets. No full Cargo or live desktop
+verification was available in this environment.
