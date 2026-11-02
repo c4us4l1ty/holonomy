@@ -415,6 +415,8 @@ pub fn run(
                 DocumentRequest::ImportText => { form = Some(Form::import()); }
                 DocumentRequest::InsertImage => { form = Some(Form::insert_image()); }
                 DocumentRequest::InsertTable => { form = Some(Form::insert_table()); }
+                DocumentRequest::Find => { form = Some(Form::find(false)); }
+                DocumentRequest::Replace => { form = Some(Form::find(true)); }
                 DocumentRequest::DocumentMenu(i) => {
                     session.switch_document_public(i);
                     form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
@@ -444,6 +446,7 @@ pub fn run(
             session.tick().map_err(WindowedError::Session)?;
             if vault.is_some()
                 && form.is_none()
+                && session.state.autosave
                 && session.has_unsaved_documents()
                 && last_edit.elapsed() >= Duration::from_millis(800)
             {
@@ -704,7 +707,7 @@ fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _pat
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, InsertImage, InsertTable, DocMenu }
+enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, InsertImage, InsertTable, DocMenu, Find, Replace }
 #[derive(Clone)]
 struct Form {
     kind: FormKind, path: std::path::PathBuf, values: Vec<zeroize::Zeroizing<String>>,
@@ -729,6 +732,12 @@ impl Form {
         if let Some(v) = vault { for d in v.documents() { f.choices.push(d.title.clone()); f.ids.push(d.id); } }
         f.choices.push("Open another container…".into()); f.focus = 0; f
     }
+    fn find(replace: bool) -> Self {
+        let mut f=Self::base(if replace {FormKind::Replace} else {FormKind::Find}, "".into(), 3);
+        f.values[2].push_str("no");
+        f.choices=vec!["Find next".into(),"Find previous".into(),"Replace".into(),"Replace all".into(),"Close".into()];
+        f
+    }
     fn doc_menu(title: String, id: u64) -> Self { let mut f = Self::base(FormKind::DocMenu, "".into(), 0); f.choices = vec!["Rename".into(), "Delete…".into(), "Close".into()]; f.target_id = id; f.values.push(zeroize::Zeroizing::new(title)); f }
     fn view(&self) -> holonomy_render::dialog::DialogView {
         let (title, message, labels, secrets, confirm, cancel) = match self.kind {
@@ -743,6 +752,8 @@ impl Form {
             FormKind::Import => ("Import text", "Import a UTF-8 text file into this unlocked space.", vec!["File path"], vec![false], "Import", Some("Cancel")),
             FormKind::InsertImage => ("Insert image", "Enter the path to a PNG image (up to 16 MiB).", vec!["PNG file path"], vec![false], "Insert", Some("Cancel")),
             FormKind::InsertTable => ("Insert table", "Choose rows and columns. Up to 8 columns and 10 rows.", vec!["Rows", "Columns"], vec![false, false], "Insert", Some("Cancel")),
+            FormKind::Find => ("Find", "Search the current document. Match case accepts yes/no.", vec!["Find", "Replace with", "Match case (yes/no)"], vec![false,false,false], "Run", Some("Close")),
+            FormKind::Replace => ("Replace", "Replace the selection or every match. Each replacement is undoable.", vec!["Find", "Replace with", "Match case (yes/no)"], vec![false,false,false], "Run", Some("Close")),
             FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
         };
         let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
@@ -843,6 +854,19 @@ impl Form {
                 let p = val(0).trim(); if p.is_empty() { return Err("Enter a container path.".into()); }
                 if !save(vault, session) { return Err("Save failed; current vault kept open.".into()); }
                 let path = std::path::PathBuf::from(p); lock(vault, session, &path); Ok(Some(if path.exists() { Form::unlock(path) } else { Form::setup(path) }))
+            }
+            FormKind::Find | FormKind::Replace => {
+                let query=self.values[0].to_string(); let replacement=self.values[1].to_string();
+                let case=self.values[2].trim().eq_ignore_ascii_case("yes");
+                let mut next=self.clone();
+                let result=match self.choice {
+                    0 => session.find_text(&query,true,case).map(|r| if r.is_some() {"Match selected.".to_string()} else {"No match.".to_string()}),
+                    1 => session.find_text(&query,false,case).map(|r| if r.is_some() {"Match selected.".to_string()} else {"No match.".to_string()}),
+                    2 => session.replace_selection(&query,&replacement,case).map(|ok| if ok {"Replaced.".to_string()} else {"Selection does not match.".to_string()}),
+                    3 => session.replace_all(&query,&replacement,case).map(|n| format!("Replaced {n} matches.")),
+                    _ => return Ok(None),
+                };
+                match result { Ok(msg)=>{ next.error=Some(msg); Ok(Some(next)) }, Err(e)=>{ next.error=Some(e.to_string()); Ok(Some(next)) } }
             }
             FormKind::DocMenu => match self.choice {
                 0 => Ok(Some(Form::rename(self.values[0].to_string()))),

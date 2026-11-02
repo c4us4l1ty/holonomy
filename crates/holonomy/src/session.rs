@@ -904,7 +904,7 @@ pub struct DocumentSnapshot {
 
 /// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentRequest { Home, New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, InsertImage, InsertTable, DocumentMenu(usize) }
+pub enum DocumentRequest { Home, New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, InsertImage, InsertTable, Find, Replace, DocumentMenu(usize) }
 
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
@@ -1802,6 +1802,7 @@ impl<'a> Session<'a> {
     /// Returns whether the size actually changed.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, SessionError> {
         let mut metrics = self.chrome.metrics.clamp_to(width, height);
+        if self.state.ribbon { metrics.title_h=76; metrics.menu_h=32; metrics.toolbar_h=if self.state.ribbon_collapsed {0} else {112}; metrics.ruler_h=26; metrics.status_h=28; }
         if self.managed_documents {
             metrics.page_pad = Self::desktop_page_padding(metrics.width);
         }
@@ -1859,6 +1860,10 @@ impl<'a> Session<'a> {
     /// reason. `a_narrow_toolbar_puts_the_hidden_tools_in_the_overflow_menu` is the gate.
     pub fn refresh_overflow(&mut self) {
         let l = self.chrome.layout;
+        if self.state.ribbon {
+            self.state.ribbon_overflow = holonomy_render::ribbon::overflow(&l,&self.state);
+            return;
+        }
         let hidden: Vec<widgets::Tool> = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
             .into_iter()
             // **`Overflow` is excluded too, and the reason is its role.** Part 44 put it in the
@@ -1972,9 +1977,16 @@ impl<'a> Session<'a> {
     pub fn set_managed_documents(&mut self, managed: bool) {
         self.managed_documents = managed;
         self.state.paged = managed;
+        self.state.ribbon = managed;
+        self.state.sidebar_open = false;
+        self.state.dark = true;
         let page_pad = if managed { Self::desktop_page_padding(self.chrome.metrics.width) }
             else { self.type_metrics.page_pad };
-        self.chrome = Chrome::new(ChromeMetrics { page_pad, ..self.chrome.metrics });
+        let mut metrics = ChromeMetrics { page_pad, sidebar_w: 0, ..self.chrome.metrics };
+        if managed { metrics.title_h=76; metrics.menu_h=32; metrics.toolbar_h=112; metrics.ruler_h=26; metrics.status_h=28; }
+        self.chrome = Chrome::new(metrics);
+        self.refresh_overflow();
+        self.refresh_navigation();
         self.invalidate(self.chrome.full_damage());
         if managed {
             self.reflow_for_measure();
@@ -3062,7 +3074,8 @@ impl<'a> Session<'a> {
                 // The thing that opened it is still live: hovering it and pressing it toggles it.
                 None => {
                     let opener = match open {
-                        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
+                        widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
+        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
                         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
                     };
                     if widgets::hit(l, &self.state, x, y) == opener {
@@ -3140,6 +3153,15 @@ impl<'a> Session<'a> {
     ) -> Result<(), SessionError> {
         use widgets::{Hit, Tool};
         match hit {
+            Hit::Ribbon(action) => { self.apply_action(action)?; }
+            Hit::RibbonTab(i) => {
+                if i==0 { self.apply_action(holonomy_render::menus::Action::Home)?; }
+                else { self.state.ribbon_tab=i as u8; self.state.open=None; self.invalidate(self.chrome.full_damage()); }
+            }
+            Hit::RibbonSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
+            Hit::RibbonLock => self.apply_action(holonomy_render::menus::Action::Lock)?,
+            Hit::RibbonCollapse => self.apply_action(holonomy_render::menus::Action::ToggleRibbon)?,
+            Hit::Nav(i) => { if let Some((line,_))=self.state.navigation.get(i) { self.scroll_to(*line)?; } }
             Hit::MenuItem { open, row } => {
                 let Some(item) = open.items(&self.state).get(row).copied() else {
                     return Ok(());
@@ -3190,7 +3212,7 @@ impl<'a> Session<'a> {
                 // the button found there was nothing to show. **`pointer_inert` means a widget with no
                 // action behind it**, and there is one -- it just has nothing to do at this width.
                 if tool.has_dropdown()
-                    && !(tool == widgets::Tool::Overflow && self.state.overflow_tools.is_empty())
+                    && !(tool == widgets::Tool::Overflow && !self.state.ribbon && self.state.overflow_tools.is_empty())
                 {
                     // **No `pointer_chrome` here, and that is the gate `pointer.rs::
                     // every_tool_that_has_a_command_is_routed_through_it` enforcing.** Part 44 added
@@ -3208,6 +3230,11 @@ impl<'a> Session<'a> {
                     self.state.open = (self.state.open != Some(open)).then_some(open);
                     self.invalidate_popup_change(before);
                     return Ok(());
+                }
+                if tool == widgets::Tool::Overflow && self.state.ribbon {
+                    let before=self.state.open; let open=widgets::Open::RibbonOverflow;
+                    self.state.open=(self.state.open!=Some(open)).then_some(open);
+                    self.invalidate_popup_change(before); return Ok(());
                 }
                 if tool == widgets::Tool::Overflow {
                     self.stats.pointer_chrome += 1;
@@ -3475,9 +3502,10 @@ impl<'a> Session<'a> {
         dx: i32,
         source: &mut dyn holonomy_text::LeafSource,
     ) -> Option<u32> {
-        let dx = u32::try_from(dx).unwrap_or(0);
         let start = self.lines.line_begin(line as usize) as u32;
         let end = self.lines.line_end(line as usize) as u32;
+        let align=if self.managed_documents { let text=self.editor.text().unwrap_or_default(); self.line_align_offset(start,&text[start as usize..end as usize]) } else {0};
+        let dx = u32::try_from(dx-align).unwrap_or(0);
         // **A click left of the text column is column 0**, which is what the grid arm answered and is
         // still right: there is no glyph before the first one.
         if dx == 0 || end <= start {
@@ -3858,6 +3886,13 @@ impl<'a> Session<'a> {
             }
             at += n as u32;
         }
+        let mut line_buf=[0u8; LINE_SCRATCH_BYTES];
+        let line_len=(self.lines.line_end(self.line_index(start as usize) as usize)-start as usize).min(LINE_SCRATCH_BYTES);
+        let align=if self.managed_documents && line_len>0 {
+            let got=match source.as_deref_mut() { Some(src)=>self.editor.read_into_faulting(src,start as usize,&mut line_buf[..line_len]).ok(), None=>self.editor.read_into(start as usize,&mut line_buf[..line_len]).ok() };
+            if got==Some(line_len) { self.line_align_offset(start,&line_buf[..line_len]) } else {0}
+        } else {0};
+        let pen=(pen as i32+align).max(0) as u32;
         self.state.caret_pen_x = Some(pen);
         Some(pen)
     }
@@ -4069,6 +4104,121 @@ impl<'a> Session<'a> {
     /// alternative was to reach into the chrome, work out the Bold button's rectangle and press it --
     /// **which would have tested the hit test as well as the styling, and failed for reasons that
     /// have nothing to do with what it claims.** A gate should fail for one reason.
+    /// Rebuild the desktop heading outline. Bounded, and never run by the sealed UI.
+    pub fn refresh_navigation(&mut self) {
+        if !self.managed_documents { return; }
+        let Ok(text)=self.editor.text() else { return };
+        let mut out=Vec::new(); let mut line=0u32; let mut start=0usize;
+        for (i,b) in text.iter().enumerate().chain(std::iter::once((text.len(),&b'\n'))) {
+            if *b==b'\n' {
+                let flags=self.editor.style_at(start as u32).style_flags;
+                if flags & STYLE_HEADER != 0 && out.len()<256 {
+                    let title=String::from_utf8_lossy(&text[start..i]).chars().take(80).collect();
+                    if !title.is_empty() { out.push((line,title)); }
+                }
+                line+=1; start=i+1;
+            }
+        }
+        self.state.navigation=out;
+    }
+
+    /// Text prefixes are the list representation: they survive plain-text export and
+    /// every existing payload without a format migration. Enter continues the prefix.
+    fn toggle_list(&mut self, numbered:bool) -> Result<(),SessionError> {
+        self.check_editable()?;
+        let (from,to)=self.paragraph_range();
+        let mut text=self.editor.text()?;
+        let segment=String::from_utf8_lossy(&text[from as usize..to as usize]).into_owned();
+        let mut out=String::new(); let mut changed=false; use zeroize::Zeroize;
+        for line in segment.split_inclusive('\n') {
+            let (body,term)=line.strip_suffix('\n').map(|s|(s,"\n")).unwrap_or((line,""));
+            let trimmed=body.trim_start();
+            let indent=&body[..body.len()-trimmed.len()];
+            let bullet=trimmed.strip_prefix("- ").or_else(||trimmed.strip_prefix("* "));
+            let number=trimmed.find(". ").filter(|p|p>0&&trimmed[..*p].bytes().all(|b|b.is_ascii_digit())).map(|p|&trimmed[p+2..]);
+            let prefix=if numbered {"1. "} else {"- "};
+            let already=if numbered {number.is_some()} else {bullet.is_some()};
+            let content=bullet.or(number).unwrap_or(trimmed);
+            if already { out.push_str(indent); out.push_str(content); changed=true; }
+            else { out.push_str(indent); out.push_str(prefix); out.push_str(content); changed=true; }
+            out.push_str(term);
+        }
+        if numbered { renumber_list(&mut out); }
+        if changed {
+            self.select_range(from,to)?;
+            self.delete_selected()?;
+            self.insert(out.as_bytes(),None)?;
+        }
+        text.zeroize();
+        Ok(())
+    }
+
+    fn set_alignment(&mut self, action:holonomy_render::menus::Action) -> Result<(),SessionError> {
+        self.check_editable()?;
+        if !self.managed_documents { self.set_notice(Some("Alignment is available in the desktop document editor.".into())); return Ok(()); }
+        use holonomy_render::menus::Action;
+        let bit=match action {Action::AlignCenter=>holonomy_text::STYLE_ALIGN_CENTER,Action::AlignRight=>holonomy_text::STYLE_ALIGN_RIGHT,_=>0};
+        let (from,to)=self.paragraph_range();
+        if from<to {
+            self.editor.format_range(from,to,|s|((s.style_flags & !holonomy_text::STYLE_ALIGN_MASK)|bit,s.color_rgb))?;
+            self.after_edit(0)?; self.invalidate(self.chrome.full_damage());
+        } else {
+            let f=self.pending_style.unwrap_or(0);
+            self.pending_style=Some((f & !holonomy_text::STYLE_ALIGN_MASK)|bit);
+        }
+        Ok(())
+    }
+
+    /// Find next substring, wrapping once. Case-insensitive search is ASCII-only:
+    /// Unicode case folding can change byte lengths and must never select the wrong range.
+    pub fn find_text(&mut self, query:&str, forward:bool, case_sensitive:bool) -> Result<Option<(u32,u32)>,SessionError> {
+        if query.is_empty() { return Ok(None); }
+        let text=self.editor.text()?;
+        let (hay,q)=if case_sensitive {(text.clone(),query.as_bytes().to_vec())} else {
+            if !query.is_ascii() { return Err(SessionError::Sink(std::io::Error::other("Case-insensitive search supports ASCII; enable Match case for Unicode."))); }
+            (text.to_ascii_lowercase(),query.as_bytes().to_ascii_lowercase())
+        };
+        let caret=self.editor.selection().map(|s|if forward {s.end} else {s.start}).unwrap_or(self.editor.caret()) as usize;
+        let find_in=|slice:&[u8]| -> Option<usize> { slice.windows(q.len()).position(|w|w==q) };
+        let at=if forward { find_in(&hay[caret.min(hay.len())..]).map(|i|caret+i).or_else(||find_in(&hay)) }
+            else { hay[..caret.min(hay.len())].windows(q.len()).rposition(|w|w==q).or_else(||hay.windows(q.len()).rposition(|w|w==q)) };
+        let Some(at)=at else { return Ok(None) };
+        self.select_range(at as u32,(at+q.len()) as u32)?;
+        Ok(Some((at as u32,(at+q.len()) as u32)))
+    }
+
+    pub fn replace_selection(&mut self, query:&str, replacement:&str, case_sensitive:bool) -> Result<bool,SessionError> {
+        self.check_editable()?;
+        let Some(sel)=self.editor.selection() else { return Ok(false) };
+        let text=self.editor.text()?;
+        let selected=&text[sel.start as usize..sel.end as usize];
+        let ok=if case_sensitive {selected==query.as_bytes()} else {selected.to_ascii_lowercase()==query.as_bytes().to_ascii_lowercase()};
+        if !ok { return Ok(false); }
+        self.delete_selected()?; self.insert(replacement.as_bytes(),None)?; Ok(true)
+    }
+
+    /// Replace all non-overlapping matches from the end backwards, so earlier byte
+    /// offsets remain valid. Each replacement is an ordinary bounded editor edit.
+    pub fn replace_all(&mut self, query:&str, replacement:&str, case_sensitive:bool) -> Result<usize,SessionError> {
+        self.check_editable()?;
+        if query.is_empty() { return Ok(0); }
+        let text=self.editor.text()?;
+        let (hay,q)=if case_sensitive {(text.clone(),query.as_bytes().to_vec())} else {
+            if !query.is_ascii() { return Err(SessionError::Sink(std::io::Error::other("Case-insensitive replace supports ASCII; enable Match case for Unicode."))); }
+            (text.to_ascii_lowercase(),query.as_bytes().to_ascii_lowercase())
+        };
+        let mut matches=Vec::new(); let mut at=0;
+        while at+q.len()<=hay.len() && matches.len()<10000 {
+            if hay[at..at+q.len()]==q[..] { matches.push(at as u32); at+=q.len(); } else { at+=1; }
+        }
+        let count=matches.len();
+        for start in matches.into_iter().rev() {
+            self.select_range(start,start+q.len() as u32)?;
+            self.replace_selection(query,replacement,case_sensitive)?;
+        }
+        Ok(count)
+    }
+
     pub fn apply_action(
         &mut self,
         action: holonomy_render::menus::Action,
@@ -4088,6 +4238,33 @@ impl<'a> Session<'a> {
             }
         }
         match action {
+            Action::Find | Action::Replace => {
+                if self.managed_documents {
+                    self.document_request = Some(if action==Action::Find {DocumentRequest::Find} else {DocumentRequest::Replace});
+                } else { self.set_notice(Some("Find is available in the desktop document editor.".into())); }
+                return Ok(());
+            }
+            Action::ToggleTheme => { self.state.dark=!self.state.dark; self.invalidate(self.chrome.full_damage()); return Ok(()); }
+            Action::ToggleAutosave => { self.state.autosave=!self.state.autosave; self.set_notice(Some(if self.state.autosave {"AutoSave on"} else {"AutoSave off"}.into())); return Ok(()); }
+            Action::ToggleRibbon => {
+                self.state.ribbon_collapsed=!self.state.ribbon_collapsed;
+                let mut m=self.chrome.metrics; m.toolbar_h=if self.state.ribbon_collapsed {0} else {112};
+                self.chrome=Chrome::new(m); self.reflow_for_measure(); self.refresh_overflow(); self.invalidate(self.chrome.full_damage()); return Ok(());
+            }
+            Action::ToggleNavigation => { self.set_sidebar(!self.state.sidebar_open); self.refresh_navigation(); return Ok(()); }
+            Action::ToggleBullets => { self.toggle_list(false)?; return Ok(()); }
+            Action::ToggleNumbering => { self.toggle_list(true)?; return Ok(()); }
+            Action::AlignLeft | Action::AlignCenter | Action::AlignRight => { self.set_alignment(action)?; return Ok(()); }
+            Action::Indent => { self.apply(Command::Tab)?; return Ok(()); }
+            Action::Outdent => { self.apply(Command::ShiftTab)?; return Ok(()); }
+            Action::InsertPageBreak => {
+                self.check_editable()?;
+                let line=self.line_index(self.editor.caret() as usize) as u32;
+                let rows=self.chrome.layout.page_rows();
+                let n=rows-(line%rows);
+                self.insert(&vec![b'\n'; n as usize], None)?;
+                return Ok(());
+            }
             Action::WordCount => {
                 self.set_notice(Some(format!("{} words · {} lines", self.state.words, self.counts.lines())));
                 return Ok(());
@@ -4245,6 +4422,9 @@ impl<'a> Session<'a> {
                 let (flags, colour) = match idx {
                     1 => (STYLE_HEADER | STYLE_BOLD, 0x001A_5C75),
                     2 => (STYLE_ITALIC, 0),
+                    3 => (STYLE_HEADER | STYLE_BOLD, 0),
+                    4 => (STYLE_HEADER | STYLE_ITALIC, 0x0059_5959),
+                    5 => (STYLE_BOLD, 0x001A_5C75),
                     _ => (0, 0),
                 };
                 let (from, to) = match self.editor.selection() {
@@ -4569,6 +4749,9 @@ impl<'a> Session<'a> {
             .with_cell_width(self.painter.cell_width())
             .with_type_scale(u32::from(pitch))
             .with_line_pitch(u32::from(pitch));
+        let metrics = if self.state.ribbon {
+            ChromeMetrics { title_h: 76, menu_h: 32, toolbar_h: if self.state.ribbon_collapsed {0} else {112}, ruler_h: 26, status_h: 28, ..metrics }
+        } else { metrics };
         // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
         // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
         // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and
@@ -4896,6 +5079,8 @@ impl<'a> Session<'a> {
             Command::Hotkey(Hotkey::Superscript) => self.apply_action(holonomy_render::menus::Action::ToggleSuperscript)?,
             Command::Hotkey(Hotkey::Subscript) => self.apply_action(holonomy_render::menus::Action::ToggleSubscript)?,
             Command::Hotkey(Hotkey::ClearFormatting) => self.apply_action(holonomy_render::menus::Action::ClearFormatting)?,
+            Command::Hotkey(Hotkey::Find) => self.apply_action(holonomy_render::menus::Action::Find)?,
+            Command::Hotkey(Hotkey::Replace) => self.apply_action(holonomy_render::menus::Action::Replace)?,
             Command::Hotkey(Hotkey::Undo) => self.undo()?,
             Command::Hotkey(Hotkey::Redo) => self.redo()?,
             Command::Hotkey(Hotkey::Save) => {
@@ -5091,6 +5276,29 @@ impl<'a> Session<'a> {
             && self.editor.style_at((at - 1) as u32).style_flags & STYLE_HEADER != 0;
         // `GrowIntoInsert` so typing at the end of a bold word keeps it bold, which is what a word
         // processor does and what `SpanPolicy`'s own docs argue for.
+        let list_prefix = if bytes==b"\n" && self.active_cell.is_none() && self.managed_documents {
+            let start=self.line_start(at); let end=self.line_end_offset(at);
+            let line=String::from_utf8_lossy(&self.editor.text().unwrap_or_default()[start..end]).into_owned();
+            let t=line.trim_start(); let indent=&line[..line.len()-t.len()];
+            if t=="-" || t=="*" || t.chars().all(|c|c.is_ascii_digit()) && t.ends_with('.') {
+                Some((start,end,String::new()))
+            } else if let Some(rest)=t.strip_prefix("- ").or_else(||t.strip_prefix("* ")) {
+                let _=rest; Some((start,end,format!("{indent}- ")))
+            } else if let Some(p)=t.find(". ").filter(|p|*p>0&&t[..*p].bytes().all(|b|b.is_ascii_digit())) {
+                let n:u32=t[..p].parse().unwrap_or(0); Some((start,end,format!("{indent}{}. ",n.saturating_add(1))))
+            } else { None }
+        } else { None };
+        if let Some((start,end,prefix))=list_prefix {
+            if prefix.is_empty() {
+                self.editor.delete_at(start as u32,(end-start) as u32)?;
+                self.counts=crate::counts::TextCounts::scan(&self.editor.text().unwrap_or_default());
+                self.after_edit(0)?; return Ok(());
+            }
+            let bytes=format!("\n{prefix}");
+            self.editor.insert_at(self.editor.caret(),bytes.as_bytes(),SpanPolicy::GrowIntoInsert)?;
+            self.counts.after_insert(&self.editor,at,bytes.as_bytes());
+            return self.after_edit(bytes.len() as u32);
+        }
         self.editor
             .insert_at(self.editor.caret(), bytes, SpanPolicy::GrowIntoInsert)?;
         self.counts.after_insert(&self.editor, at, bytes);
@@ -6184,6 +6392,7 @@ impl<'a> Session<'a> {
     /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
     fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
         self.stats.edits += 1;
+        if self.managed_documents { self.refresh_navigation(); }
         // **The caret's line before this edit, captured before `reconcile_caret` overwrites it.**
         // `state.caret_line` is a *view* of where the caret is, and it is kept current by
         // `reconcile_caret` — which every caret move and every edit goes through — so at the top of
@@ -6824,6 +7033,18 @@ impl<'a> Session<'a> {
     ///
     /// Block rows in the managed view displace later rows, but they are not yet repaginated
     /// or split across sheets. Existing objects sharing one line can still overlap.
+    fn line_align_offset(&self, doc_at:u32, text:&[u8]) -> i32 {
+        if !self.managed_documents { return 0; }
+        let flags=self.editor.style_at(doc_at).style_flags;
+        let mask=flags & holonomy_text::STYLE_ALIGN_MASK;
+        if mask==0 { return 0; }
+        let shown=strip_terminator(text);
+        let runs=self.editor.spans().runs_in(doc_at,doc_at+shown.len() as u32);
+        let width=pen_at(&self.painter,shown,doc_at,shown.len(),&runs,self.body_style(),|f|self.run_size_index(f)) as i32;
+        let measure=self.chrome.layout.text.width as i32;
+        if mask & holonomy_text::STYLE_ALIGN_RIGHT != 0 { (measure-width).max(0) } else { (measure-width).max(0)/2 }
+    }
+
     fn emit_body_text(
         &mut self,
         tree: &mut SurfaceTree,
@@ -7122,10 +7343,11 @@ impl<'a> Session<'a> {
                         self.body_style(),
                         size_of,
                     ));
+                    let align=self.line_align_offset(doc_at,text);
                     if pen1 > pen0 {
                         push_rect(
                             tree,
-                            l.x + pen0,
+                            (l.x as i32 + pen0 as i32 + align) as u32,
                             y,
                             pen1 - pen0,
                             m.cell_h,
@@ -7198,6 +7420,7 @@ impl<'a> Session<'a> {
             // is drawn plain and a plain line is drawn in the style of whatever was at the same
             // *page* offset in the document.
             let doc_at = doc_base + (at - page_base);
+            let align = self.line_align_offset(doc_at, &self.line_scratch[at as usize..(at+len) as usize]);
             let mut runs = page_runs
                 .iter()
                 .skip_while(|(_, _, hi)| *hi <= doc_at)
@@ -7214,7 +7437,7 @@ impl<'a> Session<'a> {
                 let flags = self.editor.style_at(doc_at).style_flags;
                 tree.before
                     .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
-                        l.x as i32,
+                        l.x as i32 + align,
                         y as i32,
                         at,
                         shown_len,
@@ -7271,7 +7494,7 @@ impl<'a> Session<'a> {
                     let gap = &seg[cursor..lo];
                     push_doc_run(
                         tree,
-                        l.x + pen_x,
+                        (l.x as i32 + pen_x as i32 + align) as u32,
                         y,
                         at + cursor as u32,
                         gap.len() as u32,
@@ -7296,7 +7519,7 @@ impl<'a> Session<'a> {
                     // that here would be a second answer to a question with one right one.
                     push_doc_run(
                         tree,
-                        l.x + pen_x,
+                        (l.x as i32 + pen_x as i32 + align) as u32,
                         y,
                         at + cursor as u32,
                         run.len() as u32,
@@ -7331,7 +7554,7 @@ impl<'a> Session<'a> {
                 let tail = &seg[cursor..];
                 push_doc_run(
                     tree,
-                    l.x + pen_x,
+                    (l.x as i32 + pen_x as i32 + align) as u32,
                     y,
                     at + cursor as u32,
                     tail.len() as u32,
@@ -8987,6 +9210,10 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         | Action::ToggleSubscript
         | Action::ClearFormatting => return None,
         Action::WordCount | Action::KeyboardShortcuts => return None,
+        Action::Find | Action::Replace | Action::ToggleBullets | Action::ToggleNumbering
+        | Action::AlignLeft | Action::AlignCenter | Action::AlignRight | Action::Indent | Action::Outdent
+        | Action::ToggleRibbon | Action::ToggleTheme | Action::ToggleAutosave | Action::ToggleNavigation
+        | Action::InsertPageBreak => return None,
     })
 }
 
@@ -9202,4 +9429,17 @@ impl EdgeScroll {
 /// different answer than the doc comment claims. **The name says "byte" for that reason.**
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn renumber_list(text:&mut String) {
+    let mut n=1; let mut out=String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body,term)=line.strip_suffix('\n').map(|s|(s,"\n")).unwrap_or((line,""));
+        let t=body.trim_start();
+        if let Some(p)=t.find(". ").filter(|p|*p>0&&t[..*p].bytes().all(|b|b.is_ascii_digit())) {
+            out.push_str(&body[..body.len()-t.len()]); out.push_str(&format!("{n}. {}",&t[p+2..])); n+=1;
+        } else { out.push_str(body); }
+        out.push_str(term);
+    }
+    *text=out;
 }

@@ -104,7 +104,10 @@ pub const STYLE_DECORATIONS: u16 = STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERS
 /// **Every bit this build defines.** A flag outside this mask is not a formatting request, it is a
 /// corrupt payload — and the importer's check names this so a file written by a newer build fails
 /// loudly rather than drawing text nobody asked for.
-pub const STYLE_KNOWN: u16 = STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS;
+pub const STYLE_ALIGN_CENTER: u16 = 1 << 8;
+pub const STYLE_ALIGN_RIGHT: u16 = 1 << 9;
+pub const STYLE_ALIGN_MASK: u16 = STYLE_ALIGN_CENTER | STYLE_ALIGN_RIGHT;
+pub const STYLE_KNOWN: u16 = STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK;
 
 /// One styled byte range.
 ///

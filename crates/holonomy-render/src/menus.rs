@@ -180,12 +180,40 @@ pub enum Action {
     /// `Action` per tool**, which is a table that has to be kept in step with `TOOLBAR` and is wrong
     /// the moment a tool is added.
     SelectTool(crate::widgets::Tool),
+    Find,
+    Replace,
+    ToggleBullets,
+    ToggleNumbering,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    Indent,
+    Outdent,
+    ToggleRibbon,
+    ToggleTheme,
+    ToggleAutosave,
+    ToggleNavigation,
+    InsertPageBreak,
 }
 
 impl Action {
     /// A short name for a status bar and for a gate's failure message.
     pub const fn name(self) -> &'static str {
         match self {
+            Action::Find => "find",
+            Action::Replace => "replace",
+            Action::ToggleBullets => "bullets",
+            Action::ToggleNumbering => "numbering",
+            Action::AlignLeft => "align-left",
+            Action::AlignCenter => "align-center",
+            Action::AlignRight => "align-right",
+            Action::Indent => "indent",
+            Action::Outdent => "outdent",
+            Action::ToggleRibbon => "toggle-ribbon",
+            Action::ToggleTheme => "toggle-theme",
+            Action::ToggleAutosave => "toggle-autosave",
+            Action::ToggleNavigation => "toggle-navigation",
+            Action::InsertPageBreak => "insert-page-break",
             Action::Undo => "undo",
             Action::Redo => "redo",
             Action::SelectAll => "select-all",
@@ -483,11 +511,7 @@ pub fn items_for(index: usize) -> &'static [Item] {
 /// than an allocation.** Part 19 stored `style_name: String` and formatted a `String` for the toolbar
 /// on *every paint*; an index into this list is a `u8` in the state and a borrow at the point of use.
 /// See `ChromeState::style_name`.
-pub const STYLES: &[&str] = &[
-    "Normal text",
-    "Heading",
-    "Quote",
-];
+pub const STYLES: &[&str] = &["Normal", "Heading 1", "Quote", "Title", "Subtitle", "Heading 2"];
 
 /// The fonts the font dropdown offers, in the order it shows them.
 ///

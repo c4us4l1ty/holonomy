@@ -597,7 +597,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     assert_eq!(b, "Inter");
     // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
     // names would have to be returned as a borrow of the state and could not be `'static`.
-    assert_eq!(menus::STYLES.len(), 3);
+    assert_eq!(menus::STYLES.len(), 6);
     // **Two, and both loaded.** The list used to be five names of which four had no face in the
     // atlas; the dropdown is now exactly the families `Session::doc_style` can actually draw.
     assert_eq!(menus::FONTS.len(), 2);

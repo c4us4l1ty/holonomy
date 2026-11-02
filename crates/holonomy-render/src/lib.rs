@@ -31,6 +31,7 @@ pub mod dialog;
 pub mod home;
 pub mod icons;
 pub mod menus;
+pub mod ribbon;
 pub mod table;
 pub mod widgets;
 pub mod wrap;

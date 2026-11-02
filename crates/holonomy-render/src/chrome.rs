@@ -1635,6 +1635,13 @@ impl LineHeights {
 pub struct ChromeState {
     /// Document name, shown in the tab bar.
     pub title: String,
+    pub ribbon: bool,
+    pub ribbon_tab: u8,
+    pub ribbon_collapsed: bool,
+    pub dark: bool,
+    pub autosave: bool,
+    pub navigation: Vec<(u32, String)>,
+    pub ribbon_overflow: Vec<crate::menus::Item>,
     /// Whether the container is sealed. Drives the `[SEALED]` badge.
     pub sealed: bool,
     /// Zoom, as a percentage.
@@ -1814,6 +1821,7 @@ impl Default for ChromeState {
     fn default() -> Self {
         Self {
             title: "Journal".to_string(),
+            ribbon: false, ribbon_tab: 1, ribbon_collapsed: false, dark: true, autosave: true, navigation: Vec::new(), ribbon_overflow: Vec::new(),
             // **Open, which reverses a correction that was right about the arithmetic and wrong about
             // the product.**
             //
@@ -2443,9 +2451,13 @@ impl Chrome {
         // `widgets::hit` answers cannot drift. That is the entire reason `widgets.rs` exists: the
         // failure mode of a hit test is a button that is drawn in one place and pressed in another,
         // and the only cure is for there to be one place.
-        paint_title(&mut chrome.before, m, l, state);
-        paint_menubar(&mut chrome.before, m, l, state);
-        paint_toolbar(&mut chrome.before, m, l, state);
+        if state.ribbon {
+            crate::ribbon::paint(&mut chrome.before, l, state, m.cell_h);
+        } else {
+            paint_title(&mut chrome.before, m, l, state);
+            paint_menubar(&mut chrome.before, m, l, state);
+            paint_toolbar(&mut chrome.before, m, l, state);
+        }
         // **The sidebar is NOT here.** It is layer 2: a panel inside the canvas, drawn over the page.
         // See the layer table on this function.
 
@@ -2491,6 +2503,7 @@ impl Chrome {
         // left, because they are a property of the document and are useful at every moment. The notice
         // is a *transient* and is drawn after the counters, separated from them — so `Saved` appears
         // beside `Ln 1, Col 1  0 words  0 B` instead of instead of it.
+        if !state.ribbon {
         let counters = if state.paged {
             let rows = l.page_rows();
             format!("Page {} / {}  Ln {}, Col {}  {} words  {} B",
@@ -2546,6 +2559,7 @@ impl Chrome {
                 m.cell_h.saturating_sub(8),
                 colour::ACTIVE,
             ));
+        }
         }
         root.before.push(chrome);
 
@@ -2962,8 +2976,10 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     let x = pop.rect.x as i32;
     let y = pop.rect.y as i32;
 
-    into.push(rounded(x + 2, y + 3, pop.rect.width, pop.rect.height, 8, colour::SHADOW));
-    into.push(rounded(x, y, pop.rect.width, pop.rect.height, 8, colour::POPUP));
+    let pal = crate::ribbon::Palette::get(state.dark);
+    let (popup_bg, popup_ink, popup_hover) = if state.ribbon { (pal.ribbon, pal.text, pal.hover) } else { (colour::POPUP, colour::INK, colour::PILL_HOVER) };
+    into.push(rounded(x + 2, y + 3, pop.rect.width, pop.rect.height, 8, if state.ribbon { pal.border } else { colour::SHADOW }));
+    into.push(rounded(x, y, pop.rect.width, pop.rect.height, 8, popup_bg));
     for (i, it) in items.iter().enumerate() {
         let Some(row) = pop.rows.get(i) else { break };
         // **Hover and press come from the session, not from a re-hit-test here.** The painter does not
@@ -3349,6 +3365,20 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
 /// The sidebar: a back arrow, a heading, a "+", and one row per document.
 fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
+    if state.ribbon {
+        let t = crate::ribbon::Palette::get(state.dark);
+        into.push(fill(0,l.sidebar.y as i32,l.sidebar.width,l.sidebar.height,t.ribbon));
+        into.push(fill(l.sidebar.right().saturating_sub(1) as i32,l.sidebar.y as i32,1,l.sidebar.height,t.border));
+        push_text(into,m,l.sidebar.y+24,"Navigation",Style::BOLD,t.text,24);
+        push_text(into,m,l.sidebar.y+60,"Headings",Style::REGULAR,t.group,24);
+        for (i,(_,title)) in state.navigation.iter().enumerate() {
+            let Some(r)=l.sidebar_doc(i) else { break };
+            if state_fill(state,crate::widgets::Hit::Nav(i)).is_some() { into.push(rounded(r.x as i32,r.y as i32,r.width,r.height,5,t.hover)); }
+            push_text(into,m,r.y+(r.height.saturating_sub(m.cell_h))/2,title,Style::REGULAR,t.text,r.x as i32+24);
+        }
+        if state.navigation.is_empty() { push_text(into,m,l.sidebar.y+100,"Apply Heading 1 to add entries.",Style::REGULAR,t.group,24); }
+        return;
+    }
     // # CORRECTION: the rail's own fill was `CHROME`
     //
     // It was `colour::CHROME`, the panel's colour, so a *closed* sidebar and an open one differed only

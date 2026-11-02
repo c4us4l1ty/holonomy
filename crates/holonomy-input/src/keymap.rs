@@ -220,6 +220,10 @@ pub enum Hotkey {
     /// would land if it were spelled as a character: the ctrl block runs before the character table,
     /// and that ordering is what makes `Ctrl+\` clear formatting rather than type `\`.
     ClearFormatting,
+    /// Ctrl+F. Find in the managed desktop editor.
+    Find,
+    /// Ctrl+Shift+H. Replace in the managed desktop editor.
+    Replace,
 }
 
 /// Everything the session can be asked to do by one keystroke.
@@ -401,6 +405,8 @@ impl Keymap {
                 KEY_DOT if !mods.shift() && !mods.alt() => Some(Hotkey::Superscript),
                 KEY_COMMA if !mods.shift() && !mods.alt() => Some(Hotkey::Subscript),
                 KEY_BACKSLASH if !mods.shift() && !mods.alt() => Some(Hotkey::ClearFormatting),
+                KEY_F if !mods.shift() && !mods.alt() => Some(Hotkey::Find),
+                KEY_H if mods.shift() && !mods.alt() => Some(Hotkey::Replace),
                 _ => None,
             };
             if let Some(hotkey) = binding {
