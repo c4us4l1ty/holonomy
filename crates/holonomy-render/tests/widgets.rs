@@ -342,6 +342,37 @@ fn the_bands_themselves_are_not_widgets() {
     let _ = TitleButton::Star;
 }
 
+/// **The title bar draws only the buttons that do something.**
+///
+/// **Seven of the eight were inert**, and they were not anonymous: Star, Folder, Upgrade and Sparkle
+/// each had a picture and no behaviour, and the two *pills* — Share and Cloud — were the ones that
+/// worked. That is the worst possible ratio for a first impression, because a title bar is the first
+/// thing a new user presses.
+///
+/// **The claim is about the drawn list, not about the enum.** `place_title` filters on
+/// `TitleButton::has_action`, so a button can stay a variant (the enum is the vocabulary) while not
+/// being drawn — and this asserts the drawn set exactly, so a future button cannot be added to the
+/// layout without an action behind it.
+#[test]
+fn the_title_bar_draws_only_buttons_that_do_something() {
+    let l = layout();
+    let drawn: Vec<TitleButton> = place_title(&l, TITLE_PAD).into_iter().map(|(b, _)| b).collect();
+    assert_eq!(
+        drawn,
+        vec![TitleButton::Cloud, TitleButton::Share],
+        "the title bar draws {drawn:?}. It should draw Cloud (save) and Share (export) and nothing \
+         else: every other button in the enum needs a model this program does not have, and a title \
+         button that closes over a no-op is the strongest signal that the application is a mock-up."
+    );
+    // **And the filter is the source of truth**, so the two cannot drift.
+    for b in &drawn {
+        assert!(
+            b.has_action(),
+            "{b:?} is drawn but `has_action` says it does nothing"
+        );
+    }
+}
+
 /// **The menu widths are measured, not tabulated, and the cell width is the metrics'.**
 ///
 /// ## CORRECTION, part 32: the guard was comparing a constant with itself

@@ -482,9 +482,15 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `opened` and not here. The first version of this assertion expected `["zoom", "bold", "italic"]`
     // and the compiler was right: a dropdown's opener has changed nothing yet.
     //
-    // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 21 tools:
-    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **4 open a dropdown**
-    // (Zoom, Style, Font, TextColour), 2 change chrome state (Bold, Italic), and the rest are inert.
+    // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 22 tools:
+    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **5 open a dropdown**
+    // (Zoom, Style, Font, TextColour, Mode), 6 change chrome state (Bold, Italic, the zoom pair and
+    // Overflow), and the remaining seven are inert.
+    //
+    // **The leading number said 21 and the categories said 3 + 1 + 4 + 2**, which left thirteen inert —
+    // neither matched the `22` asserted below nor the seven this file measures. The prose had drifted
+    // two parts behind the code, which is the failure mode of writing arithmetic in a comment: it is
+    // checked by nothing. The two assertions below are the arithmetic; this paragraph is the index.
     //
     // **Eleven, and it was twelve until part 29.** `Tool::TextColour` joined `has_dropdown` and opened
     // a palette of six colours, which put it in the same category as Zoom and **took it out of the
@@ -493,18 +499,20 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     //
     // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
     // reason the comment above gives: opening a popup has applied nothing yet.
-    // **Eight, and it has been eight since part 44.** Nothing has left this list since. Part 33's
-    // `Tool::Print` was given `Action::Export` to do rather than taken off the toolbar, and part 46's
-    // `Tool::Comment` was intended to go but never did -- it is still there and still inert.
-    // **The arithmetic follows: 23 tools, so 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
-    // 6 chrome changes and 8 inert leaves nothing unaccounted for.**
+    // **Seven inert, and it was eight until `Tool::Comment` was removed.** Part 33's `Tool::Print`
+    // was given `Action::Export` to do rather than taken off the toolbar; part 46's `Tool::Comment`
+    // was intended to go, never did, and is now gone. **The removal is why the tool count moved and
+    // not the inert count alone.**
+    // **The arithmetic follows: 22 tools, so 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
+    // 6 chrome changes and 7 inert leaves nothing unaccounted for.**
     assert_eq!(
         widgets::TOOLBAR.len(),
-        23,
-        "**twenty-three tools.** Neither of the two deletions an earlier part claimed actually \
-         landed: `Tool::Print` is still here and wired to `Action::Export`, and `Tool::Comment` is \
-         still here and inert -- part 46 intended to remove it and did not. The count is asserted \
-         separately so that the inert arithmetic below cannot be quietly wrong on both sides."
+        22,
+        "**twenty-two tools.** This was twenty-three while `Tool::Comment` was still on the bar: it had \
+         no annotation store -- no list, no anchor range, no author -- so it could never work, and a \
+         button that will never work is a lie about the product. `Tool::Print` went the other way and \
+         was given `Action::Export` to do. The count is asserted separately so that the inert \
+         arithmetic below cannot be quietly wrong on both sides."
     );
     // **Eight.** Four buttons left the inert list in part 44, each with a decision
     // behind it:
@@ -515,25 +523,25 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // | `mode` | 44 | a two-row switcher -- **a fifth dropdown** |
     // | `overflow` | 44 | a menu of the tools that did not fit |
     //
-    // **The arithmetic, restated: 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 chrome
-    // changes leaves the 8 above.**
+    // **The arithmetic, restated: 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 chrome
+    // changes leaves the 7 above.**
     // Two of those five are new categories this part created rather than new members of an old one --
     // `mode` made the dropdown count five, and `overflow` is a chrome change that changes nothing at
     // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
     //
     // **The list in the message is the evidence.** It is [`search`, `spellcheck`, `paint-format`,
-    // `font-size`, `underline`, `highlight`, `link`, `comment`] -- eight, not six -- and every one of
-    // them is either a model this program does not have (a search query, a dictionary, a format
-    // model, a size list the atlas can back, a URL, an annotation store) or a run-level flag the
-    // document does not carry. `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_eight`
-    // records them by name, with a reason for each.
+    // `font-size`, `underline`, `highlight`, `link`] -- seven, not six -- and every one of them is
+    // either a model this program does not have (a search query, a dictionary, a format model, a size
+    // list the atlas can back, a URL) or a run-level flag the document does not carry.
+    // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_seven` records them by name, with
+    // a reason for each.
     assert_eq!(
         inert.len(),
-        8,
-        "**eight inert buttons**, which is 23 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 \
+        7,
+        "**seven inert buttons**, which is 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 \
          chrome changes. The list is {inert:?}. Part 44 removed four from this list and each removal \
-         came with a recorded decision; **part 46 intended to remove a fifth from the toolbar \
-         altogether and the removal never landed**, so `Comment` is still here and still inert."
+         came with a recorded decision; the fifth left the toolbar altogether when `Comment` was \
+         removed."
     );
 }
 

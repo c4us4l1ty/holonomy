@@ -366,6 +366,32 @@ fn the_sidebar_flag_and_its_reservation_agree_after_every_change() {
         sidebar_reservation(true),
         "and the width is the design one"
     );
+
+    // **And the default is closed, which this gate did not check and the audit asked for.**
+    //
+    // The sweep above starts at `set_sidebar(false)` on a fresh session, so **it cannot tell a session
+    // that opens with the rail closed from one that opened with it open and was then closed** — and the
+    // difference is the whole of A11: a document rail covering 19 % of the window before the user has
+    // asked for one. The default lives in `ChromeState::default` and reaches the layout through
+    // `Session::new`'s reservation, so **both halves are asserted here**: the flag, and the width it
+    // reserved, because a default flag that forgot to reserve would look the same as a fix until the
+    // first toggle.
+    let fresh = session();
+    assert!(
+        !fresh.state.sidebar_open,
+        "a new session opens with the document rail open, which costs the page 280 px of its desk \
+         before the user has asked for a rail"
+    );
+    assert_eq!(
+        fresh.chrome_metrics().sidebar_w,
+        sidebar_reservation(false),
+        "and a session that opens with the rail closed reserves nothing for it"
+    );
+    assert_eq!(
+        fresh.chrome_layout().sidebar.width,
+        0,
+        "and draws no rail"
+    );
 }
 
 /// **`set_document` sets the title and the one row together, because they are one fact.**

@@ -2378,6 +2378,16 @@ impl<'a> Session<'a> {
         self.save_requested
     }
 
+    /// Take the pending export request: `true` if a row asked for one since the last call.
+    ///
+    /// **The windowed driver's reader, and it did not exist.** [`export_requested`](Self::export_requested)
+    /// was the only accessor, and a reader that does not clear is a reader no driver can act on without
+    /// asking the same question forever — so `windowed.rs` never asked at all, and the File > Export row
+    /// was inert there while `run_with_io`'s drain worked. **Two drivers, one drain.**
+    pub fn take_export_request(&mut self) -> bool {
+        std::mem::take(&mut self.export_requested)
+    }
+
     /// Whether an export has been asked for and not yet performed.
     ///
     /// **The export twin of [`save_requested`](Self::save_requested)**, and a reader for the same
@@ -5038,19 +5048,30 @@ impl<'a> Session<'a> {
         if self.editor.caret() == 0 {
             return Ok(());
         }
-        let at = self.editor.caret() as usize - 1;
-        // The byte about to be deleted, captured first: FR-1.2 zeroes it, so afterwards there is
-        // nothing for `TextCounts` to count. `Editor::backspace` deletes exactly one byte
-        // (`editor.rs:729`), so one byte is read -- no char-length lookup, because this editor's caret
-        // is byte-addressed.
+        // The bytes about to be deleted, captured first: FR-1.2 zeroes them, so afterwards there is
+        // nothing for `TextCounts` to count.
         //
+        // **CORRECTION: this read one byte and deleted one byte, and both were wrong together.** The
+        // editor's Backspace now deletes a whole character (see `Editor::backspace`), so the byte count
+        // has to be derived the same way — otherwise `after_delete` is told about the first byte of a
+        // three-byte character and the word count drifts by one every time a non-ASCII character is
+        // removed.
+        //
+        // **The range comes from the editor**, not from arithmetic here: `backspace_range` is the one
+        // definition of "which bytes does this keystroke remove", and a second copy of a UTF-8
+        // boundary walk is exactly the kind of two-answer-one-question this file's comments are
+        // otherwise careful about.
+        let Some((start, end)) = self.editor.backspace_range() else {
+            return Ok(());
+        };
         // A **stack** array, copied out before the delete. Holding a borrow of `self.editor` across
         // the delete is E0502, and the borrow has to end there because `TextCounts` must be told the
-        // bytes *after* the document has changed. `editor.rs:778` reads a byte the same way.
-        let mut one = [0u8; 1];
-        let n = self.editor.read_into(at, &mut one).unwrap_or(0);
+        // bytes *after* the document has changed. Four bytes is the most one character can encode.
+        let mut buf = [0u8; 4];
+        let want = (end - start).min(buf.len());
+        let n = self.editor.read_into(start, &mut buf[..want]).unwrap_or(0);
         self.editor.backspace()?;
-        self.counts.after_delete(&self.editor, at, &one[..n]);
+        self.counts.after_delete(&self.editor, start, &buf[..n]);
         self.after_edit(1)
     }
 
@@ -5070,10 +5091,27 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         let at = self.editor.caret() as usize;
-        let mut one = [0u8; 1];
-        let n = self.editor.read_into(at, &mut one).unwrap_or(0);
+        // **One byte was read, and a character was deleted.** `Editor::delete_forward` walks to the
+        // end of the character (`editor.rs`), so a `é` read as its first byte counts as one byte in
+        // `TextCounts` and as two bytes in the document — the same drift the Backspace note above
+        // describes, in the other direction. **The length comes from the same walk**, so the count and
+        // the delete cannot disagree.
+        let mut len = 1usize;
+        while at + len < self.editor.text_len() {
+            let mut one = [0u8; 1];
+            if self.editor.read_into(at + len, &mut one).unwrap_or(0) == 0 {
+                break;
+            }
+            if one[0] & 0xC0 != 0x80 {
+                break;
+            }
+            len += 1;
+        }
+        let mut buf = [0u8; 4];
+        let want = len.min(buf.len());
+        let n = self.editor.read_into(at, &mut buf[..want]).unwrap_or(0);
         self.editor.delete_forward()?;
-        self.counts.after_delete(&self.editor, at, &one[..n]);
+        self.counts.after_delete(&self.editor, at, &buf[..n]);
         self.after_edit(1)
     }
 
@@ -7792,6 +7830,18 @@ fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) ->
     let mut pen = 0u32;
     let mut at = 0usize;
     while at < bytes.len() {
+        // **`painter.advance_of`, and that is the whole reason this function exists.**
+        //
+        // It is the one function that answers "how far does the pen move for this codepoint" for
+        // *both* the painter and every caller that has to place something between two glyphs — the
+        // caret, the selection's two edges, and a styled run's start. `Painter::advance_of`'s own
+        // comment records what happened when there were two answers: a run boundary placed on the grid
+        // while `doc_text` advanced by the face's metrics, so styling a word moved the text after it.
+        //
+        // **A space is the case where the two would still differ if this function decided for itself.**
+        // A space has no ink and an advance, and takes the *face's* advance; a `.notdef` has neither and
+        // takes the cell. Re-deciding that here — with `.max(1)`, say — would put the caret a pixel off
+        // after every space, which is the most common character in the document.
         let (cp, used) = match std::str::from_utf8(&bytes[at..]) {
             Ok(s) => match s.chars().next() {
                 Some(c) => (u32::from(c), c.len_utf8()),
@@ -8107,6 +8157,17 @@ fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::
 }
 
 /// What a title-bar button means, or `None`.
+///
+/// # This is now the *only* arm, and it matches the drawn set
+///
+/// **`place_title` draws `Cloud` and `Share` and nothing else** — see `TitleButton::has_action`, which
+/// is the filter it uses. So this function and that one have to agree or a drawn button is inert again:
+/// `Cloud` is here, `Share` is routed to `Action::Export` in `press` because it is an action rather than
+/// a `Command`, and **the two functions together are the whole of "what can this title bar do".**
+///
+/// **The `_ => return None` stays.** A future button that is drawn but not wired must count as
+/// `pointer_inert` rather than be swallowed, which is what that counter is for: a button that silently
+/// does nothing is the defect, and a button that is *counted* doing nothing is a measurement.
 fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_input::Command> {
     use holonomy_input::{Command, Hotkey};
     use holonomy_render::widgets::TitleButton;

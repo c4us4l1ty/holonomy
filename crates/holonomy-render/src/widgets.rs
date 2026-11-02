@@ -73,8 +73,6 @@ pub enum Tool {
     Highlight,
     /// Link.
     Link,
-    /// Comment.
-    Comment,
     /// Image.
     Image,
     /// Overflow: the rest of the toolbar.
@@ -108,7 +106,6 @@ impl Tool {
             Tool::TextColour => Some(IconId::TextColour),
             Tool::Highlight => Some(IconId::Highlight),
             Tool::Link => Some(IconId::Link),
-            Tool::Comment => Some(IconId::Comment),
             Tool::Image => Some(IconId::Image),
             Tool::Overflow => Some(IconId::Overflow),
             Tool::Mode => Some(IconId::Pen),
@@ -168,7 +165,6 @@ impl Tool {
             Tool::TextColour => "text-colour",
             Tool::Highlight => "highlight",
             Tool::Link => "link",
-            Tool::Comment => "comment",
             Tool::Image => "image",
             Tool::Overflow => "overflow",
             Tool::Mode => "mode",
@@ -305,7 +301,6 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::TextColour,
     Tool::Highlight,
     Tool::Link,
-    Tool::Comment,
     Tool::Image,
     Tool::Overflow,
     Tool::Mode,
@@ -861,32 +856,79 @@ pub enum TitleButton {
     Share,
     /// Upgrade / local badge.
     Upgrade,
-    /// Comments.
-    Comments,
     /// Sparkle.
     Sparkle,
 }
+
+impl TitleButton {
+    /// **Whether this button has anything behind it.**
+    ///
+    /// This is the same question `Session::tool_command` answers for the toolbar — one arm per tool that
+    /// has something behind it — and it exists for the same reason: **a control that draws and does
+    /// nothing is a lie about the product.** For the title
+    /// bar it is worse, because these are the buttons a *first-time* user presses — Share, Star, History
+    /// — and every one of them closing over a no-op is the strongest possible signal that the
+    /// application is a mock-up.
+    ///
+    /// # Only two, and the other five are named here
+    ///
+    /// * [`Share`](Self::Share) routes to `Action::Export`, so it writes the document's HTML and PDF.
+    /// * [`Cloud`](Self::Cloud) routes to `Save`, and saving is the one thing this program does that a
+    ///   user can verify.
+    ///
+    /// **The five that are gone had no model to attach to, and none of them was close:** `Star` needs a
+    /// favourites store, `Folder` needs a file dialog (the sealed build has no `openat`), `History`
+    /// needs the version store that `Session`'s undo ring is not, `Upgrade` is an advertisement for a
+    /// product that does not exist, and `Sparkle` is a placeholder for an assistant. **A button whose
+    /// justification is "the reference has one" is not a button; it is a pixel budget.**
+    ///
+    /// **The gate is `the_title_bar_draws_only_buttons_that_do_something`.** The layout is derived from
+    /// this function rather than from a list beside it, so the two cannot disagree.
+    pub const fn has_action(self) -> bool {
+        matches!(self, Self::Share | Self::Cloud)
+    }
+}
+
+/// **The cell at which the title band's left-hand button group starts.**
+///
+/// Named because two places need the number and one of them is a *bound rather than a position*:
+/// `place_title` starts `Cloud` here, and `paint_title` stops the document's name before it. **A name
+/// that ran under the button would be a name drawn across a glyph**, which is the class of defect this
+/// band has already had once.
+///
+/// `18` cells is 144 px at the design size — past the app mark at 24 px and a comfortable gap after it.
+pub const TITLE_START_CELLS: u32 = 18;
 
 /// Lay the title bar's buttons out, right-anchored.
 pub fn place_title(l: &Layout, pad: u32) -> Vec<(TitleButton, DamageRect)> {
     let b = l.title.height.saturating_sub(8).min(32);
     let y = l.title.y + (l.title.height - b) / 2;
     let mut out = Vec::new();
-    // Left group: star, folder, cloud, just after the document title.
-    let mut x = l.cell_w.saturating_mul(18);
+    // **Every group is filtered by `has_action`, and the filter is applied to the list rather than
+    // written into it** — so the day a button gains a model, adding it to its group here is the whole
+    // change, and a button that loses one disappears without a second edit to the layout.
+    //
+    // Left group: beside the document title. It holds only `Cloud` now; the star and the folder were
+    // two of the five that had nothing behind them.
+    let mut x = l.cell_w.saturating_mul(TITLE_START_CELLS);
     for btn in [TitleButton::Star, TitleButton::Folder, TitleButton::Cloud] {
+        if !btn.has_action() {
+            continue;
+        }
         out.push((btn, DamageRect::new(x, y, b, b)));
         x = x.saturating_add(b + 4);
     }
-    // Right group: sparkle, upgrade, share, comments, history.
+    // Right group: right-anchored, so Share stays where the reference puts it.
     let mut x = l.title.right().saturating_sub(pad);
     for (btn, w) in [
         (TitleButton::Sparkle, b),
         (TitleButton::Upgrade, b * 4),
         (TitleButton::Share, b * 4),
-        (TitleButton::Comments, b),
         (TitleButton::History, b),
     ] {
+        if !btn.has_action() {
+            continue;
+        }
         x = x.saturating_sub(w + 4);
         out.push((btn, DamageRect::new(x, y, w, b)));
     }

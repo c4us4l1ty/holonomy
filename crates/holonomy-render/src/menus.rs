@@ -218,8 +218,13 @@ pub struct Item {
     pub accelerator: Option<&'static str>,
     /// Whether it opens a submenu.
     pub submenu: bool,
-    /// **What it is.** `None` for an item that is drawn and has no action behind it yet — which is
-    /// most of them, and is the honest state rather than a stub that does nothing while looking real.
+    /// **What it is.**
+    ///
+    /// **Every row in [`MENUS`] now carries one, so `None` is a state no shipped row is in** — this was
+    /// `None` for most of them for most of the project's life, and the field stays an `Option` because
+    /// *"this row is deliberately inert"* is still a legitimate thing for a future row to be. What is
+    /// not legitimate is a row that is inert by *accident*, which is why `tests/actions.rs` asserts the
+    /// unwired count rather than trusting this comment.
     pub action: Option<Action>,
     /// Whether this row shows a tick.
     ///
@@ -349,9 +354,36 @@ const EDIT: &[Item] = &[
     act("Select all", Action::SelectAll),
 ];
 
+/// **VIEW, and it was two dead submenus.**
+///
+/// It read `[sub("Mode", ..), sub("Zoom", ..)]` — two rows with a right-hand chevron, `submenu: true`,
+/// and `action: None`. **Nothing in the program can open a submenu**: there is one popup, `state.open`
+/// is an `Option<Open>`, and `Open` names a menu heading or a toolbar tool. So both rows were inert,
+/// and worse than inert: **the chevron says "there is more behind this", which is a promise the client
+/// cannot keep.** Clicking them closed the menu and did nothing.
+///
+/// **Replaced by rows that do what they say**, one per thing a View menu is for in this program —
+/// there is no other zoom or mode surface, and the accelerators are the ones the rest of the chrome
+/// already uses (`Ctrl+0` and `Ctrl+1` are not claimed elsewhere).
+///
+/// **Only the zoom levels that exist.** `ZOOMS` has two entries and the pair of rows below is one per
+/// entry rather than a hand-written 100/125: a level added to `ZOOMS` is a level the menu can reach,
+/// and a level removed from it cannot be offered here.
+///
+/// **A `const` builder rather than a loop**, because `VIEW` is a `&'static [Item]` and a computed list
+/// would have to be a `const fn` walk anyway. The two zoom rows are written against `ZOOMS`'s two
+/// entries, so a level added to that list is a level this menu can reach.
+///
+/// **No accelerators, and that is deliberate.** The keymap binds `Ctrl+0` and `Ctrl+1` to nothing, and
+/// `Ctrl+M` is Insert Math (`keymap.rs`, the `KEY_M` arm). An accelerator is a label that claims a key
+/// works; **printing one for an unbound key is the same lie the chevrons were telling**, and it is a
+/// worse one because the user will try it and conclude the program is broken rather than the menu.
+/// Every accelerator in this file is checked against `keymap.rs` for the same reason.
 const VIEW: &[Item] = &[
-    sub("Mode", IconId::Pen),
-    sub("Zoom", IconId::Search),
+    chosen("Zoom 100%", Action::SetZoom(ZOOMS[0].1), false),
+    chosen("Zoom 125%", Action::SetZoom(ZOOMS[1].1), false),
+    act("Editing mode", Action::SetMode(0)),
+    act("Viewing mode", Action::SetMode(1)),
 ];
 
 const INSERT: &[Item] = &[
