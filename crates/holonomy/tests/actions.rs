@@ -1,4 +1,4 @@
-//! **What a row means: `Action`, and the three dropdowns.** 9 tests.
+//! **What a row means: `Action`, and the three dropdowns.** 11 tests.
 //!
 //! # The coupling this file exists to remove
 //!

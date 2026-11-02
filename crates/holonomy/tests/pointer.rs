@@ -1,4 +1,4 @@
-//! **Clicking: a pointer press, through the widget list, to the document.** 10 tests.
+//! **Clicking: a pointer press, through the widget list, to the document.** 12 tests.
 //!
 //! # What is being claimed
 //!

@@ -1,4 +1,4 @@
-//! **A span's colour is stored, splits runs, survives undo — and is drawn.** 5 tests.
+//! **A span's colour is stored, splits runs, survives undo — and is drawn.** 9 tests.
 //!
 //! # The finding this file closes
 //!

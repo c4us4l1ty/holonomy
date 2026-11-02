@@ -1,4 +1,4 @@
-//! **A selection: made, drawn, extended, and replaced.** 11 tests.
+//! **A selection: made, drawn, extended, and replaced.** 12 tests.
 //!
 //! # What this file is
 //!
