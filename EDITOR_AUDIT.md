@@ -720,6 +720,8 @@ this has been compiled** — the first `cargo test` is the real review.
 
 # Part 6 — The icon set was redrawn
 
+![The toolbar row, before and after](docs/images/icons-before-after.png)
+
 The first generation of `icons.rs` artwork was typed by hand, one `b"...."` row at a time, and **nothing
 ever compared one icon to another.** The result is visible in the shipped build: a toolbar whose marks
 read as unrelated doodles rather than as a family.
@@ -744,6 +746,10 @@ Not the colour — measured from the user's screenshot, the toolbar ink is `(68,
 **Every one of these passed the gates.** `every_icon_is_sixteen_square_and_not_empty` counted ink, and
 `no_icon_is_mostly_ink` bounded it at a third of the box. A dash-outline is neither empty nor over
 budget. **A count of inked pixels cannot tell a picture from a smudge** — that sentence is the finding.
+
+The full new set, rendered at 1x from the masks in `icons.rs`:
+
+![All 33 icons](docs/images/icons-sheet.png)
 
 ## How they were redrawn
 
