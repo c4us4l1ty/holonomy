@@ -961,16 +961,28 @@ impl Layout {
         // **`min(canvas_h - 2 * DESK_V)`, and that clamp is what keeps a short window usable.** A
         // window too short to show a whole page shows as much of it as it can, which is the same answer
         // `Layout` gives everywhere else: degrade, do not refuse.
-        let shadow = m.shadow.min(canvas_h / 2);
         let page_x = gutter_left;
+        // **Desk above and below the sheet, in pixels.**
+        //
+        // *(A plain comment, not a doc comment: this is a `let` inside a function body, and rustdoc
+        // generates nothing for a statement — `unused_doc_comments` says so, and it is right. The note
+        // still belongs here because this constant is a decision, not an arithmetic detail.)*
+        //
+        // **Half a line of type, and deliberately not more.** This is the one place in this layout
+        // where "make it look like a page" competes directly with the viewport, and the viewport has
+        // already been reported once as too small. Half a cell is 12 px at the 16 ppem default and
+        // costs **one row of text** against the old full-canvas sheet, while still ending the white
+        // area above the status bar instead of pressing it against the band.
+        //
+        // **It is a `let`, not a `const`, because it reads `m`** — the metrics are per-size and this
+        // layout is built for one of them.
+        //
+        // **`m.shadow` used to be subtracted here** and no longer is: it bounded `page_h` so the sheet
+        // could leave room for the shadow it throws. The aspect ratio and the desk clamp bound it now,
+        // and the shadow is drawn *outside* the sheet's box rather than reserved inside the canvas —
+        // so the binding was dead, which the compiler pointed out as an unused variable. Removed
+        // rather than renamed to `_shadow`, because a value nobody reads is not a comment.
         let page_h = {
-            /// Desk above and below the sheet, in pixels.
-            ///
-            /// **Half a line of type, and deliberately not more.** This is the one place in this layout
-            /// where "make it look like a page" competes directly with the viewport, and the viewport
-            /// has already been reported once as too small. Half a cell is 12 px at the 16 ppem default
-            /// and costs **one row of text** against the old full-canvas sheet, while still ending the
-            /// white area above the status bar instead of pressing it against the band.
             let desk_v = (m.cell_h / 2).max(6);
             // 11 : 8.5 in integer arithmetic, so the sheet is a portrait page whatever its measure is.
             let by_aspect = page_w.saturating_mul(11) / 9;
@@ -2166,7 +2178,10 @@ impl Chrome {
                 break;
             }
             let major = col.is_multiple_of(MAJOR_EVERY);
-            let (height, ink) = if major {
+            // **`u32`, spelled out.** Both arms are integer literals and `fill` takes a `u32` height,
+            // so the inference had nothing to pin the type to: `height.saturating_sub(1)` is a method
+            // call on an ambiguous numeric type, which is an error (E0689) rather than a coercion.
+            let (height, ink): (u32, u32) = if major {
                 (7, colour::INK_CHROME)
             } else {
                 (3, colour::RULE)
