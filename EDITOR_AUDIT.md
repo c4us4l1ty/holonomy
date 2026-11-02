@@ -715,3 +715,69 @@ control is silent except the seven tools that are recorded by name in `toolbar_w
 **It will still not be enough to write the two documents in.** Soft wrap (C2) and headings (C6) are the
 two blockers that no amount of visual work substitutes for, and both are feature-sized. **And none of
 this has been compiled** — the first `cargo test` is the real review.
+
+---
+
+# Part 6 — The icon set was redrawn
+
+The first generation of `icons.rs` artwork was typed by hand, one `b"...."` row at a time, and **nothing
+ever compared one icon to another.** The result is visible in the shipped build: a toolbar whose marks
+read as unrelated doodles rather than as a family.
+
+## What was actually wrong
+
+Not the colour — measured from the user's screenshot, the toolbar ink is `(68, 71, 70)`, which is exactly
+`colour::INK_CHROME` = `#444746`. The icons were never washed out. **The artwork was.**
+
+| Icon | What was drawn | What it should be |
+|---|---|---|
+| `Minus` | six rows tall, 4 px of ink each: two stubs joined by a bar | one 10 px dash |
+| `Plus` | 2 px cross bleeding into neighbours, widest row 6, tallest column 7 | two crossing 1 px arms |
+| `Bold` | 2 px strokes that close both counters | a readable `B` |
+| `TextColour` | a colour bar *plus* a filled wedge over it | an `A` over a colour bar |
+| `Star` | a solid blob, 3x the ink of a normal glyph | a star |
+| `Undo`/`Redo` | a circle with a detached splinter of an arrowhead | a return arrow |
+| `History` | a broken ring | a clock |
+| `Cloud`, `Sparkle`, `Search`, `Pen` | various blobs and combs | as named |
+| `Tab` | a mark in the corner of its box | tab stop |
+
+**Every one of these passed the gates.** `every_icon_is_sixteen_square_and_not_empty` counted ink, and
+`no_icon_is_mostly_ink` bounded it at a third of the box. A dash-outline is neither empty nor over
+budget. **A count of inked pixels cannot tell a picture from a smudge** — that sentence is the finding.
+
+## How they were redrawn
+
+The 33 masks are now **geometrically authored and rasterised**, not typed: each icon is described as
+lines, arcs, circles and filled polygons, then rasterised with Bresenham (no antialiasing) to a 16x16
+bitmap. Two attempts at antialiased vector downsampling were thrown away first — at 16 px a 1.15 px
+stroke straddles two pixel centres at ~50 % coverage, so a threshold either loses every diagonal or
+doubles it. **Bresenham was the whole fix.**
+
+The result is still `&'static [u64]` from `.rodata` built by a `const fn`, so §2 of PROJECT.md — no SVG
+runtime, no font parser for chrome — is untouched. Only the *authoring* step changed.
+
+## Inspiration
+
+[`storytold/wordcraft`](https://github.com/storytold/wordcraft) (MIT) draws its icon library as path data
+on a 24×24 grid in `crates/render/src/icon_lib.rs` and rasterises at runtime. Holonomy cannot take the
+runtime half — that is the SVG dependency §2 forbids — but the **design principles transferred
+directly**: one pen weight across the whole set, round joins, and geometry described rather than
+pixel-poked. Nothing was copied; the artwork here is new.
+
+## The gates that would have caught it
+
+Two new tests, both verified to **fail against the old masks and pass against the new** — which is the
+only thing that makes a gate a gate, and the mistake the first two candidates made:
+
+* `a_horizontal_rule_is_one_wide_row_and_not_an_outline` — `Minus` had a widest row of 4 px and 12 px of
+  bleed in the rows around it. A rule is one wide row; an outline of a rule is not.
+* `a_plus_crosses_the_box_in_both_axes` — `Plus` reached 6 wide and 7 tall in a 16 px box.
+
+## Still open
+
+`Tool::Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Underline`, `Highlight` and `Link` are drawn
+and inert (the seven in `toolbar_wiring.rs`). **They now look like they work, which is worse than looking
+broken** — see the note in that test.
+
+**And none of this has been compiled.** The masks were validated by round-tripping the bytes in the file
+back to pixels and re-rendering them, not by `cargo test`.
