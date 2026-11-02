@@ -1,4 +1,4 @@
-//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 11 tests.
+//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 12 tests.
 //!
 //! # The gap this file closes
 //!
@@ -56,6 +56,7 @@
 //! | and stops at the end of the last selected line | [`clearing_stops_at_the_end_of_the_last_selected_paragraph`] |
 //! | **underline arms at a caret and types underlined** | [`arming_underline_styles_the_text_typed_after_it`] |
 //! | **a strike arms without lighting a button** | [`the_strikethrough_arms_without_lighting_any_button`] |
+//! | **a decoration is not a face** | [`a_decoration_is_not_a_face`] |
 //! | a heading draws at the larger size | [`a_heading_draws_at_the_larger_atlas_size`] |
 //! | and its underline follows its baseline | [`a_headings_underline_is_where_a_headings_baseline_is`] |
 
@@ -529,6 +530,66 @@ fn clearing_stops_at_the_end_of_the_last_selected_paragraph() {
         STYLE_UNDERLINE,
         "**the second paragraph must keep its formatting**: byte 5 is inside `two`, which the selection \
          did not reach. A range that ran to `line_end_offset(end)` would have cleared it."
+    );
+}
+
+/// **A decoration is not a face: it costs no atlas size and changes no advance.**
+///
+/// # The decision this records
+///
+/// The PRD's 512 KiB ceiling makes the atlas a budget rather than a cache, and **a face is the expensive
+/// way to draw formatting**. `AtlasBuilder::new` refuses a third size outright; one extra size costs
+/// 14,080 bytes of metric table on top of the first size's 236,690. A design that wanted an underlined
+/// face would be asking for a seventh and eighth set of glyphs whose ink is the same glyphs with a line
+/// drawn near them — and the line would still have to be drawn, because a face cannot draw *under* a
+/// descender without a glyph that does.
+///
+/// **So the four decorations are one atlas.** Underline and strike are `Node::Rule` — a filled rectangle,
+/// no glyph; super- and subscript are a `baseline_shift`, which is a `y` offset and nothing else.
+///
+/// # What is measured, and why each half is separate
+///
+/// * **The size list**, which is what the ceiling is actually about: two sizes, the ones the fixture
+///   built, and a decoration did not add a third.
+/// * **The advance**, which is what a face would change. A face whose glyphs are drawn differently has
+///   different metrics, so the decorated line's ink would be wider or narrower than the plain one's. A
+///   rule and a shift change neither.
+#[test]
+fn a_decoration_is_not_a_face() {
+    let decorated = painted(
+        "under struck supersub\n",
+        Some((
+            0,
+            19,
+            STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT,
+        )),
+    );
+    let plain = painted("under struck supersub\n", None);
+    // **The fixture has to be decorated for the gate to mean anything.** If the flags above were a typo
+    // in a bit the session does not read, both frames would be plain and every assertion below would
+    // pass trivially -- which is the failure mode of every "nothing changed" gate.
+    assert!(
+        differing(&plain, &decorated) > 0,
+        "the fixture is wrong: the decorated document paints identically to the plain one, so this \
+         gate is comparing a frame with itself"
+    );
+
+    // **Two sizes and no more**, from the atlas's own list. The fixture builds `[16, 20]`; a decoration
+    // that needed a face would need a size for it, and this is where that would show.
+    assert_eq!(
+        atlas().sizes(),
+        &[16, 20],
+        "the atlas is built at exactly the two sizes the fixture asked for"
+    );
+
+    // **The advance is unchanged.** Both frames begin at the text rect's left edge, so the right edges of
+    // their ink are comparable directly, and a decoration that changed a glyph's advance would move one.
+    let (_, _, _, plain_right) = ink_box(&plain).expect("the plain line has ink");
+    let (_, _, _, deco_right) = ink_box(&decorated).expect("the decorated line has ink");
+    assert_eq!(
+        deco_right, plain_right,
+        "the decorated line's ink ends at x = {deco_right} and the plain one's at x = {plain_right}: \
+         **a decoration must not move a glyph**, and a face is exactly the way it would"
     );
 }
 
