@@ -54,7 +54,10 @@ use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRu
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
 use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
-use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD, STYLE_HEADER, STYLE_ITALIC};
+use holonomy_text::{
+    Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD, STYLE_HEADER, STYLE_ITALIC,
+    STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
@@ -3142,6 +3145,7 @@ impl<'a> Session<'a> {
                     let action = match slot {
                         holonomy_render::chrome::StyleFlagsSlot::Bold => holonomy_render::menus::Action::ToggleBold,
                         holonomy_render::chrome::StyleFlagsSlot::Italic => holonomy_render::menus::Action::ToggleItalic,
+                        holonomy_render::chrome::StyleFlagsSlot::Underline => holonomy_render::menus::Action::ToggleUnderline,
                     };
                     self.apply_action(action)?;
                     return Ok(());
@@ -3491,17 +3495,26 @@ impl<'a> Session<'a> {
                         .get(si)
                         .map_or(end, |s| s.end_byte);
                 }
-                let style = self
+                // **The run's face and its size, from the same span and in one lookup.** A click
+                // inside a heading has to resolve its column in the size the heading is *drawn* at,
+                // or the hit test and the caret disagree past the heading's first word -- which is
+                // part 33's defect on the one axis part 33 did not have.
+                let (style, size) = self
                     .editor
                     .spans()
                     .spans()
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
-                    .map_or(self.body_style(), |sp| self.doc_style(sp.atlas_style()));
+                    .map_or((self.body_style(), 0), |sp| {
+                        (
+                            self.doc_style(sp.atlas_style()),
+                            self.run_size_index(sp.style_flags),
+                        )
+                    });
                 // **One scalar at a time, because the boundary is per glyph.** A chunk-wide advance
                 // would give the click the whole chunk's midpoint, which is not a column.
                 let len = scalar_len(&buf[from..n]).min(n - from);
-                let adv = pen_of(&self.painter, &buf[from..from + len], style);
+                let adv = pen_of(&self.painter, &buf[from..from + len], style, size);
                 // **The glyph owns `[pen, pen + adv)`, and the midpoint rule splits it at
                 // `pen + adv / 2`.** `>=` on the right edge is what puts a click past the last glyph on
                 // the last column rather than one past it.
@@ -3793,16 +3806,24 @@ impl<'a> Session<'a> {
                         .get(si)
                         .map_or(caret, |s| s.end_byte);
                 }
-                let style = self
+                // **The run's face and its size together**, because the caret is the one caller that
+                // must agree with the pixels to the pixel: a heading drawn at 125 % with a caret
+                // measured at 100 % puts the caret inside the heading's second word by its end.
+                let (style, size) = self
                     .editor
                     .spans()
                     .spans()
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
-                    .map_or(self.body_style(), |sp| self.doc_style(sp.atlas_style()));
+                    .map_or((self.body_style(), 0), |sp| {
+                        (
+                            self.doc_style(sp.atlas_style()),
+                            self.run_size_index(sp.style_flags),
+                        )
+                    });
                 // **To the end of this run, or to the end of the chunk, whichever comes first.**
                 let to = n.min((run_end - at) as usize).max(from + 1);
-                pen = pen.saturating_add(pen_of(&self.painter, &buf[from..to], style));
+                pen = pen.saturating_add(pen_of(&self.painter, &buf[from..to], style, size));
                 from = to;
             }
             at += n as u32;
@@ -3956,20 +3977,24 @@ impl<'a> Session<'a> {
     ///
     /// **So `armed_style` is the only reader of `pending_style` and `set_armed_style` the only writer, and
     /// they are adjacent.** `apply_action` and the toolbar's press both go through the setter.
-    fn set_armed_style(&mut self, bold: bool, italic: bool) {
+    fn set_armed_style(&mut self, bold: bool, italic: bool, underline: bool) {
         self.state.styles.bold = bold;
         self.state.styles.italic = italic;
+        self.state.styles.underline = underline;
         // **`Some(flags)` and never `None`, and that is the deliberate part.** Un-pressing Bold when nothing
         // else is armed writes `Some(0)` rather than `None`, because `None` means "inherit from the
         // character before the caret" and inheriting bold after the user turned bold off is the bug this
         // option type exists to prevent. **`None` is for a session nobody has toggled anything in.**
         // Inline toggles must not discard an armed paragraph's header bit.
-        let mut f = self.pending_style.unwrap_or(0) & !(STYLE_BOLD | STYLE_ITALIC);
+        let mut f = self.pending_style.unwrap_or(0) & !(STYLE_BOLD | STYLE_ITALIC | STYLE_UNDERLINE);
         if bold {
             f |= STYLE_BOLD;
         }
         if italic {
             f |= STYLE_ITALIC;
+        }
+        if underline {
+            f |= STYLE_UNDERLINE;
         }
         self.pending_style = Some(f);
     }
@@ -3978,12 +4003,18 @@ impl<'a> Session<'a> {
     ///
     /// **`&self` and the session, not a `pub` accessor on the chrome**, so a gate cannot ask the chrome what
     /// it thinks is armed and conclude the two agree.
-    fn armed_style(&self) -> (bool, bool) {
+    ///
+    /// **A tuple of three, in the order `set_armed_style` takes them**, and that adjacency is the whole
+    /// contract: a caller reading this and a caller writing that must not be able to swap two of the
+    /// three without the compiler noticing. A named struct would be safer still and would be two hundred
+    /// lines of `..Default::default()` at three call sites; the adjacency and this sentence are the
+    /// trade, and it is worth stating that it *is* one.
+    fn armed_style(&self) -> (bool, bool, bool) {
         // **Through `unwrap_or(0)`, so "the user said nothing" and "the user said plain" both read as
-        // nothing armed** — which is right for the two bools and wrong for the model, and the difference is
+        // nothing armed** — which is right for the bools and wrong for the model, and the difference is
         // the whole reason the model is an `Option`.
         let f = self.pending_style.unwrap_or(0);
-        (f & STYLE_BOLD != 0, f & STYLE_ITALIC != 0)
+        (f & STYLE_BOLD != 0, f & STYLE_ITALIC != 0, f & STYLE_UNDERLINE != 0)
     }
 
     /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
@@ -4105,27 +4136,61 @@ impl<'a> Session<'a> {
                 self.press(widgets::Hit::Tool(tool), pos.0, pos.1, &mut crate::store::NoSource)?;
                 self.stats.pointer_commands += 1;
             }
-            Action::ToggleBold => {
-                self.check_editable()?;
-                if let Some(sel) = self.editor.selection() {
-                    let enabled = self.editor.style_at(sel.start).style_flags & STYLE_BOLD == 0;
-                    self.update_selection_style(Some((STYLE_BOLD, enabled)), None)?;
-                    self.damage = self.chrome.full_damage();
-                } else {
-                    self.set_armed_style(!self.armed_style().0, self.armed_style().1);
-                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Bold)));
-                }
-                self.stats.pointer_chrome += 1;
+            // **Three inline toggles and one function.** Bold, italic and underline differ only in which
+            // bit they flip and which button they invalidate, so they are one arm with one parameter
+            // rather than three near-identical arms — which is how the third one gets forgotten when the
+            // fourth arrives. `Tool::Underline` was exactly that forgotten case until the document model
+            // grew `STYLE_UNDERLINE`.
+            Action::ToggleBold | Action::ToggleItalic | Action::ToggleUnderline => {
+                let (flag, tool) = match action {
+                    Action::ToggleItalic => (STYLE_ITALIC, Some(Tool::Italic)),
+                    Action::ToggleUnderline => (STYLE_UNDERLINE, Some(Tool::Underline)),
+                    _ => (STYLE_BOLD, Some(Tool::Bold)),
+                };
+                self.toggle_inline_style(flag, tool)?;
             }
-            Action::ToggleItalic => {
+            // **The three decorations that are not buttons, and each one is the same gesture.**
+            //
+            // **Superscript and subscript are one another's opposite and both are a *position*;** a
+            // selection that is already superscript becomes plain when superscript is pressed again,
+            // and a selection that is subscript becomes superscript rather than both. That is what
+            // `toggle_decoration` does for superscript/subscript specifically, because a run cannot be
+            // both raised and lowered and a bitset that said so would draw at neither.
+            // **`None`, because the toolbar has no strikethrough button**, so there is no button
+            // whose armed state could be drawn and nothing to invalidate. Passing `Underline` here
+            // would light up a button for a flag it does not own.
+            Action::ToggleStrike => self.toggle_inline_style(STYLE_STRIKE, None)?,
+            Action::ToggleSuperscript => self.toggle_decoration(STYLE_SUPERSCRIPT)?,
+            Action::ToggleSubscript => self.toggle_decoration(STYLE_SUBSCRIPT)?,
+            Action::ClearFormatting => {
                 self.check_editable()?;
-                if let Some(sel) = self.editor.selection() {
-                    let enabled = self.editor.style_at(sel.start).style_flags & STYLE_ITALIC == 0;
-                    self.update_selection_style(Some((STYLE_ITALIC, enabled)), None)?;
+                // **The selection, or the paragraph the caret is in.** An empty selection is a place,
+                // not a range, and "clear the formatting here" means the paragraph — which is what
+                // every word processor does and what `SetStyle` already does one line below.
+                let (from, to) = self.paragraph_range();
+                let cleared = from < to && self.editor.format_range(from, to, |_| (0, 0))?;
+                // **The armed flags go with it, whether or not there was a range to clear.** Leaving
+                // `pending_style` armed after clearing would make the next character bold in a
+                // paragraph the user just asked to have no formatting at all -- and a caret in an
+                // *empty* paragraph is exactly where that happens, because there `from == to` and
+                // nothing was cleared, so the armed state is the only thing the action can act on.
+                //
+                // **`None` for both pending values, which is what "write nothing special" is.**
+                // `Some(0)` is a *style of zero* and `Some(0)` for a colour is `0x000000`, so arming
+                // those would give the next paragraph an opaque-black span that no palette row can
+                // produce. `None` is what the field's own type says the default is, and it is what
+                // the insert path tests for.
+                self.pending_style = None;
+                self.pending_colour = None;
+                self.state.styles = holonomy_render::chrome::StyleFlags::default();
+                // **The last `COLOURS` row, which is the automatic one.** `COLOURS` ends with
+                // `("Default", 0)`, so this is the dropdown row that agrees with the pixels: a
+                // selected swatch that says Default beside text that draws in the document's ink.
+                self.state.colour_index = holonomy_render::menus::COLOURS.len() - 1;
+                self.state.style_index = 0;
+                if cleared {
+                    self.after_edit(0)?;
                     self.damage = self.chrome.full_damage();
-                } else {
-                    self.set_armed_style(self.armed_style().0, !self.armed_style().1);
-                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Italic)));
                 }
                 self.stats.pointer_chrome += 1;
             }
@@ -4360,6 +4425,86 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// **The atlas size index a run of document text draws at.**
+    ///
+    /// # The heading, and why this is an index rather than a ppem
+    ///
+    /// **A document's headings have had a style bit since Phase 6 and have never been drawn bigger.**
+    /// `STYLE_HEADER` is load-bearing for the *line metrics* — a header line is taller, which is why
+    /// `LineMetrics::from_font` is called with a size chosen by the flag — and `doc_style` collapsed it
+    /// onto the body face, so a heading rendered at the body size in bold teal. **The exports have
+    /// always emitted `<h1>` and a 1.35x PDF size**, so the screen and the file disagreed about the same
+    /// paragraph.
+    ///
+    /// **The atlas can back exactly two sizes** (`MAX_SIZES`; `[16, 20]` fits in 378,850 of the 458,752
+    /// byte budget and a third does not). So the heading is **index 1**, which is 125 % of the body —
+    /// the zoom pair and the heading share the one spare size, and that is the honest consequence of a
+    /// 512 KiB atlas. **Nothing else gets a size**: a heading is the only document style whose *whole
+    /// point* is that it is bigger.
+    ///
+    /// **Clamped to what the atlas holds**, so a one-size atlas draws headings at the body size rather
+    /// than asking for an index that was never rasterised. `bool as u8` cannot be written in a way that
+    /// is clearer than the conditional, and the conditional is what says *which* two values are possible.
+    fn run_size_index(&self, flags: u16) -> u8 {
+        if flags & STYLE_HEADER == 0 {
+            return 0;
+        }
+        match self.painter.atlas() {
+            Some(atlas) if atlas.sizes().len() > 1 => 1,
+            _ => 0,
+        }
+    }
+
+    /// **How far a run's baseline moves, in pixels, for its super- or subscript bit.**
+    ///
+    /// **A third of the line's ascent**, which is the fraction every word processor uses and the one
+    /// that reads as "raised" rather than "on the line above". **`i8`, and the sign is the direction on
+    /// screen**: positive is up, because `DocRun::baseline_shift` is added to the ascent.
+    ///
+    /// **Superscript wins over subscript when both bits are set**, because a run cannot be both and the
+    /// two being set is a corrupt payload rather than a request. The session's own toggles clear the
+    /// opposite bit, so this arm is only reachable from a hand-built span.
+    fn baseline_shift(&self, flags: u16) -> i8 {
+        // **The painter's own fraction, at the run's own size.** `Painter::shift_of` is
+        // `cell_height_at(size) / 3` and is clamped to `i8::MAX`, so this is a *call* rather than a
+        // division and the two numbers cannot drift. The size matters: a heading's line is 20 px and its
+        // third is 6, against the body's 18 and 6 -- but a zoomed session's cell is different again, and
+        // a shift computed from the *painter's* size while the run draws at another is the class of
+        // disagreement part 31 removed from the x axis.
+        let third = self
+            .painter
+            .shift_of(flags & (STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT) != 0, self.run_size_index(flags))
+            as i8;
+        if flags & STYLE_SUPERSCRIPT != 0 {
+            third
+        } else if flags & STYLE_SUBSCRIPT != 0 {
+            // **`0 - third` and not `saturating_neg()`**, which is an `i8` inherent method this
+            // toolchain's `i8` does have — and subtracting is what the expression means. `third` is
+            // non-negative by construction (it is a `u32` division result cast down), so the
+            // subtraction cannot overflow and does not need the saturating form.
+            0 - third
+        } else {
+            0
+        }
+    }
+
+    /// **The two rule decorations a run draws**, as `DocRun`'s bitset.
+    ///
+    /// A translation and not the span's own bits, because the two vocabularies are different on
+    /// purpose: `STYLE_*` is what the *document* holds and `DocRun::DECORATION_*` is what the
+    /// *painter* draws. Keeping them separate is what lets the document model grow a decoration the
+    /// painter has no idea about without the painter drawing something wrong.
+    const fn decorations(flags: u16) -> u8 {
+        let mut out = 0u8;
+        if flags & STYLE_UNDERLINE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_UNDERLINE;
+        }
+        if flags & STYLE_STRIKE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_STRIKE;
+        }
+        out
+    }
+
     /// [`doc_style`](Self::doc_style) for unstyled text: the body face itself.
     fn body_style(&self) -> holonomy_render::Style {
         self.doc_style(0)
@@ -4370,7 +4515,8 @@ impl<'a> Session<'a> {
     /// **A private function rather than three lines inline in `set_zoom`,** because the same three
     /// lines run in `Session::new` and a second copy of "the cell comes from the face" is a second
     /// thing to keep in step with part 32's derivation.
-    fn apply_type_scale(&mut self) {        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
+    fn apply_type_scale(&mut self) {
+        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
         // is the tallest face *over every size in the atlas*, so with `[16, 20]` it answers 20 ppem's
         // pitch whatever is being drawn -- and a session at 100 % would space 16 ppem glyphs on 20 ppem
         // leading, which reads as double-spaced text at 100 % and as a zoom that changed nothing.
@@ -4709,6 +4855,17 @@ impl<'a> Session<'a> {
             | Command::ZoomReset => {}
             Command::Hotkey(Hotkey::Bold) => self.apply_action(holonomy_render::menus::Action::ToggleBold)?,
             Command::Hotkey(Hotkey::Italic) => self.apply_action(holonomy_render::menus::Action::ToggleItalic)?,
+            // **The four decorations and the clear, each through `apply_action`.**
+            //
+            // **Through the action rather than straight to the bit**, because the action is what the
+            // menu row and the toolbar button reach and *that is the point*: one implementation, three
+            // ways in. A shortcut that called `editor.format_range` directly would be a fifth path, and
+            // the two would diverge the first time one of them learned about armed state.
+            Command::Hotkey(Hotkey::Underline) => self.apply_action(holonomy_render::menus::Action::ToggleUnderline)?,
+            Command::Hotkey(Hotkey::Strike) => self.apply_action(holonomy_render::menus::Action::ToggleStrike)?,
+            Command::Hotkey(Hotkey::Superscript) => self.apply_action(holonomy_render::menus::Action::ToggleSuperscript)?,
+            Command::Hotkey(Hotkey::Subscript) => self.apply_action(holonomy_render::menus::Action::ToggleSubscript)?,
+            Command::Hotkey(Hotkey::ClearFormatting) => self.apply_action(holonomy_render::menus::Action::ClearFormatting)?,
             Command::Hotkey(Hotkey::Undo) => self.undo()?,
             Command::Hotkey(Hotkey::Redo) => self.redo()?,
             Command::Hotkey(Hotkey::Save) => {
@@ -5478,6 +5635,180 @@ impl<'a> Session<'a> {
         })?;
         if changed { self.after_edit(0)?; }
         Ok(true)
+    }
+
+    /// **Toggle one inline flag: over the selection if there is one, armed at the caret if not.**
+    ///
+    /// # Why this is one function and not three arms
+    ///
+    /// **Because the three arms were three copies of one behaviour**, and the fourth copy is where the
+    /// bug lives: `Action::ToggleBold` and `Action::ToggleItalic` were written out separately, the
+    /// Underline button drew from part 19 onward, and *neither* of them could reach it — so pressing
+    /// Underline armed nothing, restyled nothing and counted as `pointer_inert`. Folding the three onto
+    /// one path is what makes `slot_for`'s three slots and this function's one implementation the same
+    /// set of three.
+    ///
+    /// # The two halves, and why `toggle` is the flag's *inverse* over the selection
+    ///
+    /// A selection is restyled according to what is at its **start**, which is the rule every word
+    /// processor uses: "select a bold word and press Bold" un-bolds it. A bare caret cannot be
+    /// restyled — there is no text — so the flag is armed for the next character instead, through
+    /// [`set_armed_style`](Self::set_armed_style), which is the one writer of both copies.
+    fn toggle_inline_style(
+        &mut self,
+        flag: u16,
+        tool: Option<widgets::Tool>,
+    ) -> Result<(), SessionError> {
+        self.check_editable()?;
+        let (bold, italic, underline) = self.armed_style();
+        if let Some(sel) = self.editor.selection() {
+            // **A selection is restyled according to what is at its start**, which is the rule every
+            // word processor uses: "select a bold word and press Bold" un-bolds it.
+            let on = self.editor.style_at(sel.start).style_flags & flag == 0;
+            self.update_selection_style(Some((flag, on)), None)?;
+            // **The armed flags follow the selection's new state**, so a Bold press with a selection
+            // and then a click at a bare caret types what the selection now is. Without this the
+            // button's highlight and the armed state disagreed the moment a selection was styled.
+            //
+            // **The three `if`s and not an index**, because `flag` may be none of the three: a
+            // `STYLE_STRIKE` press with a selection restyles the text and changes no slot, and an
+            // arithmetic mapping from a bit to a position would have to answer what happens for every
+            // other bit in `STYLE_KNOWN`.
+            self.set_armed_style(
+                if flag == STYLE_BOLD { on } else { bold },
+                if flag == STYLE_ITALIC { on } else { italic },
+                if flag == STYLE_UNDERLINE { on } else { underline },
+            );
+            self.damage = self.chrome.full_damage();
+        } else {
+            // **The bit flipped in the model, and then both copies rewritten from it.** A bare caret
+            // has no text to restyle, so the flag is armed for the next character -- and doing the
+            // flip on `pending_style` rather than on a bool is what lets a flag with *no slot* work.
+            // `STYLE_STRIKE` has no toolbar button and therefore no bool in `StyleFlags`, and a
+            // version that flipped a bool could not arm it at all.
+            //
+            // **The `set_armed_style` call is still the only writer of the chrome's copy**, and it is
+            // an identity here: it masks out the three bits it owns and puts back the same three,
+            // every other bit -- strike, super, sub, header -- riding through the mask.
+            let f = self.pending_style.unwrap_or(0) ^ flag;
+            self.pending_style = Some(f);
+            self.set_armed_style(
+                f & STYLE_BOLD != 0,
+                f & STYLE_ITALIC != 0,
+                f & STYLE_UNDERLINE != 0,
+            );
+            // **`None` for a flag with no button**, which is a no-op rather than a repaint: there is
+            // nothing on screen that draws "strike is armed", so there is nothing to invalidate.
+            self.invalidate_hit(tool.map(widgets::Hit::Tool));
+        }
+        self.stats.pointer_chrome += 1;
+        Ok(())
+    }
+
+    /// **How far above and below its line box this line's runs draw, in pixels.**
+    ///
+    /// # Why the emitter needs this and the painter cannot supply it
+    ///
+    /// A baseline shift moves *ink* out of the line box, and the box is what the emitter damages: one
+    /// `cell_h` per line, unioned into the frame's damage. `Painter::doc_text` grows its own cull box by
+    /// the shift, which is the right answer to "may I skip this run" — but it is not the answer to "which
+    /// rows must this line repaint", because **a row outside the line's rect is never asked about at all**.
+    /// The painter only ever sees the damage it is given.
+    ///
+    /// So the extent is computed here, from the same flags the runs were emitted from, and returns
+    /// `(up, down)` — one nonzero and the other zero on every line, since a run cannot be raised and
+    /// lowered at once and this takes the larger of the two if a corrupt payload says otherwise.
+    ///
+    /// **Both come from [`baseline_shift`](Self::baseline_shift)**, so there is no second answer to how
+    /// far a shift moves: the number that widens the damage is the number the painter offsets the glyphs
+    /// by.
+    fn line_shift(
+        &self,
+        page_runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
+        doc_at: u32,
+        len: u32,
+    ) -> (u32, u32) {
+        let mut up = 0u32;
+        let mut down = 0u32;
+        for (span, lo, hi) in page_runs {
+            // **Only the runs that touch this line.** `page_runs` is the whole page, and a superscript on
+            // line 3 must not widen line 1's damage — the cost is a taller repaint for every line of a
+            // document that has one, which on a scrolled page is the whole page.
+            if *hi <= doc_at || *lo >= doc_at + len {
+                continue;
+            }
+            let shift = self.baseline_shift(span.style_flags);
+            if shift > 0 {
+                up = up.max(u32::from(shift.unsigned_abs()));
+            } else if shift < 0 {
+                down = down.max(u32::from(shift.unsigned_abs()));
+            }
+        }
+        (up, down)
+    }
+
+    /// **Toggle superscript or subscript over the selection, or arm it at the caret.**
+    ///
+    /// # The two are mutually exclusive, and the bitset has to be made to say so
+    ///
+    /// `STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT` is a value the format can hold and a value nothing can
+    /// draw: a run cannot be both raised and lowered. So pressing one clears the other, which is what
+    /// pressing `Ctrl+.` on a subscripted word has to mean. **The toggle is decided from the
+    /// selection's start**, exactly as [`toggle_inline_style`](Self::toggle_inline_style) decides its
+    /// own, so "press it twice" is "on, then off" rather than "on, then on again".
+    fn toggle_decoration(&mut self, flag: u16) -> Result<(), SessionError> {
+        self.check_editable()?;
+        let both = STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
+        let other = if flag == STYLE_SUPERSCRIPT { STYLE_SUBSCRIPT } else { STYLE_SUPERSCRIPT };
+        match self.editor.selection() {
+            Some(sel) => {
+                let enabled = self.editor.style_at(sel.start).style_flags & flag == 0;
+                let changed = self.editor.format_range(sel.start, sel.end, |span| {
+                    let mut flags = span.style_flags & !other;
+                    if enabled { flags |= flag } else { flags &= !flag; }
+                    (flags, span.color_rgb)
+                })?;
+                if changed {
+                    self.after_edit(0)?;
+                    self.damage = self.chrome.full_damage();
+                }
+            }
+            None => {
+                // **Armed at the caret, and the opposite bit cleared.** `pending_style` is the model's
+                // own copy of "what the next character is", so a superscript armed after a subscript
+                // has to *replace* it rather than join it.
+                let f = (self.pending_style.unwrap_or(0) & !other) ^ flag;
+                self.pending_style = Some(f);
+                self.state.styles = holonomy_render::chrome::StyleFlags {
+                    bold: f & STYLE_BOLD != 0,
+                    italic: f & STYLE_ITALIC != 0,
+                    underline: f & STYLE_UNDERLINE != 0,
+                };
+            }
+        }
+        self.stats.pointer_chrome += 1;
+        Ok(())
+    }
+
+    /// **The byte range a paragraph-level command acts on: the selection, or the caret's line.**
+    ///
+    /// `SetStyle` and `ClearFormatting` both need it and it was written out inside `SetStyle`, which is
+    /// the one place a copy of a range calculation can be wrong without anybody noticing — the symptom
+    /// is a heading applied to the *previous* paragraph, which reads as an off-by-one in the editor.
+    fn paragraph_range(&self) -> (u32, u32) {
+        match self.editor.selection() {
+            Some(sel) => (
+                self.line_start(sel.start as usize) as u32,
+                self.line_end_offset((sel.end.saturating_sub(1)) as usize) as u32,
+            ),
+            None => {
+                let caret = self.editor.caret() as usize;
+                (
+                    self.line_start(caret) as u32,
+                    self.line_end_offset(caret) as u32,
+                )
+            }
+        }
     }
 
     /// **Re-read everything about the caret that is derived from where it is.** Part 28.
@@ -6620,10 +6951,29 @@ impl<'a> Session<'a> {
                     // a cell right of the caret at its left edge -- **the caret outside its own
                     // highlight**, which is the defect the caret fix would otherwise have made worse
                     // rather than better.
-                    let pen0 =
-                        pen_at(&self.painter, text, doc_start, lo, &page_runs, self.body_style());
-                    let pen1 =
-                        pen_at(&self.painter, text, doc_start, hi, &page_runs, self.body_style());
+                    // **`self.run_size_index` is handed in, because `pen_at` is a free function and
+                    // the size is a session decision.** It is the same answer `emit_body_text` gives
+                    // every run below, so the highlight and the glyphs cannot disagree about how wide a
+                    // heading's letters are.
+                    let size_of = |flags: u16| self.run_size_index(flags);
+                    let pen0 = pen_at(
+                        &self.painter,
+                        text,
+                        doc_start,
+                        lo,
+                        &page_runs,
+                        self.body_style(),
+                        size_of,
+                    );
+                    let pen1 = pen_at(
+                        &self.painter,
+                        text,
+                        doc_start,
+                        hi,
+                        &page_runs,
+                        self.body_style(),
+                        size_of,
+                    );
                     // **`shown` is the measure, and the highlight stops there too.** A line longer
                     // than the page is clipped by `codepoints_upto`, and a highlight running past the
                     // edge of the text would be a blue band over the page margin — which is not a
@@ -6642,6 +6992,7 @@ impl<'a> Session<'a> {
                         shown,
                         &page_runs,
                         self.body_style(),
+                        size_of,
                     ));
                     if pen1 > pen0 {
                         push_rect(
@@ -6726,17 +7077,31 @@ impl<'a> Session<'a> {
                 .map(|(s, lo, hi)| (*s, *lo, *hi))
                 .peekable();
             if runs.peek().is_none() {
+                // **The line's own flags even when it has no runs of its own.** A `STYLE_HEADER`
+                // paragraph is stored as a span, so it *does* have a run and lands in the loop below —
+                // but a document whose header span covers only part of the line has a plain tail, and
+                // a whole-line run that ignored the flags would draw that tail at the body size. The
+                // lookup is one binary search over the span list, and it is skipped entirely on a
+                // document with no spans at all.
+                let flags = self.editor.style_at(doc_at).style_flags;
                 tree.before
-                    .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
+                    .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
                         l.x as i32,
                         y as i32,
                         at,
                         shown_len,
                         self.body_style(),
-                        0,
+                        self.run_size_index(flags),
                         ink,
+                        self.baseline_shift(flags),
+                        Self::decorations(flags),
                     ))));
-                extra = union_opt(extra, Some(rect));
+                // **The same widened rect the styled path unions**, because this run can be shifted too:
+                // a whole line in superscript takes this branch — it has flags and no *runs* of its own
+                // -- and a plain `rect` would leave the raised rows undamaged. The two branches are the
+                // same decision about damage, so they compute it the same way.
+                let shift = self.line_shift(&page_runs, doc_at, shown_len);
+                extra = union_opt(extra, Some(shifted_rect(rect, shift)));
                 continue;
             }
 
@@ -6756,6 +7121,9 @@ impl<'a> Session<'a> {
             let mut pen_x: u32 = 0;
             let mut cursor = 0usize; // byte index into `seg`
             for (span, lo, hi) in runs {
+                // **`span` drives every property of the run it produces** -- face, size, ink,
+                // baseline shift and the two rules -- and `runs` iterates an owned `Vec` (`page_runs`),
+                // so nothing here borrows the editor and the `&self` calls below are all readable.
                 // **Skip anything past the drawn prefix.** `runs_in` is asked for `[at, at + shown_len)`
                 // so this cannot happen today; it is a bound rather than a belief, because `seg` was
                 // truncated to the measure and a run clipped to a range the caller then shortened would
@@ -6781,8 +7149,15 @@ impl<'a> Session<'a> {
                         gap.len() as u32,
                         self.body_style(),
                         ink,
+                        // **The gap between two styled runs is body text**, so it takes the body size,
+                        // no shift and no rules. A gap that inherited the *previous* run's decoration
+                        // would underline the space between two underlined words — which is what an
+                        // underline across a whole phrase looks like and is not what this is.
+                        0,
+                        0,
+                        0,
                     );
-                    pen_x += pen_of(&self.painter, gap, self.body_style());
+                    pen_x += pen_of(&self.painter, gap, self.body_style(), 0);
                     cursor = lo;
                 }
                 let run = &seg[cursor..hi];
@@ -6799,11 +7174,25 @@ impl<'a> Session<'a> {
                         run.len() as u32,
                         self.doc_style(span.atlas_style()),
                         span_ink(&span, ink),
+                        // **The three new properties, from the same span the face came from.** The
+                        // size is the heading's, the shift is the super/subscript's, and the two
+                        // rules are the underline's and the strike's — so one span drives one run and
+                        // there is no second place for a decoration to be read from.
+                        self.run_size_index(span.style_flags),
+                        self.baseline_shift(span.style_flags),
+                        Self::decorations(span.style_flags),
                     );
                     // **The run's own face, not `REGULAR`.** A bold glyph advances differently from a
                     // plain one, and measuring the gap with the wrong face is the same class of error as
                     // the grid was -- a second place where the position and the painting disagree.
-                    pen_x += pen_of(&self.painter, run, self.doc_style(span.atlas_style()));
+                    pen_x += pen_of(
+                        &self.painter,
+                        run,
+                        self.doc_style(span.atlas_style()),
+                        // **The same size the run was emitted at**, so the next run starts where this
+                        // one's glyphs ended -- see `Painter::advance_at`.
+                        self.run_size_index(span.style_flags),
+                    );
                     cursor = hi;
                 }
             }
@@ -6820,11 +7209,26 @@ impl<'a> Session<'a> {
                     tail.len() as u32,
                     self.body_style(),
                     ink,
+                    0,
+                    0,
+                    0,
                 );
             }
-            // Managed desktop geometry is indexed by visual row. The sealed path retains its
-            // logical-line index and the older clipping behavior.
-            extra = union_opt(extra, Some(rect));
+            // **The line's damage is the line box, widened by any shift in it.**
+            //
+            // A super- or subscript draws outside `[y, y + cell_h)`: the emitter hands the painter a
+            // shifted baseline, so the *glyphs* of a raised run occupy rows above `y`. `rect` is one
+            // `cell_h` tall, and a damage rect that misses those rows is a repaint that leaves them
+            // holding what the previous frame drew -- the caret's old position, most visibly, inside the
+            // raised part of a superscript.
+            //
+            // **Both directions, from every run on the line and not from the last one emitted.** A line
+            // is damaged once, so the extent is a maximum over the runs that touch it -- see `line_shift`.
+            // It is a scan of the page's own run list per line, which is a handful of spans, and it
+            // answers `(0, 0)` for the overwhelming majority of lines; the alternative is a mutable
+            // accumulator threaded through forty-line loops for a number that is usually zero.
+            let shift = self.line_shift(&page_runs, doc_at, shown_len);
+            extra = union_opt(extra, Some(shifted_rect(rect, shift)));
         }
 
         self.stats.lines_drawn = lines;
@@ -7861,6 +8265,7 @@ fn scalar_len(bytes: &[u8]) -> usize {
 /// that are all values — the same reason `strip_terminator` and `codepoints_upto` are free. **Part 24
 /// added it because the styled path emits four runs per line** (the plain gaps and the tail) and writing
 /// the `DocRun::new` call out four times is how four slightly different calls drift apart.
+#[allow(clippy::too_many_arguments)]
 fn push_doc_run(
     tree: &mut SurfaceTree,
     x: u32,
@@ -7869,13 +8274,33 @@ fn push_doc_run(
     len: u32,
     style: holonomy_render::Style,
     ink: u32,
+    size: u8,
+    baseline_shift: i8,
+    decorations: u8,
 ) {
     if len == 0 {
         return;
     }
+    // **A shifted run is decided here, once, and not by its caller.** A super- or subscript's glyphs are
+    // drawn outside `[y, y + cell_h)`, so its node has to say so: `DocRun::bounds` is what any caller asks
+    // for the box, and `Session::emit_body_text` widens this line's damage from it. Two call sites pass a
+    // shift and neither knows this arithmetic, which is why it is not theirs to write.
+    //
+    // **`bounds` is not what the sum says.** A shift of `s` makes the run `cell_h + |s|` tall starting
+    // `|s|` above `y` for a superscript -- and `DocRun::bounds` is the function that must answer that,
+    // because the emitter's damage is computed from it and a box one line too short leaves a raised run's
+    // top third undamaged.
     tree.before
-        .push(SurfaceTree::leaf(Node::DocText(DocRun::new(
-            x as i32, y as i32, at, len, style, 0, ink,
+        .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
+            x as i32,
+            y as i32,
+            at,
+            len,
+            style,
+            size,
+            ink,
+            baseline_shift,
+            decorations,
         ))));
 }
 
@@ -7945,7 +8370,12 @@ fn span_ink(span: &holonomy_text::TextIntervalSpan, ink: u32) -> u32 {
 /// this reads a buffer that was read anyway; `refresh_caret_column` would pass one line. **Decoding is
 /// `from_utf8().valid_up_to()`, the same walk `doc_text` does**, and an invalid byte counts as one
 /// `.notdef` — the same direction, for the same reason.
-fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) -> u32 {
+fn pen_of(
+    painter: &Painter<'_>,
+    bytes: &[u8],
+    style: holonomy_render::Style,
+    size: u8,
+) -> u32 {
     let mut pen = 0u32;
     let mut at = 0usize;
     while at < bytes.len() {
@@ -7980,7 +8410,11 @@ fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) ->
                 }
             }
         };
-        pen = pen.saturating_add(painter.advance_of(cp, style));
+        // **`advance_at` and `size`, not `advance_of`.** A heading is 125 % of the body and its
+        // glyphs are wider, so measuring it at the body size would place every run after a heading --
+        // and the caret -- left of where the glyphs actually are. The two sizes are one argument
+        // apart and the argument is the run's own `DocRun::size`, which is what `doc_text` advances by.
+        pen = pen.saturating_add(painter.advance_at(cp, style, size));
         at += used;
     }
     pen
@@ -8016,6 +8450,7 @@ fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style) ->
 /// `Session::body_style()` and this applies the same rule `doc_style` does (a face-0 span is
 /// body text too; bold, italic and code keep their own faces). A highlight measured in Inter
 /// over a page painted in Mono would be part 33's defect reintroduced from the other side.
+#[allow(clippy::too_many_arguments)]
 fn pen_at(
     painter: &Painter<'_>,
     text: &[u8],
@@ -8023,6 +8458,7 @@ fn pen_at(
     at: usize,
     runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
     body: holonomy_render::Style,
+    size_of: impl Fn(u16) -> u8,
 ) -> u32 {
     let at = at.min(text.len());
     let mut pen = 0u32;
@@ -8041,7 +8477,7 @@ fn pen_at(
             continue;
         }
         if lo > cursor {
-            pen = pen.saturating_add(pen_of(painter, &text[cursor..lo], body));
+            pen = pen.saturating_add(pen_of(painter, &text[cursor..lo], body, 0));
         }
         let end = hi.min(at);
         // **The same mapping `Session::doc_style` applies**: a span whose flags collapse to face 0
@@ -8052,14 +8488,18 @@ fn pen_at(
         } else {
             holonomy_render::Style(span.atlas_style())
         };
-        pen = pen.saturating_add(pen_of(painter, &text[lo..end], span_style));
+        // **The span's own size, resolved by the caller's `size_of`.** A heading is the one style
+        // whose advance differs, and a caret measured at the body size inside a heading would sit a
+        // fifth of a line left of the glyph it points at by the end of the heading's first word.
+        let span_size = size_of(span.style_flags);
+        pen = pen.saturating_add(pen_of(painter, &text[lo..end], span_style, span_size));
         cursor = end;
         if cursor >= at {
             return pen;
         }
     }
     if cursor < at {
-        pen = pen.saturating_add(pen_of(painter, &text[cursor..at], body));
+        pen = pen.saturating_add(pen_of(painter, &text[cursor..at], body, 0));
     }
     pen
 }
@@ -8208,6 +8648,27 @@ fn widen(damage: &mut Option<DamageRect>, extra: Option<DamageRect>) {
     if let (Some(d), Some(e)) = (*damage, extra) {
         *damage = Some(d.union(&e));
     }
+}
+
+/// **A line box grown by the furthest a shift in it draws out of the box.**
+///
+/// `shift` is `(up, down)` from [`Session::line_shift`], and exactly one of them is nonzero on a real
+/// line. **The growth is the whole of the fix for a repaint that leaves a superscript's raised third
+/// standing**, because the emitter's damage is this rectangle and the painter only ever sees it.
+///
+/// A free function rather than a method, because both emit paths — the whole-line run and the
+/// per-style runs — must grow the box the same way, and a method called twice is two chances to call it
+/// with one of the two.
+fn shifted_rect(rect: DamageRect, shift: (u32, u32)) -> DamageRect {
+    if shift == (0, 0) {
+        return rect;
+    }
+    DamageRect::new(
+        rect.x,
+        rect.y.saturating_sub(shift.0),
+        rect.width,
+        rect.height.saturating_add(shift.0).saturating_add(shift.1),
+    )
 }
 
 fn union_opt(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
@@ -8383,7 +8844,20 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         }
         // **Arming a style is a chrome-state change, not a command** -- the same shape as the three
         // above, and `Session::apply_action` handles it before this function is reached.
-        Action::ToggleBold | Action::ToggleItalic => return None,
+        //
+        // **Seven variants, and they are all `apply_action`'s.** Bold, italic and underline; the
+        // strike toggle; the super/subscript pair; and clear-formatting. None of them is a keystroke
+        // the *editor* applies -- the keymap routes `Ctrl+B` to `Hotkey::Bold` and `Hotkey::Bold`
+        // reaches `apply_action(Action::ToggleBold)`, so routing these back to a `Command` would be a
+        // loop. `Hotkey::Underline` and the three decoration chords are in the same shape and land
+        // here for the same reason.
+        Action::ToggleBold
+        | Action::ToggleItalic
+        | Action::ToggleUnderline
+        | Action::ToggleStrike
+        | Action::ToggleSuperscript
+        | Action::ToggleSubscript
+        | Action::ClearFormatting => return None,
         Action::WordCount | Action::KeyboardShortcuts => return None,
     })
 }
