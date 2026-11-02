@@ -46,18 +46,20 @@ jobs:
           mkdir -p shots
           cargo test -p holonomy --test zz_capture -- --nocapture > ci-logs/capture.log 2>&1 || true
           python3 -m pip install --quiet pillow || true
-          python3 -c "
-import glob, os
-from PIL import Image
-os.makedirs('shots', exist_ok=True)
-for p in sorted(glob.glob('/tmp/shot/*.ppm')):
-    im = Image.open(p)
-    stem = os.path.basename(p)[:-4]
-    im.save('shots/%s.png' % stem)
-    top = min(im.height, 200)
-    im.crop((0, 0, im.width, top)).resize((im.width * 2, top * 2), Image.LANCZOS).save('shots/%s-band2x.png' % stem)
-    print(stem, im.size)
-" || true
+          cat > /tmp/topng.py <<'PY'
+          import glob, os
+          from PIL import Image
+          os.makedirs('shots', exist_ok=True)
+          for p in sorted(glob.glob('/tmp/shot/*.ppm')):
+              im = Image.open(p)
+              stem = os.path.basename(p)[:-4]
+              im.save('shots/%s.png' % stem)
+              top = min(im.height, 200)
+              im.crop((0, 0, im.width, top)).resize((im.width * 2, top * 2), Image.LANCZOS).save(
+                  'shots/%s-band2x.png' % stem)
+              print(stem, im.size)
+          PY
+          python3 /tmp/topng.py || true
       - name: publish
         if: always()
         run: |
