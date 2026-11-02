@@ -14,16 +14,17 @@ use crate::{DamageRect, Layout};
 /// The secret mask. ASCII so every atlas size/style carries it; see the module note on U+2022.
 pub const MASK: char = '*';
 
-const SCRIM: u32 = 0xB000_0000;
-const PANEL: u32 = 0xFF1E_232B;
-const FIELD_BG: u32 = 0xFF0F_1319;
-const FIELD_BORDER: u32 = 0xFF3A_424E;
+// The framebuffer is opaque; use a soft neutral backdrop rather than pretending alpha blends.
+const SCRIM: u32 = 0xFFE9_EEF5;
+const PANEL: u32 = 0xFFFF_FFFF;
+const FIELD_BG: u32 = 0xFFFF_FFFF;
+const FIELD_BORDER: u32 = 0xFFD0_D5DE;
 const ACCENT: u32 = 0xFF7A_A2F7;
-const TEXT: u32 = 0xFFF2_F4F8;
-const TEXT_SECONDARY: u32 = 0xFFB8_C0CC;
-const ERROR: u32 = 0xFFFF_8A8A;
-const PRIMARY: u32 = 0xFF3B_6FD4;
-const SECONDARY: u32 = 0xFF31_3A47;
+const TEXT: u32 = 0xFF20_2124;
+const TEXT_SECONDARY: u32 = 0xFF5F_6368;
+const ERROR: u32 = 0xFFB3_261E;
+const PRIMARY: u32 = 0xFF1A_73E8;
+const SECONDARY: u32 = 0xFFF0_F4F9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
@@ -299,7 +300,7 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
             r.x as i32, r.y as i32, r.width, r.height, 8, colour,
         ))));
         let ty = r.y + (r.height.saturating_sub(g.text_h)) / 2;
-        label(&mut tree.before, r.x + 12, ty, &clip(&d.choices[idx], max_chars), Style::REGULAR, g.text_size, TEXT);
+        label(&mut tree.before, r.x + 12, ty, &clip(&d.choices[idx], max_chars), Style::REGULAR, g.text_size, if idx == d.choice { 0xFFFF_FFFF } else { TEXT });
     }
 
     if let Some(e) = &d.error {
@@ -324,6 +325,6 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
         let tw = text.chars().count() as u32 * g.text_advance;
         let tx = r.x + (r.width.saturating_sub(tw)) / 2;
         let ty = r.y + (r.height.saturating_sub(g.text_h)) / 2;
-        label(&mut tree.before, tx, ty, &text, Style::BOLD, g.text_size, TEXT);
+        label(&mut tree.before, tx, ty, &text, Style::BOLD, g.text_size, if primary { 0xFFFF_FFFF } else { TEXT });
     }
 }

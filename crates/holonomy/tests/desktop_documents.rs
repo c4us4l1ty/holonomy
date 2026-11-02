@@ -74,3 +74,20 @@ fn sample_is_a_managed_request_and_gets_a_persistable_identity() {
     let restored = Editor::from_payload(&sample.payload).unwrap();
     assert_ne!(restored.style_at(0).style_flags & holonomy_text::STYLE_HEADER, 0);
 }
+
+#[test]
+fn document_library_does_not_replace_the_editor_and_is_a_managed_request() {
+    let mut s = session();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "Notes".into(), payload: Editor::from_text(b"draft").unwrap().payload().unwrap(), caret: 5, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    s.insert_text("!").unwrap();
+    s.apply_action(Action::Home).unwrap();
+    assert_eq!(s.take_document_request(), Some(DocumentRequest::Home));
+    s.set_home(Some(holonomy_render::home::View::new(vec!["Notes".into()])));
+    s.repaint_all().unwrap();
+    assert_eq!(s.active_document_id(), 1);
+    assert_eq!(s.text().unwrap(), b"draft!");
+    assert!(s.has_unsaved_documents());
+    s.set_home(None);
+    s.repaint_all().unwrap();
+    assert_eq!(s.text().unwrap(), b"draft!");
+}
