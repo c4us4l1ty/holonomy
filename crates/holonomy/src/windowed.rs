@@ -51,11 +51,11 @@ use std::time::{Duration, Instant};
 
 use holonomy_assets::atlas::Atlas;
 use holonomy_display::paint::Painter;
-use holonomy_display::{Desktop, Scanout};
+use holonomy_display::Desktop;
 use holonomy_input::compose::{Composer, Fed};
 use holonomy_input::x11key;
 use holonomy_export::Format;
-use holonomy_render::chrome::{Blink, ChromeMetrics};
+use holonomy_render::chrome::ChromeMetrics;
 use holonomy_text::Editor;
 
 use crate::args::Args;
@@ -362,7 +362,7 @@ pub fn run(
             match req {
                 DocumentRequest::New => { form = Some(Form::new_doc()); }
                 DocumentRequest::NewSample => {
-                    if let Some(v) = vault.as_ref() {
+                    if let Some(v) = vault.as_mut() {
                         let id = v.next_id();
                         match session.create_sample_document(id) {
                             Ok(()) => {

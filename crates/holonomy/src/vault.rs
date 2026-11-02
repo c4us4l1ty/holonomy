@@ -207,7 +207,7 @@ impl Vault {
 
 fn legacy_editor(bytes: &[u8]) -> Result<Editor, VaultError> {
     if bytes.starts_with(b"HDOC") { return Editor::from_payload(bytes).map_err(Into::into); }
-    let text = std::str::from_utf8(bytes).map_err(|_| VaultError::InvalidBundle("legacy payload is neither HDOC nor UTF-8"))?;
+    std::str::from_utf8(bytes).map_err(|_| VaultError::InvalidBundle("legacy payload is neither HDOC nor UTF-8"))?;
     Editor::from_text(bytes).map_err(Into::into)
 }
 
