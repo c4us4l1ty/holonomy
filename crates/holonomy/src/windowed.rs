@@ -245,7 +245,7 @@ pub fn run(
     if let Ok(pass) = std::env::var("HOLONOMY_PASSPHRASE") {
         if !pass.is_empty() && path.exists() {
             match crate::vault::Vault::open(&path, &pass, holonomy_crypto::envelope::VDF_ITERATIONS) {
-                Ok(v) => { v.load_all(&mut session).map_err(|e| WindowedError::Session(crate::session::SessionError::Sink(std::io::Error::other(e.to_string()))))?; vault = Some(v); form = None; }
+                Ok(v) => { v.load_all(&mut session).map_err(|e| WindowedError::Session(crate::session::SessionError::Sink(std::io::Error::other(e.to_string()))))?; session.set_home(Some(home_view(&v))); vault = Some(v); form = None; }
                 Err(e) => { if let Some(f) = form.as_mut() { f.error = Some(e.to_string()); } }
             }
         }
@@ -360,6 +360,12 @@ pub fn run(
         // a dismissal that arrived a frame late would run against a form the user had already left.
         if let Some(req) = session.take_document_request() {
             match req {
+                DocumentRequest::Home => {
+                    if save(&mut vault, &mut session) {
+                        pending_paste = None;
+                        if let Some(v) = vault.as_ref() { session.set_home(Some(home_view(v))); }
+                    }
+                }
                 DocumentRequest::New => { form = Some(Form::new_doc()); }
                 DocumentRequest::NewSample => {
                     if let Some(v) = vault.as_mut() {
@@ -437,7 +443,7 @@ pub fn run(
             // **Any clipboard answer completes the request, not only a non-empty one.** A selection the
             // owner reports as empty is an answer, and leaving `pending_paste` set for it would make the
             // timeout above fire on a paste the server *did* answer.
-            if pending_paste.take().is_some() {
+            if pending_paste.take().is_some() && session.home().is_none() && form.is_none() {
                 match std::str::from_utf8(&bytes) {
                     Ok(text) if !text.is_empty() => {
                         match session.insert_text(text) {
@@ -471,7 +477,7 @@ pub fn run(
                         KeyOutcome::Submit => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
-                                Ok(next) => { form = next; session.set_notice(None); last_edit = Instant::now(); }
+                                Ok(next) => { form = next; last_edit = Instant::now(); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
                             sync_form(&mut session, form.as_ref())?;
@@ -485,6 +491,31 @@ pub fn run(
                     continue;
                 }
                 if vault.is_none() { continue; }
+                if let Some(home) = session.home().cloned() {
+                    let mut home = home;
+                    if state & 4 != 0 && keycode.saturating_sub(8) == 16 {
+                        if save(&mut vault, &mut session) { let _ = window_of(&mut session)?.clear_clipboard(); return Ok(Exit::Quit); }
+                    } else if state & (4 | 8) == 0 {
+                        match keycode.saturating_sub(8) {
+                            1 => { if session.active_document_id() != 0 { session.set_home(None); } },
+                            14 => { home.query.pop(); home.page = 0; session.set_home(Some(home)); },
+                            28 | 96 => {
+                                let l = holonomy_render::Layout::new(&session.chrome_metrics());
+                                if let Some((index, _)) = holonomy_render::home::geometry(&l, &home).cards.first() {
+                                    open_home_document(&vault, &mut session, *index);
+                                }
+                            },
+                            _ => if let Fed::Text(text) = fed {
+                                let l = holonomy_render::Layout::new(&session.chrome_metrics());
+                                if !holonomy_render::home::geometry(&l, &home).search.is_empty() && home.query.len().saturating_add(text.len()) <= 256 && !text.chars().any(char::is_control) {
+                                    home.query.push_str(&text); home.page = 0; session.set_home(Some(home));
+                                }
+                            },
+                        }
+                    }
+                    session.tick().map_err(WindowedError::Session)?;
+                    continue;
+                }
                 match fed {
                     Fed::Text(text) => {
                         match session.insert_text(&text) {
@@ -507,7 +538,7 @@ pub fn run(
             }
             holonomy_x11::Event::KeyRelease { state, .. } => {
                 session.sync_modifiers(x11key::modifier_state(state));
-                if form.is_none() { if let Some(key) = x11key::key_event(&ev) { session.handle_event(key).map_err(WindowedError::Session)?; } }
+                if form.is_none() && session.home().is_none() { if let Some(key) = x11key::key_event(&ev) { session.handle_event(key).map_err(WindowedError::Session)?; } }
             }
             holonomy_x11::Event::ConfigureNotify { width, height } => {
                 if session.resize(width as u32, height as u32).map_err(WindowedError::Session)? { session.repaint_all().map_err(WindowedError::Session)?; }
@@ -525,7 +556,7 @@ pub fn run(
                         holonomy_render::dialog::Hit::Confirm => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
-                                Ok(next) => { form = next; session.set_notice(None); }
+                                Ok(next) => { form = next; }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
                             sync_form(&mut session, form.as_ref())?;
@@ -535,12 +566,51 @@ pub fn run(
                     }
                     continue;
                 }
+                if let Some(mut home) = session.home().cloned() {
+                    let l = holonomy_render::Layout::new(&session.chrome_metrics());
+                    match holonomy_render::home::hit(&l, &home, event_x as i32, event_y as i32) {
+                        holonomy_render::home::Hit::New => { form = Some(Form::new_doc()); sync_form(&mut session, form.as_ref())?; },
+                        holonomy_render::home::Hit::Sample => {
+                            if let Some(v) = vault.as_mut() {
+                                let id = v.next_id();
+                                match session.create_sample_document(id) {
+                                    Ok(()) => { session.set_home(None); save(&mut vault, &mut session); },
+                                    Err(e) => session.set_notice(Some(format!("Could not create sample: {e}"))),
+                                }
+                            }
+                        },
+                        holonomy_render::home::Hit::Open => { form = Some(Form::open(&vault, &session)); sync_form(&mut session, form.as_ref())?; },
+                        holonomy_render::home::Hit::Lock => {
+                            if save(&mut vault, &mut session) {
+                                let _ = window_of(&mut session)?.clear_clipboard();
+                                composer.reset(); pending_paste = None;
+                                let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone());
+                                lock(&mut vault, &mut session, &p);
+                                form = Some(Form::unlock(p)); sync_form(&mut session, form.as_ref())?;
+                            }
+                        },
+                        holonomy_render::home::Hit::Document(i) => open_home_document(&vault, &mut session, i),
+                        holonomy_render::home::Hit::Previous => { home.page = home.page.saturating_sub(1); home.hover = holonomy_render::home::Hit::None; session.set_home(Some(home)); },
+                        holonomy_render::home::Hit::Next => { home.page = holonomy_render::home::geometry(&l, &home).page + 1; home.hover = holonomy_render::home::Hit::None; session.set_home(Some(home)); },
+                        holonomy_render::home::Hit::None => {},
+                    }
+                    session.tick().map_err(WindowedError::Session)?;
+                    continue;
+                }
                 if vault.is_some() {
                     if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; }
                 }
             }
             ev @ (holonomy_x11::Event::ButtonRelease { .. } | holonomy_x11::Event::MotionNotify { .. }) => {
-                if form.is_none() && vault.is_some() { if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; } }
+                if form.is_none() && vault.is_some() {
+                    if let Some(mut home) = session.home().cloned() {
+                        if let holonomy_x11::Event::MotionNotify { event_x, event_y } = ev {
+                            let l = holonomy_render::Layout::new(&session.chrome_metrics());
+                            let hover = holonomy_render::home::hit(&l, &home, event_x as i32, event_y as i32);
+                            if home.hover != hover { home.hover = hover; session.set_home(Some(home)); session.tick().map_err(WindowedError::Session)?; }
+                        }
+                    } else if let Some(p) = x11key::pointer_event(&ev) { session.handle_pointer(&mut crate::store::NoSource, p).map_err(WindowedError::Session)?; }
+                }
             }
             holonomy_x11::Event::ClientMessage { data1, .. } if data1 == WM_DELETE_WINDOW => {
                 if vault.is_none() || save(&mut vault, &mut session) { let _ = window_of(&mut session)?.clear_clipboard(); report(&session, events, start); return Ok(Exit::Quit); }
@@ -568,6 +638,19 @@ pub fn run(
     }
 }
 
+fn home_view(vault: &crate::vault::Vault) -> holonomy_render::home::View {
+    holonomy_render::home::View::new(vault.documents().iter().map(|d| d.title.clone()).collect())
+}
+
+fn open_home_document(vault: &Option<crate::vault::Vault>, session: &mut Session<'_>, index: usize) {
+    if let Some(doc) = vault.as_ref().and_then(|v| v.documents().get(index)) {
+        match session.open_stored_document(doc.id, doc.title.clone(), &doc.payload, doc.caret) {
+            Ok(()) => session.set_home(None),
+            Err(e) => session.set_notice(Some(format!("Could not open document: {e}"))),
+        }
+    }
+}
+
 /// Push the form into the session and paint it now.
 ///
 /// The tick is the point: a modal edit invalidates only the dialog panel, and waiting for the next
@@ -583,6 +666,7 @@ fn save(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>) -> b
     match v.save(session) { Ok(()) => { session.set_notice(Some("Saved".into())); true } Err(e) => { session.set_notice(Some(format!("Save failed: {e}"))); false } }
 }
 fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _path: &std::path::Path) {
+    session.set_home(None);
     *vault = None;
     let _ = session.replace_documents(Vec::new());
     session.clear_clipboard();
@@ -658,13 +742,16 @@ impl Form {
             }
             FormKind::Unlock => {
                 let v = crate::vault::Vault::open(&self.path, val(0), vdf).map_err(|e| e.to_string())?;
-                v.load_all(session).map_err(|e| e.to_string())?; *vault = Some(v); Ok(None)
+                v.load_all(session).map_err(|e| e.to_string())?; session.set_notice(None); session.set_home(Some(home_view(&v))); *vault = Some(v); Ok(None)
             }
             FormKind::New => {
                 let title = val(0).trim().to_string(); if title.is_empty() || title.chars().count() > 128 || title.chars().any(char::is_control) { return Err("Enter a title of 1–128 characters.".into()); }
                 let Some(v) = vault.as_mut() else { return Err("Unlock first.".into()); };
                 let id = v.next_id(); session.create_document(id, title);
-                if !save(vault, session) { return Err("Document created in memory but not saved; retry Ctrl+S.".into()); }
+                // A failed write must not leave the create form open: submitting it again would
+                // allocate another document. Keep the new editor dirty and show the save error.
+                save(vault, session);
+                session.set_home(None);
                 Ok(None)
             }
             FormKind::Rename => {
@@ -692,7 +779,7 @@ impl Form {
                 if self.choice < self.ids.len() {
                     let id = self.ids[self.choice]; let v = vault.as_ref().ok_or("Unlock first.")?;
                     let d = v.documents().iter().find(|d| d.id == id).ok_or("Document missing.")?;
-                    session.open_stored_document(d.id, d.title.clone(), &d.payload, d.caret).map_err(|e| e.to_string())?; return Ok(None);
+                    session.open_stored_document(d.id, d.title.clone(), &d.payload, d.caret).map_err(|e| e.to_string())?; session.set_home(None); return Ok(None);
                 }
                 let mut f = Form::base(FormKind::OpenPath, "".into(), 1); f.values[0].push_str("holonomy.wavefunction"); Ok(Some(f))
             }

@@ -124,3 +124,20 @@ in `third_party/wordcraft/LICENSE-MIT`.
 
 `Ctrl+B` toggles bold and `Ctrl+Shift+I` toggles italic through the same selection-aware
 commands as the toolbar. `Ctrl+I` remains the existing image shortcut.
+
+
+## Document library (desktop)
+
+After unlocking, the desktop opens a document library inspired by the Plan references. Select
+**Blank document** to name and create a document in the current encrypted space, or **Studio
+handbook** to create an editable sample. Document cards open saved documents, including documents
+previously closed in the editor. The card artwork is a generic illustration, not a preview of the
+document's contents. Type to filter titles, use Backspace to correct the search, and press Enter to
+open the first visible match. Previous/Next show more results. **Open...** offers the existing vault
+and container picker; **Lock** saves before returning to the unlock screen. From the editor, use
+**File > Documents** to return to the library. The library uses the currently unlocked space only;
+no titles or previews are written to separate files.
+
+The library and desktop forms are part of the X11 desktop build, not the sealed boot interface.
+This UI work does not add a table editor, real list objects, or additional font sizes to the document
+model; the existing editing and export limitations still apply.

@@ -464,6 +464,7 @@ pub struct Session<'a> {
     document_request: Option<DocumentRequest>,
     notice: Option<String>,
     dialog: Option<holonomy_render::dialog::DialogView>,
+    home: Option<holonomy_render::home::View>,
     /// **A `File > Open` or `File > Import` waiting for a path, and which of the two it was.**
     ///
     /// **A request rather than an opening, for the same reason the export is one:** the path is
@@ -881,7 +882,7 @@ pub struct DocumentSnapshot {
 
 /// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentRequest { New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
+pub enum DocumentRequest { Home, New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
 
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
@@ -1103,7 +1104,7 @@ impl<'a> Session<'a> {
             // **No second document yet.** A session starts with the one it was built over; `New`,
             // `Open` and `Import` are what put entries here.
             parked: Vec::new(),
-            active_id: 0, managed_documents: false, document_request: None, notice: None, dialog: None,
+            active_id: 0, managed_documents: false, document_request: None, notice: None, dialog: None, home: None,
             // **Nothing asked for a path yet.**
             open_request: None,
             clipboard_generation: 0,
@@ -1884,8 +1885,24 @@ impl<'a> Session<'a> {
     /// row for it.
     pub fn set_managed_documents(&mut self, managed: bool) { self.managed_documents = managed; }
     pub fn take_document_request(&mut self) -> Option<DocumentRequest> { self.document_request.take() }
+    /// Display or dismiss the desktop library, without changing the active document.
+    pub fn set_home(&mut self, view: Option<holonomy_render::home::View>) {
+        self.home = view;
+        self.state.open = None;
+        self.invalidate(self.chrome.full_damage());
+    }
+    pub fn home(&self) -> Option<&holonomy_render::home::View> { self.home.as_ref() }
     pub fn take_save_request(&mut self) -> bool { std::mem::take(&mut self.save_requested) }
-    pub fn set_notice(&mut self, notice: Option<String>) { self.notice = notice; self.state.notice = self.notice.clone(); self.invalidate_status_bar(); }
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
+        self.state.notice = self.notice.clone();
+        if let Some(home) = self.home.as_mut() {
+            home.notice = self.notice.clone();
+            self.invalidate(self.chrome.full_damage());
+        } else {
+            self.invalidate_status_bar();
+        }
+    }
     /// Show, update, or dismiss the modal dialog.
     ///
     /// Damage is scoped to what actually changed. An identical view is a no-op, so a driver that
@@ -3866,7 +3883,7 @@ impl<'a> Session<'a> {
         use widgets::Tool;
         if self.managed_documents {
             let request = match action {
-                Action::New => Some(DocumentRequest::New), Action::NewSample => Some(DocumentRequest::NewSample), Action::Close => Some(DocumentRequest::Close),
+                Action::Home => Some(DocumentRequest::Home), Action::New => Some(DocumentRequest::New), Action::NewSample => Some(DocumentRequest::NewSample), Action::Close => Some(DocumentRequest::Close),
                 Action::Rename => Some(DocumentRequest::Rename), Action::Delete => Some(DocumentRequest::Delete),
                 Action::Lock => Some(DocumentRequest::Lock), Action::Open => Some(DocumentRequest::OpenContainer),
                 Action::Import => Some(DocumentRequest::ImportText), _ => None,
@@ -4057,6 +4074,7 @@ impl<'a> Session<'a> {
             // **Part 45 changed what happens to the document being replaced.** It was dropped; it is
             // now parked, because the sidebar has a row for it and `Close` and the row itself are what
             // make it reachable again.
+            Action::Home => { self.stats.pointer_inert += 1; }
             Action::NewSample => {
                 self.create_sample_document(0)?;
                 self.stats.pointer_chrome += 1;
@@ -4286,6 +4304,7 @@ impl<'a> Session<'a> {
             // `paint` clears `damage` itself, so this does not need to.
             self.paint_with(Some(self.damage), bytes)?;
         }
+        if self.home.is_some() { return Ok(()); }
         let caret = self.caret_cell();
         // `advance` reports only a transition *to visible*; see `Blink` for why the other
         // direction is free.
@@ -5888,42 +5907,47 @@ impl<'a> Session<'a> {
         // The line-height model is rebuilt from the tables *before* the chrome's tree, because the
         // chrome's tree and `Caret::locate` both read it: a table that pushed the lines below it down
         // but was published afterwards would move the text and leave the caret behind.
-        self.publish_line_heights(source);
-        // **The caret's column is recomputed here, with a faulting source, immediately before the
-        // chrome's tree — and that position in this function is the whole argument for it.**
-        //
-        // `Caret::locate` runs inside `chrome.tree` and reads `state.caret_column` to place the
-        // caret's cell, so **whatever this call leaves is what gets drawn.** The `None` read in
-        // `caret_to` is best-effort because the keystroke path cannot take a source; this one is not,
-        // and it runs on the frame that draws, so a caret on a line that was not resident when it
-        // moved is still drawn under the right glyph.
-        //
-        // **A read error here does not fail the paint.** `None` leaves the previous value, which is
-        // the byte count — a status bar number, not a reason to lose a frame over.
-        let _ = self.refresh_caret_column(Some(&mut *source));
-        // **The pen, in the same place and immediately after, because `chrome.tree` below reads it.**
-        //
-        // **`Caret::locate` runs inside `chrome.tree`**, so whatever this leaves is what gets drawn —
-        // the same argument `refresh_caret_column` is called there for, and the reason neither is
-        // hoisted out of this function. `None` leaves the previous value, and `Caret::locate` falls
-        // back to the grid, so a failed read costs a caret 10 px out rather than a frame.
-        let _ = self.refresh_caret_pen(Some(&mut *source));
-        // **The manifest, refreshed if the keystroke path could not measure it.**
-        //
-        // The manifest answers *"does this document contain a formula, table or image?"*, and four
-        // emitters ask it before deciding whether to read the whole document. **The keystroke path
-        // does not fault** -- a section is sixteen leaves and a fetch per leaf per character does
-        // not fit in a 0.50 ms keystroke -- so after a save (which evicts every leaf) it could not
-        // re-measure, and the manifest said nothing about it.
-        //
-        // **The paint path is where the refresh belongs**: it has a source, and a frame that draws
-        // a formula reads the whole document anyway, so one more section read is noise there.
-        // Without it, **the formula was never drawn again after the first save.**
-        if self.manifest.is_stale() {
-            self.sync_manifest(&mut Some(&mut *source));
+        if self.home.is_none() {
+            self.publish_line_heights(source);
+            // **The caret's column is recomputed here, with a faulting source, immediately before the
+            // chrome's tree — and that position in this function is the whole argument for it.**
+            //
+            // `Caret::locate` runs inside `chrome.tree` and reads `state.caret_column` to place the
+            // caret's cell, so **whatever this call leaves is what gets drawn.** The `None` read in
+            // `caret_to` is best-effort because the keystroke path cannot take a source; this one is not,
+            // and it runs on the frame that draws, so a caret on a line that was not resident when it
+            // moved is still drawn under the right glyph.
+            //
+            // **A read error here does not fail the paint.** `None` leaves the previous value, which is
+            // the byte count — a status bar number, not a reason to lose a frame over.
+            let _ = self.refresh_caret_column(Some(&mut *source));
+            // **The pen, in the same place and immediately after, because `chrome.tree` below reads it.**
+            //
+            // **`Caret::locate` runs inside `chrome.tree`**, so whatever this leaves is what gets drawn —
+            // the same argument `refresh_caret_column` is called there for, and the reason neither is
+            // hoisted out of this function. `None` leaves the previous value, and `Caret::locate` falls
+            // back to the grid, so a failed read costs a caret 10 px out rather than a frame.
+            let _ = self.refresh_caret_pen(Some(&mut *source));
+            // **The manifest, refreshed if the keystroke path could not measure it.**
+            //
+            // The manifest answers *"does this document contain a formula, table or image?"*, and four
+            // emitters ask it before deciding whether to read the whole document. **The keystroke path
+            // does not fault** -- a section is sixteen leaves and a fetch per leaf per character does
+            // not fit in a 0.50 ms keystroke -- so after a save (which evicts every leaf) it could not
+            // re-measure, and the manifest said nothing about it.
+            //
+            // **The paint path is where the refresh belongs**: it has a source, and a frame that draws
+            // a formula reads the whole document anyway, so one more section read is noise there.
+            // Without it, **the formula was never drawn again after the first save.**
+            if self.manifest.is_stale() {
+                self.sync_manifest(&mut Some(&mut *source));
+            }
+            self.sync_selection();
         }
-        self.sync_selection();
-        let mut tree = self.chrome.tree(&self.state);
+        let mut tree = match &self.home {
+            Some(home) => holonomy_render::home::tree(&self.chrome.layout, home),
+            None => self.chrome.tree(&self.state),
+        };
         // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
         // they have to be painted in the page's coordinate space and clipped by the same damage the
         // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
@@ -5934,15 +5958,17 @@ impl<'a> Session<'a> {
         // **Each emitter is passed the source by reborrow**, so all four see the same store and none of
         // them can hold it across the next one's call. `&mut *source` rather than `source`: the emitters
         // take `&mut dyn LeafSource`, and moving the `&mut` would spend it.
-        self.emit_tables(&mut tree, &mut damage, &mut *source);
-        self.emit_math(&mut tree, &mut damage, &mut *source);
-        self.emit_images(&mut tree, &mut damage, &mut *source);
-        // **Body text last among the emitters, so it draws over the others.** A table, a formula and an
-        // image are all anchored to a document line, and the body text of that line is what a reader
-        // expects to see *behind* them -- a table whose cells are empty still has the paragraph that
-        // introduced it around it. Emitting the body first would put the paragraph's glyphs on top of
-        // the table's borders.
-        self.emit_body_text(&mut tree, &mut damage, source);
+        if self.home.is_none() {
+            self.emit_tables(&mut tree, &mut damage, &mut *source);
+            self.emit_math(&mut tree, &mut damage, &mut *source);
+            self.emit_images(&mut tree, &mut damage, &mut *source);
+            // **Body text last among the emitters, so it draws over the others.** A table, a formula and an
+            // image are all anchored to a document line, and the body text of that line is what a reader
+            // expects to see *behind* them -- a table whose cells are empty still has the paragraph that
+            // introduced it around it. Emitting the body first would put the paragraph's glyphs on top of
+            // the table's borders.
+            self.emit_body_text(&mut tree, &mut damage, source);
+        }
         // The raster source is borrowed *for this call* and not held: the cache is mutated by the next
         // frame's decode and eviction, so a borrow that outlived the paint would be a self-referential
         // `Session` -- the painter is a field and so is the cache it would have to point at.
@@ -8206,7 +8232,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // allowed to do that is `Session::adopt_document`, which `apply_action` reaches directly.
         // Routing it through a `Command` would hand the keymap a variant whose meaning is "discard
         // the document", which no chord asks for in this build.
-        Action::New | Action::NewSample => return None,
+        Action::Home | Action::New | Action::NewSample => return None,
         // **And the same for the two rows that need a path.** `Open` and `Import` are not keystrokes
         // at all: the session can ask for a path to be opened but cannot supply one, so the row is a
         // request the *window driver* answers — `apply_action` stores it, the driver calls

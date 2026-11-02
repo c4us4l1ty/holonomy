@@ -77,6 +77,8 @@ pub enum Action {
     New,
     /// Create a new editable copy of the built-in studio handbook.
     NewSample,
+    /// Return to the desktop document library.
+    Home,
     /// **Open a container from a path and make it the document this session paints.** Part 45.
     ///
     /// **The developer window only, and the reason is the seal.** The jail's seccomp filter has no
@@ -172,6 +174,7 @@ impl Action {
             Action::DocumentEnd => "document-end",
             Action::New => "new-document",
             Action::NewSample => "new-sample",
+            Action::Home => "document-home",
             Action::Open => "open",
             Action::Import => "import",
             Action::Save => "save",
@@ -337,6 +340,7 @@ const fn accel(label: &'static str, acc: &'static str) -> Item {
 // Menu cleanup: rows that named cloud/add-on/voice/translation features are removed rather than
 // drawn as inert affordances. The sealed product has no network, add-on runtime, or spell service.
 const FILE: &[Item] = &[
+    act("Documents", Action::Home),
     act("New", Action::New),
     act("New sample", Action::NewSample),
     act("Open", Action::Open),

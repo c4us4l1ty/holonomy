@@ -28,6 +28,7 @@ pub mod math_layout;
 
 pub mod chrome;
 pub mod dialog;
+pub mod home;
 pub mod icons;
 pub mod menus;
 pub mod table;
