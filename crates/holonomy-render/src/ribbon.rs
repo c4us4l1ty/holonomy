@@ -114,6 +114,14 @@ pub struct Button {
     pub icon: Option<IconId>,
     pub rect: DamageRect,
     pub large: bool,
+    /// **Whether this button draws its label, or only its icon.** See [`Row::fit`].
+    ///
+    /// A small button with an icon in a row that had to go compact draws the icon alone and keeps its
+    /// name for the overflow menu and for a tooltip; **a button with no icon always draws its label**,
+    /// because an icon-less button with no label is an empty square. That is the whole rule, and it is
+    /// why this is a field rather than something `paint` re-derives: the *layout* decided to drop the
+    /// label, so the layout has to be the one that says so.
+    pub labelled: bool,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Group {
@@ -237,7 +245,7 @@ fn specs(
                 "Styles",
                 &[
                     (Action::SetStyle(0), "Normal", None, true),
-                    (Action::SetStyle(1), "Heading 1", None, true),
+                    (Action::SetStyle(1), "Heading", None, true),
                     (Action::SetStyle(3), "Title", None, true),
                     (Action::SetStyle(4), "Subtitle", None, true),
                 ],
@@ -247,7 +255,7 @@ fn specs(
                 &[
                     (Action::Find, "Find", Some(IconId::Search), false),
                     (Action::Replace, "Replace", Some(IconId::Replace), false),
-                    (Action::SelectAll, "Select all", Some(IconId::Check), false),
+                    (Action::SelectAll, "Select all", Some(IconId::Select), false),
                 ],
             ),
         ],
@@ -283,7 +291,7 @@ fn specs(
                 "Document formatting",
                 &[
                     (Action::SetStyle(0), "Normal", None, true),
-                    (Action::SetStyle(1), "Heading 1", None, true),
+                    (Action::SetStyle(1), "Heading", None, true),
                     (Action::SetStyle(3), "Title", None, true),
                     (Action::SetStyle(2), "Quote", None, true),
                 ],
@@ -425,24 +433,165 @@ fn specs(
     }
 }
 
+/// **The one place the ribbon measures a string.** Part 46.
+///
+/// # The defect this exists to end
+///
+/// **Every measurement in this file used `let advance = 8`** -- a number that is right only at the
+/// 16 ppem design, and only because *there* the Monospace face's advance happens to be 8. The painter
+/// does not read it: [`Painter::label`](../../holonomy_display/paint/struct.Painter.html) advances by
+/// `atlas.metric(c, style, size).advance_x`, the face's own number. At 125 % -- which is what
+/// `initial_desktop_zoom` picks on any screen 1,800 px or wider, so it is the **shipping default** --
+/// that advance is 12, not 8.
+///
+/// **So the ribbon drew 12 px glyphs into boxes measured at 8 px each, and every symptom followed from
+/// that one ratio:**
+///
+/// * `Italic` is six cells -- 48 px believed, **72 px drawn** -- in a 54 px label area, so it overflowed
+///   its button and the next one's ink started before this one's ended. Two adjacent labels over a
+///   background of the *same colour* read as one word, which is why the screenshot says `Int� Ital.`
+///   and `Superscript` came out `Supe x`.
+/// * `Home` + `Insert` were laid 54 + 70 px apart while their ink was 120 px wide, so the tab strip
+///   read `HomeInsert` with no gap. There was no padding bug -- there was a *measurement* bug, and
+///   padding is what a real 8 px cell would have needed.
+/// * The `...` elision could not fire, because its guard `(width - 8) / 8` believed a 54 px area holds
+///   six cells when it holds four. **A truncation guard measured in the wrong unit does not truncate,
+///   it lies**, and the `Ital..`, `Subs..`, `Font...` in the screenshot are the *font's* renderer
+///   clipping at the button edge rather than this code choosing to elide.
+///
+/// **The fix is not "widen the buttons".** Widening them at 8 px would leave them wrong at 24 ppem, and
+/// it is the same mistake that produced this file's first pass: Wordcraft's 76/82/150 px were sized
+/// for egui's *proportional* text, and porting the numbers without re-measuring them against a
+/// monospace cell is what made them wrong in the first place. **The buttons are now sized from the
+/// advance the painter will actually use**, so the same code is right at every ppem.
+pub fn advance(l: &Layout) -> u32 {
+    l.cell_w.max(1)
+}
+
+/// How many cells of `cell_w` a string occupies -- **the only measurement of text in this module**.
+///
+/// `chars().count()` and not `len()`: the byte count of `Font color` is 10 and its cell count is 10,
+/// but of `Decrease indent` it is 15 against 15 -- and of any label with a multi-byte character the
+/// two diverge, at which point a byte-measured box is wider than its ink. The ribbon's own labels are
+/// ASCII today; a measurement that is only correct for ASCII is a trap for the first one that is not.
+pub fn cells(s: &str) -> u32 {
+    s.chars().count() as u32
+}
+
+/// The pixel width of `s` in this layout's cell.
+pub fn text_w(l: &Layout, s: &str) -> u32 {
+    cells(s) * advance(l)
+}
+
+/// Horizontal padding either side of a tab's label, and the gap between two tabs.
+pub const TAB_PAD: u32 = 12;
+pub const TAB_GAP: u32 = 10;
+
 pub fn tab_rects(l: &Layout) -> Vec<DamageRect> {
+    // **Measured, padded and separated, and all three were missing.** It was `len() * 8 + 22` with no
+    // gap at all, so at a 12 px cell `Home`'s 48 px of ink sat in a 54 px box that began 10 px after
+    // `File`'s box ended -- which reads as one word. The `+ 22` was the padding *and* the gap rolled
+    // into one, which works only while the ink is narrower than the box it is in, and at 12 px the ink
+    // was wider than the box.
     let mut x = 12;
     TABS.iter()
         .map(|t| {
-            let w = (*t as &str).len() as u32 * 8 + 22;
+            let w = text_w(l, t) + TAB_PAD * 2;
             let r = DamageRect::new(
                 x.min(l.width),
                 l.menubar.y,
                 w.min(l.width.saturating_sub(x)),
                 l.menubar.height,
             );
-            x = x.saturating_add(w);
+            x = x.saturating_add(w).saturating_add(TAB_GAP);
             r
         })
         .collect()
 }
 
+/// **The gutter a small button spends on its icon before its label may begin.**
+///
+/// It is 28 and not 22 because the painter draws the 16 px mask at `x + 6` -- so the ink ends at 22
+/// and the label starts at 28. A constant, because **[`IconId`] masks are 16 px at every type size**:
+/// icons do not scale with the cell, so the space before a label does not either.
+pub const ICON_GUTTER: u32 = 28;
+/// Air after a label.
+pub const SMALL_PAD: u32 = 10;
+/// Air under a small button's row, on top of one line of type.
+///
+/// It was a hardcoded `29` px pitch, which is a 25 px line and 4 px of air at the design size and a
+/// **5 px overlap** at 125 %, where a line is 30 px. **A row pitch written as a number instead of as
+/// a line plus air is the same class of error as a width written in a cell that does not exist.**
+pub const SMALL_ROW_AIR: u32 = 4;
+/// The room a drop-down chevron needs at a button's right edge. `paint` draws it at
+/// `rect.right() - 20`, so a label that ran to the edge would be under it.
+pub const CHEVRON_W: u32 = 22;
+/// A large button's minimum edge, icon or no icon.
+pub const LARGE_MIN: u32 = 68;
+/// Air between one group and the next, and the group's own inset.
+pub const GROUP_PAD: u32 = 16;
+/// Air around a group's caption, on top of one line of type.
+///
+/// **A separate constant because it is read by both `layout` and `paint`**, and the two disagreeing is
+/// the defect that put the caption in the ruler: `paint` gave the strip a literal 20 px and `layout`
+/// gave the buttons everything above `bottom - 20`.
+pub const CAPTION_AIR: u32 = 4;
+/// A small button with a label, and a small button with only its icon, at this type size.
+///
+/// **Two numbers and not one, because the ribbon needs both to plan a row.** The labelled width is
+/// what the user reads; the icon-only width is what the *same* button costs when the row will not
+/// fit as labelled -- Word's own compact behaviour, and Wordcraft's `ribbon_fit::COMPACT`.
+fn small_widths(l: &Layout, state: &ChromeState, action: Action, label: &str, icon: bool) -> (u32, u32) {
+    // **The Font button draws `font_name()`, not `label`.** `layout` is handed the state, so the
+    // measurement can be of the string that will actually be drawn -- `Inter` is five cells and
+    // `JetBrains Mono` fourteen, and a width that fits one does not fit the other.
+    let text = if action == Action::SelectTool(crate::widgets::Tool::Font) {
+        state.font_name()
+    } else {
+        label
+    };
+    // An icon-less button's only content is its label, so dropping the label is not an option for it.
+    let chevron = if matches!(action, Action::SelectTool(_)) {
+        CHEVRON_W
+    } else {
+        0
+    };
+    let left = if icon { ICON_GUTTER } else { 6 };
+    let labelled = text_w(l, text) + SMALL_PAD + left + chevron;
+    let icon_only = if icon {
+        ICON_GUTTER + SMALL_PAD
+    } else {
+        labelled
+    };
+    (labelled, icon_only)
+}
+
+/// One group of a tab, planned before anything is placed.
+struct Row {
+    name: &'static str,
+    large: Vec<Button>,
+    /// One small column: the buttons stacked in it, and their labelled and icon-only widths.
+    cols: Vec<(Vec<Button>, u32, u32)>,
+}
+
 /// One layout pass is the authority for both ink and pointer targets.
+///
+/// # CORRECTION, part 46: every width in here was measured in a cell that does not exist
+///
+/// **`small_w: 76`, `82`, `150`, `92` and `68` are Wordcraft's numbers, and they are egui
+/// *proportional*-text numbers.** Ported to a monospace framebuffer they are only right by accident,
+/// and the accident happened at 16 ppem: 54 px of label area holds six 9 px glyphs, which is enough
+/// for `Italic` and not enough for `Underline`. **At the 125 % the desktop boots into they are not
+/// even that**, and the reported screenshot is what that looks like: labels longer than their buttons
+/// (`Int` / `Ital` running together, `Supe` / `Subs` clipped), the elision guard never firing because
+/// `(width - 8) / 8` believed six cells fitted in an area that holds four, the group row running
+/// **40 px** past `limit` so the overflow square answered for a Font button, and the caption strip
+/// in a literal 20 px box under a 30 px line.
+///
+/// **So nothing here is a constant any more except what is genuinely fixed** -- the icons, the
+/// chevron and the padding. Every label's width is [`text_w`] of the string the painter will draw,
+/// the Font button's width is `text_w` of [`ChromeState::font_name`] because `paint` draws the face's
+/// name there, and the row is fitted by [`Row::fit`] when the honest widths do not fit the window.
 pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
     let mut groups = Vec::new();
     let mut buttons = Vec::new();
@@ -453,83 +602,172 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
     let mut x = l.toolbar.x + 10;
     let top = l.toolbar.y + 7;
     let h = l.toolbar.height.saturating_sub(10);
+    // **The caption strip is a line of type, so it is as tall as one.** It was a literal 20 in
+    // `paint` against a line pitch of 25 -- and at 125 % a pitch of 30 in a 20 px box is a caption
+    // whose bottom four rows are drawn *in the ruler*, which is the `Paragraph` printed over
+    // `232 234 236` in the report.
+    let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
+    let row_h = l.cell_h.saturating_add(SMALL_ROW_AIR);
+    let body_h = h.saturating_sub(caption_h);
     // **`- 48`, and it is the overflow square's column.** `overflow_rect` occupies the last 40 px of
     // the band, so a group's last button must end before `width - 48` or the two overlap -- which is
     // what `widgets::hit` reported at 768 px: the middle of the overflow square answered
     // `Ribbon(SelectTool(Font))` because the Font group had drawn over it.
     let limit = l.width.saturating_sub(48);
+
+    // Per-group specs at the current font name, without placing anything.
+    let mut rows: Vec<Row> = Vec::new();
     for (name, items) in specs(tab) {
-        let small: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
-        let large: Vec<_> = items.iter().filter(|i| i.3).copied().collect();
-        let rows = if small.len() > 5 { 2 } else { 1 };
-        let small_w = if tab == 1 && *name == "Font" { 82 } else { 76 };
-        // **The width of a button, in one place.** This is a closure and not a `sum` because the
-        // group's width and the buttons inside it must be the same arithmetic -- and they were not.
-        //
-        // The sum used `cols * small_w` (one row's worth of the small width) while the loop below
-        // makes every `Font` button **150 px**, not `small_w`. So the Font group measured 344 px and
-        // drew 384: its SizeUp button ran 40 px past the end of the group and the next group's Bold
-        // was laid out on top of it. `widgets::hit` then answered **"Italic" with
-        // `Ribbon(SelectTool(Font))`**, because the Font group's button was the last one drawn over
-        // that pixel -- which is the one symptom of an overlap that a user would ever notice: a click
-        // that runs the tool next door.
-        let small_bw = |action: Action| {
-            if action == Action::SelectTool(crate::widgets::Tool::Font) {
-                150
-            } else {
-                small_w
+        let sm: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
+        let lg: Vec<_> = items.iter().filter(|i| i.3).copied().collect();
+        let rows_n = if sm.len() > 5 { 2 } else { 1 };
+        let mut large = Vec::new();
+        for (action, label, icon, _) in lg.iter().copied() {
+            let bw = if icon.is_none() { 92 } else { LARGE_MIN };
+            // A large label is centred in the whole rect, so its box must be at least its own width.
+            let bw = bw.max(text_w(l, label).saturating_add(SMALL_PAD * 2));
+            large.push(Button {
+                action,
+                label,
+                icon,
+                rect: DamageRect::new(0, top + 3, bw, body_h.saturating_sub(3)),
+                large: true,
+                labelled: true,
+            });
+        }
+        let mut cols = Vec::new();
+        for pair in sm.chunks(rows_n) {
+            let mut col = Vec::new();
+            let (mut width, mut icon_only) = (0u32, 0u32);
+            for (row, (action, label, icon, _)) in pair.iter().copied().enumerate() {
+                let (bw, io) = small_widths(l, state, action, label, icon.is_some());
+                width = width.max(bw);
+                icon_only = icon_only.max(io);
+                col.push(Button {
+                    action,
+                    label,
+                    icon,
+                    // The width is replaced by the column's below; the `y` is final.
+                    rect: DamageRect::new(0, top + 3 + row as u32 * row_h, bw, row_h),
+                    large: false,
+                    labelled: true,
+                });
             }
-        };
-        let w = large
-            .iter()
-            .map(|i| if i.2.is_none() { 92 } else { 68 })
-            .sum::<u32>()
-            + small
-                .iter()
-                .map(|(a, _, _, _)| small_bw(*a))
-                .sum::<u32>()
-            + 16;
-        let gr = DamageRect::new(x.min(l.width), top, w.min(l.width.saturating_sub(x)), h);
+            cols.push((col, width, icon_only));
+        }
+        rows.push(Row { name, large, cols });
+    }
+
+    // **Plan the whole row before placing any of it.** The widths are now honest, so the plan can
+    // know whether the tab fits -- and if it does not, give the labels up from the right.
+    //
+    // **One width rule, used by the plan and by the placement.** That is the whole reason this is a
+    // closure rather than two loops that agree today: the defect this file opened with was two
+    // expressions for one number (the group's `cols * small_w` sum against the buttons' own widths),
+    // and a plan that measures differently from the thing it plans is that defect in a new place.
+    //
+    // `compact` is per group; a *column* inside a compact group is as wide as its widest button where
+    // **an icon-bearing button drops to its icon and a button without one keeps its label**, because
+    // an unlabelled icon-less button would be an empty square.
+    let col_w = |col: &[Button], labelled: u32, icon_only: u32, compact: bool| -> u32 {
+        col.iter()
+            .map(|b| {
+                if !compact {
+                    labelled
+                } else if b.icon.is_some() {
+                    icon_only
+                } else {
+                    labelled
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    let total = |rs: &[Row], from: usize| -> u32 {
+        rs.iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let mut w: u32 = r.large.iter().map(|b| b.rect.width).sum::<u32>() + GROUP_PAD;
+                for (col, labelled, icon_only) in &r.cols {
+                    w += col_w(col, *labelled, *icon_only, i >= from);
+                }
+                w
+            })
+            .sum()
+    };
+    let avail = limit.saturating_sub(x);
+    let mut compact_from = rows.len();
+    let mut width = total(&rows, compact_from);
+    while width > avail && compact_from > 0 {
+        compact_from -= 1;
+        width = total(&rows, compact_from);
+    }
+
+    for (gi, row) in rows.iter_mut().enumerate() {
+        let compact = gi >= compact_from;
+        let mut cols: Vec<(u32, Vec<Button>)> = Vec::new();
+        for (col, labelled, icon_only) in row.cols.drain(..) {
+            let mut col = col;
+            for b in col.iter_mut() {
+                if compact && b.icon.is_some() {
+                    b.labelled = false;
+                }
+            }
+            let cw = col_w(&col, labelled, icon_only, compact);
+            cols.push((cw, col));
+        }
+        let w = row.large.iter().map(|b| b.rect.width).sum::<u32>()
+            + cols.iter().map(|(cw, _)| *cw).sum::<u32>()
+            + GROUP_PAD;
+        // **The group's own rect stops at the overflow square's column too**, not only at the panel
+        // edge. A group whose buttons were all hidden for want of room still drew a divider and a
+        // centred caption out to its *planned* width -- through the overflow square and, on a narrow
+        // window, off the panel. The caption is centred in this rect, so clamping it here is what
+        // keeps a group that did not fit from labelling itself over the control that stands in for it.
+        let gr = DamageRect::new(
+            x.min(l.width),
+            top,
+            w.min(limit.saturating_sub(x)).min(l.width.saturating_sub(x)),
+            h,
+        );
         groups.push(Group {
-            label: name,
+            label: row.name,
             rect: gr,
         });
         let mut bx = x + 6;
-        for (_, label, icon, _) in large.iter().copied() {
-            let bw = if icon.is_none() { 92 } else { 68 };
-            let r = if bx + bw <= limit {
-                DamageRect::new(bx, top + 3, bw, h.saturating_sub(22))
+        for mut b in row.large.drain(..) {
+            if bx + b.rect.width <= limit {
+                b.rect.x = bx;
             } else {
-                DamageRect::EMPTY
-            };
-            buttons.push(Button {
-                action: items.iter().find(|i| i.1 == label).unwrap().0,
-                label,
-                icon,
-                rect: r,
-                large: true,
-            });
-            bx += bw;
-        }
-        for (i, (action, label, icon, _)) in small.iter().copied().enumerate() {
-            let row = i % rows;
-            let bw = small_bw(action);
-            let by = top + 3 + row as u32 * 29;
-            let r = if bx + bw <= limit {
-                DamageRect::new(bx, by, bw, 27)
-            } else {
-                DamageRect::EMPTY
-            };
-            buttons.push(Button {
-                action: action,
-                label,
-                icon,
-                rect: r,
-                large: false,
-            });
-            if row + 1 == rows {
-                bx += bw;
+                b.rect = DamageRect::EMPTY;
             }
+            bx += b.rect.width;
+            buttons.push(b);
+        }
+        for (cw, col) in cols {
+            for mut b in col {
+                b.rect.width = cw;
+                if bx + cw <= limit {
+                    b.rect.x = bx;
+                } else {
+                    b.rect = DamageRect::EMPTY;
+                }
+                // **The last row must end above the caption strip, or the caption loses.**
+                // `body_h` is `h - caption_h`, and a two-row group is `2 * row_h` tall, so a pitch
+                // that does not fit leaves the buttons over the caption and the caption over the
+                // ruler. Clamping here rather than asserting, because a caller can hand this a
+                // `Layout` whose band is too short and the honest answer is a button a few pixels
+                // shorter, not one drawn outside its group.
+                if !b.rect.is_empty() && b.rect.bottom() > gr.y + body_h {
+                    let cut = b.rect.bottom() - (gr.y + body_h);
+                    b.rect.height = b.rect.height.saturating_sub(cut);
+                    if b.rect.height == 0 {
+                        b.rect = DamageRect::EMPTY;
+                    }
+                }
+                buttons.push(b);
+            }
+            bx += cw;
         }
         x = x.saturating_add(w);
     }
@@ -552,13 +790,27 @@ pub fn overflow(l: &Layout, state: &ChromeState) -> Vec<crate::menus::Item> {
         .collect()
 }
 
+/// The quick-access row: AutoSave, Save, Undo, Redo, left to right in the title band.
+///
+/// # CORRECTION, part 46: AutoSave's box was 76 px and its label is not
+///
+/// The first entry was a fixed 112 px with `paint` drawing the label into the first **76** of them --
+/// and `AutoSave` is eight cells, so those 76 px held six at the 125 % this boots into. The screenshot
+/// shows `AutoSa` with the toggle sitting on top of the `v`: **the switch was drawn at `r.x + 78`, which
+/// is past the ink but not past the word**, so the two overlapped. It is `text_w` of the label plus the
+/// switch now, so the switch starts where the label ends at any cell.
 pub fn qat(l: &Layout) -> Vec<(Action, DamageRect)> {
     let y = l.title.y + (l.title.height.saturating_sub(26)) / 2;
+    const AUTOSAVE_LABEL: &str = "AutoSave";
+    const SWITCH_W: u32 = 30;
+    const SWITCH_GAP: u32 = 4;
+    let autosave = text_w(l, AUTOSAVE_LABEL) + SWITCH_W + SWITCH_GAP + 8;
+    let icon_button = 30u32.max(l.cell_w * 3);
     [
-        (Action::ToggleAutosave, 112),
-        (Action::Save, 30),
-        (Action::Undo, 30),
-        (Action::Redo, 30),
+        (Action::ToggleAutosave, autosave),
+        (Action::Save, icon_button),
+        (Action::Undo, icon_button),
+        (Action::Redo, icon_button),
     ]
     .into_iter()
     .scan(12u32, |x, (a, w)| {
@@ -568,19 +820,60 @@ pub fn qat(l: &Layout) -> Vec<(Action, DamageRect)> {
     })
     .collect()
 }
+
+/// Where the AutoSave switch sits inside the AutoSave rect, and the label's box.
+///
+/// **One function, because `paint` needs both and they must agree**: the label ends where the switch
+/// begins, and the switch is the part that is *clickable* along with the label.
+pub fn autosave_switch(l: &Layout, r: DamageRect) -> (DamageRect, DamageRect) {
+    let label_w = text_w(l, "AutoSave");
+    let sw = DamageRect::new(
+        r.x + label_w + 4,
+        r.y + r.height.saturating_sub(14) / 2,
+        30,
+        14,
+    );
+    let text_box = DamageRect::new(r.x, r.y, label_w.min(r.width), r.height);
+    (text_box, sw)
+}
+/// The command search field, **sized to the placeholder it draws into itself**.
+///
+/// It was a fixed 244 px and the placeholder is `Find in document  Ctrl+F` -- **24 cells, which is 288 px
+/// at the 125 % this product boots into.** So the placeholder was elided to `Find in docun`, and in the
+/// screenshot the `Ctrl+F` is a separate run and the two run together as `Find in document Ctrl+F` that
+/// had to be clipped. **A field that is narrower than the text it puts in itself is a field that is
+/// always wrong**; this asks for what the string needs and lets a narrow window have what is left.
 pub fn search_rect(l: &Layout) -> DamageRect {
+    const PLACEHOLDER: &str = "Find in document  Ctrl+F";
+    // The magnifier, the text, and a little air -- see `paint`, which draws the icon in the first 28.
+    let want = text_w(l, PLACEHOLDER) + 28 + 12;
+    let lock = lock_rect(l);
+    // **Never wider than the room between the document title and the lock button**, or the field is a
+    // field drawn under another control instead of one that did not fit.
+    let right = lock.x.saturating_sub(8);
+    // **The left bound is the end of the quick-access row, read from `qat` rather than re-derived.**
+    // A second expression for "where the quick access row ends" is exactly the defect that opened
+    // this pass -- `qat`'s widths and this sum were one number written twice, and at 12 px a cell the
+    // `AutoSave` label alone was 96 px against the 112 the row had already spent.
+    let left = qat(l)
+        .last()
+        .map_or(12, |(_, r)| r.right())
+        .saturating_add(16);
+    let w = want.min(right.saturating_sub(left));
     DamageRect::new(
-        l.width.saturating_sub(340),
+        right.saturating_sub(w),
         l.title.y + 6,
-        244,
+        w,
         l.title.height.saturating_sub(12).min(28),
     )
 }
 pub fn lock_rect(l: &Layout) -> DamageRect {
+    // **Wide enough for the word it draws, `Lock` plus its padding** -- 70 px held four of five cells.
+    let w = text_w(l, "Lock") + 20;
     DamageRect::new(
-        l.width.saturating_sub(84),
+        l.width.saturating_sub(w + 14),
         l.title.y + 6,
-        70,
+        w,
         l.title.height.saturating_sub(12).min(28),
     )
 }
@@ -622,6 +915,18 @@ fn round(v: &mut Vec<SurfaceTree>, r: DamageRect, radius: u32, c: u32) {
         ))));
     }
 }
+/// Draw a label into `r`, eliding it **only when it genuinely will not fit**.
+///
+/// # CORRECTION, part 46: the guard was measured in a cell that does not exist
+///
+/// It was `let advance = 8;` and `let max = (r.width - 8) / advance` -- *"how many cells fit"* asked of
+/// a number that is only the cell at the 16 ppem design. **The painter does not use it**; it advances
+/// by `atlas.metric(c, ..).advance_x`, which is 12 at the 125 % this product boots into. So the guard
+/// believed a 54 px area holds six cells when it holds four, declined to elide a six-cell word, and
+/// the *font's* renderer then clipped it at the button edge: that is the `Ital..` and `Subs..` in the
+/// report. **A truncation guard in the wrong unit does not truncate -- it lies, and the pixels clip.**
+///
+/// `cell_w` is now an argument rather than a literal, and every caller passes [`Layout::cell_w`].
 fn text(
     v: &mut Vec<SurfaceTree>,
     r: DamageRect,
@@ -629,25 +934,44 @@ fn text(
     c: u32,
     bold: bool,
     center: bool,
+    cell_w: u32,
     cell_h: u32,
 ) {
-    if r.width < 8 || r.height < 8 {
+    let advance = cell_w.max(1);
+    if r.width < advance || r.height < 8 {
         return;
     }
     let size = 0;
-    let advance = 8;
-    let max = (r.width.saturating_sub(8) / advance) as usize;
-    let mut shown: String = s.chars().take(max).collect();
-    if shown.len() < s.len() && shown.len() > 3 {
-        shown.pop();
-        shown.push_str("...");
-    }
-    let w = shown.len() as u32 * advance;
+    // Every cell the rect can hold, then three of them given back for the ellipsis if one is needed.
+    let fits = (r.width / advance).max(1);
+    let total = cells(s);
+    let shown: String = if total <= fits {
+        s.to_string()
+    } else if fits > 4 {
+        // **Cells, not bytes.** `t.len()` in the loop below was a byte count, so a label with one
+        // multi-byte character in it got one dot too many and the ellipsis itself overflowed the box.
+        let mut t: String = s.chars().take((fits - 3) as usize).collect();
+        for _ in cells(&t)..fits {
+            t.push('.');
+        }
+        t
+    } else {
+        // **Too narrow for an ellipsis and a single character**, so the last cell is dropped rather
+        // than the ellipsis being drawn as a single `..` that reads as punctuation.
+        s.chars().take(fits as usize).collect()
+    };
+    let w = cells(&shown) * advance;
+    // **Centred, or left-aligned in the *ink* column the caller handed over.** The rect a small
+    // button passes in already begins at its icon's gutter (`layout` sized the button that way), so
+    // the only air this adds is a cell's worth at the left -- `SMALL_PAD / 2`. **It used to clamp
+    // that to `r.width - w`, which is zero whenever the label exactly fills its box**, so a label
+    // that fitted was drawn flush against its icon and one that did not was drawn over it.
+    let pad = (SMALL_PAD / 2).min(r.width.saturating_sub(w));
     let x = r.x
         + if center {
             r.width.saturating_sub(w) / 2
         } else {
-            6
+            pad
         };
     let y = r.y + r.height.saturating_sub(cell_h.min(r.height)) / 2;
     v.push(SurfaceTree::leaf(Node::Label(Label::new(
@@ -690,7 +1014,15 @@ fn active(a: Action, s: &ChromeState) -> bool {
     }
 }
 
+/// Paint the ribbon. **`cell_w` is not optional and not a constant.**
+///
+/// # CORRECTION, part 46: this took only the height
+///
+/// It took `cell_h` and measured every horizontal extent in a hardcoded `8`, so the caller passed the
+/// one metric the file did not need and omitted the one it did. [`text`] now takes both, and every
+/// call site here passes `l.cell_w`.
 pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32) {
+    let cell_w = advance(l);
     let t = Palette::get(s.dark);
     fill(v, DamageRect::new(0, 0, l.width, l.height), t.canvas);
     fill(v, l.title, t.title);
@@ -708,16 +1040,8 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             round(v, r, 4, t.hover);
         }
         if a == Action::ToggleAutosave {
-            text(
-                v,
-                DamageRect::new(r.x, r.y, 76, r.height),
-                "AutoSave",
-                t.dim,
-                false,
-                false,
-                cell_h,
-            );
-            let sw = DamageRect::new(r.x + 78, r.y + 6, 30, 14);
+            let (tb, sw) = autosave_switch(l, r);
+            text(v, tb, "AutoSave", t.dim, false, false, cell_w, cell_h);
             round(v, sw, 7, if s.autosave { t.accent } else { t.input_border });
             round(
                 v,
@@ -742,6 +1066,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         t.text,
         true,
         true,
+        cell_w,
         cell_h,
     );
     round(v, search_rect(l), 5, t.input);
@@ -757,20 +1082,25 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         t.dim,
         false,
     );
-    text(
-        v,
-        DamageRect::new(
-            search_rect(l).x + 28,
-            search_rect(l).y,
-            search_rect(l).width - 28,
-            search_rect(l).height,
-        ),
-        "Find in document  Ctrl+F",
-        t.dim,
-        false,
-        false,
-        cell_h,
-    );
+    // **The placeholder is only drawn where it fits.** `search_rect` asks for the room the string
+    // needs, so on a wide window this is the whole of it; on a narrow one the field is narrower than
+    // its own placeholder and drawing the first fifteen cells of it reads as a bug rather than as a
+    // hint. Below that the field is an empty search box, which is what it is when it has no room to
+    // say what it is for.
+    let sr = search_rect(l);
+    let placeholder = "Find in document  Ctrl+F";
+    if sr.width >= text_w(l, placeholder) + 28 {
+        text(
+            v,
+            DamageRect::new(sr.x + 28, sr.y, sr.width - 28, sr.height),
+            placeholder,
+            t.dim,
+            false,
+            false,
+            cell_w,
+            cell_h,
+        );
+    }
     round(v, lock_rect(l), 5, t.accent);
     text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h);
     for (i, r) in tab_rects(l).into_iter().enumerate() {
@@ -797,6 +1127,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             if selected { t.text } else { t.dim },
             selected,
             true,
+            cell_w,
             cell_h,
         );
     }
@@ -812,6 +1143,20 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         t.dim,
         false,
     );
+    // **The caption strip, derived the way `layout` derived it -- and it was not.**
+    //
+    // The caption was drawn in a literal `20` px box at `g.rect.bottom() - 20`, while `layout` had
+    // already given the bottom `20` of the same rect to the buttons: a small button is
+    // `top + 3 + row * 29` and 27 tall, so in a 102 px group the second row ends at 79 and the caption
+    // began at 92. At the design pitch of 25 that is 7 px of clearance and it just about worked.
+    // **At 125 % the pitch is 30**, so a 20 px box under a caption whose glyphs are 24 px tall drew its
+    // bottom four rows *below* `g.rect.bottom()` -- that is, **into the ruler**, which is exactly the
+    // `Paragraph` printed over `232 234 236` in the report. The band below is not a coincidence: it
+    // is the next band.
+    //
+    // **So the strip is one line of type plus its air** ([`CAPTION_AIR`]), the buttons stop above it,
+    // and the check at the end of `layout` is what keeps the two from meeting again.
+    let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
     let (groups, buttons) = layout(l, s);
     for g in groups {
         fill(
@@ -828,14 +1173,15 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             v,
             DamageRect::new(
                 g.rect.x,
-                g.rect.bottom().saturating_sub(20),
+                g.rect.bottom().saturating_sub(caption_h),
                 g.rect.width,
-                20,
+                caption_h,
             ),
             g.label,
             t.group,
             false,
             true,
+            cell_w,
             cell_h,
         );
     }
@@ -861,45 +1207,76 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
                 v,
                 if b.large {
                     b.rect
+                } else if b.labelled {
+                    // **The icon column, which is also where `layout` said it would be.** It was a
+                    // literal 28 here and `small_w`'s arithmetic in `layout` assumed 22, so the two
+                    // disagreed about how much of a button the label had.
+                    DamageRect::new(b.rect.x, b.rect.y, ICON_GUTTER, b.rect.height)
                 } else {
-                    DamageRect::new(b.rect.x, b.rect.y, 28, b.rect.height)
+                    // **A label-less button centres its icon in the whole box**, because the box was
+                    // narrowed to the icon and the gutter no longer exists: at `x + 6` in a 38 px box
+                    // the icon sits eight pixels left of centre and a compact row reads as ragged.
+                    b.rect
                 },
                 i,
                 ink,
                 b.large,
             );
         }
+        // **The chevron is measured before the label box is, because it owns the right edge.**
+        let has_menu = matches!(b.action, Action::SelectTool(_));
         let tr = if b.large {
+            // A large button stacks: a 20 px icon at the top, the label under it. **The split is
+            // derived from the cell, not the literal 27** -- a 30 px line in a 27 px offset drew the
+            // label over the icon.
+            let icon_h = 20 + 5;
             DamageRect::new(
                 b.rect.x,
-                b.rect.y + 27,
+                b.rect.y + icon_h.min(b.rect.height),
                 b.rect.width,
-                b.rect.height.saturating_sub(27),
+                b.rect.height.saturating_sub(icon_h),
             )
         } else if b.icon.is_some() {
             DamageRect::new(
-                b.rect.x + 28,
+                b.rect.x + ICON_GUTTER,
                 b.rect.y,
-                b.rect.width.saturating_sub(28),
+                b.rect.width
+                    .saturating_sub(ICON_GUTTER)
+                    .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
                 b.rect.height,
             )
         } else {
-            b.rect
+            DamageRect::new(
+                b.rect.x,
+                b.rect.y,
+                b.rect.width.saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
+                b.rect.height,
+            )
         };
+        // **The Font button draws the face's name, not its static label** -- and `layout` sized it from
+        // the same string, which is why `JetBrains Mono` does not print itself into the Bold column.
         let label = if b.action == Action::SelectTool(crate::widgets::Tool::Font) {
             s.font_name()
         } else {
             b.label
         };
-        text(
-            v,
-            tr,
-            label,
-            ink,
-            b.large && b.action == Action::SetStyle(3),
-            b.large || b.icon.is_none(),
-            cell_h,
-        );
+        // **A compact button keeps its name for the overflow menu and loses it here**, which is the
+        // whole of `Row`'s compact level: the icon remains and the label does not.
+        if b.labelled {
+            text(
+                v,
+                tr,
+                label,
+                ink,
+                b.large && b.action == Action::SetStyle(3),
+                // **A large label is centred; a small one is left-aligned after its icon.** `b.icon.is_none()`
+                // used to centre a small label that had no icon, which put the plain-text styles in a
+                // column whose labels each started somewhere different.
+                b.large,
+                cell_w,
+                cell_h,
+            );
+        }
         if matches!(b.action, Action::SelectTool(_)) {
             icon(
                 v,
@@ -951,6 +1328,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         t.dim,
         false,
         false,
+        cell_w,
         cell_h,
     );
     if let Some(n) = &s.notice {
@@ -961,6 +1339,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             t.dim,
             false,
             true,
+            cell_w,
             cell_h,
         );
     }
@@ -976,6 +1355,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         t.dim,
         false,
         true,
+        cell_w,
         cell_h,
     );
 }

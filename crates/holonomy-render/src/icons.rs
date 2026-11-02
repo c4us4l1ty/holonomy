@@ -1084,6 +1084,28 @@ pub(crate) mod wordcraft_masks {
         b"................",
         b"................",
     ]);
+    /// **A selection marquee, not a tick.** `Select all` was drawn with `IconId::Check`, which in every
+    /// toolbar in the world means *done* or *applied* -- so the Editing group read `Find`, `Replace`,
+    /// then a tick that appeared to confirm the two before it. A dashed rect with a corner handle is
+    /// what "this is selected" looks like, and it is what the screenshot was missing.
+    pub const SELECT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"..##.##.##.##...",
+        b"................",
+        b"..#..........#..",
+        b"................",
+        b"..#..........#..",
+        b"................",
+        b"..#..........#..",
+        b"................",
+        b"..#..........#..",
+        b"................",
+        b"..##.##.##.##...",
+        b"................",
+        b"................",
+        b"................",
+    ]);
 }
 use wordcraft_masks as wc;
 
@@ -1170,6 +1192,8 @@ pub enum IconId {
     Subscript,
     Superscript,
     Replace,
+    /// A dashed selection marquee.
+    Select,
     Navigation,
     Theme,
     Close,
@@ -1252,6 +1276,7 @@ impl IconId {
         IconId::Subscript,
         IconId::Superscript,
         IconId::Replace,
+        IconId::Select,
         IconId::Navigation,
         IconId::Theme,
         IconId::Close,
@@ -1312,6 +1337,7 @@ impl IconId {
             IconId::Subscript => &wc::SUBSCRIPT,
             IconId::Superscript => &wc::SUPERSCRIPT,
             IconId::Replace => &wc::REPLACE,
+            IconId::Select => &wc::SELECT,
             IconId::Navigation => &wc::NAVIGATION,
             IconId::Theme => &wc::THEME,
             IconId::Close => &wc::CLOSE,
