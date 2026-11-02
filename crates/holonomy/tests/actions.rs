@@ -593,7 +593,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     let st = ChromeState::default();
     let a: &'static str = st.style_name();
     let b: &'static str = st.font_name();
-    assert_eq!(a, "Normal text");
+    assert_eq!(a, "Normal");
     assert_eq!(b, "Inter");
     // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
     // names would have to be returned as a borrow of the state and could not be `'static`.
@@ -612,7 +612,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
         font_index: 999,
         ..ChromeState::default()
     };
-    assert_eq!(oob.style_name(), "Normal text");
+    assert_eq!(oob.style_name(), "Normal");
     assert_eq!(oob.font_name(), "Inter");
     // **And one at a time, so the first assertion is not carrying the second.** Setting both and
     // checking both passes if `style_name` ignores its index entirely and reads `font_index`; the
@@ -623,7 +623,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     };
     assert_eq!(
         style_only.style_name(),
-        "Normal text",
+        "Normal",
         "a bad style index alone still falls back"
     );
     let font_only = ChromeState {

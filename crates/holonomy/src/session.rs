@@ -3414,6 +3414,7 @@ impl<'a> Session<'a> {
                 } else {
                     self.state.ribbon_tab = i as u8;
                     self.state.open = None;
+                    self.refresh_overflow();
                     self.invalidate(self.chrome.full_damage());
                 }
             }
@@ -6624,7 +6625,6 @@ impl<'a> Session<'a> {
     /// own, so "press it twice" is "on, then off" rather than "on, then on again".
     fn toggle_decoration(&mut self, flag: u16) -> Result<(), SessionError> {
         self.check_editable()?;
-        let both = STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
         let other = if flag == STYLE_SUPERSCRIPT {
             STYLE_SUBSCRIPT
         } else {

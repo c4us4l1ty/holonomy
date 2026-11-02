@@ -489,7 +489,6 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
             bx += bw;
         }
         for (i, (action, label, icon, _)) in small.iter().copied().enumerate() {
-            let col = i / rows;
             let row = i % rows;
             let bw = if action == Action::SelectTool(crate::widgets::Tool::Font) {
                 150

@@ -18,6 +18,10 @@ jobs:
           toolchain: 1.98.1
           targets: x86_64-unknown-linux-musl
           components: rustfmt
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: holonomy-musl-release
+          save-if: ${{ github.ref == 'refs/heads/arena/ca2b02bd-holonomy' }}
       - name: Formatting
         run: |
           cargo fmt --all
@@ -46,11 +50,11 @@ jobs:
       - name: Release tests
         run: |
           set -o pipefail
-          cargo test --workspace --release -- --test-threads=1 2>&1 | tee /tmp/test.log
+          cargo test --workspace --release --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/test.log
       - name: Desktop tests
         run: |
           set -o pipefail
-          cargo test -p holonomy --features desktop --release -- --test-threads=2 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 2>&1 | tee -a /tmp/test.log
           cargo test -p holonomy-input --features desktop --release 2>&1 | tee -a /tmp/test.log
           cargo test -p holonomy-x11 --release 2>&1 | tee -a /tmp/test.log
           cargo test -p holonomy-display --features desktop --release 2>&1 | tee -a /tmp/test.log
