@@ -1,4 +1,4 @@
-//! **Clicking: a pointer press, through the widget list, to the document.** 10 tests.
+//! **Clicking: a pointer press, through the widget list, to the document.** 12 tests.
 //!
 //! # What is being claimed
 //!
@@ -116,8 +116,9 @@ fn move_to(x: i32, y: i32) -> Vec<Event> {
 /// **The pen position after `text`, in the Regular face at 16 ppem.** Part 33.
 ///
 /// **The two-case rule, not a sum of `advance_x`**: a blank with an advance takes it, a `.notdef`
-/// takes the cell. `Painter::advance_of` is the definition; this is the same rule written out, because
-/// a test that called the product's own function would not be a test of the product.
+/// takes the cell. `Painter::advance_at` is the definition — `advance_of` is that function at the
+/// painter's own size, and this helper measures at one explicit size — and the rule is written out here
+/// because a test that called the product's own function would not be a test of the product.
 fn pen(text: &str) -> u32 {
     let atlas: &'static holonomy_assets::atlas::Atlas = {
         static A: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
@@ -472,10 +473,18 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // did.
     assert_eq!(
         chrome,
-        vec!["print", "size-down", "size-up", "bold", "italic", "overflow"],
-        "**and the tools that change chrome state are exactly these, in toolbar order.** Bold and \
-         Italic arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty menu. A \
-         sixth would mean something else started claiming to work without a decision."
+        vec![
+            "print",
+            "size-down",
+            "size-up",
+            "bold",
+            "italic",
+            "underline",
+            "overflow"
+        ],
+        "**and the tools that change chrome state are exactly these, in toolbar order.** Bold, Italic \
+         and Underline arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty \
+         menu. A seventh would mean something else started claiming to work without a decision."
     );
     // **Zoom, Style and Font are not in that list, and their absence is the point.** They *open a
     // dropdown* and return before anything is applied, so they are counted by the routing gate's
@@ -484,8 +493,8 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     //
     // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 22 tools:
     // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **5 open a dropdown**
-    // (Zoom, Style, Font, TextColour, Mode), 6 change chrome state (Bold, Italic, the zoom pair and
-    // Overflow), and the remaining seven are inert.
+    // (Zoom, Style, Font, TextColour, Mode), 7 change chrome state (Bold, Italic, Underline, the zoom
+    // pair and Overflow), and the remaining six are inert.
     //
     // **The leading number said 21 and the categories said 3 + 1 + 4 + 2**, which left thirteen inert —
     // neither matched the `22` asserted below nor the seven this file measures. The prose had drifted
@@ -499,12 +508,15 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     //
     // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
     // reason the comment above gives: opening a popup has applied nothing yet.
-    // **Seven inert, and it was eight until `Tool::Comment` was removed.** Part 33's `Tool::Print`
+    // **Six inert, and it was eight until `Tool::Comment` was removed.** Part 33's `Tool::Print`
     // was given `Action::Export` to do rather than taken off the toolbar; part 46's `Tool::Comment`
     // was intended to go, never did, and is now gone. **The removal is why the tool count moved and
     // not the inert count alone.**
+    // **And it was seven until `Underline` was wired**: `STYLE_UNDERLINE` is in the document model, the
+    // button arms it, the painter draws a rule and the export writes a `<u>`, so the button is no
+    // longer a widget with nothing behind it.
     // **The arithmetic follows: 22 tools, so 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
-    // 6 chrome changes and 7 inert leaves nothing unaccounted for.**
+    // 7 chrome changes and 6 inert leaves nothing unaccounted for.**
     assert_eq!(
         widgets::TOOLBAR.len(),
         22,
@@ -530,18 +542,17 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
     //
     // **The list in the message is the evidence.** It is [`search`, `spellcheck`, `paint-format`,
-    // `font-size`, `underline`, `highlight`, `link`] -- seven, not six -- and every one of them is
-    // either a model this program does not have (a search query, a dictionary, a format model, a size
-    // list the atlas can back, a URL) or a run-level flag the document does not carry.
-    // `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_seven` records them by name, with
-    // a reason for each.
+    // `font-size`, `highlight`, `link`] -- six, not seven -- and every one of them needs a model this
+    // program does not have (a search query, a dictionary, a format model, a size list the atlas can
+    // back, a highlight colour, a URL). `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six`
+    // records them by name, with a reason for each.
     assert_eq!(
         inert.len(),
-        7,
-        "**seven inert buttons**, which is 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 \
+        6,
+        "**six inert buttons**, which is 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 7 \
          chrome changes. The list is {inert:?}. Part 44 removed four from this list and each removal \
          came with a recorded decision; the fifth left the toolbar altogether when `Comment` was \
-         removed."
+         removed; the sixth started working when `Underline` did."
     );
 }
 

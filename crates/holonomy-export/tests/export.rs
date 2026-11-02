@@ -23,7 +23,10 @@
 use holonomy_export::html::{self, HtmlOptions};
 use holonomy_export::pdf::{self, PdfOptions};
 use holonomy_export::Format;
-use holonomy_text::{Editor, SpanPolicy, STYLE_BOLD, STYLE_CODE, STYLE_HEADER, STYLE_ITALIC};
+use holonomy_text::{
+    Editor, SpanPolicy, STYLE_BOLD, STYLE_CODE, STYLE_HEADER, STYLE_ITALIC, STYLE_STRIKE,
+    STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+};
 
 mod content;
 
@@ -104,6 +107,59 @@ fn html_applies_each_span_as_its_tag() {
     assert_eq!(stats.italic_runs, 1);
     assert_eq!(stats.code_runs, 1);
     assert_eq!(stats.text_bytes, ed.text_len() as u64);
+}
+
+/// **The four decorative bits reach the HTML as tags, each opening its own element.**
+///
+/// The defect this exists for is the quiet one: the bits were added to the model, the toolbar and the
+/// painter and **not to the exporter**, so an underlined word exported as plain text with the underline
+/// gone and nothing said so. A format that drops a user's formatting without saying so is worse than
+/// one that refuses the document.
+#[test]
+fn html_applies_the_decorations_as_their_own_elements() {
+    for (flag, open, close) in [
+        (STYLE_UNDERLINE, "<u>", "</u>"),
+        (STYLE_STRIKE, "<s>", "</s>"),
+        (STYLE_SUPERSCRIPT, "<sup>", "</sup>"),
+        (STYLE_SUBSCRIPT, "<sub>", "</sub>"),
+    ] {
+        let mut ed = Editor::from_text(b"abcd").expect("load");
+        ed.style_range(1, 3, flag, 0).expect("style the middle");
+        let mut out: Vec<u8> = Vec::new();
+        let stats = html::export_body(&mut out, &ed).expect("export");
+        let s = String::from_utf8(out).expect("utf-8");
+        assert_eq!(
+            s,
+            format!("a{open}bc{close}d"),
+            "flag {flag:#x} must wrap exactly the styled bytes"
+        );
+        // And each is counted, once, because the counters are what a status line reports.
+        let counted = match flag {
+            STYLE_UNDERLINE => stats.underline_runs,
+            STYLE_STRIKE => stats.strike_runs,
+            STYLE_SUPERSCRIPT => stats.superscript_runs,
+            _ => stats.subscript_runs,
+        };
+        assert_eq!(counted, 1, "flag {flag:#x} must be counted once");
+    }
+}
+
+/// **A decoration composes with bold rather than replacing it.**
+///
+/// The nesting contract is `<b><u>` and not `<u><b>`, and the close order is the exact reverse --
+/// get it wrong and the rest of the page renders underlined, which a browser will not report.
+#[test]
+fn html_nests_a_decoration_inside_bold() {
+    let mut ed = Editor::from_text(b"abc").expect("load");
+    ed.style_range(0, 3, STYLE_BOLD | STYLE_UNDERLINE, 0)
+        .expect("style");
+    let mut out: Vec<u8> = Vec::new();
+    html::export_body(&mut out, &ed).expect("export");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        "<b><u>abc</u></b>",
+        "the decoration is inside the weight, and closes first"
+    );
 }
 
 /// Nested styles nest their tags, and the close order is the exact reverse.
@@ -306,7 +362,206 @@ fn pdf_text_extracts_to_the_source() {
     assert!(text.contains("code_words();"));
 }
 
+/// **A decorated run still extracts to its own text, and the content stream carries the operators.**
+///
+/// Two claims, deliberately separate. **The text** must round-trip, because a decoration is not a
+/// character: a `Ts` rise or a stroked line must not change what the reader selects or copies. **The
+/// stream** must carry the operators, because the failure this guards is the quiet one -- the bits were
+/// added to the model, the toolbar and the painter and not to the exporter, so an underlined word
+/// exported as plain text with nothing said.
+///
+/// **The stream is decoded rather than grepped**, which is the difference between "the bytes
+/// `/F1 11 Tf` appear somewhere" and "the operators are in the text object they belong to".
+#[test]
+fn pdf_carries_the_decorations_without_changing_the_text() {
+    let mut ed = Editor::new();
+    ed.insert_at(0, b"E=mc2 and more\n", SpanPolicy::Strict)
+        .expect("insert");
+    // "2" is superscript; "an" rises and "d" sinks (a real subscript next to a superscript, so both
+    // signs are exercised); "more" is underlined and struck through at once.
+    ed.style_range(4, 5, STYLE_SUPERSCRIPT, 0).expect("sup");
+    ed.style_range(6, 8, STYLE_SUPERSCRIPT, 0).expect("sup 2");
+    ed.style_range(8, 9, STYLE_SUBSCRIPT, 0).expect("sub");
+    ed.style_range(10, 14, STYLE_STRIKE | STYLE_UNDERLINE, 0)
+        .expect("both rules");
+
+    let mut stats = pdf::PdfStats::default();
+    let bytes = pdf::build(&ed, &PdfOptions::default(), &mut stats).expect("build");
+    let text = content::extract_text(&bytes).expect("parse");
+
+    // **The text is the source**, decorations and all -- a rise moves a glyph and does not insert one.
+    assert_eq!(text, text_of(&ed));
+
+    // **And the operators are there.** `Ts` for the rises (positive and negative), a stroked path for
+    // the two rules. Read out of the decoded stream, not out of the file, so a `Ts` in a comment or a
+    // font dictionary could not satisfy it.
+    let streams = content::content_streams(&bytes).expect("streams");
+    assert!(!streams.is_empty(), "a PDF with text has a content stream");
+    let ops: String = streams
+        .iter()
+        .map(|(_, data)| String::from_utf8_lossy(data))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // **Whitespace-split tokens, not substrings.** `pdf-writer` chooses its own padding -- a newline
+    // before an operator with no operands and a space before one with them -- so a gate written as
+    // `ops.contains(" m\n")` would be asserting the writer's formatting rather than the operator.
+    // A token that *is* `S` is the stroke operator and nothing else can be.
+    let tokens: Vec<&str> = ops.split_whitespace().collect();
+    let count_op = |op: &str| tokens.iter().filter(|t| **t == op).count();
+
+    assert!(
+        count_op("Ts") >= 2,
+        "a rise per decorated run: {} Ts",
+        count_op("Ts")
+    );
+    // The rise is a third of the run's size: positive for the superscript, negative for the subscript.
+    // **The number is parsed back off the stream**, because `pdf-writer` formats floats with `ryu` --
+    // a substring built with `format!` would be asserting `Display`'s digits rather than the writer's,
+    // which is a test that passes and proves nothing.
+    let rise = PdfOptions::default().font_size / 3.0;
+    let rises: Vec<f32> = tokens
+        .windows(2)
+        .filter(|w| w[1] == "Ts")
+        .filter_map(|w| w[0].parse::<f32>().ok())
+        .collect();
+    assert!(
+        rises.iter().any(|r| (*r - rise).abs() < 1e-3),
+        "no superscript rise of {rise} in {rises:?}"
+    );
+    assert!(
+        rises.iter().any(|r| (*r + rise).abs() < 1e-3),
+        "no subscript rise of -{rise} in {rises:?}"
+    );
+
+    // **The two rules are a path**: one `m`/`l` pair for the underline and one for the strike, stroked
+    // once with `S`. A text-only PDF has neither, so any of these appearing at all is the claim.
+    assert_eq!(count_op("m"), 2, "one subpath per rule: {tokens:?}");
+    assert_eq!(count_op("l"), 2, "each rule is one straight segment");
+    assert_eq!(count_op("S"), 1, "both rules stroke in one pass");
+    assert_eq!(count_op("RG"), 1, "one stroke colour, set once");
+    // And the thickness, parsed the same way: half a point, not the default one.
+    assert!(
+        tokens
+            .windows(2)
+            .any(|w| w[1] == "w" && (w[0].parse::<f32>().unwrap_or(9.0) - 0.5).abs() < 1e-6),
+        "the rule is half a point thick: {tokens:?}"
+    );
+
+    // **And the counters say the same thing as the stream, which is the point of having them.**
+    //
+    // The operators above prove *something* stroked; they cannot prove *which runs* stroked, because a
+    // path has no identity. The counters are per segment, so the two together are the claim: `struck ==
+    // 1` and `underlined == 1` for the one segment carrying both bits, and `risen == 3` for the three
+    // styled runs — `2` superscript, `an` superscript and `d` subscript. **A PDF that dropped a
+    // decoration entirely still extracts the same text**, which is why the text assertion above cannot
+    // stand alone.
+    //
+    // **The numbers are per *segment*, and a segment is not a span.** `push_many` merges only when face,
+    // size, rise, underline and strike all agree, and **`flush_spaces` deliberately pushes the held space
+    // plain and unraised** — an underline across the gap between two underlined words would draw one rule
+    // where the author wrote two. So the space between `2` and `an` is its own plain segment and the
+    // three styled words are three risen segments, not one.
+    assert_eq!(stats.underlined, 1, "one underlined segment");
+    assert_eq!(
+        stats.struck, 1,
+        "one struck segment, and it is the same one: `more` carries both bits and is one run"
+    );
+    assert_eq!(
+        stats.risen, 3,
+        "three risen segments: `2` and `an` raised and `d` lowered. **Two would mean the plain space \
+         between the two superscripts had been merged into one of them**, which is the defect \
+         `flush_spaces`' own comment is about"
+    );
+    // **The rise count and the `Ts` count are different numbers, and that is not a bug**: `Ts` is
+    // emitted before *every* segment, including the `0` that puts plain text back on the baseline, so
+    // the stream has more rises than the document has raised runs. Asserting they were equal would be
+    // asserting that text state did not persist -- which is the defect `write_line`'s comment is about.
+    assert!(
+        count_op("Ts") > stats.risen as usize,
+        "every segment gets a rise operator, decorated or not: {} Ts for {} risen segments",
+        count_op("Ts"),
+        stats.risen
+    );
+}
+
 /// Plain ASCII, no styling: the simplest possible round trip.
+/// **A raised run's rule rises with it, in the content stream.**
+///
+/// # Why the screen's gate cannot stand in for this one
+///
+/// `tests/decorations.rs` asserts the same *relationship* on the painter, and **the exporter is a second
+/// implementation of where a rule goes** — a stroked path built from `advance(seg.metric, ..)` and a
+/// constant offset, in points, with no atlas anywhere in it. A raise is `Ts`, which moves the text matrix;
+/// a rule is a path in user space. The two are reconciled in `draw_rules` and nowhere else, so a fix in
+/// the painter says nothing about the file.
+///
+/// # What is parsed, and why the row is the assertion
+///
+/// **The `y` operand of each `m`,** which is the subpath's start row. Underlining a plain word and the
+/// same word raised puts two rules a whole rise apart; underlining only the raised word puts its rule a
+/// rise *above* where the same underline would be for body text on that line. Both are read back off the
+/// decoded stream, so this is asserting the operator arguments and not the writer's formatting.
+#[test]
+fn a_raised_runs_rule_rises_with_it_in_the_stream() {
+    let opts = PdfOptions::default();
+    let rise = opts.font_size / 3.0;
+
+    // One word, raised and underlined: its rule must be a rise above the baseline it would have had.
+    let mut raised = Editor::new();
+    raised
+        .insert_at(0, b"raised\n", SpanPolicy::Strict)
+        .expect("insert");
+    raised
+        .style_range(0, 6, STYLE_SUPERSCRIPT | STYLE_UNDERLINE, 0)
+        .expect("style");
+    // The same word, underlined and *not* raised.
+    let mut flat = Editor::new();
+    flat.insert_at(0, b"raised\n", SpanPolicy::Strict)
+        .expect("insert");
+    flat.style_range(0, 6, STYLE_UNDERLINE, 0).expect("style");
+
+    // **A nested `fn` and not a closure**, because it is called twice with different documents and a
+    // closure that borrows `opts` would have to be `Fn` over a capture the caller also uses. The row of
+    // every `m` in the decoded streams, which is a subpath's start point.
+    fn rule_rows(ed: &Editor, opts: &PdfOptions) -> Vec<f32> {
+        let mut stats = pdf::PdfStats::default();
+        let bytes = pdf::build(ed, opts, &mut stats).expect("build");
+        let streams = content::content_streams(&bytes).expect("streams");
+        let ops: Vec<String> = streams
+            .iter()
+            .map(|(_, data)| String::from_utf8_lossy(data).into_owned())
+            .collect();
+        let ops = ops.join("\n");
+        let tokens: Vec<&str> = ops.split_whitespace().collect();
+        // **`x y m`**, so the row is the operand two back from the operator.
+        tokens
+            .windows(3)
+            .filter(|w| w[2] == "m")
+            .filter_map(|w| w[1].parse::<f32>().ok())
+            .collect()
+    }
+
+    let raised_rows = rule_rows(&raised, &opts);
+    let flat_rows = rule_rows(&flat, &opts);
+    assert_eq!(
+        raised_rows.len(),
+        1,
+        "one underlined run is one subpath: {raised_rows:?}"
+    );
+    assert_eq!(flat_rows.len(), 1, "one subpath: {flat_rows:?}");
+
+    // **A rise up the page**, so the raised word's rule is the higher of the two: PDF's y grows upward.
+    assert!(
+        (raised_rows[0] - flat_rows[0] - rise).abs() < 1e-3,
+        "**the raised run's rule did not rise with its glyphs**: it is at y = {} and the same underline \
+         on unraised text is at y = {}, a gap of {} where the rise is {rise}. A rule left on the line's \
+         baseline draws under the air below a superscript.",
+        raised_rows[0],
+        flat_rows[0],
+        raised_rows[0] - flat_rows[0]
+    );
+}
+
 #[test]
 fn pdf_a_plain_ascii_document_round_trips() {
     let source = "The quick brown fox jumps over the lazy dog.";
@@ -421,6 +676,123 @@ fn pdf_line_structure_matches_the_document() {
     ed.style_range(8, 13, STYLE_CODE, 0).expect("code");
     let (_, text) = build_and_extract(&ed, &PdfOptions::default());
     assert_eq!(text, "one\ntwo\nthree");
+}
+
+/// **A held space inside a `code` run is measured in Courier, so the text does not grow.**
+///
+/// # What this catches
+///
+/// `flush_spaces` used to convert the held space width at `BaseFont::Helvetica` while naming the run's
+/// own face -- two halves of one decision disagreeing. **Courier's space is twice Helvetica's**, so every
+/// space inside a `code` run came out as two spaces: the exported text read `a  b` where the document said
+/// `a b`, and `draw_rules` traced a rule twice the length of the text underneath it.
+///
+/// # Why the assertion is the extracted text and not a width
+///
+/// **Because the defect was invisible in every measurement that did not reconstruct the string.** The
+/// line still fitted, the page still had one line, and the extra space is a legal PDF byte. Only a reader
+/// that puts the runs back together sees the document the author wrote, which is what `extract_text` is.
+#[test]
+fn a_space_inside_a_code_run_is_one_space() {
+    // Two words, both in the code face, so the space between them is a *held* space in a Courier run --
+    // the one case the conversion used to get wrong.
+    let mut ed = Editor::from_text(b"alpha beta\n").expect("load");
+    ed.style_range(0, 10, STYLE_CODE, 0).expect("code");
+    let (bytes, text) = build_and_extract(&ed, &PdfOptions::default());
+    assert_eq!(
+        text, "alpha beta",
+        "**the code run's words must be one space apart**: a doubled space means the held width was \
+         converted in Helvetica and measured in Courier"
+    );
+    // **And the face really is Courier**, so a pass that silently fell back to Helvetica would not make
+    // the assertion above true for the wrong reason. `base_fonts` reads the `/BaseFont` entries by name,
+    // which is the helper that exists for exactly this -- `contains(&bytes, b"Courier")` would also match
+    // the string on a line that never named a resource.
+    assert!(
+        content::base_fonts(&bytes).iter().any(|f| f == "Courier"),
+        "the code run must be drawn in Courier, or this gate is comparing two Helvetica spaces: {:?}",
+        content::base_fonts(&bytes).join(", ")
+    );
+}
+
+/// **A held space is shown at the size of the run it came from, not the body size.**
+///
+/// # The second half of the held-space defect
+///
+/// `a_space_inside_a_code_run_is_one_space` catches the *metric* half: a space measured in Helvetica and
+/// drawn in Courier is half the width it claims, so the width converts to two spaces. **The size is the
+/// other half and it is invisible in the extracted text**, because `"a b"` extracts as `"a b"` at 11 pt
+/// and at 14.85 pt. What changes is where the *pen* is: a space pushed at the body size inside a run of
+/// heading-size words is narrower than the space the reader lays out, so the exporter's line breaking and
+/// the reader's disagree from that point on -- a line that ends one word later than the file says.
+///
+/// # What is measured, and why the stream and not the segments
+///
+/// **The `Tf` in force where the space's own `Tj` is shown.** A segment carries its size into the content
+/// stream, so the operator is the whole claim, and reading it out of the decoded stream means this is
+/// asserting the file's answer rather than the layouter's internal one.
+#[test]
+fn a_held_space_is_shown_at_the_size_of_the_run_it_came_from() {
+    // **The space at byte 4 is inside the heading run** (0..5), which is the case that matters: the space
+    // is what *ends* the heading's word, so it is a heading space, and the word after it is not.
+    let mut ed = Editor::from_text(b"Head tail\n").expect("load");
+    ed.style_range(0, 5, STYLE_HEADER, 0).expect("heading");
+    assert_eq!(
+        ed.style_at(4).style_flags & STYLE_HEADER,
+        STYLE_HEADER,
+        "the fixture must put the space inside the heading run, or there is nothing here to measure"
+    );
+    // **The heading must not be bold.** `Faces::for_span` gives a bold heading `HelveticaBold`, and a bold
+    // run is a different face *and* a different metric -- which would leave this gate measuring a size in
+    // a run whose width was computed from another table. Asserting the flags keeps the fixture to the one
+    // variable the gate is about: the size.
+    assert_eq!(
+        ed.style_at(0).style_flags & STYLE_BOLD,
+        0,
+        "the heading face must be the regular one, so the only difference between the words is size"
+    );
+
+    let opts = PdfOptions::default();
+    let mut stats = pdf::PdfStats::default();
+    let bytes = pdf::build(&ed, &opts, &mut stats).expect("build");
+    let streams = content::content_streams(&bytes).expect("streams");
+    let ops: String = streams
+        .iter()
+        .map(|(_, data)| String::from_utf8_lossy(data).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tokens: Vec<&str> = ops.split_whitespace().collect();
+
+    let heading_size = opts.font_size * pdf::HEADER_SCALE;
+    // **A one-space string is a held space**, and nothing else in this document can produce one: the two
+    // words contain no spaces of their own. `Str` writes an all-ASCII string literally, so the operand is
+    // the three-character token `( )`.
+    let space_sizes: Vec<Option<f32>> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| **t == "Tj" && i.checked_sub(1).is_some_and(|j| tokens[j] == "( )"))
+        .map(|(i, _)| {
+            tokens[..i]
+                .windows(3)
+                .rev()
+                .find(|w| w[2] == "Tf")
+                .and_then(|w| w[1].parse::<f32>().ok())
+        })
+        .collect();
+    assert!(
+        !space_sizes.is_empty(),
+        "**the held space never reached the stream as its own `Tj`**, so this gate has nothing to \
+         measure. The tokens are {tokens:?}"
+    );
+    for size in &space_sizes {
+        assert_eq!(
+            *size,
+            Some(heading_size),
+            "**the space was shown at {size:?} and the run it was typed in is {heading_size} pt.** A \
+             space at the body size is narrower than the one the reader lays out, so every line after \
+             it breaks in a different place than the file says it does."
+        );
+    }
 }
 
 /// A run wider than the measure overflows and is *counted*, not silently clipped.

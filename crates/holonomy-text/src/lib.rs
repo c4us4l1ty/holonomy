@@ -36,8 +36,9 @@ pub use payload::{
 };
 pub use selection::SelectionRange;
 pub use span::{
-    SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER,
-    STYLE_ITALIC,
+    SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_DECORATIONS,
+    STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT,
+    STYLE_UNDERLINE,
 };
 pub use table::{Cell, ResolvedTable, TableError, TableSpan, CELL_SEPARATOR};
 pub use tables::{

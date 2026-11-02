@@ -55,6 +55,57 @@ pub const STYLE_CODE: u16 = 1 << 2;
 /// with a face or a size behind them, and Underline has neither. See `atlas_style` for the mapping.
 pub const STYLE_HEADER: u16 = 1 << 3;
 
+/// **Underline. Bit 4, and the first four bits are full.**
+///
+/// # Why this is a *decoration* bit and not a face
+///
+/// **The atlas holds two sizes and five faces** (`MAX_SIZES = 2`, `ATLAS_BYTES = 458_752`), and an
+/// underlined face would be a sixth. It would also be the wrong model: underline, strikethrough,
+/// superscript and subscript are **decorations of a run**, not properties of a typeface — a word can be
+/// bold *and* underlined, and a serif and a sans face both underline the same way.
+///
+/// **So the run keeps its face and the painter draws a line under it**, which is what every word
+/// processor does and what makes `STYLE_BOLD | STYLE_UNDERLINE` mean something. `atlas_style` ignores
+/// this bit entirely, which is why four sizes of decoration cost zero bytes of atlas.
+///
+/// # Why the bit was free, and why it is being used now
+///
+/// Bits 0-3 are Bold, Italic, Code and Header, and **nothing in the project has ever used bits 4-15**
+/// — `style_flags` is a `u16` and the payload format stores the whole word. So a document written by
+/// this build round-trips through `TextIntervalSpan` with the decoration intact and costs the format
+/// nothing. The WordCraft reference offers Ctrl+U, Alt+Shift+5, Ctrl+. and Ctrl+, for the four
+/// decorations, and they are the only formatting controls it has that this program had no way to
+/// represent at all.
+pub const STYLE_UNDERLINE: u16 = 1 << 4;
+
+/// Strikethrough. Bit 5. Drawn as a rule through the run's x-height. See [`STYLE_UNDERLINE`].
+pub const STYLE_STRIKE: u16 = 1 << 5;
+
+/// Superscript. Bit 6. The run is drawn raised by a third of the line box.
+///
+/// **A shift, not a smaller face**, for the same reason the two above are rules: a superscript is a
+/// *position*, and drawing one from a smaller atlas size would need a third size the atlas cannot hold
+/// — `AtlasBuilder::new` refuses it, and the refusal is the PRD's 512 KiB ceiling rather than this
+/// crate's preference.
+///
+/// **Smaller is what the reference does and what a reader expects**, and there is a cheap version of it
+/// that costs no atlas bytes: the run is drawn at the *body* size and clipped to the raised band, which
+/// reads as a superscript because the baseline moved. That is what `DocRun`'s size index already
+/// expresses, so this bit is a position and the emitter chooses the index.
+pub const STYLE_SUPERSCRIPT: u16 = 1 << 6;
+
+/// Subscript. Bit 7. The counterpart of [`STYLE_SUPERSCRIPT`], shifted down.
+pub const STYLE_SUBSCRIPT: u16 = 1 << 7;
+
+/// **The four decoration bits, as one mask.** A word processor's "clear formatting" clears all of them
+/// and the two face bits besides; naming the set means the code that does it cannot leave one behind.
+pub const STYLE_DECORATIONS: u16 = STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
+
+/// **Every bit this build defines.** A flag outside this mask is not a formatting request, it is a
+/// corrupt payload — and the importer's check names this so a file written by a newer build fails
+/// loudly rather than drawing text nobody asked for.
+pub const STYLE_KNOWN: u16 = STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS;
+
 /// One styled byte range.
 ///
 /// PRD.md §7.1's field list, and its widths: `color_rgb` is a `u32` holding `0x00RRGGBB`, which is
@@ -71,7 +122,13 @@ pub struct TextIntervalSpan {
     pub start_byte: u32,
     /// One past the last byte of the run, exclusive.
     pub end_byte: u32,
-    /// [`STYLE_BOLD`] | [`STYLE_ITALIC`] | [`STYLE_CODE`] | [`STYLE_HEADER`], or 0 for plain.
+    /// [`STYLE_BOLD`] | [`STYLE_ITALIC`] | [`STYLE_CODE`] | [`STYLE_HEADER`] | any of
+    /// [`STYLE_DECORATIONS`], or 0 for plain.
+    ///
+    /// **Eight bits are in use and the payload stores the whole `u16`**, so a decoration costs the
+    /// format nothing and a document that has one is readable by a build that does not draw it — which
+    /// is the direction to fail in: the text is right and the ornament is missing, rather than the
+    /// document refusing to open.
     pub style_flags: u16,
     /// `0x00RRGGBB`. Zero means "the document's default colour", not opaque black.
     pub color_rgb: u32,
@@ -131,6 +188,12 @@ impl TextIntervalSpan {
     /// | [`STYLE_BOLD`] | 1, Inter Bold |
     /// | [`STYLE_ITALIC`] | 2, Inter Italic |
     /// | [`STYLE_CODE`] | 3, JetBrains Mono |
+    ///
+    /// **The four decoration bits never reach this function and that is deliberate.** An underline is a
+    /// rule the painter strokes, not a sixth face: a face would be new atlas bytes and would still draw
+    /// no line, because a typeface's underline is a *drawing instruction* rather than a glyph. So
+    /// `STYLE_BOLD | STYLE_UNDERLINE` resolves to face 1 and draws a rule under it, which is what the
+    /// word processor this mirrors does.
     ///
     /// Bold+Italic has no face in the atlas, so it resolves to Bold. `u8::MAX` is returned for an
     /// unknown request rather than a valid index, so a caller that adds a face later fails loudly

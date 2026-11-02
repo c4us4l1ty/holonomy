@@ -31,11 +31,11 @@
 //! exporter's, read from the Adobe AFM, while the glyphs drawn are the reader's. If those two disagree
 //! the document still opens and the line breaks in the wrong place -- which is why [`fonts`] is
 //! transcribed, cross-checked, and tested rather than approximated, and why the PDF exporter reports
-//! [`PdfStats::overflowing_runs`] instead of quietly overflowing.
+//! [`PdfStats::overflowing_lines`] instead of quietly overflowing.
 //!
 //! [`holonomy_jail::seccomp::table::ALLOWLIST`]: https://docs.rs/holonomy-jail
 //! [`fonts`]: crate::fonts
-//! [`PdfStats::overflowing_runs`]: crate::pdf::PdfStats::overflowing_runs
+//! [`PdfStats::overflowing_lines`]: crate::pdf::PdfStats::overflowing_lines
 
 pub mod asset;
 mod fonts;

@@ -1411,12 +1411,27 @@ impl Layout {
 /// **They do not retro-style what is already typed.** Pressing Bold and then pressing Left and typing
 /// does not bold the character before the caret: that needs a selection, and inventing one is a
 /// different part.
+/// **Three slots and three buttons, and `Underline` joined them in the typography pass.**
+///
+/// **It is a slot and not a fourth kind of thing.** Underline is armed and applied exactly as bold is
+/// — `Session::set_armed_style` writes the bit, `Session::pending_style` carries it to the next
+/// character, and a selection is restyled in place — so giving it a separate path would be a second
+/// implementation of one behaviour, and the failure would be an Underline button that lights up and
+/// types plain text. The bug that shape produces is written down in `tests/armed_style.rs` and it is
+/// the reason the slot exists at all.
+///
+/// **Strikethrough, superscript and subscript are deliberately *not* slots.** They are reachable from
+/// `Format` and from their chords, and a slot is only worth having when there is a *button* whose
+/// state it draws: the toolbar has no strikethrough button, so a `strike: bool` here would be a field
+/// nothing reads — which is precisely the defect part 25 deleted four of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StyleFlags {
     /// Bold is armed for the next character typed.
     pub bold: bool,
     /// Italic is armed for the next character typed.
     pub italic: bool,
+    /// **Underline is armed for the next character typed.**
+    pub underline: bool,
 }
 
 impl StyleFlags {
@@ -1425,6 +1440,7 @@ impl StyleFlags {
         match slot {
             StyleFlagsSlot::Bold => self.bold,
             StyleFlagsSlot::Italic => self.italic,
+            StyleFlagsSlot::Underline => self.underline,
         }
     }
 
@@ -1438,6 +1454,7 @@ impl StyleFlags {
         match tool {
             crate::widgets::Tool::Bold => Some(StyleFlagsSlot::Bold),
             crate::widgets::Tool::Italic => Some(StyleFlagsSlot::Italic),
+            crate::widgets::Tool::Underline => Some(StyleFlagsSlot::Underline),
             _ => None,
         }
     }
@@ -1454,6 +1471,13 @@ pub enum StyleFlagsSlot {
     Bold,
     /// Italic.
     Italic,
+    /// **Underline.** The third, added when the document model grew `STYLE_UNDERLINE`.
+    ///
+    /// **A slot only became honest once the bit existed**, and that is the whole history of this
+    /// enum: the toolbar has drawn an Underline button since part 19 and `slot_for` said `None` for
+    /// it, so pressing it counted as inert — which was *correct* until `STYLE_UNDERLINE` existed. A
+    /// slot with nothing behind it is exactly what part 25 deleted `Mono` and `Heading` for.
+    Underline,
 }
 
 /// Per-line vertical geometry, as a uniform pitch plus a sparse table of extra heights.

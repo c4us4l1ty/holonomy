@@ -13,7 +13,7 @@
 //!
 //! # And what is still inert, and why
 //!
-//! **Seven: `Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Underline`, `Highlight`, `Link`.**
+//! **Six: `Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Highlight`, `Link`.**
 //! Each is recorded below with the reason, because **a count with no reasons is a number nobody can
 //! act on**:
 //!
@@ -25,26 +25,33 @@
 //! - **`PaintFormat`** needs a format model, so one range's formatting can be copied to another.
 //! - **`FontSize`** is a second size control; the face is chosen by `Font`, and a size list the
 //!   atlas can back is the same budget the zoom pair already spent.
-//! - **`Underline`** needs a run-level underline flag in the document model.
 //! - **`Highlight`** needs a run-level highlight colour, which is the span field `Link` needs too.
 //! - **`Link`** needs a URL model — a span field plus something that resolves a URL.
 //!
-//! **None of the seven is "not done yet".** They are features that need models this program does not
+//! **`Underline` has left this list**, and it is the one that was cheapest to wrong: it needed a
+//! run-level underline flag in the document model, the model grew `STYLE_UNDERLINE`, and the button was
+//! left in this array for a compile-time-visible reason — **the array's type is a length**, so a tool
+//! that starts working cannot be forgotten silently. It is now a real toggle: armed at the caret, a
+//! restyle of the selection, a rule in the painter and a `<u>` in the export. `tests/armed_style.rs`
+//! holds the armed half.
+//!
+//! **None of the six is "not done yet".** They are features that need models this program does not
 //! have, and a button that pretends to one is worse than a button that is visibly absent.
 //!
 //! # And they now *look* like they work, which is a new problem
 //!
 //! Part 6 of `EDITOR_AUDIT.md` redrew every mask in `icons.rs`, because the first generation read as a
-//! row of unrelated doodles. **The seven inert tools were redrawn along with the fifteen that work**, so
-//! `Underline` is a legible underlined `U`, `Highlight` a legible marker, `Link` a legible chain — where
-//! before they at least looked like pencil shavings.
+//! row of unrelated doodles. **The inert tools were redrawn along with the ones that work**, so
+//! `Highlight` is a legible marker and `Link` a legible chain — where before they at least looked like
+//! pencil shavings. (`Underline`, the third example this paragraph used to give, is now wired and drawn
+//! with a real rule over real glyphs.)
 //!
 //! **That inverts the argument in the paragraph above.** A button that looks broken is visibly broken; a
 //! button that looks finished and does nothing is a dead end the user only discovers by pressing it. The
-//! count below still passes and still names all seven — **this note exists so that the next reader does
+//! count below still passes and still names all six — **this note exists so that the next reader does
 //! not read a green test as "these are fine".** The honest fixes are the models listed above, or removal
-//! in the style of `Comment`; what is *not* an option is leaving seven convincing-looking buttons in a
-//! row whose other fifteen work.
+//! in the style of `Comment`; what is *not* an option is leaving six convincing-looking buttons in a
+//! row whose other sixteen work.
 //!
 //! # `Comment` is gone, and it was the one that needed arguing
 //!
@@ -60,12 +67,12 @@
 //!
 //! **Why this was a decision this repository had already taken**: `icons.rs`'s count note says in as
 //! many words that the number to change when that decision is made is 34 -> 33. **A gate that names
-//! the edit it will need is a gate that has already had the argument.** The seven that remain each
+//! the edit it will need is a gate that has already had the argument.** The six that remain each
 //! need a model this program does not have and are not the subject of a pre-authorised deletion.
 //!
 //! # The measurement
 //!
-//! [`every_tool_that_is_not_wired_is_one_of_the_seven`] presses all twenty-two toolbar tools through the
+//! [`every_tool_that_is_not_wired_is_one_of_the_six`] presses all twenty-two toolbar tools through the
 //! real hit test on a fresh session each time and counts the ones whose press lands in
 //! `pointer_inert`. **A fresh session per tool**, because a press that opens a popup swallows the next
 //! press as a dismissal — **the first version of this measurement looped over one session and counted
@@ -73,7 +80,7 @@
 //!
 //! | what it proves | test |
 //! | --- | --- |
-//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_seven`] |
+//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_six`] |
 //! | `SizeUp` changes the type | [`the_size_buttons_are_the_zoom_buttons`] |
 //! | and clamp at their ends | [`the_size_buttons_clamp_rather_than_wrapping`] |
 //! | `Overflow` lists what did not fit | [`the_overflow_menu_lists_the_tools_that_did_not_fit`] |
@@ -161,14 +168,18 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
 /// **The header above once said five, and once said that part 46 had removed `Comment`; both were
 /// wrong** — the tool was still there and still inert, which is why this list had eight entries. It is
 /// seven now because the tool is gone: no annotation store, no anchor range, no author, so nothing this
-/// session could ever do with it. See `icons.rs`'s count note. This array is written in `TOOLBAR`
-/// order, so a reordering of the toolbar shows up here as a diff rather than as a silent mismatch.
-const STILL_INERT: [Tool; 7] = [
+/// session could ever do with it. See `icons.rs`'s count note.
+///
+/// **Six since `Underline` was wired**, and the *length of this array is the gate's second claim*: a tool
+/// that starts working while its name stays here fails the equality below rather than sitting in the
+/// list quietly, and a tool that stops working fails it from the other side. This array is written in
+/// `TOOLBAR` order, so a reordering of the toolbar shows up here as a diff rather than as a silent
+/// mismatch.
+const STILL_INERT: [Tool; 6] = [
     Tool::Search,
     Tool::Spellcheck,
     Tool::PaintFormat,
     Tool::FontSize,
-    Tool::Underline,
     Tool::Highlight,
     Tool::Link,
 ];
@@ -188,7 +199,7 @@ const STILL_INERT: [Tool; 7] = [
 /// **Because a click is decided on the press.** `Session::press`'s own note says so, and a release
 /// would be measuring a different gesture.
 #[test]
-fn every_tool_that_is_not_wired_is_one_of_the_seven() {
+fn every_tool_that_is_not_wired_is_one_of_the_six() {
     let mut inert: Vec<&'static str> = Vec::new();
     for &tool in TOOLBAR {
         let mut s = session();
@@ -209,7 +220,9 @@ fn every_tool_that_is_not_wired_is_one_of_the_seven() {
         expected,
         "**{inert:?} are inert, and the list is {expected:?}.** Part 39 said ten; part 44 wired \
          SizeUp, SizeDown, Overflow and Mode; the count went eight -> seven when `Comment` was \
-         removed rather than wired."
+         removed rather than wired, and seven -> six when `Underline` was. A tool that has started \
+         working and is still named here is a gate asserting a defect is present, which is worse \
+         than no gate at all."
     );
 }
 
