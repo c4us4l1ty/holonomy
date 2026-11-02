@@ -44,10 +44,22 @@ jobs:
           git commit -m "ci: publish check diagnostics" || true
           git push origin HEAD:arena/ca2b02bd-holonomy || true
       - name: Release tests
-        run: cargo test --workspace --release -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --workspace --release -- --test-threads=1 2>&1 | tee /tmp/test.log
       - name: Desktop tests
         run: |
-          cargo test -p holonomy --features desktop --release -- --test-threads=2
-          cargo test -p holonomy-input --features desktop --release
-          cargo test -p holonomy-x11 --release
-          cargo test -p holonomy-display --features desktop --release
+          set -o pipefail
+          cargo test -p holonomy --features desktop --release -- --test-threads=2 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-input --features desktop --release 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-x11 --release 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-display --features desktop --release 2>&1 | tee -a /tmp/test.log
+      - name: Publish test diagnostics
+        if: failure()
+        run: |
+          tail -n 400 /tmp/test.log > ci-test.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci-test.log
+          git commit -m "ci: publish test diagnostics" || true
+          git push origin HEAD:arena/ca2b02bd-holonomy || true
