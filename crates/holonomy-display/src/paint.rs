@@ -54,6 +54,12 @@ use crate::frame::{Frame, FrameError};
 pub struct PaintStats {
     /// Filled rectangles.
     pub rects: u32,
+    /// **Underlines, strikethroughs and block rules**, drawn from [`Node::Rule`](holonomy_render::Node).
+    ///
+    /// **Its own counter rather than folded into `rects`**, for the reason `doc_glyphs` is separate
+    /// from `glyphs`: a frame that drew a rule is a frame that had decorated text on it, and a gate
+    /// that asserts "the underline was drawn" needs a number that means that and nothing else.
+    pub rules: u32,
     /// Rectangles skipped because they were outside the damage rect.
     pub rects_skipped: u32,
     /// Glyphs blitted from the atlas.
@@ -119,6 +125,7 @@ impl PaintStats {
     /// tree, and that is the number that says the clipping worked.
     pub fn merge(&mut self, other: PaintStats) {
         self.rects += other.rects;
+        self.rules += other.rules;
         self.rects_skipped += other.rects_skipped;
         self.glyphs += other.glyphs;
         self.glyphs_skipped += other.glyphs_skipped;
@@ -239,15 +246,31 @@ impl<'a> Painter<'a> {
     /// **No atlas and not the cell: `cell_width()`.** The chrome is a fixed grid and that is right for
     /// it; this is about the one place the grid is the fallback rather than the rule.
     pub fn advance_of(&self, cp: u32, style: holonomy_render::Style) -> u32 {
+        self.advance_at(cp, style, self.size_index)
+    }
+
+    /// **How far the pen moves for one codepoint in a run at an explicit atlas size index.**
+    ///
+    /// [`advance_of`](Self::advance_of) is this function at the painter's own size, and the pair exists
+    /// because **a document has more than one size now.** A heading draws at atlas index 1 at 125 % of
+    /// the body's advance, so a caret or a selection edge measured with `advance_of` would drift right
+    /// of the glyphs on every heading -- the exact defect part 29 and part 31 exist to prevent, arriving
+    /// through the one axis those parts did not have when they were written.
+    ///
+    /// **The size index, and not a ppem**, for the reason `DocRun::size` gives: the painter resolves an
+    /// index against the atlas it holds, so a caller cannot name a size that was never rasterised.
+    /// `label_size` does the clamping, which means an index past the atlas's last one measures at that
+    /// last one instead of falling through to a different face entirely.
+    pub fn advance_at(&self, cp: u32, style: holonomy_render::Style, size: u8) -> u32 {
         let Some(atlas) = self.atlas else {
             return self.cell_width();
         };
-        let m = atlas.metric(cp, atlas_style(style), self.atlas_size());
+        let m = atlas.metric(cp, atlas_style(style), self.label_size(size));
         if m.is_blank() {
             if m.advance_x > 0 {
                 u32::from(m.advance_x)
             } else {
-                self.cell_width()
+                self.cell_width_at(self.label_size(size))
             }
         } else {
             u32::from(m.advance_x).max(1)
@@ -392,6 +415,7 @@ impl<'a> Painter<'a> {
             // second copy of a glyph blitter is a second thing to keep in step with the atlas.
             Node::Repeat(run) => self.text_repeated(frame, run, damage),
             Node::DocText(run) => self.doc_text(frame, run, damage, text),
+            Node::Rule(run) => self.rule(frame, &run, damage),
             Node::Image { rect, asset_id } => self.image(frame, &rect, asset_id, damage, rasters),
             Node::Icon(icon) => self.icon(frame, &icon, damage),
         }
@@ -812,18 +836,51 @@ impl<'a> Painter<'a> {
             return;
         };
 
-        let cell_w = self.cell_width();
-        let cell_h = self.cell_height();
-        let size = self.atlas_size();
+        // **The run's own size when it names one, and the painter's when it names zero.** Index 0 is
+        // "the chrome size" everywhere else in this file and it is the same convention here, so an
+        // ordinary body run and a chrome label cannot disagree about what zero means. A heading asks
+        // for index 1 and gets the larger atlas size, which is the *only* mechanism this build has for
+        // drawing type bigger than the body — see `Session::run_size_index`.
+        let size = self.label_size(run.size);
+        let cell_w = self.cell_width_at(size);
+        let cell_h = self.cell_height_at(size);
         let style = atlas_style(run.style);
-        let ascent = i32::from(self.vertical(run.style, size).0);
+        // **The baseline shift is added to the ascent, not to `y`.** A superscript is the same glyph
+        // at the same size, raised; adding it to the ascent is one expression, and shifting `y` would
+        // need the same number subtracted from the damage box below. `i8` because a shift is a fraction
+        // of a line box and cannot exceed either one.
+        let ascent = i32::from(self.vertical(run.style, size).0) - i32::from(run.baseline_shift);
 
         // **The line box is culled once, not per glyph.** A run's box is its byte count times the cell
         // width -- a conservative over-estimate, as `DocRun::bounds` says -- and if that box misses the
         // damage then every glyph in it does too. Culling per glyph would be the same answer at ~150x
         // the comparisons for a 150-codepoint line.
         let box_width = want.saturating_mul(cell_w);
-        let whole = DamageRect::new(run.x.max(0) as u32, run.y.max(0) as u32, box_width, cell_h);
+        // **The box grows by the shift, in the direction the shift moved the glyphs.**
+        //
+        // A raised run draws its glyphs above `run.y` and a lowered one below `run.y + cell_h`, and
+        // `baseline_shift` is `i8` -- so a run raised by a third of the line has its top third outside a
+        // box that starts at `run.y`. Two consequences, and the second is the one that bites:
+        //
+        // * **The cull is right again.** A caret blink inside the raised third of a superscript damages a
+        //   rect that misses this box, so the run is skipped, and the frame keeps whatever the last paint
+        //   drew there -- which is the correct pixels today and the wrong ones as soon as the character
+        //   changes.
+        // * **The emitter is not told, so this box is all there is.** `Session::emit_body_text` damages one
+        //   `cell_h` per line, and `DocRun::bounds` -- the function that answers "how big is this run" for
+        //   anyone who asks -- has no shift in it. Making the painter's own box honest is the half that can
+        //   be fixed here.
+        let (grow_up, grow_down) = if run.baseline_shift > 0 {
+            (u32::from(run.baseline_shift.unsigned_abs()), 0)
+        } else {
+            (0, u32::from(run.baseline_shift.unsigned_abs()))
+        };
+        let whole = DamageRect::new(
+            run.x.max(0) as u32,
+            (run.y.max(0) as u32).saturating_sub(grow_up),
+            box_width,
+            cell_h.saturating_add(grow_up).saturating_add(grow_down),
+        );
         if !intersects(whole, damage) {
             self.scratch.stats.glyphs_skipped += self.count_codepoints(bytes);
             return;
@@ -908,8 +965,190 @@ impl<'a> Painter<'a> {
             self.scratch.stats.doc_glyphs += 1;
             // **`advance_of`, and not the expression.** See the blank arm above: the rule has two
             // cases and this is one of them, and `Painter::advance_of` is the single definition.
-            pen += self.advance_of(u32::from(c), run.style) as i32;
+            // **The run's own size, which is the size its glyphs were just measured at.** A heading's
+            // `m` is wider than the body's, so advancing by `advance_of` would overlap every heading's
+            // glyphs at 125 % -- see `advance_at`.
+            pen += self.advance_at(u32::from(c), run.style, run.size) as i32;
         }
+
+        // **The run's own rules, drawn after its glyphs and over the span the pen actually covered.**
+        //
+        // The width is `pen - run.x`, not the byte count times the cell, because the pen is where the
+        // last glyph ended and a rule that ran past it would underline the trailing whitespace of a
+        // proportional face — which reads as a selection rather than as an underline.
+        if run.decorations != DocRun::DECORATION_NONE && pen > run.x {
+            let at = [(
+                DocRun::DECORATION_UNDERLINE,
+                holonomy_render::RuleAt::Underline,
+            ), (
+                DocRun::DECORATION_STRIKE,
+                holonomy_render::RuleAt::Strike,
+            )];
+            for (bit, at) in at {
+                if run.decorations & bit == 0 {
+                    continue;
+                }
+                self.rule(
+                    frame,
+                    &holonomy_render::RuleRun::sized(
+                        run.x,
+                        run.y,
+                        (pen - run.x) as u32,
+                        // **The decoration's own weight, from the crate that defines the bit.** See
+                        // `DocRun::RULE_THICKNESS`: the emitter in `holonomy` and the PDF writer are the
+                        // two callers that disagree about the right number, so the number lives next to
+                        // the bitset and `rule_thickness` is what a painter may widen it to.
+                        holonomy_render::DocRun::RULE_THICKNESS,
+                        at,
+                        run.size,
+                        run.colour,
+                    ),
+                    damage,
+                );
+            }
+        }
+    }
+
+    /// **Draw a hairline: an underline, a strikethrough, or a block rule.**
+    ///
+    /// # Why the painter decides where the line goes
+    ///
+    /// **Because the painter is the code that already knows where the baseline is.** A glyph is blitted
+    /// at `run.y + ascent - bearing_y`, and `ascent` comes from `Atlas::vertical` for the run's own
+    /// face and size. An emitter that computed an underline's y would be computing the *same* answer
+    /// from a `cell_h` it has rather than the ascent it does not — and the two diverge the moment a
+    /// face's ascent is not a fixed fraction of the pitch, which is exactly what a two-size atlas makes
+    /// true.
+    ///
+    /// # The two line-relative positions, and why these fractions
+    ///
+    /// ```text
+    ///   line box top            y
+    ///   ├── ascent ─────────────┤ baseline = y + ascent
+    ///   │                       ├── descent ────┤
+    ///   underline: min(y + ascent + descent + 1,     y + cell_h - thickness)
+    ///   strike:    min(y + ascent - ascent/3,        y + cell_h - thickness)
+    /// ```
+    ///
+    /// **Under the ink, not under the baseline.** A quarter of the descent below the baseline was the
+    /// first version and it is wrong for the packed faces: their descent is deep (the doc on
+    /// `cell_height` measures 20, 22 and 24 px of ascent-plus-descent at 16 ppem), so a quarter of it
+    /// lands *on* the descenders rather than below them. **The rule goes one pixel under
+    /// `ascent + descent`** — the face's own ink bottom — and the clamp keeps it inside the line box,
+    /// which is the rectangle the emitter damages. **A third of the ascent above the baseline** is
+    /// where the x-height's midpoint sits for Inter (x-height is about two-thirds of the ascent), which
+    /// is where a strikethrough belongs; the exact fraction is a typographic judgement and it is written
+    /// here rather than measured, because measuring it would need the `OS/2` table this atlas does not
+    /// keep.
+    ///
+    /// **How many pixels a rule fills, which is not always how many it asked for.**
+    ///
+    /// # Why a rule's thickness is not the caller's number
+    ///
+    /// **Because a one-pixel line is a hairline and this is not always a hairline.** A `Block` rule — the
+    /// border of a table cell, the line across a page — asks for one pixel and means it. A decoration's
+    /// rule is drawn at 16 ppem against a 16 px ascent, where a single row of pixels reads as a
+    /// rasteriser artefact rather than as formatting, so
+    /// [`DocRun::RULE_THICKNESS`](holonomy_render::DocRun::RULE_THICKNESS) is the floor for the two
+    /// line-relative kinds and the *caller's* number for `Block`.
+    ///
+    /// **A floor and not an assignment**, because the emitter is allowed to ask for more: the number lives
+    /// in `holonomy-render` beside the bitset, and a caller that wants a heavier underline gets one.
+    ///
+    /// # And a rule can never be zero rows tall
+    ///
+    /// `max(1)`, because a zero-height `DamageRect` intersects nothing, `Frame::fill_rect` writes no
+    /// pixels, and **`PaintStats::rules` would count a rule that drew nothing** — a statistic that says
+    /// the underline was drawn while the page shows no line is worse than no statistic.
+    fn rule_thickness(&self, run: &holonomy_render::RuleRun, cell_h: u32) -> u32 {
+        let asked = run.thickness.max(1);
+        match run.at {
+            // **A two-pixel line-relative rule, capped by the line box.** `min(cell_h)` because a caller
+            // can name any thickness and the box it must fit inside is `cell_h`; the clamp in `Strike`
+            // subtracts this value, so a thickness larger than the box would make that subtraction
+            // saturate and put the strikethrough at the top of the cell instead of the bottom.
+            holonomy_render::RuleAt::Underline | holonomy_render::RuleAt::Strike => asked
+                .max(holonomy_render::DocRun::RULE_THICKNESS)
+                .min(cell_h.max(1)),
+            holonomy_render::RuleAt::Block => asked,
+        }
+    }
+
+    /// # And `Block` reads its own `y`
+    ///
+    /// **Because a block rule is not relative to a line of type.** A paragraph border sits at a
+    /// rectangle the layout chose, and a header's rule under a section sits under the section — neither
+    /// is "somewhere in a line box". So that arm draws where it is told and the other two are resolved.
+    fn rule(&mut self, frame: &mut Frame, run: &holonomy_render::RuleRun, damage: Option<DamageRect>) {
+        // The line's geometry, from the same source the glyphs use. `RuleAt::Block` does not read it,
+        // and computing it unconditionally is one atlas lookup per rule against a branch — the
+        // lookup is the cheaper of the two.
+        let size = self.label_size(run.size);
+        let cell_h = self.cell_height_at(size);
+        let (ascent, descent) = self.vertical(holonomy_render::Style::REGULAR, size);
+        let (ascent, descent) = (u32::from(ascent), u32::from(descent));
+        let top = match run.at {
+            // **A rule the layout placed**, so its own row is the answer.
+            holonomy_render::RuleAt::Block => run.y.max(0) as u32,
+            // **Clamped to the bottom of the line box, and that is what keeps it in its own cell.**
+            //
+            // The ascent and descent of the packed faces add up to *more* than `line_pitch`'s 18, so
+            // `y + ascent + 1` is already the last row of the box and a second row would fall into the
+            // line below -- and `Session::emit_body_text` damages a line as exactly one `cell_h` tall, so
+            // a rule one pixel past it is a pixel no damage rect covers. It repaints correctly on a full
+            // frame and leaves the previous frame's rule behind on a partial one, which is the defect
+            // `widen` exists for and cannot fix here: the emitter does not know where the painter put the
+            // line.
+            holonomy_render::RuleAt::Underline => {
+                let y = run.y.max(0) as u32;
+                // **One pixel below the deepest descender this face has**, which is the ink extent and
+                // not the baseline: a rule placed a quarter of the descent under the baseline crosses
+                // `g`, `y` and `p`, and an underline through a descender is the one thing it must not
+                // do.
+                let ink_bottom = y
+                    .saturating_add(ascent)
+                    .saturating_add(descent)
+                    .saturating_add(1);
+                // **And never past the bottom of the line box**, because a rule one pixel into the
+                // line below is a pixel the emitter's `cell_h`-tall damage rect does not cover -- it
+                // repaints on a full frame and leaves the old rule behind on a partial one.
+                ink_bottom.min(y.saturating_add(cell_h.saturating_sub(self.rule_thickness(run, cell_h))))
+            }
+            // **Clamped into the line box**, because a short ascent with a small cap height would put
+            // a third of it above the box's own top — a strikethrough drawn on the line above.
+            //
+            // **`rule_thickness`, and not `run.thickness`.** The clamp exists to keep the line *inside*
+            // the cell it belongs to, so the number that must fit is the number of pixels actually
+            // filled -- and `rule_thickness` is the one place that decides that number. Clamping by the
+            // requested value while drawing a taller one puts a two-pixel strikethrough's bottom row on
+            // the next line, which is the same defect one pixel down and invisible in a one-line
+            // document.
+            holonomy_render::RuleAt::Strike => (run.y.max(0) as u32)
+                .saturating_add(ascent.saturating_sub(ascent / 3))
+                .min(
+                    (run.y.max(0) as u32)
+                        .saturating_add(cell_h.saturating_sub(self.rule_thickness(run, cell_h))),
+                ),
+        };
+        let rect = DamageRect::new(
+            run.x.max(0) as u32,
+            top,
+            run.width,
+            self.rule_thickness(run, cell_h),
+        );
+        if !intersects(rect, damage) {
+            return;
+        }
+        // **Clipped to the damage, like `Node::Rect`.** A rule under a styled word is a few dozen
+        // pixels and the whole point of the damage model is that a run outside it costs nothing; a
+        // fill that ignored the clip would repaint the rule's full width for a caret blink inside it.
+        let fill = match damage {
+            Some(d) => rect.clip(&d),
+            None => rect,
+        };
+        self.scratch.stats.pixels +=
+            frame.fill_rect(fill.x as i64, fill.y as i64, fill.width, fill.height, run.colour);
+        self.scratch.stats.rules += 1;
     }
 
     /// How many codepoints `bytes` holds, for the skipped and missing counts.
@@ -1064,6 +1303,33 @@ impl<'a> Painter<'a> {
     fn vertical(&self, style: holonomy_render::Style, size: u16) -> (u16, u16) {
         self.atlas
             .map_or((0, 0), |a| a.vertical(atlas_style(style), size))
+    }
+
+    /// **How far a baseline shift of a run moves the glyphs.**
+    ///
+    /// # Why this is the painter's answer and not the session's
+    ///
+    /// **Because the shift is a fraction of the line and the line is the atlas's.** The painter subtracts
+    /// the session's shift from the ascent it looked up for the run's own face and size, so the two
+    /// numbers are both derivations of `Atlas::line_pitch` — and **the emitter's is what the damage rect
+    /// is grown by.** One function here, called by `Session::baseline_shift`, is what keeps the glyphs'
+    /// offset and the repaint's box the same number.
+    ///
+    /// **It takes the run's size index**, because a heading's line is taller than the body's and a third
+    /// of it is a different number of pixels.
+    ///
+    /// **This function exists for the emitter's damage rect**: a shifted run draws outside its line box,
+    /// and the box a repaint must cover is the line box grown by this. Nothing else reads it for a
+    /// second opinion.
+    pub fn shift_of(&self, shifted: bool, size: u8) -> u32 {
+        if !shifted {
+            return 0;
+        }
+        // **The line box at the run's own size**, which is the `cell_h` the emitter lays the line out
+        // with: a heading's shift is a third of the heading's line, not of the body's. `i8::MAX`
+        // because the field is an `i8` and a 400-px line would otherwise wrap it negative -- a
+        // superscript drawn as a subscript.
+        (self.cell_height_at(self.label_size(size)) / 3).min(i8::MAX as u32)
     }
 
     /// The text cell height: the line box a run occupies.
