@@ -58,19 +58,20 @@ jobs:
           ref: main
       - uses: dtolnay/rust-toolchain@stable
       - name: baseline-all
+        id: base
         run: |
-          set -o pipefail
           mkdir -p ci-baseline
-          if cargo test --workspace --no-fail-fast > ci-baseline/chrome.log 2>&1; then
-            echo "BASELINE all PASS" > ci-baseline/summary.log
-          else
-            echo "BASELINE all FAIL" > ci-baseline/summary.log
+          if cargo test --workspace --no-fail-fast > ci-baseline/all.log 2>&1
+          then echo "BASELINE all PASS" > ci-baseline/summary.log
+          else echo "BASELINE all FAIL" > ci-baseline/summary.log
           fi
-          grep -E "^test result|^---- |panicked at" ci-baseline/chrome.log | head -40
+          grep -c "FAILED" ci-baseline/all.log >> ci-baseline/summary.log || true
+          cat ci-baseline/summary.log
       - name: publish
         if: always()
         run: |
-          git config user.name ci; git config user.email ci@example.invalid
+          git config user.name ci
+          git config user.email ci@example.invalid
           git add -f ci-baseline
-          git commit --allow-empty -m "ci: main baseline [skip ci]" || true
-          git push origin HEAD:refs/heads/ci-baseline-main 2>&1 | tail -3
+          git commit --allow-empty -m "ci: main baseline [skip ci]"
+          git push origin HEAD:refs/heads/ci-baseline-${GITHUB_RUN_ID}
