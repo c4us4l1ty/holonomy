@@ -4,21 +4,3 @@ info: downloading 6 components
 warn: the missing active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been auto-installed
 warn: this might cause rustup commands to take longer time to finish than expected
 info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
-Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/ribbon.rs:1109:
-         );
-     }
-     round(v, lock_rect(l), 5, t.accent);
--    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_w, cell_h);
-+    text(
-+        v,
-+        lock_rect(l),
-+        "Lock",
-+        t.on_accent,
-+        true,
-+        true,
-+        cell_w,
-+        cell_h,
-+    );
-     for (i, r) in tab_rects(l).into_iter().enumerate() {
-         let selected = i == usize::from(s.ribbon_tab);
-         if selected {

@@ -1,18 +1,18 @@
 [1m[92m    Updating[0m crates.io index
 [1m[92m Downloading[0m crates ...
-[1m[92m  Downloaded[0m cmov v0.5.4
 [1m[92m  Downloaded[0m alloc-stdlib v0.3.0
-[1m[92m  Downloaded[0m crypto-common v0.2.2
-[1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
 [1m[92m  Downloaded[0m block-buffer v0.12.1
-[1m[92m  Downloaded[0m digest v0.11.3
+[1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
+[1m[92m  Downloaded[0m blake2 v0.11.0
+[1m[92m  Downloaded[0m crypto-common v0.2.2
 [1m[92m  Downloaded[0m typenum v1.20.1
 [1m[92m  Downloaded[0m zeroize v1.9.0
+[1m[92m  Downloaded[0m cmov v0.5.4
 [1m[92m  Downloaded[0m ctutils v0.4.2
+[1m[92m  Downloaded[0m digest v0.11.3
 [1m[92m  Downloaded[0m hybrid-array v0.4.15
-[1m[92m  Downloaded[0m blake2 v0.11.0
-[1m[92m  Downloaded[0m ttf-parser v0.25.1
 [1m[92m  Downloaded[0m brotli-decompressor v6.0.1
+[1m[92m  Downloaded[0m ttf-parser v0.25.1
 [1m[92m  Downloaded[0m libc v0.2.190
 [1m[92m    Checking[0m typenum v1.20.1
 [1m[92m   Compiling[0m libc v0.2.190
@@ -24,10 +24,10 @@
 [1m[92m    Checking[0m brotli-decompressor v6.0.1
 [1m[92m    Checking[0m ttf-parser v0.25.1
 [1m[92m    Checking[0m hybrid-array v0.4.15
-[1m[92m    Checking[0m crypto-common v0.2.2
-[1m[92m    Checking[0m block-buffer v0.12.1
 [1m[92m    Checking[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
 [1m[92m    Checking[0m holonomy-secure v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-secure)
+[1m[92m    Checking[0m crypto-common v0.2.2
+[1m[92m    Checking[0m block-buffer v0.12.1
 [1m[92m    Checking[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
 [1m[92m    Checking[0m digest v0.11.3
 [1m[92m    Checking[0m blake2 v0.11.0
@@ -47,4 +47,4 @@
     [1m[94m|[0m
 
 [1m[33mwarning[0m: `holonomy-render` (test "icons") generated 1 warning (run `cargo fix --test "icons" -p holonomy-render` to apply 1 suggestion)
-[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 3.60s
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 3.77s
