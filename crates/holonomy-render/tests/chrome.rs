@@ -1582,3 +1582,100 @@ fn a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row() {
     let state = ChromeState { paged: true, caret_column: cells, ..ChromeState::default() };
     assert!(Caret::locate(&layout, &m, &state).is_some());
 }
+
+#[test]
+fn desktop_sheets_stack_with_a_gap_and_scroll_without_losing_the_previous_page() {
+    let m = ChromeMetrics::for_size(1280, 2400);
+    let layout = Layout::new(&m);
+    let per_page = layout.page_rows();
+    let mut state = ChromeState { paged: true, total_lines: per_page * 3, ..ChromeState::default() };
+    let first = layout.visible_page(&state, 0).unwrap();
+    let second = layout.visible_page(&state, 1).unwrap();
+    assert!(second.y > first.bottom());
+    assert_eq!(layout.page_count(state.total_lines), 3);
+    assert_eq!(layout.page_at(&state, first.x as i32 + 2, first.y as i32 + 2), Some(0));
+    assert_eq!(layout.page_at(&state, second.x as i32 + 2, second.y as i32 + 2), Some(1));
+    assert_eq!(layout.page_at(&state, first.x as i32 + 2, first.bottom() as i32 + 2), None);
+    state.scroll_line = per_page;
+    assert!(layout.visible_page(&state, 1).is_some());
+    state.scroll_line = 0;
+    assert!(layout.visible_page(&state, 0).is_some());
+}
+
+#[test]
+fn desktop_page_rows_share_one_mapping_for_caret_and_hit_testing() {
+    let m = ChromeMetrics::for_size(1280, 2400);
+    let layout = Layout::new(&m);
+    let rows = layout.page_rows();
+    let mut state = ChromeState { paged: true, total_lines: rows * 3, ..ChromeState::default() };
+    for line in [0, rows - 1, rows, rows + 1] {
+        state.caret_line = line;
+        let caret = Caret::locate(&layout, &m, &state).unwrap();
+        let hit = layout.caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1).unwrap();
+        assert_eq!(hit.0, line);
+    }
+    state.scroll_line = rows;
+    state.caret_line = rows + 2;
+    let caret = Caret::locate(&layout, &m, &state).unwrap();
+    assert_eq!(layout.caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1).unwrap().0, rows + 2);
+    assert!(layout.visible_page(&state, 0).is_none());
+}
+
+#[test]
+fn desktop_page_capacity_does_not_depend_on_window_height() {
+    let short = Layout::new(&ChromeMetrics::for_size(1280, 600));
+    let tall = Layout::new(&ChromeMetrics::for_size(1280, 1600));
+    assert_eq!(short.page_rows(), tall.page_rows());
+    assert_eq!(short.page_height(), tall.page_height());
+}
+
+#[test]
+fn the_paged_chrome_tree_paints_separate_visible_sheets() {
+    let m = ChromeMetrics::for_size(1280, 2400);
+    let c = Chrome::new(m);
+    let state = ChromeState { paged: true, total_lines: c.layout.page_rows() * 2, ..ChromeState::default() };
+    let sheets: Vec<_> = nodes(&c.tree(&state)).into_iter().filter_map(|n| match n {
+        Node::Rect(r) if r.colour == chrome::colour::PAGE && r.x == c.layout.page.x as i32 && r.width == c.layout.page.width => Some(r),
+        _ => None,
+    }).collect();
+    assert_eq!(sheets.len(), 2);
+    assert!(sheets[1].y > sheets[0].y + sheets[0].height as i32);
+}
+
+#[test]
+fn many_pages_render_a_viewport_bounded_number_of_sheets() {
+    let m = ChromeMetrics::for_size(1280, 900);
+    let c = Chrome::new(m);
+    let rows = c.layout.page_rows();
+    let state = ChromeState { paged: true, total_lines: rows * 2_000, scroll_line: rows * 1_600 + 3, ..ChromeState::default() };
+    assert_eq!(c.layout.page_count(state.total_lines), 2_000);
+    let nodes = nodes(&c.tree(&state));
+    let sheets = nodes.iter().filter(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE && r.x == c.layout.page.x as i32 && r.width == c.layout.page.width)).count();
+    assert!((1..=3).contains(&sheets), "only visible sheets should be painted, got {sheets}");
+    assert!(c.layout.visible_end(&state) - state.scroll_line <= c.layout.canvas.height / c.layout.cell_h.max(1) + 2);
+    let thumb = c.scroll_thumb(&state);
+    assert!(thumb.bottom() <= c.layout.scrollbar.bottom());
+}
+
+#[test]
+fn desktop_wheel_and_pointer_can_use_the_next_sheet() {
+    use holonomy_render::widgets::{hit, Hit};
+    let m = ChromeMetrics::for_size(1280, 2400);
+    let c = Chrome::new(m);
+    let rows = c.layout.page_rows();
+    let state = ChromeState { paged: true, total_lines: rows * 2, ..ChromeState::default() };
+    let y = c.layout.row_y(&state, rows).unwrap() + 1;
+    let x = c.layout.text.x as i32;
+    assert_eq!(hit(&c.layout, &state, x, y as i32), Hit::Page);
+    assert_eq!(c.layout.caret_at(&state, x, y as i32).unwrap().0, rows);
+}
+
+#[test]
+fn a_short_canvas_scrolls_the_first_line_into_view() {
+    let m = ChromeMetrics::for_size(1280, 160);
+    let layout = Layout::new(&m);
+    let state = ChromeState { paged: true, ..ChromeState::default() };
+    if layout.canvas.height >= layout.cell_h {
+        assert_eq!(layout.row_y(&state, 0), Some(layout.canvas.y));
+    }
+}

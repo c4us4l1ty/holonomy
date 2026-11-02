@@ -144,14 +144,18 @@ model; the existing editing and export limitations still apply.
 
 ## Desktop long-document view
 
-Managed desktop documents soft-wrap prose into indexed visual rows; the stored document is not
-modified by wrapping. Scrolling and Page Up/Down can reach subsequent screenfuls, including inside
-one long paragraph. The status bar's **View** number describes viewport-sized groups of rows; it is
-not a print page number. A resize or zoom can change the grouping. Physical page breaks, fixed paper
-sizes and matching the PDF export's pagination are **not implemented**. Logical lines containing `$$` or table separators retain the old unwrapped block-rendering
-behavior; multiline tables still need a block-aware layout. Layout currently counts Unicode scalars
-rather than measuring styled glyph widths; complex shaping and soft-boundary caret affinity remain
-limitations.
+Managed desktop documents soft-wrap prose into indexed visual rows without changing stored text.
+The editor stacks individual sheets with a gap, drawing only sheets and rows near the viewport.
+The wheel, scrollbar, arrow keys and Page Up/Down can move through the document; the status bar reports the
+sheet containing the first visible row. Sheet height is derived from its width, rather than the
+window height. Zoom or a width change can reflow text and alter page boundaries.
+
+This is not yet a full print-layout engine: page dimensions are not selectable paper sizes and PDF
+export paginates independently. Logical lines containing `$$` or table separators retain the old
+unwrapped block rendering. Variable-height formulas, images, and multiline tables are not yet
+repaginated or split to fit sheets, and their click geometry can differ from plain text. Layout
+counts Unicode scalars rather than measuring styled glyph widths; complex shaping and soft-boundary
+caret affinity remain limitations.
 
 The index keeps offsets and row lengths, not a copy of the document text. An edit normally rewraps
 its paragraph; changes in row count rebuild the row index, and newline edits and resize may re-index

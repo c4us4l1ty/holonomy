@@ -149,7 +149,7 @@ fn click_and_selection_follow_wrapped_rows_after_scrolling() {
     s.scroll_to(10).unwrap();
     let l = s.chrome_layout();
     let x = l.text.x as i32;
-    let y = (l.text.y + s.chrome.metrics.cell_h + s.chrome.metrics.cell_h / 2) as i32;
+    let y = (l.row_y(&s.state, 11).unwrap() + s.chrome.metrics.cell_h / 2) as i32;
     s.handle_pointer(&mut NoSource, Event::Button { button: Button::Left, pressed: true, x, y, time_ms: 100 }).unwrap();
     s.handle_pointer(&mut NoSource, Event::Button { button: Button::Left, pressed: false, x, y, time_ms: 101 }).unwrap();
     assert_eq!(s.caret_line(), 11);
@@ -158,5 +158,51 @@ fn click_and_selection_follow_wrapped_rows_after_scrolling() {
     let selected = s.editor().selection().unwrap();
     assert_eq!(selected.start, at);
     assert!(selected.end > selected.start);
+    s.repaint_all().unwrap();
+}
+
+#[test]
+fn entering_past_a_sheet_creates_a_second_visible_page_without_losing_the_first() {
+    use holonomy_input::Command;
+    let mut s = session();
+    s.create_document(1, "Pages".into());
+    s.insert_text("first page").unwrap();
+    let rows = s.chrome_layout().page_rows();
+    for _ in 0..rows { s.apply(Command::Newline).unwrap(); }
+    s.insert_text("second page").unwrap();
+    assert_eq!(s.chrome_layout().page_count(s.total_lines()), 2);
+    assert!(s.scroll_line() > 0);
+    assert!(s.text().unwrap().starts_with(b"first page\n"));
+    assert!(s.text().unwrap().ends_with(b"second page"));
+    s.repaint_all().unwrap();
+    s.scroll_to(0).unwrap();
+    let canvas = s.chrome_layout().canvas;
+    let wheel_x = canvas.right().saturating_sub(2) as i32;
+    let wheel_y = (canvas.y + canvas.height / 2) as i32;
+    let x_wheel = |button| holonomy_input::x11key::pointer_event(&holonomy_x11::Event::ButtonPress {
+        button, event_x: wheel_x as i16, event_y: wheel_y as i16, time: 1,
+    }).unwrap();
+    s.handle_pointer(&mut holonomy::store::NoSource, x_wheel(5)).unwrap();
+    assert!(s.scroll_line() > 0, "wheel down works over the desk, not just a sheet");
+    s.handle_pointer(&mut holonomy::store::NoSource, x_wheel(4)).unwrap();
+    assert_eq!(s.scroll_line(), 0);
+    let rail = s.chrome_layout().scrollbar;
+    let x = (rail.x + rail.width / 2) as i32;
+    let bottom = rail.bottom().saturating_sub(1) as i32;
+    s.handle_pointer(&mut holonomy::store::NoSource, holonomy_input::Event::Button {
+        button: holonomy_input::Button::Left, pressed: true, x, y: bottom, time_ms: 200,
+    }).unwrap();
+    assert!(s.scroll_line() > 0, "clicking the scrollbar moves to later pages");
+    s.handle_pointer(&mut holonomy::store::NoSource, holonomy_input::Event::Motion {
+        x, y: rail.y as i32,
+    }).unwrap();
+    s.handle_pointer(&mut holonomy::store::NoSource, holonomy_input::Event::Button {
+        button: holonomy_input::Button::Left, pressed: false, x, y: rail.y as i32, time_ms: 201,
+    }).unwrap();
+    assert_eq!(s.scroll_line(), 0, "dragging the thumb back returns to the first page");
+    assert!(s.chrome_layout().visible_page(&s.state, 0).is_some());
+    s.repaint_all().unwrap();
+    s.scroll_to(rows).unwrap();
+    assert!(s.chrome_layout().visible_page(&s.state, 1).is_some());
     s.repaint_all().unwrap();
 }

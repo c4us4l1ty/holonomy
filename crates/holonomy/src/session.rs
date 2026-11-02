@@ -561,6 +561,8 @@ pub struct Session<'a> {
     /// then dragged back over the page would start selecting text. **The flag is set only by a press
     /// that landed on the page**, and nothing else touches it.
     page_drag: bool,
+    /// Pointer offset within a dragged desktop scrollbar thumb.
+    scrollbar_drag: Option<i32>,
     /// **The click that came before this one, and how many clicks in a row it was.** Part 41.
     ///
     /// ## Why the session keeps this and not the chrome
@@ -937,6 +939,7 @@ impl<'a> Session<'a> {
         text.fill(0);
 
         self.editor = editor;
+        self.scrollbar_drag = None;
         self.state.dirty = false;
         self.state.font_index = 0;
         self.state.style_index = 0;
@@ -1128,6 +1131,7 @@ impl<'a> Session<'a> {
             keymap: Keymap::us(),
             mods: ModifierState::new(),
             page_drag: false,
+            scrollbar_drag: None,
             clicks: None,
             mode: holonomy_render::menus::ViewMode::Editing,
             edge_scroll: None,
@@ -1933,6 +1937,7 @@ impl<'a> Session<'a> {
     pub fn take_document_request(&mut self) -> Option<DocumentRequest> { self.document_request.take() }
     /// Display or dismiss the desktop library, without changing the active document.
     pub fn set_home(&mut self, view: Option<holonomy_render::home::View>) {
+        self.scrollbar_drag = None;
         self.home = view;
         self.state.open = None;
         self.invalidate(self.chrome.full_damage());
@@ -2550,6 +2555,31 @@ impl<'a> Session<'a> {
             return Ok(());
         };
 
+        if self.state.paged && self.home.is_none() {
+            match event {
+                P::Motion { .. } if self.scrollbar_drag.is_some() => {
+                    self.seek_scrollbar(y);
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                P::Button { button: holonomy_input::Button::Left, pressed: true, .. }
+                    if self.state.open.is_none() && self.chrome.layout.scrollbar.contains(x, y) => {
+                    let thumb = self.chrome.scroll_thumb(&self.state);
+                    let offset = if thumb.contains(x, y) { y - thumb.y as i32 } else { (thumb.height / 2) as i32 };
+                    self.scrollbar_drag = Some(offset);
+                    self.seek_scrollbar(y);
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                P::Button { button: holonomy_input::Button::Left, pressed: false, .. }
+                    if self.scrollbar_drag.is_some() => {
+                    self.scrollbar_drag = None;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match event {
             P::Motion { .. } => {
                 // **A drag in progress extends the selection, before anything else here.** Part 28.
@@ -2618,10 +2648,15 @@ impl<'a> Session<'a> {
                 // scroll, and a wheel over the sidebar should scroll the sidebar, which does not
                 // either. Scrolling the document under an open popup would move the thing the user is
                 // reading while the menu they are choosing from stays put.
-                let over_page =
-                    widgets::hit(&self.chrome.layout, &self.state, x, y) == widgets::Hit::Page;
+                let over_page = if self.state.paged {
+                    self.state.open.is_none() && self.chrome.layout.canvas.contains(x, y)
+                        && !(self.state.sidebar_open && self.chrome.layout.sidebar.contains(x, y))
+                } else {
+                    widgets::hit(&self.chrome.layout, &self.state, x, y) == widgets::Hit::Page
+                };
                 if over_page && dy != 0 {
-                    self.scroll_by(i64::from(dy) * 3);
+                    // Both evdev and X11 use a positive notch for wheel-up.
+                    self.scroll_by(-i64::from(dy) * 3);
                 }
             }
             P::Button {
@@ -3498,10 +3533,9 @@ impl<'a> Session<'a> {
         // **Scroll too, because a shift-arrow to a line off the page needs it as much as a plain one.**
         self.scroll_line_into_view(self.state.caret_line);
         let l = self.chrome.layout;
-        self.damage = l
-            .page
-            .union(&l.scrollbar)
-            .union(&l.status);
+        self.damage = if self.state.paged { l.canvas.union(&l.status) } else {
+            l.page.union(&l.scrollbar).union(&l.status)
+        };
     }
 
     /// Recompute [`ChromeState::caret_column`] as a count of UTF-8 scalars, and return it if complete.
@@ -5332,21 +5366,23 @@ impl<'a> Session<'a> {
     /// **`rows == 0` returns rather than subtracting**, because `rows - 1` would be the underflow the
     /// project's `for_size` docs describe, and a window with no text rows is reachable by dragging.
     fn scroll_line_into_view(&mut self, line: u32) {
-        let rows = self.chrome.layout.rows;
-        if rows == 0 {
-            return;
-        }
+        let layout = self.chrome.layout;
+        let rows = layout.rows;
+        if rows == 0 && !self.state.paged { return; }
         let first = self.state.scroll_line;
         let last = first.saturating_add(rows);
-        let scroll = if self.state.paged && (line < first || line >= last) {
-            (line / rows) * rows
-        } else if line < first {
-            line
-        } else if line >= last {
-            line.saturating_sub(rows - 1)
-        } else {
-            first
-        };
+        let scroll = if self.state.paged {
+            if line < first { line } else if layout.paged_row_y(first, line) + i64::from(layout.cell_h) > i64::from(layout.canvas.bottom()) {
+                // Find the smallest scroll that brings the caret into the canvas. The row-to-y
+                // mapping is monotonic even across page gaps, so this is logarithmic.
+                let (mut lo, mut hi) = (first, line);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if layout.paged_row_y(mid, line) + i64::from(layout.cell_h) <= i64::from(layout.canvas.bottom()) { hi = mid; } else { lo = mid + 1; }
+                }
+                lo
+            } else { first }
+        } else if line < first { line } else if line >= last { line.saturating_sub(rows - 1) } else { first };
         self.state.scroll_line = scroll;
         if self.state.paged && scroll != first {
             // A caret move can change every visible row, not just the two caret cells.
@@ -5656,7 +5692,9 @@ impl<'a> Session<'a> {
     /// page-down.
     fn page_by_lines(&mut self, direction: i64) -> Result<(), SessionError> {
         let rows = self.chrome.layout.rows.max(1) as i64;
-        let step = if self.state.paged { rows } else { (rows - 1).max(1) };
+        let step = if self.state.paged {
+            i64::from((self.chrome.layout.canvas.height / self.chrome.layout.cell_h.max(1)).saturating_sub(2).max(1))
+        } else { (rows - 1).max(1) };
         let line = self.line_index(self.editor.caret() as usize);
         let last = self.state.total_lines.saturating_sub(1);
         let want = (line as i64 + direction * step).clamp(0, i64::from(last)) as u32;
@@ -5805,12 +5843,11 @@ impl<'a> Session<'a> {
         let m = &self.chrome.metrics;
         let text = self.chrome.layout.text;
         let row = line.checked_sub(self.state.scroll_line)?;
-        if row >= self.chrome.layout.rows {
-            return None;
-        }
+        if !self.state.paged && row >= self.chrome.layout.rows { return None; }
+        let y = if self.state.paged { self.chrome.layout.row_y(&self.state, line)? } else { text.y + row * m.cell_h };
         Some(DamageRect::new(
             text.x,
-            text.y + row * m.cell_h,
+            y,
             text.width,
             m.cell_h,
         ))
@@ -6274,7 +6311,7 @@ impl<'a> Session<'a> {
         // and mixing the two is how a run ends up on the page margin.
         let l = self.chrome.layout.text;
         let first = self.state.scroll_line;
-        let last = (first + self.chrome.layout.rows).min(self.state.total_lines);
+        let last = self.chrome.layout.visible_end(&self.state);
         if first >= last {
             return;
         }
@@ -6452,7 +6489,10 @@ impl<'a> Session<'a> {
         };
         for (row, &(at, len)) in spans.iter().enumerate() {
             let line = first + row as u32;
-            let y = l.y + line_heights.y(line - first);
+            let y = if self.state.paged {
+                let Some(y) = self.chrome.layout.row_y(&self.state, line) else { continue; };
+                y
+            } else { l.y + line_heights.y(line - first) };
             let rect = DamageRect::new(l.x, y, l.width, m.cell_h);
             // **Culled by row range, after the read.** Two comparisons rather than a rectangle
             // intersection: `DamageRect` has no `intersects`, and a general-purpose method used in exactly
@@ -6750,7 +6790,7 @@ impl<'a> Session<'a> {
         let m = self.chrome.metrics;
         let l = self.chrome.layout;
         let first = self.state.scroll_line;
-        let last = first + l.rows;
+        let last = l.visible_end(&self.state);
         let mut cells_drawn = 0u32;
         let mut borders_drawn = 0u32;
         let mut extra: Option<DamageRect> = None;
@@ -6766,7 +6806,9 @@ impl<'a> Session<'a> {
             };
             // From the model, not from `row_pitch`: this is the line the model has reserved for the
             // table, so the table and the chrome agree on where that line is by construction.
-            let top = l.text.y + self.state.line_heights.y(line - first);
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else { continue; }; y
+            } else { l.text.y + self.state.line_heights.y(line - first) };
             let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
 
             // --- borders, as procedural box-drawing glyph runs on the cell grid.
@@ -6914,10 +6956,10 @@ impl<'a> Session<'a> {
         let text = &self.doc_scratch[..read];
         let l = self.chrome.layout;
         let first = self.state.scroll_line;
-        let last = first + l.rows;
+        let last = l.visible_end(&self.state);
 
         // --- 1. eviction. The window is the visible page plus one either side.
-        let rows_per_page = l.rows.max(1);
+        let rows_per_page = if self.state.paged { l.page_rows() } else { l.rows.max(1) };
         let first_page = first / rows_per_page;
         let last_page = last.saturating_sub(1) / rows_per_page;
         let evicted = self.images.set_window(
@@ -6949,13 +6991,15 @@ impl<'a> Session<'a> {
 
             // --- 2. decode if absent. Only for what is on screen, which is the whole of the ±1 rule's
             // point: a document may hold a thousand images and only the visible ones cost anything.
-            if !self.images.holds(id.as_bytes()) && self.decode_into_cache(ordinal, line) {
+            if !self.images.holds(id.as_bytes()) && self.decode_into_cache(ordinal, line / rows_per_page) {
                 // Decoded. `rw`/`rh` are recomputed by the decoder's own header, and a header that
                 // disagreed with the catalog would already have been refused when the catalog was
                 // loaded.
             }
 
-            let top = l.text.y + line_heights.y(line - first);
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else { continue; }; y
+            } else { l.text.y + line_heights.y(line - first) };
             // The colour is never read: `Painter::image` blits the raster's own RGBA and ignores
             // `Rect::colour`. The page background is passed because `Rect` requires one, and because
             // it is the right answer for the `DamageRect` a caller derives from the rect.
@@ -7052,6 +7096,18 @@ impl<'a> Session<'a> {
     /// Bytes of decoded image resident right now. The number §2.9.4's budget row is about.
     pub fn image_cache_bytes(&self) -> usize {
         self.images.resident_bytes()
+    }
+
+    fn seek_scrollbar(&mut self, y: i32) {
+        let rail = self.chrome.layout.scrollbar;
+        let thumb = self.chrome.scroll_thumb(&self.state);
+        let span = rail.height.saturating_sub(thumb.height);
+        if span == 0 { return; }
+        let offset = self.scrollbar_drag.unwrap_or(0);
+        let position = (i64::from(y) - i64::from(rail.y) - i64::from(offset)).clamp(0, i64::from(span)) as u64;
+        let last = u64::from(self.state.total_lines.saturating_sub(1));
+        let line = ((position * last + u64::from(span) / 2) / u64::from(span)) as u32;
+        let _ = self.scroll_to(line);
     }
 
     /// Scroll the page by `delta` lines, without moving the caret.
@@ -7224,7 +7280,7 @@ impl<'a> Session<'a> {
         // prints it.
         mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
         let first = self.state.scroll_line;
-        let last = first + l.rows;
+        let last = l.visible_end(&self.state);
         let caret = self.editor.caret();
         let ink = holonomy_render::chrome::colour::INK;
         let line_heights = self.state.line_heights.clone();
@@ -7251,7 +7307,9 @@ impl<'a> Session<'a> {
                 return;
             }
             let inner = span.inner();
-            let top = l.text.y + line_heights.y(line - first);
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else { return; }; y
+            } else { l.text.y + line_heights.y(line - first) };
 
             // --- caret inside: the raw LaTeX, in the monospace face.
             if span.contains(caret) {

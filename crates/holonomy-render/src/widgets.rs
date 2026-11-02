@@ -1075,7 +1075,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
     }
 
-    if at(&l.page) {
+    if if state.paged { l.page_at(state, x, y).is_some() } else { at(&l.page) } {
         Hit::Page
     } else {
         Hit::None
