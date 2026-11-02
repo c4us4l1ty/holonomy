@@ -1,11 +1,11 @@
-//! **The icon set: 34 hand-authored 1-bit masks.** 6 tests.
+//! **The icon set: 33 hand-authored 1-bit masks.** 6 tests.
 //!
 //! # What these assertions are for, given that the icons are pictures
 //!
 //! A bitmap is the one artefact in this codebase that **compiles when it is wrong.** Every other thing
 //! here is checked by a type or a bound; an icon that is mirrored, blank, or two pixels off its box is
 //! a valid `&'static [u64]` of the right length and no compiler will ever mention it again. So the gate
-//! is about the properties a human cannot reliably check by eye across 34 icons:
+//! is about the properties a human cannot reliably check by eye across 33 icons:
 //!
 //! | what it proves | test |
 //! | --- | --- |
@@ -146,8 +146,8 @@ fn every_icon_is_sixteen_square_and_not_empty() {
 ///
 /// The mirror of the test above, and the one that catches the mistake of drawing with a thick brush
 /// instead of a thin one. A 16x16 box filled past ~40% reads as a *block* at 1x rather than as a glyph,
-/// because there is no white space left for the eye to separate the strokes. **34 icons of blocks look
-/// exactly like 34 icons of glyphs in a node-count assertion**, which is why this is a gate.
+/// because there is no white space left for the eye to separate the strokes. **33 icons of blocks look
+/// exactly like 33 icons of glyphs in a node-count assertion**, which is why this is a gate.
 #[test]
 fn no_icon_is_mostly_ink() {
     let budget = (SIZE * SIZE) / 3;
@@ -189,36 +189,34 @@ fn no_two_icons_share_a_mask() {
 /// covered. So `ALL` is checked against the enum's own discriminants.
 #[test]
 fn the_all_list_and_the_match_agree() {
-    // **34, and neither of the two deletions a previous part claimed is actually in the code.**
+    // **33, and this number has a history worth keeping because it is a record of claims that did not
+    // land.**
     //
-    // **Part 33 was written as though `IconId::Print` had been removed** -- "the mask, the enum
-    // variant and the `ALL` entry went together" -- and part 46 was written as though
-    // `IconId::Comment` had been removed the same way. **Neither deletion landed.** `IconId::Print`
-    // and `IconId::Comment` are both still in `ALL`, `mask::PRINT` and `mask::COMMENT` both still
-    // resolve, `Tool::Print` and `Tool::Comment` are both still in `TOOLBAR`, and
-    // `TitleButton::Comments` is still a variant.
+    // **Part 33 was written as though `IconId::Print` had been removed** — "the mask, the enum variant
+    // and the `ALL` entry went together" — and **part 46 was written as though `IconId::Comment` had
+    // been removed the same way. Neither deletion landed at the time.** Both were still in `ALL`, both
+    // masks still resolved, both tools were still on the toolbar, and `TitleButton::Comments` was still
+    // a variant. So the count said 34 while the prose said 32, and a reader who trusted the prose went
+    // looking for an icon that was still there.
     //
-    // **The number below is the one the code produces, and it was written against the code rather
-    // than against the plan** -- which is why it says 34 and not 32. The prose around it was not,
-    // and a reader who trusted it would look for an icon that is still there.
+    // **`Print` was resolved by wiring it, not by deleting it.** `Tool::Print` reaches `Action::Export`,
+    // so the button does the one thing a print button does — the cheaper end of the same argument.
     //
-    // **`Print` was resolved by wiring it, not by deleting it.** `Tool::Print` reaches
-    // `Action::Export`, so the button does the one thing a print button does. That is the cheaper
-    // end of the same argument: a button that does nothing is a lie about the product, and this one
-    // was given something to do rather than taken off the bar.
+    // **`Comment` is resolved by deleting it, and this is that deletion.** It had no annotation store —
+    // no list, no anchor range, no author, and no way for an anchor to move when the text before it was
+    // edited — so it could never work, and by this project's own standard *a button that will never work
+    // is a lie about the product*. The tool, the icon, the mask and `TitleButton::Comments` are all
+    // gone together, which is what the previous attempt said it had done.
     //
-    // **`Comment` is the one still standing.** It has no annotation store -- no list, no anchor
-    // range, no author, and no way for an anchor to move when the text before it is edited -- so it
-    // is inert, and by this project's own standard *a button that will never work is a lie about the
-    // product*. **It is left here and named rather than deleted on the strength of a comment**,
-    // because removing a toolbar button is a product decision and this file is a gate. The count to
-    // change if that decision is made is 34 -> 33.
+    // **34 -> 33 is the number this file said to change**, and it is the only number that moved: the
+    // remaining 33 are unchanged, `mask::PRINT` still resolves, and `Tool::Print` is still wired.
     assert_eq!(
         IconId::ALL.len(),
-        34,
+        33,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
-         `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. Part 33 removed \
-         **Neither removal a previous part claimed actually landed**: `IconId::Print` and `IconId::Comment` are both still in this list, `Tool::Print` is wired to `Action::Export`, and `Tool::Comment` is still inert on the toolbar."
+         `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. This went 34 -> 33 \
+         when `Comment` was removed with `Tool::Comment` and `TitleButton::Comments`: it had no \
+         annotation store and could never work, so it was a button that lied about the product."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.

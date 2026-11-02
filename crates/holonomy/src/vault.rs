@@ -143,7 +143,26 @@ impl Vault {
 
     /// Merge resident edits, retaining documents that were closed but not deleted.
     pub fn save(&mut self, session: &mut Session) -> Result<(), VaultError> {
-        for snap in session.document_snapshots().map_err(VaultError::Editor)? {
+        self.save_snapshots(session.document_snapshots().map_err(VaultError::Editor)?)?;
+        session.mark_documents_saved();
+        Ok(())
+    }
+
+    /// [`save`](Self::save) for a caller that has already produced the snapshots.
+    ///
+    /// # Why the split exists
+    ///
+    /// **`document_snapshots` needs the session; nothing else in a save does.** The expensive half is
+    /// the container write, and the tray below runs it on another thread — so the UI thread's share is
+    /// meant to be exactly the snapshot, and a `save` that took `&mut Session` could never be called
+    /// from a worker. Pulling the payloads on the UI thread and sealing them on a worker is what keeps
+    /// the event loop off the disk.
+    ///
+    /// **It does not touch `dirty`.** A worker that completed the write is the only thing that knows it
+    /// landed, and [`mark_documents_saved`](Session::mark_documents_saved) is that worker's call, made
+    /// through the tray — not this function's.
+    pub fn save_snapshots(&mut self, snapshots: Vec<DocumentSnapshot>) -> Result<(), VaultError> {
+        for snap in snapshots {
             let doc = StoredDocument { id: snap.id, title: snap.title, payload: snap.payload, caret: snap.caret };
             if let Some(old) = self.documents.iter_mut().find(|d| d.id == doc.id) { *old = doc; }
             else { self.documents.push(doc); }
@@ -151,9 +170,7 @@ impl Vault {
         let mut bytes = encode_bundle(self.next_id, &self.documents)?;
         let result = self.container.write_content(&bytes).map_err(VaultError::Container);
         bytes.zeroize();
-        result?;
-        session.mark_documents_saved();
-        Ok(())
+        result
     }
 
     /// Persist the smaller bundle *before* removing the resident document. A failed write leaves

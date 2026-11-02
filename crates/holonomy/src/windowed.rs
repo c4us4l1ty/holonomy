@@ -54,11 +54,12 @@ use holonomy_display::paint::Painter;
 use holonomy_display::{Desktop, Scanout};
 use holonomy_input::compose::{Composer, Fed};
 use holonomy_input::x11key;
+use holonomy_export::Format;
 use holonomy_render::chrome::{Blink, ChromeMetrics};
 use holonomy_text::Editor;
 
 use crate::args::Args;
-use crate::session::{DocumentRequest, Exit, Session};
+use crate::session::{DocumentRequest, Exit, ExportSink, Session};
 
 /// Why the window could not be driven.
 #[derive(Debug)]
@@ -242,7 +243,7 @@ pub fn run(
         }
     }
     let (mut min_keycode, mut mapping) = window_of(&mut session)?.keyboard_mapping().map_err(WindowedError::Desktop)?;
-    sync_form(&mut session, form.as_ref());
+    sync_form(&mut session, form.as_ref())?;
     session.repaint_all().map_err(WindowedError::Session)?;
     let start = Instant::now();
     let mut events = 0u64;
@@ -258,47 +259,143 @@ pub fn run(
             if session.state.notice.as_deref() == Some("Saved") { session.set_notice(None); }
         }
         was_dirty = dirty;
+        // **An explicit request, and only that, runs before the read.** Ctrl+S and File > Save are
+        // commands the user is waiting on and their next question is "did it work". The *timed* autosave
+        // does not run here -- it runs in the idle arm below, after the frame is on the wire. This is a
+        // `bool` and the branch is not taken on a keystroke, so it costs a compare.
+        if vault.is_some() && form.is_none() && session.take_save_request() {
+            save(&mut vault, &mut session);
+        }
         if let Some(t) = pending_paste {
             if t.elapsed() >= Duration::from_millis(700) {
                 pending_paste = None;
                 let _ = session.paste_internal();
             }
         }
-        if let Some(f) = form.as_ref() { sync_form(&mut session, Some(f)); }
-        if vault.is_some() && form.is_none() {
-            if session.take_save_request() || (session.has_unsaved_documents() && last_edit.elapsed() >= Duration::from_millis(800)) {
-                save(&mut vault, &mut session);
+        // # File > Export, which had no reader in this driver
+        //
+        // **Every drain of `export_requested` in the tree was inside `run_with_io`**, which the windowed
+        // path does not call. So the row set a flag, painted nothing, wrote nothing, and the menu closed
+        // as if it had done something — the audit's one dead control whose only missing part was a
+        // consumer. `take_export_request` is the clearing reader this driver needed.
+        //
+        // **Where the file goes.** There is no file picker in this client, and inventing one is a
+        // dialog with an operating-system browser behind it — the same amount of new surface as the
+        // feature it serves. So the export lands beside the vault, named after the document, and the
+        // status bar says the path: the user gets a real file and a real message, and the extension is
+        // chosen by the format the exporter already writes.
+        //
+        // **`Html` and `Pdf` both, because `export_all` takes a slice and a half-wired Export is what
+        // this is fixing.** A failure is per-sink and reported, not fatal: a PDF that could not be
+        // written on a read-only directory must not stop the HTML beside it going through.
+        if session.take_export_request() {
+            let mut written: Vec<String> = Vec::new();
+            let mut failed: Option<String> = None;
+            let dir = vault
+                .as_ref()
+                .and_then(|v| v.path().parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let stem = session.state.title.replace(['/', '\\'], "_");
+            for format in [Format::Html, Format::Pdf] {
+                let path = dir.join(format!("{stem}.{}", format.extension()));
+                let shown = path.display().to_string();
+                let file = match std::fs::File::create(&path) {
+                    Ok(f) => f,
+                    Err(e) => { failed = Some(format!("{shown}: {e}")); continue; }
+                };
+                let mut sink = ExportSink { format, file, path: shown.clone() };
+                match session.export(&mut sink, &stem) {
+                    Ok(_) => written.push(shown),
+                    Err(e) => failed = Some(format!("{shown}: {e}")),
+                }
             }
-            if let Some(req) = session.take_document_request() {
-                match req {
-                    DocumentRequest::New => { form = Some(Form::new_doc()); }
-                    DocumentRequest::Rename => { form = Some(Form::rename(session.state.title.clone())); }
-                    DocumentRequest::Delete => { form = Some(Form::delete(session.state.title.clone(), session.active_document_id())); }
-                    DocumentRequest::Close => {
-                        if save(&mut vault, &mut session) { let id = session.active_document_id(); session.close_document(id); session.set_notice(Some("Document closed. File > Open lists saved documents.".into())); }
-                    }
-                    DocumentRequest::Lock => {
-                        if save(&mut vault, &mut session) {
-                            let _ = window_of(&mut session)?.clear_clipboard();
-                            composer.reset();
-                            session.clear_clipboard();
-                            let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p));
-                        }
-                    }
-                    DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
-                    DocumentRequest::ImportText => { form = Some(Form::import()); }
-                    DocumentRequest::DocumentMenu(i) => {
-                        session.switch_document_public(i);
-                        form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
+            // **`written` wins over `failed` only when nothing failed**, because a notice is one line
+            // and the line the user needs is the one that says something did not work.
+            session.set_notice(Some(match (failed, written.is_empty()) {
+                (Some(e), _) => format!("Export failed: {e}"),
+                (None, false) => format!("Exported to {}", written.join(" and ")),
+                (None, true) => "Export wrote nothing".to_string(),
+            }));
+        }
+        // # The timed save moved behind the paint
+        //
+        // **This block used to run `save` at the top of the loop**, so after a keystroke the order was:
+        // dispatch → paint → come round → **seal and fsync the whole container** → wait for the next key.
+        // Every keystroke that arrived 800 ms after the previous one therefore paid for a save *between
+        // the key and its frame*, which is where a stale caret and a stuck pointer sample come from.
+        //
+        // **`Container::write_content` is not cheap.** It re-seals every chunk and commits with an fsync
+        // per chunk (`holonomy-container`'s per-chunk `commit`), and the audit measured exactly this
+        // 800 ms autosave as the synchronous block on the UI thread.
+        //
+        // **An explicit request still runs here**, because Ctrl+S and File > Save are commands the user
+        // is waiting on and their next action is "did it work". **The timed autosave runs on an idle
+        // wake, after `tick` has already put the frame on the wire** — see the `None` arm below. That is
+        // the split that is affordable without moving `Vault` to a worker thread, which would need the
+        // container and every key in it to be `Send`.
+        // **A lifecycle request is a command the user just chose from a menu**, so it runs before the
+        // read rather than in the idle arm: Close and Lock both save first and both discard state, and
+        // a dismissal that arrived a frame late would run against a form the user had already left.
+        if let Some(req) = session.take_document_request() {
+            match req {
+                DocumentRequest::New => { form = Some(Form::new_doc()); }
+                DocumentRequest::Rename => { form = Some(Form::rename(session.state.title.clone())); }
+                DocumentRequest::Delete => { form = Some(Form::delete(session.state.title.clone(), session.active_document_id())); }
+                DocumentRequest::Close => {
+                    if save(&mut vault, &mut session) { let id = session.active_document_id(); session.close_document(id); session.set_notice(Some("Document closed. File > Open lists saved documents.".into())); }
+                }
+                DocumentRequest::Lock => {
+                    if save(&mut vault, &mut session) {
+                        let _ = window_of(&mut session)?.clear_clipboard();
+                        composer.reset();
+                        session.clear_clipboard();
+                        let p = vault.as_ref().map(|v| v.path().to_path_buf()).unwrap_or_else(|| path.clone()); lock(&mut vault, &mut session, &p); form = Some(Form::unlock(p));
                     }
                 }
-                sync_form(&mut session, form.as_ref());
+                DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
+                DocumentRequest::ImportText => { form = Some(Form::import()); }
+                DocumentRequest::DocumentMenu(i) => {
+                    session.switch_document_public(i);
+                    form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
+                }
             }
+            sync_form(&mut session, form.as_ref())?;
         }
+        // # Coalesce the pointer run — the lag was a backlog, not a sleep
+        //
+        // **The loop does not spin.** `EVENT_WAIT` is handed to `Conn::ensure`, which `poll`s until the
+        // deadline before it touches the socket, so an idle window wakes 60 times a second for the caret
+        // blink and not once more. **The click lag came from the queue in front of the click**: a drag
+        // generates one `MotionNotify` per pixel, and each one was dispatched and repainted on its own,
+        // so a 900 px drag cost 900 pointer dispatches and the selection trailed the cursor by however
+        // long that took.
+        //
+        // **Every motion event but the last in a run is stale before it is drawn**, because its only
+        // content is a position. Folding the run to its newest position is not a heuristic; it is the
+        // only position among them that is still true. `Desktop::take_motion_run` does the fold and
+        // leaves every non-motion event in place, so a `ButtonPress` that arrived mid-run is still seen
+        // in order — **which is what stops a click from landing on the wrong cell.**
         let event = { let desktop = window_of(&mut session)?; desktop.next_event(EVENT_WAIT).map_err(WindowedError::Desktop)? };
         let Some(ev) = event else {
-            session.tick().map_err(WindowedError::Session)?; continue;
+            // **The tick paints first, then the timed save may take the thread.** `tick` drains the
+            // damage from the last keystroke, so by the time it returns the frame on screen is current;
+            // only then does an unrequested fsync get to run.
+            session.tick().map_err(WindowedError::Session)?;
+            if vault.is_some()
+                && form.is_none()
+                && session.has_unsaved_documents()
+                && last_edit.elapsed() >= Duration::from_millis(800)
+            {
+                save(&mut vault, &mut session);
+            }
+            continue;
         };
+        let mut ev = ev;
+        if matches!(ev, holonomy_x11::Event::MotionNotify { .. }) {
+            if let Some(newer) = window_of(&mut session)?.take_motion_run() {
+                ev = newer;
+            }
+        }
         events += 1;
         if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() { eprintln!("event {ev:?}"); }
         if let Some(bytes) = window_of(&mut session)?.handle_clipboard_event(&ev).map_err(WindowedError::Desktop)? {
@@ -315,19 +412,19 @@ pub fn run(
                 let ch = x11key::layout_char(&mapping, min_keycode, keycode, state);
                 let fed = if state & (4 | 8) == 0 { composer.feed(sym, ch) } else { composer.reset(); Fed::Pass };
                 if let Some(f) = form.as_mut() {
-                    if matches!(fed, Fed::Pending) { sync_form(&mut session, Some(f)); continue; }
+                    if matches!(fed, Fed::Pending) { continue; }
                     let text = match &fed { Fed::Text(t) => Some(t.as_str()), _ => None };
                     let outcome = f.key(keycode, state, text);
                     match outcome {
-                        KeyOutcome::Changed => sync_form(&mut session, Some(f)),
-                        KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        KeyOutcome::Changed => sync_form(&mut session, Some(f))?,
+                        KeyOutcome::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None)?; }
                         KeyOutcome::Submit => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); last_edit = Instant::now(); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
-                            sync_form(&mut session, form.as_ref());
+                            sync_form(&mut session, form.as_ref())?;
                             if vault.is_none() {
                                 let _ = window_of(&mut session)?.clear_clipboard();
                                 composer.reset();
@@ -366,17 +463,17 @@ pub fn run(
                     let l = holonomy_render::Layout::new(&session.chrome_metrics());
                     let view = f.view();
                     match holonomy_render::dialog::hit(&l, &view, event_x as i32, event_y as i32) {
-                        holonomy_render::dialog::Hit::Field(i) => { f.focus = i; sync_form(&mut session, Some(f)); }
-                        holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f)); }
+                        holonomy_render::dialog::Hit::Field(i) => { f.focus = i; sync_form(&mut session, Some(f))?; }
+                        holonomy_render::dialog::Hit::Choice(i) => { f.choice = i; sync_form(&mut session, Some(f))?; }
                         holonomy_render::dialog::Hit::Confirm => {
                             let f = form.take().unwrap();
                             match f.clone().submit(&mut vault, &mut session, holonomy_crypto::envelope::VDF_ITERATIONS) {
                                 Ok(next) => { form = next; session.set_notice(None); }
                                 Err(e) => { let mut f = f; f.error = Some(e); form = Some(f); }
                             }
-                            sync_form(&mut session, form.as_ref());
+                            sync_form(&mut session, form.as_ref())?;
                         }
-                        holonomy_render::dialog::Hit::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None); }
+                        holonomy_render::dialog::Hit::Cancel => { if vault.is_none() { return Ok(Exit::Quit); } form = None; sync_form(&mut session, None)?; }
                         _ => {}
                     }
                     continue;
@@ -414,7 +511,16 @@ pub fn run(
     }
 }
 
-fn sync_form(session: &mut Session<'_>, form: Option<&Form>) { session.set_dialog(form.map(Form::view)); }
+/// Push the form into the session and paint it now.
+///
+/// The tick is the point: a modal edit invalidates only the dialog panel, and waiting for the next
+/// 16 ms event timeout to drain that damage is the difference between a caret that moves with the
+/// key and one that lags behind it. `set_dialog` is a no-op for an unchanged view, so this is cheap
+/// to call after every form mutation.
+fn sync_form(session: &mut Session<'_>, form: Option<&Form>) -> Result<(), WindowedError> {
+    session.set_dialog(form.map(Form::view));
+    session.tick().map_err(WindowedError::Session)
+}
 fn save(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>) -> bool {
     let Some(v) = vault.as_mut() else { return true; };
     match v.save(session) { Ok(()) => { session.set_notice(Some("Saved".into())); true } Err(e) => { session.set_notice(Some(format!("Save failed: {e}"))); false } }
@@ -463,7 +569,7 @@ impl Form {
             FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
         };
         let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
-        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { "•".repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
+        let fields = labels.iter().enumerate().map(|(i,label)| { let j=i+offset; holonomy_render::dialog::Field { label: (*label).into(), value: if secrets[i] { holonomy_render::dialog::MASK.to_string().repeat(self.values.get(j).map(|s| s.chars().count()).unwrap_or(0)) } else { self.values.get(j).map(|s| s.as_str()).unwrap_or("").into() }, secret: secrets[i] } }).collect();
         holonomy_render::dialog::DialogView { title: title.into(), message: message.into(), fields, focus: self.focus, error: self.error.clone(), confirm: confirm.into(), cancel: cancel.map(str::to_string), choices: self.choices.clone(), choice: self.choice }
     }
     fn key(&mut self, keycode: u8, state: u16, text: Option<&str>) -> KeyOutcome {

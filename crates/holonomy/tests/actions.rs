@@ -313,8 +313,9 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 22,
-        "the wired rows after the menu cleanup: lifecycle rows plus Word count and Keyboard shortcuts. Adding one changes this number."
+        with_action, 26,
+        "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
+         Keyboard shortcuts. Adding one changes this number."
     );
     // **The list is printed rather than asserted empty**, because "everything is wired" is not true
     // and pretending otherwise would be the worse answer. What matters is that the count of the rest
@@ -368,11 +369,19 @@ fn every_wired_menu_item_carries_an_action() {
     // **A gate that prints the list is what made these safe to get right.** The list is printed because
     // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
     // matters is that the count is stable and the rows are named. Got: {without:?}
+    // **`(0, 26)`, and the zero is the news.**
+    //
+    // It read `(2, 24)` and the two were **`View > Mode` and `View > Zoom`** — `sub(..)` headers, whose
+    // chevron promised a submenu the client cannot draw in any case: `state.open` names a menu heading
+    // or a toolbar tool, and there is no `Open::Submenu` at all. **Every menu row now means
+    // something**, which is a stronger claim than this gate has ever been able to make, and the total
+    // went up by two because the four rows that replaced them are four rows.
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (2, 24),
-        "**2 unwired of 24 menu items** in the seven headings after out-of-scope cloud/add-on rows were \
-         removed. The remaining unwired rows are the View > Mode/Zoom submenu headers. Got: {without:?}"
+        (0, 26),
+        "**0 unwired of 26 menu items** in the seven headings after out-of-scope cloud/add-on rows \
+         were removed. Any row that reappears here is a row that draws and does nothing. Got: \
+         {without:?}"
     );
 }
 

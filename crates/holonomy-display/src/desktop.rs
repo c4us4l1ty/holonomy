@@ -421,6 +421,31 @@ impl Desktop {
         }
     }
 
+    /// Fold the queued run of pointer motion into the newest position, if the queue starts with one.
+    ///
+    /// **The coalescing half of the pointer-lag fix.** `next_event` hands back one event at a time, so a
+    /// drag that outruns the frame rate leaves a queue of positions that are already stale. The driver
+    /// calls this after it has handled a `MotionNotify` and before it dispatches the next one; the
+    /// last position in the run is the one the pointer is actually at.
+    ///
+    /// Returns `None` when the queue's oldest event is not a motion event, so the driver can tell
+    /// "nothing more to fold" from "folded up to a click".
+    pub fn take_motion_run(&mut self) -> Option<Event> {
+        if let Some(ev) = self.events.pop_front() {
+            if matches!(ev, Event::MotionNotify { .. }) {
+                // **The driver's queue is the only one that matters**, and it is the one that is
+                // private to this type: `Desktop` buffers events so that a `ConfigureNotify` this
+                // layer synthesised and one the server sent are seen in the order they happened.
+                // Anything folded here has not been looked at yet, so dropping it reorders nothing.
+                if let Some(newer) = self.conn.take_motion_run() {
+                    return Some(newer);
+                }
+            }
+            self.events.push_front(ev);
+        }
+        None
+    }
+
     /// Take the keyboard focus. A click handler calls this, because a window manager may take the focus
     /// back at any time -- measured on GNOME, which answers `SetInputFocus` and then sends `FocusOut`.
     /// The server's current keycode→keysym table, for layout-aware text entry.
@@ -511,8 +536,12 @@ impl Desktop {
     }
 
     pub fn focus(&mut self) -> Result<(), DesktopError> {
+        // A click arrives only after the window is mapped, so this must not wait for a fresh
+        // `MapNotify` (the initial-map path in `open` still uses `Window::focus`). Waiting here was
+        // the per-click stall: the event had already been consumed, so the helper timed out and
+        // drained queued keystrokes before the caret could move.
         self.window
-            .focus(&mut self.conn)
+            .focus_now(&mut self.conn)
             .map(|_| ())
             .map_err(DesktopError::Window)
     }

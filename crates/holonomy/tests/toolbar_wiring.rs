@@ -13,9 +13,9 @@
 //!
 //! # And what is still inert, and why
 //!
-//! **Eight: `Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Underline`, `Highlight`, `Link`,
-//! `Comment`.** Each is recorded below with the reason, because **a count with no reasons is a number
-//! nobody can act on**:
+//! **Seven: `Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Underline`, `Highlight`, `Link`.**
+//! Each is recorded below with the reason, because **a count with no reasons is a number nobody can
+//! act on**:
 //!
 //! - **`Search`** needs a search model — a query, a match range, and a way to walk the matches as
 //!   the document changes.
@@ -28,30 +28,30 @@
 //! - **`Underline`** needs a run-level underline flag in the document model.
 //! - **`Highlight`** needs a run-level highlight colour, which is the span field `Link` needs too.
 //! - **`Link`** needs a URL model — a span field plus something that resolves a URL.
-//! - **`Comment`** needs an annotation store — a list, an anchor range, an author, and anchors that
-//!   move when the text before them is edited.
 //!
-//! **None of the eight is "not done yet".** They are features that need models this program does not
+//! **None of the seven is "not done yet".** They are features that need models this program does not
 //! have, and a button that pretends to one is worse than a button that is visibly absent.
 //!
-//! # `Comment` is still here, and that is the one thing worth arguing about
+//! # `Comment` is gone, and it was the one that needed arguing
 //!
-//! **Part 46 intended to remove it and the removal never landed.** `Tool::Comment`,
-//! `TitleButton::Comments`, `IconId::Comment` and `mask::COMMENT` are all still present, and the
-//! counts in `pointer.rs` and `icons.rs` were written against the code rather than against the plan —
-//! which is why they say 23 and 34 and not 22 and 33. **The prose in those files claims the deletion
-//! happened; this file is where that is corrected.**
+//! **Part 46 intended to remove it and the removal never landed**, so `Tool::Comment`,
+//! `TitleButton::Comments`, `IconId::Comment` and `mask::COMMENT` were all still present and the counts
+//! in `pointer.rs` and `icons.rs` said 23 and 34 rather than 22 and 33 — written against the code, and
+//! correct about it.
 //!
-//! **The argument for removing it is this project's own**: Comment needed an annotation store that
-//! this program has no reason to want, and *a button that will never work is a lie about the
-//! product* — the same argument part 33 made about `Tool::Print`. **The argument for leaving it is
-//! that a toolbar change is a product decision and not a documentation fix**, so it sits inert and
-//! named here rather than deleted on the strength of a comment. `Print` is the precedent for the
-//! other route: it was given `Action::Export` to do, and it is wired.
+//! **It is removed now.** It needed an annotation store — a list, an anchor range, an author, and
+//! anchors that move when the text before them is edited — and this program has no reason to want that,
+//! so *a button that will never work is a lie about the product*: the same argument part 33 made about
+//! `Tool::Print`, which was resolved the other way, by giving it `Action::Export` to do.
+//!
+//! **Why this was a decision this repository had already taken**: `icons.rs`'s count note says in as
+//! many words that the number to change when that decision is made is 34 -> 33. **A gate that names
+//! the edit it will need is a gate that has already had the argument.** The seven that remain each
+//! need a model this program does not have and are not the subject of a pre-authorised deletion.
 //!
 //! # The measurement
 //!
-//! [`every_tool_that_is_not_wired_is_one_of_the_eight`] presses all twenty-three toolbar tools through the
+//! [`every_tool_that_is_not_wired_is_one_of_the_seven`] presses all twenty-two toolbar tools through the
 //! real hit test on a fresh session each time and counts the ones whose press lands in
 //! `pointer_inert`. **A fresh session per tool**, because a press that opens a popup swallows the next
 //! press as a dismissal — **the first version of this measurement looped over one session and counted
@@ -59,7 +59,7 @@
 //!
 //! | what it proves | test |
 //! | --- | --- |
-//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_eight`] |
+//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_seven`] |
 //! | `SizeUp` changes the type | [`the_size_buttons_are_the_zoom_buttons`] |
 //! | and clamp at their ends | [`the_size_buttons_clamp_rather_than_wrapping`] |
 //! | `Overflow` lists what did not fit | [`the_overflow_menu_lists_the_tools_that_did_not_fit`] |
@@ -140,14 +140,16 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
 /// computed list would silently become a different five when a tool is renamed. **Five is written
 /// down and the gate compares against it.**
 ///
-/// **Eight, and it has been eight since part 44.** The count is in the type as well as the value, so
-/// dropping a tool from the list without dropping the array length is a compile error rather than a
-/// gate that quietly measures one fewer thing.
+/// **Seven, and it went eight -> seven by removing `Comment`, not by wiring it.** The count is in the
+/// type as well as the value, so dropping a tool from the list without dropping the array length is a
+/// compile error rather than a gate that quietly measures one fewer thing.
 ///
 /// **The header above once said five, and once said that part 46 had removed `Comment`; both were
-/// wrong.** The measured set is these eight, and this array is written in `TOOLBAR` order — so a
-/// reordering of the toolbar shows up here as a diff rather than as a silent mismatch.
-const STILL_INERT: [Tool; 8] = [
+/// wrong** — the tool was still there and still inert, which is why this list had eight entries. It is
+/// seven now because the tool is gone: no annotation store, no anchor range, no author, so nothing this
+/// session could ever do with it. See `icons.rs`'s count note. This array is written in `TOOLBAR`
+/// order, so a reordering of the toolbar shows up here as a diff rather than as a silent mismatch.
+const STILL_INERT: [Tool; 7] = [
     Tool::Search,
     Tool::Spellcheck,
     Tool::PaintFormat,
@@ -155,7 +157,6 @@ const STILL_INERT: [Tool; 8] = [
     Tool::Underline,
     Tool::Highlight,
     Tool::Link,
-    Tool::Comment,
 ];
 
 /// **Pressing every tool and counting the ones with nothing behind them.
@@ -173,7 +174,7 @@ const STILL_INERT: [Tool; 8] = [
 /// **Because a click is decided on the press.** `Session::press`'s own note says so, and a release
 /// would be measuring a different gesture.
 #[test]
-fn every_tool_that_is_not_wired_is_one_of_the_eight() {
+fn every_tool_that_is_not_wired_is_one_of_the_seven() {
     let mut inert: Vec<&'static str> = Vec::new();
     for &tool in TOOLBAR {
         let mut s = session();
@@ -193,9 +194,8 @@ fn every_tool_that_is_not_wired_is_one_of_the_eight() {
         inert,
         expected,
         "**{inert:?} are inert, and the list is {expected:?}.** Part 39 said ten; part 44 wired \
-         SizeUp, SizeDown, Overflow and Mode, and nothing has left this list since -- \
-         **part 46 intended to remove Comment and the removal never landed**, so the count is \
-         eight and not seven."
+         SizeUp, SizeDown, Overflow and Mode; the count went eight -> seven when `Comment` was \
+         removed rather than wired."
     );
 }
 

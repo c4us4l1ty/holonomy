@@ -1007,17 +1007,55 @@ impl Editor {
         })
     }
 
-    /// Delete the byte before the caret.
-    pub fn backspace(&mut self) -> Result<EditOutcome, EditorError> {
+    /// The byte range [`backspace`](Self::backspace) deletes: the character before the caret.
+    ///
+    /// # Why this is a method and not arithmetic at each call site
+    ///
+    /// **"How long is the character before the caret" is asked twice** — once by the editor to delete
+    /// it, and once by `Session::backspace` to tell `TextCounts` which bytes went away. **Two copies of
+    /// a UTF-8 boundary walk is two answers waiting to differ**, and the failure mode is a word count
+    /// that drifts by one per non-ASCII deletion, which is invisible for months.
+    ///
+    /// `None` at offset 0: there is no character before the start of the document.
+    pub fn backspace_range(&self) -> Option<(usize, usize)> {
         let cursor = self.rope.cursor();
         if cursor == 0 {
+            return None;
+        }
+        let mut start = cursor - 1;
+        // A UTF-8 continuation byte is `0b10xx_xxxx`, and `is_char_boundary` is defined as the
+        // *absence* of one at that index — so stepping back while the index is not a boundary walks
+        // over exactly the continuation bytes of the character the caret sits after. At most three.
+        while start > 0 && !self.is_char_boundary(start) {
+            start -= 1;
+        }
+        Some((start, cursor))
+    }
+
+    /// Delete the character before the caret.
+    ///
+    /// # CORRECTION: this deleted one *byte*, and one byte is not one character
+    ///
+    /// It was `self.delete_at((cursor - 1) as u32, 1)` with a docstring that said "the byte before the
+    /// caret". **`delete_at` is right to refuse an offset that is not a char boundary**
+    /// ([`EditorError::NotCharBoundary`]), so pressing Backspace after any non-ASCII character — `é`,
+    /// an em dash, a curly quote — returned an error instead of deleting. In the window that error
+    /// travelled out of the session and **ended the process**, so a document could not be typed into
+    /// at all once one such character was in it.
+    ///
+    /// **The fix is the mirror of [`delete_forward`](Self::delete_forward), which has always walked
+    /// boundaries.** The range comes from [`backspace_range`](Self::backspace_range), so the session's
+    /// byte count and this delete cannot disagree. **No allocation and no decoding**: this is the
+    /// keystroke path, and `tests/no_alloc.rs` measures it.
+    pub fn backspace(&mut self) -> Result<EditOutcome, EditorError> {
+        let Some((start, end)) = self.backspace_range() else {
             return Err(EditorError::Rope(RopeError::OutOfBounds {
                 offset: 0,
                 text_len: 0,
             }));
-        }
+        };
         // `delete_at` reads the bytes from the rope, so the caret must be *after* the target.
-        self.delete_at((cursor - 1) as u32, 1)
+        self.delete_at(start as u32, (end - start) as u32)
     }
 
     /// Delete `len` bytes by caret-relative delete, so the rope's merge path runs.

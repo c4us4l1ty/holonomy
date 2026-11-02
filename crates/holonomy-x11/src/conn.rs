@@ -937,6 +937,40 @@ impl Conn {
         }
     }
 
+    /// Fold the run of motion events at the **front** of the queue into the last of them.
+    ///
+    /// # Why the *front*, and why this does not read the socket
+    ///
+    /// A drag produces one `MotionNotify` per pixel, and every one of them but the last is superseded
+    /// before it can be drawn — a mouse at 1,000 Hz against a 60 Hz frame is sixteen positions per
+    /// frame, of which fifteen were dispatched and repainted for nothing. **The observable symptom was
+    /// a selection highlight that trailed the cursor**, and a click that landed a frame or two late
+    /// because the queue in front of it was full of positions already out of date.
+    ///
+    /// **It only folds a *leading* run.** Everything else in the queue keeps its position, so a
+    /// `ButtonPress` that arrived between two motions is still seen before the motion that followed
+    /// it. Folding the whole queue would be less code and would reorder input, which is how a click
+    /// ends up selecting the wrong thing.
+    ///
+    /// **It does not read.** A read here would consume an event that is not a motion event and have
+    /// nowhere to put it — `queue` is private and this is the same object — so the driver calls this
+    /// once it already knows it is in a motion run, and whatever it returns is the newest position the
+    /// server has already sent.
+    ///
+    /// Returns `None` when the queue does not start with a motion event, which leaves the queue
+    /// untouched.
+    pub fn take_motion_run(&mut self) -> Option<Event> {
+        let mut last = None;
+        while self
+            .events
+            .front()
+            .is_some_and(|e| matches!(e, Event::MotionNotify { .. }))
+        {
+            last = self.events.pop_front();
+        }
+        last
+    }
+
     /// Take the oldest protocol error, if the server reported one.
     pub fn take_error(&mut self) -> Option<ProtocolError> {
         self.errors.pop_front()

@@ -57,8 +57,22 @@ pub mod colour {
     pub const CHROME: u32 = 0xFFF8_FAFD;
     /// The document page.
     pub const PAGE: u32 = 0xFFFF_FFFF;
-    /// A band that is one step lighter than the chrome: the toolbar and the status bar.
-    pub const BAND: u32 = 0xFFF8_FAFD;
+    /// A band that is one step **off** the chrome: the toolbar and the status bar.
+    ///
+    /// # CORRECTION: this was `0xFFF8_FAFD` -- the same value as [`CHROME`]
+    ///
+    /// `Chrome::tree` does push a band fill for the toolbar and the status bar
+    /// (`chrome.rs`, `let band = |y, h| fill(.., colour::BAND)`). **Both fills were invisible**, because
+    /// the colour they painted was the colour already underneath them, so the toolbar's only visible
+    /// surface was the capsule pill and the status bar had no surface at all. In a screenshot that
+    /// reads as "the toolbar is floating in the window" rather than "the toolbar is a row".
+    ///
+    /// **A step of about 12/255 in each channel, and no more.** The band has to be distinguishable from
+    /// the panel at one glance but must not compete with the pill that sits on it: `PILL` is by
+    /// definition lighter than the band, so the band cannot get lighter without colliding with it.
+    /// Since this palette is light-on-light, "off the panel" means **darker** here, which is also what
+    /// makes the toolbar read as a depressed strip with a raised control surface on it.
+    pub const BAND: u32 = 0xFFEF_F2F6;
     /// Rules, separators and box drawing.
     pub const RULE: u32 = 0xFFC4_C7C5;
     /// A rule that is *incidental* -- a tick, a gutter marker.
@@ -137,11 +151,21 @@ pub mod colour {
     /// The caret.
     pub const CARET: u32 = 0xFF1F_1F1F;
     /// The scrollbar track.
-    pub const TRACK: u32 = 0xFFF8_FAFD;
+    ///
+    /// **One step off the panel, for the same reason [`BAND`] is.** It was `0xFFF8_FAFD` -- the panel's
+    /// own value -- so the rail around the thumb was invisible and the thumb read as a grey sliver
+    /// floating at the window's edge with nothing behind it.
+    pub const TRACK: u32 = 0xFFEF_F2F6;
     /// The scrollbar thumb.
     pub const THUMB: u32 = 0xFFDA_DCE0;
     /// The page's drop shadow, as a flat band. A real gradient would need `f32` alpha.
-    pub const SHADOW: u32 = 0xFFE0_E0E0;
+    ///
+    /// **Darker than [`RULE_DIM`], and that is the correction.** It was `0xFFE0E0E0`, which is
+    /// `RULE_DIM`'s value exactly -- so the one-pixel band that is supposed to lift the sheet off the
+    /// desk was the same colour as a divider, and at one pixel wide it read as neither. The band is
+    /// still flat and still one pixel (`ChromeMetrics::shadow`), which is the honest limit of a blitter
+    /// with no alpha; what changed is that the one pixel is now a step the eye can see.
+    pub const SHADOW: u32 = 0xFFD2_D5D9;
     /// Google blue, for the document mark and active accents.
     pub const BLUE: u32 = 0xFF42_85F4;
     /// The cyan Share/Export pill.
@@ -886,28 +910,75 @@ impl Layout {
         let page_w = m.page_w_for(measure);
         let sidebar_w = m.sidebar_w.min(m.width / 2);
         let desk = m.width.saturating_sub(sidebar_w);
-        let (gutter_left, gutter_right) = if page_w >= desk {
-            // A page wider than the desk: no gutters, and the text column is clipped rather than
-            // wrapped. `text` below still reports the full measure; `caller_draw` clips. **The
-            // sidebar's width is still reserved** — a page that started under the sidebar would put
-            // the ruler's zero over a panel.
-            (sidebar_w, 0)
-        } else if sidebar_w > 0 && page_w.saturating_add(24) <= desk {
-            // The reference keeps the sheet close to the document-tabs rail, not centred in the desk.
-            let left = sidebar_w + 24;
+        // # CORRECTION: the sheet was flush against the rail with all the slack on its right
+        //
+        // The middle arm used to be `let left = sidebar_w + 24;` — *"the reference keeps the sheet
+        // close to the document-tabs rail"* — and with the rail open at 280 px and a 72-column sheet it
+        // produced a **24 px left gutter and a 200 px right one**. Worse, once `page_w + 24 > desk` the
+        // first arm fired and the left gutter collapsed to **zero**: the sheet's left rim sat exactly on
+        // the rail's edge and its right rim had a fifth of the window beside it. In a screenshot that is
+        // the single strongest "this fell over" signal, because a page on a desk has two margins.
+        //
+        // **`MIN_GUTTER` either side, and the rest split evenly.** The clamping is done here rather than
+        // by narrowing the measure, because the measure is already at its floor when this matters —
+        // `measure_for` will not go below `columns` at or under the anchor width — and a page that is
+        // wider than its desk is a page whose text the renderer clips, which `text`'s comment below
+        // already accounts for. **What this fixes is the placement, and placement is what the eye reads.**
+        const MIN_GUTTER: u32 = 16;
+        let room = desk.saturating_sub(page_w);
+        let (gutter_left, gutter_right) = if room >= MIN_GUTTER * 2 {
+            // The remainder goes right, so an odd pixel count puts the sheet one pixel left of centre
+            // rather than one pixel right — the rule this `Layout` has always followed.
+            let left = sidebar_w + room / 2;
             (left, m.width.saturating_sub(left + page_w))
+        } else if page_w >= desk {
+            // **Wider than the desk: the measure could not be narrowed any further.** The sheet starts
+            // at the rail and is clipped on the right, which is the old first arm — kept, because this
+            // is the one case where there is no gutter to distribute.
+            (sidebar_w, 0)
         } else {
-            let left = sidebar_w + (desk - page_w) / 2;
+            // Somewhere between: honour the minimum on the left and give the rest to the right.
+            let left = sidebar_w.saturating_add(MIN_GUTTER).min(m.width);
             (left, m.width.saturating_sub(left + page_w))
         };
         // The page and the scrollbar both *end* at the canvas bottom; the shadow band occupies the
         // `shadow` rows at the top of the canvas that the page is inset by. Growing the page by
         // `shadow` instead -- which is what this did first -- pushes the scrollbar's bottom edge
         // past the canvas's, and a rect that leaves its band is a rect the renderer must clip.
+        // # CORRECTION: the sheet had no height of its own — it *was* the canvas
+        //
+        // `page_h` was `canvas_h - shadow`, so the white rectangle always ended exactly at the bottom of
+        // the canvas, with the status bar pressed against its lower rim and no desk below it. **A page
+        // that fills its canvas is not a page; it is a white panel.** The reported screenshot is 999 x
+        // 624 px of client area with a 607 x 349 px sheet whose bottom edge is the last pixel above the
+        // status band, and that is what makes the window read as a form rather than as a document.
+        //
+        // **The sheet keeps a page's aspect ratio**, taken from its own width, and is centred in the
+        // desk vertically. US Letter's 11/8.5 is the shape the reference uses; the exact number matters
+        // less than the fact that there *is* one, because a fixed aspect is what produces a visible
+        // bottom margin on a tall window and a visible top margin on a short one.
+        //
+        // **`min(canvas_h - 2 * DESK_V)`, and that clamp is what keeps a short window usable.** A
+        // window too short to show a whole page shows as much of it as it can, which is the same answer
+        // `Layout` gives everywhere else: degrade, do not refuse.
         let shadow = m.shadow.min(canvas_h / 2);
         let page_x = gutter_left;
-        let page_y = canvas_y + shadow;
-        let page_h = canvas_h - shadow;
+        let page_h = {
+            /// Desk above and below the sheet, in pixels.
+            ///
+            /// **Half a line of type, and deliberately not more.** This is the one place in this layout
+            /// where "make it look like a page" competes directly with the viewport, and the viewport
+            /// has already been reported once as too small. Half a cell is 12 px at the 16 ppem default
+            /// and costs **one row of text** against the old full-canvas sheet, while still ending the
+            /// white area above the status bar instead of pressing it against the band.
+            let desk_v = (m.cell_h / 2).max(6);
+            // 11 : 8.5 in integer arithmetic, so the sheet is a portrait page whatever its measure is.
+            let by_aspect = page_w.saturating_mul(11) / 9;
+            by_aspect
+                .min(canvas_h.saturating_sub(desk_v * 2))
+                .max(m.cell_h.saturating_mul(2)) // never a zero-height sheet
+        };
+        let page_y = canvas_y + (canvas_h.saturating_sub(page_h)) / 2;
 
         // **CORRECTION, part 39: the page is clipped into the panel on *both* axes, and the right edge is the
     // one that was not.**
@@ -1571,7 +1642,13 @@ impl Default for ChromeState {
     fn default() -> Self {
         Self {
             title: "Journal".to_string(),
-            sidebar_open: true,
+            // **Closed, and that is a correction.** It was `true`, and `Session::new` applies the
+            // reservation from this default at construction — so every session opened with a 280 px
+            // document rail covering 19 % of the window before the user had asked for one, and the page
+            // paid for it with its right-hand gutter. **A rail is something you open; opening with it
+            // open is the state the collapse button exists to leave.** The back arrow in the rail and
+            // the collapse button on the toolbar are both still there, so the rail is one click away.
+            sidebar_open: false,
             docs: Vec::new(),
             active_doc: 0,
             style_index: 0,
@@ -2025,78 +2102,121 @@ impl Chrome {
         chrome.before.push(band(l.toolbar.y, l.toolbar.height));
         chrome.before.push(band(l.status.y, l.status.height));
 
-        // Tab bar bottom rule, and the ruler's baseline.
+        // # The band rules, and the correction that matters more than their colour
+        //
+        // **The old `hline` helper did not draw a hairline, and that is why it is gone.** It built a
+        // `RepeatRun` of `─` (U+2500) once per cell,
+        // and `box_glyph` rasterises a Box Drawing glyph to *the whole cell it is given* — so a "one
+        // pixel rule" at band `y` is a `<width> x cell_h` block of solid ink whose horizontal stroke
+        // sits on the cell's centre row. That is **20 px of `RULE` at the design size**, not one: the
+        // menu band's boundary and the ruler's baseline were both 20-pixel grey slabs, which is why the
+        // screenshot shows a heavy grey band under the menu row and another under the ruler with a
+        // sheet pressed against it. A `fill` of height 1 is what a rule is.
+        //
+        // **Four rules now, because three of the five bands had no boundary at all**: under the title
+        // band, under the menu band, under the toolbar band, and the ruler's baseline. The title and
+        // menu bands had none, which is why the title, the menus and the toolbar read as one undivided
+        // field of `CHROME`.
         let rules = [
-            (l.tabs.bottom(), colour::RULE, l.width),
-            (l.ruler.bottom(), colour::RULE, l.width),
+            (l.title.bottom(), colour::RULE_DIM),
+            (l.menubar.bottom(), colour::RULE_DIM),
+            (l.toolbar.bottom(), colour::RULE_DIM),
+            (l.ruler.bottom(), colour::RULE),
         ];
-        for (y, c, w) in rules {
-            chrome
-                .before
-                .push(hline(m, 0, y.saturating_sub(1), w, c, 1));
+        for (y, c) in rules {
+            let y = y.saturating_sub(1);
+            if y < l.height {
+                chrome.before.push(fill(0, y as i32, l.width, 1, c));
+            }
         }
-        // The ruler's column ticks, every ten columns, plus the page's two edges.
-        let tick_y = l.ruler.y + m.ruler_h.saturating_sub(2);
-        let tick_every = 10u32;
+        // # The ruler, rebuilt
+        //
+        // ## CORRECTION: the ticks were one pixel tall in a colour 16/255 off the band
+        //
+        // Measured from a running window: fifteen ticks at a 37-38 px pitch, every one of them
+        // `RULE_DIM` (`0xFFE0E0E0`) on `CHROME` (`0xFFF8FAFD`), one pixel wide and **two pixels tall**
+        // at the very bottom of a 28 px band — and the numerals on the band's *top* row, twelve pixels
+        // above the marks that were supposed to locate them. At that contrast the band read as empty;
+        // the earlier report that "the ruler has no ticks" was wrong, and this is what it looked like
+        // while the ticks were there.
+        //
+        // ## What a ruler has to say, and in what order
+        //
+        // 1. **Which column am I in** — a tick per five columns, taller at ten, in an ink that is
+        //    visible rather than implied.
+        // 2. **Where does the type start and stop** — numbered from the *page's* left edge, so `1` sits
+        //    at the first column of text and the last number at the last one. It used to be numbered
+        //    from `l.text.x`, which is the page edge plus the page's padding, so `1` floated 35 px
+        //    inside the sheet over nothing in particular.
+        // 3. **Where are the margins** — the two end markers, full height, in the rule ink.
+        //
+        // ## Why the numbers are centred in the band and not pinned to its top
+        //
+        // Because a number is a label for the marks below it and the eye reads the two as one object.
+        // Pinned to the top of the band it is a float of digits with a dotted line somewhere beneath.
+        let tick_bottom = l.ruler.bottom().saturating_sub(1);
+        // **A five-column minor tick and a ten-column major one**, so the eye can count without the
+        // band becoming a comb. `MINOR_EVERY` divides `MAJOR_EVERY` or the majors land off the minors.
+        const MAJOR_EVERY: u32 = 10;
+        const MINOR_EVERY: u32 = 5;
         let mut col = 0u32;
         while col <= m.columns {
             let x = l.text.x + col * m.cell_w;
-            if x < l.text.right() {
-                chrome.before.push(fill(
-                    x as i32,
-                    tick_y as i32,
-                    1,
-                    2,
-                    if col.is_multiple_of(tick_every) {
-                        colour::RULE
-                    } else {
-                        colour::RULE_DIM
-                    },
-                ));
-                // **The number, every ten columns, centred over its tick.**
-                //
-                // **Part 39: the ruler had ticks and no labels for its whole life**, so it read as a
-                // dotted line: 31 px of band carrying two rows of one-pixel marks and nothing a person
-                // could read. The reference's ruler is numbered `1 .. n` across the measure, and the
-                // number is what makes it a ruler rather than a dotted rule — **the ticks alone say
-                // "something is measured here" and the numbers say what.**
-                //
-                // **Centred on the tick rather than left-aligned**, because the reference centres them
-                // and a left-aligned number sits over the *previous* interval: `1` at x = 0 is
-                // half off the left edge of the page.
-                //
-                // **`col / 10 + 1` and not `col / 10`**, so the leftmost column is 1 — the reference's
-                // first number is 1, and a ruler that starts at 0 has a number hanging off the page's
-                // left edge.
-                if col.is_multiple_of(tick_every) {
-                    let n = (col / tick_every + 1).to_string();
-                    let w = n.chars().count() as u32 * m.cell_w;
-                    // **Skipped rather than clipped when it will not fit.** A number half outside the
-                    // measure is worse than no number: `push_text` cannot clip, so this is the only way
-                    // to keep the last one from being drawn over the page's right-hand margin.
-                    if w <= m.cell_w * 4 && x + w / 2 < l.text.right() {
-                        push_text(
-                            &mut chrome.before,
-                            m,
-                            l.ruler.y,
-                            &n,
-                            Style::REGULAR,
-                            colour::INK_DIM,
-                            (x + w / 2).saturating_sub(w / 2) as i32,
-                        );
-                    }
+            if x >= l.text.right() {
+                break;
+            }
+            let major = col.is_multiple_of(MAJOR_EVERY);
+            let (height, ink) = if major {
+                (7, colour::INK_CHROME)
+            } else {
+                (3, colour::RULE)
+            };
+            chrome.before.push(fill(
+                x as i32,
+                tick_bottom.saturating_sub(height.saturating_sub(1)) as i32,
+                1,
+                height,
+                ink,
+            ));
+            // **The number, every ten columns, centred over its tick** — and `col / 10 + 1` so the
+            // leftmost is `1`. `l.text.x` is the page edge plus padding, so this numbers the measure,
+            // which is what a ruler over a text column is for.
+            if major {
+                let n = (col / MAJOR_EVERY + 1).to_string();
+                let w = n.chars().count() as u32 * m.cell_w;
+                // **Skipped rather than clipped when it will not fit.** A number half outside the
+                // measure is worse than no number: `push_text` cannot clip.
+                if w <= m.cell_w * 4 && x + w / 2 < l.text.right() {
+                    // **Centred in the band**, which at the design size puts the digit row above the
+                    // tick rows: a numeral has no descender, so the marks below it do not touch it.
+                    // **`saturating_sub`, so a band shorter than a line of type puts the label at the
+                    // band's top rather than at a wrapped offset** -- `at_least_a_line` prevents that
+                    // for every band the product builds, and a caller can still construct one.
+                    let label_y = l.ruler.y + m.ruler_h.saturating_sub(m.cell_h) / 2;
+                    push_text(
+                        &mut chrome.before,
+                        m,
+                        label_y,
+                        &n,
+                        Style::REGULAR,
+                        colour::INK_DIM,
+                        (x + w / 2).saturating_sub(w / 2) as i32,
+                    );
                 }
             }
-            col += tick_every / 2;
+            col += MINOR_EVERY;
         }
-        // The page's left and right edge markers, so the measure is visible when the page is blank.
+        // **The measure's two edges, full height, in the rule ink.** They were `RULE_DIM` and drawn
+        // *below* the band (`l.ruler.bottom()` for `ruler_h` pixels), i.e. outside the ruler entirely
+        // and down the sheet's face — which is why they showed up as two stray grey columns on the page
+        // rather than as margin markers.
         for x in [l.text.x, l.text.right().saturating_sub(1)] {
             chrome.before.push(fill(
                 x as i32,
-                l.ruler.bottom() as i32,
+                l.ruler.y as i32,
                 1,
                 m.ruler_h,
-                colour::RULE_DIM,
+                colour::RULE,
             ));
         }
 
@@ -2142,22 +2262,58 @@ impl Chrome {
             );
         }
 
-        let status = state.notice.clone().unwrap_or_else(|| format!(
+        // # CORRECTION: a notice *replaced* the counters, so the status bar was blank
+        //
+        // It was `state.notice.clone().unwrap_or_else(|| format!("Ln {}, Col {}  {} words  {} B", ..))`
+        // — one string, and the notice won. **`set_notice` is called on every save**, so from the first
+        // autosave onward the status bar read `Saved` and nothing else: no line, no column, no word
+        // count, no byte count, for the whole session. In the reported screenshot that is exactly what
+        // it shows.
+        //
+        // **Two regions now, and neither displaces the other.** The counters are always drawn at the
+        // left, because they are a property of the document and are useful at every moment. The notice
+        // is a *transient* and is drawn after the counters, separated from them — so `Saved` appears
+        // beside `Ln 1, Col 1  0 words  0 B` instead of instead of it.
+        let counters = format!(
             "Ln {}, Col {}  {} words  {} B",
             state.caret_line + 1,
             state.caret_column + 1,
             state.words,
             state.bytes
-        ));
+        );
+        let status_y = l.status.y + l.status.height.saturating_sub(m.cell_h) / 2;
+        let counters_x = m.cell_w as i32;
         push_text(
             &mut chrome.before,
             m,
-            l.status.y + l.status.height.saturating_sub(m.cell_h) / 2,
-            &status,
+            status_y,
+            &counters,
             Style::REGULAR,
             colour::INK_DIM,
-            m.cell_w as i32,
+            counters_x,
         );
+        if let Some(notice) = state.notice.as_deref().filter(|n| !n.is_empty()) {
+            // **Placed by cells, so it cannot overlap the counters**, and **clamped to what is left of
+            // the band**, so a long failure message cannot run off the panel edge. A truncated notice is
+            // better than one drawn over the dirty dot, and better than none at all — the save-failure
+            // messages in `windowed.rs` are the whole reason this region exists.
+            let gap = 2 * m.cell_w;
+            let after = counters.chars().count() as u32 * m.cell_w;
+            let notice_x = counters_x as u32 + after + gap;
+            let room = l.width.saturating_sub(notice_x).saturating_sub(4 * m.cell_w) / m.cell_w.max(1);
+            let shown = fit_to_width(notice, m.cell_w, room);
+            if !shown.is_empty() {
+                push_text(
+                    &mut chrome.before,
+                    m,
+                    status_y,
+                    &shown,
+                    Style::REGULAR,
+                    colour::INK_CHROME,
+                    notice_x as i32,
+                );
+            }
+        }
         if state.dirty {
             chrome.before.push(fill(
                 // **`saturating_sub`, and it is the fourth bare subtraction in this file.**
@@ -2198,23 +2354,49 @@ impl Chrome {
         // of *drawing the page*; `Layout` answers "where is everything", not "how do I paint one piece
         // of it". A `Layout::shadow` would be a second source for a number `ChromeMetrics::shadow`
         // already is.
+        // # Shadow: a flat band to the *right and below*, and it was neither
+        //
+        // The two fills read
+        //
+        // ```text
+        // (page.x + shadow, page.y,        page.width,  shadow)   // a band across the TOP
+        // (page.x,          page.y + shadow, shadow,     page.height) // a strip down the LEFT
+        // ```
+        //
+        // — **one pixel above the sheet and one pixel to its left**, which is a shadow cast up and to
+        // the left by a light source below and to the right. Nobody has ever lit a desk that way. At
+        // `shadow: 1` the result was a 1 px `SHADOW` line along the page's top edge and another down its
+        // left, i.e. **the sheet appeared to be inset into the desk rather than lying on it**, and the
+        // two lines read as a seam where the page met the ruler.
+        //
+        // **A shadow is below and to the right of what casts it.** The bands go first, so the sheet is
+        // painted over any part of them it covers; the clip at the rect's own edge is what keeps them
+        // from leaving the canvas, which `no_chrome_box_ever_lands_outside_its_panel` sweeps for.
         let shadow = m.shadow.min(l.page.width).min(l.page.height);
-        // Shadow: a flat band to the right and below. Not a gradient, because alpha is masked off
-        // in the frame and a ramp would need `f32`.
-        page.before.push(fill(
-            (l.page.x + shadow) as i32,
-            l.page.y as i32,
-            l.page.width,
-            shadow,
-            colour::SHADOW,
-        ));
-        page.before.push(fill(
-            l.page.x as i32,
-            (l.page.y + shadow) as i32,
-            shadow,
-            l.page.height,
-            colour::SHADOW,
-        ));
+        // A band across the BOTTOM: same x as the sheet, starting one pixel past its bottom edge.
+        if let Some(y) = l.page.bottom().checked_add(1) {
+            if y < l.canvas.bottom() {
+                page.before.push(fill(
+                    l.page.x as i32,
+                    y as i32,
+                    l.page.width,
+                    shadow,
+                    colour::SHADOW,
+                ));
+            }
+        }
+        // A strip down the RIGHT: same y as the sheet, starting one pixel past its right edge.
+        if let Some(x) = l.page.right().checked_add(1) {
+            if x < l.canvas.right() {
+                page.before.push(fill(
+                    x as i32,
+                    l.page.y as i32,
+                    shadow,
+                    l.page.height,
+                    colour::SHADOW,
+                ));
+            }
+        }
         page.before.push(fill(
             l.page.x as i32,
             l.page.y as i32,
@@ -2222,7 +2404,15 @@ impl Chrome {
             l.page.height,
             colour::PAGE,
         ));
-        // A hairline border, as the reference's sheet has.
+        // # The sheet's hairline border, and the one-pixel seam the shadow left behind
+        //
+        // The border is drawn on the sheet's own outermost pixels, so it has to come **after** the
+        // page fill — which it does. What it did *not* have was anything to hide the gap the old
+        // shadow left: the shadow began at `page.x + shadow` on the top row, so **one pixel at
+        // `(page.x, page.y)` and one at `(page.x, page.bottom())` were filled with the shadow colour in
+        // the corner the border does not cover**. With the shadow moved to the bottom and right there is
+        // no gap left to leave: the border occupies exactly the sheet's rim and the shadow starts one
+        // pixel outside it.
         for (bx, by, bw, bh) in [
             (l.page.x, l.page.y, l.page.width, 1),
             (l.page.x, l.page.bottom().saturating_sub(1), l.page.width, 1),
@@ -2418,7 +2608,6 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
             B::Folder => crate::icons::IconId::Folder,
             B::Cloud => crate::icons::IconId::Cloud,
             B::History => crate::icons::IconId::History,
-            B::Comments => crate::icons::IconId::Comment,
             B::Sparkle => crate::icons::IconId::Sparkle,
             B::Share | B::Upgrade => unreachable!(),
         };
@@ -2616,6 +2805,57 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
 ///
 /// The two are separate `Hit` values only so the session can clear `pressed` on a release that
 /// happened off the widget. **They render identically, which is why one function reads both.**
+/// **The toolbar's control surface: a rounded rectangle around the tools that were actually placed.**
+///
+/// Public because it is *geometry the product asserts about*, not an implementation detail: the paint
+/// order gate probes a pixel inside this rect to prove the pill reaches the frame, and a gate that
+/// re-derived the same arithmetic would pass while the pill was somewhere else.
+///
+/// # Why it is fitted to the tools, and why it used to be the whole band
+///
+/// It was `(8, y + 3, width - 16, h - 6)` with a radius of `h / 2` — a stadium spanning the panel, with
+/// roughly 700 px of tools at its left end and **46 % of the surface empty**. Because the radius scaled
+/// with the band, the corners were larger than the buttons. It read as one enormous lozenge with icons
+/// lost in it.
+///
+/// **A control surface has to be the size of its controls**, so this walks the same `placed` list the
+/// painter and the hit test walk. A tool that did not fit has a zero-extent rect and contributes
+/// nothing, so the surface shrinks with the bar instead of keeping a dead right-hand half.
+///
+/// `None` when nothing was placed at all — a panel too narrow to hold one tool — because the honest
+/// surface for that is the band and nothing else.
+pub fn toolbar_pill(l: &Layout, placed: &[crate::widgets::Placed]) -> Option<DamageRect> {
+    /// How far the surface extends past the first and last tools. **Half a button's inset**: enough
+    /// that the icons are not touching the pill's rim, less than the 8 px pad so the pill stays inside
+    /// the band's own margins.
+    const OVERHANG: u32 = 6;
+    let first = placed.iter().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
+    let last = placed.iter().rev().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
+    let x = first.rect.x.saturating_sub(OVERHANG);
+    // **Clamped into the band.** The overhang can push the right edge past the panel on a narrow
+    // window, and a rect that leaves its band is a rect the renderer must clip — `Layout::new`'s
+    // comment says why every emitted rect is clamped rather than trusted.
+    let right = last.rect.right().saturating_add(OVERHANG).min(l.width);
+    let width = right.saturating_sub(x);
+    if width == 0 {
+        return None;
+    }
+    Some(DamageRect::new(
+        x.min(l.width),
+        l.toolbar.y + 3,
+        width,
+        l.toolbar.height.saturating_sub(6),
+    ))
+}
+
+/// The toolbar pill's corner radius, in pixels.
+///
+/// **A constant and not `height / 2`.** The pill used to be a stadium — its radius was half the band's
+/// height — which at the design size is a 25 px corner on a 50 px box, and at a scaled type size was
+/// larger still. A stadium is the shape of a *button*; the surface that holds a row of buttons is a
+/// rounded rectangle, and the reference keeps this radius constant as the type scales.
+pub const TOOLBAR_PILL_RADIUS: u32 = 8;
+
 fn row_is_live(state: &ChromeState, open: crate::widgets::Open, row: usize) -> bool {
     let h = crate::widgets::Hit::MenuItem { open, row };
     state.hover == Some(h) || state.pressed == Some(h)
@@ -2623,26 +2863,45 @@ fn row_is_live(state: &ChromeState, open: crate::widgets::Open, row: usize) -> b
 
 /// The toolbar: a pill, then one button per [`TOOLBAR`](crate::widgets::TOOLBAR) entry.
 ///
-/// **The pill is the whole width of the band minus its inset**, rather than being fitted to its
-/// contents. It is what makes the toolbar read as one control surface rather than as a row of loose
-/// icons, and fitting it would mean recomputing the pill's width every time a tool was added.
+/// **The pill is fitted to the tools that were actually placed**, rather than being the whole width of
+/// the band. See the correction on the `pill` binding below.
 fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
     // **No band fill, for the reason `paint_menubar`'s gives.** The first version of this emitter
-    // pushed `fill(.., CHROME)` for the toolbar band -- the same colour as the panel -- so it painted
-    // the panel's colour over the chrome's own toolbar band and the band became invisible. `Chrome::tree`
-    // already fills that band; an emitter that re-fills its band has to know what colour it is, and
-    // this one does not need to know anything. **The pill below is a different surface**: it is a
-    // control, and it *is* this emitter's to draw.
-    let pill = DamageRect::new(
-        8,
-        l.toolbar.y + 3,
-        l.width.saturating_sub(16),
-        l.toolbar.height.saturating_sub(6),
-    );
-    into.push(rounded(pill.x as i32, pill.y as i32, pill.width, pill.height, pill.height / 2, colour::PILL));
+    // pushed `fill(.., CHROME)` for the toolbar band -- so it painted the panel's colour over the
+    // chrome's own toolbar band. `Chrome::tree` already fills that band; an emitter that re-fills its
+    // band has to know what colour it is, and this one does not need to know anything.
+    //
+    // # CORRECTION: the pill was the width of the *band*, not of its contents
+    //
+    // It was `DamageRect::new(8, y + 3, l.width - 16, h - 6)` with `radius = height / 2`, i.e. a stadium
+    // spanning the whole window. On a 1,600 px panel with roughly 700 px of tools that left **46 % of
+    // the pill empty**, and because the radius was half the band's height and the band is scaled with
+    // the type, the corners were bigger than the buttons: the toolbar read as one enormous lozenge with
+    // icons lost in its left end. **A control surface has to be the size of its controls.**
+    //
+    // Three things changed together, and they are one change:
+    //
+    // 1. **The pill spans only the tools that were placed** — read from the same `place_toolbar` the
+    //    loop below walks, so the surface and the buttons cannot disagree about what is on the bar.
+    //    A tool that did not fit has a zero-width rect and contributes nothing.
+    // 2. **The radius is a fixed 8 px**, not half the height. A stadium is the shape of a *button*, not
+    //    of a container: at the design size this is a rounded rectangle around a row of controls.
+    // 3. **The pill is inset from the band's edges**, so the band is visible around it. That is what
+    //    makes the band fill introduced above do any work.
+    let placed = crate::widgets::place_toolbar(l, crate::widgets::TOOLBAR_PAD);
+    if let Some(pill) = toolbar_pill(l, &placed) {
+        into.push(rounded(
+            pill.x as i32,
+            pill.y as i32,
+            pill.width,
+            pill.height,
+            TOOLBAR_PILL_RADIUS,
+            colour::PILL,
+        ));
+    }
 
     let mut prev_separated = false;
-    for p in crate::widgets::place_toolbar(l, crate::widgets::TOOLBAR_PAD) {
+    for p in placed {
         // # CORRECTION 2026-10-12: a tool with no room is skipped, not drawn at zero
         //
         // `place_toolbar` now hands back a zero-extent rect for a tool that does not fit — the right
@@ -2783,7 +3042,35 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
 /// The sidebar: a back arrow, a heading, a "+", and one row per document.
 fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
-    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height, colour::CHROME));
+    // # CORRECTION: the rail's own fill was `CHROME`
+    //
+    // It was `colour::CHROME`, the panel's colour, so a *closed* sidebar and an open one differed only
+    // by their contents — and the panel boundary had nothing to be a boundary of. In the reported
+    // screenshot the rail, the empty desk beside it and the strip under the page were one flat field.
+    //
+    // **`PILL` is the raised plane, and a rail is a surface the sheet sits next to.** It is also the
+    // only plane lighter than `CHROME` in this palette that is not the page itself, and the popup's
+    // ladder (`PILL < PILL_HOVER < POPUP`) is a different axis: a popup is *above* everything, so it
+    // stays the lightest plane and the rail does not compete with it.
+    //
+    // **`a_popup_is_a_lighter_plane_than_anything_it_covers` still holds**: `POPUP` is `0xFFFF_FFFF`,
+    // which is lighter than `PILL`.
+    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height, colour::PILL));
+    // **A rule down the rail's right edge, and the reason is the same one `BAND`'s correction gives.**
+    // The panel is `colour::CHROME`, and so is the desk beside it, so the rail had no edge at all: the
+    // document list and the empty space to its right read as one surface, and the sheet's left gutter
+    // looked like a mistake rather than the rail's boundary. **One pixel of `RULE` is what a panel
+    // boundary is in this chrome** — the popup has `POPUP_EDGE`, the sheet has `RULE`, and this is the
+    // third surface that needed the same treatment.
+    if l.sidebar.width > 0 {
+        into.push(fill(
+            l.sidebar.right().saturating_sub(1) as i32,
+            l.sidebar.y as i32,
+            1,
+            l.sidebar.height,
+            colour::RULE,
+        ));
+    }
     into.push(SurfaceTree::leaf(crate::Node::Icon(
         crate::icons::IconId::ArrowLeft.at(
             l.sidebar_back.x as i32 + 8,
@@ -2868,58 +3155,6 @@ fn cells_left_of(to: u32, from: i32, cell_w: u32) -> u32 {
 
 /// A `TextRun` for one glyph at `x, y`.
 ///
-/// A horizontal rule of `n` `─` glyphs starting at `x`, `y`.
-///
-/// # CORRECTION, part 39: this was a `TextRun`, and a `TextRun` is *consecutive codepoints*
-///
-/// ```text
-/// TextRun::new(x, y, '─', n, ..)   ==   U+2500, U+2501, U+2502, .. U+2500 + n - 1
-/// ```
-///
-/// **So every rule in the application was a row of unrelated Box Drawing glyphs.** At the default
-/// width a rule is ~120 cells long, which is the first 120 codepoints of the block: `─│┌┐└┘├┤┬┴┼`,
-/// then every rounded corner and every diagonal in the Unicode block, one per cell. It is in every
-/// screenshot of this application as a row of crossed circles — under the menu bar, across the ruler,
-/// at the foot of the sidebar.
-///
-/// **Nothing caught it, and the reason is worth keeping**: every gate asserted that the rule node
-/// existed, that it was inside the panel, and that its colour was `RULE`. **A gate that checks what a
-/// node *is* cannot catch a node that draws the wrong thing**, and "n copies of a glyph" was never
-/// something a `TextRun` could be asked to be.
-///
-/// A run rather than a `Rect`, so the rule joins up: `─` is drawn to the full cell width by
-/// construction, not by accident — see the LEFT and RIGHT arms in `box_drawing::draw_glyph`.
-fn hline(m: &ChromeMetrics, x: u32, y: u32, width: u32, c: u32, weight: u32) -> SurfaceTree {
-    let _ = weight;
-    // **Clamped to `MAX_LEN`, and this is a correction.**
-    //
-    // `u16::try_from(width / cell_w).unwrap_or(TextRun::MAX_LEN)` is right for a width so large the
-    // count does not fit in a `u16` and wrong for **every width between 256 and 65,535 cells** -- which
-    // is a 3,072 px panel at a 12 px cell, on any monitor made this decade. `unwrap_or` only catches
-    // the failure `try_from` reports, and 257 fits in a `u16` perfectly well.
-    //
-    // **The symptom is a panic inside a paint**, and a panic inside a paint takes the session with it:
-    // `RepeatRun::new` asserts the bound, so resizing to 3,072 px would have killed the window rather
-    // than drawing it. Found by `the_chrome_paints_at_every_panel_size_without_drawing_outside_itself`,
-    // which paints every size from 1x1 up -- **the gate was already sweeping the widths and had never
-    // reached one this wide.**
-    let cells = width / m.cell_w.max(1);
-    let n = cells.min(u32::from(TextRun::MAX_LEN)) as u16;
-    if n == 0 {
-        return SurfaceTree::group();
-    }
-    // **`RepeatRun`, which is the node that means "the same glyph again".**
-    SurfaceTree::leaf(crate::Node::Repeat(crate::RepeatRun::new(
-        x as i32,
-        y as i32,
-        rune::H,
-        n,
-        Style::MONOSPACE,
-        0,
-        c,
-    )))
-}
-
 /// Emit `text` as [`ascending_runs`] at `(x, y)`, in `style` and `c`, with `x` the left edge.
 ///
 /// Right-aligned labels are positioned by the *caller* subtracting `cell_w * char_count` from the

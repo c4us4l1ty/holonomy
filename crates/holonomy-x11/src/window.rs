@@ -792,6 +792,19 @@ impl Window {
         self.focus_when_mapped(conn, Duration::from_millis(500))
     }
 
+    /// Take the keyboard focus **without waiting for a map event**.
+    ///
+    /// [`focus`](Self::focus) is for the first focus after `map`, when `SetInputFocus` would be a
+    /// `BadMatch` until the server has made the window viewable. A click handler is the opposite
+    /// case: the window is already mapped and the `MapNotify` was consumed long ago, so waiting for
+    /// another one burns the whole timeout and drains queued input. This issues the focus request
+    /// immediately and leaves the event queue alone.
+    pub fn focus_now(&self, conn: &mut Conn) -> Result<u32, WindowError> {
+        let previous = conn.input_focus()?;
+        conn.set_input_focus(self.id)?;
+        Ok(previous)
+    }
+
     /// Ask the window manager to bring this window to the front and give it the keyboard.
     ///
     /// # `SetInputFocus` alone is not enough on a managed desktop

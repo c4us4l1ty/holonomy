@@ -90,10 +90,32 @@ fn pixel(frame: &Frame, x: u32, y: u32) -> u32 {
 #[test]
 fn the_toolbar_band_reaches_the_frame() {
     let (frame, chrome, _) = paint_chrome(&ChromeState::default());
-    let band = chrome.layout.toolbar;
-    // The Plan chrome's toolbar is a raised pill on the panel, so the visible surface to probe is
-    // the pill, not the band's outer edge (which is intentionally the panel colour).
-    let got = pixel(&frame, band.width / 2, band.y + 4);
+    // **The probe is the pill's own geometry, not the band's centre.**
+    //
+    // It used to be `(band.width / 2, band.y + 4)`, which was only ever inside the pill because the
+    // pill spanned the whole band. It no longer does: the surface is fitted to the tools that were
+    // placed (see `toolbar_pill`), so the band's *centre* is now empty band — probing there would fail
+    // on a correct frame and, worse, would have kept passing on the old wrong one. A gate has to name
+    // the rect it is talking about.
+    let placed = holonomy_render::widgets::place_toolbar(&chrome.layout, 8);
+    let pill = holonomy_render::chrome::toolbar_pill(&chrome.layout, &placed)
+        .expect("the design panel places at least one tool");
+    // A point inside the pill and clear of every button: between the first button's left edge and the
+    // pill's own left rim, vertically centred so the rounded corners cannot reach it.
+    let first = placed
+        .iter()
+        .find(|p| p.rect.width > 0)
+        .expect("a placed tool");
+    assert!(
+        first.rect.x > pill.x,
+        "the pill at {pill:?} does not extend left of the first tool at {:?}, so there is no bare \
+         pill surface to probe",
+        first.rect
+    );
+    let probe_x = (pill.x + first.rect.x) / 2;
+    // Vertically centred, so the rounded corners are nowhere near the sample.
+    let probe_y = pill.y + pill.height / 2;
+    let got = pixel(&frame, probe_x, probe_y);
     assert_ne!(
         got,
         c(colour::CHROME),
@@ -189,11 +211,34 @@ fn the_page_is_still_drawn_over_the_chrome() {
 /// is exactly the kind of thing a chain of otherwise-sound assertions quietly depends on.
 #[test]
 fn a_band_is_not_the_panel_colour() {
+    // **The assertion the test is named for, which was missing.**
+    //
+    // It compared `PILL` against `CHROME` and `RULE` against `PILL` — two true statements that say
+    // nothing about `BAND`. **`BAND` was `0xFFF8FAFD` and `CHROME` was `0xFFF8FAFD`**: the toolbar and
+    // status bands were painted in the panel's own colour and were invisible, and this gate passed the
+    // whole time because it never mentioned the constant in its own name. `TRACK` had the same value
+    // for the same reason, and the page's `SHADOW` was `RULE_DIM`'s.
+    assert_ne!(
+        c(colour::BAND),
+        c(colour::CHROME),
+        "the band and the panel are the same colour, so the toolbar and status bars have no surface \
+         and 'the band is visible' is not checkable by colour"
+    );
+    assert_ne!(
+        c(colour::TRACK),
+        c(colour::CHROME),
+        "and the scrollbar's rail is invisible against the panel it runs down"
+    );
+    assert_ne!(
+        c(colour::SHADOW),
+        c(colour::RULE_DIM),
+        "and the page's shadow is a divider's colour, so the sheet has no edge"
+    );
     assert_ne!(
         c(colour::PILL),
         c(colour::CHROME),
-        "the raised toolbar pill and the panel are the same colour, so 'the band is visible' is not \
-         checkable by colour and every other test in this file is vacuous"
+        "the raised toolbar pill and the panel are the same colour, so every other test in this file \
+         is vacuous"
     );
     assert_ne!(
         colour::RULE,
@@ -394,8 +439,16 @@ fn the_open_popup_is_emitted_into_after_and_nothing_else_is() {
 fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     use holonomy_render::widgets::Open;
 
+    // **`sidebar_open: true` is set explicitly, and it was not before.**
+    //
+    // The default became *closed* (see `ChromeState::default`), and with the sidebar closed this whole
+    // test becomes vacuous in a way that reads as a pass: it asserts that the popup overlaps the
+    // sidebar, and against a zero-width sidebar it failed on its own premise. That is the right failure,
+    // but the test is worth keeping — the File popup really does hang over the rail — so it now opens
+    // the rail rather than depending on a default that has no reason to be the one this test needs.
     let state = ChromeState {
         open: Some(Open::Menu(0)),
+        sidebar_open: true,
         ..ChromeState::default()
     };
     let (frame, chrome, _) = paint_chrome(&state);
@@ -424,13 +477,21 @@ fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
         side
     );
 
-    // **The sidebar's band colour inside the popup's rect: zero, over every pixel.**
-    let band = c(colour::BAND);
+    // **The sidebar's own fill inside the popup's rect: zero, over every pixel.**
+    //
+    // **This was `colour::BAND`, and it only worked because `BAND` and `CHROME` were the same value.**
+    // `paint_sidebar` filled the rail with `CHROME`, so the premise scan below was looking for a colour
+    // the toolbar band had — not the one the sidebar had — and it passed solely because the two
+    // constants were identical. **That is the very defect the palette correction fixed.**
+    //
+    // **The rail is `PILL` now** (see `paint_sidebar`), which is a raised surface rather than the
+    // panel, so both the negative scan and its premise name the colour the rail is actually painted in.
+    let panel = c(colour::PILL);
     let mut leaked = 0;
     let mut first_leak = None;
     for y in popup.rect.y.max(side.y).saturating_add(8)..popup.rect.bottom().min(side.bottom()).saturating_sub(8) {
         for x in popup.rect.x.max(side.x).saturating_add(8)..popup.rect.right().min(side.right()).saturating_sub(8) {
-            if pixel(&frame, x, y) == band {
+            if pixel(&frame, x, y) == panel {
                 leaked += 1;
                 first_leak.get_or_insert((x, y));
             }
@@ -438,7 +499,7 @@ fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     }
     assert_eq!(
         leaked, 0,
-        "{leaked} px inside the popup at {first_leak:?} are the sidebar's band colour, over a \
+        "{leaked} px inside the popup at {first_leak:?} are the sidebar's panel colour, over a \
          {overlap_w}x{overlap_h} overlap. The popup is being painted under the sidebar, which is the \
          'dropdown opens one layer back' report."
     );
@@ -461,13 +522,13 @@ fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     let beside = (lo + side.right()) / 2;
     let mut show = 0;
     for y in side.y..side.bottom() {
-        if pixel(&frame, beside, y) == band {
+        if pixel(&frame, beside, y) == panel {
             show += 1;
         }
     }
     assert!(
         show > side.height / 2,
-        "only {show} of the sidebar's {height} rows at x={beside} are the band colour, so the scan \
+        "only {show} of the sidebar's {height} rows at x={beside} are the panel colour, so the scan \
          above would have found zero for the wrong reason.",
         height = side.height
     );
