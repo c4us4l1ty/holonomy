@@ -961,12 +961,42 @@ impl Conn {
     /// untouched.
     pub fn take_motion_run(&mut self) -> Option<Event> {
         let mut last = None;
-        while self
-            .events
-            .front()
-            .is_some_and(|e| matches!(e, Event::MotionNotify { .. }))
-        {
-            last = self.events.pop_front();
+        loop {
+            while self
+                .events
+                .front()
+                .is_some_and(|e| matches!(e, Event::MotionNotify { .. }))
+            {
+                last = self.events.pop_front();
+            }
+            // **And one non-blocking read**, because the queue is usually *empty* when a drag is
+            // running: the server's motion events are in the socket, not in this deque, and folding
+            // only what is already parsed would fold nothing during the one moment it matters.
+            // `read_packet_now` is the call that cannot wait — see its note on why
+            // `read_packet(Some(Instant::now()))` is *not* that call.
+            //
+            // **A non-motion packet is put back, not dropped.** Pushing to the front of this object's
+            // own deque preserves order, so a `ButtonPress` that arrives behind the motion run is the
+            // next thing the driver sees — **which is what stops a click being swallowed by a drag.**
+            match self.read_packet_now() {
+                Ok(Some(Packet::Event(e))) => {
+                    if matches!(e, Event::MotionNotify { .. }) {
+                        last = Some(e);
+                        continue;
+                    }
+                    // Not motion: it goes back at the front, in order, and the fold is over.
+                    self.events.push_front(e);
+                    break;
+                }
+                Ok(Some(other)) => {
+                    self.queue(other);
+                    break;
+                }
+                // A partial packet, the deadline, or a read error. **An error is not swallowed here** —
+                // the next `next_event` will report it, and reporting it twice would turn one broken
+                // socket into two messages.
+                Ok(None) | Err(_) => break,
+            }
         }
         last
     }
@@ -983,6 +1013,58 @@ impl Conn {
 
     /// Close the connection.
     pub fn close(self) {}
+
+    /// Read one packet if the socket already has one, and return `Ok(None)` otherwise.
+    ///
+    /// # Why this is not `read_packet(Some(Instant::now()))`
+    ///
+    /// **That call reads nothing, always.** `ensure` checks its deadline *before* it touches the socket
+    /// (`if Instant::now() >= d { return Ok(false) }`) and `Instant::now()` is its own deadline, so the
+    /// guard fires on the first pass and a "non-blocking" call written that way is a no-op that looks
+    /// like a drained socket. **The deadline form is right for every other caller** — it is what stops
+    /// a read loop spinning once its deadline has passed — so the fix is a second entry point rather
+    /// than a change to `ensure`'s rule.
+    ///
+    /// **It does not read unless there is something to read.** `poll` with a zero timeout is the
+    /// question "is the socket readable"; asking it first means the `read` below can never block,
+    /// because it is only issued when the kernel has already said there are bytes.
+    fn read_packet_now(&mut self) -> Result<Option<Packet>, ConnError> {
+        self.compact();
+        // Anything already buffered is answered without touching the socket, and the greeting and the
+        // partial-packet states are `read_packet`'s business — this defers to it whenever there is a
+        // byte in hand, with a deadline far enough away that it will not refuse.
+        if self.rbuf.len() > self.rstart {
+            // **A deadline of *now*, and that is deliberate here.** `read_packet` completes a packet from
+            // bytes already in the buffer without consulting the deadline (the `ensure` guard only fires
+            // when it has to touch the socket), so this answers immediately for a whole packet and
+            // answers `None` rather than waiting for a half-delivered one. **The fold is an optimisation
+            // and must never cost a frame**: a partial packet is left for `next_event`, which is the
+            // call that is allowed to wait.
+            return self.read_packet(Some(Instant::now()));
+        }
+        let mut pfd = libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd`, initialised, and a count of one.
+        let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(ConnError::Io(e));
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        // Readable, so the first `read` cannot block — there are bytes, and `ensure` reads them without
+        // consulting the deadline. **The deadline is now, so a *partial* packet is left for
+        // `next_event`** rather than making a pointer optimisation the reason a frame waits on the
+        // server. That is the same rule as the buffered arm above.
+        self.read_packet(Some(Instant::now()))
+    }
 
     /// Read one packet, waiting until `deadline`.
     ///

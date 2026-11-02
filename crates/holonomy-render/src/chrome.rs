@@ -2578,9 +2578,16 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     )));
     let title_x = 24 + crate::icons::SIZE as i32 + 12;
     let title_y = l.title.y + m.title_h.saturating_sub(m.cell_h) / 2;
-    // Keep a long document name clear of the star/folder/cloud group that follows it.
-    let left_group_x = m.cell_w.saturating_mul(32) as i32;
-    let title_cells = ((left_group_x - title_x - 8).max(0) as u32) / m.cell_w.max(1);
+    // Keep a long document name clear of the left-hand button group.
+    //
+    // **`cell_w * 18`, which is where `place_title` starts that group** — it was `* 32`, reserving room
+    // for three buttons where one is now drawn. The reservation is a *bound on the title's text*, so
+    // leaving it at 32 truncates a name fourteen cells earlier than it needs to for a group that no
+    // longer exists. **The number is a copy of `place_title`'s and cannot be derived from it here**
+    // (`place_title` does not run until after this),
+    // so it is written with its derivation rather than as a magic 18.
+    let title_room = m.cell_w.saturating_mul(crate::widgets::TITLE_START_CELLS) as i32;
+    let title_cells = ((title_room - title_x - 8).max(0) as u32) / m.cell_w.max(1);
     push_text(into, m, title_y, &fit_to_width(&state.title, m.cell_w, title_cells), Style::REGULAR, colour::INK, title_x);
 
     for (btn, r) in crate::widgets::place_title(l, crate::widgets::TITLE_PAD) {
@@ -2603,6 +2610,11 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         if let Some(c) = state_fill(state, crate::widgets::Hit::Title(btn)) {
             into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
         }
+        // **`Cloud` is the only button that reaches this arm**, because `place_title` filters on
+        // `TitleButton::has_action` and the pill branch above already `continue`d for `Share`. The
+        // other arms are kept rather than deleted so that a button which *regains* an action is drawn
+        // as an icon without a second edit here — and `unreachable!()` on the two pills is still the
+        // right answer for the same reason it was: reaching it means `place_title` stopped filtering.
         let icon = match btn {
             B::Star => crate::icons::IconId::Star,
             B::Folder => crate::icons::IconId::Folder,

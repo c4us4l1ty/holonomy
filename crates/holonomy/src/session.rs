@@ -8157,6 +8157,17 @@ fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::
 }
 
 /// What a title-bar button means, or `None`.
+///
+/// # This is now the *only* arm, and it matches the drawn set
+///
+/// **`place_title` draws `Cloud` and `Share` and nothing else** — see `TitleButton::has_action`, which
+/// is the filter it uses. So this function and that one have to agree or a drawn button is inert again:
+/// `Cloud` is here, `Share` is routed to `Action::Export` in `press` because it is an action rather than
+/// a `Command`, and **the two functions together are the whole of "what can this title bar do".**
+///
+/// **The `_ => return None` stays.** A future button that is drawn but not wired must count as
+/// `pointer_inert` rather than be swallowed, which is what that counter is for: a button that silently
+/// does nothing is the defect, and a button that is *counted* doing nothing is a measurement.
 fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_input::Command> {
     use holonomy_input::{Command, Hotkey};
     use holonomy_render::widgets::TitleButton;
