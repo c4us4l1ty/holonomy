@@ -45,6 +45,7 @@ jobs:
         run: |
           mkdir -p shots
           cargo test -p holonomy --test zz_capture -- --nocapture > ci-logs/capture.log 2>&1 || true
+          cargo test -p holonomy --test zz_probe -- --nocapture > ci-logs/probe.log 2>&1 || true
           python3 -m pip install --quiet pillow || true
           cat > /tmp/topng.py <<'PY'
           import glob, os
