@@ -5797,9 +5797,20 @@ impl<'a> Session<'a> {
     /// is a heading applied to the *previous* paragraph, which reads as an off-by-one in the editor.
     fn paragraph_range(&self) -> (u32, u32) {
         match self.editor.selection() {
+            // **`end - 1`, because a selection that ends at the *start* of a line did not select it.**
+            //
+            // Drag from the middle of paragraph 1 to the start of paragraph 2 and the selection's `end`
+            // is the first byte of paragraph 2. Asking `line_end_offset(end)` would answer with paragraph
+            // 2's last byte, so clearing the formatting would clear a paragraph the user did not touch
+            // -- and it would do it one line *below* the one they were looking at, which is the hardest
+            // kind of off-by-one to see in a diff. `end - 1` is the last byte they did select, which is
+            // paragraph 1's newline, and `line_end_offset` turns that into paragraph 1's end.
+            //
+            // **The subtraction cannot underflow**, because `Editor::selection` returns `None` for an
+            // empty range and an empty range is the only way `end` could be 0.
             Some(sel) => (
                 self.line_start(sel.start as usize) as u32,
-                self.line_end_offset((sel.end.saturating_sub(1)) as usize) as u32,
+                self.line_end_offset(sel.end.saturating_sub(1) as usize) as u32,
             ),
             None => {
                 let caret = self.editor.caret() as usize;

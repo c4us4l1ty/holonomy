@@ -1,4 +1,4 @@
-//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 10 tests.
+//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 11 tests.
 //!
 //! # The gap this file closes
 //!
@@ -24,19 +24,26 @@
 //! computed an underline's `y` would be a second answer to "where is the baseline", which is the defect
 //! `pen_of` exists to prevent, one axis over.
 //!
-//! **The size of the rule is shared and its position is not.**
-//! `DocRun::RULE_THICKNESS` is the emitter's request, because "how thick is an underline" has the same
-//! answer in every renderer; `Painter::rule_thickness` may widen it, because only the painter knows the
-//! line box it has to fit inside. **A position cannot be shared that way**, which is why there is no
-//! `RULE_OFFSET` beside it: the offset is the ascent, and the ascent is the atlas's.
+//! **The size of the rule is shared and its position is not.** `DocRun::RULE_THICKNESS` is the request,
+//! because "how thick is an underline" has the same answer in every renderer; `Painter::rule_thickness`
+//! is a floor the painter may raise, because only the painter knows the line box the rule has to fit
+//! inside. **A position cannot be shared that way**, which is why there is no `RULE_OFFSET` beside it: the
+//! offset is the ascent, and the ascent belongs to the atlas.
 //!
-//! # What is measured
+//! # What is measured, and why not "did anything change"
 //!
-//! **Pixels, and their positions relative to the baseline.** The claim "the rule is under the glyphs and
-//! not through them" cannot be checked by counting differing pixels — a rule drawn *through* the letters
-//! differs from plain text by a similar number of pixels as one drawn under them. So the row's
-//! **lowest ink row** is compared between a plain frame and an underlined one: an underline must put ink
-//! *below* the last row the plain frame had.
+//! **Ink extents, relative to the baseline.** "The rule is under the glyphs and not through them" cannot
+//! be checked by counting differing pixels — a rule drawn *through* the letters differs from plain text by
+//! a similar *number* of pixels as one drawn under them. What separates them is the **shape** of the
+//! difference: an underline extends the box's bottom and leaves its top alone, a strikethrough stays
+//! inside the box, and a shift moves both edges together by the same amount.
+//!
+//! **So every gate here compares box edges between two frames**, and the two that cannot be answered that
+//! way — "was a glyph drawn" and "how many rules were asked for" — read `PaintStats` instead.
+//!
+//! **The window is one line taller than the text rect in each direction**, because a raised run is *not
+//! inside its own line box*: a measurement clipped to `cell_h` would report a superscript's ink as
+//! starting at the top of the box, which is exactly the number the superscript gate needs to see move.
 //!
 //! | what it proves | test |
 //! | --- | --- |
@@ -46,6 +53,7 @@
 //! | a superscript moves the run up | [`a_superscript_moves_its_run_up_the_screen`] |
 //! | a subscript moves it down | [`a_subscript_moves_its_run_down_the_screen`] |
 //! | clear formatting undoes all of them | [`clearing_formatting_removes_every_decoration`] |
+//! | and stops at the end of the last selected line | [`clearing_stops_at_the_end_of_the_last_selected_paragraph`] |
 //! | **underline arms at a caret and types underlined** | [`arming_underline_styles_the_text_typed_after_it`] |
 //! | **a strike arms without lighting a button** | [`the_strikethrough_arms_without_lighting_any_button`] |
 //! | a heading draws at the larger size | [`a_heading_draws_at_the_larger_atlas_size`] |
@@ -478,6 +486,49 @@ fn the_strikethrough_arms_without_lighting_any_button() {
         struck_bottom, plain_bottom,
         "**a strikethrough must not extend the ink box downward** -- that is an underline's signature, \
          and getting it means the two bits are wired to the same rule"
+    );
+}
+
+/// **Clearing with a selection that stops at the next paragraph does not clear the next paragraph.**
+///
+/// # The off-by-one this exists for
+///
+/// `paragraph_range` answers with `line_end_offset(end - 1)` and the doc says why: a selection whose
+/// `end` is the *first byte of the next line* did not select that line, so asking where the line
+/// containing `end` finishes answers one paragraph too low. **The symptom is a paragraph going plain that
+/// the user never selected**, one line below the one they were looking at, and it is invisible in a test
+/// that only ever selects within a single line.
+///
+/// # Why the fixture is two decorated paragraphs
+///
+/// **So "the wrong one was cleared" is observable.** With one decorated paragraph and one plain one, both
+/// a correct range and a range one line long leave *some* decoration on screen. Here both are decorated
+/// and only the first should lose its formatting.
+#[test]
+fn clearing_stops_at_the_end_of_the_last_selected_paragraph() {
+    use holonomy_render::menus::Action;
+    // `one` is bytes 0..=3, the newline is 3, and `two` is 4..=7.
+    let mut s = painted("one\ntwo\n", None);
+    s.editor_mut()
+        .style_range(0, 8, STYLE_UNDERLINE, 0)
+        .expect("underline both paragraphs");
+    s.repaint_all().expect("paint");
+
+    // **A selection from the middle of the first paragraph to the first byte of the second**, which is
+    // what a drag that stops at the start of the next line produces.
+    s.select_range(1, 4).expect("select into the second line's first byte");
+    s.apply_action(Action::ClearFormatting).expect("clear");
+
+    assert_eq!(
+        s.editor().style_at(0).style_flags & STYLE_UNDERLINE,
+        0,
+        "the paragraph the selection started in must be cleared"
+    );
+    assert_eq!(
+        s.editor().style_at(5).style_flags & STYLE_UNDERLINE,
+        STYLE_UNDERLINE,
+        "**the second paragraph must keep its formatting**: byte 5 is inside `two`, which the selection \
+         did not reach. A range that ran to `line_end_offset(end)` would have cleared it."
     );
 }
 
