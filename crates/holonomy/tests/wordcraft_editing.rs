@@ -42,7 +42,9 @@ fn find_and_replace_all_are_bounded_and_undoable() {
     assert_eq!(s.replace_all("alpha", "gamma", true).unwrap(), 2);
     assert_eq!(s.text().unwrap(), b"gamma beta gamma");
     // Each replacement is a delete plus an insert in the existing bounded history.
-    for _ in 0..4 { s.undo().unwrap(); }
+    for _ in 0..4 {
+        s.undo().unwrap();
+    }
     assert_eq!(s.text().unwrap(), b"alpha beta alpha");
 }
 
