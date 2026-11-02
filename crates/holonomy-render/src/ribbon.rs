@@ -1109,7 +1109,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         );
     }
     round(v, lock_rect(l), 5, t.accent);
-    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_w, cell_h);
+    text(
+        v,
+        lock_rect(l),
+        "Lock",
+        t.on_accent,
+        true,
+        true,
+        cell_w,
+        cell_h,
+    );
     for (i, r) in tab_rects(l).into_iter().enumerate() {
         let selected = i == usize::from(s.ribbon_tab);
         if selected {

@@ -48,3 +48,28 @@ jobs:
           git add -f ci-logs
           git commit --allow-empty -m "ci: verification logs [skip ci]" || true
           git push 2>&1 | tail -5
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - name: baseline-chrome
+        run: |
+          set -o pipefail
+          mkdir -p ci-baseline
+          if cargo test -p holonomy-render --test chrome > ci-baseline/chrome.log 2>&1; then
+            echo "BASELINE chrome PASS" > ci-baseline/summary.log
+          else
+            echo "BASELINE chrome FAIL" > ci-baseline/summary.log
+          fi
+          grep -E "^test result|^---- |panicked at" ci-baseline/chrome.log | head -40
+      - name: publish
+        if: always()
+        run: |
+          git config user.name ci; git config user.email ci@example.invalid
+          git add -f ci-baseline
+          git commit --allow-empty -m "ci: main baseline [skip ci]" || true
+          git push origin HEAD:refs/heads/ci-baseline-main 2>&1 | tail -3
