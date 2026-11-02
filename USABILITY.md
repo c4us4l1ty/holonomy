@@ -163,3 +163,13 @@ the whole document. This is not yet H2's bounded section-level strategy, nor a v
 performance claim. In a standalone synthetic run of the index (not the app), a single 5.28 MB
 paragraph rebuilt in about 44 ms and a middle edit took about 46 ms. These figures are illustrative,
 not a hardware-independent performance guarantee.
+
+## Desktop editor appearance
+
+The managed desktop editor uses a softly contrasted desk, a rounded toolbar, sheet shadows, and
+roomier page margins inspired by the `Plan/1.png` editor reference. Margins narrow on small windows.
+The larger prebuilt icon masks are used at the larger text size; the sealed editor keeps its existing
+chrome and margins. On screens at least 1800 by 1000 pixels, a sufficiently large desktop window
+starts at 125% when the two-size atlas is available. This is a screen-resolution heuristic, not DPI
+detection; use the zoom menu or `--zoom 100` to select the smaller view. An explicit `--zoom` or
+`--ppem` is never overridden. Startup falls back to 100% if the atlas has only one size.

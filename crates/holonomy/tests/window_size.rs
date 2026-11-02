@@ -174,3 +174,19 @@ fn the_margin_is_a_fixed_number_of_pixels() {
     assert_eq!(big, DESIGN_W, "plenty of room: the design width");
     assert_eq!(small, 600 - SCREEN_MARGIN, "not enough: the screen minus the margin");
 }
+
+#[test]
+fn desktop_startup_zoom_is_readable_and_respects_explicit_choices() {
+    use holonomy::args::Args;
+    use holonomy::windowed::initial_desktop_zoom;
+
+    let defaults = Args::default();
+    assert_eq!(initial_desktop_zoom((1920, 1080), (1600, 1000), &defaults), 125);
+    assert_eq!(initial_desktop_zoom((1917, 1157), (1600, 1000), &defaults), 125);
+    assert_eq!(initial_desktop_zoom((1366, 768), (1302, 704), &defaults), 100);
+    assert_eq!(initial_desktop_zoom((3840, 2160), (800, 600), &defaults), 100);
+    let explicit = Args::parse(["--zoom", "100"]).unwrap();
+    assert_eq!(initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit), 100);
+    let explicit_ppem = Args::parse(["--ppem", "16"]).unwrap();
+    assert_eq!(initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit_ppem), 100);
+}

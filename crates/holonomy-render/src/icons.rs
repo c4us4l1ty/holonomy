@@ -839,6 +839,33 @@ pub enum IconId {
     Print,
 }
 
+// A slightly larger set for the desktop's higher zoom. Masks remain static and
+// one-bit; no vector rasterizer or allocation is needed on the paint path.
+const LARGE_SIZE: u32 = 20;
+const fn enlarged_masks() -> [[u64; LARGE_SIZE as usize]; IconId::ALL.len()] {
+    let mut out = [[0u64; LARGE_SIZE as usize]; IconId::ALL.len()];
+    let mut icon = 0;
+    while icon < IconId::ALL.len() {
+        let src = IconId::ALL[icon].mask();
+        let mut y = 0;
+        while y < LARGE_SIZE {
+            let mut x = 0;
+            while x < LARGE_SIZE {
+                let sx = x * SIZE / LARGE_SIZE;
+                let sy = y * SIZE / LARGE_SIZE;
+                if src[sy as usize] & (1u64 << (63 - sx)) != 0 {
+                    out[icon][y as usize] |= 1u64 << (63 - x);
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        icon += 1;
+    }
+    out
+}
+static LARGE_MASKS: [[u64; LARGE_SIZE as usize]; IconId::ALL.len()] = enlarged_masks();
+
 impl IconId {
     /// Every icon, in declaration order.
     pub const ALL: &'static [IconId] = &[
@@ -937,6 +964,12 @@ impl IconId {
             y,
             colour,
         }
+    }
+
+    /// A 20 px desktop icon, using a compile-time enlarged mask.
+    #[must_use]
+    pub fn at_large(self, x: i32, y: i32, colour: u32) -> Icon {
+        Icon { bits: &LARGE_MASKS[self as usize], width: LARGE_SIZE, height: LARGE_SIZE, x, y, colour }
     }
 
     /// This icon's bounds at `(x, y)`.

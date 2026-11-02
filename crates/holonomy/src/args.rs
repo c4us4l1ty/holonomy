@@ -51,6 +51,10 @@ pub struct Args {
     pub sized: bool,
     /// Zoom, as a percentage.
     pub zoom: u32,
+    /// Whether the user explicitly selected a zoom or font rasterization size.
+    pub zoom_explicit: bool,
+    /// Whether `--ppem` was supplied, including when it equals the default.
+    pub ppem_explicit: bool,
     /// **Pixels per em the faces are rasterised at.** This is the type size, and it is the one that
     /// actually makes the application bigger.
     pub ppem: u16,
@@ -79,6 +83,8 @@ impl Default for Args {
             height: 1000,
             sized: false,
             zoom: 100,
+            zoom_explicit: false,
+            ppem_explicit: false,
             // **CORRECTION, part 36: 20, not 24.**
             //
             // Part 32 raised this from 16 to 24 because the type was too small, and it measured the
@@ -240,9 +246,9 @@ holonomy --container <path> [--headless] [--screenshot <path.ppm>]
                          enlarges the glyphs and every band that holds them,
                          so it costs rows as well as pixels. Part 32 chose
                          24; part 36 measured the viewport and chose 20.
-  --zoom N             Zoom percentage, 25..=400 (default 100).
-                         CORRECTION, part 23: this does not zoom. It sets the
-                         number the toolbar prints; the page does not change.
+  --zoom N             Zoom percentage (100 or 125 when both atlas sizes fit).
+                         On large desktop screens the default is 125; pass
+                         --zoom 100 to use the smaller size.
                          See PROJECT.md part 23 and crates/holonomy/tests/zoom.rs.
   --headless           No DRM, no evdev, no jail.
   --dry-run            Print the boot plan and exit without opening anything.
@@ -288,6 +294,7 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                     out.sized = true;
                 }
                 "--ppem" => {
+                    out.ppem_explicit = true;
                     let ppem = parse_u32(&flag, &value()?)?;
                     // Range-check before narrowing: `65546 as u16` is 10, which used to
                     // smuggle an out-of-range value past the atlas clamp below.
@@ -298,7 +305,10 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                         max: 26,
                     })?;
                 }
-                "--zoom" => out.zoom = parse_u32(&flag, &value()?)?,
+                "--zoom" => {
+                    out.zoom = parse_u32(&flag, &value()?)?;
+                    out.zoom_explicit = true;
+                },
                 "--headless" => out.headless = true,
                 "--window" => out.window = true,
                 "--display" => out.display = Some(value()?),
@@ -394,6 +404,16 @@ mod tests {
         assert_eq!(a, Args::default());
         assert!(!a.headless);
         assert!(a.exports.is_empty());
+    }
+
+    #[test]
+    fn explicit_display_size_preferences_are_remembered_even_at_the_default() {
+        let defaults = parse(&[]).unwrap();
+        assert!(!defaults.zoom_explicit && !defaults.ppem_explicit);
+        let zoom = parse(&["--zoom=100"]).unwrap();
+        assert!(zoom.zoom_explicit && !zoom.ppem_explicit);
+        let ppem = parse(&["--ppem", "16"]).unwrap();
+        assert!(ppem.ppem_explicit && !ppem.zoom_explicit);
     }
 
     #[test]

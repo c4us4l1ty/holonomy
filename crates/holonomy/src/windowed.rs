@@ -224,6 +224,15 @@ pub const DESIGN_H: u32 = 1000;
 /// everywhere.
 pub const SCREEN_MARGIN: u32 = 64;
 
+/// Choose a readable initial desktop zoom without overriding an explicit user choice.
+/// Screen size is only a conservative heuristic, not a DPI measurement; the toolbar
+/// and `--zoom` remain available when the choice is not right for a particular display.
+pub fn initial_desktop_zoom(screen: (u32, u32), window: (u32, u32), args: &Args) -> u32 {
+    if !args.zoom_explicit && !args.ppem_explicit
+        && screen.0 >= 1800 && screen.1 >= 1000 && window.0 >= 1200 && window.1 >= 700
+    { 125 } else { args.zoom }
+}
+
 pub fn run(
     atlas: &'static Atlas,
     args: &Args,
@@ -231,14 +240,23 @@ pub fn run(
 ) -> Result<Exit, WindowedError> {
     #[cfg(debug_assertions)]
     eprintln!("holonomy: debug build — use --release for responsive painting");
+    let screen = Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000));
     let (w, h) = if args.sized { (metrics.width, metrics.height) } else {
-        opening_size(Desktop::screen_size(args.display.as_deref()).unwrap_or((1600, 1000)), None)
+        opening_size(screen, None)
     };
     let metrics = ChromeMetrics { width: w, height: h, ..metrics };
     let desktop = Desktop::open(args.display.as_deref(), w, h, "Holonomy").map_err(WindowedError::Desktop)?;
     let mut session = Session::new(Editor::new(), Painter::new(atlas, 0), Box::new(desktop), metrics);
     session.set_managed_documents(true);
-    if let Err(e) = session.set_zoom(args.zoom) { eprintln!("holonomy: {e}"); }
+    let zoom = initial_desktop_zoom(screen, (w, h), args);
+    if let Err(e) = session.set_zoom(zoom) {
+        // An atlas with only one size cannot provide the automatic 125% choice.
+        if zoom != args.zoom {
+            let _ = session.set_zoom(args.zoom);
+        } else {
+            eprintln!("holonomy: {e}");
+        }
+    }
     let path = args.container.clone().unwrap_or_else(|| std::path::PathBuf::from("holonomy.wavefunction"));
     let mut vault: Option<crate::vault::Vault> = None;
     let mut form: Option<Form> = Some(if path.exists() { Form::unlock(path.clone()) } else { Form::setup(path.clone()) });

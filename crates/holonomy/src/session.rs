@@ -525,6 +525,8 @@ pub struct Session<'a> {
     pending_colour: Option<u32>,
     /// The chrome geometry.
     pub chrome: Chrome,
+    /// Unscaled type-dependent dimensions, so zooming in and out does not compound rounding.
+    type_metrics: ChromeMetrics,
     /// What the chrome shows.
     pub state: ChromeState,
     /// The framebuffer.
@@ -1013,7 +1015,8 @@ impl<'a> Session<'a> {
         // the type at 16 ppem and the measure at `cell_w = 8`, so rasterising at a larger ppem grew the
         // glyphs into bands that did not grow with them. `with_type_scale` scales every dimension that
         // describes type, from the same measured pitch, and leaves the furniture alone.
-        let metrics = match painter.atlas().map(|a| a.line_pitch()).filter(|&p| p > 0) {
+        let type_metrics = metrics;
+        let metrics = match painter.atlas().and_then(|a| painter.size().map(|size| a.line_pitch_at(size))).filter(|&p| p > 0) {
             Some(pitch) => metrics
                 // **The cell from the face, and not the 8 the constant carries.** `cell_width()` reads
                 // the Monospace face's own advance out of the atlas -- 10 at 16 ppem, 14 at 24 -- which
@@ -1124,6 +1127,7 @@ impl<'a> Session<'a> {
             // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
             pending_style: None,
             chrome,
+            type_metrics,
             state,
             frame,
             scanout,
@@ -1731,7 +1735,10 @@ impl<'a> Session<'a> {
     ///
     /// Returns whether the size actually changed.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, SessionError> {
-        let metrics = self.chrome.metrics.clamp_to(width, height);
+        let mut metrics = self.chrome.metrics.clamp_to(width, height);
+        if self.managed_documents {
+            metrics.page_pad = Self::desktop_page_padding(metrics.width);
+        }
         let (w, h) = (metrics.width, metrics.height);
         if (w, h) == (self.frame.width(), self.frame.height()) {
             return Ok(false);
@@ -1899,6 +1906,10 @@ impl<'a> Session<'a> {
     pub fn set_managed_documents(&mut self, managed: bool) {
         self.managed_documents = managed;
         self.state.paged = managed;
+        let page_pad = if managed { Self::desktop_page_padding(self.chrome.metrics.width) }
+            else { self.type_metrics.page_pad };
+        self.chrome = Chrome::new(ChromeMetrics { page_pad, ..self.chrome.metrics });
+        self.invalidate(self.chrome.full_damage());
         if managed {
             self.reflow_for_measure();
         } else if let Ok(mut text) = self.editor.text() {
@@ -1912,6 +1923,10 @@ impl<'a> Session<'a> {
             self.invalidate(self.chrome.full_damage());
         }
     }
+
+    // Print-like desktop margins which shrink with a narrow viewport. The sealed
+    // surface retains the caller's original metrics.
+    fn desktop_page_padding(width: u32) -> u32 { 96.min(width / 12) }
 
     fn wrap_measure(&self) -> u32 {
         self.chrome.layout.cells_per_row(self.chrome.metrics.cell_w) as u32
@@ -4255,6 +4270,7 @@ impl<'a> Session<'a> {
         // the caret and the selection would then be placing cells in a grid the text is not in.**
         self.apply_type_scale();
         self.reflow_for_measure();
+        self.scroll_line_into_view(self.state.caret_line);
         // **Everything.** Every band, every pixel: the page's width in cells changes with the cell
         // width, so the page moves as well as the type.
         self.damage = self.chrome.full_damage();
@@ -4330,9 +4346,16 @@ impl<'a> Session<'a> {
         if pitch == 0 {
             return;
         }
-        let metrics = self
-            .chrome
-            .metrics
+        // Preserve the current viewport and sidebar, but derive type dimensions from the
+        // original unscaled design. Re-scaling the already-scaled bands caused zoom drift.
+        let current = self.chrome.metrics;
+        let base = self.type_metrics;
+        let metrics = ChromeMetrics {
+            title_h: base.title_h, menu_h: base.menu_h, tab_h: base.tab_h,
+            toolbar_h: base.toolbar_h, ruler_h: base.ruler_h, status_h: base.status_h,
+            button: base.button, anchor_width: base.anchor_width,
+            ..current
+        }
             .with_cell_width(self.painter.cell_width())
             .with_type_scale(u32::from(pitch))
             .with_line_pitch(u32::from(pitch));

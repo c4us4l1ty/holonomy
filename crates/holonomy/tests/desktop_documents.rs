@@ -206,3 +206,16 @@ fn entering_past_a_sheet_creates_a_second_visible_page_without_losing_the_first(
     assert!(s.chrome_layout().visible_page(&s.state, 1).is_some());
     s.repaint_all().unwrap();
 }
+
+#[test]
+fn desktop_sheet_margins_shrink_when_the_window_is_narrowed() {
+    let mut s = session();
+    let large = s.chrome.metrics.page_pad;
+    assert!(large > holonomy_render::ChromeMetrics::DESKTOP.page_pad);
+    s.resize(600, 700).unwrap();
+    assert!(s.chrome.metrics.page_pad < large);
+    assert_eq!(s.chrome.metrics.page_pad, 50);
+    assert!(s.chrome_layout().text.width > 0);
+    s.resize(1280, 800).unwrap();
+    assert_eq!(s.chrome.metrics.page_pad, large);
+}
