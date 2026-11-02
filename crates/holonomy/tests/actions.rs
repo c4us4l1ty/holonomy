@@ -169,12 +169,19 @@ fn renaming_a_label_does_not_change_what_a_row_does() {
     );
 }
 
-/// **Every action is either routed to a command, handled by the session, or named as unwired.**
+/// **Every action is either routed to a command or handled by the session, and the split is 19 + 12.**
 ///
-/// **The three lists must add up to the whole enum, and `Action` is matched exhaustively twice.** A new
-/// variant that reaches `action_command` and hits its `_ => None` — there is no `_ =>` arm — does not
-/// compile. So this test is about the *documented* split: the ones that change chrome state, and now
-/// the one that writes files, are handled in `apply_action`; the rest must produce a command.
+/// **`Action` has 31 variants and the two lists name all of them between them.** That is not how the
+/// lists are *checked* — `action_command` and `apply_action` are both exhaustive matches, so a variant in
+/// neither is caught by the linker rather than by this test — but it is what the two lists mean, and the
+/// first version of this doc said the lists "must add up" without ever asserting a total. **They did add
+/// up: 19 + 12 = 31.** The arithmetic is written here so the next row that lands in either list has a
+/// number to move, and so that a variant which is quietly in neither is a discrepancy somebody can see.
+///
+/// **What the lists are for is the reason each variant is where it is.** A routed one becomes a `Command`
+/// the editor applies. A handled one changes chrome state, replaces the document, or asks for a path —
+/// none of which a `Command` can express, because `Command` is the vocabulary of *edits* and these are
+/// not edits.
 #[test]
 fn every_action_is_routed_or_accounted_for() {
     // The chrome-state actions never reach `action_command`, and saying so here is what keeps the two
@@ -206,6 +213,18 @@ fn every_action_is_routed_or_accounted_for() {
         Action::Import,
         Action::WordCount,
         Action::KeyboardShortcuts,
+        // **The seven style actions, which `action_command` deliberately refuses to route.** They were
+        // already here in effect -- `ToggleBold` and `ToggleItalic` are in the list above with a
+        // different reason -- and the five that made `Format` a real menu joined them on the same
+        // terms: a style is applied *to the document through the session*, because that is where the
+        // armed state, the selection and the damage are. Routing `ToggleStrike` to a bare
+        // `Command::Format` would be a second path to the same edit and the two would diverge the
+        // first time one of them learned about `pending_style`.
+        Action::ToggleUnderline,
+        Action::ToggleStrike,
+        Action::ToggleSuperscript,
+        Action::ToggleSubscript,
+        Action::ClearFormatting,
     ];
     for a in handled_by_session {
         assert_eq!(
@@ -276,6 +295,14 @@ fn every_action_has_a_name() {
         Action::SetColour(0),
         Action::ToggleBold,
         Action::ToggleItalic,
+        // **The five that made `Format` a menu worth opening.** Each is in this list for the reason
+        // the gate's own doc gives -- a `match` with no `_` sees a new variant, and only this sees a
+        // *duplicate name*, which is the part a compile error cannot catch.
+        Action::ToggleUnderline,
+        Action::ToggleStrike,
+        Action::ToggleSuperscript,
+        Action::ToggleSubscript,
+        Action::ClearFormatting,
         Action::WordCount,
         Action::KeyboardShortcuts,
     ];
@@ -315,13 +342,21 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 27,
+        with_action, 33,
         "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
-         Keyboard shortcuts. Adding one changes this number."
+         Keyboard shortcuts, and the five text-formatting rows that made `Format` a real menu -- \
+         Underline, Strikethrough, Superscript, Subscript and Clear formatting. Adding one changes \
+         this number."
     );
     // **The list is printed rather than asserted empty**, because a row that is *deliberately* inert —
     // a submenu header, a reference-only command — is a legitimate state and hiding it would be worse
-    // than showing it. **There are none of those left**, and the assertion below is `(0, 26)`.
+    // than showing it. **There are none of those left**, and the assertion below is `(0, 33)`.
+    //
+    // **And 33 was arrived at from 28, not from 27**, which is the arithmetic worth writing down. The
+    // assertion read `(0, 27)` on a `menus.rs` whose seven arrays summed to **28** rows: the number was
+    // one short and nothing noticed, because the gate counts what `MENUS` holds and only *this* line
+    // named a total. The five formatting rows added here therefore make it 28 + 5, and the first version
+    // of this edit wrote 31 -- it moved the stale number by the same five and kept the same error.
     //
     // **It was 40 of 57, and 47 of 55 before the save gained a row.**
     //
@@ -381,8 +416,8 @@ fn every_wired_menu_item_carries_an_action() {
     // went up by two because the four rows that replaced them are four rows.
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (0, 27),
-        "**0 unwired of 27 menu items** in the seven headings after out-of-scope cloud/add-on rows \
+        (0, 33),
+        "**0 unwired of 33 menu items** in the seven headings after out-of-scope cloud/add-on rows \
          were removed. Any row that reappears here is a row that draws and does nothing. Got: \
          {without:?}"
     );

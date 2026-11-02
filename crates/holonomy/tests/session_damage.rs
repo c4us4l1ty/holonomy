@@ -32,6 +32,7 @@
 //! | **typing repaints the status bar, a hover does not** | [`typing_repaints_the_status_bar_and_a_hover_does_not`] |
 //! | **and the bar draws the real count** | [`the_word_count_on_the_status_bar_counts_the_document`] |
 //! | **an edit that moves the caret repaints the line it left** | [`a_caret_that_moves_line_damages_the_line_it_left`] |
+//! | **a raised run's damage reaches above its line** | [`a_superscript_widens_the_lines_damage_upward`] |
 
 use holonomy::session::Session;
 use holonomy::store::NoSource;
@@ -626,6 +627,85 @@ fn ink_in(s: &Session<'_>, r: holonomy_render::DamageRect) -> Vec<u32> {
 /// the caret to the end of the row moves down a line; and the pixels where it used to be are nobody's
 /// damage. They stay on screen until some unrelated repaint happens to cover them — which on a still
 /// screen is a long time, because the point of damage tracking is that nothing else covers them.
+/// **A superscript's line is damaged above its own line box, and its neighbours are not.**
+///
+/// # What this is for
+///
+/// A baseline shift moves *ink* out of the line box, and the emitter damages a line as one `cell_h`. A
+/// raised run's top third is therefore outside every damage rect there is, and an undamaged row keeps
+/// whatever the previous frame drew in it — the caret's old position, most visibly, standing inside a
+/// character that has since changed. It is the same class of defect as the caret-left-behind bug above,
+/// one axis over, and it needs the same kind of gate: a *rect*, not a pixel count.
+///
+/// # Why the fixture is two lines with one raised word
+///
+/// **So "wider" can be told from "everything."** A session that answered with `full_damage()` would pass
+/// a one-line fixture. Here the raised run is on line 0 of a two-line document, so line 1 is a row the
+/// damage must *not* grow into — the growth is up and the line box's bottom is unmoved.
+#[test]
+fn a_superscript_widens_the_lines_damage_upward() {
+    let m = ChromeMetrics::DESKTOP;
+    let mut ed = Editor::new();
+    ed.insert_at(0, b"x2\nplain\n", SpanPolicy::GrowIntoInsert)
+        .expect("room");
+    // `2` at offset 1, raised. The digit is styled and the `x` before it is not, so the line has both a
+    // plain run and a shifted one and the damage is a union of the two.
+    ed.style_range(1, 2, holonomy_text::STYLE_SUPERSCRIPT, 0)
+        .expect("raise the exponent");
+
+    let mut s = Session::new(
+        ed,
+        Painter::new(atlas(), 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
+    s.caret_to(0).expect("caret");
+    s.repaint_all().expect("first paint");
+
+    let cell_h = s.chrome_metrics().cell_h;
+    let text = s.chrome_layout().text;
+    let row0 = text.y;
+    // **`damage()` is what the caret move asked for; `last_damage()` is the same after a paint, and the
+    // *second* is the one that has the emitters' widening in it.** `paint_with` keeps a copy of the rect it
+    // was handed *before* the emitters union their lines into it, so a bare `apply` cannot show this — the
+    // only way to observe it is to let the session paint and then read back.
+    s.apply(holonomy_input::Command::Right).expect("move the caret");
+    s.tick().expect("paint the move");
+    let d = s.last_damage();
+
+    assert!(
+        d.y < row0,
+        "**the damage must start above the first line box**: the line box begins at y = {row0} and the \
+         damage begins at {}, so a raised run's raised rows are outside it. This is what a superscript \
+         costs on a partial repaint -- the rows above it are never asked about.",
+        d.y
+    );
+    // **And exactly by the shift, not by a line.** The growth is `cell_height / 3` from
+    // `Painter::shift_of`, so a version that grew by a whole cell — the easiest way to make the previous
+    // assertion pass — is caught here rather than by a screenshot.
+    // **`cell_h / 3`, which is `Painter::shift_of`'s arithmetic at the body size**, and the same expression
+    // `Session::baseline_shift` calls it with. Written out here rather than imported because the point of
+    // the assertion is the *relationship*: a gate that called a function to predict a function's answer
+    // cannot tell a wrong answer from a wrong function.
+    let shift = cell_h / 3;
+    assert_eq!(
+        row0 - d.y,
+        shift,
+        "the damage reaches {} px above the line box, and the shift is {shift} px (`cell_h {cell_h} / 3`)\
+         -- a whole line of growth is not a superscript, it is a full repaint of the row above",
+        row0 - d.y
+    );
+    // **The bottom is the line box's**, so the growth is one-sided. A subscript would grow the other way
+    // and both directions would be a taller repaint for every line in the document.
+    let row1 = row0 + cell_h;
+    assert!(
+        d.bottom() <= row1,
+        "the damage ends at {}, which is past the first line's bottom at {row1}: a raised run grows the \
+         box upward only",
+        d.bottom()
+    );
+}
+
 #[test]
 fn a_caret_that_moves_line_damages_the_line_it_left() {
     let m = ChromeMetrics::DESKTOP;
