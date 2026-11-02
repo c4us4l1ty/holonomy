@@ -2289,40 +2289,59 @@ impl Chrome {
                 colour::CHROME,
             ))));
         let band = |y: u32, h: u32| fill(0, y as i32, l.width, h, colour::BAND);
-        if !state.paged { chrome.before.push(band(l.toolbar.y, l.toolbar.height)); }
+        // **The toolbar's band is filled in both views.** It was `if !state.paged`, so the one band that
+        // is a step off the chrome — the band the palette names `BAND` for — was `CHROME` in the paged
+        // view, and the pill floated on the panel with no band under it. The panel's fill and the
+        // status bar's were both unconditional, so this was the odd one out rather than a considered
+        // difference between the views.
+        chrome.before.push(band(l.toolbar.y, l.toolbar.height));
         chrome.before.push(band(l.status.y, l.status.height));
-        if state.paged {
-            chrome.before.push(fill(l.canvas.x as i32, l.canvas.y as i32,
-                l.canvas.width, l.canvas.height, colour::DESK));
-        }
+        // # CORRECTION: the paged view painted its canvas a different colour, and the reference does not
+        //
+        // `plan-colour::DESK` (`0xFFF1F3F8`) was laid under the whole canvas in the paged view, so the
+        // rail, the gutters and the strip above the sheet were a plane of their own and the page sat in
+        // a well. **Measured on `Plan/1.png`**, every pixel outside the sheet's own bounds is
+        // `CHROME` (`0xFFF8FAFD`): the right gutter at (1,678, 700), the rail at (60, 600), the strip
+        // above the page. The reference distinguishes the page from the chrome and does **not**
+        // distinguish the desk from the chrome.
+        //
+        // **The sheet keeps its border and its shadow**, which are what lift it off the surface; the
+        // extra plane was doing the same job twice and lifting the whole window with it.
 
-        // # The band rules, and the correction that matters more than their colour
+        // # The band rules: ONE, and the count was wrong in both directions
         //
-        // **The old `hline` helper did not draw a hairline, and that is why it is gone.** It built a
-        // `RepeatRun` of `─` (U+2500) once per cell,
-        // and `box_glyph` rasterises a Box Drawing glyph to *the whole cell it is given* — so a "one
-        // pixel rule" at band `y` is a `<width> x cell_h` block of solid ink whose horizontal stroke
-        // sits on the cell's centre row. That is **20 px of `RULE` at the design size**, not one: the
-        // menu band's boundary and the ruler's baseline were both 20-pixel grey slabs, which is why the
-        // screenshot shows a heavy grey band under the menu row and another under the ruler with a
-        // sheet pressed against it. A `fill` of height 1 is what a rule is.
+        // **The first correction was that there were no band rules at all.** The `hline` helper built a
+        // `RepeatRun` of `─` (U+2500) once per cell, and `box_glyph` rasterises a Box Drawing glyph to
+        // *the whole cell it is given* — so a "one pixel rule" at band `y` is a `<width> x cell_h` block
+        // of solid ink. That is 20 px of `RULE` at the design size, which is why an old screenshot has a
+        // heavy grey slab under the menu row and another under the ruler. A `fill` of height 1 is what a
+        // rule is, and that part of the correction stands.
         //
-        // **Four rules now, because three of the five bands had no boundary at all**: under the title
-        // band, under the menu band, under the toolbar band, and the ruler's baseline. The title and
-        // menu bands had none, which is why the title, the menus and the toolbar read as one undivided
-        // field of `CHROME`.
-        let rules = [
-            (l.title.bottom(), colour::RULE_DIM),
-            (l.menubar.bottom(), colour::RULE_DIM),
-            (l.toolbar.bottom(), colour::RULE_DIM),
-            (l.ruler.bottom(), colour::RULE),
-        ];
-        for (i, (y, c)) in rules.into_iter().enumerate() {
-            if state.paged && i < 3 { continue; }
-            let y = y.saturating_sub(1);
-            if y < l.height {
-                chrome.before.push(fill(0, y as i32, l.width, 1, c));
-            }
+        // **The second correction over-corrected: it added FOUR rules.** Under the title, under the menu
+        // bar, under the toolbar, and the ruler's baseline — on the reasoning that the title, menu and
+        // toolbar "read as one undivided field of `CHROME`". **The reference does not draw them.**
+        // Measured on `Plan/1.png`, row by row:
+        //
+        // ```text
+        // y   0..94   CHROME  (100 % of the row)
+        // y  95..154  PILL    (the toolbar's stadium, 93 %)
+        // y 155..188  CHROME  (100 %)
+        // y 189       RULE    (96 %)   <- the toolbar band's underside
+        // y 190..     CHROME, then the page
+        // ```
+        //
+        // One rule in the whole band stack, and it is the toolbar's underside. There is **no** rule
+        // between the title and the menus, none between the menus and the toolbar, and the three bands
+        // are divided by whitespace rather than by lines — which is what makes the reference's chrome
+        // read as one calm surface instead of a stack of strips. The four-rule version was not a fix; it
+        // was three rules the design does not have.
+        //
+        // **The toolbar's underside is `RULE` and not `RULE_DIM`**, which is the other thing the four-way
+        // version got wrong: it used the hairline tone for a boundary that the reference draws in the
+        // full rule ink, because this is the edge where the chrome meets the document.
+        let y = l.toolbar.bottom().saturating_sub(1);
+        if y < l.height {
+            chrome.before.push(fill(0, y as i32, l.width, 1, colour::RULE));
         }
         // # The ruler, rebuilt
         //
@@ -3185,14 +3204,32 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         }
         if p.tool.separated() && !prev_separated {
             // The separator is drawn on the tool's *left* edge, in the gap before it.
+            //
+            // # CORRECTION: the rule was as tall as the *button*, and it belongs to the pill
+            //
+            // It was `(x, button.y + 4, 1, button.height - 8, RULE)` -- a rule derived from the button
+            // it happens to precede.
+            //
+            // **Measured on `Plan/1.png`**, every one of the seven rules is **one pixel wide and 30 px
+            // tall inside a 60 px stadium** -- inset 15 px from the pill's top and bottom, a quarter of
+            // its height each side. So the rule is a property of the *surface*, and deriving it from the
+            // button is what made it grow whenever [`chrome_button`] did: the pill and the rule scale
+            // together in the reference and only the pill scaled here.
+            //
+            // **`RULE` is the right ink and `RULE_DIM` is not.** The reference's rule is `0xFFC4_C7C5`
+            // on `PILL`, a twenty-four step that is clearly visible at one pixel; `RULE_DIM` is the
+            // *band* hairline's tone, six steps off `CHROME`. A divider inside a control surface is a
+            // stronger edge than a band boundary, not a weaker one.
             let sx = p.rect.x as i32 - (crate::widgets::SEPARATOR / 2) as i32 - 1;
-            into.push(fill(
-                sx.max(0),
-                p.rect.y as i32 + 4,
-                1,
-                p.rect.height.saturating_sub(8),
-                colour::RULE,
-            ));
+            // **Derived from the pill's own box**, which is what [`toolbar_pill`] returns: the pill
+            // sits three pixels inside the band and the rule sits inside the pill. Expressing it from
+            // the band instead is the same number today and a different one the moment the pill's own
+            // inset changes, which is exactly the class of drift this file has been bitten by.
+            let pill_y = l.toolbar.y + 3;
+            let pill_h = l.toolbar.height.saturating_sub(6);
+            let rule_h = (pill_h / 2).max(8);
+            let rule_y = pill_y.saturating_add(pill_h.saturating_sub(rule_h) / 2);
+            into.push(fill(sx.max(0), rule_y as i32, 1, rule_h, colour::RULE));
         }
         prev_separated = p.tool.separated();
 
@@ -3333,13 +3370,23 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     // looked like a mistake rather than the rail's boundary. **One pixel of `RULE` is what a panel
     // boundary is in this chrome** — the popup has `POPUP_EDGE`, the sheet has `RULE`, and this is the
     // third surface that needed the same treatment.
-    if l.sidebar.width > 0 && !state.paged {
+    // # CORRECTION: the rule was suppressed in paged mode, and paged mode is the desktop window
+    //
+    // It read `l.sidebar.width > 0 && !state.paged`, so the rail and the space beside it were one flat
+    // field in exactly the view the product ships (`windowed.rs` calls `set_managed_documents(true)`),
+    // and the rule only ever appeared in the unpaged view. **The comment above the rail's fill says the
+    // rail had no edge without it** — and it had none, in the screenshot.
+    //
+    // **`RULE_DIM` in the paged view, `RULE` otherwise.** The paged view's surface beside the rail is
+    // the same `CHROME` as the rest of the window, and a seam there is softer than a boundary between
+    // two named planes; the unpaged view keeps what it drew.
+    if l.sidebar.width > 0 {
         into.push(fill(
             l.sidebar.right().saturating_sub(1) as i32,
             l.sidebar.y as i32,
             1,
             l.sidebar.height,
-            colour::RULE,
+            if state.paged { colour::RULE_DIM } else { colour::RULE },
         ));
     }
     let icon_size = if state.paged && m.cell_h >= 30 { 20 } else { crate::icons::SIZE };

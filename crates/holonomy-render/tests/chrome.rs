@@ -1680,22 +1680,58 @@ fn a_short_canvas_scrolls_the_first_line_into_view() {
     }
 }
 
+/// **The desktop view is a sheet on a surface: shadow, sheet, and a stadium toolbar.**
+///
+/// # This gate used to assert a `DESK` plane, and the reference does not have one
+///
+/// It required a `DESK`-coloured rect the size of the whole canvas, and the paged view emitted exactly
+/// that — so the rail, the gutters and the strip above the sheet were a plane of their own and the
+/// window was divided into three depths (panel, desk, page). **Measured on `Plan/1.png`**, every pixel
+/// outside the sheet is `CHROME` (`0xFFF8FAFD`): the right gutter at (1,678, 700), the rail at
+/// (60, 600), the strip above the page. The reference distinguishes *the page* from the chrome; it does
+/// not distinguish a desk from the chrome as well.
+///
+/// So what this asserts now is what actually lifts the sheet: its **shadow**, its **border**, and the
+/// toolbar's **stadium**. The shadow is the part that was never in doubt — it is what makes a white
+/// rectangle read as paper.
 #[test]
-fn desktop_workspace_has_a_distinct_desk_and_rounded_toolbar() {
+fn desktop_workspace_is_a_sheet_with_a_shadow_on_a_flat_panel() {
     use holonomy_render::{Node, SurfaceTree};
     fn collect<'a>(tree: &'a SurfaceTree, nodes: &mut Vec<&'a Node>) {
         if let Some(n) = &tree.node { nodes.push(n); }
         for child in tree.before.iter().chain(tree.after.iter()) { collect(child, nodes); }
     }
     let chrome = Chrome::new(ChromeMetrics::DESKTOP);
-    let mut state = ChromeState::default();
-    state.paged = true;
+    let state = ChromeState { paged: true, ..ChromeState::default() };
     let tree = chrome.tree(&state);
     let mut nodes = Vec::new();
     collect(&tree, &mut nodes);
-    assert!(nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::DESK && r.width == chrome.layout.canvas.width && r.height == chrome.layout.canvas.height)));
-    assert!(nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE_SHADOW)));
-    assert!(nodes.iter().any(|n| matches!(n, Node::RoundRect(r) if r.rect.colour == chrome::colour::PILL && r.radius == r.rect.height / 2 && r.rect.width > chrome.layout.width / 2)));
+    assert!(
+        nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE_SHADOW)),
+        "the sheet casts no shadow, so it is a white rectangle rather than paper"
+    );
+    assert!(
+        nodes.iter().any(|n| matches!(n, Node::Rect(r)
+            if r.colour == chrome::colour::PAGE
+                && r.width > chrome.layout.width / 3
+                && r.height > chrome.layout.canvas.height / 2)),
+        "no sheet"
+    );
+    assert!(
+        nodes.iter().any(|n| matches!(n, Node::RoundRect(r)
+            if r.rect.colour == chrome::colour::PILL
+                && r.radius == r.rect.height / 2
+                && r.rect.width > chrome.layout.width / 2)),
+        "the toolbar is not a stadium"
+    );
+    // **And not a desk plane.** The whole window is one surface plus the page.
+    assert!(
+        !nodes.iter().any(|n| matches!(n, Node::Rect(r)
+            if r.colour == chrome::colour::DESK
+                && r.width == chrome.layout.canvas.width
+                && r.height == chrome.layout.canvas.height)),
+        "the paged view paints a DESK plane under the page; the reference's gutters are CHROME"
+    );
 }
 
 #[test]
@@ -1762,4 +1798,145 @@ fn paged_blocks_start_on_their_anchor_and_displace_only_following_rows() {
     let x = layout.text.x as i32;
     assert_eq!(layout.caret_at(&state, x, (y1 + h * 2) as i32).unwrap().0, 1);
     assert_eq!(layout.caret_at(&state, x, (y2 + 1) as i32).unwrap().0, 2);
+}
+
+// ------------------------------------------------------------- the reference's edges
+
+/// **The chrome has exactly one band rule, and it is under the toolbar.**
+///
+/// # This reverses a correction, and the measurement is the whole reason
+///
+/// `Chrome::tree` drew four hairlines — under the title, under the menu bar, under the toolbar and the
+/// ruler's baseline. Reading `Plan/1.png` row by row, the reference has **one**:
+///
+/// ```text
+/// y   0..94   CHROME  (100 % of the row)
+/// y  95..154  PILL    (the toolbar's stadium, 93 %)
+/// y 155..188  CHROME  (100 %)
+/// y 189       RULE    (96 %)   <- the toolbar band's underside
+/// y 190..     CHROME / the page
+/// ```
+///
+/// There is **no** rule between the title band and the menu bar, nor between the menu bar and the
+/// toolbar, and the desk either side of the page is plain `CHROME` rather than a separate plane. So the
+/// three rules above the toolbar's are not in the design, and a chrome that draws them is *more*
+/// divided than the reference — which is the opposite of the correction that added them.
+///
+/// **What this gate asserts is "one, and where"**, because the count is the part that was wrong twice:
+/// once when the bands had no boundary at all, and once when they had three more than the reference.
+#[test]
+fn the_only_band_rule_is_the_toolbar_s_underside() {
+    let c = Chrome::new(ChromeMetrics::DESKTOP);
+    let l = &c.layout;
+    for paged in [false, true] {
+        let state = ChromeState { paged, ..ChromeState::default() };
+        let tree = c.tree(&state);
+        // A band rule is full width; the separators and the ruler's ticks are not.
+        let rules: Vec<u32> = nodes(&tree)
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::Rect(r) if r.width == l.width && r.height == 1 && r.y >= 0 => Some(r.y as u32),
+                _ => None,
+            })
+            .filter(|&y| y < l.ruler.bottom())
+            .collect();
+        // **One, and it is the toolbar's underside.** Not the ruler's baseline as well: the ruler's
+        // marks and its margin markers are drawn in `RULE` too, and the row the reference paints
+        // across the whole window is the one under the toolbar.
+        assert_eq!(
+            rules,
+            vec![l.toolbar.bottom() - 1],
+            "paged={paged}: the chrome draws {} full-width rules above the canvas; the reference \
+             draws one, the toolbar's underside at y={}",
+            rules.len(),
+            l.toolbar.bottom() - 1
+        );
+    }
+}
+
+/// **The toolbar band is filled in the paged view too.**
+///
+/// The band fill was `if !state.paged`, so the one band that is a step off the chrome — the toolbar,
+/// which the palette names `BAND` for — was `CHROME` in the paged view and the pill had no band under
+/// it. The panel's fill and the canvas' fill were both unconditional, so this was the odd one out
+/// rather than a considered difference between the two views.
+#[test]
+fn the_toolbar_band_is_filled_in_both_views() {
+    for paged in [false, true] {
+        let c = Chrome::new(ChromeMetrics::DESKTOP);
+        let l = &c.layout;
+        let state = ChromeState { paged, ..ChromeState::default() };
+        let tree = c.tree(&state);
+        assert!(
+            nodes(&tree).into_iter().any(|n| matches!(n,
+                Node::Rect(r) if r.colour == chrome::colour::BAND
+                    && r.y == l.toolbar.y as i32
+                    && r.height == l.toolbar.height
+                    && r.width == l.width)),
+            "paged={paged}: the toolbar band has no BAND fill"
+        );
+    }
+}
+
+/// **The rail has an edge in the paged view, and it is the softer of the two inks.**
+///
+/// The rule down the rail's right edge was gated on `!state.paged`, so the rail and the desk beside it
+/// were one flat field in the view the desktop window runs (`windowed.rs` calls
+/// `set_managed_documents(true)`) — the exact defect the fill above the rule was changed to fix, in the
+/// one view that ships.
+///
+/// **The ink is `RULE_DIM` in the paged view and `RULE` otherwise**, and that is a choice about which
+/// surface the rule is on rather than a difference in confidence: the paged view's panel is the desk,
+/// and a seam on a desk is softer than a boundary on chrome.
+#[test]
+fn the_sidebar_has_a_right_edge_in_both_views() {
+    for paged in [false, true] {
+        let c = Chrome::new(ChromeMetrics::DESKTOP);
+        let l = &c.layout;
+        let state = ChromeState { sidebar_open: true, paged, ..ChromeState::default() };
+        let tree = c.tree(&state);
+        let x = l.sidebar.right().saturating_sub(1);
+        assert!(
+            nodes(&tree).into_iter().any(|n| matches!(n,
+                Node::Rect(r) if r.x == x as i32
+                    && r.width == 1
+                    && r.height == l.sidebar.height
+                    && (r.colour == chrome::colour::RULE || r.colour == chrome::colour::RULE_DIM))),
+            "paged={paged}: the rail has no rule at its right edge x={x}"
+        );
+    }
+}
+
+/// **A separator is a rule inside the pill, not a rule as tall as its button.**
+///
+/// Measured on `Plan/1.png`: one pixel wide and 30 px tall inside a 60 px stadium, i.e. inset a quarter
+/// of the pill's height from its top and bottom. It was `button.height - 8` positioned from the button,
+/// so the rule grew every time the button did and the two were only accidentally in proportion.
+#[test]
+fn a_toolbar_separator_is_inset_from_the_pill_not_from_the_button() {
+    let c = Chrome::new(ChromeMetrics::DESKTOP);
+    let l = &c.layout;
+    let state = ChromeState::default();
+    let tree = c.tree(&state);
+    let pill_h = l.toolbar.height.saturating_sub(6);
+    let inside: Vec<_> = nodes(&tree)
+        .into_iter()
+        .filter_map(|n| match n {
+            Node::Rect(r) if r.width == 1 && r.colour == chrome::colour::RULE => Some(r),
+            _ => None,
+        })
+        .filter(|r| r.y >= l.toolbar.y as i32 && (r.y as u32) < l.toolbar.bottom())
+        .collect();
+    assert!(!inside.is_empty(), "the toolbar drew no separators");
+    for r in inside {
+        assert!(
+            r.height * 2 <= pill_h + 1 && r.height * 2 >= pill_h.saturating_sub(1),
+            "a separator is {} px tall in a {pill_h} px pill; the reference's is half of it",
+            r.height
+        );
+        assert!(
+            r.y >= l.toolbar.y as i32 + 2 && r.y as u32 + r.height <= l.toolbar.bottom() - 1,
+            "a separator leaves the band it is drawn in"
+        );
+    }
 }

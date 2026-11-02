@@ -27,7 +27,7 @@
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{
-    hit, place_title, place_toolbar, Hit, TitleButton, TITLE_PAD, TOOLBAR,
+    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR,
 };
 
 fn layout() -> Layout {
@@ -595,4 +595,114 @@ fn a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs() {
             );
         }
     }
+}
+
+/// **The right-hand group reserves exactly the gaps it draws, and the gap is on the tool's own side.**
+///
+/// Two defects, both in this group, both invisible from the left-hand end of the bar:
+///
+/// * the reservation folded three widths onto **one** `SEPARATOR`, so it and the placement agreed only
+///   while exactly one member separated;
+/// * the placement took that gap *after* subtracting the width, so the nine pixels landed to the right
+///   of `Mode` — the gap between the pen and the collapse chevron — while the painter draws `Mode`'s
+///   rule on its left. Space reserved on one side of a button and a rule drawn on the other.
+///
+/// **What this asserts is the agreement**, so it holds whatever `separated()` says.
+#[test]
+fn the_right_hand_group_reserves_the_gaps_it_draws() {
+    let l = layout();
+    let placed = place_toolbar(&l, 8);
+    let find = |tool| {
+        placed
+            .iter()
+            .find(|p| p.tool == tool)
+            .map(|p| p.rect)
+            .expect("the right-hand group is placed at the design size")
+    };
+    let overflow = find(Tool::Overflow);
+    let mode = find(Tool::Mode);
+    let collapse = find(Tool::Collapse);
+    assert!(
+        overflow.right() <= mode.x && mode.right() <= collapse.x,
+        "the right-hand group is not ordered left to right: {overflow:?} {mode:?} {collapse:?}"
+    );
+    // The gap a tool reserves is its own leading gap, so it starts that much past its neighbour.
+    for (tool, prev) in [(Tool::Mode, overflow), (Tool::Collapse, mode)] {
+        let want = prev.right() + if tool.separated() { SEPARATOR } else { 0 };
+        let got = find(tool).x;
+        assert_eq!(
+            got, want,
+            "{} starts at {got} but {:?} ends at {} and {} a separator",
+            tool.name(),
+            prev,
+            prev.right(),
+            if tool.separated() { "has" } else { "has no" }
+        );
+    }
+}
+
+/// **Every placed left-hand tool sits a gap past the one before it, exactly where its separator is.**
+///
+/// `place_toolbar` advances `x` by `SEPARATOR` for a tool that separates, so a tool that is *dropped*
+/// for not fitting leaves its nine pixels behind — a gap in the row that closes up — while one that
+/// fits must land at `previous.right() + (separator ? SEPARATOR : 0)`. That is the arithmetic the
+/// painter's rule position assumes when it draws at `rect.x - SEPARATOR / 2 - 1`, so a drift here moves
+/// the rule off the gap it is drawn in.
+#[test]
+fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
+    let l = layout();
+    let mut prev: Option<(Tool, u32)> = None;
+    for p in place_toolbar(&l, 8) {
+        // The right-hand group is laid out from the right and is covered above.
+        if matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
+            continue;
+        }
+        if p.rect.width == 0 {
+            prev = None;
+            continue;
+        }
+        if let Some((before, right)) = prev {
+            let want = right + if p.tool.separated() { SEPARATOR } else { 0 };
+            assert_eq!(
+                p.rect.x, want,
+                "{} starts at {} but {} ends at {} and {} a separator",
+                p.tool.name(),
+                p.rect.x,
+                before.name(),
+                right,
+                if p.tool.separated() { "has" } else { "has no" }
+            );
+        }
+        prev = Some((p.tool, p.rect.right()));
+    }
+}
+
+/// **The toolbar's groups are the reference's, and there are seven rules.**
+///
+/// Measured on `Plan/1.png`: seven one-pixel rules at x = 446, 641, 798, 942, 1,193, 1,347 and 1,674 of
+/// a 1,778 px window. The pattern that drew them was `Print | Zoom | Bold | Link | Mode | Collapse`,
+/// which put a rule where the reference has none (after paint format, after `Mode`) and missed six
+/// where it has one.
+///
+/// **This gate names the groups by their leading tool**, so a tool inserted into the middle of a group
+/// has to be placed in one here rather than silently inheriting its neighbour's side of a rule.
+#[test]
+fn the_toolbar_dividers_are_the_reference_s_seven() {
+    let leading: Vec<&'static str> = TOOLBAR
+        .iter()
+        .filter(|t| t.separated())
+        .map(|t| t.name())
+        .collect();
+    assert_eq!(
+        leading,
+        vec!["undo", "print", "style", "font", "size-down", "bold", "link", "overflow", "mode"],
+        "nine leading tools, seven of them left-hand: the reference's six groups"
+    );
+    // **Nothing at the head of the bar**, because there is no group before the first one.
+    assert!(!TOOLBAR[0].separated(), "the first tool has nothing to its left to divide from");
+    // **And nothing at the tail**, because the collapse chevron sits against the pill's curve.
+    assert!(
+        !TOOLBAR[TOOLBAR.len() - 1].separated(),
+        "the last tool is separated by the pill's rim, not by a rule"
+    );
 }
