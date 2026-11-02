@@ -5859,7 +5859,9 @@ impl<'a> Session<'a> {
             // An empty prefix is the honest answer for a line the cache cannot place: it continues no
             // list, which leaves the newline a newline.
             let line = match self.editor.text() {
-                Ok(text) => String::from_utf8_lossy(text.get(start..end).unwrap_or_default()).into_owned(),
+                Ok(text) => {
+                    String::from_utf8_lossy(text.get(start..end).unwrap_or_default()).into_owned()
+                }
                 Err(_) => String::new(),
             };
             let t = line.trim_start();
