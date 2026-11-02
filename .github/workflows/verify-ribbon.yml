@@ -40,13 +40,31 @@ jobs:
           run test-all cargo test --workspace --no-fail-fast
           echo "OVERALL=$status" | tee -a ci-logs/summary.log
           exit $status
+      - name: capture
+        if: always()
+        run: |
+          mkdir -p shots
+          cargo test -p holonomy --test zz_capture -- --nocapture > ci-logs/capture.log 2>&1 || true
+          python3 -m pip install --quiet pillow || true
+          python3 -c "
+import glob, os
+from PIL import Image
+os.makedirs('shots', exist_ok=True)
+for p in sorted(glob.glob('/tmp/shot/*.ppm')):
+    im = Image.open(p)
+    stem = os.path.basename(p)[:-4]
+    im.save('shots/%s.png' % stem)
+    top = min(im.height, 200)
+    im.crop((0, 0, im.width, top)).resize((im.width * 2, top * 2), Image.LANCZOS).save('shots/%s-band2x.png' % stem)
+    print(stem, im.size)
+" || true
       - name: publish
         if: always()
         run: |
           set -o pipefail
           git config user.name "ci"
           git config user.email "ci@example.invalid"
-          git add -f ci-logs
+          git add -f ci-logs shots
           git commit --allow-empty -m "ci: verification logs [skip ci]" || true
           git push 2>&1 | tail -5
   baseline:
