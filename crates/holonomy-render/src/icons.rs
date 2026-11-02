@@ -767,8 +767,6 @@ pub mod mask {
 /// 37 and get a mask out of the bounds of a match. Every accessor goes through [`IconId::mask`], which
 /// is exhaustive, so adding an icon is a compile error at every site that has to handle it — which is
 /// the property that makes the set safe to extend while the toolbar is still being built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
 // WordCraft-inspired line icons, pre-rasterised into the same 1-bit masks as the
 // existing set. No SVG parser, allocator or curve evaluator enters the UI path.
 pub(crate) mod wordcraft_masks {
@@ -1089,6 +1087,8 @@ pub(crate) mod wordcraft_masks {
 }
 use wordcraft_masks as wc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum IconId {
     /// A page with lines on it.
     Doc,

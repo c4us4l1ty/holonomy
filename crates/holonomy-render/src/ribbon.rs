@@ -74,7 +74,7 @@ pub struct Palette {
 impl Palette {
     pub fn get(dark: bool) -> Self {
         macro_rules! p {
-            ($m:ident) => {
+            ($m:path) => {
                 Self {
                     title: $m::TITLE,
                     ribbon: $m::RIBBON,
