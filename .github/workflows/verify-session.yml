@@ -65,19 +65,26 @@ jobs:
       - name: Publish diagnostics
         if: always()
         run: |-
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # **Rebase and retry, because both jobs publish in the same run.**
-          # The first version pushed once and the loser of the race lost its log, so the
-          # baseline of a failing build was the one file that never arrived.
+          git add -f ci-test.log ci-check.log
+          git commit -m "ci: publish diagnostics" || true
+          # **`fetch` + `rebase`, not `pull --rebase`.** `actions/checkout` leaves the work tree in
+          # a detached HEAD, where `git pull --rebase` refuses to run ("not currently on a branch"),
+          # so the `&&` short-circuited and the push never happened -- the step still reported
+          # success because the loop's last command was `sleep`. That is how two failing jobs
+          # published nothing while both said "Publish ... | success".
           for attempt in 1 2 3 4 5; do
-            git add -f ci-test.log ci-check.log
-            git commit -m "ci: publish diagnostics" || true
-            if git pull --rebase -q origin arena/ca2b02bd-holonomy && git push -q origin HEAD:arena/ca2b02bd-holonomy; then
-              break
+            git fetch -q origin arena/ca2b02bd-holonomy
+            git rebase -q FETCH_HEAD || { git rebase --abort || true; }
+            if git push -q origin HEAD:arena/ca2b02bd-holonomy; then
+              exit 0
             fi
             sleep 5
           done
+          echo "publishing the diagnostics failed after five attempts" >&2
+          exit 1
   # **The baseline, so "red" can be told apart from "newly red".** `main` carries its own
   # suites and its own gates; a branch is judged by the difference, not by an absolute zero
   # nobody has reached.
@@ -112,16 +119,18 @@ jobs:
       - name: Publish baseline
         if: always()
         run: |-
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # **Rebase and retry, because both jobs publish in the same run.**
-          # The first version pushed once and the loser of the race lost its log, so the
-          # baseline of a failing build was the one file that never arrived.
+          git add -f ci-baseline.log
+          git commit -m "ci: publish main baseline" || true
           for attempt in 1 2 3 4 5; do
-            git add -f ci-baseline.log
-            git commit -m "ci: publish main baseline" || true
-            if git pull --rebase -q origin arena/ca2b02bd-holonomy && git push -q origin HEAD:arena/ca2b02bd-holonomy; then
-              break
+            git fetch -q origin arena/ca2b02bd-holonomy
+            git rebase -q FETCH_HEAD || { git rebase --abort || true; }
+            if git push -q origin HEAD:arena/ca2b02bd-holonomy; then
+              exit 0
             fi
             sleep 5
           done
+          echo "publishing the baseline failed after five attempts" >&2
+          exit 1
