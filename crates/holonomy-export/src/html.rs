@@ -37,6 +37,7 @@ use std::io::{self, Write};
 use holonomy_text::ANCHOR_BYTES;
 use holonomy_text::{
     Editor, EditorError, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER, STYLE_ITALIC,
+    STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
 };
 
 /// Bytes read from the document per iteration.
@@ -134,6 +135,14 @@ pub struct HtmlStats {
     pub code_runs: u32,
     /// `<h1>` blocks emitted.
     pub headers: u32,
+    /// `<u>` runs opened.
+    pub underline_runs: u32,
+    /// `<s>` runs opened.
+    pub strike_runs: u32,
+    /// `<sup>` runs opened.
+    pub superscript_runs: u32,
+    /// `<sub>` runs opened.
+    pub subscript_runs: u32,
     /// Bytes that became an escape sequence rather than themselves.
     pub escaped: u32,
     /// `<img>` elements emitted, one per anchor that had an asset.
@@ -484,6 +493,10 @@ const fn escape_expansion(b: u8) -> u8 {
 struct Open {
     bold: bool,
     italic: bool,
+    underline: bool,
+    strike: bool,
+    superscript: bool,
+    subscript: bool,
     code: bool,
     header: bool,
 }
@@ -492,14 +505,29 @@ impl Open {
     const NONE: Self = Self {
         bold: false,
         italic: false,
+        underline: false,
+        strike: false,
+        superscript: false,
+        subscript: false,
         code: false,
         header: false,
     };
 
+    /// **Every bit the document model has, and that is the point.**
+    ///
+    /// The four original flags were the whole of `STYLE_KNOWN` when this was written. Phase 6's
+    /// decorative bits (`STYLE_UNDERLINE`, `STYLE_STRIKE`, `STYLE_SUPERSCRIPT`, `STYLE_SUBSCRIPT`) were
+    /// then added to the model, the toolbar and the painter -- and **not here**, so an underlined word
+    /// exported as plain text with the underline silently gone. A format that drops a user's formatting
+    /// without saying so is worse than one that refuses the document.
     fn of(span: &TextIntervalSpan) -> Self {
         Self {
             bold: span.style_flags & STYLE_BOLD != 0,
             italic: span.style_flags & STYLE_ITALIC != 0,
+            underline: span.style_flags & STYLE_UNDERLINE != 0,
+            strike: span.style_flags & STYLE_STRIKE != 0,
+            superscript: span.style_flags & STYLE_SUPERSCRIPT != 0,
+            subscript: span.style_flags & STYLE_SUBSCRIPT != 0,
             code: span.style_flags & STYLE_CODE != 0,
             header: span.style_flags & STYLE_HEADER != 0,
         }
@@ -507,9 +535,15 @@ impl Open {
 
     /// The opening tags, outermost first.
     ///
-    /// Heading outside everything, then bold, then italic, then code innermost. Fixed rather than a bit
-    /// scan: the close order has to match exactly and a reversed close renders the rest of the page in
-    /// the wrong style, which browsers do not report.
+    /// Heading outside everything, then bold, then italic, then the decorations, then code innermost.
+    /// Fixed rather than a bit scan: the close order has to match exactly and a reversed close renders
+    /// the rest of the page in the wrong style, which browsers do not report.
+    ///
+    /// **`sup` and `sub` are mutually exclusive in the model** -- `Session::toggle_decoration` clears
+    /// the opposite bit -- so the two never open together. They are still two independent tests here,
+    /// because this function must be the literal inverse of [`closes_for`](Self::closes_for) for *every*
+    /// bit pattern, including the corrupt one, and `the_open_and_close_orders_are_exact_mirrors` sweeps
+    /// all 256 of them.
     fn opens_for(self, out: &mut Vec<&'static str>) {
         out.clear();
         if self.header {
@@ -521,16 +555,44 @@ impl Open {
         if self.italic {
             out.push("i");
         }
+        if self.underline {
+            out.push("u");
+        }
+        if self.strike {
+            out.push("s");
+        }
+        if self.superscript {
+            out.push("sup");
+        }
+        if self.subscript {
+            out.push("sub");
+        }
         if self.code {
             out.push("code");
         }
     }
 
     /// The closing tags for going from `self` to `to`, innermost first.
+    ///
+    /// **The literal reverse of `opens_for`, and the reverse is the reason the two are written next to
+    /// each other.** `the_open_and_close_orders_are_exact_mirrors` asserts it over every bit pattern
+    /// rather than over the four that used to exist.
     fn closes_for(self, to: Self, out: &mut Vec<&'static str>) {
         out.clear();
         if self.code && !to.code {
             out.push("code");
+        }
+        if self.subscript && !to.subscript {
+            out.push("sub");
+        }
+        if self.superscript && !to.superscript {
+            out.push("sup");
+        }
+        if self.strike && !to.strike {
+            out.push("s");
+        }
+        if self.underline && !to.underline {
+            out.push("u");
         }
         if self.italic && !to.italic {
             out.push("i");
@@ -565,6 +627,18 @@ fn open_delta<W: Write>(w: &mut W, to: Open, stats: &mut HtmlStats) -> Result<()
     }
     if to.code {
         stats.code_runs += 1;
+    }
+    if to.underline {
+        stats.underline_runs += 1;
+    }
+    if to.strike {
+        stats.strike_runs += 1;
+    }
+    if to.superscript {
+        stats.superscript_runs += 1;
+    }
+    if to.subscript {
+        stats.subscript_runs += 1;
     }
     let mut tags = Vec::new();
     to.opens_for(&mut tags);
@@ -612,13 +686,19 @@ mod tests {
 
     #[test]
     fn the_open_and_close_orders_are_exact_mirrors() {
-        // Every combination of flags, opened and then closed, must balance.
-        for bits in 0u8..16 {
+        // **Every combination of flags, opened and then closed, must balance.** Eight bits is 256
+        // cases and the sweep is cheap; a hand-listed four is how the four decorations came to be
+        // missing from `Open::of` in the first place.
+        for bits in 0u16..256 {
             let o = Open {
                 bold: bits & 1 != 0,
                 italic: bits & 2 != 0,
-                code: bits & 4 != 0,
-                header: bits & 8 != 0,
+                underline: bits & 4 != 0,
+                strike: bits & 8 != 0,
+                superscript: bits & 16 != 0,
+                subscript: bits & 32 != 0,
+                code: bits & 64 != 0,
+                header: bits & 128 != 0,
             };
             let mut opens = Vec::new();
             o.opens_for(&mut opens);
@@ -635,14 +715,11 @@ mod tests {
         let both = Open {
             bold: true,
             italic: true,
-            code: false,
-            header: false,
+            ..Open::NONE
         };
         let bold_only = Open {
             bold: true,
-            italic: false,
-            code: false,
-            header: false,
+            ..Open::NONE
         };
         let mut closes = Vec::new();
         both.closes_for(bold_only, &mut closes);
