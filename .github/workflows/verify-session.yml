@@ -52,15 +52,15 @@ jobs:
             grep -a -E '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/test.log
             echo
             awk '/^---- .* stdout ----/ { p = 1 } /^(failures:|error)/ { p = 0 } p' /tmp/test.log
-          } > /tmp/ci-test.log || true
-          tail -n 300 /tmp/check.log > /tmp/ci-check.log || true
+          } > ci-test.log || true
+          tail -n 300 /tmp/check.log > ci-check.log || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: diagnostics
           path: |
-            /tmp/ci-test.log
-            /tmp/ci-check.log
+            ci-test.log
+            ci-check.log
           if-no-files-found: ignore
   # **The baseline, so "red" can be told apart from "newly red".** `main` carries its own
   # suites and gates; this branch is judged by the difference, not by an absolute zero
@@ -93,12 +93,12 @@ jobs:
             grep -a -E '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/base.log
             echo
             awk '/^---- .* stdout ----/ { p = 1 } /^(failures:|error)/ { p = 0 } p' /tmp/base.log
-          } > /tmp/ci-baseline.log || true
+          } > ci-baseline.log || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: baseline
-          path: /tmp/ci-baseline.log
+          path: ci-baseline.log
           if-no-files-found: ignore
   # **Publishing is its own job, on purpose.** It used to be a step inside each test job,
   # and two jobs in one run both pushing a rebased commit meant the loser's push was
@@ -121,13 +121,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p /tmp/logs
+          published=0
           for f in ci-test.log ci-check.log ci-baseline.log; do
             if [ -f "/tmp/logs/$f" ]; then
               cp "/tmp/logs/$f" "$f"
               git add -f "$f"
               git commit -m "ci: publish $f" || true
+              published=1
             fi
           done
+          if [ "$published" = 0 ]; then
+            echo "no diagnostics were produced -- nothing to publish" >&2
+            exit 0
+          fi
           for attempt in 1 2 3 4 5; do
             git fetch -q origin arena/ca2b02bd-holonomy
             if git push -q origin HEAD:arena/ca2b02bd-holonomy; then
