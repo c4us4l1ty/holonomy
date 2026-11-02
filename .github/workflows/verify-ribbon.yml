@@ -54,7 +54,7 @@ jobs:
               im = Image.open(p)
               stem = os.path.basename(p)[:-4]
               im.save('shots/%s.png' % stem)
-              top = min(im.height, 200)
+              top = min(im.height, 190)
               im.crop((0, 0, im.width, top)).resize((im.width * 2, top * 2), Image.LANCZOS).save(
                   'shots/%s-band2x.png' % stem)
               print(stem, im.size)

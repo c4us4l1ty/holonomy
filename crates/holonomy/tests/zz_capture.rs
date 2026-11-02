@@ -68,6 +68,10 @@ fn capture() {
             shot(&format!("ribbon-{ppem}-{w}"), w, h, ppem, 1);
         }
     }
+    for tab in 1u8..8 {
+        shot(&format!("tab{tab}-16-1600"), 1600, 900, 16, tab);
+        shot(&format!("tab{tab}-20-1280"), 1280, 800, 20, tab);
+    }
     let _ = TEST_CHART_PNG;
     let _ = PaintStats::default();
 }
