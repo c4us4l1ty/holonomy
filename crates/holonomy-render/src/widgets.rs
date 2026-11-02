@@ -264,15 +264,66 @@ impl Tool {
         }
     }
 
-    /// **Whether a separator is drawn before this tool.**
+    /// **Whether a rule is drawn in the gap before this tool.**
     ///
-    /// A toolbar without separators is a row of 21 identical boxes, and the eye has to work to find
-    /// the groups. The reference's separators are cheap and this is where they are recorded, so that a
-    /// tool added to the middle of a group gets its separator by position rather than by remembering.
+    /// A toolbar without separators is a row of twenty-one identical boxes and the eye has to work to
+    /// find the groups. The reference's rules are cheap and this is where they are recorded, so a tool
+    /// added to the middle of a group gets its separator by position rather than by remembering.
+    ///
+    /// # CORRECTION: the pattern was not the reference's grouping, and six boundaries were missing
+    ///
+    /// It was `Print | Zoom | Bold | Link | Mode | Collapse`. Measured against `Plan/1.png` — which has
+    /// **seven** rules, one pixel wide and 30 px tall in a 60 px stadium, at x = 446, 641, 798, 942,
+    /// 1,193, 1,347 and 1,674 of a 1,778 px window — that pattern drew a rule after two boundaries the
+    /// reference leaves open and missed six it closes:
+    ///
+    /// | boundary | was | `Plan/1.png` |
+    /// | --- | --- | --- |
+    /// | search / undo | no | **yes** |
+    /// | paint format / zoom | **yes** | no |
+    /// | zoom / style | **yes** | **yes** |
+    /// | style / font | no | **yes** |
+    /// | font / size | no | **yes** |
+    /// | size / bold | **yes** | **yes** |
+    /// | image / overflow | **yes** | **yes** |
+    /// | overflow / mode | no | **yes** |
+    /// | mode / collapse | **yes** | no |
+    ///
+    /// **Read off the rules rather than off the icons**, which is the only reading that does not drift
+    /// with the icon set. The reference's groups are: search, undo, redo · print, spellcheck, paint
+    /// format · zoom, style, font, size · bold, italic, underline, text colour, highlight · link, image
+    /// · overflow · mode · collapse.
+    ///
+    /// **The zoom label sits with the style control and the font and size controls with them**, which
+    /// is the grouping that looks wrong and is not: the reference puts no rule between the zoom label
+    /// and the style control, so they are one group, while the font control, the two size steppers and
+    /// the size box are one typographic group introduced by the style control.
+    ///
+    /// **`Collapse` gets none.** The last rule in the reference is 80 px before the pill's right rim and
+    /// the collapse chevron sits at the rim — separated by the pill's own curve, not by a line. A rule
+    /// there divides nothing, which is why the old pattern's sixth entry was wrong as well as the six
+    /// that were missing.
+    ///
+    /// **The width, because this is the change that had to be measured before it was made.** Seven
+    /// separators are three more than six, and the row is tight: at the design cell (`cell_w = 8`,
+    /// `button = 40`) the left group ends 13 px before `left_limit` with this pattern and 54 px before
+    /// it with the old one. It fits — with 13 px to spare, and nothing falls into `Overflow`, which is
+    /// what `an_overflow_button_with_nothing_hidden_opens_nothing` requires at 1,280 px. **A narrower
+    /// cell is worse, not better**: at `cell_w = 9` one labelled control's extra cell costs more than
+    /// the three separators and `image` is hidden. That is the same trade the reference makes, so it is
+    /// not a regression, but it is why the numbers are written down here rather than discovered later.
     pub const fn separated(self) -> bool {
         matches!(
             self,
-            Tool::Print | Tool::Zoom | Tool::Bold | Tool::Link | Tool::Mode | Tool::Collapse
+            Tool::Undo
+                | Tool::Print
+                | Tool::Style
+                | Tool::Font
+                | Tool::SizeDown
+                | Tool::Bold
+                | Tool::Link
+                | Tool::Overflow
+                | Tool::Mode
         )
     }
 }
@@ -442,10 +493,17 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
     // **So the right group's width is reserved first and the left group is given what is left.**
     // Which of the two loses is not arbitrary: the right-hand group wins, because it holds the
     // overflow menu, and **a menu that cannot be reached is worse than a toolbar with a gap in it.**
+    // **The reservation is computed from `separated()` and not from a literal, and that is the bug
+    // this replaces.** It folded three widths onto a *single* `SEPARATOR`, which was correct only
+    // while exactly one member of this group separated. The reference's grouping gives two of them a
+    // rule — before `Overflow` and before `Mode` — so a literal one gap would under-reserve by nine
+    // pixels, and under-reserving here is the part-44 overlap: the left group runs nine pixels into a
+    // button the user can see.
     let right_w = [Tool::Collapse, Tool::Mode, Tool::Overflow]
         .iter()
-        .fold(SEPARATOR, |acc, &t| {
+        .fold(0u32, |acc, &t| {
             acc.saturating_add(t.width(button, m.cell_w))
+                .saturating_add(if t.separated() { SEPARATOR } else { 0 })
         });
     // **Both ends of this budget moved with `TOOLBAR_INSET`, and forgetting that was a real overlap.**
     //
@@ -537,18 +595,27 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         .right()
         .saturating_sub(pad)
         .saturating_sub(TOOLBAR_INSET);
+    // # The gap belongs to the tool on the *right*, and that is the whole correction
+    //
+    // The loop is right-to-left, so the nine pixels reserved when placing a tool open out on that
+    // tool's **right** — and a separator is drawn on the **left** of the tool it precedes. It read
+    // `r -= w; if p.tool == Mode { r -= SEPARATOR }`, i.e. it reserved the gap for `Mode` *after*
+    // subtracting `Mode`'s width, so the gap between the pen and the collapse chevron was reserved
+    // because of the rule that is drawn on the pen's other side. **Space reserved on one side of a
+    // button and a rule drawn on the other**, which is the "drawn one way, laid out another" defect
+    // this module exists to prevent, one dimension over.
+    //
+    // **So the gap is carried by the successor.** After a tool is placed, the next one — which is to
+    // its left — has to end one `SEPARATOR` short of it if *that successor* separates, because the
+    // successor's rule is drawn in the space between the two.
+    let mut below_gap = 0u32;
     for p in out.iter_mut().rev() {
         if !matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;
         }
         let w = p.tool.width(button, m.cell_w);
+        r = r.saturating_sub(below_gap);
         r = r.saturating_sub(w);
-        // **The separator follows `Mode` and precedes `Overflow`**, which is where the reference puts
-        // it: the left-hand group, then a gap, then the two controls that act on the window rather
-        // than on the text.
-        if p.tool == Tool::Mode {
-            r = r.saturating_sub(SEPARATOR);
-        }
         p.rect = fit(
             r,
             m.toolbar.y
@@ -557,6 +624,7 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
             w,
             button,
         );
+        below_gap = if p.tool.separated() { SEPARATOR } else { 0 };
     }
     out
 }
