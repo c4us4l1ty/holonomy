@@ -11,14 +11,14 @@ struct Keep {
 }
 
 impl Scanout for Keep {
-    fn present(&self, frame: &Frame) -> Result<u64, holonomy_display::FrameError> {
+    fn present(&mut self, frame: &Frame) -> Result<u64, holonomy_display::FrameError> {
         *self.last.borrow_mut() = Some(frame.clone());
         Ok(frame.pixels().len() as u64)
     }
     fn present_damage(
-        &self,
+        &mut self,
         frame: &Frame,
-        _d: holonomy_geometry::DamageRect,
+        _d: Option<holonomy_render::DamageRect>,
     ) -> Result<u64, holonomy_display::FrameError> {
         self.present(frame)
     }
