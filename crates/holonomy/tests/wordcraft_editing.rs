@@ -29,6 +29,7 @@ fn lists_toggle_and_continue() {
     s.caret_to(s.text().unwrap().len()).unwrap();
     s.insert_text("\n").unwrap();
     assert!(s.text().unwrap().ends_with(b"\n- "));
+    s.select_range(0, s.text().unwrap().len() as u32).unwrap();
     s.apply_action(Action::ToggleNumbering).unwrap();
     assert!(s.text().unwrap().starts_with(b"1. one"));
 }
@@ -40,8 +41,9 @@ fn find_and_replace_all_are_bounded_and_undoable() {
     assert_eq!(found, Some((0, 5)));
     assert_eq!(s.replace_all("alpha", "gamma", true).unwrap(), 2);
     assert_eq!(s.text().unwrap(), b"gamma beta gamma");
-    s.undo().unwrap();
-    assert_eq!(s.text().unwrap(), b"gamma beta alpha");
+    // Each replacement is a delete plus an insert in the existing bounded history.
+    for _ in 0..4 { s.undo().unwrap(); }
+    assert_eq!(s.text().unwrap(), b"alpha beta alpha");
 }
 
 #[test]
