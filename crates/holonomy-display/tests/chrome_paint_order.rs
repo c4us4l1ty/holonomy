@@ -97,24 +97,41 @@ fn the_toolbar_band_reaches_the_frame() {
     // placed (see `toolbar_pill`), so the band's *centre* is now empty band — probing there would fail
     // on a correct frame and, worse, would have kept passing on the old wrong one. A gate has to name
     // the rect it is talking about.
-    let placed = holonomy_render::widgets::place_toolbar(&chrome.layout, 8);
+    // **The pad is the real one, not a literal.** It said `8` here, and when `TOOLBAR_PAD` became 24
+    // the toolbar was laid out for the gate at a different inset than the painter uses — so the gate
+    // was probing a row that does not exist in the product and would not have noticed the pill moving.
+    let placed =
+        holonomy_render::widgets::place_toolbar(&chrome.layout, holonomy_render::widgets::TOOLBAR_PAD);
     let pill = holonomy_render::chrome::toolbar_pill(&chrome.layout, &placed)
         .expect("the design panel places at least one tool");
-    // A point inside the pill and clear of every button: between the first button's left edge and the
-    // pill's own left rim, vertically centred so the rounded corners cannot reach it.
+    // # The probe, and why it moved
+    //
+    // It used to sample halfway between the pill's left rim and the first tool's left edge, on the
+    // reasoning that this was bare pill. **That gap no longer exists**: `toolbar_pill`'s rim is now
+    // `TOOLBAR_PAD` and `place_toolbar` starts the buttons at the same `TOOLBAR_PAD`, so there is
+    // nothing between them. The old probe would have sat *on the rim* and sampled band instead of pill.
+    //
+    // **The bare surface that does exist is inside the first button but outside its icon** — the button
+    // is 32 px of pill for a 16 px glyph, so its top strip is seven pixels of pill and no ink. Sampling
+    // four rows down from the button's top edge is inside the button, clear of the glyph, and (because
+    // the corner radius is half the pill's height) far enough from the rim that the rounded corner
+    // cannot reach it.
     let first = placed
         .iter()
         .find(|p| p.rect.width > 0)
         .expect("a placed tool");
     assert!(
-        first.rect.x > pill.x,
-        "the pill at {pill:?} does not extend left of the first tool at {:?}, so there is no bare \
-         pill surface to probe",
+        pill.x <= first.rect.x,
+        "the pill at {pill:?} starts right of the first tool at {:?}: the surface does not contain \
+         the control it is a surface for",
         first.rect
     );
-    let probe_x = (pill.x + first.rect.x) / 2;
-    // Vertically centred, so the rounded corners are nowhere near the sample.
-    let probe_y = pill.y + pill.height / 2;
+    let probe_x = first.rect.x + first.rect.width / 2;
+    let probe_y = first.rect.y + 4;
+    assert!(
+        probe_y + 1 < first.rect.bottom(),
+        "the probe must stay inside the first button"
+    );
     let got = pixel(&frame, probe_x, probe_y);
     assert_ne!(
         got,

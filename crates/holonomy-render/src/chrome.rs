@@ -1654,13 +1654,25 @@ impl Default for ChromeState {
     fn default() -> Self {
         Self {
             title: "Journal".to_string(),
-            // **Closed, and that is a correction.** It was `true`, and `Session::new` applies the
-            // reservation from this default at construction — so every session opened with a 280 px
-            // document rail covering 19 % of the window before the user had asked for one, and the page
-            // paid for it with its right-hand gutter. **A rail is something you open; opening with it
-            // open is the state the collapse button exists to leave.** The back arrow in the rail and
-            // the collapse button on the toolbar are both still there, so the rail is one click away.
-            sidebar_open: false,
+            // **Open, which reverses a correction that was right about the arithmetic and wrong about
+            // the product.**
+            //
+            // It was `true`, then `false` with the reasoning that a 280 px rail covering 19 % of the
+            // window before the user asked for one is a rail that should have been closed. **That
+            // measurement is correct and the conclusion does not follow from it**, because the rail is
+            // not a preview pane — it is *the only way to reach a second document*. A user who cannot
+            // see it has one page and no visible way to make another, which is exactly what was
+            // reported from the built window: "I can't create more than 1 page."
+            //
+            // **The reference opens with the rail showing**, and every screenshot in `Plan/` shows it
+            // showing. The thing the reference does *not* do is the thing the original defect was:
+            // cover the page with it. The rail is a column beside the desk, and the desk loses 280 px
+            // of gutter rather than the sheet losing 280 px of measure.
+            //
+            // **The cost is honest and it is not zero**: a 999 px window gives the sheet a narrower
+            // measure. That is the trade the reference makes, and "the document list is visible" beats
+            // "the page is 280 px wider" for an editor whose whole point is several documents.
+            sidebar_open: true,
             docs: Vec::new(),
             active_doc: 0,
             style_index: 0,
@@ -2852,36 +2864,52 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
 /// `None` when nothing was placed at all — a panel too narrow to hold one tool — because the honest
 /// surface for that is the band and nothing else.
 pub fn toolbar_pill(l: &Layout, placed: &[crate::widgets::Placed]) -> Option<DamageRect> {
-    /// How far the surface extends past the first and last tools. **Half a button's inset**: enough
-    /// that the icons are not touching the pill's rim, less than the 8 px pad so the pill stays inside
-    /// the band's own margins.
-    const OVERHANG: u32 = 6;
-    let first = placed.iter().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
-    let last = placed.iter().rev().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
-    let x = first.rect.x.saturating_sub(OVERHANG);
-    // **Clamped into the band.** The overhang can push the right edge past the panel on a narrow
-    // window, and a rect that leaves its band is a rect the renderer must clip — `Layout::new`'s
-    // comment says why every emitted rect is clamped rather than trusted.
-    let right = last.rect.right().saturating_add(OVERHANG).min(l.width);
-    let width = right.saturating_sub(x);
+    // # CORRECTION: the pill is inset by the pad on BOTH sides
+    //
+    // It used to be `first.rect.x - 6` to `last.rect.right() + 6` — the rim derived from where the
+    // buttons happened to land. That was invisible while `TOOLBAR_PAD` was 8, because 8 - 6 = 2 px of
+    // margin reads as no margin either way. **It is wrong now that the measured pad is 24**, and it was
+    // wrong in a second way all along: the left rim was `pad - 6` and the right rim `pad + 6`, so the
+    // surface was **six pixels closer to the window's left edge than its right**, in a bar that is
+    // supposed to be symmetric.
+    //
+    // **The reference is symmetric to the pixel**: measured on
+    // `Plan/Screenshot From 2026-10-01 00-17-10.png`, the pill spans x 24..1754 in a 1778 px window.
+    // So the rim is the pad, on both sides, and it is read from `TOOLBAR_PAD` rather than restated.
+    //
+    // **The `?` on an empty row survives the change**: a toolbar with nothing placed still has no
+    // surface, and `placed` is walked for that fact rather than for a coordinate.
+    placed.iter().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
+    let pad = crate::widgets::TOOLBAR_PAD.min(l.width / 2);
+    let width = l.width.saturating_sub(pad.saturating_mul(2));
     if width == 0 {
         return None;
     }
     Some(DamageRect::new(
-        x.min(l.width),
+        pad,
         l.toolbar.y + 3,
         width,
         l.toolbar.height.saturating_sub(6),
     ))
 }
 
-/// The toolbar pill's corner radius, in pixels.
+/// The toolbar pill's corner radius, as a fraction of its height.
 ///
-/// **A constant and not `height / 2`.** The pill used to be a stadium — its radius was half the band's
-/// height — which at the design size is a 25 px corner on a 50 px box, and at a scaled type size was
-/// larger still. A stadium is the shape of a *button*; the surface that holds a row of buttons is a
-/// rounded rectangle, and the reference keeps this radius constant as the type scales.
-pub const TOOLBAR_PILL_RADIUS: u32 = 8;
+/// **The pill is a stadium: the radius is half the height.** This constant was `8`, with a doc comment
+/// asserting that "a stadium is the shape of a *button*; the surface that holds a row of buttons is a
+/// rounded rectangle, and the reference keeps this radius constant as the type scales."
+///
+/// **That claim about the reference is false, and it was checkable.** Measuring
+/// `Plan/Screenshot From 2026-10-01 00-17-10.png` row by row: the pill occupies y 95..155, its left rim
+/// is at x = 24 in the middle rows, and the rim steps in to 46, 41, 38, 35, 33, 31, 30, 28, 27, 26, 25
+/// as it climbs to the top — a quarter-circle of radius ≈ 30 on a 60 px box, which *is* `height / 2`.
+/// The reference has no straight vertical edge on this surface at all, at any height.
+///
+/// **So the radius is derived from the height rather than fixed**, and it stays a stadium as the type
+/// scales — which is the one property the old comment was right about and then inverted.
+pub const fn toolbar_pill_radius(pill_height: u32) -> u32 {
+    pill_height / 2
+}
 
 fn row_is_live(state: &ChromeState, open: crate::widgets::Open, row: usize) -> bool {
     let h = crate::widgets::Hit::MenuItem { open, row };
@@ -2922,7 +2950,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             pill.y as i32,
             pill.width,
             pill.height,
-            TOOLBAR_PILL_RADIUS,
+            toolbar_pill_radius(pill.height),
             colour::PILL,
         ));
     }
