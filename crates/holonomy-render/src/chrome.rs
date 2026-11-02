@@ -3007,14 +3007,20 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                         colour::INK_DIM,
                     ),
                 )));
-            } else {
-                into.push(SurfaceTree::leaf(crate::Node::RoundRect(crate::RoundRect::new(
-                    p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 6, colour::PAGE,
-                ))));
-                // redraw label over the box
-                push_text(into, m, p.rect.y + (p.rect.height.saturating_sub(m.cell_h)) / 2,
-                    &p.tool.label(state), Style::REGULAR, colour::INK, ix + ih + 4);
             }
+            // # `FontSize` no longer draws a white box, and that is the fix
+            //
+            // It used to fall into an `else` that pushed a `RoundRect` in `colour::PAGE` — pure white,
+            // the *document's* colour — behind the control and then re-drew the label in `INK` over it.
+            // On a `PILL` toolbar that is the only white rectangle on the chrome, and it is **shaped
+            // exactly like a text input**. The one control on the bar that looked like something you
+            // could type into was the one that accepted nothing: `Tool::FontSize` has no action, no
+            // dropdown, and `FONT_SIZE` is a constant with no setter. **A dead control is a lie; a dead
+            // control styled as an input field is a lie with an invitation.**
+            //
+            // It is drawn as a labelled button now, like `Font` beside it, so it reads as what it is —
+            // a control that is not available. The chevron arm above is unchanged: `has_dropdown` is
+            // false for `FontSize`, which is exactly why it landed in the `else`.
         } else if p.tool == crate::widgets::Tool::Overflow {
             // **Part 44: `Overflow`'s chevron is drawn only when there is something in the menu.**
             //

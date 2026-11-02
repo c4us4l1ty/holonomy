@@ -171,7 +171,15 @@ fn the_title_reaches_the_frame() {
 /// canvas above it is chrome.
 #[test]
 fn the_page_is_still_drawn_over_the_chrome() {
-    let (frame, chrome, _) = paint_chrome(&ChromeState::default());
+    // **The rail is opened explicitly.** The default is now closed, and the gutter probe below is the
+    // gap *between the rail and the sheet* -- against a closed rail there is no such gap and the probe
+    // would measure the desk. Opening it is what this test has always been about; it only used to get
+    // that for free from a default that had no reason to be the one the test needed.
+    let state = ChromeState {
+        sidebar_open: true,
+        ..ChromeState::default()
+    };
+    let (frame, chrome, _) = paint_chrome(&state);
     let page = chrome.layout.page;
     assert_eq!(
         pixel(&frame, page.x + page.width / 2, page.y + page.height / 2),

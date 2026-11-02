@@ -92,6 +92,14 @@ impl std::error::Error for WindowedError {}
 /// cadence. 16 ms is ~60 wakes/s, no pixels between keystrokes.
 pub const EVENT_WAIT: Duration = Duration::from_millis(16);
 
+/// How long a `Ctrl+V` waits for the clipboard owner before it reports that nothing came.
+///
+/// **Two seconds, and the number matters less than what happens at the end of it.** It was 700 ms and
+/// the timeout *pasted the wrong thing* — see the note at the pending-paste check in `run`. Two seconds
+/// is long enough for a selection transfer to a busy server and short enough that a user who pressed
+/// Ctrl+V knows the message is about *their* paste rather than a stale one.
+pub const PASTE_TIMEOUT: Duration = Duration::from_millis(2000);
+
 /// Run a session in a window until Ctrl+Q, the window is closed, or the display goes away.
 ///
 /// `atlas` is the already-built atlas: building one takes milliseconds and `include_bytes!` data, and
@@ -266,10 +274,24 @@ pub fn run(
         if vault.is_some() && form.is_none() && session.take_save_request() {
             save(&mut vault, &mut session);
         }
+        // # A paste that never arrived, and a paste that arrived late
+        //
+        // **The 700 ms timeout pasted the session's *own* clipboard**, which is not what Ctrl+V means
+        // when the text is coming from another application. `paste_internal` reads the session's
+        // clipboard, and the request in flight is an X11 selection transfer whose bytes land later in
+        // `handle_clipboard_event`. So on a slow or busy server the sequence was: wait 700 ms, paste
+        // whatever this session had copied last (usually nothing), give up — **and then the bytes
+        // arrived, found `pending_paste` already consumed, and were discarded without a message.**
+        //
+        // **The timeout now says so instead of pasting something else.** `paste_internal` is left only
+        // for the case it was written for: a session with no window clipboard at all, which is the
+        // `run_with_io` path. Here an empty request is a failure to report.
         if let Some(t) = pending_paste {
-            if t.elapsed() >= Duration::from_millis(700) {
+            if t.elapsed() >= PASTE_TIMEOUT {
                 pending_paste = None;
-                let _ = session.paste_internal();
+                session.set_notice(Some(
+                    "Paste: the clipboard owner did not answer. Try Ctrl+V again.".into(),
+                ));
             }
         }
         // # File > Export, which had no reader in this driver
@@ -399,9 +421,21 @@ pub fn run(
         events += 1;
         if std::env::var_os("HOLONOMY_WINDOW_TRACE").is_some() { eprintln!("event {ev:?}"); }
         if let Some(bytes) = window_of(&mut session)?.handle_clipboard_event(&ev).map_err(WindowedError::Desktop)? {
+            // **Any clipboard answer completes the request, not only a non-empty one.** A selection the
+            // owner reports as empty is an answer, and leaving `pending_paste` set for it would make the
+            // timeout above fire on a paste the server *did* answer.
             if pending_paste.take().is_some() {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    if !text.is_empty() { session.insert_text(text).map_err(WindowedError::Session)?; last_edit = Instant::now(); }
+                match std::str::from_utf8(&bytes) {
+                    Ok(text) if !text.is_empty() => {
+                        session.insert_text(text).map_err(WindowedError::Session)?;
+                        last_edit = Instant::now();
+                    }
+                    // **Said out loud, because the alternative is Ctrl+V doing nothing at all** — which
+                    // is the report this is fixing.
+                    Ok(_) => session.set_notice(Some("Paste: the clipboard is empty.".into())),
+                    Err(_) => session.set_notice(Some(
+                        "Paste: the clipboard is not UTF-8 text, so it cannot be inserted.".into(),
+                    )),
                 }
             }
         }

@@ -317,10 +317,11 @@ fn every_wired_menu_item_carries_an_action() {
         "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
          Keyboard shortcuts. Adding one changes this number."
     );
-    // **The list is printed rather than asserted empty**, because "everything is wired" is not true
-    // and pretending otherwise would be the worse answer. What matters is that the count of the rest
-    // is stable and visible.
-    // **40 of 57, and it was 47 of 55 before the save gained a row.**
+    // **The list is printed rather than asserted empty**, because a row that is *deliberately* inert —
+    // a submenu header, a reference-only command — is a legitimate state and hiding it would be worse
+    // than showing it. **There are none of those left**, and the assertion below is `(0, 26)`.
+    //
+    // **It was 40 of 57, and 47 of 55 before the save gained a row.**
     //
     // **This gate has now been through six edits and they are not all the same shape**, which is worth
     // stating plainly — because three of them moved the same number for opposite reasons:

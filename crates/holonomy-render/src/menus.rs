@@ -218,8 +218,13 @@ pub struct Item {
     pub accelerator: Option<&'static str>,
     /// Whether it opens a submenu.
     pub submenu: bool,
-    /// **What it is.** `None` for an item that is drawn and has no action behind it yet — which is
-    /// most of them, and is the honest state rather than a stub that does nothing while looking real.
+    /// **What it is.**
+    ///
+    /// **Every row in [`MENUS`] now carries one, so `None` is a state no shipped row is in** — this was
+    /// `None` for most of them for most of the project's life, and the field stays an `Option` because
+    /// *"this row is deliberately inert"* is still a legitimate thing for a future row to be. What is
+    /// not legitimate is a row that is inert by *accident*, which is why `tests/actions.rs` asserts the
+    /// unwired count rather than trusting this comment.
     pub action: Option<Action>,
     /// Whether this row shows a tick.
     ///
