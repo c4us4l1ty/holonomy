@@ -32,6 +32,20 @@
 //! **None of the seven is "not done yet".** They are features that need models this program does not
 //! have, and a button that pretends to one is worse than a button that is visibly absent.
 //!
+//! # And they now *look* like they work, which is a new problem
+//!
+//! Part 6 of `EDITOR_AUDIT.md` redrew every mask in `icons.rs`, because the first generation read as a
+//! row of unrelated doodles. **The seven inert tools were redrawn along with the fifteen that work**, so
+//! `Underline` is a legible underlined `U`, `Highlight` a legible marker, `Link` a legible chain — where
+//! before they at least looked like pencil shavings.
+//!
+//! **That inverts the argument in the paragraph above.** A button that looks broken is visibly broken; a
+//! button that looks finished and does nothing is a dead end the user only discovers by pressing it. The
+//! count below still passes and still names all seven — **this note exists so that the next reader does
+//! not read a green test as "these are fine".** The honest fixes are the models listed above, or removal
+//! in the style of `Comment`; what is *not* an option is leaving seven convincing-looking buttons in a
+//! row whose other fifteen work.
+//!
 //! # `Comment` is gone, and it was the one that needed arguing
 //!
 //! **Part 46 intended to remove it and the removal never landed**, so `Tool::Comment`,
