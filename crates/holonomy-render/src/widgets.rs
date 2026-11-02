@@ -333,7 +333,45 @@ pub struct Placed {
 ///
 /// **It is a parameter of [`place_toolbar`] and not a field of `Layout`**, so a caller that genuinely
 /// wants a different inset can pass one; this constant is what the project uses.
-pub const TOOLBAR_PAD: u32 = 8;
+///
+/// # CORRECTION: 8 -> 24, and the number came from a screenshot rather than from taste
+///
+/// **The pill ran flush to the window's left and right edges.** Measured on the running build against
+/// `Plan/Screenshot From 2026-10-01 00-17-10.png`: the pill's left rim sat at **x = 1** of a 999 px
+/// window, and the reference keeps **24 px** of its chrome colour on both sides — 24 px of a 1778 px
+/// window, which at this window's scale is the same 24 px, because the reference's chrome is drawn at
+/// 1.7x the cell the build is drawing at and its paddings do not scale with it.
+///
+/// **Every control in the bar moved closer to the edge and none of them moved closer to each other.**
+/// The padding is the only thing that changed, so the row keeps its internal rhythm and gains the
+/// margin that makes it read as a bar *inside* a window rather than as a strip *filling* one. That
+/// distinction is the whole of the reported "padding issues" — the band was the full width of the
+/// panel by construction, and only the inset can make it stop being so.
+///
+/// **24 and not `cell_w`**, even though the design cell is 8 and 24 is three of them: the pads in this
+/// chrome are pixel constants that do not scale (`TITLE_PAD` is 12 at every size), because a margin
+/// that grows with the type size is a margin that eats a narrow window.
+///
+/// # And it is the *pill's* margin, not the first button's
+///
+/// **There are two insets in the reference and the first version of this change conflated them.**
+/// Measured on `Plan/Screenshot From 2026-10-01 00-17-10.png`: the pill's rim is at x = 24 and the
+/// first glyph's ink starts at x = 55 — so there is **31 px of bare pill** before the search icon,
+/// which is a button's own leading space and not the window margin. Scaling that to this build's
+/// 16 px glyph gives ~25 px of bare pill, and a 40 px button with a centred 16 px glyph carries 12 of
+/// that itself — so the buttons start about 13 px inside the rim.
+///
+/// **So `TOOLBAR_PAD` is the rim** (read by `toolbar_pill`), and the buttons are inset from it by
+/// [`TOOLBAR_INSET`]. Putting both in one constant is what produced a first button flush against the
+/// pill's rounded corner.
+pub const TOOLBAR_PAD: u32 = 24;
+
+/// **The gap between the pill's rim and the first button, in pixels.**
+///
+/// The second of the reference's two insets — see [`TOOLBAR_PAD`]. It is `pad + inset` that the buttons
+/// are laid out from and `pad` alone that the surface is drawn from, so the row keeps a margin *and* a
+/// leading gap, which is what stops the first icon sitting on the pill's curve.
+pub const TOOLBAR_INSET: u32 = 13;
 
 /// **The title bar's right inset, in pixels.** The painter and the hit test must agree on it.
 ///
@@ -419,7 +457,11 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         .max(pad);
 
     // Left group.
-    let mut x = pad;
+    //
+    // **`pad + TOOLBAR_INSET`**, because `pad` alone is the pill's rim and not where a button goes —
+    // see `TOOLBAR_PAD`. The first icon was flush against the pill's rounded corner, which at a
+    // stadium radius of half the height is a corner that reaches 25 px in.
+    let mut x = pad.saturating_add(TOOLBAR_INSET);
     for p in out.iter_mut() {
         // **`Overflow` is in the right-hand group too, and that is a correction.** Part 44: it was
         // laid out with the left group, and the left group's rule is *"a tool with no room left gets
@@ -474,7 +516,14 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
     // in it -- so Collapse is placed first at the rightmost slot and each of the others lands to its
     // left. **Overflow is before Mode in `TOOLBAR`, so it lands to the left of Mode**, which puts it
     // next to the left-hand group where it belongs and next to the gap it will fill.
-    let mut r = l.toolbar.right().saturating_sub(pad);
+    // **`pad + TOOLBAR_INSET` for the same reason as the left group**, and the reference is symmetric
+    // about it: its last control's ink ends 27 px inside the right rim, mirroring the 31 px of bare
+    // pill on the left. One inset would have left the right-hand group flush against its own corner.
+    let mut r = l
+        .toolbar
+        .right()
+        .saturating_sub(pad)
+        .saturating_sub(TOOLBAR_INSET);
     for p in out.iter_mut().rev() {
         if !matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;

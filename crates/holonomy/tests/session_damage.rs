@@ -45,7 +45,14 @@ use holonomy_text::{Editor, SpanPolicy};
 
 /// The toolbar's padding, as `place_toolbar` wants it. **8 px, and not the cell width** -- see
 /// [`tool_rect`] for why the two are not interchangeable.
-const TOOLBAR_PAD: u32 = 8;
+///
+/// **Now an alias rather than a literal, because it drifted the moment the real one changed.** When
+/// `widgets::TOOLBAR_PAD` went from 8 to 24 this file kept saying 8, so every rectangle in this gate
+/// named a position the painter would not use — and the file would still have *passed*, because it
+/// compares `place_toolbar(pad)` against `Session`, both of which it fed the same wrong number. **A
+/// duplicated constant in a test is a test that agrees with itself.** The alias is the fix; the reason
+/// it was a literal (that the parameter is the padding and not a cell) is kept in the doc above.
+const TOOLBAR_PAD: u32 = widgets::TOOLBAR_PAD;
 
 /// The shared atlas, built once for the whole test binary.
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
@@ -367,30 +374,43 @@ fn the_sidebar_flag_and_its_reservation_agree_after_every_change() {
         "and the width is the design one"
     );
 
-    // **And the default is closed, which this gate did not check and the audit asked for.**
+    // **And the default is OPEN, which reverses A11.**
     //
     // The sweep above starts at `set_sidebar(false)` on a fresh session, so **it cannot tell a session
-    // that opens with the rail closed from one that opened with it open and was then closed** — and the
-    // difference is the whole of A11: a document rail covering 19 % of the window before the user has
-    // asked for one. The default lives in `ChromeState::default` and reaches the layout through
-    // `Session::new`'s reservation, so **both halves are asserted here**: the flag, and the width it
-    // reserved, because a default flag that forgot to reserve would look the same as a fix until the
-    // first toggle.
+    // that opens with the rail drawn from one that opened with it closed and was then opened** — which
+    // is why the default is asserted separately here, in both halves: the flag, and the width it
+    // reserved. A default flag that forgot to reserve would look the same as a fix until the first
+    // toggle.
+    //
+    // # A11 was measured correctly and concluded backwards
+    //
+    // A11 said a 280 px rail "covering 19 % of the window before the user has asked for one" is a
+    // defect, and it is right that the number is 19 %. **But the rail is not a preview pane; it is the
+    // only route to a second document.** With it closed the built window showed one page and no visible
+    // way to make another — reported back as *"I can't create more than 1 page"* — which is a worse
+    // defect than a narrower sheet and is the one a user actually hits.
+    //
+    // **So this gate now asserts the opposite of what it asserted, and it asserts the property that
+    // makes the opposite safe**: the rail is drawn AND reserved, so the sheet is laid out beside it
+    // rather than under it. `paint_sidebar`'s fill and the desk's left gutter both read this, and the
+    // failure mode the gate is really guarding is a rail that is drawn without the reservation — a rail
+    // painted *over* the page, which is the original defect wearing the opposite hat.
     let fresh = session();
     assert!(
-        !fresh.state.sidebar_open,
-        "a new session opens with the document rail open, which costs the page 280 px of its desk \
-         before the user has asked for a rail"
+        fresh.state.sidebar_open,
+        "a new session opens with the document rail closed, so the only route to a second document \
+         is a button the user has no reason to look for"
     );
     assert_eq!(
         fresh.chrome_metrics().sidebar_w,
-        sidebar_reservation(false),
-        "and a session that opens with the rail closed reserves nothing for it"
+        sidebar_reservation(true),
+        "and a session that opens with the rail shown reserves its width, so the sheet is laid out \
+         beside the rail rather than under it"
     );
     assert_eq!(
         fresh.chrome_layout().sidebar.width,
-        0,
-        "and draws no rail"
+        sidebar_reservation(true),
+        "and draws the rail at the width it reserved"
     );
 }
 
