@@ -5836,8 +5836,19 @@ impl<'a> Session<'a> {
             // kind of off-by-one to see in a diff. `end - 1` is the last byte they did select, which is
             // paragraph 1's newline, and `line_end_offset` turns that into paragraph 1's end.
             //
-            // **The subtraction cannot underflow**, because `Editor::selection` returns `None` for an
-            // empty range and an empty range is the only way `end` could be 0.
+            // **The subtraction cannot underflow, and a backwards selection cannot reach it.**
+            // `Editor::selection` answers `SelectionRange::between`, whose constructor both normalises
+            // (`start <= end` whichever way the drag went) and refuses a degenerate range, so this arm
+            // is only ever entered with `0 <= start < end`. **The guard is in the constructor rather
+            // than here on purpose**: every consumer of a selection — the highlight, the typed-over
+            // range, the styled range — would otherwise need the same swap, and this function is one of
+            // them. `end - 1` is therefore at least `start`, and at least 0.
+            //
+            // **`saturating_sub(1)` rather than `- 1`, which is defence against a hand-built range and
+            // not a second normalisation.** A range with `end == 0` cannot come out of
+            // `SelectionRange::between`; if one ever does, subtracting would panic in a debug build on
+            // the keystroke path, and the saturating form answers `line_end_offset(0)` — one line's
+            // formatting cleared in the wrong place, which is a visible bug rather than a crash.
             Some(sel) => (
                 self.line_start(sel.start as usize) as u32,
                 self.line_end_offset(sel.end.saturating_sub(1) as usize) as u32,

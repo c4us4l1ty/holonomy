@@ -239,12 +239,14 @@ impl<'a> Painter<'a> {
     /// ## The rule, verbatim from `doc_text`
     ///
     /// ```text
-    /// blank   : advance_x if it is > 0, else cell_width() and count it missing
+    /// blank   : advance_x if it is > 0, else cell_width_at(size) and count it missing
     /// inked   : advance_x.max(1)
     /// ```
     ///
-    /// **No atlas and not the cell: `cell_width()`.** The chrome is a fixed grid and that is right for
-    /// it; this is about the one place the grid is the fallback rather than the rule.
+    /// **No atlas and not the cell: `cell_width_at(size)`.** The chrome is a fixed grid and that is right
+    /// for it; this is about the one place the grid is the fallback rather than the rule — and since the
+    /// fallback is now resolved at the *caller's* size, a heading's missing glyph takes the heading's cell
+    /// rather than the body's.
     pub fn advance_of(&self, cp: u32, style: holonomy_render::Style) -> u32 {
         self.advance_at(cp, style, self.size_index)
     }
@@ -984,6 +986,13 @@ impl<'a> Painter<'a> {
                 DocRun::DECORATION_STRIKE,
                 holonomy_render::RuleAt::Strike,
             )];
+            // **The rule follows the baseline, and the baseline is the one the glyphs were drawn on.**
+            // `RuleAt::Underline`/`Strike` resolve their row from `run.y + ascent`, and `doc_text` moved
+            // the baseline by adding `baseline_shift` to that same ascent -- so the rules must be asked
+            // for at the shifted line box, or a run that is both raised and underlined gets its rule
+            // under the *unraised* baseline: through the air below the letters, and at the one
+            // combination of the four bits where that is plain to see.
+            let ruled_y = run.y - i32::from(run.baseline_shift);
             for (bit, at) in at {
                 if run.decorations & bit == 0 {
                     continue;
@@ -992,7 +1001,7 @@ impl<'a> Painter<'a> {
                     frame,
                     &holonomy_render::RuleRun::sized(
                         run.x,
-                        run.y,
+                        ruled_y,
                         (pen - run.x) as u32,
                         // **The decoration's own weight, from the crate that defines the bit.** See
                         // `DocRun::RULE_THICKNESS`: the emitter in `holonomy` and the PDF writer are the

@@ -376,8 +376,11 @@ impl DocRun {
     /// a superscript entirely. **Anything that computes damage from this function then leaves those rows
     /// undamaged**, and an undamaged row keeps whatever the previous frame drew there.
     ///
-    /// The line box is `cell_h` tall regardless: the shift moves *ink*, not leading. So the box grows in
-    /// the direction of the shift by its magnitude and keeps its height.
+    /// **The *leading* is unchanged: the shift moves ink, not the line.** A `cell_h`-tall line box is what
+    /// the layout reserved, so the box this function answers with is `[y - up, y + cell_h + down)` — the
+    /// line box plus the reach the shift added on one side. It is a **damage** box and not a line box, and
+    /// the two being different numbers is the entire point: the emitter damages a rectangle and the
+    /// painter only ever sees that rectangle.
     pub fn bounds(&self, line_height: u32, advance: u32) -> Option<DamageRect> {
         if self.len == 0 || advance == 0 {
             return None;

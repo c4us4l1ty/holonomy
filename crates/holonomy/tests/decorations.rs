@@ -1,4 +1,4 @@
-//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 12 tests.
+//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 13 tests.
 //!
 //! # The gap this file closes
 //!
@@ -57,6 +57,7 @@
 //! | **underline arms at a caret and types underlined** | [`arming_underline_styles_the_text_typed_after_it`] |
 //! | **a strike arms without lighting a button** | [`the_strikethrough_arms_without_lighting_any_button`] |
 //! | **a decoration is not a face** | [`a_decoration_is_not_a_face`] |
+//! | **a decorated run's rules follow its baseline** | [`a_rule_follows_the_baseline_its_glyphs_were_drawn_on`] |
 //! | a heading draws at the larger size | [`a_heading_draws_at_the_larger_atlas_size`] |
 //! | and its underline follows its baseline | [`a_headings_underline_is_where_a_headings_baseline_is`] |
 
@@ -651,5 +652,98 @@ fn a_headings_underline_is_where_a_headings_baseline_is() {
         "**the rule must be below the heading's glyphs**: the heading's lowest ink is {hb} and the \\
          underlined one's is {ub}. A rule that came out at or above it was resolved against the body \\
          size instead of the heading's, which puts it through the letters"
+    );
+}
+
+/// **A decorated run's rules are drawn on the baseline its glyphs were put on, not on its line's.**
+///
+/// # The combination, which is the fourth mechanism and not a fifth bit
+///
+/// Each of the four bits has a gate above, and **the bits compose**. That is the case none of them can
+/// see, because the two mechanisms live in different places: the shift moves the glyphs by *subtracting*
+/// from the ascent inside `doc_text`, and `Painter::rule` resolves an underline or a strike row from
+/// `run.y + ascent` — the *unshifted* line box. So a run that is raised and underlined has its rule a
+/// third of a line below the letters it underlines: in the air, under the descenders, and at the one
+/// combination where it is plain to see.
+///
+/// **The fix is one expression — the rules are asked for at `run.y - baseline_shift`** — and this is the
+/// gate that fails without it. It compares the **rule's distance below its own glyphs** on two runs of one
+/// line: the raised word's rule must be exactly as far below the raised word as the flat word's rule is
+/// below the flat one. A rule left at the line box makes the raised word's span a whole shift taller.
+///
+/// **The two words are measured in their own columns**, so the flat word's rule cannot be mistaken for the
+/// raised word's — which is the failure a whole-line ink box would have, since the line's lowest ink is
+/// the flat word's rule in both the correct and the broken version.
+#[test]
+fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
+    // `raised` at 0..6 is raised *and* underlined; `flat` at 8..12 is underlined only. One line, so both
+    // rules are drawn by one frame -- and a bug that moved every rule on the line would move both, which
+    // the comparison below would then not see. That is deliberate: the *per-run* bug is the one this
+    // gate is for, and the per-line bug is `a_headings_underline_is_where_a_headings_baseline_is`.
+    //
+    // **Two spaces between the words, and they are the measurement's slack.** The first word ends at cell
+    // 6 and the second begins at cell 8, so a glyph that overhangs its own cell cannot reach the other
+    // word's scan and turn one word's rule into the other's.
+    let mut s = painted_at(
+        "raised  flat\n",
+        Some((0, 6, STYLE_SUPERSCRIPT | STYLE_UNDERLINE)),
+        0,
+    );
+    s.editor_mut()
+        .style_range(8, 12, STYLE_UNDERLINE, 0)
+        .expect("underline the second word");
+    s.repaint_all().expect("paint both words");
+
+    // **The window, and not the line box**: a raised run draws above `y`, so a measurement clipped to
+    // `cell_h` would report the raised word's ink as starting at the top of the box and the gap below it
+    // would come out a shift short -- the same number the broken version produces.
+    let (x0, y0, x1, y1) = window(&s);
+    let cell_w = s.chrome.metrics.cell_w;
+    let left = s.text_rect().x;
+    debug_assert_eq!(left, x0, "the window starts at the text column, which is where cell 0 is");
+    // **Each word's ink in its own columns.** `raised` occupies cells 0..6 from the text rect's left edge,
+    // the two spaces are cells 6 and 7, and `flat` is cells 8..12 — both words at the body size, because
+    // neither is a heading.
+    let word = |from: u32, to: u32| -> (u32, u32) {
+        let (mut top, mut bottom) = (u32::MAX, 0u32);
+        for y in y0..y1 {
+            for x in (left + from * cell_w)..(left + to * cell_w).min(x1) {
+                if s.frame().pixel(x, y) != 0 {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+        (top, bottom)
+    };
+    let (raised_top, raised_bottom) = word(0, 6);
+    let (flat_top, flat_bottom) = word(8, 12);
+    // **Both columns must have ink at all**, or `u32::MAX` and `0` would make the comparison below a
+    // statement about two empty scans rather than about two rules.
+    assert!(
+        raised_top != u32::MAX && flat_top != u32::MAX,
+        "the fixture is wrong: one of the two words drew nothing (raised {raised_top}..={raised_bottom}, \
+         flat {flat_top}..={flat_bottom})"
+    );
+
+    assert!(
+        raised_top < flat_top,
+        "**the first word must be the raised one**: its ink starts at {raised_top} and the flat word's at \
+         {flat_top}. If the shift did not happen, this gate is comparing two words that are the same and \
+         proves nothing about where their rules went."
+    );
+
+    // **Each word's ink bottom is its rule**, because the rule is the lowest thing either draws. The
+    // distances are what must agree: a rule that stayed on the line's baseline leaves the raised word's
+    // rule a third of a line below its glyphs and its span is a shift taller than the flat word's.
+    assert_eq!(
+        raised_bottom - raised_top,
+        flat_bottom - flat_top,
+        "**the raised word's rule did not rise with its glyphs**: its ink spans {raised_top}..={raised_bottom} \
+         ({} px) and the flat word's spans {flat_top}..={flat_bottom} ({} px). A larger span on the raised \
+         word means its rule is still at the unraised baseline -- a third of a line below the letters it is \
+         supposed to underline.",
+        raised_bottom - raised_top,
+        flat_bottom - flat_top
     );
 }

@@ -485,6 +485,83 @@ fn pdf_carries_the_decorations_without_changing_the_text() {
 }
 
 /// Plain ASCII, no styling: the simplest possible round trip.
+/// **A raised run's rule rises with it, in the content stream.**
+///
+/// # Why the screen's gate cannot stand in for this one
+///
+/// `tests/decorations.rs` asserts the same *relationship* on the painter, and **the exporter is a second
+/// implementation of where a rule goes** — a stroked path built from `advance(seg.metric, ..)` and a
+/// constant offset, in points, with no atlas anywhere in it. A raise is `Ts`, which moves the text matrix;
+/// a rule is a path in user space. The two are reconciled in `draw_rules` and nowhere else, so a fix in
+/// the painter says nothing about the file.
+///
+/// # What is parsed, and why the row is the assertion
+///
+/// **The `y` operand of each `m`,** which is the subpath's start row. Underlining a plain word and the
+/// same word raised puts two rules a whole rise apart; underlining only the raised word puts its rule a
+/// rise *above* where the same underline would be for body text on that line. Both are read back off the
+/// decoded stream, so this is asserting the operator arguments and not the writer's formatting.
+#[test]
+fn a_raised_runs_rule_rises_with_it_in_the_stream() {
+    let opts = PdfOptions::default();
+    let rise = opts.font_size / 3.0;
+
+    // One word, raised and underlined: its rule must be a rise above the baseline it would have had.
+    let mut raised = Editor::new();
+    raised
+        .insert_at(0, b"raised\n", SpanPolicy::Strict)
+        .expect("insert");
+    raised
+        .style_range(0, 6, STYLE_SUPERSCRIPT | STYLE_UNDERLINE, 0)
+        .expect("style");
+    // The same word, underlined and *not* raised.
+    let mut flat = Editor::new();
+    flat.insert_at(0, b"raised\n", SpanPolicy::Strict)
+        .expect("insert");
+    flat.style_range(0, 6, STYLE_UNDERLINE, 0).expect("style");
+
+    // **A nested `fn` and not a closure**, because it is called twice with different documents and a
+    // closure that borrows `opts` would have to be `Fn` over a capture the caller also uses. The row of
+    // every `m` in the decoded streams, which is a subpath's start point.
+    fn rule_rows(ed: &Editor, opts: &PdfOptions) -> Vec<f32> {
+        let mut stats = pdf::PdfStats::default();
+        let bytes = pdf::build(ed, opts, &mut stats).expect("build");
+        let streams = content::content_streams(&bytes).expect("streams");
+        let ops: Vec<String> = streams
+            .iter()
+            .map(|(_, data)| String::from_utf8_lossy(data).into_owned())
+            .collect();
+        let ops = ops.join("\n");
+        let tokens: Vec<&str> = ops.split_whitespace().collect();
+        // **`x y m`**, so the row is the operand two back from the operator.
+        tokens
+            .windows(3)
+            .filter(|w| w[2] == "m")
+            .filter_map(|w| w[1].parse::<f32>().ok())
+            .collect()
+    }
+
+    let raised_rows = rule_rows(&raised, &opts);
+    let flat_rows = rule_rows(&flat, &opts);
+    assert_eq!(
+        raised_rows.len(),
+        1,
+        "one underlined run is one subpath: {raised_rows:?}"
+    );
+    assert_eq!(flat_rows.len(), 1, "one subpath: {flat_rows:?}");
+
+    // **A rise up the page**, so the raised word's rule is the higher of the two: PDF's y grows upward.
+    assert!(
+        (raised_rows[0] - flat_rows[0] - rise).abs() < 1e-3,
+        "**the raised run's rule did not rise with its glyphs**: it is at y = {} and the same underline \
+         on unraised text is at y = {}, a gap of {} where the rise is {rise}. A rule left on the line's \
+         baseline draws under the air below a superscript.",
+        raised_rows[0],
+        flat_rows[0],
+        raised_rows[0] - flat_rows[0]
+    );
+}
+
 #[test]
 fn pdf_a_plain_ascii_document_round_trips() {
     let source = "The quick brown fox jumps over the lazy dog.";

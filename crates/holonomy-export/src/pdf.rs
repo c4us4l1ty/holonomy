@@ -1502,6 +1502,13 @@ fn write_line(
 ///   strike        y + size * 0.28
 /// ```
 ///
+/// **Both are relative to the baseline, so a raised run's rules rise with it.** `Ts` moves the text
+/// matrix and the rule is a path in *user* space at `y`, so the two must be reconciled here rather than
+/// left to agree by accident: a superscript's underline is drawn under the raised glyphs, two points
+/// above where the same rule would sit for body text on that line. Without this a run that was both
+/// raised and underlined had its rule under the *baseline* — through the air below the letters, and in
+/// the one style combination where the mistake is obvious to a reader.
+///
 /// **Two points under the baseline** clears the descenders of an 11-pt face. **It is not the screen's
 /// rule, and the two agreeing on a number is a coincidence rather than a shared constant.** The
 /// painter resolves an underline from the *atlas's ascent and descent*, because the atlas is what it has;
@@ -1518,6 +1525,9 @@ fn write_line(
 fn draw_rules(out: &mut Content, segments: &[Segment], y: f32, x: f32) {
     let mut pen = x;
     let mut any = false;
+    // **No `save_state`/`restore_state`, because one path is stroked once.** The pen is a local, the
+    // colour and width are set immediately before the single `S`, and nothing outside this function
+    // reads the graphics state afterwards -- the next line starts from `BT` and its own `Td`.
     // **The path is built first and stroked once**, so a line with no rule emits nothing at all -- not
     // a `save_state`/`restore_state` pair around an empty path, which would be two operators on every
     // line of every document that has no underlining in it.
@@ -1527,12 +1537,15 @@ fn draw_rules(out: &mut Content, segments: &[Segment], y: f32, x: f32) {
     // wrong word -- so the advance is taken for every segment and only the *rule* is conditional.
     for seg in segments {
         let seg_width = advance(seg.metric, &seg.text) as f32 * seg.size / 1000.0;
+        // **The line's baseline, moved by the segment's own rise.** Both offsets below are distances
+        // from the baseline, and a raised run's baseline is not the line's -- see this function's doc.
+        let baseline = y + seg.rise;
         for (draw, at) in [(seg.underline, -2.0), (seg.strike, seg.size * 0.28)] {
             if !draw || seg_width <= 0.0 {
                 continue;
             }
-            out.move_to(pen, y + at);
-            out.line_to(pen + seg_width, y + at);
+            out.move_to(pen, baseline + at);
+            out.line_to(pen + seg_width, baseline + at);
             any = true;
         }
         pen += seg_width;
