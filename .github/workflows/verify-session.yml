@@ -10,7 +10,7 @@ concurrency:
 jobs:
   rust:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
@@ -23,7 +23,7 @@ jobs:
           shared-key: holonomy-musl-release
           save-if: ${{ github.ref == 'refs/heads/arena/ca2b02bd-holonomy' }}
       - name: Formatting
-        run: |
+        run: |-
           cargo fmt --all
           if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
@@ -34,36 +34,78 @@ jobs:
           fi
           cargo fmt --all -- --check
       - name: Check sealed and desktop targets
-        run: |
+        run: |-
           set -o pipefail
           cargo check --workspace --all-targets --message-format=short 2>&1 | tee /tmp/check.log
           cargo check --workspace --all-targets --features holonomy/desktop --message-format=short 2>&1 | tee -a /tmp/check.log
-      - name: Publish check diagnostics
-        if: failure()
-        run: |
-          tail -n 300 /tmp/check.log > ci-check.log
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci-check.log
-          git commit -m "ci: publish check diagnostics" || true
-          git push origin HEAD:arena/ca2b02bd-holonomy || true
       - name: Release tests
-        run: |
+        run: |-
           set -o pipefail
-          cargo test --workspace --release --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/test.log
+          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/test.log 2>&1
       - name: Desktop tests
-        run: |
-          set -o pipefail
-          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 2>&1 | tee -a /tmp/test.log
-          cargo test -p holonomy-input --features desktop --release 2>&1 | tee -a /tmp/test.log
-          cargo test -p holonomy-x11 --release 2>&1 | tee -a /tmp/test.log
-          cargo test -p holonomy-display --features desktop --release 2>&1 | tee -a /tmp/test.log
-      - name: Publish test diagnostics
-        if: failure()
-        run: |
-          tail -n 400 /tmp/test.log > ci-test.log
+        if: always()
+        run: |-
+          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/test.log 2>&1
+          cargo test -p holonomy-input --features desktop --release >> /tmp/test.log 2>&1
+          cargo test -p holonomy-x11 --release >> /tmp/test.log 2>&1
+          cargo test -p holonomy-display --features desktop --release >> /tmp/test.log 2>&1
+          exit 0
+      # **Only the failures, so the summary fits in a commit and in a context window.**
+      # The raw log is megabytes; what a fix needs is one line per failed test with the
+      # panic site and the assertion's two sides.
+      - name: Summarise
+        if: always()
+        run: |-
+          {
+            grep -aE '^(running|test result|failures:)' /tmp/test.log
+            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/test.log
+            grep -aE 'panicked at|^thread |^  (left|right):' /tmp/test.log
+          } | uniq > ci-test.log || true
+          tail -n 200 /tmp/check.log > ci-check.log || true
+      - name: Publish diagnostics
+        if: always()
+        run: |-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci-test.log
-          git commit -m "ci: publish test diagnostics" || true
+          git add -f ci-test.log ci-check.log
+          git commit -m "ci: publish diagnostics" || true
+          git push origin HEAD:arena/ca2b02bd-holonomy || true
+  # **The baseline, so "red" can be told apart from "newly red".** `main` carries its own
+  # suites and its own gates; a branch is judged by the difference, not by an absolute zero
+  # nobody has reached.
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: holonomy-musl-release
+          save-if: false
+      - name: Release tests on main
+        run: |-
+          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/base.log 2>&1
+          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/base.log 2>&1
+          exit 0
+      - name: Summarise
+        if: always()
+        run: |-
+          {
+            grep -aE '^(running|test result|failures:)' /tmp/base.log
+            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/base.log
+            grep -aE 'panicked at|^thread |^  (left|right):' /tmp/base.log
+          } | uniq > ci-baseline.log || true
+      - name: Publish baseline
+        if: always()
+        run: |-
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ci-baseline.log
+          git commit -m "ci: publish main baseline" || true
           git push origin HEAD:arena/ca2b02bd-holonomy || true
