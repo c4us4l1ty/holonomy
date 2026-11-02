@@ -453,6 +453,10 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
     let mut x = l.toolbar.x + 10;
     let top = l.toolbar.y + 7;
     let h = l.toolbar.height.saturating_sub(10);
+    // **`- 48`, and it is the overflow square's column.** `overflow_rect` occupies the last 40 px of
+    // the band, so a group's last button must end before `width - 48` or the two overlap -- which is
+    // what `widgets::hit` reported at 768 px: the middle of the overflow square answered
+    // `Ribbon(SelectTool(Font))` because the Font group had drawn over it.
     let limit = l.width.saturating_sub(48);
     for (name, items) in specs(tab) {
         let small: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
@@ -567,8 +571,20 @@ pub fn lock_rect(l: &Layout) -> DamageRect {
         l.title.height.saturating_sub(12).min(28),
     )
 }
+/// **The ribbon's overflow button sits in the group row's top right, not on the ribbon's floor.**
+///
+/// It was `l.toolbar.y + 8` with a height of 30, which is the top of a 112 px band -- a 30 px square
+/// floating above the buttons it is supposed to stand in for, and, at 768 px, overlapping the last
+/// group's large buttons, which is why `widgets::hit` answered `Ribbon(SelectTool(Font))` for the
+/// middle of the overflow square. **Anchored to the group's own top and height** so the two are the
+/// same row and cannot overlap: the row starts 7 px into the band and its buttons are `h - 10` tall.
 pub fn overflow_rect(l: &Layout) -> DamageRect {
-    DamageRect::new(l.width.saturating_sub(40), l.toolbar.y + 8, 30, 30)
+    DamageRect::new(
+        l.width.saturating_sub(40),
+        l.toolbar.y + 7,
+        30,
+        l.toolbar.height.saturating_sub(10).min(46).max(27),
+    )
 }
 pub fn collapse_rect(l: &Layout) -> DamageRect {
     DamageRect::new(
