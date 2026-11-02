@@ -322,7 +322,7 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
             .collect();
         let widest = *rows.iter().max().unwrap();
         assert!(
-            widest >= SIZE / 2,
+            widest >= (SIZE / 2) as usize,
             "{id:?}: the widest row is {widest} pixels. A horizontal rule that does not span at least \
              half the box is not a rule — it is the top of an outline, which is exactly how `Minus` was \
              originally drawn."
@@ -371,12 +371,12 @@ fn a_plus_crosses_the_box_in_both_axes() {
     // `SIZE / 2` is the same bar the rule test uses: an arm that does not reach half the box is an
     // arm of an outline rather than of a plus.
     assert!(
-        widest >= SIZE / 2,
+        widest >= (SIZE / 2) as usize,
         "Plus's widest row is {widest} pixels; the horizontal arm must reach at least {}",
         SIZE / 2
     );
     assert!(
-        tallest >= SIZE / 2,
+        tallest >= (SIZE / 2) as usize,
         "Plus's tallest column is {tallest} pixels; the vertical arm must reach at least {}",
         SIZE / 2
     );
