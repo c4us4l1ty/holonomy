@@ -74,32 +74,32 @@ pub struct Palette {
 impl Palette {
     pub fn get(dark: bool) -> Self {
         macro_rules! p {
-            ($m:path) => {
+            ($m:ident) => {
                 Self {
-                    title: $m::TITLE,
-                    ribbon: $m::RIBBON,
-                    canvas: $m::CANVAS,
-                    border: $m::BORDER,
-                    text: $m::TEXT,
-                    dim: $m::DIM,
-                    disabled: $m::DISABLED,
-                    hover: $m::HOVER,
-                    pressed: $m::PRESSED,
-                    checked: $m::CHECKED,
-                    accent: $m::ACCENT,
-                    on_accent: $m::ON_ACCENT,
-                    input: $m::INPUT,
-                    input_border: $m::INPUT_BORDER,
-                    group: $m::GROUP,
-                    ruler: $m::RULER,
-                    ruler_margin: $m::RULER_MARGIN,
+                    title: tokens::$m::TITLE,
+                    ribbon: tokens::$m::RIBBON,
+                    canvas: tokens::$m::CANVAS,
+                    border: tokens::$m::BORDER,
+                    text: tokens::$m::TEXT,
+                    dim: tokens::$m::DIM,
+                    disabled: tokens::$m::DISABLED,
+                    hover: tokens::$m::HOVER,
+                    pressed: tokens::$m::PRESSED,
+                    checked: tokens::$m::CHECKED,
+                    accent: tokens::$m::ACCENT,
+                    on_accent: tokens::$m::ON_ACCENT,
+                    input: tokens::$m::INPUT,
+                    input_border: tokens::$m::INPUT_BORDER,
+                    group: tokens::$m::GROUP,
+                    ruler: tokens::$m::RULER,
+                    ruler_margin: tokens::$m::RULER_MARGIN,
                 }
             };
         }
         if dark {
-            p!(tokens::dark)
+            p!(dark)
         } else {
-            p!(tokens::light)
+            p!(light)
         }
     }
 }
@@ -455,8 +455,8 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
     let h = l.toolbar.height.saturating_sub(10);
     let limit = l.width.saturating_sub(48);
     for (name, items) in specs(tab) {
-        let small: Vec<_> = items.iter().filter(|i| !i.3).collect();
-        let large: Vec<_> = items.iter().filter(|i| i.3).collect();
+        let small: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
+        let large: Vec<_> = items.iter().filter(|i| i.3).copied().collect();
         let rows = if small.len() > 5 { 2 } else { 1 };
         let cols = small.len().div_ceil(rows.max(1));
         let small_w = if tab == 1 && *name == "Font" { 82 } else { 76 };
