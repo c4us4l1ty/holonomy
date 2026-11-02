@@ -1679,3 +1679,63 @@ fn a_short_canvas_scrolls_the_first_line_into_view() {
         assert_eq!(layout.row_y(&state, 0), Some(layout.canvas.y));
     }
 }
+
+#[test]
+fn desktop_workspace_has_a_distinct_desk_and_rounded_toolbar() {
+    use holonomy_render::{Node, SurfaceTree};
+    fn collect<'a>(tree: &'a SurfaceTree, nodes: &mut Vec<&'a Node>) {
+        if let Some(n) = &tree.node { nodes.push(n); }
+        for child in tree.before.iter().chain(tree.after.iter()) { collect(child, nodes); }
+    }
+    let chrome = Chrome::new(ChromeMetrics::DESKTOP);
+    let mut state = ChromeState::default();
+    state.paged = true;
+    let tree = chrome.tree(&state);
+    let mut nodes = Vec::new();
+    collect(&tree, &mut nodes);
+    assert!(nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::DESK && r.width == chrome.layout.canvas.width && r.height == chrome.layout.canvas.height)));
+    assert!(nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE_SHADOW)));
+    assert!(nodes.iter().any(|n| matches!(n, Node::RoundRect(r) if r.rect.colour == chrome::colour::PILL && r.radius == r.rect.height / 2 && r.rect.width > chrome.layout.width / 2)));
+}
+
+#[test]
+fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
+    use holonomy_render::icons::{IconId, SIZE};
+    for &id in IconId::ALL {
+        let small = id.at(0, 0, 0);
+        let large = id.at_large(0, 0, 0);
+        assert_eq!((large.width, large.height), (20, 20));
+        for y in 0..20 {
+            for x in 0..20 {
+                assert_eq!(large.coverage(x, y), small.coverage(x * SIZE / 20, y * SIZE / 20));
+            }
+        }
+    }
+    let m = ChromeMetrics::DESKTOP.with_line_pitch(30);
+    let c = Chrome::new(m);
+    let state = ChromeState { paged: true, ..ChromeState::default() };
+    let icons: Vec<_> = nodes(&c.tree(&state)).into_iter().filter_map(|n| match n {
+        Node::Icon(i) if i.width == 20 => Some(i), _ => None,
+    }).collect();
+    assert!(!icons.is_empty());
+    assert!(icons.iter().all(|i| i.x >= 0 && i.y >= 0 && i.x as u32 + i.width <= m.width && i.y as u32 + i.height <= m.height));
+}
+
+#[test]
+fn paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes() {
+    for (width, height) in [(640, 480), (800, 600), (1280, 800), (1920, 1080), (1280, 2400)] {
+        let c = Chrome::new(ChromeMetrics::for_size(width, height));
+        let rows = c.layout.page_rows();
+        let state = ChromeState { paged: true, total_lines: rows * 3,
+            scroll_line: rows / 2, ..ChromeState::default() };
+        for node in nodes(&c.tree(&state)) {
+            if let Node::Rect(r) = node {
+                if r.colour == chrome::colour::PAGE_SHADOW {
+                    assert!(r.x >= 0 && r.y >= c.layout.canvas.y as i32);
+                    assert!((r.x as u32 + r.width) <= c.layout.width);
+                    assert!((r.y as u32 + r.height) <= c.layout.canvas.bottom());
+                }
+            }
+        }
+    }
+}

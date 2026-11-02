@@ -57,6 +57,10 @@ pub mod colour {
     pub const CHROME: u32 = 0xFFF8_FAFD;
     /// The document page.
     pub const PAGE: u32 = 0xFFFF_FFFF;
+    /// The desktop writing surface, a little cooler than the paper and top chrome.
+    pub const DESK: u32 = 0xFFF1_F3F8;
+    /// A soft shadow beneath desktop sheets.
+    pub const PAGE_SHADOW: u32 = 0xFFDC_E1E9;
     /// A band that is one step **off** the chrome: the toolbar and the status bar.
     ///
     /// # CORRECTION: this was `0xFFF8_FAFD` -- the same value as [`CHROME`]
@@ -2244,8 +2248,12 @@ impl Chrome {
                 colour::CHROME,
             ))));
         let band = |y: u32, h: u32| fill(0, y as i32, l.width, h, colour::BAND);
-        chrome.before.push(band(l.toolbar.y, l.toolbar.height));
+        if !state.paged { chrome.before.push(band(l.toolbar.y, l.toolbar.height)); }
         chrome.before.push(band(l.status.y, l.status.height));
+        if state.paged {
+            chrome.before.push(fill(l.canvas.x as i32, l.canvas.y as i32,
+                l.canvas.width, l.canvas.height, colour::DESK));
+        }
 
         // # The band rules, and the correction that matters more than their colour
         //
@@ -2268,7 +2276,8 @@ impl Chrome {
             (l.toolbar.bottom(), colour::RULE_DIM),
             (l.ruler.bottom(), colour::RULE),
         ];
-        for (y, c) in rules {
+        for (i, (y, c)) in rules.into_iter().enumerate() {
+            if state.paged && i < 3 { continue; }
             let y = y.saturating_sub(1);
             if y < l.height {
                 chrome.before.push(fill(0, y as i32, l.width, 1, c));
@@ -2528,15 +2537,28 @@ impl Chrome {
             let limit = (l.canvas.height / l.page_height().max(1)).saturating_add(3);
             for index in first_page.saturating_sub(1)..first_page.saturating_add(limit) {
                 let Some(sheet) = l.visible_page(state, index) else { continue; };
+                // The shadow is clipped to the desk and drawn behind the paper, including
+                // when a sheet is partially visible at either edge of the viewport.
+                let full_top = i64::from(l.canvas.y) + i64::from(Layout::DESK_TOP)
+                    + i64::from(index) * i64::from(l.page_height() + Layout::PAGE_GAP)
+                    - l.scroll_pixels(state.scroll_line) as i64;
+                let shadow_width = 3u32.min(l.width.saturating_sub(sheet.right()));
+                if shadow_width > 0 {
+                    page.before.push(fill(sheet.right() as i32, sheet.y as i32,
+                        shadow_width, sheet.height, colour::PAGE_SHADOW));
+                }
+                let bottom = full_top + i64::from(l.page_height());
+                if bottom >= i64::from(l.canvas.y) && bottom < i64::from(l.canvas.bottom()) {
+                    let shadow_h = 3u32.min(l.canvas.bottom() - bottom as u32);
+                    page.before.push(fill(sheet.x as i32, bottom as i32, sheet.width,
+                        shadow_h, colour::PAGE_SHADOW));
+                }
                 page.before.push(fill(sheet.x as i32, sheet.y as i32, sheet.width, sheet.height, colour::PAGE));
                 // Side borders remain visible on partial sheets. Horizontal borders are clipped
                 // by the sheet itself; the gap still separates consecutive pages.
                 for x in [sheet.x, sheet.right().saturating_sub(1)] {
                     page.before.push(fill(x as i32, sheet.y as i32, 1, sheet.height, colour::RULE));
                 }
-                let full_top = i64::from(l.canvas.y) + i64::from(Layout::DESK_TOP)
-                    + i64::from(index) * i64::from(l.page_height() + Layout::PAGE_GAP)
-                    - l.scroll_pixels(state.scroll_line) as i64;
                 for y in [full_top, full_top + i64::from(l.page_height()) - 1] {
                     if y >= i64::from(l.canvas.y) && y < i64::from(l.canvas.bottom()) {
                         page.before.push(fill(sheet.x as i32, y as i32, sheet.width, 1, colour::RULE));
@@ -2745,11 +2767,12 @@ fn state_fill(state: &ChromeState, h: crate::widgets::Hit) -> Option<u32> {
 /// document name eventually overflows, and overflow at the left of a title bar truncates the mark.
 fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
     into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::CHROME));
-    let icon_y = l.title.y + m.title_h.saturating_sub(crate::icons::SIZE) / 2;
-    into.push(SurfaceTree::leaf(crate::Node::Icon(
-        crate::icons::IconId::Doc.at(24, icon_y as i32, colour::BLUE),
-    )));
-    let title_x = 24 + crate::icons::SIZE as i32 + 12;
+    let icon_size = if state.paged && m.cell_h >= 30 { 20 } else { crate::icons::SIZE };
+    let icon_y = l.title.y + m.title_h.saturating_sub(icon_size) / 2;
+    let icon = if icon_size == 20 { crate::icons::IconId::Doc.at_large(24, icon_y as i32, colour::BLUE) }
+        else { crate::icons::IconId::Doc.at(24, icon_y as i32, colour::BLUE) };
+    into.push(SurfaceTree::leaf(crate::Node::Icon(icon)));
+    let title_x = 24 + icon_size as i32 + 12;
     let title_y = l.title.y + m.title_h.saturating_sub(m.cell_h) / 2;
     // Keep a long document name clear of the left-hand button group.
     //
@@ -3096,7 +3119,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             pill.y as i32,
             pill.width,
             pill.height,
-            toolbar_pill_radius(pill.height),
+            if state.paged { pill.height / 2 } else { toolbar_pill_radius(pill.height) },
             colour::PILL,
         ));
     }
@@ -3165,7 +3188,8 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 
         let cx = p.rect.x as i32;
         let cy = p.rect.y as i32;
-        let ih = crate::icons::SIZE as i32;
+        let large_icons = state.paged && m.cell_h >= 30;
+        let ih = if large_icons { 20 } else { crate::icons::SIZE as i32 };
         let iy = cy + (p.rect.height as i32 - ih) / 2;
 
         // **The label is the outer branch, not the inner one.** The first version matched on `icon()`
@@ -3180,11 +3204,9 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             cx + (p.rect.width as i32 - ih) / 2
         };
         if let Some(icon) = p.tool.icon() {
-            into.push(SurfaceTree::leaf(crate::Node::Icon(icon.at(
-                ix,
-                iy,
-                colour::INK_CHROME,
-            ))));
+            let icon = if large_icons { icon.at_large(ix, iy, colour::INK_CHROME) }
+                else { icon.at(ix, iy, colour::INK_CHROME) };
+            into.push(SurfaceTree::leaf(crate::Node::Icon(icon)));
         }
         if p.tool.has_label() {
             push_text(
@@ -3204,7 +3226,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 into.push(SurfaceTree::leaf(crate::Node::Icon(
                     crate::icons::IconId::ChevronDown.at(
                         p.rect.right() as i32 - ih - 4,
-                        iy,
+                        iy + (ih - crate::icons::SIZE as i32) / 2,
                         colour::INK_DIM,
                     ),
                 )));
@@ -3238,7 +3260,7 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 into.push(SurfaceTree::leaf(crate::Node::Icon(
                     crate::icons::IconId::ChevronDown.at(
                         p.rect.right() as i32 - ih,
-                        iy,
+                        iy + (ih - crate::icons::SIZE as i32) / 2,
                         colour::INK_DIM,
                     ),
                 )));
@@ -3262,14 +3284,15 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     //
     // **`a_popup_is_a_lighter_plane_than_anything_it_covers` still holds**: `POPUP` is `0xFFFF_FFFF`,
     // which is lighter than `PILL`.
-    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height, colour::PILL));
+    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height,
+        if state.paged { colour::DESK } else { colour::PILL }));
     // **A rule down the rail's right edge, and the reason is the same one `BAND`'s correction gives.**
     // The panel is `colour::CHROME`, and so is the desk beside it, so the rail had no edge at all: the
     // document list and the empty space to its right read as one surface, and the sheet's left gutter
     // looked like a mistake rather than the rail's boundary. **One pixel of `RULE` is what a panel
     // boundary is in this chrome** — the popup has `POPUP_EDGE`, the sheet has `RULE`, and this is the
     // third surface that needed the same treatment.
-    if l.sidebar.width > 0 {
+    if l.sidebar.width > 0 && !state.paged {
         into.push(fill(
             l.sidebar.right().saturating_sub(1) as i32,
             l.sidebar.y as i32,
@@ -3278,22 +3301,24 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             colour::RULE,
         ));
     }
-    into.push(SurfaceTree::leaf(crate::Node::Icon(
-        crate::icons::IconId::ArrowLeft.at(
-            l.sidebar_back.x as i32 + 8,
-            l.sidebar_back.y as i32 + 8,
-            colour::INK_CHROME,
-        ),
-    )));
+    let icon_size = if state.paged && m.cell_h >= 30 { 20 } else { crate::icons::SIZE };
+    let icon_at = |icon: crate::icons::IconId, x, y, ink| {
+        if icon_size == 20 { icon.at_large(x, y, ink) } else { icon.at(x, y, ink) }
+    };
+    into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
+        crate::icons::IconId::ArrowLeft,
+        l.sidebar_back.x as i32 + (l.sidebar_back.width.saturating_sub(icon_size) / 2) as i32,
+        l.sidebar_back.y as i32 + (l.sidebar_back.height.saturating_sub(icon_size) / 2) as i32,
+        colour::INK_CHROME,
+    ))));
     let head_y = l.sidebar_new.y + (l.sidebar_new.height.saturating_sub(m.cell_h)) / 2;
     push_text(into, m, head_y, "Document tabs", Style::REGULAR, colour::INK, l.sidebar.x as i32 + 40);
-    into.push(SurfaceTree::leaf(crate::Node::Icon(
-        crate::icons::IconId::Plus.at(
-            l.sidebar_new.x as i32 + 8,
-            l.sidebar_new.y as i32 + 8,
-            colour::INK_CHROME,
-        ),
-    )));
+    into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
+        crate::icons::IconId::Plus,
+        l.sidebar_new.x as i32 + (l.sidebar_new.width.saturating_sub(icon_size) / 2) as i32,
+        l.sidebar_new.y as i32 + (l.sidebar_new.height.saturating_sub(icon_size) / 2) as i32,
+        colour::INK_CHROME,
+    ))));
 
     for i in 0..l.sidebar_rows as usize {
         let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else { break };
@@ -3304,26 +3329,20 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
         }
         let ink = if active { colour::UPGRADE_INK } else { colour::INK_CHROME };
-        into.push(SurfaceTree::leaf(crate::Node::Icon(
-            crate::icons::IconId::Doc.at(
-                r.x as i32 + 16,
-                r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
-                ink,
-            ),
-        )));
+        into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
+            crate::icons::IconId::Doc, r.x as i32 + 16,
+            r.y as i32 + (r.height as i32 - icon_size as i32) / 2, ink,
+        ))));
         let ty = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
-        let tx = r.x as i32 + 16 + crate::icons::SIZE as i32 + 10;
+        let tx = r.x as i32 + 16 + icon_size as i32 + 10;
         push_text(into, m, ty,
             &fit_to_width(title, m.cell_w, cells_left_of(r.right(), tx, m.cell_w)),
             Style::REGULAR, ink, tx);
         if active {
-            into.push(SurfaceTree::leaf(crate::Node::Icon(
-                crate::icons::IconId::Overflow.at(
-                    r.right() as i32 - crate::icons::SIZE as i32 - 12,
-                    r.y as i32 + (r.height as i32 - crate::icons::SIZE as i32) / 2,
-                    ink,
-                ),
-            )));
+            into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
+                crate::icons::IconId::Overflow, r.right() as i32 - icon_size as i32 - 12,
+                r.y as i32 + (r.height as i32 - icon_size as i32) / 2, ink,
+            ))));
         }
     }
 }

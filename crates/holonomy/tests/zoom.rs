@@ -561,3 +561,20 @@ fn the_row_pitch_follows_the_zoom_and_not_the_tallest_size() {
         b.chrome.metrics.cell_h
     );
 }
+
+#[test]
+fn zoom_round_trips_without_growing_the_chrome() {
+    let mut s = session("A document");
+    s.set_zoom(100).unwrap();
+    let original = s.chrome.metrics;
+    for _ in 0..4 {
+        s.set_zoom(125).unwrap();
+        s.set_zoom(100).unwrap();
+    }
+    let restored = s.chrome.metrics;
+    assert_eq!((restored.title_h, restored.menu_h, restored.toolbar_h, restored.ruler_h,
+                restored.status_h, restored.button, restored.cell_w, restored.cell_h),
+               (original.title_h, original.menu_h, original.toolbar_h, original.ruler_h,
+                original.status_h, original.button, original.cell_w, original.cell_h));
+    assert_eq!(s.chrome_layout().page.width, holonomy_render::Layout::new(&original).page.width);
+}
