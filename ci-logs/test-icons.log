@@ -20,7 +20,7 @@
     [1m[94m|[0m
 
 [1m[33mwarning[0m: `holonomy-render` (test "icons") generated 1 warning (run `cargo fix --test "icons" -p holonomy-render` to apply 1 suggestion)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 2.53s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 2.00s
 [1m[92m     Running[0m tests/icons.rs (target/x86_64-unknown-linux-musl/debug/deps/icons-06cd320dc8374460)
 
 running 8 tests

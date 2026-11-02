@@ -4,3 +4,15 @@ info: downloading 6 components
 warn: the missing active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been auto-installed
 warn: this might cause rustup commands to take longer time to finish than expected
 info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_capture.rs:38:
+ }
+ 
+ fn shot(name: &str, w: u32, h: u32, ppem: u16, tab: u8) {
+-    let atlas: &'static holonomy_assets::atlas::Atlas =
+-        Box::leak(Box::new(holonomy_assets::build_atlas(&[ppem]).expect("atlas").0));
++    let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
++        holonomy_assets::build_atlas(&[ppem]).expect("atlas").0,
++    ));
+     let keep = Keep {
+         last: Default::default(),
+         size: (w, h),
