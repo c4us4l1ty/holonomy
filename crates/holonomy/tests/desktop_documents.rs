@@ -9,7 +9,7 @@ use holonomy_text::Editor;
 
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> = std::sync::OnceLock::new();
-    ATLAS.get_or_init(|| { let (a, _) = holonomy_assets::build_atlas(&[16]).unwrap(); Box::leak(Box::new(a)) })
+    ATLAS.get_or_init(|| { let (a, _) = holonomy_assets::build_atlas(&[16, 20]).unwrap(); Box::leak(Box::new(a)) })
 }
 fn session() -> Session<'static> {
     let m = ChromeMetrics::DESKTOP;
@@ -90,4 +90,73 @@ fn document_library_does_not_replace_the_editor_and_is_a_managed_request() {
     s.set_home(None);
     s.repaint_all().unwrap();
     assert_eq!(s.text().unwrap(), b"draft!");
+}
+
+#[test]
+fn long_paragraph_wraps_scrolls_edits_and_round_trips_without_hard_breaks() {
+    use holonomy_input::Command;
+    let mut s = session();
+    let text = "many words form an ordinary paragraph that continues beyond the visible sheet ".repeat(55);
+    let payload = Editor::from_text(text.as_bytes()).unwrap().payload().unwrap();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "Long".into(), payload,
+        caret: 0, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    assert!(s.total_lines() > s.chrome_layout().rows);
+    s.apply(Command::PageDown).unwrap();
+    assert!(s.caret() > 0);
+    assert!(s.scroll_line() > 0);
+    let at = s.caret() as usize;
+    s.insert_text("Z").unwrap();
+    let mut expected = text.clone().into_bytes();
+    expected.insert(at, b'Z');
+    assert_eq!(s.text().unwrap(), expected);
+    assert!(!s.text().unwrap().contains(&b'\n'));
+    s.undo().unwrap();
+    assert_eq!(s.text().unwrap(), text.as_bytes());
+    let snapshots = s.document_snapshots().unwrap();
+    let mut reopened = session();
+    reopened.replace_documents(snapshots).unwrap();
+    assert_eq!(reopened.text().unwrap(), text.as_bytes());
+    assert_eq!(reopened.total_lines(), s.total_lines());
+}
+
+#[test]
+fn wrapping_reflows_on_resize_sidebar_and_zoom_without_moving_text_or_caret() {
+    let mut s = session();
+    let text = "a long paragraph with several words ".repeat(90);
+    let payload = Editor::from_text(text.as_bytes()).unwrap().payload().unwrap();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "Reflow".into(), payload,
+        caret: 300, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    let before = s.total_lines();
+    assert!(s.resize(700, 700).unwrap());
+    assert!(s.total_lines() >= before);
+    let caret = s.caret();
+    s.set_sidebar(true);
+    s.set_zoom(125).unwrap();
+    assert_eq!(s.caret(), caret);
+    assert_eq!(s.text().unwrap(), text.as_bytes());
+    s.repaint_all().unwrap();
+}
+
+#[test]
+fn click_and_selection_follow_wrapped_rows_after_scrolling() {
+    use holonomy_input::{Button, Command, Event};
+    use holonomy::store::NoSource;
+    let mut s = session();
+    let text = "line wrapping needs a consistent byte index for the pointer and selection ".repeat(60);
+    let payload = Editor::from_text(text.as_bytes()).unwrap().payload().unwrap();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "Click".into(), payload,
+        caret: 0, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    s.scroll_to(10).unwrap();
+    let l = s.chrome_layout();
+    let x = l.text.x as i32;
+    let y = (l.text.y + s.chrome.metrics.cell_h + s.chrome.metrics.cell_h / 2) as i32;
+    s.handle_pointer(&mut NoSource, Event::Button { button: Button::Left, pressed: true, x, y, time_ms: 100 }).unwrap();
+    s.handle_pointer(&mut NoSource, Event::Button { button: Button::Left, pressed: false, x, y, time_ms: 101 }).unwrap();
+    assert_eq!(s.caret_line(), 11);
+    let at = s.caret();
+    s.apply(Command::SelectDown).unwrap();
+    let selected = s.editor().selection().unwrap();
+    assert_eq!(selected.start, at);
+    assert!(selected.end > selected.start);
+    s.repaint_all().unwrap();
 }

@@ -1573,3 +1573,12 @@ fn the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open() {
          reader gets is the same either way"
     );
 }
+
+#[test]
+fn a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row() {
+    let m = ChromeMetrics::DESKTOP;
+    let layout = Layout::new(&m);
+    let cells = layout.cells_per_row(m.cell_w) as u32;
+    let state = ChromeState { paged: true, caret_column: cells, ..ChromeState::default() };
+    assert!(Caret::locate(&layout, &m, &state).is_some());
+}

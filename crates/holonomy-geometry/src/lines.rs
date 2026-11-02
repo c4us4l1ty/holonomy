@@ -269,6 +269,18 @@ impl LineGeometry {
         Self::new(vec![metrics; line_count], metrics)
     }
 
+    /// Construct uniform-height geometry from existing byte weights in linear time.
+    /// Weights are opaque to this index; callers choose whether terminators are included.
+    pub fn uniform_with_lengths(lengths: &[u32], metrics: LineMetrics) -> Self {
+        let heights = Fenwick::from_weights(&vec![metrics.height(); lengths.len()]);
+        Self {
+            heights,
+            lengths: Fenwick::from_weights(lengths),
+            metrics: vec![metrics; lengths.len()],
+            default_metrics: metrics,
+        }
+    }
+
     /// Number of lines.
     #[inline]
     pub fn line_count(&self) -> usize {
@@ -908,6 +920,23 @@ mod tests {
             descender: 4,
             leading: 3,
             caret_height: 17,
+        }
+    }
+
+    #[test]
+    fn uniform_lengths_build_matches_incremental_weights() {
+        let lengths = [4, 0, 9, 1, 7];
+        let direct = LineGeometry::uniform_with_lengths(&lengths, body());
+        let mut incremental = LineGeometry::uniform(lengths.len(), body());
+        for (i, &len) in lengths.iter().enumerate() {
+            incremental.set_line_len(i, len as usize).unwrap();
+        }
+        for i in 0..lengths.len() {
+            assert_eq!(direct.byte_of(i), incremental.byte_of(i));
+            assert_eq!(direct.line_len(i), incremental.line_len(i));
+        }
+        for byte in 0..=21 {
+            assert_eq!(direct.line_of_byte(byte), incremental.line_of_byte(byte));
         }
     }
 
