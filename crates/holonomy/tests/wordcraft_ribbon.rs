@@ -12,7 +12,7 @@ fn ribbon_buttons_and_hits_share_geometry() {
         status_h: 28,
         ..ChromeMetrics::DESKTOP
     };
-    let l = Layout::new(m);
+    let l = Layout::new(&m);
     let mut s = ChromeState {
         ribbon: true,
         ..ChromeState::default()
@@ -42,7 +42,7 @@ fn narrow_ribbon_overflows_instead_of_drawing_dead_buttons() {
         toolbar_h: 112,
         ..ChromeMetrics::DESKTOP
     };
-    let l = Layout::new(m);
+    let l = Layout::new(&m);
     let s = ChromeState {
         ribbon: true,
         ..ChromeState::default()
