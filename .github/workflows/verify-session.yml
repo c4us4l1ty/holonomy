@@ -2,8 +2,12 @@ name: Verify Holonomy UI
 on:
   push:
     branches: ['arena/ca2b02bd-holonomy']
+# **Read-only.** This workflow verifies; it never writes to the branch. The earlier
+# revisions pushed logs and rustfmt commits back, which made a verification run an
+# editor of the thing it was verifying -- and a push that raced another job of the
+# same run could lose the log it was trying to deliver.
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: verify-ca2b02bd
   cancel-in-progress: true
@@ -21,18 +25,8 @@ jobs:
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           shared-key: holonomy-musl-release
-          save-if: ${{ github.ref == 'refs/heads/arena/ca2b02bd-holonomy' }}
       - name: Formatting
-        run: |-
-          cargo fmt --all
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -u
-            git commit -m "style: apply rustfmt"
-            git push origin HEAD:arena/ca2b02bd-holonomy
-          fi
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
       - name: Check sealed and desktop targets
         run: |-
           set -o pipefail
@@ -41,53 +35,36 @@ jobs:
       - name: Release tests
         run: |-
           set -o pipefail
-          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/test.log 2>&1
+          cargo test --workspace --release --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/test.log
       - name: Desktop tests
         if: always()
         run: |-
-          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/test.log 2>&1
-          cargo test -p holonomy-input --features desktop --release >> /tmp/test.log 2>&1
-          cargo test -p holonomy-x11 --release >> /tmp/test.log 2>&1
-          cargo test -p holonomy-display --features desktop --release >> /tmp/test.log 2>&1
-          exit 0
-      # **Only the failures, so the summary fits in a commit and in a context window.**
-      # The raw log is megabytes; what a fix needs is one line per failed test with the
-      # panic site and the assertion's two sides.
+          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-input --features desktop --release 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-x11 --release 2>&1 | tee -a /tmp/test.log
+          cargo test -p holonomy-display --features desktop --release 2>&1 | tee -a /tmp/test.log
+      # **Only the failures.** The raw log is megabytes and mostly `... ok`; what a fix
+      # needs is one line per failed test, its panic site and the two sides it compared.
       - name: Summarise
         if: always()
         run: |-
           {
-            grep -aE '^(running|test result|failures:)' /tmp/test.log
-            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/test.log
-            grep -aA3 'panicked at' /tmp/test.log
-          } | uniq > ci-test.log || true
-          tail -n 200 /tmp/check.log > ci-check.log || true
-      - name: Publish diagnostics
+            grep -aE '^(test result: FAILED|error(\[E[0-9]+\])?: )' /tmp/test.log
+            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/test.log
+            grep -aA4 'panicked at' /tmp/test.log
+          } > ci-test.log || true
+          tail -n 300 /tmp/check.log > ci-check.log || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
-        run: |-
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f ci-test.log ci-check.log
-          git commit -m "ci: publish diagnostics" || true
-          # **`fetch` + `rebase`, not `pull --rebase`.** `actions/checkout` leaves the work tree in
-          # a detached HEAD, where `git pull --rebase` refuses to run ("not currently on a branch"),
-          # so the `&&` short-circuited and the push never happened -- the step still reported
-          # success because the loop's last command was `sleep`. That is how two failing jobs
-          # published nothing while both said "Publish ... | success".
-          for attempt in 1 2 3 4 5; do
-            git fetch -q origin arena/ca2b02bd-holonomy
-            git rebase -q FETCH_HEAD || { git rebase --abort || true; }
-            if git push -q origin HEAD:arena/ca2b02bd-holonomy; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "publishing the diagnostics failed after five attempts" >&2
-          exit 1
-  # **The baseline, so "red" can be told apart from "newly red".** `main` carries its own
-  # suites and its own gates; a branch is judged by the difference, not by an absolute zero
-  # nobody has reached.
+        with:
+          name: diagnostics
+          path: |
+            ci-test.log
+            ci-check.log
+          if-no-files-found: ignore
+  # **The baseline, so "red" can be told apart from "newly red".** `main` carries its
+  # own suites and gates; this branch is judged by the difference, not by an absolute
+  # zero nobody has reached.
   baseline:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -102,35 +79,22 @@ jobs:
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           shared-key: holonomy-musl-release
-          save-if: false
       - name: Release tests on main
         run: |-
-          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/base.log 2>&1
-          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/base.log 2>&1
+          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/base.log 2>&1 || true
+          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/base.log 2>&1 || true
           exit 0
       - name: Summarise
         if: always()
         run: |-
           {
-            grep -aE '^(running|test result|failures:)' /tmp/base.log
-            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----|error: test failed|error\[|error: could not compile)' /tmp/base.log
-            grep -aA3 'panicked at' /tmp/base.log
-          } | uniq > ci-baseline.log || true
-      - name: Publish baseline
+            grep -aE '^(test result: FAILED|error(\[E[0-9]+\])?: )' /tmp/base.log
+            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/base.log
+            grep -aA4 'panicked at' /tmp/base.log
+          } > ci-baseline.log || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
-        run: |-
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f ci-baseline.log
-          git commit -m "ci: publish main baseline" || true
-          for attempt in 1 2 3 4 5; do
-            git fetch -q origin arena/ca2b02bd-holonomy
-            git rebase -q FETCH_HEAD || { git rebase --abort || true; }
-            if git push -q origin HEAD:arena/ca2b02bd-holonomy; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "publishing the baseline failed after five attempts" >&2
-          exit 1
+        with:
+          name: baseline
+          path: ci-baseline.log
+          if-no-files-found: ignore
