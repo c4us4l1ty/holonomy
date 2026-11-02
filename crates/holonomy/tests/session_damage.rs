@@ -1,4 +1,4 @@
-//! **What a click costs, what the chrome lies about, and what the sidebar and the title agree on.** 10 tests.
+//! **What a click costs, what the chrome lies about, and what the sidebar and the title agree on.** 12 tests.
 //!
 //! # What this file is about
 //!
