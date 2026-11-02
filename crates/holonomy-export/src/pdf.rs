@@ -934,6 +934,12 @@ impl RunStyle {
     /// one argument instead of six. `big` is a parameter rather than a constant because a header is
     /// still "plain" in the sense that matters here -- it has no decoration -- and the leading test
     /// depends on it.
+    ///
+    /// **`cfg(test)`, because `build` does not call it.** Every run the product lays out comes from
+    /// [`Self::of_span`], which reads the flags; this constructor exists for the unit tests below, and
+    /// a non-test build that compiled it would be a second way to make a `RunStyle` -- one that cannot
+    /// carry a decoration, which is the class of constructor this file's docs argue against having.
+    #[cfg(test)]
     fn of_plain(font: Name<'static>, metric: BaseFont, size: f32, big: bool) -> Self {
         Self {
             font,

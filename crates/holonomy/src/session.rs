@@ -6660,6 +6660,19 @@ impl<'a> Session<'a> {
         // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
         // using the source height would displace by a factor of three at 1920x1080.
         blocks.extend(self.image_blocks(source));
+        // **Headings join them too, and they did not until this line.**
+        //
+        // A heading's glyphs are drawn at the atlas's *second* size -- that is `run_size_index`'s whole
+        // purpose, and `tests/decorations.rs` gates it. But the line box it was laid on is `cell_h` at
+        // the painter's own size, which is the body pitch: so a 20 px heading on an 18 px line has two
+        // pixels of its ink in the line above or below, and every line after it starts two pixels too
+        // high. **The old comment above is the bug, written down**: it says `STYLE_HEADER` is
+        // load-bearing for the line metrics, and nothing published them.
+        //
+        // The extra is the difference between the two pitches, and only when the atlas *has* a second
+        // size -- a one-size atlas clamps `run_size_index` to 0 and draws the heading at the body size,
+        // so it needs no extra and would otherwise reserve rows for ink that is not there.
+        blocks.extend(self.heading_blocks());
         if self.state.paged {
             // All paint and hit-test callers ask for viewport-relative rows. Discard blocks above
             // the viewport and translate the rest, rather than displacing the wrong visible rows.
@@ -6667,6 +6680,65 @@ impl<'a> Session<'a> {
             blocks = blocks.into_iter().filter_map(|(line, h)| line.checked_sub(first).map(|row| (row, h))).collect();
         }
         self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
+    }
+
+    /// **Every heading line and how much taller than the body pitch it is**, for
+    /// [`Session::publish_line_heights`].
+    ///
+    /// # Why a heading needs a block at all
+    ///
+    /// `LineHeights` is the model every consumer of line geometry reads: the body emitter lays each run
+    /// at `line_heights.y(line)`, the caret locates itself with the same function, and the damage rects
+    /// are `height(line)` tall. Its `pitch` is one number for the whole document, and it is
+    /// `ChromeMetrics::cell_h` -- the *body* pitch.
+    ///
+    /// A heading draws at `Painter::label_size(1)`, the atlas's second size, which is taller than the
+    /// body's. Without a block here the heading's own line box is too short for its own glyphs, and
+    /// because `y` is a prefix sum **every line below it starts that many pixels too high as well**. On
+    /// the shipped 16/20 ppem pair that is a couple of pixels per heading: small enough to read as sloppy
+    /// spacing rather than as a bug, which is exactly why it is worth a number and a gate.
+    ///
+    /// # Why the pitch difference and not the ascent difference
+    ///
+    /// A line box is `line_pitch_at(size)` tall and the baselines inside it are placed from each run's
+    /// own ascent -- that is what lets a heading and a body run share a line at all. So the extra the
+    /// *sum* needs is exactly the difference between the two pitches.
+    ///
+    /// **Nothing when the atlas has one size**, because `run_size_index` clamps to 0 and the heading
+    /// really is drawn at the body pitch; reserving rows there would reserve them for ink nothing draws.
+    ///
+    /// **Reported in document line numbers**, like `image_blocks` and `math_blocks_for`: the paged
+    /// translation is `publish_line_heights`'s job and it already does it for every block in the list.
+    fn heading_blocks(&self) -> Vec<(u32, u32)> {
+        let body = self.chrome.metrics.cell_h.max(1);
+        let Some(atlas) = self.painter.atlas() else {
+            return Vec::new();
+        };
+        // The second size, from the atlas the painter actually holds -- the same atlas
+        // `Painter::label_size(1)` resolves the run's glyphs against.
+        let Some(&heading) = atlas.sizes().get(1) else {
+            return Vec::new();
+        };
+        let taller = u32::from(atlas.line_pitch_at(heading))
+            .max(body)
+            .saturating_sub(body);
+        if taller == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<(u32, u32)> = self
+            .editor
+            .spans()
+            .runs_in(0, self.editor.text_len() as u32)
+            .into_iter()
+            .filter(|(span, _, _)| span.style_flags & STYLE_HEADER != 0)
+            .map(|(_, lo, _)| (self.line_index(lo as usize), taller))
+            .collect();
+        // **One block per line, not one per span.** Two heading spans on one line are still one taller
+        // line, and `LineHeights::from` merges duplicate lines by *adding* -- so an undeduplicated list
+        // would make a line with two heading runs two heading-heights tall. `runs_in` answers in
+        // ascending order, so the duplicates are adjacent.
+        out.dedup_by_key(|(line, _)| *line);
+        out
     }
 
     /// Every visible image's `(anchor_line, raster_height_px)`, for [`Session::publish_line_heights`].

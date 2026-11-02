@@ -1,4 +1,4 @@
-//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 13 tests.
+//! **Underline, strikethrough, superscript and subscript, armed and drawn.** 14 tests.
 //!
 //! # The gap this file closes
 //!
@@ -60,6 +60,7 @@
 //! | **a decorated run's rules follow its baseline** | [`a_rule_follows_the_baseline_its_glyphs_were_drawn_on`] |
 //! | a heading draws at the larger size | [`a_heading_draws_at_the_larger_atlas_size`] |
 //! | and its underline follows its baseline | [`a_headings_underline_is_where_a_headings_baseline_is`] |
+//! | **and the line it sits on is taller, so the lines below move** | [`a_heading_line_reserves_the_heading_s_height`] |
 
 use holonomy::Session;
 use holonomy_display::paint::Painter;
@@ -745,5 +746,59 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
          supposed to underline.",
         raised_bottom - raised_top,
         flat_bottom - flat_top
+    );
+}
+
+/// **A heading's line is taller than a body line, in the model every consumer reads.**
+///
+/// # The bug this exists for, and why nothing else could see it
+///
+/// `LineHeights` is the one place line geometry comes from: the body emitter positions each run with
+/// `line_heights.y(line)`, the caret locates itself with the same function, and damage rects are
+/// `height(line)` tall. Its `pitch` is `ChromeMetrics::cell_h` -- the **body** pitch.
+///
+/// A heading draws its glyphs at the atlas's second size, which is taller. Until this gate's fix nothing
+/// published that difference, so a heading's own line box was too short for its own ink *and* every line
+/// below it started one difference too high. **That is a two-pixel layout error per heading**, which
+/// reads as slightly sloppy spacing; worse, it is invisible to every gate in this file, because they all
+/// measure a single line's ink.
+///
+/// # What is measured
+///
+/// **`LineHeights::y` for the line after the heading**, against the same function on a document with no
+/// heading. That is the number the emitter uses, the number the caret uses and the number the damage uses,
+/// so a one-pixel disagreement here is a one-pixel disagreement everywhere.
+#[test]
+fn a_heading_line_reserves_the_heading_s_height() {
+    // The same two-line document twice: line 0 is a heading in one of them, and line 1 is identical in
+    // both. **Two lines and not one**, because the claim is about the lines *below* the heading.
+    let plain = painted_at("Title\nbody\n", None, 1);
+    let head = painted_at("Title\nbody\n", Some((0, 5, STYLE_HEADER)), 1);
+
+    // **Both sessions use the atlas's second size as their own**, which is what a zoomed session looks
+    // like and the only configuration where `run_size_index` resolves to a different pitch than
+    // `ChromeMetrics::cell_h`.
+    let heights = |s: &Session<'_>| {
+        let h = &s.state.line_heights;
+        (h.y(0), h.y(1), h.height(0))
+    };
+    let (_, plain_line1, plain_h0) = heights(&plain);
+    let (_, head_line1, head_h0) = heights(&head);
+
+    assert!(
+        head_h0 > plain_h0,
+        "**the heading's line is not taller than a body line**: {head_h0} px against {plain_h0} px. \
+         `LineHeights::pitch` is `ChromeMetrics::cell_h`, so something has to publish the difference \
+         between the two atlas sizes and nothing does."
+    );
+    assert_eq!(
+        head_line1 - plain_line1,
+        head_h0 - plain_h0,
+        "**the heading is taller but the line below it did not move**: line 1 starts at {plain_line1} \
+         plain and {head_line1} with a heading, a shift of {} where the heading's line grew by {}. The \
+         extra is a prefix sum in `LineHeights::y`, so a heading that grows without pushing the lines \
+         below it draws its own descenders over the paragraph underneath.",
+        head_line1 - plain_line1,
+        head_h0 - plain_h0
     );
 }
