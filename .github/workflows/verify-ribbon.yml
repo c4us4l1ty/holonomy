@@ -6,27 +6,43 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: fmt
-        run: cargo fmt --all -- --check 2>&1 | tee /tmp/fmt.log; echo "EXIT=$?" >> /tmp/fmt.log
-      - name: check-render
-        run: cargo check -p holonomy-render --all-targets 2>&1 | tail -200 | tee /tmp/check.log
-      - name: check-workspace
-        run: cargo check --workspace --all-targets 2>&1 | tail -300 | tee /tmp/checkall.log
-      - name: test-ribbon
-        run: cargo test -p holonomy --test wordcraft_ribbon 2>&1 | tail -200 | tee /tmp/test-ribbon.log
-      - name: test-icons
-        run: cargo test -p holonomy-render --test icons 2>&1 | tail -150 | tee /tmp/test-icons.log
+      # **`pipefail`, because `cmd | tail` reports tail's exit code.** The first version of this
+      # workflow printed six green steps for a 4-second workspace check, which is not possible on a
+      # cold runner -- the pipes had been swallowing the failures.
+      - name: verify
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          status=0
+          run() {
+            name="$1"; shift
+            echo "===== $name: $* ====="
+            if "$@" > "ci-logs/$name.log" 2>&1; then
+              echo "RESULT $name PASS" | tee -a ci-logs/summary.log
+            else
+              echo "RESULT $name FAIL ($?)" | tee -a ci-logs/summary.log
+              status=1
+            fi
+            tail -40 "ci-logs/$name.log"
+          }
+          run fmt cargo fmt --all -- --check
+          run check-render cargo check -p holonomy-render --all-targets
+          run check-workspace cargo check --workspace --all-targets
+          run test-ribbon cargo test -p holonomy --test wordcraft_ribbon
+          run test-icons cargo test -p holonomy-render --test icons
+          run test-chrome cargo test -p holonomy-render --test chrome
+          echo "OVERALL=$status" | tee -a ci-logs/summary.log
+          exit $status
       - name: publish
         if: always()
         run: |
+          set -o pipefail
           git config user.name "ci"
           git config user.email "ci@example.invalid"
-          mkdir -p ci-logs
-          cp /tmp/*.log ci-logs/ 2>/dev/null || true
           git add -f ci-logs
-          git commit -m "ci: logs [skip ci]" || echo "nothing"
-          git push || echo "push failed"
+          git commit --allow-empty -m "ci: verification logs [skip ci]" || true
+          git push || true
