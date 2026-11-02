@@ -1,197 +1,400 @@
-[1m[92m   Compiling[0m libc v0.2.190
-[1m[92m   Compiling[0m getrandom v0.4.3
-[1m[92m   Compiling[0m proc-macro2 v1.0.107
-[1m[92m   Compiling[0m quote v1.0.47
-[1m[92m   Compiling[0m unicode-ident v1.0.26
-[1m[92m   Compiling[0m rand_core v0.10.1
-[1m[92m   Compiling[0m cfg-if v1.0.5
-[1m[92m   Compiling[0m typenum v1.20.1
-[1m[92m   Compiling[0m cmov v0.5.4
-[1m[92m   Compiling[0m ctutils v0.4.2
-[1m[92m   Compiling[0m syn v2.0.119
-[1m[92m   Compiling[0m const-oid v0.10.2
-[1m[92m   Compiling[0m alloc-no-stdlib v3.0.0
-[1m[92m   Compiling[0m alloc-stdlib v0.3.0
-[1m[92m   Compiling[0m hybrid-array v0.4.15
-[1m[92m   Compiling[0m brotli-decompressor v6.0.1
-[1m[92m   Compiling[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
-[1m[92m   Compiling[0m crypto-common v0.2.2
-[1m[92m   Compiling[0m block-buffer v0.12.1
-[1m[92m   Compiling[0m ttf-parser v0.25.1
-[1m[92m   Compiling[0m digest v0.11.3
-[1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
-[1m[92m   Compiling[0m cpufeatures v0.3.1
-[1m[92m   Compiling[0m inout v0.2.2
-[1m[92m   Compiling[0m base64ct v1.8.3
-[1m[92m   Compiling[0m phc v0.6.1
-[1m[92m   Compiling[0m cipher v0.5.2
-[1m[92m   Compiling[0m universal-hash v0.6.1
-[1m[92m   Compiling[0m poly1305 v0.9.1
-[1m[92m   Compiling[0m chacha20 v0.10.2
-[1m[92m   Compiling[0m password-hash v0.6.1
-[1m[92m   Compiling[0m aead v0.6.1
-[1m[92m   Compiling[0m hmac v0.13.0
-[1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
-[1m[92m   Compiling[0m tinyvec v1.13.3
-[1m[92m   Compiling[0m zeroize_derive v1.5.0
-[1m[92m   Compiling[0m unicode-normalization v0.1.25
-[1m[92m   Compiling[0m zeroize v1.9.0
-[1m[92m   Compiling[0m holonomy-secure v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-secure)
-[1m[92m   Compiling[0m secrecy v0.10.3
-[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
-[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[92m   Compiling[0m hkdf v0.13.0
-[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
-[1m[92m   Compiling[0m argon2 v0.6.0
-[1m[92m   Compiling[0m sha2 v0.11.0
-[1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[33mwarning[0m[1m: unused variable: `col`[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/ribbon.rs:492:17
-    [1m[94m|[0m
-[1m[94m492[0m [1m[94m|[0m             let col = i / rows;
-    [1m[94m|[0m                 [1m[33m^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_col`[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
-[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
-[1m[92m   Compiling[0m adler2 v2.0.1
-[1m[92m   Compiling[0m miniz_oxide v0.9.1
-[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
-[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
-[1m[33mwarning[0m: `holonomy-render` (lib) generated 1 warning (run `cargo fix --lib -p holonomy-render` to apply 1 suggestion)
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m bitflags v2.13.2
-[1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m memchr v2.8.3
-[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
-[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[92m   Compiling[0m pdf-writer v0.15.0
-[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
-[1m[33mwarning[0m[1m: unused variable: `both`[0m
-    [1m[94m--> [0mcrates/holonomy/src/session.rs:6627:13
-     [1m[94m|[0m
-[1m[94m6627[0m [1m[94m|[0m         let both = STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
-     [1m[94m|[0m             [1m[33m^^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_both`[0m
-     [1m[94m|[0m
-     [1m[94m= [0m[1mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+running 16 tests
+test a_deleted_byte_has_no_current_offset ... ok
+test a_typed_byte_is_served_without_asking_the_source ... ok
+test an_edit_after_a_later_one_is_still_seen ... ok
+test an_inserted_byte_has_no_saved_counterpart ... ok
+test an_insertion_anchored_inside_a_deleted_region_is_still_reproduced ... ok
+test an_insertion_anchored_inside_typed_text_is_reproduced ... ok
+test compaction_drops_only_wholly_earlier_edits ... ok
+test overlapping_edits_do_not_break_the_translation ... ok
+test replay_agrees_with_to_saved_at_every_offset ... ok
+test replay_refuses_a_short_fetch ... ok
+test replay_reproduces_the_document_at_every_window ... ok
+test saved_runs_are_maximal_and_contiguous_in_both_systems ... ok
+test saved_runs_then_fill_typed_reproduces_the_document ... ok
+test the_backwards_fold_matches_a_model_on_every_offset ... ok
+test the_record_carries_what_undo_needs ... ok
+test to_saved_and_typed_byte_never_disagree ... ok
 
-[1m[33mwarning[0m: `holonomy-render` (lib) generated 1 warning (1 duplicate)
-[1m[33mwarning[0m: `holonomy` (lib) generated 1 warning (run `cargo fix --lib -p holonomy` to apply 1 suggestion)
-[1m[92m   Compiling[0m holonomy-x11 v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-x11)
-[1m[33mwarning[0m: `holonomy` (lib) generated 1 warning (1 duplicate)
-[1m[33mwarning[0m: `holonomy` (lib test) generated 1 warning (1 duplicate)
-[1m[33mwarning[0m[1m: unnecessary parentheses around closure body[0m
-   [1m[94m--> [0mcrates/holonomy-render/tests/icons.rs:334:30
-    [1m[94m|[0m
-[1m[94m334[0m [1m[94m|[0m             .filter(|(y, _)| (*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest))
-    [1m[94m|[0m                              [1m[33m^[0m                                                      [1m[33m^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
-[1m[96mhelp[0m: remove these parentheses
-    [1m[94m|[0m
-[1m[94m334[0m [91m- [0m            .filter(|(y, _)| [91m([0m*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest[91m)[0m)
-[1m[94m334[0m [92m+ [0m            .filter(|(y, _)| *y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest)
-    [1m[94m|[0m
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-[1m[33mwarning[0m: `holonomy-render` (test "icons") generated 1 warning (run `cargo fix --test "icons" -p holonomy-render` to apply 1 suggestion)
-[1m[33mwarning[0m: `holonomy-render` (lib test) generated 1 warning (1 duplicate)
-[1m[92m    Finished[0m `release` profile [optimized] target(s) in 7m 32s
-[1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/release/deps/holonomy-d4be67bc958df5c4)
+[1m[92m     Running[0m tests/fault_edit_conflict.rs (target/x86_64-unknown-linux-musl/release/deps/fault_edit_conflict-2c523c3e78bd39aa)
 
-running 54 tests
-test args::tests::a_container_is_named ... ok
-test args::tests::a_flag_without_its_value_is_an_error ... ok
-test args::tests::an_empty_command_line_is_the_defaults ... ok
-test args::tests::an_unknown_flag_is_an_error_not_a_warning ... ok
-test args::tests::explicit_display_size_preferences_are_remembered_even_at_the_default ... ok
-test args::tests::exports_are_collected_and_deduplicated ... ok
-test args::tests::flags_compose_and_repeat ... ok
-test args::tests::help_is_a_successful_request_not_an_unknown_flag ... ok
-test args::tests::numbers_are_parsed_and_bounded ... ok
-test args::tests::ppem_is_range_checked_before_narrowing_to_u16 ... ok
-test args::tests::width_and_height_reject_values_above_the_documented_ceiling ... ok
-test counts::tests::a_long_run_is_counted_exactly ... ok
-test counts::tests::a_newline_is_one_line_and_a_trailing_one_is_an_empty_line ... ok
-test counts::tests::an_empty_document_is_one_line_and_no_words ... ok
-test counts::tests::an_insert_followed_by_its_delete_restores_the_totals ... ok
-test counts::tests::deleting_one_byte_keeps_the_totals_exact_at_every_offset ... ok
-test counts::tests::inserting_a_space_between_two_words_keeps_two_words ... ok
-test counts::tests::inserting_inside_a_word_keeps_one_word ... ok
-test counts::tests::inserting_into_an_empty_document_counts_one_word ... ok
-test counts::tests::typing_one_letter_keeps_the_totals_exact_at_every_offset ... ok
-test counts::tests::whitespace_runs_are_not_words ... ok
-test doclines::tests::a_letter_is_one_line_update_not_a_rebuild ... ok
-test doclines::tests::a_letter_typed_at_a_line_end_updates_the_line_that_grew ... ok
-test doclines::tests::a_line_longer_than_one_scan_chunk_is_measured_whole ... ok
-test doclines::tests::a_newline_is_a_rebuild_not_a_one_line_update ... ok
-test doclines::tests::a_sync_that_changes_nothing_says_so ... ok
-test doclines::tests::a_trailing_newline_is_a_last_empty_line ... ok
-test doclines::tests::an_edit_far_from_the_caret_rebuilds_rather_than_lying ... ok
-test doclines::tests::an_edit_that_straddles_a_line_boundary_still_finds_its_line ... ok
-test doclines::tests::an_empty_document_is_one_line ... ok
-test doclines::tests::byte_offsets_are_document_offsets ... ok
-test doclines::tests::the_tree_agrees_with_a_full_scan_for_lines_of_every_length ... ok
-test doclines::tests::the_tree_agrees_with_a_full_scan_on_every_line ... ok
-test doclines::tests::wrapped_incremental_edits_match_a_fresh_index ... ok
-test doclines::tests::wrapped_rows_partition_utf8_and_newlines_without_changing_text ... ok
-test manifest::tests::a_document_with_a_formula_counts_one_span_per_opener ... ok
-test manifest::tests::a_document_with_no_markers_answers_the_question ... ok
-test manifest::tests::a_documents_structure_is_its_bytes ... ok
-test manifest::tests::a_keystroke_measures_three_sections_not_the_document ... ok
-test manifest::tests::a_letter_is_one_section_update_and_a_nothing_is_unchanged ... ok
-test manifest::tests::a_manifest_costs_eight_bytes_a_section ... ok
-test manifest::tests::a_marker_free_edit_does_not_change_the_span_total ... ok
-test manifest::tests::a_section_boundary_never_splits_a_character ... ok
-test manifest::tests::a_section_is_one_container_chunk ... ok
-test manifest::tests::an_empty_document_is_one_empty_section ... ok
-test manifest::tests::an_image_anchor_is_a_span ... ok
-test manifest::tests::the_manifest_agrees_with_a_rebuild_from_its_own_sections ... ok
-test manifest::tests::the_manifest_agrees_with_the_document_after_every_sync ... ok
-test manifest::tests::the_sections_tile_the_document_exactly_once ... ok
-test manifest::word_at_a_time_tests::a_zero_byte_does_not_borrow_into_the_next_lane ... ok
-test manifest::word_at_a_time_tests::measure_agrees_with_a_byte_scan_on_every_marker_at_every_alignment ... ok
-test manifest::word_at_a_time_tests::the_anchor_constant_matches_the_text_crates ... ok
-test store::tests::a_new_store_holds_nothing_and_has_no_victim ... ok
-test store::tests::a_resident_section_is_page_locked ... ok
+running 6 tests
+test a_faulting_cursor_move_does_not_drift_the_store ... ok
+test a_faulting_read_of_an_unedited_document_is_correct ... ok
+test a_refused_edit_leaves_no_phantom_in_the_record ... ok
+test an_edit_no_longer_shifts_the_fault_out_by_one_byte ... ok
+test the_window_still_reads_correctly_after_a_mutation_refuses ... ok
+test there_is_no_faulting_mutator_on_the_rope ... ok
 
-test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-[1m[92m     Running[0m unittests src/main.rs (target/x86_64-unknown-linux-musl/release/deps/holonomy-d84a06ed926dddc4)
+[1m[92m     Running[0m tests/fault_residency.rs (target/x86_64-unknown-linux-musl/release/deps/fault_residency-63d516569269cbac)
+
+running 4 tests
+test a_read_of_a_resident_document_never_faults ... ok
+test an_edit_far_away_leaves_this_leaf_byte_for_byte_intact ... ok
+test the_cost_of_a_read_does_not_grow_with_the_edit_count ... ok
+test the_same_read_is_correct_as_well_as_cheap ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/format_history.rs (target/x86_64-unknown-linux-musl/release/deps/format_history-c354c338e636079b)
+
+running 6 tests
+test a_decoration_boundary_splits_the_run ... ok
+test mixed_formatting_is_one_undoable_and_redoable_action ... ok
+test no_op_and_refused_format_leave_history_and_redo_intact ... ok
+test oversize_format_record_is_refused_before_mutation ... ok
+test the_decoration_bits_round_trip_through_format_undo ... FAILED
+test undo_redo_interleaves_formatting_typing_and_deletion ... ok
+
+failures:
+
+---- the_decoration_bits_round_trip_through_format_undo stdout ----
+
+thread 'the_decoration_bits_round_trip_through_format_undo' (8753) panicked at crates/holonomy-text/tests/format_history.rs:48:14:
+called `Result::unwrap()` on an `Err` value: NothingToUndo
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_decoration_bits_round_trip_through_format_undo
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+[1m[91merror[0m: test failed, to rerun pass `-p holonomy-text --test format_history`
+[1m[92m     Running[0m tests/latency.rs (target/x86_64-unknown-linux-musl/release/deps/latency-772f7ba99337bfe1)
+
+running 13 tests
+test a_cursor_move_within_a_leaf_is_bounded_by_the_leaf_not_the_document ... ok
+test a_full_document_read_is_bounded_by_bandwidth_not_by_per_byte_dispatch ... ok
+test a_keystroke_costs_the_same_in_a_big_document_as_in_a_small_one ... ok
+test a_line_height_change_costs_the_same_in_a_big_document_as_a_small_one ... ok
+test a_line_lookup_costs_the_same_in_a_big_document_as_in_a_small_one ... ok
+test a_sixty_thousand_line_document_has_exact_inverse_lookups ... ok
+test base_edits_stay_within_the_keystroke_budget ... ok
+test deleting_is_far_under_the_per_keystroke_budget ... ok
+test fenwick_prefix_and_lower_bound_agree_at_sixty_thousand_lines ... ok
+test the_offset_map_costs_more_at_scale_and_that_is_recorded ... ok
+test the_page_locked_text_budget_is_what_limits_a_two_thousand_page_document ... ok
+test the_simulated_document_is_two_thousand_pages_and_a_million_words ... ok
+test typing_is_far_under_the_per_keystroke_budget ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.24s
+
+[1m[92m     Running[0m tests/multibyte_undo.rs (target/x86_64-unknown-linux-musl/release/deps/multibyte_undo-0a65f38f50ee064b)
+
+running 9 tests
+test a_multi_byte_character_survives_typing_around_it ... ok
+test a_multi_byte_run_leaves_no_stale_bytes_or_length_drift ... ok
+test redo_after_undo_restores_a_multi_byte_run ... ok
+test undo_removes_a_four_byte_run ... ok
+test undo_removes_a_multi_byte_run_from_the_middle_of_a_document ... ok
+test undo_removes_a_one_byte_run ... ok
+test undo_removes_a_three_byte_run ... ok
+test undo_removes_a_two_byte_run ... ok
+test undo_removes_several_runs_of_mixed_width_in_reverse_order ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/no_alloc.rs (target/x86_64-unknown-linux-musl/release/deps/no_alloc-14aa68c425280c10)
+
+running 10 tests
+test a_burst_round_trips_byte_for_byte ... ok
+test a_keystroke_is_o1_except_at_a_leaf_boundary ... ok
+test a_leaf_absorbs_3840_keystrokes_before_splitting ... ok
+test alloc_probe_child ... ok
+test deleted_text_does_not_survive_in_any_leaf ... ok
+test deleting_allocates_only_at_leaf_merges ... ok
+test plain_deletion_through_the_editor_allocates_nothing_per_delete ... ok
+test the_undo_stack_allocates_once_at_construction ... ok
+test typing_a_burst_allocates_nothing ... ok
+test typing_through_the_editor_allocates_nothing ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+[1m[92m     Running[0m tests/skeleton_editor.rs (target/x86_64-unknown-linux-musl/release/deps/skeleton_editor-e0de986cffb84444)
+
+running 7 tests
+test a_faulted_in_leaf_reads_and_edits_like_a_resident_one ... ok
+test a_skeleton_editor_has_every_structure_and_holds_no_bytes ... ok
+test a_skeleton_editor_knows_its_length_before_reading_anything ... ok
+test a_skeleton_editor_peaks_below_a_from_text_editor ... ok
+test a_skeleton_editor_refuses_an_edit_until_the_leaf_is_faulted_in ... ok
+test editor_peak_child ... ok
+test the_span_map_covers_the_whole_document_without_reading_it ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m     Running[0m tests/skeleton_load.rs (target/x86_64-unknown-linux-musl/release/deps/skeleton_load-e43564d02362ba45)
+
+running 7 tests
+test a_skeleton_rope_holds_no_bytes ... ok
+test a_skeleton_rope_reads_identically_through_a_source ... ok
+test an_empty_document_is_one_absent_leaf ... ok
+test peak_child ... ok
+test the_peak_is_a_function_of_leaves_not_of_the_document ... ok
+test the_spine_is_proportional_to_leaves_and_pays_no_more_than_a_resident_leaf ... ok
+test the_spine_knows_the_document_without_holding_it ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m     Running[0m tests/span_table_sparse.rs (target/x86_64-unknown-linux-musl/release/deps/span_table_sparse-b05528b1e078877b)
+
+running 6 tests
+test a_map_from_a_payload_is_fully_read_not_partly ... ok
+test a_truncated_span_table_is_refused_not_padded ... ok
+test styling_is_recoverable_with_the_text_absent ... ok
+test the_span_table_costs_runs_not_document_bytes ... ok
+test the_span_table_is_where_the_layout_says_it_is ... ok
+test the_sparse_path_and_the_whole_payload_path_agree ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m tests/sparse_rope.rs (target/x86_64-unknown-linux-musl/release/deps/sparse_rope-2589a1060497e6ac)
+
+running 9 tests
+test a_faulting_read_recovers_an_evicted_leaf ... ok
+test a_short_source_is_refused_rather_than_zero_filled ... ok
+test editing_an_absent_leaf_is_refused_not_applied ... ok
+test every_byte_of_a_sparse_rope_reads_identically ... ok
+test evicting_a_leaf_does_not_change_the_document_length ... ok
+test evicting_an_absent_leaf_twice_is_an_error ... ok
+test offsets_are_identical_before_and_after_eviction ... ok
+test read_at_refuses_an_absent_leaf_and_names_it ... ok
+test the_scrub_audit_refuses_an_absent_leaf ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m tests/sparse_style.rs (target/x86_64-unknown-linux-musl/release/deps/sparse_style-bc7c65f73e4efc59)
+
+running 8 tests
+test a_gappy_or_overrunning_observation_is_refused ... ok
+test a_refused_observation_leaves_the_map_untouched ... ok
+test an_unstyled_region_still_advances_the_watermark ... ok
+test re_observing_a_prefix_is_idempotent_not_an_error ... ok
+test style_does_not_depend_on_residency ... ok
+test styling_an_empty_map_is_not_a_silent_no_op ... ok
+test the_read_watermark_never_goes_backwards ... ok
+test unread_bytes_are_not_reported_as_known_plain ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/style_undo.rs (target/x86_64-unknown-linux-musl/release/deps/style_undo-4fa4c9d26602c215)
+
+running 12 tests
+test a_delete_across_a_styled_and_a_plain_run_restores_both_exactly ... ok
+test a_fresh_edit_drops_the_redo_branch ... ok
+test a_plain_delete_against_a_bold_run_restores_plain ... ok
+test a_plain_delete_does_not_restore_an_earlier_deletess_styling ... ok
+test a_refused_edit_leaves_the_redo_branch_intact ... ok
+test a_styled_delete_after_a_plain_one_still_gets_its_styling_back ... ok
+test an_insert_between_two_deletes_does_not_shift_the_pairing ... ok
+test clear_history_drops_redo_as_well ... ok
+test interleaved_deletes_keep_their_own_styling ... ok
+test redo_of_a_delete_does_not_disturb_the_undo_pairing ... ok
+test redo_replaces_the_redo_branch ... ok
+test the_style_record_stays_paired_past_its_bound ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m tests/tables.rs (target/x86_64-unknown-linux-musl/release/deps/tables-3260f61c67bab4c7)
+
+running 10 tests
+test a_control_t_inserts_a_three_by_three_table ... ok
+test an_empty_table_is_exactly_one_separator_fewer_than_it_has_cells ... ok
+test arrows_cross_cells_and_clamp_to_a_ragged_cell ... ok
+test column_widths_divide_the_measure_and_refuse_when_they_cannot ... ok
+test shift_tab_walks_back_and_stops_at_the_first_cell ... ok
+test tab_and_shift_tab_are_two_commands ... ok
+test tab_walks_cells_and_appends_a_row_at_the_bottom_right ... ok
+test table_spans_follow_the_bytes_around_them ... ok
+test two_undos_and_two_redos_restore_the_table_map_twice ... ok
+test undoing_a_table_insertion_removes_the_table ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/write_back.rs (target/x86_64-unknown-linux-musl/release/deps/write_back-30d29173285478ed)
+
+running 7 tests
+test a_commit_clears_the_record_so_a_later_fault_asks_no_question ... ok
+test a_commit_repairs_the_shift_a_leaf_write_back_could_not ... ok
+test a_committed_document_reads_back_byte_for_byte ... ok
+test a_deletion_survives_a_commit_and_the_length_shrinks ... ok
+test committing_an_empty_document_records_a_zero_length ... ok
+test every_leaf_is_written_not_just_the_resident_ones ... ok
+test ten_edits_across_the_document_all_survive_a_commit ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/x86_64-unknown-linux-musl/release/deps/holonomy_x11-b9caad7159b9e2d5)
+
+running 34 tests
+test auth::tests::a_cookie_is_matched_against_the_display_being_opened ... ok
+test auth::tests::a_file_without_a_usable_cookie_says_so ... ok
+test auth::tests::a_missing_file_names_its_path ... ok
+test auth::tests::a_truncated_record_is_refused_with_the_offset ... ok
+test auth::tests::lengths_are_read_big_endian ... ok
+test auth::tests::the_format_this_host_writes_parses ... ok
+test proto::tests::a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire ... ok
+test proto::tests::a_configure_notify_reads_the_size_from_the_wire ... ok
+test proto::tests::a_key_press_decodes_to_its_keycode_and_state ... ok
+test proto::tests::a_key_press_reads_the_keycode_and_the_coordinates_from_the_wire ... ok
+test proto::tests::a_motion_reads_the_coordinates_from_the_wire ... ok
+test proto::tests::a_reader_past_the_end_panics_instead_of_inventing_a_value - should panic ... ok
+test proto::tests::a_request_with_a_field_in_byte_one_keeps_the_sequence_number_out_of_it ... ok
+test proto::tests::an_expose_decodes_its_rectangle ... ok
+test proto::tests::an_expose_reads_its_rectangle_from_the_wire ... ok
+test proto::tests::an_extension_request_puts_its_minor_opcode_in_the_sequence_slot ... ok
+test proto::tests::an_odd_length_request_is_padded_and_counted_with_the_pad ... ok
+test proto::tests::an_undecoded_event_is_reported_by_code ... ok
+test proto::tests::every_core_error_code_has_a_name ... ok
+test proto::tests::every_event_is_thirty_two_bytes ... ok
+test proto::tests::selection_events_decode_from_the_wire ... ok
+test proto::tests::the_reader_is_little_endian_whatever_the_host_is ... ok
+test proto::tests::the_request_ceiling_is_the_protocols ... ok
+test proto::tests::the_request_length_is_word_counted_and_includes_the_header ... ok
+test proto::tests::the_sequence_number_is_in_the_second_header_byte ... ok
+test tests::a_display_spec_yields_its_number ... ok
+test window::tests::a_server_without_a_32_bit_format_is_refused_by_name ... ok
+test window::tests::the_event_mask_asks_for_exposure_and_keys ... ok
+test xtest::tests::a_short_reply_is_a_version_nobody_can_use_rather_than_a_panic ... ok
+test xtest::tests::fake_input_is_nine_words ... ok
+test xtest::tests::get_version_is_two_words ... ok
+test xtest::tests::press_and_release_are_different_events ... ok
+test xtest::tests::the_minor_opcodes_start_at_zero ... ok
+test xtest::tests::the_version_reply_is_read_past_the_prefix ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/live.rs (target/x86_64-unknown-linux-musl/release/deps/live-b0e05824c037f4a1)
+
+running 11 tests
+test a_configure_window_request_is_three_words_plus_one_per_value ... ok
+test a_frame_put_into_a_drawable_reads_back_identically ... ok
+test a_full_size_frame_goes_out_in_several_requests ... ok
+test a_resize_arrives_as_a_configure_notify_carrying_the_new_size ... ok
+test a_run_of_keystrokes_arrives_as_coherent_thirty_two_byte_events ... ok
+test a_shifted_character_arrives_as_four_key_events ... ok
+test a_synthesised_keystroke_arrives_as_the_keycode_that_was_injected ... ok
+test a_window_this_client_owns_resizes_and_the_server_confirms_the_new_size ... ok
+test an_x_keycode_is_a_linux_input_code_plus_eight ... ok
+test the_handshake_describes_a_server_a_frame_can_go_to ... ok
+test the_size_hints_reach_the_server_and_read_back ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/window_size.rs (target/x86_64-unknown-linux-musl/release/deps/window_size-ea2029d1fb0d24cf)
+
+running 4 tests
+test a_flag_is_set_only_when_the_field_it_names_is_written ... ok
+test a_psize_flag_never_names_a_zero_size ... ok
+test a_window_opens_at_its_size_and_resizes_to_another ... ignored, needs an X display; run with --ignored
+test the_size_hints_offsets_are_the_protocols ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-[1m[92m     Running[0m tests/actions.rs (target/x86_64-unknown-linux-musl/release/deps/actions-9d0ecd6ffc8f4bac)
+[1m[92m   Doc-tests[0m holonomy_assets
 
-running 11 tests
-test a_dropdown_ticks_the_current_value_and_applies_a_new_one ... ok
-test an_action_is_routed_without_a_menu_open_around_it ... ok
-test every_action_has_a_name ... ok
-test every_action_is_routed_or_accounted_for ... ok
-test every_wired_menu_item_carries_an_action ... ok
-test exporting_with_no_sinks_writes_nothing_and_is_not_an_error ... ok
-test only_one_popup_is_open_at_a_time ... ok
-test renaming_a_label_does_not_change_what_a_row_does ... ok
-test the_file_menu_rows_reach_their_actions ... ok
-test the_toolbar_labels_are_borrows_not_allocations ... FAILED
-test the_two_dropdown_lists_agree ... ok
+running 0 tests
 
-failures:
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
----- the_toolbar_labels_are_borrows_not_allocations stdout ----
+[1m[92m   Doc-tests[0m holonomy_container
 
-thread 'the_toolbar_labels_are_borrows_not_allocations' (6951) panicked at crates/holonomy/tests/actions.rs:596:5:
-assertion `left == right` failed
-  left: "Normal"
- right: "Normal text"
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+running 0 tests
 
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-failures:
-    the_toolbar_labels_are_borrows_not_allocations
+[1m[92m   Doc-tests[0m holonomy_crypto
 
-test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+running 0 tests
 
-[1m[91merror[0m: test failed, to rerun pass `-p holonomy --test actions`
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_display
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_export
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_geometry
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_image
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_input
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_jail
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_render
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_secure
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_text
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m holonomy_x11
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[91merror[0m: 16 targets failed:
+    `-p holonomy --test actions`
+    `-p holonomy --test armed_style`
+    `-p holonomy --test decorations`
+    `-p holonomy --test pointer`
+    `-p holonomy --test session`
+    `-p holonomy --test session_image`
+    `-p holonomy --test toolbar_wiring`
+    `-p holonomy --test wordcraft_ribbon`
+    `-p holonomy --test zoom`
+    `-p holonomy-display --test paint_chrome`
+    `-p holonomy-export --lib`
+    `-p holonomy-export --test export`
+    `-p holonomy-render --test chrome`
+    `-p holonomy-render --test icons`
+    `-p holonomy-render --test widgets`
+    `-p holonomy-text --test format_history`
