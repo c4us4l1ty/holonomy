@@ -191,6 +191,35 @@ pub enum Hotkey {
     /// The honest summary: the directive specifies `Ctrl+M`, the chords above are worse, so it is
     /// `Ctrl+M`. [`Command::InsertMath`] is what the session applies.
     InsertMath,
+    /// **Ctrl+U. Toggle underline.** The reference's chord and Google Docs'.
+    ///
+    /// **A hotkey and not a `Command`**, for [`Bold`](Self::Bold)'s reason: the styling has to look at
+    /// the selection before it can decide whether it is arming or applying, and that is a session
+    /// question. `Hotkey::Bold` set the pattern and this follows it exactly — one `apply_action` arm
+    /// serves the button, the menu row and the chord.
+    Underline,
+    /// **Alt+Shift+5. Toggle strikethrough**, the reference's chord.
+    ///
+    /// **Alt, and there is not one other Alt chord in this keymap.** That is deliberate rather than an
+    /// oversight: Alt is `None` for characters on a US layout (`Keymap::text_for` says so), so an Alt
+    /// combination is free real estate — and `Alt+Shift+5` is *the* chord three separate editors use,
+    /// which makes it worth the one exception.
+    Strike,
+    /// **Ctrl+period. Toggle superscript.**
+    ///
+    /// **`Ctrl+.` and not `Ctrl+Shift+Plus`**, because the latter is a *character* chord on a US
+    /// layout (`+` is Shift+`=`) and would be read by the shifted key table before anybody could
+    /// intercept it. The full stop is unshifted and unclaimed.
+    Superscript,
+    /// **Ctrl+comma. Toggle subscript.** The mirror of [`Superscript`](Self::Superscript), and the two
+    /// being adjacent keys is the mnemonic.
+    Subscript,
+    /// **Ctrl+backslash. Clear the selection's formatting.**
+    ///
+    /// **On the `KEY_BACKSLASH` hotkey arm and not in the shifted table**, which is where `Ctrl+\`
+    /// would land if it were spelled as a character: the ctrl block runs before the character table,
+    /// and that ordering is what makes `Ctrl+\` clear formatting rather than type `\`.
+    ClearFormatting,
 }
 
 /// Everything the session can be asked to do by one keystroke.
@@ -364,6 +393,14 @@ impl Keymap {
                 KEY_C if !mods.shift() && !mods.alt() => Some(Hotkey::Copy),
                 KEY_X if !mods.shift() && !mods.alt() => Some(Hotkey::Cut),
                 KEY_V if !mods.shift() && !mods.alt() => Some(Hotkey::Paste),
+                // **The four decorations and the clear.** None of these keys carries a chord in the
+                // table above, so each arm is the *only* meaning its combination has — and an
+                // unbound ctrl combination still falls through to `return None` below, which is what
+                // keeps `Ctrl+G` from typing a `g`.
+                KEY_U if !mods.shift() && !mods.alt() => Some(Hotkey::Underline),
+                KEY_DOT if !mods.shift() && !mods.alt() => Some(Hotkey::Superscript),
+                KEY_COMMA if !mods.shift() && !mods.alt() => Some(Hotkey::Subscript),
+                KEY_BACKSLASH if !mods.shift() && !mods.alt() => Some(Hotkey::ClearFormatting),
                 _ => None,
             };
             if let Some(hotkey) = binding {
@@ -371,6 +408,17 @@ impl Keymap {
             }
             // Unbound control combinations are swallowed, never typed.
             return None;
+        }
+
+        // **`Alt+Shift+5` is strikethrough, and it is the one Alt binding in the keymap.**
+        //
+        // It has to be here rather than in the ctrl block, and it has to be *before* the character
+        // table — because on a US layout `Alt+5` produces no character (`text_for` returns `None` for
+        // any alt), so nothing below would ever see it. **A chord that is only reachable from a block
+        // that runs before the one that would swallow it** is the shape of every modifier binding, and
+        // the reason `ctrl` above comes first.
+        if mods.alt() && mods.shift() && !mods.ctrl() && code == KEY_5 {
+            return Some(Command::Hotkey(Hotkey::Strike));
         }
 
         // 2. Navigation and editing keys. Unshifted only where a shifted variant would be a character.

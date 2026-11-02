@@ -247,9 +247,58 @@ pub struct DocRun {
     pub size: u8,
     /// Packed 0xAARRGGBB.
     pub colour: u32,
+    /// **How far the run's baseline is moved, in pixels, and in which direction.**
+    ///
+    /// **A signed shift and not a third atlas size.** Superscript and subscript are the two
+    /// decorations the atlas cannot express as a face: a raised glyph at a *smaller* size is what a word
+    /// processor draws, and `AtlasBuilder::new` refuses a third size outright — the PRD's 512 KiB
+    /// ceiling, measured at 236,690 bytes for one size and 378,850 for two. **So the shift is what the
+    /// node carries**, and the emitter decides whether the run also drops to the body size.
+    ///
+    /// `0` is ordinary text and is what every run that is not super- or subscript carries, so the field
+    /// costs nothing on the common path. A positive value moves the glyphs **up** the screen (a
+    /// superscript), because the painter adds it to the ascent and `y` grows downward — see
+    /// `Painter::doc_text`.
+    pub baseline_shift: i8,
+    /// **The lines this run draws through or under itself.** [ `DECORATION_NONE`](Self::DECORATION_NONE),
+    /// [`DECORATION_UNDERLINE`](Self::DECORATION_UNDERLINE) or
+    /// [`DECORATION_STRIKE`](Self::DECORATION_STRIKE), or both.
+    ///
+    /// **A bitset and not two bools**, because the painter draws them in one pass over the same
+    /// line box and the emitter has one word to set. Bit 0 is the underline and bit 1 the strike, which
+    /// are the two decorations that are a *rule* rather than a *position*; the position is
+    /// [`baseline_shift`](Self::baseline_shift) and is a different kind of thing.
+    ///
+    /// **The painter owns where the rule goes**, not the emitter: an underline sits a fixed distance
+    /// below the baseline and a strike a fixed fraction above it, and both are functions of the line
+    /// box the painter is already computing for the glyphs. An emitter that computed the y would be a
+    /// second answer to "where is the baseline" — the defect `pen_of` exists to prevent, one axis over.
+    pub decorations: u8,
 }
 
 impl DocRun {
+    /// No decoration.
+    pub const DECORATION_NONE: u8 = 0;
+    /// A rule under the run.
+    pub const DECORATION_UNDERLINE: u8 = 1 << 0;
+    /// A rule through the run.
+    pub const DECORATION_STRIKE: u8 = 1 << 1;
+
+    /// **How many pixels tall a decoration's rule is**, for the two bits above.
+    ///
+    /// # Why the emitter names this and the painter may override it
+    ///
+    /// **Because the two emitters disagree about the right number and both are right.** The screen draws
+    /// at 16 ppem, where a one-pixel underline under Inter is a broken-looking row of single pixels; the
+    /// PDF draws vector line art at 0.5 pt, where two pixels would be most of a point. So the *request*
+    /// lives here — it is a property of what a decoration looks like — and the painter's own
+    /// `rule_thickness` is free to widen it, because the painter is the code that knows the line box the
+    /// rule has to fit in and this crate does not.
+    ///
+    /// **Two, and not one.** At 16 ppem the ascent is 16 px and a 1 px line under the descenders reads as
+    /// an artefact of the rasteriser rather than as formatting.
+    pub const RULE_THICKNESS: u32 = 2;
+
     /// The longest a run may be, in bytes.
     ///
     /// **Bytes, not codepoints, and 4x [`TextRun::MAX_LEN`]'s 256** -- so the same nominal length in
@@ -265,6 +314,10 @@ impl DocRun {
     pub const MAX_BYTES: u32 = 1024;
 
     /// A run of `len` document bytes starting at `offset`.
+    ///
+    /// **Plain and unshifted.** Every existing caller means ordinary body text, and adding the two new
+    /// fields to this constructor rather than to a second one keeps the change to the five decoration
+    /// call sites instead of every call site. [`Self::styled`] is the one a decorated run uses.
     pub fn new(x: i32, y: i32, offset: u32, len: u32, style: Style, size: u8, colour: u32) -> Self {
         Self {
             x,
@@ -274,26 +327,80 @@ impl DocRun {
             style,
             size,
             colour,
+            baseline_shift: 0,
+            decorations: Self::DECORATION_NONE,
         }
     }
 
-    /// Conservative width in pixels: one full cell per *byte*.
+    /// A run carrying a baseline shift and its decorations.
+    ///
+    /// **A second constructor rather than two more arguments on [`new`](Self::new)**, because every
+    /// caller of `new` wants the answer those arguments would give — and a build where the two were one
+    /// function would have `new(.., 0, 0)` at eleven call sites that all mean "nothing".
+    pub fn styled(
+        x: i32,
+        y: i32,
+        offset: u32,
+        len: u32,
+        style: Style,
+        size: u8,
+        colour: u32,
+        baseline_shift: i8,
+        decorations: u8,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            offset,
+            len,
+            style,
+            size,
+            colour,
+            baseline_shift,
+            decorations,
+        }
+    }
+
+    /// Conservative width in pixels: one full cell per *byte*, and tall enough for the baseline shift.
     ///
     /// Over-estimates by up to 4x for multi-byte text, which is the safe direction for the reason
     /// [`TextRun::bounds`] gives: a box that is too wide costs a little unnecessary repaint, and one
     /// that is too narrow leaves stale pixels on the screen. Exactness would mean measuring every glyph
     /// before drawing any, which is FR-1.3's DOM-measurement dependency.
+    ///
+    /// # Why the shift is in here
+    ///
+    /// **Because a shifted run is not inside its line box, and this is the function that answers "how
+    /// big is this run".** A superscript's glyphs are drawn `|baseline_shift|` above `y` and a
+    /// subscript's that far below the line, so a box of `line_height` from `y` misses the raised third of
+    /// a superscript entirely. **Anything that computes damage from this function then leaves those rows
+    /// undamaged**, and an undamaged row keeps whatever the previous frame drew there.
+    ///
+    /// The line box is `cell_h` tall regardless: the shift moves *ink*, not leading. So the box grows in
+    /// the direction of the shift by its magnitude and keeps its height.
     pub fn bounds(&self, line_height: u32, advance: u32) -> Option<DamageRect> {
         if self.len == 0 || advance == 0 {
             return None;
         }
         let x = self.x.max(0) as u32;
-        let y = self.y.max(0) as u32;
+        // **The sign decides the direction, and both directions grow the height.** Positive is up the
+        // screen, because `baseline_shift` is subtracted from the ascent — so a positive shift moves the
+        // box's top up and a negative one its bottom down.
+        let shift = u32::from(self.baseline_shift.unsigned_abs());
+        let (up, down) = if self.baseline_shift > 0 {
+            (shift, 0)
+        } else {
+            (0, shift)
+        };
+        let y = (self.y.max(0) as u32).saturating_sub(up);
         Some(DamageRect::new(
             x,
             y,
             self.len.saturating_mul(advance),
-            line_height.max(1),
+            line_height
+                .max(1)
+                .saturating_add(up)
+                .saturating_add(down),
         ))
     }
 }
@@ -533,6 +640,97 @@ impl Label {
     }
 }
 
+/// Where on its line box a [`RuleRun`] is drawn.
+///
+/// **Three positions, and no coordinate.** The painter turns each into a y from the line box it is
+/// already computing for the glyphs, which is what stops an underline from drifting away from the text
+/// it belongs to the day the pitch changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleAt {
+    /// Under the run: below the baseline, in the descent.
+    Underline,
+    /// Through the run: at the x-height's midpoint, which is where a strikethrough sits.
+    Strike,
+    /// Under a *block* — a paragraph's bottom border, a header's rule. Drawn at the rule's own `y`,
+    /// which is why this arm reads the node's `y` and the other two do not.
+    Block,
+}
+
+/// A hairline: an underline, a strikethrough, or a paragraph rule.
+///
+/// See [`Node::Rule`] for why this is a node rather than a `Rect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleRun {
+    /// Left edge in pixels.
+    pub x: i32,
+    /// **Top of the line box for `Underline` and `Strike`; the rule's own row for `Block`.**
+    pub y: i32,
+    /// How many pixels wide.
+    pub width: u32,
+    /// How many pixels thick. One is a hairline and two is what the reference's underline is at a 16 px
+    /// cap height; a caller that asks for zero gets nothing, because a zero-thickness rule is a rule
+    /// that draws nothing and should say so rather than emit an empty `Rect`.
+    pub thickness: u32,
+    /// Where on the line box.
+    pub at: RuleAt,
+    /// **Atlas size index the rule is resolved against**, and it must be the run's own.
+    ///
+    /// **Because a heading's underline is not where a body line's underline is.** The two positions are
+    /// a fraction of the ascent, and the ascent belongs to the size — so a rule that resolved against
+    /// the painter's current size instead of the run's would sit *inside* a heading's glyphs. The index
+    /// means what it means everywhere else: 0 is the chrome size, 1 the larger atlas size.
+    pub size: u8,
+    /// Packed `0xAARRGGBB`.
+    pub colour: u32,
+}
+
+impl RuleRun {
+    /// A rule at the chrome size, for a chrome-side caller that has no run to follow.
+    pub const fn new(x: i32, y: i32, width: u32, thickness: u32, at: RuleAt, colour: u32) -> Self {
+        Self::sized(x, y, width, thickness, at, 0, colour)
+    }
+
+    /// A rule resolved against `size`, which is the form a text run's decoration uses.
+    pub const fn sized(
+        x: i32,
+        y: i32,
+        width: u32,
+        thickness: u32,
+        at: RuleAt,
+        size: u8,
+        colour: u32,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            thickness: if thickness == 0 { 1 } else { thickness },
+            at,
+            size,
+            colour,
+        }
+    }
+
+    /// The bounding box. **Conservative by one line box**, because the two line-relative positions are
+    /// resolved against a pitch this crate does not own and a bounds that omitted them would let a
+    /// moved line's underline stay on screen.
+    pub fn bounds(&self, line_height: u32) -> Option<DamageRect> {
+        if self.width == 0 {
+            return None;
+        }
+        let height = match self.at {
+            RuleAt::Block => self.thickness,
+            RuleAt::Underline | RuleAt::Strike => line_height.max(self.thickness),
+        };
+        Some(DamageRect::new(
+            self.x.max(0) as u32,
+            self.y.max(0) as u32,
+            self.width,
+            height,
+        ))
+    }
+}
+
 /// One thing to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Node {
@@ -552,6 +750,22 @@ pub enum Node {
     /// synthetic run is a codepoint sequence and a document run is a UTF-8 byte range, and one type
     /// carrying both would have a `len` that means different things depending on a flag.
     DocText(DocRun),
+    /// **A hairline drawn across or under a range of type: an underline or a strikethrough.**
+    ///
+    /// # Why this is a node and not a `Rect`
+    ///
+    /// It *is* a `Rect` in pixels — one or two rows, `w` wide — and pushing a `Rect` from the session
+    /// would have worked. **The reason it is a node is the same reason [`RepeatRun`] is:** the session
+    /// does not know where the baseline is. The painter does, it is the code that turns `run.y` into a
+    /// glyph's top-left, and an underline whose y the *emitter* computed would be a second answer to
+    /// the question the painter already answers — which is exactly the class of defect `pen_of` and
+    /// `Caret::locate` exist to close on the x axis.
+    ///
+    /// **So the emitter says "this run is underlined" and the painter draws the rule**, from the same
+    /// metrics it draws the glyph with. `RuleRun::thickness` is in pixels and `RuleRun::kind` says where
+    /// on the line box it goes, so the node carries no y at all — the line box's top is `y` and the rest
+    /// is the painter's business.
+    Rule(RuleRun),
     /// A 1-bit icon mask.
     Icon(Icon),
     /// A decoded raster, at `rect`, from the asset `asset_id`.
@@ -596,6 +810,10 @@ impl Node {
             Node::Text(t) => t.bounds(line_height, advance),
             Node::Repeat(t) => t.bounds(line_height, advance),
             Node::DocText(t) => t.bounds(line_height, advance),
+            // **One line box per rule, and that is the conservative direction.** The two line-relative
+            // positions are resolved against a pitch this crate does not own, so a bounds that claimed
+            // only the rule's own row would let a re-pitched line leave its underline behind.
+            Node::Rule(r) => r.bounds(line_height),
             Node::Icon(i) => i.bounds(),
             Node::Image { rect, .. } => rect.bounds(),
         }?;
@@ -612,6 +830,10 @@ impl Node {
             Node::Label(_) => NodeKind::Text,
             Node::Text(_) | Node::Repeat(_) => NodeKind::Text,
             Node::DocText(_) => NodeKind::Text,
+            // **A rule reports `Rect`.** It is a filled rectangle; the kind answers "what does a
+            // consumer have to handle", and a consumer of `NodeKind` has nothing extra to do for a
+            // two-pixel band because it is an underline.
+            Node::Rule(_) => NodeKind::Rect,
             Node::Icon(_) => NodeKind::Icon,
             Node::Image { .. } => NodeKind::Image,
         }
@@ -922,6 +1144,44 @@ mod tests {
                 .is_none(),
             "an empty run has no bounds"
         );
+    }
+
+    /// **A shifted run's box grows in the direction of the shift, and only that direction.**
+    ///
+    /// **The claim is one line in `DocRun::bounds`, and its consequence is a stale pixel.** A raised run
+    /// draws above `y`; a box that starts at `y` and is `cell_h` tall misses every one of those rows, so
+    /// the damage a caller computes from it leaves them holding the previous frame. The failure is
+    /// invisible in a screenshot of a still page and obvious on the second frame of a caret blink.
+    #[test]
+    fn a_shifted_run_reaches_above_or_below_its_line_box() {
+        let plain = DocRun::new(0, 100, 0, 3, Style::REGULAR, 0, BLACK);
+        let raised = DocRun::styled(0, 100, 0, 3, Style::REGULAR, 0, BLACK, 6, 0);
+        let lowered = DocRun::styled(0, 100, 0, 3, Style::REGULAR, 0, BLACK, -6, 0);
+
+        let p = plain.bounds(18, 8).expect("plain has bounds");
+        assert_eq!((p.y, p.height), (100, 18), "a plain run is its line box");
+
+        // **The shift is `6` and it is a *positive* shift that moves up**, because the painter subtracts
+        // it from the ascent. Getting the sign backwards here would grow the box the wrong way and the
+        // test would pass while the raised third stayed undamaged -- so both directions are checked.
+        let r = raised.bounds(18, 8).expect("raised has bounds");
+        assert_eq!(r.y, 94, "the box starts six pixels above the line box");
+        assert_eq!(r.height, 24, "and is six pixels taller");
+        assert_eq!(
+            r.y + r.height,
+            118,
+            "the bottom is the line's, because a raised run sits *inside* the line at the bottom"
+        );
+
+        let l = lowered.bounds(18, 8).expect("lowered has bounds");
+        assert_eq!(l.y, 100, "a lowered run keeps the line box's top");
+        assert_eq!(l.height, 24, "and hangs six pixels below it");
+        assert_eq!(l.y + l.height, 124);
+
+        // **A shift past the top of the screen does not wrap.** `y` is an `i32` and `saturating_sub` on
+        // the clamped `u32` is what keeps a run scrolled off the top from claiming damage at y = 65531.
+        let high = DocRun::styled(0, 0, 0, 3, Style::REGULAR, 0, BLACK, 6, 0);
+        assert_eq!(high.bounds(18, 8).expect("bounds").y, 0);
     }
 
     #[test]

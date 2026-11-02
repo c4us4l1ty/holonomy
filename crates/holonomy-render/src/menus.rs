@@ -146,6 +146,25 @@ pub enum Action {
     ToggleBold,
     /// **Arm or disarm italic for the next character typed.**
     ToggleItalic,
+    /// **Toggle underline over the selection, or arm it at the caret.** `Ctrl+U`.
+    ///
+    /// **The four decoration actions below are one family and the shape is the same for all five**:
+    /// a selection is restyled in place, a bare caret arms the flag, and the toolbar button and the
+    /// menu row reach the same action. `Session::toggle_decoration` is the one implementation.
+    ToggleUnderline,
+    /// **Toggle strikethrough.** `Alt+Shift+5` — the reference's chord, and the one Google Docs uses.
+    ToggleStrike,
+    /// **Toggle superscript.** `Ctrl+.`
+    ToggleSuperscript,
+    /// **Toggle subscript.** `Ctrl+,`
+    ToggleSubscript,
+    /// **Return the selected range, or the caret's paragraph, to the document's default formatting.**
+    /// `Ctrl+\`.
+    ///
+    /// **One action and not a dozen toggles off**, because "clear" is a *state* the user asks for and
+    /// not a sequence of flips: pressing it must work whatever is currently on, and doing it as seven
+    /// calls would be seven undo entries for one gesture.
+    ClearFormatting,
     /// **Switch to the mode at this index in [`MODES`].** Part 44.
     SetMode(u8),
     /// Show the current word/line count in the status notice.
@@ -195,6 +214,11 @@ impl Action {
             Action::SetColour(_) => "set-colour",
             Action::ToggleBold => "toggle-bold",
             Action::ToggleItalic => "toggle-italic",
+            Action::ToggleUnderline => "toggle-underline",
+            Action::ToggleStrike => "toggle-strike",
+            Action::ToggleSuperscript => "toggle-superscript",
+            Action::ToggleSubscript => "toggle-subscript",
+            Action::ClearFormatting => "clear-formatting",
             Action::SetMode(_) => "set-mode",
             // **One name for both tools, and not `format!("select-tool-{}", ..)`.** `name` is a
             // `const fn` answering `&'static str`, so it cannot format. **The tool's own name is
@@ -400,9 +424,34 @@ const INSERT: &[Item] = &[
     act("Equation", Action::InsertMath),
 ];
 
+/// **FORMAT, and as of the typography pass it is the reference's Text menu.**
+///
+/// | row | chord | what it does |
+/// |---|---|---|
+/// | Bold | `Ctrl+B` | `STYLE_BOLD` |
+/// | Italic | `Ctrl+Shift+I` | `STYLE_ITALIC` |
+/// | Underline | `Ctrl+U` | `STYLE_UNDERLINE`, drawn as a rule by the painter |
+/// | Strikethrough | `Alt+Shift+5` | `STYLE_STRIKE` |
+/// | Superscript | `Ctrl+.` | `STYLE_SUPERSCRIPT`, a raised baseline |
+/// | Subscript | `Ctrl+,` | `STYLE_SUBSCRIPT`, a lowered one |
+/// | Clear formatting | `Ctrl+\` | every bit back to zero |
+///
+/// **`Ctrl+Shift+I` for italic and not `Ctrl+I`,** because `Ctrl+I` inserts an image in this program
+/// and has since Phase 9 — see `Hotkey::Italic`. That deviation is old, it is deliberate, and the
+/// accelerator column says what the program actually binds rather than what the reference does.
+///
+/// **Every chord here is bound in `keymap.rs`**, which is the rule this file has always followed: an
+/// accelerator printed beside a row that does nothing is the kind of lie a menu is best at. The four
+/// new ones are `Alt+Shift+5`, `Ctrl+.`, `Ctrl+,` and `Ctrl+\` — none of which collided with anything,
+/// and all of which are the chords WordCraft and Google Docs both use.
 const FORMAT: &[Item] = &[
     Item { accelerator: Some("Ctrl+B"), ..act("Bold", Action::ToggleBold) },
     Item { accelerator: Some("Ctrl+Shift+I"), ..act("Italic", Action::ToggleItalic) },
+    Item { accelerator: Some("Ctrl+U"), ..act("Underline", Action::ToggleUnderline) },
+    Item { accelerator: Some("Alt+Shift+5"), ..act("Strikethrough", Action::ToggleStrike) },
+    Item { accelerator: Some("Ctrl+."), ..act("Superscript", Action::ToggleSuperscript) },
+    Item { accelerator: Some("Ctrl+,"), ..act("Subscript", Action::ToggleSubscript) },
+    Item { accelerator: Some("Ctrl+\\"), ..act("Clear formatting", Action::ClearFormatting) },
 ];
 
 const TOOLS: &[Item] = &[

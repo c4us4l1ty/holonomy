@@ -172,6 +172,75 @@ fn ctrl_hotkeys_from_a_real_two_key_press() {
     }
 }
 
+/// **The four text-formatting chords, plus the one that is not a Ctrl chord at all.**
+///
+/// **`Alt+Shift+5` is the odd one and it is the reason this gate exists separately.** Every other
+/// shortcut in `Keymap` is a Ctrl combination, handled in one block that swallows *every* unbound Ctrl
+/// key so a Ctrl chord can never type a letter. This one is Alt+Shift, which the character table would
+/// otherwise treat as "Alt held, so no text" and quietly drop -- so it has its own block ahead of the
+/// table, and this is the gate that says the block is reachable.
+#[test]
+fn the_formatting_chords_fire_and_type_nothing() {
+    for (code, want) in [
+        (KEY_U, Hotkey::Underline),
+        (KEY_DOT, Hotkey::Superscript),
+        (KEY_COMMA, Hotkey::Subscript),
+        (KEY_BACKSLASH, Hotkey::ClearFormatting),
+    ] {
+        let mut events = vec![InputEvent::press(KEY_LEFTCTRL)];
+        events.extend(tap(code));
+        events.push(InputEvent::release(KEY_LEFTCTRL));
+        let cmds = run_bare(&events);
+        assert_eq!(cmds, vec![Command::Hotkey(want)], "Ctrl+{code} did not fire {want:?}");
+        assert!(
+            typed(&cmds).is_empty(),
+            "Ctrl+{code} typed {:?} as well as firing",
+            typed(&cmds)
+        );
+    }
+
+    // **Alt+Shift+5, and the keyboard has to be in that order to reach the block.** Shift is pressed
+    // first because the block tests `alt() && shift() && !ctrl()`, and a real user reaching for `%`
+    // presses Shift before the digit anyway.
+    let events = vec![
+        InputEvent::press(KEY_LEFTALT),
+        InputEvent::press(KEY_LEFTSHIFT),
+        InputEvent::press(KEY_5),
+        InputEvent::release(KEY_5),
+        InputEvent::release(KEY_LEFTSHIFT),
+        InputEvent::release(KEY_LEFTALT),
+    ];
+    let cmds = run_bare(&events);
+    assert_eq!(cmds, vec![Command::Hotkey(Hotkey::Strike)], "Alt+Shift+5 is Strikethrough");
+    assert!(
+        typed(&cmds).is_empty(),
+        "and it must not type '%', which is what Alt+Shift+5 is on a US layout: {:?}",
+        typed(&cmds)
+    );
+}
+
+/// **A Ctrl chord that means something does not also type its letter, and the new ones are no different.**
+///
+/// The four above were added to the `ctrl` block, which swallows *every* unbound Ctrl key. A version
+/// that bound `Ctrl+U` in the character table instead would type `u` on the way -- and the failure is
+/// invisible in a document that is mostly plain text.
+#[test]
+fn a_formatting_chord_does_not_also_type_its_character() {
+    for code in [KEY_U, KEY_DOT, KEY_COMMA, KEY_BACKSLASH] {
+        let mut events = vec![InputEvent::press(KEY_LEFTCTRL)];
+        events.extend(tap(code));
+        events.push(InputEvent::release(KEY_LEFTCTRL));
+        // And then a plain character, which must still arrive: the Ctrl state has to be released.
+        events.extend(tap(KEY_A));
+        let cmds = run_bare(&events);
+        assert_eq!(
+            typed(&cmds),
+            "a",
+            "Ctrl+{code} then 'a' must type exactly 'a'"
+        );
+    }
+}
+
 /// Ctrl held across several keys does not leak into the text after it.
 #[test]
 fn releasing_ctrl_returns_to_letters() {
