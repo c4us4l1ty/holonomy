@@ -4424,7 +4424,7 @@ impl<'a> Session<'a> {
             return;
         }
         let Ok(text) = self.editor.text() else { return };
-        let mut out = Vec::new();
+        let mut out: Vec<(u32, String)> = Vec::new();
         let mut line = 0u32;
         let mut start = 0usize;
         for (i, b) in text
@@ -4472,7 +4472,7 @@ impl<'a> Session<'a> {
                 .or_else(|| trimmed.strip_prefix("* "));
             let number = trimmed
                 .find(". ")
-                .filter(|p| p > 0 && trimmed[..*p].bytes().all(|b| b.is_ascii_digit()))
+                .filter(|p| *p > 0 && trimmed[..*p].bytes().all(|b| b.is_ascii_digit()))
                 .map(|p| &trimmed[p + 2..]);
             let prefix = if numbered { "1. " } else { "- " };
             let already = if numbered {
@@ -5875,7 +5875,7 @@ impl<'a> Session<'a> {
             if prefix.is_empty() {
                 self.editor.delete_at(start as u32, (end - start) as u32)?;
                 self.counts =
-                    crate::counts::TextCounts::scan(&self.editor.text().unwrap_or_default());
+                    crate::counts::TextCounts::scan(&self.editor);
                 self.after_edit(0)?;
                 return Ok(());
             }
@@ -10015,6 +10015,7 @@ fn push_math_source(
 
 fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> DamageRect {
     let h = match open {
+        widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
     };
