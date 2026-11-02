@@ -16,3 +16,35 @@ Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_capture.rs:
      let keep = Keep {
          last: Default::default(),
          size: (w, h),
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_probe.rs:18:
+             s.ribbon = true;
+             s.ribbon_tab = tab;
+             let (groups, buttons) = ribbon::layout(&l, &s);
+-            println!("=== {w}x{h} tab {} cell_w {} cell_h {} toolbar {:?}", ribbon::TABS[tab as usize], ribbon::advance(&l), l.cell_h, l.toolbar);
++            println!(
++                "=== {w}x{h} tab {} cell_w {} cell_h {} toolbar {:?}",
++                ribbon::TABS[tab as usize],
++                ribbon::advance(&l),
++                l.cell_h,
++                l.toolbar
++            );
+             for g in &groups {
+                 println!("  group {:20} rect {:?}", g.label, g.rect);
+             }
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_probe.rs:25:
+             for b in &buttons {
+                 println!(
+                     "    btn {:22} w {:3} x {:4} y {:3} h {:3} large {} labelled {} tw {}",
+-                    b.label, b.rect.width, b.rect.x, b.rect.y, b.rect.height,
+-                    b.large, b.labelled, ribbon::text_w(&l, b.label)
++                    b.label,
++                    b.rect.width,
++                    b.rect.x,
++                    b.rect.y,
++                    b.rect.height,
++                    b.large,
++                    b.labelled,
++                    ribbon::text_w(&l, b.label)
+                 );
+             }
+         }
