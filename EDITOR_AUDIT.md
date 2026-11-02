@@ -297,15 +297,19 @@ the menu that would own them.
 label (`widgets.rs:546`). In the capture the control reads `Quote` while the document is plain text.
 **Verdict.** `AMENDMENT` (AM-11).
 
-### B10 — The eight inert tools, one of which is styled to look like the most functional control on the bar
+### B10 — The inert tools, one of which is styled to look like the most functional control on the bar
 **Cause.** `tests/toolbar_wiring.rs` names the inert set: **Search, Spellcheck, PaintFormat, FontSize,
-Underline, Highlight, Link, Comment**. `Comment`'s removal (recorded as part 46's item) never landed, so
-it is still in `TOOLBAR` (`widgets.rs:290–313`). `FontSize` is worse than inert: `paint_toolbar` draws a
-`RoundRect` in `colour::PAGE` (white) behind it and re-draws the label in `INK`
-(`chrome.rs:2754–2760`), so the one control that looks like an input field is a dead rectangle. Underline
-and Highlight cannot work at all: `TextIntervalSpan::style_flags` is a `u16` whose `atlas_style` maps
-only CODE/BOLD/ITALIC/HEADER (`span.rs:138`), so there is no bit to store them in.
-**Verdict.** `AMENDMENT` (AM-10/AM-12).
+Highlight, Link** — six, out of a 22-tool `TOOLBAR` (`widgets.rs`). Two of the eight this finding
+counted have since left: `Comment` was deleted from the bar (the item part 46 left unfinished), and
+`Underline` was wired rather than removed. `FontSize` is worse than inert: `paint_toolbar`
+draws a `RoundRect` in `colour::PAGE` (white) behind it and re-draws the label in `INK`
+(`chrome.rs:2754–2760`), so the one control that looks like an input field is a dead rectangle.
+**Status of underline.** `TextIntervalSpan::style_flags` now carries `STYLE_UNDERLINE`,
+`STYLE_STRIKE`, `STYLE_SUPERSCRIPT` and `STYLE_SUBSCRIPT` (`span.rs`), `atlas_style` still ignores all
+four because a decoration is drawn rather than a face, the painter draws the two rules from a `DocRun`
+bitset and the two shifts from a signed `baseline_shift`, and the toolbar's Underline button is live.
+`tests/decorations.rs` is the gate. **Highlight is still unbuilt** and still has no bit.
+**Verdict.** `AMENDMENT` (AM-10/AM-12). Six inert tools remain where this list found eight.
 
 ### B11 — Pasting waits up to 700 ms and is then silently dropped
 **Cause.** `windowed.rs:410`: a paste requests the clipboard, sets `pending_paste = Some(now)`, and the
@@ -356,8 +360,12 @@ Combined with A9 this is why the ruler has nothing to show.
 **Cause.** Same as B9/B10: `STYLE_HEADER` is written **only** by the export tests
 (`crates/holonomy-export/tests/export.rs:37`) and read **only** by the exporters (`html.rs:504`,
 `pdf.rs:385`). No session path ever writes it, and `ChromeState` has no style slot beyond an index into
-`STYLES`. So Normal is the only reachable paragraph style, and multi-size type does not exist in the
-editor.
+`STYLES`. So Normal is the only reachable paragraph style.
+**Still open, and now measurable.** `run_size_index` resolves `STYLE_HEADER` to the atlas's second size
+and the painter advances and blits at the run's own size, so **the screen can now draw a heading bigger
+than the body** — `tests/decorations.rs::a_heading_draws_at_the_larger_atlas_size` is the gate for that
+half. What is missing is the *other* half: nothing writes the bit from the UI, so no user can reach it.
+The amendment below is unchanged and is still the largest piece of work on this list.
 **Verdict.** `AMENDMENT` (AM-11) — and the amendment has to say what a heading *is* (a `style_flags` bit
 plus a size from the atlas, or a paragraph attribute), because `STYLE_HEADER` currently conflates "this
 run is a header" with "this line is taller", which is a line metric, not a run property.
@@ -614,8 +622,11 @@ the clauses that must be added (short form; each is written to be checkable).
   attributes with a stated size and spacing for each, applied from the style dropdown and the Format
   menu, stored so that they survive a save round-trip, and readable by the exporters.
 * **AM-12 (Command coverage).** The editor's command set is enumerated (a table in Part 4), and any drawn
-  control must name its command or not be drawn. Inline attributes are enumerated too — underline and
-  highlight need a bit in `TextIntervalSpan::style_flags` before either may appear on the toolbar.
+  control must name its command or not be drawn. Inline attributes are enumerated too. **Underline,
+  strikethrough, superscript, subscript and clear-formatting now have bits and chords** (`Ctrl+U`,
+  `Alt+Shift+5`, `Ctrl+.`, `Ctrl+,`, `Ctrl+\`), so the clause has to say which of them is a *span* bit
+  and which is a *run* property: super- and subscript are the second, because the bit is a baseline
+  offset rather than a face. **Highlight still has no bit.**
 * **AM-13 (Error policy).** Non-fatal model conditions (a refused edit, a read-only session, an oversized
   delete, an absent leaf) are counted and reported; they never terminate the session. Fatal conditions
   are enumerated.
@@ -637,7 +648,8 @@ Google Docs.* As of `7cd016c`, on a blank page, the following are **impossible**
 | Non-ASCII text that can be deleted | kills the session | C1 |
 | A title, a Heading 1 and a Heading 2 | unreachable | C6 |
 | Bold and italic over a selection | works | — |
-| Underline, highlight | no storage bit | B10 |
+| Underline, strikethrough, super-/subscript | **works** (screen and both exporters) | — |
+| Highlight | no storage bit | B10 |
 | A page that looks like a page | fills the canvas, off-centre | A5, A6 |
 | A ruler that can be read | ticks at Δ24/255 | A8 |
 | A status bar with a word count | replaced by "Saved" | A4 |
