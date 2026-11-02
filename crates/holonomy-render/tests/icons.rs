@@ -322,7 +322,7 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
             .collect();
         let widest = *rows.iter().max().unwrap();
         assert!(
-            widest >= (SIZE / 2) as usize,
+            widest >= SIZE / 2,
             "{id:?}: the widest row is {widest} pixels. A horizontal rule that does not span at least \
              half the box is not a rule — it is the top of an outline, which is exactly how `Minus` was \
              originally drawn."
