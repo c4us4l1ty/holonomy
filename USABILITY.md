@@ -141,3 +141,21 @@ no titles or previews are written to separate files.
 The library and desktop forms are part of the X11 desktop build, not the sealed boot interface.
 This UI work does not add a table editor, real list objects, or additional font sizes to the document
 model; the existing editing and export limitations still apply.
+
+## Desktop long-document view
+
+Managed desktop documents soft-wrap prose into indexed visual rows; the stored document is not
+modified by wrapping. Scrolling and Page Up/Down can reach subsequent screenfuls, including inside
+one long paragraph. The status bar's **View** number describes viewport-sized groups of rows; it is
+not a print page number. A resize or zoom can change the grouping. Physical page breaks, fixed paper
+sizes and matching the PDF export's pagination are **not implemented**. Logical lines containing `$$` or table separators retain the old unwrapped block-rendering
+behavior; multiline tables still need a block-aware layout. Layout currently counts Unicode scalars
+rather than measuring styled glyph widths; complex shaping and soft-boundary caret affinity remain
+limitations.
+
+The index keeps offsets and row lengths, not a copy of the document text. An edit normally rewraps
+its paragraph; changes in row count rebuild the row index, and newline edits and resize may re-index
+the whole document. This is not yet H2's bounded section-level strategy, nor a validated 2,000-page
+performance claim. In a standalone synthetic run of the index (not the app), a single 5.28 MB
+paragraph rebuilt in about 44 ms and a middle edit took about 46 ms. These figures are illustrative,
+not a hardware-independent performance guarantee.

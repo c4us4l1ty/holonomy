@@ -927,7 +927,11 @@ impl<'a> Session<'a> {
         let mut text = editor
             .text_faulting(bytes)
             .map_err(|_| crate::store::StoreError::Read)?;
-        self.lines = DocLines::build(&text, holonomy_geometry::LineMetrics::default());
+        self.lines = if self.managed_documents {
+            DocLines::build_wrapped(&text, holonomy_geometry::LineMetrics::default(), self.wrap_measure())
+        } else {
+            DocLines::build(&text, holonomy_geometry::LineMetrics::default())
+        };
         self.manifest = crate::manifest::Manifest::from_text(&text);
         self.counts = TextCounts::scan_bytes(&text);
         text.fill(0);
@@ -945,10 +949,14 @@ impl<'a> Session<'a> {
         self.pending_colour = None;
         self.active_cell = None;
         self.state.words = self.counts.words;
-        self.state.total_lines = self.counts.lines();
+        self.state.total_lines = self.lines.len() as u32;
         self.state.bytes = self.editor.text_len() as u32;
         self.state.scroll_line = 0;
         self.caret_drawn_at = None;
+        if self.state.paged {
+            let _ = self.reconcile_caret();
+            self.scroll_line_into_view(self.state.caret_line);
+        }
         // **A full repaint, not a damage-limited one.** The frame holds the *previous* document's
         // pixels and there is no relationship between them and this one's, so a damage-limited pass
         // would leave the old document's words on screen with the new one's geometry.
@@ -1738,6 +1746,7 @@ impl<'a> Session<'a> {
             }));
         }
         self.chrome = Chrome::new(metrics);
+        self.reflow_for_measure();
         // **The overflow menu is part of the layout, so it is recomputed wherever the layout is.**
         // **Here and in `set_zoom`, and nowhere else**: those are the only two things that build a
         // new `Chrome`. A resize that did not would leave the menu offering tools that now fit.
@@ -1883,7 +1892,44 @@ impl<'a> Session<'a> {
     ///
     /// **The document being replaced is parked, not dropped**: it is still open, and the sidebar has a
     /// row for it.
-    pub fn set_managed_documents(&mut self, managed: bool) { self.managed_documents = managed; }
+    pub fn set_managed_documents(&mut self, managed: bool) {
+        self.managed_documents = managed;
+        self.state.paged = managed;
+        if managed {
+            self.reflow_for_measure();
+        } else if let Ok(mut text) = self.editor.text() {
+            let anchor = self.lines.line_begin(self.state.scroll_line as usize);
+            self.lines = DocLines::build(&text, holonomy_geometry::LineMetrics::default());
+            use zeroize::Zeroize;
+            text.zeroize();
+            self.state.total_lines = self.lines.len() as u32;
+            self.state.scroll_line = self.lines.line_of(anchor);
+            let _ = self.reconcile_caret();
+            self.invalidate(self.chrome.full_damage());
+        }
+    }
+
+    fn wrap_measure(&self) -> u32 {
+        self.chrome.layout.cells_per_row(self.chrome.metrics.cell_w) as u32
+    }
+
+    /// Rebuild on a measure change only. Anchor the viewport by its document byte, not its old
+    /// row number, so resizing a long document does not jump to an unrelated paragraph.
+    fn reflow_for_measure(&mut self) {
+        if !self.managed_documents { return; }
+        let measure = self.wrap_measure();
+        if self.lines.wrap_measure() == Some(measure) { return; }
+        let anchor = self.lines.line_begin(self.state.scroll_line as usize);
+        if let Ok(mut text) = self.editor.text() {
+            self.lines = DocLines::build_wrapped(&text, holonomy_geometry::LineMetrics::default(), measure);
+            use zeroize::Zeroize;
+            text.zeroize();
+            self.state.total_lines = self.lines.len() as u32;
+            self.state.scroll_line = self.lines.line_of(anchor);
+            let _ = self.reconcile_caret();
+            self.invalidate(self.chrome.full_damage());
+        }
+    }
     pub fn take_document_request(&mut self) -> Option<DocumentRequest> { self.document_request.take() }
     /// Display or dismiss the desktop library, without changing the active document.
     pub fn set_home(&mut self, view: Option<holonomy_render::home::View>) {
@@ -1973,7 +2019,9 @@ impl<'a> Session<'a> {
         self.state.title = title; self.active_id = id; self.state.dirty = dirty;
         self.state.font_index = font; self.state.style_index = style; self.state.mode_index = mode; self.mode = view_mode(mode);
         for d in iter {
-            self.parked.push(ParkedDocument { editor: Editor::from_payload(&d.payload)?, title: d.title, id: d.id, dirty: d.dirty, font_index: d.font_index, style_index: d.style_index, mode: view_mode(d.mode) });
+            let mut editor = Editor::from_payload(&d.payload)?;
+            editor.caret_to(d.caret as usize)?;
+            self.parked.push(ParkedDocument { editor, title: d.title, id: d.id, dirty: d.dirty, font_index: d.font_index, style_index: d.style_index, mode: view_mode(d.mode) });
         }
         self.sync_docs(); self.reconcile_caret()?; self.invalidate(self.chrome.full_damage()); Ok(())
     }
@@ -2143,6 +2191,7 @@ impl<'a> Session<'a> {
             ..self.chrome.metrics
         };
         self.chrome = Chrome::new(metrics);
+        self.reflow_for_measure();
         // **Part 44: the sidebar takes 256 px away from the toolbar.** Collapsing it does not change
         // the toolbar's own width -- the toolbar spans the panel and the sidebar overlays it -- so
         // this call is belt and braces rather than a fix. **It is here because the rule is "every
@@ -3745,6 +3794,7 @@ impl<'a> Session<'a> {
         // _the_pointer` found it on the first run**, and the gate's fixture is a three-line document
         // specifically because a one-line document cannot tell the two apart.
         let start = self.lines.line_begin(line as usize);
+        let end = self.lines.line_end(line as usize);
         let mut at = start;
         let mut left = column;
         while left > 0 {
@@ -3754,7 +3804,7 @@ impl<'a> Session<'a> {
             // one was in hand -- landing the caret between the two bytes of one character.
             // `caret_to` then rounded down and put it before the `é`. **You cannot tell how wide a
             // UTF-8 character is without reading all of it.**
-            let room = self.editor.text_len().saturating_sub(at);
+            let room = end.min(self.editor.text_len()).saturating_sub(at);
             let n = room.min(CHUNK);
             if n == 0 {
                 break;
@@ -3895,7 +3945,7 @@ impl<'a> Session<'a> {
         }
         match action {
             Action::WordCount => {
-                self.set_notice(Some(format!("{} words · {} lines", self.state.words, self.state.total_lines)));
+                self.set_notice(Some(format!("{} words · {} lines", self.state.words, self.counts.lines())));
                 return Ok(());
             }
             Action::KeyboardShortcuts => {
@@ -4170,6 +4220,7 @@ impl<'a> Session<'a> {
         // would leave the measure at 16 ppem's advance while the glyphs were 20 ppem's. **The ruler,
         // the caret and the selection would then be placing cells in a grid the text is not in.**
         self.apply_type_scale();
+        self.reflow_for_measure();
         // **Everything.** Every band, every pixel: the page's width in cells changes with the cell
         // width, so the page moves as well as the type.
         self.damage = self.chrome.full_damage();
@@ -5144,6 +5195,9 @@ impl<'a> Session<'a> {
         match self.editor.undo() {
             Ok(outcome) => {
                 self.recount_counts();
+                if self.state.paged {
+                    self.lines.rebuild(&self.editor, holonomy_geometry::LineMetrics::default());
+                }
                 self.after_edit(0)?;
                 if outcome.kind == holonomy_text::ActionKind::Format {
                     self.damage = self.chrome.full_damage();
@@ -5160,6 +5214,9 @@ impl<'a> Session<'a> {
         match self.editor.redo() {
             Ok(outcome) => {
                 self.recount_counts();
+                if self.state.paged {
+                    self.lines.rebuild(&self.editor, holonomy_geometry::LineMetrics::default());
+                }
                 self.after_edit(0)?;
                 if outcome.kind == holonomy_text::ActionKind::Format {
                     self.damage = self.chrome.full_damage();
@@ -5281,7 +5338,9 @@ impl<'a> Session<'a> {
         }
         let first = self.state.scroll_line;
         let last = first.saturating_add(rows);
-        let scroll = if line < first {
+        let scroll = if self.state.paged && (line < first || line >= last) {
+            (line / rows) * rows
+        } else if line < first {
             line
         } else if line >= last {
             line.saturating_sub(rows - 1)
@@ -5289,6 +5348,11 @@ impl<'a> Session<'a> {
             first
         };
         self.state.scroll_line = scroll;
+        if self.state.paged && scroll != first {
+            // A caret move can change every visible row, not just the two caret cells.
+            let moved_view = self.chrome.layout.canvas.union(&self.chrome.layout.status);
+            self.damage = self.damage.union(&moved_view);
+        }
     }
 
     /// Change one formatting property without destroying the other properties in
@@ -5592,7 +5656,7 @@ impl<'a> Session<'a> {
     /// page-down.
     fn page_by_lines(&mut self, direction: i64) -> Result<(), SessionError> {
         let rows = self.chrome.layout.rows.max(1) as i64;
-        let step = (rows - 1).max(1);
+        let step = if self.state.paged { rows } else { (rows - 1).max(1) };
         let line = self.line_index(self.editor.caret() as usize);
         let last = self.state.total_lines.saturating_sub(1);
         let want = (line as i64 + direction * step).clamp(0, i64::from(last)) as u32;
@@ -5666,6 +5730,7 @@ impl<'a> Session<'a> {
         // changes no caller: `sync_lines` needs only `counts.lines()` (the caller folded it before
         // calling) and `editor.caret()` (the edit has parked it).
         self.sync_lines();
+        self.state.total_lines = self.lines.len() as u32;
         self.reconcile_caret()?;
         // **Scroll after reconciling, not inside it.** `Session::new` also reconciles and must not
         // scroll; an edit moves the caret like a keystroke does and must. See `reconcile_caret`.
@@ -5730,7 +5795,7 @@ impl<'a> Session<'a> {
         // geometry from *before* this edit, and a line that moved needs its old box repainted regardless
         // of where the caret is. Anything else that damaged the frame before `after_edit` would be
         // dropped, so the union above is what has to stand on its own.
-        self.damage = damage;
+        self.damage = if self.state.paged { self.chrome.layout.canvas.union(&self.chrome.layout.status) } else { damage };
         let _ = inserted;
         Ok(())
     }
@@ -5843,7 +5908,7 @@ impl<'a> Session<'a> {
     fn publish_counts(&mut self) {
         self.state.bytes = self.editor.text_len() as u32;
         self.state.words = self.counts.words;
-        self.state.total_lines = self.counts.lines();
+        self.state.total_lines = self.lines.len() as u32;
         // **Part 39: the numbers these three fields hold are drawn in the status bar**, so publishing
         // them is half of changing what it shows -- and the other half is asking for the repaint. A
         // word count that is correct in the state and stale on the screen is the defect this line fixes.
@@ -6101,6 +6166,12 @@ impl<'a> Session<'a> {
         // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
         // using the source height would displace by a factor of three at 1920x1080.
         blocks.extend(self.image_blocks(source));
+        if self.state.paged {
+            // All paint and hit-test callers ask for viewport-relative rows. Discard blocks above
+            // the viewport and translate the rest, rather than displacing the wrong visible rows.
+            let first = self.state.scroll_line;
+            blocks = blocks.into_iter().filter_map(|(line, h)| line.checked_sub(first).map(|row| (row, h))).collect();
+        }
         self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
     }
 
@@ -6643,31 +6714,8 @@ impl<'a> Session<'a> {
                     ink,
                 );
             }
-            // **A line longer than the measure is truncated, and that is a recorded gap rather than a
-            // finished feature.** `LineHeights` is indexed by *document line*, so a line that wrapped onto
-            // a second visual row would have no row to be on: `caret_line`, the scroll model, the table
-            // anchors and the formula anchors are all document-line indices. Wrapping needs a second index
-            // mapping document line to visual rows, and Phase 13's section manifest is where that belongs
-            // -- it is the same "structure without content" problem, and building it twice would be worse
-            // than building it once.
-            //
-            // # UPDATE, part 45: that index exists. It is `holonomy_render::wrap::WrapMap`.
-            //
-            // **The paragraph above predicted the shape and got it right**, and the prediction is worth
-            // keeping next to the fact: *"a second index mapping document line to visual rows, and Phase
-            // 13's section manifest is where that belongs -- it is the same 'structure without content'
-            // problem, and building it twice would be worse than building it once."*
-            //
-            // **Part 45 built it once** -- `WrapMap::build` over `Line { line, start, bytes }`, 18 gates
-            // in `crates/holonomy-render/tests/wrap.rs`, and a rule that is a pure function of
-            // `(bytes, measure)`. **What is still missing is the `LineHeights` half**: `LineHeights::y`
-            // answers for a *document line*, so a line taking three visual rows still gets one slot and
-            // everything below it stays where it is.
-            //
-            // **So this emitter is still the place the text is cut, and the reason is one line of
-            // `chrome.rs`, not four of this file.** See `PROJECT.md` part 45 section H for the four
-            // call sites and the order they have to change in -- step 4, making `scroll_line` a visual-row
-            // index, is the one that decides whether soft wrap is a feature or a clipping change.
+            // Managed desktop geometry is indexed by visual row. The sealed path retains its
+            // logical-line index and the older clipping behavior.
             extra = union_opt(extra, Some(rect));
         }
 
@@ -6709,7 +6757,7 @@ impl<'a> Session<'a> {
         let active = self.active_cell;
 
         for span in spans.iter().copied() {
-            let line = line_index_in(&mut self.editor, span.start_byte as usize, source);
+            let line = self.lines.line_of(span.start_byte as usize);
             if line < first || line >= last {
                 continue;
             }
@@ -7195,12 +7243,7 @@ impl<'a> Session<'a> {
         let mut extra: Option<DamageRect> = None;
         let scratch = &mut self.math_scratch;
         let source = &mut self.math_source;
-        let line_of = |at: usize| {
-            text[..at.min(text.len())]
-                .iter()
-                .filter(|&&b| b == b'\n')
-                .count() as u32
-        };
+        let line_of = |at: usize| self.lines.line_of(at);
 
         holonomy_text::for_each_math_span(text, |span| {
             let line = line_of(span.start as usize);
@@ -7358,7 +7401,7 @@ impl<'a> Session<'a> {
         // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
         // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
         let text = &self.doc_scratch[..read];
-        math_blocks(&mut self.editor, text, &mm, source)
+        math_blocks(&self.lines, text, &mm)
     }
 
     // ---------------------------------------------------------------- export
@@ -7549,41 +7592,6 @@ pub const LINE_SCRATCH_BYTES: usize = 48 * 1024;
 /// once to centre the formula vertically before laying it out, and once for the damage rectangle --
 /// so it is the measure-only entry point rather than the one that returns a box as a by-product.
 #[inline]
-/// The 0-based line index containing `at`. Phase 11.
-///
-/// **Still O(bytes before the caret), and Phase 11 does not pretend otherwise.** The allocation is
-/// gone; the scan is not. The honest fix is the Fenwick tree over line heights, which answers this in
-/// `O(log n)`, and wiring it is Phase 11's third item. What is fixed here is that the count is the
-/// remaining cost rather than a 6.4 MiB copy that accompanied it.
-fn line_index_in(
-    editor: &mut Editor,
-    at: usize,
-    source: &mut dyn holonomy_text::LeafSource,
-) -> u32 {
-    let end = at.min(editor.text_len());
-    let mut count = 0u32;
-    let mut offset = 0usize;
-    let mut chunk = [0u8; SCAN_CHUNK];
-    while offset < end {
-        let want = (end - offset).min(SCAN_CHUNK);
-        // **Faulting, for the same reason `read_document` is.** A line index that stopped counting at the
-        // resident window would number every table, formula and image after it as being on line 0 --
-        // which is worse than not drawing it, because it draws it in the wrong place.
-        let got = match editor.read_into_faulting(source, offset, &mut chunk[..want]) {
-            Ok(got) => got,
-            Err(_) => break,
-        };
-        // `read_into` returns 0 only past the end, and `offset < end <= text_len`, so a zero here
-        // would be an infinite loop rather than a short read.
-        if got == 0 {
-            break;
-        }
-        count += chunk[..got].iter().filter(|&&b| b == b'\n').count() as u32;
-        offset += got;
-    }
-    count
-}
-
 /// Every formula's `(anchor_line, height_px)`, for the line-height model.
 ///
 /// A free function over its arguments rather than a `&self` method, for the reason
@@ -7597,10 +7605,9 @@ fn line_index_in(
 /// Phase 9B's known limit rather than a bug to be argued about here. Recorded in `PROJECT.md` §9B
 /// rather than silently approximated.
 fn math_blocks(
-    editor: &mut Editor,
+    lines: &DocLines,
     text: &[u8],
     mm: &MathMetrics,
-    source: &mut dyn holonomy_text::LeafSource,
 ) -> Vec<(u32, u32)> {
     let mut blocks = Vec::new();
     holonomy_text::for_each_math_span(text, |span| {
@@ -7610,7 +7617,7 @@ fn math_blocks(
         let Ok(node) = math::parse(&text[inner]) else {
             return;
         };
-        let line = line_index_in(editor, span.start as usize, source);
+        let line = lines.line_of(span.start as usize);
         blocks.push((line, measure_only(&node, mm).height));
     });
     blocks

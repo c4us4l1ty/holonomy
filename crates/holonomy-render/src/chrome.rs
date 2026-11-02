@@ -1599,6 +1599,8 @@ pub struct ChromeState {
     pub scroll_line: u32,
     /// Total text lines.
     pub total_lines: u32,
+    /// The desktop presents visual rows as viewport-sized pages.
+    pub paged: bool,
     /// Which style toggles are on.
     pub styles: StyleFlags,
     /// Whether the caret is currently drawn. Driven by [`Blink`].
@@ -1695,6 +1697,7 @@ impl Default for ChromeState {
             notice: None,
             scroll_line: 0,
             total_lines: 1,
+            paged: false,
             styles: StyleFlags::default(),
             caret_visible: true,
             selection: None,
@@ -1733,7 +1736,11 @@ impl Caret {
         // the uniform product. With no tables the extras are empty and this is the old expression, so
         // the caret is in the same place it always was.
         let y = layout.text.y.checked_add(state.line_heights.y(row))?;
-        if row >= layout.rows || state.caret_column >= m.columns {
+        if row >= layout.rows || if state.paged {
+            state.caret_column > layout.cells_per_row(m.cell_w) as u32
+        } else {
+            state.caret_column >= m.columns
+        } {
             return None;
         }
         // **The pen if the session gave one, the grid if it did not.** Part 33.
@@ -2301,13 +2308,15 @@ impl Chrome {
         // left, because they are a property of the document and are useful at every moment. The notice
         // is a *transient* and is drawn after the counters, separated from them — so `Saved` appears
         // beside `Ln 1, Col 1  0 words  0 B` instead of instead of it.
-        let counters = format!(
-            "Ln {}, Col {}  {} words  {} B",
-            state.caret_line + 1,
-            state.caret_column + 1,
-            state.words,
-            state.bytes
-        );
+        let counters = if state.paged {
+            let rows = l.rows.max(1);
+            format!("View {} / {}  Ln {}, Col {}  {} words  {} B",
+                state.scroll_line / rows + 1, state.total_lines.max(1).div_ceil(rows),
+                state.caret_line + 1, state.caret_column + 1, state.words, state.bytes)
+        } else {
+            format!("Ln {}, Col {}  {} words  {} B", state.caret_line + 1,
+                state.caret_column + 1, state.words, state.bytes)
+        };
         let status_y = l.status.y + l.status.height.saturating_sub(m.cell_h) / 2;
         let counters_x = m.cell_w as i32;
         push_text(
