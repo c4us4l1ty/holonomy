@@ -1,0 +1,82 @@
+info: syncing channel updates for 1.98.1-x86_64-unknown-linux-gnu
+info: latest update on 2026-09-03 for version 1.98.1 (48a229cea 2026-09-01)
+info: downloading 6 components
+warn: the missing active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/src/session.rs:5271:
+         // `ChromeMetrics::with_ribbon_bands`: these were five literals applied *after*
+         // `with_type_scale`, so at 125 % -- the shipping default -- the ribbon was 20 % too short
+         // for the type it held.
+-        let metrics =
+-            metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
++        let metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
+         // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
+         // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
+         // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/wordcraft_ribbon.rs:119:
+                 let room = if b.large {
+                     b.rect.width
+                 } else {
+-                    b.rect.width
++                    b.rect
++                        .width
+                         .saturating_sub(if b.icon.is_some() {
+                             ribbon::ICON_GUTTER
+                         } else {
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/chrome.rs:458:
+         if !ribbon {
+             return self;
+         }
+-        let by = |v: u32| -> u32 { (v as u64 * self.cell_h as u64 / Self::BASE_PITCH as u64) as u32 };
++        let by =
++            |v: u32| -> u32 { (v as u64 * self.cell_h as u64 / Self::BASE_PITCH as u64) as u32 };
+         self.title_h = by(76);
+         self.menu_h = by(32);
+         self.toolbar_h = if collapsed { 0 } else { by(112) };
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/ribbon.rs:541:
+ /// **Two numbers and not one, because the ribbon needs both to plan a row.** The labelled width is
+ /// what the user reads; the icon-only width is what the *same* button costs when the row will not
+ /// fit as labelled -- Word's own compact behaviour, and Wordcraft's `ribbon_fit::COMPACT`.
+-fn small_widths(l: &Layout, state: &ChromeState, action: Action, label: &str, icon: bool) -> (u32, u32) {
++fn small_widths(
++    l: &Layout,
++    state: &ChromeState,
++    action: Action,
++    label: &str,
++    icon: bool,
++) -> (u32, u32) {
+     // **The Font button draws `font_name()`, not `label`.** `layout` is handed the state, so the
+     // measurement can be of the string that will actually be drawn -- `Inter` is five cells and
+     // `JetBrains Mono` fourteen, and a width that fits one does not fit the other.
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/ribbon.rs:727:
+         let gr = DamageRect::new(
+             x.min(l.width),
+             top,
+-            w.min(limit.saturating_sub(x)).min(l.width.saturating_sub(x)),
++            w.min(limit.saturating_sub(x))
++                .min(l.width.saturating_sub(x)),
+             h,
+         );
+         groups.push(Group {
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/ribbon.rs:1240:
+             DamageRect::new(
+                 b.rect.x + ICON_GUTTER,
+                 b.rect.y,
+-                b.rect.width
++                b.rect
++                    .width
+                     .saturating_sub(ICON_GUTTER)
+                     .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
+                 b.rect.height,
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy-render/src/ribbon.rs:1249:
+             DamageRect::new(
+                 b.rect.x,
+                 b.rect.y,
+-                b.rect.width.saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
++                b.rect
++                    .width
++                    .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
+                 b.rect.height,
+             )
+         };
