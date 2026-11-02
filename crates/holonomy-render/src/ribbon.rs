@@ -541,7 +541,13 @@ pub const CAPTION_AIR: u32 = 4;
 /// **Two numbers and not one, because the ribbon needs both to plan a row.** The labelled width is
 /// what the user reads; the icon-only width is what the *same* button costs when the row will not
 /// fit as labelled -- Word's own compact behaviour, and Wordcraft's `ribbon_fit::COMPACT`.
-fn small_widths(l: &Layout, state: &ChromeState, action: Action, label: &str, icon: bool) -> (u32, u32) {
+fn small_widths(
+    l: &Layout,
+    state: &ChromeState,
+    action: Action,
+    label: &str,
+    icon: bool,
+) -> (u32, u32) {
     // **The Font button draws `font_name()`, not `label`.** `layout` is handed the state, so the
     // measurement can be of the string that will actually be drawn -- `Inter` is five cells and
     // `JetBrains Mono` fourteen, and a width that fits one does not fit the other.
@@ -727,7 +733,8 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
         let gr = DamageRect::new(
             x.min(l.width),
             top,
-            w.min(limit.saturating_sub(x)).min(l.width.saturating_sub(x)),
+            w.min(limit.saturating_sub(x))
+                .min(l.width.saturating_sub(x)),
             h,
         );
         groups.push(Group {
@@ -1102,7 +1109,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         );
     }
     round(v, lock_rect(l), 5, t.accent);
-    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h);
+    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_w, cell_h);
     for (i, r) in tab_rects(l).into_iter().enumerate() {
         let selected = i == usize::from(s.ribbon_tab);
         if selected {
@@ -1240,7 +1247,8 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             DamageRect::new(
                 b.rect.x + ICON_GUTTER,
                 b.rect.y,
-                b.rect.width
+                b.rect
+                    .width
                     .saturating_sub(ICON_GUTTER)
                     .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
                 b.rect.height,
@@ -1249,7 +1257,9 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             DamageRect::new(
                 b.rect.x,
                 b.rect.y,
-                b.rect.width.saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
+                b.rect
+                    .width
+                    .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
                 b.rect.height,
             )
         };

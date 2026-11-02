@@ -119,7 +119,8 @@ fn every_ribbon_label_fits_inside_its_button() {
                 let room = if b.large {
                     b.rect.width
                 } else {
-                    b.rect.width
+                    b.rect
+                        .width
                         .saturating_sub(if b.icon.is_some() {
                             ribbon::ICON_GUTTER
                         } else {

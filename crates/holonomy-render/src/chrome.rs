@@ -458,12 +458,18 @@ impl ChromeMetrics {
         if !ribbon {
             return self;
         }
-        let by = |v: u32| -> u32 { (v as u64 * self.cell_h as u64 / Self::BASE_PITCH as u64) as u32 };
-        self.title_h = by(76);
-        self.menu_h = by(32);
-        self.toolbar_h = if collapsed { 0 } else { by(112) };
-        self.ruler_h = by(26);
-        self.status_h = by(28);
+        // **A free `const fn`, not a closure.** "Cannot call non-const closure in constant functions"
+        // (E0015) is what the compiler said about the closure this was written as first, and
+        // `with_type_scale` above only gets away with its own because it is not `const`.
+        const fn by(v: u32, cell_h: u32) -> u32 {
+            (v as u64 * cell_h as u64 / ChromeMetrics::BASE_PITCH as u64) as u32
+        }
+        let cell_h = self.cell_h;
+        self.title_h = by(76, cell_h);
+        self.menu_h = by(32, cell_h);
+        self.toolbar_h = if collapsed { 0 } else { by(112, cell_h) };
+        self.ruler_h = by(26, cell_h);
+        self.status_h = by(28, cell_h);
         // **Raised to a line afterwards**, because `by` rounds down and a band under one line cannot
         // hold one -- the rule [`with_line_pitch`](Self::with_line_pitch) already enforces and that a
         // literal set silently broke.

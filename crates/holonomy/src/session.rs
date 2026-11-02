@@ -5271,8 +5271,7 @@ impl<'a> Session<'a> {
         // `ChromeMetrics::with_ribbon_bands`: these were five literals applied *after*
         // `with_type_scale`, so at 125 % -- the shipping default -- the ribbon was 20 % too short
         // for the type it held.
-        let metrics =
-            metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
+        let metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
         // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
         // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
         // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and
