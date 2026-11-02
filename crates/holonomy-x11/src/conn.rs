@@ -1352,10 +1352,12 @@ impl Conn {
         // extension this crate queries is `XTEST`-sized, so this is unreachable from the product; it is
         // asserted here for the same reason the request ceiling is: **a bound that is only sometimes
         // checked is the kind that gets skipped by the one caller who needed it.**
-        let len = u8::try_from(name.len()).map_err(|_| ConnError::Unsupported(format!(
+        let len = u8::try_from(name.len()).map_err(|_| {
+            ConnError::Unsupported(format!(
             "the extension name {name} is {} bytes and the protocol's own field for it is a CARD8",
             name.len()
-        )))?;
+        ))
+        })?;
         let seq = self.request(
             Req::new(op::QUERY_EXTENSION)
                 .second_byte(0)

@@ -5,10 +5,17 @@ use holonomy_render::{chrome::ChromeMetrics, menus::Action};
 use holonomy_text::Editor;
 
 fn session(text: &str) -> Session<'static> {
-    static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> = std::sync::OnceLock::new();
-    let atlas = ATLAS.get_or_init(|| Box::leak(Box::new(holonomy_assets::build_atlas(&[16]).unwrap().0)));
+    static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
+        std::sync::OnceLock::new();
+    let atlas =
+        ATLAS.get_or_init(|| Box::leak(Box::new(holonomy_assets::build_atlas(&[16]).unwrap().0)));
     let m = ChromeMetrics::DESKTOP;
-    let mut s = Session::new(Editor::from_text(text.as_bytes()).unwrap(), Painter::new(atlas, 0), Box::new(HeadlessScanout::new(m.width, m.height)), m);
+    let mut s = Session::new(
+        Editor::from_text(text.as_bytes()).unwrap(),
+        Painter::new(atlas, 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
     s.set_managed_documents(true);
     s
 }

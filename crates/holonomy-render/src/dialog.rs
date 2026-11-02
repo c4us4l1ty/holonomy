@@ -96,7 +96,10 @@ impl Geometry {
     pub fn choice_rect(&self, i: usize) -> DamageRect {
         DamageRect::new(
             self.panel.x + self.pad,
-            self.panel.y + self.header_h + (self.fields + i) as u32 * self.row_h + self.field_offset,
+            self.panel.y
+                + self.header_h
+                + (self.fields + i) as u32 * self.row_h
+                + self.field_offset,
             self.panel.width.saturating_sub(self.pad * 2),
             self.field_h,
         )
@@ -122,10 +125,22 @@ pub fn geometry(l: &Layout, d: &DialogView) -> Geometry {
     let compact = l.height < 560 || l.width < 700;
     let text_size = if large { 1 } else { 0 };
     let base_h = l.cell_h.max(18);
-    let text_h = if large { (base_h * 5 / 4).max(24) } else { base_h };
+    let text_h = if large {
+        (base_h * 5 / 4).max(24)
+    } else {
+        base_h
+    };
     let pad = if compact { 10 } else { base_h.clamp(20, 32) };
-    let field_h = if compact { text_h + 8 } else { (text_h + 18).max(44) };
-    let button_h = if compact { text_h + 8 } else { (text_h + 16).max(44) };
+    let field_h = if compact {
+        text_h + 8
+    } else {
+        (text_h + 18).max(44)
+    };
+    let button_h = if compact {
+        text_h + 8
+    } else {
+        (text_h + 16).max(44)
+    };
     let gap = if compact { 4 } else { 14 };
     let field_offset = text_h + if compact { 4 } else { 6 };
     let row_h = field_offset + field_h + gap;
@@ -248,31 +263,64 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
     let p = g.panel;
     let inner = p.width.saturating_sub(g.pad * 2);
     let max_chars = (inner / g.text_advance).max(1) as usize;
-    let value_chars = ((g.field_rect(0).width.saturating_sub(24)) / g.value_advance).max(1) as usize;
+    let value_chars =
+        ((g.field_rect(0).width.saturating_sub(24)) / g.value_advance).max(1) as usize;
 
     tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(
         0, 0, l.width, l.height, SCRIM,
     ))));
-    tree.before.push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
-        p.x as i32, p.y as i32, p.width, p.height, 14, PANEL,
-    ))));
+    tree.before
+        .push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+            p.x as i32, p.y as i32, p.width, p.height, 14, PANEL,
+        ))));
 
     let title_y = p.y + g.pad;
-    label(&mut tree.before, p.x + g.pad, title_y, &clip(&d.title, max_chars), Style::BOLD, g.text_size, TEXT);
+    label(
+        &mut tree.before,
+        p.x + g.pad,
+        title_y,
+        &clip(&d.title, max_chars),
+        Style::BOLD,
+        g.text_size,
+        TEXT,
+    );
     let message_y = title_y + g.text_h + if g.text_size == 1 { 8 } else { 4 };
-    label(&mut tree.before, p.x + g.pad, message_y, &clip(&d.message, max_chars), Style::REGULAR, g.text_size, TEXT_SECONDARY);
+    label(
+        &mut tree.before,
+        p.x + g.pad,
+        message_y,
+        &clip(&d.message, max_chars),
+        Style::REGULAR,
+        g.text_size,
+        TEXT_SECONDARY,
+    );
 
     for (i, f) in d.fields.iter().enumerate() {
         let ly = g.label_y(i);
-        label(&mut tree.before, p.x + g.pad, ly, &clip(&f.label, max_chars), Style::REGULAR, g.text_size, TEXT_SECONDARY);
+        label(
+            &mut tree.before,
+            p.x + g.pad,
+            ly,
+            &clip(&f.label, max_chars),
+            Style::REGULAR,
+            g.text_size,
+            TEXT_SECONDARY,
+        );
         let r = g.field_rect(i);
         let border = if i == d.focus { ACCENT } else { FIELD_BORDER };
-        tree.before.push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
-            r.x as i32, r.y as i32, r.width, r.height, 8, border,
-        ))));
-        tree.before.push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
-            r.x as i32 + 2, r.y as i32 + 2, r.width.saturating_sub(4), r.height.saturating_sub(4), 6, FIELD_BG,
-        ))));
+        tree.before
+            .push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+                r.x as i32, r.y as i32, r.width, r.height, 8, border,
+            ))));
+        tree.before
+            .push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+                r.x as i32 + 2,
+                r.y as i32 + 2,
+                r.width.saturating_sub(4),
+                r.height.saturating_sub(4),
+                6,
+                FIELD_BG,
+            ))));
 
         let masked = if f.secret {
             MASK.to_string().repeat(f.value.chars().count())
@@ -282,12 +330,24 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
         let shown = tail(&masked, value_chars);
         let vx = r.x + 12;
         let vy = r.y + (r.height.saturating_sub(g.text_h)) / 2;
-        label(&mut tree.before, vx, vy, &shown, Style::MONOSPACE, g.text_size, TEXT);
+        label(
+            &mut tree.before,
+            vx,
+            vy,
+            &shown,
+            Style::MONOSPACE,
+            g.text_size,
+            TEXT,
+        );
         if i == d.focus {
             let cx = (vx + shown.chars().count() as u32 * g.value_advance)
                 .min(r.right().saturating_sub(12));
             tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(
-                cx as i32, vy as i32, 2, g.text_h.max(16), ACCENT,
+                cx as i32,
+                vy as i32,
+                2,
+                g.text_h.max(16),
+                ACCENT,
             ))));
         }
     }
@@ -296,16 +356,33 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
         let idx = g.choice_start + i;
         let r = g.choice_rect(i);
         let colour = if idx == d.choice { PRIMARY } else { SECONDARY };
-        tree.before.push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
-            r.x as i32, r.y as i32, r.width, r.height, 8, colour,
-        ))));
+        tree.before
+            .push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+                r.x as i32, r.y as i32, r.width, r.height, 8, colour,
+            ))));
         let ty = r.y + (r.height.saturating_sub(g.text_h)) / 2;
-        label(&mut tree.before, r.x + 12, ty, &clip(&d.choices[idx], max_chars), Style::REGULAR, g.text_size, if idx == d.choice { 0xFFFF_FFFF } else { TEXT });
+        label(
+            &mut tree.before,
+            r.x + 12,
+            ty,
+            &clip(&d.choices[idx], max_chars),
+            Style::REGULAR,
+            g.text_size,
+            if idx == d.choice { 0xFFFF_FFFF } else { TEXT },
+        );
     }
 
     if let Some(e) = &d.error {
         let ey = p.y + p.height.saturating_sub(g.footer_h + g.error_h) + 6;
-        label(&mut tree.before, p.x + g.pad, ey, &clip(e, max_chars), Style::REGULAR, g.text_size, ERROR);
+        label(
+            &mut tree.before,
+            p.x + g.pad,
+            ey,
+            &clip(e, max_chars),
+            Style::REGULAR,
+            g.text_size,
+            ERROR,
+        );
     }
 
     for (r, text, primary) in [
@@ -315,16 +392,29 @@ pub fn push_tree(tree: &mut SurfaceTree, l: &Layout, d: &DialogView) {
         if text.is_empty() {
             continue;
         }
-        tree.before.push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
-            r.x as i32, r.y as i32, r.width, r.height, 8,
-            if primary { PRIMARY } else { SECONDARY },
-        ))));
+        tree.before
+            .push(SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                8,
+                if primary { PRIMARY } else { SECONDARY },
+            ))));
         let button_chars = (r.width.saturating_sub(24) / g.text_advance).max(1) as usize;
         let text = clip(text, button_chars);
         // Centre the label in the button using the same conservative advance the clip used.
         let tw = text.chars().count() as u32 * g.text_advance;
         let tx = r.x + (r.width.saturating_sub(tw)) / 2;
         let ty = r.y + (r.height.saturating_sub(g.text_h)) / 2;
-        label(&mut tree.before, tx, ty, &text, Style::BOLD, g.text_size, if primary { 0xFFFF_FFFF } else { TEXT });
+        label(
+            &mut tree.before,
+            tx,
+            ty,
+            &text,
+            Style::BOLD,
+            g.text_size,
+            if primary { 0xFFFF_FFFF } else { TEXT },
+        );
     }
 }

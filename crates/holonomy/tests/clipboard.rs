@@ -37,7 +37,7 @@
 use holonomy::session::Session;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
-use holonomy_input::{InputEvent, Hotkey, KEY_C, KEY_LEFTCTRL, KEY_V, KEY_X};
+use holonomy_input::{Hotkey, InputEvent, KEY_C, KEY_LEFTCTRL, KEY_V, KEY_X};
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_render::menus;
 use holonomy_text::{Editor, SpanPolicy, YANK_CAPACITY};
@@ -116,7 +116,11 @@ fn cut_removes_the_selection_and_undo_restores_it_in_one_step() {
     chord(&mut s, KEY_X);
 
     assert_eq!(s.stats.cuts, 1, "**the cut happened**");
-    assert_eq!(s.text_len(), before - 5, "and removed the five selected bytes");
+    assert_eq!(
+        s.text_len(),
+        before - 5,
+        "and removed the five selected bytes"
+    );
 
     s.undo().expect("undo");
 
@@ -185,12 +189,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
         unsafe { std::alloc::System.dealloc(p, l) }
     }
-    unsafe fn realloc(
-        &self,
-        p: *mut u8,
-        l: std::alloc::Layout,
-        n: usize,
-    ) -> *mut u8 {
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
         let _ = WATCH.try_with(|w| {
             if w.get() {
                 let _ = ALLOCS.try_with(|a| a.set(a.get() + 1));
@@ -245,8 +244,7 @@ fn a_paste_allocates_no_more_than_a_typed_character() {
     let mut typed = session();
     let typed_allocs = allocs_of(&mut typed, Command::Insert('a'));
     assert_eq!(
-        typed.stats.edits,
-        1,
+        typed.stats.edits, 1,
         "the typed command really was an edit, or this test compared an edit with a no-op"
     );
 
@@ -327,7 +325,10 @@ fn a_clipboard_key_with_nothing_selected_is_a_no_op_not_an_error() {
 
     assert_eq!(s.stats.copies, 0, "no copy happened");
     assert_eq!(s.stats.cuts, 0, "no cut happened");
-    assert_eq!(s.stats.clipboard_noops, 2, "**both were counted as no-ops**");
+    assert_eq!(
+        s.stats.clipboard_noops, 2,
+        "**both were counted as no-ops**"
+    );
     assert_eq!(
         s.text_len(),
         len,
@@ -358,7 +359,11 @@ fn the_edit_menu_rows_reach_the_same_keys() {
         ("Copy", Action::Copy, Hotkey::Copy),
         ("Paste", Action::Paste, Hotkey::Paste),
     ] {
-        assert_eq!(row(label), Some(action), "Edit > {label} carries its action");
+        assert_eq!(
+            row(label),
+            Some(action),
+            "Edit > {label} carries its action"
+        );
         assert_eq!(
             action_command(action),
             Some(holonomy_input::Command::Hotkey(key)),
@@ -377,7 +382,8 @@ fn the_edit_menu_rows_reach_the_same_keys() {
 fn the_clipboard_is_reachable_without_any_platform_support() {
     let m = ChromeMetrics::DESKTOP;
     let mut ed = Editor::new();
-    ed.insert_at(0, TEXT, SpanPolicy::GrowIntoInsert).expect("room");
+    ed.insert_at(0, TEXT, SpanPolicy::GrowIntoInsert)
+        .expect("room");
     let s = Session::new(
         ed,
         Painter::new(atlas(), 0),

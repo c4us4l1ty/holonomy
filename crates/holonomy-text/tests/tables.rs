@@ -392,7 +392,8 @@ fn two_undos_and_two_redos_restore_the_table_map_twice() {
     let mut ed = editor(b"");
     ed.insert_table(2, 2, MEASURE).expect("a 2x2 table");
     // A second edit on top, so there are two undos to make.
-    ed.insert_at(0, b"hello", SpanPolicy::Strict).expect("a prefix");
+    ed.insert_at(0, b"hello", SpanPolicy::Strict)
+        .expect("a prefix");
     assert_eq!(ed.tables().len(), 1, "one table");
 
     ed.undo().expect("undo the prefix");

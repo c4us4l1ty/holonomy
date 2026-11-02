@@ -57,7 +57,8 @@ fn atlas() -> &'static holonomy_assets::atlas::Atlas {
 fn session() -> Session<'static> {
     let m = ChromeMetrics::DESKTOP;
     let mut ed = Editor::new();
-    ed.insert_at(0, DOC, SpanPolicy::GrowIntoInsert).expect("room");
+    ed.insert_at(0, DOC, SpanPolicy::GrowIntoInsert)
+        .expect("room");
     Session::new(
         ed,
         Painter::new(atlas(), 0),
@@ -222,7 +223,12 @@ fn three_separate_clicks_are_three_carets_and_no_selection() {
         // **A gap of `WINDOW_MS + 1`, not `WINDOW_MS * 2`.** The boundary is the interesting place,
         // and one millisecond past the window is the smallest gap that must not count -- a gate at
         // twice the window would pass with a window that is twice as long as it claims.
-        press_at(&mut s, x, y, u64::try_from(i).expect("three") * (WINDOW_MS + 1));
+        press_at(
+            &mut s,
+            x,
+            y,
+            u64::try_from(i).expect("three") * (WINDOW_MS + 1),
+        );
     }
     assert_eq!(
         selection(&s),
@@ -439,7 +445,8 @@ fn the_window_edge_is_inclusive() {
 fn a_double_click_on_an_unreadable_line_places_a_caret() {
     let m = ChromeMetrics::DESKTOP;
     let mut ed = Editor::new();
-    ed.insert_at(0, DOC, SpanPolicy::GrowIntoInsert).expect("room");
+    ed.insert_at(0, DOC, SpanPolicy::GrowIntoInsert)
+        .expect("room");
     let mut s = Session::new(
         ed,
         Painter::new(atlas(), 0),
@@ -463,7 +470,8 @@ fn a_double_click_on_an_unreadable_line_places_a_caret() {
     }
     // **Both records in the same frame, at the same timestamp**, so the second is a double-click.
     while let Some(e) = d.next_event() {
-        s.handle_pointer(&mut NoSource, e).expect("pointer handling");
+        s.handle_pointer(&mut NoSource, e)
+            .expect("pointer handling");
     }
     assert_eq!(
         selection(&s),

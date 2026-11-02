@@ -314,7 +314,11 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
     for id in [IconId::Minus, IconId::Rule] {
         let bits = id.mask();
         let rows: Vec<u32> = (0..SIZE)
-            .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count() as u32)
+            .map(|y| {
+                (0..SIZE)
+                    .filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                    .count() as u32
+            })
             .collect();
         let widest = *rows.iter().max().unwrap();
         assert!(
@@ -349,11 +353,19 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
 fn a_plus_crosses_the_box_in_both_axes() {
     let bits = IconId::Plus.mask();
     let widest = (0..SIZE)
-        .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .map(|y| {
+            (0..SIZE)
+                .filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                .count()
+        })
         .max()
         .unwrap();
     let tallest = (0..SIZE)
-        .map(|x| (0..SIZE).filter(|&y| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .map(|x| {
+            (0..SIZE)
+                .filter(|&y| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                .count()
+        })
         .max()
         .unwrap();
     // `SIZE / 2` is the same bar the rule test uses: an arm that does not reach half the box is an

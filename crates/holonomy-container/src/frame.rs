@@ -167,7 +167,10 @@ impl core::fmt::Display for FrameError {
                 write!(f, "chunk count {found} does not fit the 32-bit field")
             }
             Self::ChunkCountTooLarge { found, cap } => {
-                write!(f, "chunk count {found} exceeds the {cap}-chunk container capacity")
+                write!(
+                    f,
+                    "chunk count {found} exceeds the {cap}-chunk container capacity"
+                )
             }
         }
     }
@@ -282,9 +285,10 @@ impl MasterFrame {
         // *different, self-consistent* document — the one shape of corruption this format cannot
         // detect later. It is unreachable today (`chunks_for` caps the count), which is exactly
         // why the check belongs at the encode boundary rather than in a comment.
-        let chunk_count = u32::try_from(self.chunk_count).map_err(|_| FrameError::ChunkCountOverflow {
-            found: self.chunk_count,
-        })?;
+        let chunk_count =
+            u32::try_from(self.chunk_count).map_err(|_| FrameError::ChunkCountOverflow {
+                found: self.chunk_count,
+            })?;
         b[16..20].copy_from_slice(&chunk_count.to_le_bytes());
         b[20..22].copy_from_slice(&(title.len() as u16).to_le_bytes());
         // b[22..26] stays zero: reserved.

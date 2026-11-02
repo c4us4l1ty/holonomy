@@ -30,9 +30,9 @@
 
 use holonomy::manifest::{Manifest, SECTION_BYTES};
 use holonomy::session::Session;
-use holonomy_input::Command;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
+use holonomy_input::Command;
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_text::{Editor, SpanPolicy};
 
@@ -59,8 +59,12 @@ fn with_text(text: &str) -> Session<'static> {
         if line.is_empty() {
             continue;
         }
-        ed.insert_at(ed.text_len() as u32, line.as_bytes(), SpanPolicy::GrowIntoInsert)
-            .expect("seed the document");
+        ed.insert_at(
+            ed.text_len() as u32,
+            line.as_bytes(),
+            SpanPolicy::GrowIntoInsert,
+        )
+        .expect("seed the document");
     }
     let m = ChromeMetrics::DESKTOP;
     Session::new(
@@ -272,8 +276,7 @@ fn a_section_is_the_size_of_one_container_chunk() {
     // quietly with a stale number.
     assert_eq!(
         SECTION_BYTES,
-        holonomy_container::layout::CHUNK_SLOT as usize
-            - 2 * holonomy_container::layout::TAG_LEN,
+        holonomy_container::layout::CHUNK_SLOT as usize - 2 * holonomy_container::layout::TAG_LEN,
         "CHUNK_SLOT minus two 16-byte trailers"
     );
     assert_eq!(SECTION_BYTES, 65_504);
@@ -342,7 +345,11 @@ fn the_manifest_agrees_with_a_scan_of_the_document_it_describes() {
     let mut at = 0u32;
     for i in 0..m.len() as u32 {
         let sec = m.section(i).expect("section");
-        assert_eq!(sec.start, at, "section {i} starts at {at}, not {}", sec.start);
+        assert_eq!(
+            sec.start, at,
+            "section {i} starts at {at}, not {}",
+            sec.start
+        );
         assert!(sec.end > sec.start, "section {i} is empty");
         at = sec.end;
     }

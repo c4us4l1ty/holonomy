@@ -197,7 +197,10 @@ fn a_hard_edge_survives_a_reduction_as_an_intermediate_value() {
 #[test]
 fn the_two_axes_pick_their_filters_independently() {
     assert!(use_area(1920, 640), "the width reduces at 3:1");
-    assert!(!use_area(1080, 1080), "and the height does not reduce at all");
+    assert!(
+        !use_area(1080, 1080),
+        "and the height does not reduce at all"
+    );
 
     // **The edge is at x = 50, inside footprint 16** ([48, 51)), for the reason `edge_at` gives.
     let img = edge_at(96, 8, 50);
@@ -229,10 +232,27 @@ fn the_two_axes_pick_their_filters_independently() {
 fn below_the_threshold_the_bytes_are_exactly_what_they_were() {
     // 3 -> 2 is 1.5:1. pos(0) = 0.25 -> (lo=0, w=64); pos(1) = 1.75 -> (lo=1, w=192).
     assert!(!use_area(3, 2));
-    assert_eq!(AREA_THRESHOLD, 2, "the threshold is a design number, not a tuning knob");
+    assert_eq!(
+        AREA_THRESHOLD, 2,
+        "the threshold is a design number, not a tuning knob"
+    );
     let m = axis_map(3, 2);
-    assert_eq!(m[0], holonomy_image::scale::Sample { lo: 0, hi: 1, weight: 64 });
-    assert_eq!(m[1], holonomy_image::scale::Sample { lo: 1, hi: 2, weight: 192 });
+    assert_eq!(
+        m[0],
+        holonomy_image::scale::Sample {
+            lo: 0,
+            hi: 1,
+            weight: 64
+        }
+    );
+    assert_eq!(
+        m[1],
+        holonomy_image::scale::Sample {
+            lo: 1,
+            hi: 2,
+            weight: 192
+        }
+    );
 
     // **And the area map is not consulted**, which is what "unchanged" means operationally. It *would*
     // give `[{0, 1}, {1, 2}]` -- two pixels for the second destination -- while bilinear gives the same
@@ -262,7 +282,13 @@ fn below_the_threshold_the_bytes_are_exactly_what_they_were() {
 /// would still return plausible pixels, just wrong ones.
 #[test]
 fn the_footprints_tile_the_source_without_gaps_or_overlap() {
-    for (src, dst) in [(1920u32, 640u32), (1080, 360), (96, 14), (56, 8), (640, 640)] {
+    for (src, dst) in [
+        (1920u32, 640u32),
+        (1080, 360),
+        (96, 14),
+        (56, 8),
+        (640, 640),
+    ] {
         let map = axis_area_map(src, dst);
         assert_eq!(map.len(), dst as usize, "one sample per destination pixel");
         let mut at = 0u32;
@@ -290,7 +316,10 @@ fn the_footprints_tile_the_source_without_gaps_or_overlap() {
             "the footprints cover {at} of {src} source pixels. Coverage short of the source means the \\
              last destination pixel's window was computed wrong."
         );
-        assert_eq!(at, src, "a reduction must consume the whole source, and {src} -> {dst} did not");
+        assert_eq!(
+            at, src,
+            "a reduction must consume the whole source, and {src} -> {dst} did not"
+        );
     }
 
     // **Magnification is a different claim, and this is where the first version of this test was
@@ -303,7 +332,11 @@ fn the_footprints_tile_the_source_without_gaps_or_overlap() {
     let m = axis_area_map(7, 9);
     assert_eq!(m.len(), 9);
     assert_eq!(m[0], AreaSample { start: 0, len: 1 });
-    assert_eq!(m[1], AreaSample { start: 0, len: 1 }, "the same source pixel, informatively twice");
+    assert_eq!(
+        m[1],
+        AreaSample { start: 0, len: 1 },
+        "the same source pixel, informatively twice"
+    );
     assert!(
         m.iter().all(|a| a.len >= 1 && a.start + a.len <= 7),
         "magnifying footprints are in range and never empty, even though they are not contiguous"

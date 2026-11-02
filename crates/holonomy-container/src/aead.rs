@@ -177,7 +177,6 @@ pub fn seal_chunk(
 /// not assumed. `crate::ring::prev_tag_from_disk` is the accessor.
 pub const UNSEALED: [u8; TAG_LEN] = [0u8; TAG_LEN];
 
-
 /// Seal a slot whose plaintext is **already** in `slot[..len]`.
 ///
 /// Exists so the ring can re-seal a decrypted chunk without a fourth 65,536-byte buffer.
@@ -377,7 +376,10 @@ mod tests {
         // **The nonce itself, not just its output.** The reference prints it, and pinning it
         // says where each term landed rather than only that the two implementations agree --
         // which they would also agree on if both had the same misunderstanding.
-        assert_eq!(hex(chunk_nonce(&n_root, 5, &prev).as_slice()), "6c6d6e6f68696a6b6465666760616263a5a5a5a5a5a5a5a0");
+        assert_eq!(
+            hex(chunk_nonce(&n_root, 5, &prev).as_slice()),
+            "6c6d6e6f68696a6b6465666760616263a5a5a5a5a5a5a5a0"
+        );
         // And the predecessor tag is stored clear, where `open_chunk` can read it back.
         assert_eq!(hex(&slot[PREV_TAG_OFFSET..TAG_OFFSET]), hex(&prev[..]));
     }
@@ -416,7 +418,10 @@ mod tests {
         let first: Vec<u8> = vec![0x41u8; CHUNK_PLAINTEXT];
         let mut second = first.clone();
         second[100] = b'Z'; // one keystroke later
-        assert_ne!(first, second, "the two revisions must differ or the test proves nothing");
+        assert_ne!(
+            first, second,
+            "the two revisions must differ or the test proves nothing"
+        );
 
         // Seal 1: the slot holds whatever was there before -- nothing.
         let before_1: [u8; TAG_LEN] = on_disk[TAG_OFFSET..].try_into().unwrap();
@@ -457,7 +462,10 @@ mod tests {
 
         // Both revisions still open, which is the property a nonce break trades away.
         let mut a = on_disk.clone();
-        assert_eq!(open_chunk(&KEY, &NONCE, 4, &mut a).expect("open 2"), CHUNK_PLAINTEXT);
+        assert_eq!(
+            open_chunk(&KEY, &NONCE, 4, &mut a).expect("open 2"),
+            CHUNK_PLAINTEXT
+        );
         assert_eq!(&a[..CHUNK_PLAINTEXT], &second[..]);
     }
 
@@ -480,7 +488,10 @@ mod tests {
             chunk_nonce(&NONCE, 2, &t1).as_slice(),
             chunk_nonce(&NONCE, 2, &t2).as_slice(),
         );
-        assert_eq!(open_chunk(&KEY, &NONCE, 2, &mut slot).expect("open"), CHUNK_PLAINTEXT);
+        assert_eq!(
+            open_chunk(&KEY, &NONCE, 2, &mut slot).expect("open"),
+            CHUNK_PLAINTEXT
+        );
     }
 
     /// The predecessor tag is authenticated, so rewriting it must break the chunk.

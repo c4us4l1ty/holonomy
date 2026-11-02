@@ -22,7 +22,7 @@
 //! | **and the constant still describes this host** | [`the_committed_cost_still_describes_this_host`] |
 
 use holonomy_crypto::envelope::{
-    vdf_iterations_for, EnvelopeError, TARGET_VDF_MS, VDF_ITERATIONS, MEASURED_NS_PER_SQUARING,
+    vdf_iterations_for, EnvelopeError, MEASURED_NS_PER_SQUARING, TARGET_VDF_MS, VDF_ITERATIONS,
 };
 use holonomy_crypto::modulus::VdfError;
 
@@ -32,7 +32,13 @@ use holonomy_crypto::modulus::VdfError;
 /// recomputes the implementation proves only that the implementation is idempotent.
 #[test]
 fn the_iteration_count_is_the_floor_of_the_documented_formula() {
-    for (ms, ns) in [(250u64, 2_664u64), (250, 2_077), (400, 2_664), (100, 10_000), (1, 1)] {
+    for (ms, ns) in [
+        (250u64, 2_664u64),
+        (250, 2_077),
+        (400, 2_664),
+        (100, 10_000),
+        (1, 1),
+    ] {
         let longhand = (ms * 1_000_000) / ns;
         assert_eq!(
             vdf_iterations_for(ms, ns).expect("derivable"),
@@ -90,7 +96,10 @@ fn a_faster_host_gets_strictly_more_squarings() {
     let measured = vdf_iterations_for(TARGET_VDF_MS, MEASURED_NS_PER_SQUARING).expect("this host");
     let fast = vdf_iterations_for(TARGET_VDF_MS, 300).expect("the PRD's claim");
 
-    assert!(fast > measured, "a faster host gets more squarings: {fast} > {measured}");
+    assert!(
+        fast > measured,
+        "a faster host gets more squarings: {fast} > {measured}"
+    );
     assert!(measured > slow, "than a slower one: {measured} > {slow}");
 
     // And the consequence the PRD got wrong, stated as arithmetic: 1,500,000 squarings costs 450 ms at
@@ -140,7 +149,10 @@ fn the_modulus_agrees_about_what_zero_iterations_means() {
         huge > VDF_ITERATIONS,
         "an absurd budget must saturate to a very large count ({huge}), not wrap to a small one"
     );
-    assert!(huge < u64::MAX, "and it must still be a count, not saturating to the type's maximum");
+    assert!(
+        huge < u64::MAX,
+        "and it must still be a count, not saturating to the type's maximum"
+    );
 
     // And the chain refuses zero, so `T = 0` is caught at both ends rather than only at the derivation.
     let seed = holonomy_crypto::modulus::seed_from_k_int(&[7u8; 64]);

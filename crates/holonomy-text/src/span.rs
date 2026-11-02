@@ -99,7 +99,8 @@ pub const STYLE_SUBSCRIPT: u16 = 1 << 7;
 
 /// **The four decoration bits, as one mask.** A word processor's "clear formatting" clears all of them
 /// and the two face bits besides; naming the set means the code that does it cannot leave one behind.
-pub const STYLE_DECORATIONS: u16 = STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
+pub const STYLE_DECORATIONS: u16 =
+    STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
 
 /// **Every bit this build defines.** A flag outside this mask is not a formatting request, it is a
 /// corrupt payload — and the importer's check names this so a file written by a newer build fails
@@ -107,7 +108,8 @@ pub const STYLE_DECORATIONS: u16 = STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERS
 pub const STYLE_ALIGN_CENTER: u16 = 1 << 8;
 pub const STYLE_ALIGN_RIGHT: u16 = 1 << 9;
 pub const STYLE_ALIGN_MASK: u16 = STYLE_ALIGN_CENTER | STYLE_ALIGN_RIGHT;
-pub const STYLE_KNOWN: u16 = STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK;
+pub const STYLE_KNOWN: u16 =
+    STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK;
 
 /// One styled byte range.
 ///
@@ -494,7 +496,10 @@ impl SpanMap {
     /// design exists to prevent. Refusing is the only safe direction.
     pub fn observe(&mut self, through: u32, learned: &[TextIntervalSpan]) -> Result<(), SpanError> {
         if through > self.text_len {
-            return Err(SpanError::OutOfBounds { offset: through as u64, text_len: self.text_len });
+            return Err(SpanError::OutOfBounds {
+                offset: through as u64,
+                text_len: self.text_len,
+            });
         }
         if through < self.read_through {
             // Re-observing a prefix already observed. **Allowed and idempotent**, because a leaf can be
@@ -700,10 +705,13 @@ impl SpanMap {
         //
         // **A document longer than 4 GiB is not representable in this map**, and saying so with an
         // error is the honest answer: the map's coordinates are `u32`.
-        let new_text_len = self.text_len.checked_add(len).ok_or(SpanError::OutOfBounds {
-            offset: u64::from(self.text_len),
-            text_len: self.text_len,
-        })?;
+        let new_text_len = self
+            .text_len
+            .checked_add(len)
+            .ok_or(SpanError::OutOfBounds {
+                offset: u64::from(self.text_len),
+                text_len: self.text_len,
+            })?;
 
         // The inserted region's own style, decided from the *pre-insertion* layout -- which is what the
         // user was looking at when they pressed the key. See `style_around`.
@@ -1118,7 +1126,11 @@ impl SpanMap {
     /// thing that is definitely false about it, and would send the paint path hunting for a fault that
     /// cannot happen.
     pub fn from_spans(spans: Vec<TextIntervalSpan>, text_len: u32) -> Result<Self, SpanError> {
-        let mut m = Self { spans, text_len, read_through: text_len };
+        let mut m = Self {
+            spans,
+            text_len,
+            read_through: text_len,
+        };
         if m.spans.is_empty() {
             if text_len > 0 {
                 m.spans.push(TextIntervalSpan::plain(0, text_len));

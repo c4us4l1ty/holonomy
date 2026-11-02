@@ -75,7 +75,10 @@ fn a_psize_flag_never_names_a_zero_size() {
             h.width,
             h.height
         );
-        assert!(h.width <= u32::from(u16::MAX) as i32, "and fits the field it is written into");
+        assert!(
+            h.width <= u32::from(u16::MAX) as i32,
+            "and fits the field it is written into"
+        );
     }
 }
 
@@ -93,10 +96,18 @@ fn the_size_hints_offsets_are_the_protocols() {
     assert_eq!(bytes.len(), 72, "XSizeHints is 18 longs");
 
     let word = |i: usize| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
-    assert_eq!(word(0) as u32, 1 | (1 << 4) | (1 << 5), "flags: PSize|PMinSize|PMaxSize");
+    assert_eq!(
+        word(0) as u32,
+        1 | (1 << 4) | (1 << 5),
+        "flags: PSize|PMinSize|PMaxSize"
+    );
     assert_eq!(word(1), 0, "x, obsolete");
     assert_eq!(word(2), 0, "y, obsolete");
-    assert_eq!(word(3), 1600, "**width is at word 3 (byte 12)**, the first of the four the table called obsolete");
+    assert_eq!(
+        word(3),
+        1600,
+        "**width is at word 3 (byte 12)**, the first of the four the table called obsolete"
+    );
     assert_eq!(word(4), 1000, "height is at word 4 (byte 16)");
     assert_eq!(word(5), 768, "min_width at word 5 (byte 20)");
     assert_eq!(word(6), 320, "min_height");
@@ -106,7 +117,11 @@ fn the_size_hints_offsets_are_the_protocols() {
     assert_eq!(word(10), 1, "height_inc");
 
     let h = SizeHints::from_bytes(&bytes);
-    assert_eq!((h.width, h.height), (1600, 1000), "and the reader agrees with the writer");
+    assert_eq!(
+        (h.width, h.height),
+        (1600, 1000),
+        "and the reader agrees with the writer"
+    );
 }
 
 /// **A flag is set only when the field it names is written.** 1 test.
@@ -148,8 +163,20 @@ fn a_flag_is_set_only_when_the_field_it_names_is_written() {
 
         for (flag, bit, width, height, what) in [
             (h.flags & 1, 1u32, h.width, h.height, "PSize"),
-            (h.flags & (1 << 4), 1 << 4, h.min_width, h.min_height, "PMinSize"),
-            (h.flags & (1 << 5), 1 << 5, h.max_width, h.max_height, "PMaxSize"),
+            (
+                h.flags & (1 << 4),
+                1 << 4,
+                h.min_width,
+                h.min_height,
+                "PMinSize",
+            ),
+            (
+                h.flags & (1 << 5),
+                1 << 5,
+                h.max_width,
+                h.max_height,
+                "PMaxSize",
+            ),
         ] {
             if flag == 0 {
                 continue;
@@ -196,7 +223,9 @@ fn a_window_opens_at_its_size_and_resizes_to_another() {
     let mut conn = match Conn::connect(None) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("SKIPPED: no X display ({e:?}) — the hints-offset and PSize tests above still ran");
+            eprintln!(
+                "SKIPPED: no X display ({e:?}) — the hints-offset and PSize tests above still ran"
+            );
             return;
         }
     };
@@ -206,7 +235,9 @@ fn a_window_opens_at_its_size_and_resizes_to_another() {
     w.map(&mut conn).expect("map");
 
     // The hints the **server** recorded, not the ones this crate meant to send.
-    let hints = w.size_hints(&mut conn).expect("the server recorded WM_NORMAL_HINTS");
+    let hints = w
+        .size_hints(&mut conn)
+        .expect("the server recorded WM_NORMAL_HINTS");
     assert_eq!(hints.flags & 1, 1, "PSize");
     assert_eq!(
         (hints.width, hints.height),

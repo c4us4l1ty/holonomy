@@ -383,7 +383,10 @@ fn pdf_finds_an_image_whose_anchor_straddles_a_run_boundary() {
         stats.images, 1,
         "the straddling anchor was found exactly once: it was neither dropped nor counted twice"
     );
-    assert_eq!(stats.images_missing, 0, "and it was not reported as a lost asset");
+    assert_eq!(
+        stats.images_missing, 0,
+        "and it was not reported as a lost asset"
+    );
     assert!(
         pdf.contains("/Subtype /Image"),
         "the picture did not survive the cut: {pdf}"

@@ -654,8 +654,10 @@ fn measure_base_edits() {
         }
     }
     let mut rope = rope.unwrap_or_else(|| {
-        panic!("could not load even {usable} >> 3 bytes; a parallel test binary is holding the \
-                 page-lock budget this measurement needs")
+        panic!(
+            "could not load even {usable} >> 3 bytes; a parallel test binary is holding the \
+                 page-lock budget this measurement needs"
+        )
     });
     let leaf_count = rope.leaf_count();
     let len = rope.text_len();
@@ -852,24 +854,26 @@ fn a_full_document_read_is_bounded_by_bandwidth_not_by_per_byte_dispatch() {
     assert!(usable > 1_000_000, "only {usable} bytes were loadable");
 
     // The bisection above and this load are not atomic, and under `cargo test --workspace` they cannot be:
-// `RLIMIT_MEMLOCK` is per-*process* but the system's locked pages are shared, so another test binary
-// running in parallel can take the headroom between "this loads" and "this loads". That is not a flake
-// in the property under test -- the property is the read's throughput, not this host's page-lock
-// budget -- so the load backs off rather than failing.
-let mut rope = None;
-let mut bytes = 0usize;
-for attempt in 0..4u32 {
-    let take = usable >> attempt;
-    if let Ok(r) = Rope::from_text(&doc[..take]) {
-        bytes = r.text_len();
-        rope = Some(r);
-        break;
+    // `RLIMIT_MEMLOCK` is per-*process* but the system's locked pages are shared, so another test binary
+    // running in parallel can take the headroom between "this loads" and "this loads". That is not a flake
+    // in the property under test -- the property is the read's throughput, not this host's page-lock
+    // budget -- so the load backs off rather than failing.
+    let mut rope = None;
+    let mut bytes = 0usize;
+    for attempt in 0..4u32 {
+        let take = usable >> attempt;
+        if let Ok(r) = Rope::from_text(&doc[..take]) {
+            bytes = r.text_len();
+            rope = Some(r);
+            break;
+        }
     }
-}
-let rope = rope.unwrap_or_else(|| {
-    panic!("could not load even {usable} >> 3 bytes; the page-lock budget is contended by a \
-             parallel test binary and this measurement needs room to run")
-});
+    let rope = rope.unwrap_or_else(|| {
+        panic!(
+            "could not load even {usable} >> 3 bytes; the page-lock budget is contended by a \
+             parallel test binary and this measurement needs room to run"
+        )
+    });
 
     // Warm the leaves into cache first: the first read of a fresh `mmap` pays page faults, and this
     // test measures the copy path, not the kernel's first-touch behaviour.

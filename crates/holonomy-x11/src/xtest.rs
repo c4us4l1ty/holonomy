@@ -345,7 +345,11 @@ mod tests {
         let mut full = vec![0u8; 20];
         full[12..16].copy_from_slice(&2u32.to_le_bytes());
         full[16..20].copy_from_slice(&3u32.to_le_bytes());
-        assert_eq!(version(&full), (2, 3), "the two u32s are at offsets 12 and 16");
+        assert_eq!(
+            version(&full),
+            (2, 3),
+            "the two u32s are at offsets 12 and 16"
+        );
 
         for short in [0usize, 1, 8, 19] {
             assert_eq!(

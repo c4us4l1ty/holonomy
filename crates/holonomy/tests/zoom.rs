@@ -148,7 +148,10 @@ fn the_type_grows_when_the_zoom_grows() {
     // **10 and 12, measured** -- the monospace face's advance at 16 and at 20 ppem. **Both are
     // literals and neither is computed from the other**, because a gate that derived the expected
     // width from the same atlas it is measuring would pass on any atlas.
-    assert_eq!(a.chrome.metrics.cell_w, 10, "**100 % is the 16 ppem design**: advance 10");
+    assert_eq!(
+        a.chrome.metrics.cell_w, 10,
+        "**100 % is the 16 ppem design**: advance 10"
+    );
     assert_eq!(b.chrome.metrics.cell_w, 12, "**and 125 % is 20 ppem's 12**");
 
     // **The row pitch follows too, and `cell_h` *is* the row pitch.** `with_line_pitch(p)` sets
@@ -238,12 +241,10 @@ fn the_page_and_its_layout_do_depend_on_the_zoom() {
     let pa = a.chrome_layout().page;
     let pb = b.chrome_layout().page;
     assert_eq!(
-        pa.x,
-        pb.x,
+        pa.x, pb.x,
         "**and both pages keep the same left edge** -- {} and {}. The Plan chrome keeps the sheet \
          a fixed gutter past the document-tabs rail, so a wider page grows to the right.",
-        pa.x,
-        pb.x
+        pa.x, pb.x
     );
 }
 
@@ -362,7 +363,11 @@ fn a_zoom_that_the_atlas_cannot_do_is_refused_rather_than_clamped() {
             msg.contains("100%") && msg.contains("125%"),
             "**and what *is* available**, so a caller does not have to go and read `ZOOMS`: {msg}"
         );
-        assert_eq!(s.state.zoom_label(), label_before, "**and the label did not move for {percent}%**");
+        assert_eq!(
+            s.state.zoom_label(),
+            label_before,
+            "**and the label did not move for {percent}%**"
+        );
         assert_eq!(
             s.chrome.metrics.cell_w, cell_before,
             "**and the measure did not move for {percent}%**"
@@ -458,8 +463,16 @@ fn the_zoom_keys_are_decoded_and_dropped() {
     // variants while the editing keys are `Hotkey` chords -- so a reader who assumes the `Hotkey`
     // shape gets a compile error, which is the cheapest possible way to be told.
     for (code, want, name) in [
-        (holonomy_input::KEY_F11, holonomy_input::Command::ZoomIn, "F11"),
-        (holonomy_input::KEY_F12, holonomy_input::Command::ZoomReset, "F12"),
+        (
+            holonomy_input::KEY_F11,
+            holonomy_input::Command::ZoomIn,
+            "F11",
+        ),
+        (
+            holonomy_input::KEY_F12,
+            holonomy_input::Command::ZoomReset,
+            "F12",
+        ),
     ] {
         let ev = holonomy_input::InputEvent {
             kind: holonomy_input::EV_KEY,
@@ -479,7 +492,8 @@ fn the_zoom_keys_are_decoded_and_dropped() {
     let mut s = session("hello\n");
     s.caret_to(0).expect("caret");
     let before = s.state.zoom_percent;
-    s.apply(holonomy_input::Command::ZoomIn).expect("apply does not fail");
+    s.apply(holonomy_input::Command::ZoomIn)
+        .expect("apply does not fail");
     assert_eq!(
         s.state.zoom_percent, before,
         "**and `apply(Command::ZoomIn)` changes nothing** -- a gap this file names rather than hides"
@@ -540,18 +554,21 @@ fn the_row_pitch_follows_the_zoom_and_not_the_tallest_size() {
     let at16 = u32::from(atlas.line_pitch_at(16));
     let at20 = u32::from(atlas.line_pitch_at(20));
 
-    assert!(at16 < global, "**16 ppem's pitch ({at16}) is below the global ({global})**");
-    assert!(at20 <= global, "**20 ppem's pitch ({at20}) is at most the global ({global})**");
+    assert!(
+        at16 < global,
+        "**16 ppem's pitch ({at16}) is below the global ({global})**"
+    );
+    assert!(
+        at20 <= global,
+        "**20 ppem's pitch ({at20}) is at most the global ({global})**"
+    );
     assert!(at16 < at20, "**and 20 ppem's is the larger of the two**");
 
     assert_eq!(
         a.chrome.metrics.cell_h, at16,
         "**100 % spaces its lines at 16 ppem's pitch**, which is what the user asked for"
     );
-    assert_eq!(
-        b.chrome.metrics.cell_h, at20,
-        "**and 125 % at 20 ppem's**"
-    );
+    assert_eq!(b.chrome.metrics.cell_h, at20, "**and 125 % at 20 ppem's**");
     // **And the user can see the difference.** 30 px of leading for 16 ppem glyphs is visible as
     // every-other-line-blank; the gate is not satisfied by the numbers agreeing.
     assert!(
@@ -572,9 +589,30 @@ fn zoom_round_trips_without_growing_the_chrome() {
         s.set_zoom(100).unwrap();
     }
     let restored = s.chrome.metrics;
-    assert_eq!((restored.title_h, restored.menu_h, restored.toolbar_h, restored.ruler_h,
-                restored.status_h, restored.button, restored.cell_w, restored.cell_h),
-               (original.title_h, original.menu_h, original.toolbar_h, original.ruler_h,
-                original.status_h, original.button, original.cell_w, original.cell_h));
-    assert_eq!(s.chrome_layout().page.width, holonomy_render::Layout::new(&original).page.width);
+    assert_eq!(
+        (
+            restored.title_h,
+            restored.menu_h,
+            restored.toolbar_h,
+            restored.ruler_h,
+            restored.status_h,
+            restored.button,
+            restored.cell_w,
+            restored.cell_h
+        ),
+        (
+            original.title_h,
+            original.menu_h,
+            original.toolbar_h,
+            original.ruler_h,
+            original.status_h,
+            original.button,
+            original.cell_w,
+            original.cell_h
+        )
+    );
+    assert_eq!(
+        s.chrome_layout().page.width,
+        holonomy_render::Layout::new(&original).page.width
+    );
 }

@@ -369,7 +369,11 @@ fn cusum_max_abs_dir(data: &[u8], reverse: bool) -> (f64, i64) {
     // Two loops rather than one iterator chain: the branch is the clearest expression of "walk this way"
     // and the body is identical in both, so the only difference between the directions is visible.
     let step = |s: &mut i64, best: &mut i64, b: u8| {
-        let (u, d, n) = (up[b as usize] as i64, down[b as usize] as i64, net[b as usize] as i64);
+        let (u, d, n) = (
+            up[b as usize] as i64,
+            down[b as usize] as i64,
+            net[b as usize] as i64,
+        );
         *s += n;
         // The excursion within this byte is measured from the value at its start.
         *best = (*best).max(*s).max(*s - n + u);
@@ -607,7 +611,11 @@ pub fn cumulative_sums(data: &[u8], n: f64, forward: bool) -> TestResult {
     // **The statistic depends on the direction, not only the p-value formula.** Using one `z` for both
     // made the reverse test a re-run of the forward test with a different tail: not an independent check,
     // and not the statistic SP 800-22 sec 2.4.4 specifies for the reverse direction.
-    let (z, _) = if forward { cusum_max_abs(data) } else { cusum_max_abs_rev(data) };
+    let (z, _) = if forward {
+        cusum_max_abs(data)
+    } else {
+        cusum_max_abs_rev(data)
+    };
     let s = (n - 1.0).sqrt();
 
     // SP 800-22 sec 2.4.4, both tails and the z < 0.5 continuation:
@@ -981,7 +989,10 @@ mod tests {
              with a different tail formula and SP 800-22's reverse direction is not being measured"
         );
         assert_eq!(fwd.statistic, 384.0, "forward walk peaks at 48 * 8");
-        assert_eq!(rev.statistic, 256.0, "reverse walk peaks at 16 * 8 + 16 * 8");
+        assert_eq!(
+            rev.statistic, 256.0,
+            "reverse walk peaks at 16 * 8 + 16 * 8"
+        );
 
         // The control: input that **is** its own reverse must give equal statistics, which shows the
         // inequality above comes from the input rather than from arithmetic noise.
@@ -1008,7 +1019,13 @@ mod tests {
         // Asserted against a naive bit-at-a-time walk, the same shape as the forward case below, so a
         // regression in either half is caught by arithmetic rather than by a p-value drifting out of
         // range on some future run.
-        for data in [vec![0x00u8; 31].into_iter().chain(vec![0xFF; 33]).collect::<Vec<_>>(), random(997)] {
+        for data in [
+            vec![0x00u8; 31]
+                .into_iter()
+                .chain(vec![0xFF; 33])
+                .collect::<Vec<_>>(),
+            random(997),
+        ] {
             let (fast, _) = cusum_max_abs_rev(&data);
             let (mut s, mut best) = (0i64, 0i64);
             for &b in data.iter().rev() {
@@ -1017,7 +1034,12 @@ mod tests {
                     best = best.max(s.abs());
                 }
             }
-            assert_eq!(fast, best as f64, "reverse cusum differs on {} bytes", data.len());
+            assert_eq!(
+                fast,
+                best as f64,
+                "reverse cusum differs on {} bytes",
+                data.len()
+            );
         }
         let cases: Vec<Vec<u8>> = vec![
             vec![0u8; 64],

@@ -432,7 +432,11 @@ fn a_colour_is_taken_back_by_one_undo() {
         0,
         "**one undo took the colour off the span**"
     );
-    assert_eq!(s.text().unwrap(), b"alpha bravo charlie\n", "undo must not delete the prior text edit");
+    assert_eq!(
+        s.text().unwrap(),
+        b"alpha bravo charlie\n",
+        "undo must not delete the prior text edit"
+    );
     // **The pixels are NOT asserted equal to the control, and the reason is measured.**
     //
     // They differ by **1,898 pixels in a box of `(0, 51, 905, 792)`** -- the bottom two rows of the
@@ -685,7 +689,11 @@ fn body_ink(s: &Session<'_>) -> (u32, u32) {
             *hist.entry(s.frame().pixel(x, y) & 0x00FF_FFFF).or_default() += 1;
         }
     }
-    let page = hist.iter().max_by_key(|(_, n)| **n).map(|(c, _)| *c).unwrap_or(0);
+    let page = hist
+        .iter()
+        .max_by_key(|(_, n)| **n)
+        .map(|(c, _)| *c)
+        .unwrap_or(0);
     let mut ink = 0;
     for y in l.y..l.y + l.height {
         for x in l.x..l.x + l.width {
@@ -731,9 +739,16 @@ fn typed(ppem: u16) -> (u32, u32) {
     let mods = ModifierState::new();
     for key in [holonomy_input::KEY_H, holonomy_input::KEY_I] {
         s.handle_event(InputEvent::press(key)).expect("handle");
-        assert!(km.dispatch(InputEvent::press(key), &mods).is_some(), "a letter");
+        assert!(
+            km.dispatch(InputEvent::press(key), &mods).is_some(),
+            "a letter"
+        );
     }
-    assert_eq!(s.text().expect("text"), b"hi", "the keystrokes are in the document");
+    assert_eq!(
+        s.text().expect("text"),
+        b"hi",
+        "the keystrokes are in the document"
+    );
     s.repaint_all().expect("repaint");
     let (ink, _) = body_ink(&s);
     (ink, empty)

@@ -592,8 +592,7 @@ impl Rope {
         // `Vec` again, and the keystroke would allocate -- which is the bug `Bytes` exists to fix.
         let at = self.cursor;
         self.insert_byte_unrecorded(ch)?;
-        self.record
-            .push(crate::edit_record::Edit::insert(at, [ch]));
+        self.record.push(crate::edit_record::Edit::insert(at, [ch]));
         self.note_edit_at_cursor();
         Ok(())
     }

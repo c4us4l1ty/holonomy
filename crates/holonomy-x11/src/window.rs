@@ -617,7 +617,9 @@ impl Window {
                 .u32(time),
         )?;
         conn.sync()?;
-        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
         Ok(())
     }
 
@@ -641,7 +643,9 @@ impl Window {
                 .u32(time),
         )?;
         conn.sync()?;
-        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
         Ok(())
     }
 
@@ -655,11 +659,24 @@ impl Window {
         format: u8,
         data: &[u8],
     ) -> Result<(), WindowError> {
-        let unit = match format { 8 => 1usize, 16 => 2, 32 => 4, _ => return Err(WindowError::Conn(ConnError::Unsupported(format!("property format {format}")))) };
+        let unit = match format {
+            8 => 1usize,
+            16 => 2,
+            32 => 4,
+            _ => {
+                return Err(WindowError::Conn(ConnError::Unsupported(format!(
+                    "property format {format}"
+                ))))
+            }
+        };
         if data.len() % unit != 0 {
-            return Err(WindowError::ShortBuffer { have: data.len(), need: data.len() + unit - data.len() % unit });
+            return Err(WindowError::ShortBuffer {
+                have: data.len(),
+                need: data.len() + unit - data.len() % unit,
+            });
         }
-        let len = u32::try_from(data.len() / unit).map_err(|_| WindowError::Conn(ConnError::Unsupported("property too large".into())))?;
+        let len = u32::try_from(data.len() / unit)
+            .map_err(|_| WindowError::Conn(ConnError::Unsupported("property too large".into())))?;
         conn.request(
             Req::new(op::CHANGE_PROPERTY)
                 .second_byte(0)
@@ -673,7 +690,9 @@ impl Window {
                 .bytes(data),
         )?;
         conn.sync()?;
-        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
         Ok(())
     }
 
@@ -698,15 +717,24 @@ impl Window {
         )?;
         conn.flush()?;
         let body = conn.reply(seq)?;
-        if body.len() < 32 { return Err(WindowError::ShortReply("GetProperty")); }
+        if body.len() < 32 {
+            return Err(WindowError::ShortReply("GetProperty"));
+        }
         let format = body[1];
         let mut r = Rdr::new(&body);
         r.skip(8);
         let ty = r.u32();
         let _bytes_after = r.u32();
         let value_len = r.u32() as usize;
-        if ty == 0 { return Ok(None); }
-        let unit = match format { 8 => 1usize, 16 => 2, 32 => 4, _ => return Ok(None) };
+        if ty == 0 {
+            return Ok(None);
+        }
+        let unit = match format {
+            8 => 1usize,
+            16 => 2,
+            32 => 4,
+            _ => return Ok(None),
+        };
         let data = &body[32..];
         let take = (value_len.saturating_mul(unit)).min(data.len());
         Ok(Some((ty, format, data[..take].to_vec())))
@@ -739,7 +767,9 @@ impl Window {
                 .u32(0),
         )?;
         conn.sync()?;
-        if let Some(e) = conn.take_error() { return Err(WindowError::Protocol(e)); }
+        if let Some(e) = conn.take_error() {
+            return Err(WindowError::Protocol(e));
+        }
         Ok(())
     }
 
@@ -1166,10 +1196,7 @@ impl Window {
     ///
     /// **Which is the root for a top-level window**, so for the window this crate creates
     /// `(x, y)` plus a widget's window-relative coordinate is the root-space coordinate XTEST wants.
-    pub fn geometry_full(
-        &self,
-        conn: &mut Conn,
-    ) -> Result<(i16, i16, u16, u16, u32), WindowError> {
+    pub fn geometry_full(&self, conn: &mut Conn) -> Result<(i16, i16, u16, u16, u32), WindowError> {
         let seq = conn.request(Req::new(op::GET_GEOMETRY).second_byte(0).u32(self.id))?;
         conn.flush()?;
         let body = conn.reply(seq)?;

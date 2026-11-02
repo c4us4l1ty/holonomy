@@ -348,10 +348,7 @@ pub fn argon2id_k_int(passphrase: &str, salt: &[u8]) -> Result<[u8; K_INT_LEN], 
 }
 
 /// The Argon2id call, with the working memory owned by this frame. See [`argon2id_k_int`].
-fn argon2id_k_int_inner(
-    passphrase: &str,
-    salt: &[u8],
-) -> Result<[u8; K_INT_LEN], EnvelopeError> {
+fn argon2id_k_int_inner(passphrase: &str, salt: &[u8]) -> Result<[u8; K_INT_LEN], EnvelopeError> {
     let params = argon2::Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
         .map_err(|_| EnvelopeError::Argon2Failed)?;
     // **Read the block count before `Argon2::new` takes `params` by value**, which is the only reason
@@ -408,7 +405,10 @@ fn scrub_blocks(memory: &mut [argon2::Block]) {
     // assertion a scrub of a real one does, and Argon2 fills 128 MiB of *derived* material — so the
     // gate has to prove the buffer was not zero to begin with or it is testing a `memset` of nothing.
     #[cfg(test)]
-    let before: Vec<u64> = memory.first().map(|b| b.as_ref().to_vec()).unwrap_or_default();
+    let before: Vec<u64> = memory
+        .first()
+        .map(|b| b.as_ref().to_vec())
+        .unwrap_or_default();
 
     for block in memory.iter_mut() {
         block.as_mut().zeroize();
@@ -420,7 +420,13 @@ fn scrub_blocks(memory: &mut [argon2::Block]) {
     // **And the "after", in the same breath**, so the two halves cannot disagree about what was
     // scrubbed. Recorded rather than asserted here because a production build has no test module.
     #[cfg(test)]
-    record_scrub(before, memory.first().map(|b| b.as_ref().to_vec()).unwrap_or_default());
+    record_scrub(
+        before,
+        memory
+            .first()
+            .map(|b| b.as_ref().to_vec())
+            .unwrap_or_default(),
+    );
 }
 
 /// The VDF's share of the unlock budget, in milliseconds. PROJECT.md §2.4.

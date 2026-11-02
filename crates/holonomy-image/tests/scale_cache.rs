@@ -674,7 +674,9 @@ fn an_exact_integer_ratio_makes_axis_map_decimate() {
         "at src/dst == 3 every destination pixel lands on a source pixel centre"
     );
     assert!(
-        map.iter().enumerate().all(|(i, s)| s.lo as usize == 3 * i + 1),
+        map.iter()
+            .enumerate()
+            .all(|(i, s)| s.lo as usize == 3 * i + 1),
         "and it lands at source 3i + 1, which is what makes the weights zero"
     );
     // The weights being zero is the whole mechanism; `hi` is still recorded so the second pass can
@@ -729,12 +731,16 @@ fn and_the_product_ratio_is_handed_to_the_area_filter() {
             //
             // Decimation would give 235 or 20 -- the exact source value -- so **either** mean falsifies
             // it, and asserting the pair is sharper than asserting one of them would be.
-            let (first, mean) = if (3 * x + y) % 2 == 0 { (235, 163) } else { (20, 92) };
+            let (first, mean) = if (3 * x + y) % 2 == 0 {
+                (235, 163)
+            } else {
+                (20, 92)
+            };
             assert_eq!(
                 got, mean,
                 "column {x} row {y}: a 3:1 area average must be the mean of three source pixels. \
-                 Got {got}, which is source pixel {} -- decimation."
-                    , first
+                 Got {got}, which is source pixel {} -- decimation.",
+                first
             );
         }
     }

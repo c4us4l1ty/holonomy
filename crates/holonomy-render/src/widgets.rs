@@ -206,12 +206,7 @@ impl Tool {
     pub const fn has_dropdown(self) -> bool {
         matches!(
             self,
-            Tool::Zoom
-                | Tool::Style
-                | Tool::Font
-                | Tool::TextColour
-                | Tool::Mode
-                | Tool::Overflow
+            Tool::Zoom | Tool::Style | Tool::Font | Tool::TextColour | Tool::Mode | Tool::Overflow
         )
     }
 
@@ -572,7 +567,8 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         }
         p.rect = fit(
             x,
-            m.toolbar.y
+            m.toolbar
+                .y
                 .saturating_add(m.toolbar.height / 2)
                 .saturating_sub(button / 2),
             w,
@@ -618,7 +614,8 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         r = r.saturating_sub(w);
         p.rect = fit(
             r,
-            m.toolbar.y
+            m.toolbar
+                .y
                 .saturating_add(m.toolbar.height / 2)
                 .saturating_sub(button / 2),
             w,
@@ -794,7 +791,12 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let anchor_x = match open {
         Open::RibbonOverflow => crate::ribbon::overflow_rect(l).x,
         Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
-        Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l,state).1.into_iter().find(|b| b.action==crate::menus::Action::SelectTool(tool)).map(|b|b.rect.x).unwrap_or(l.toolbar.x),
+        Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
+            .1
+            .into_iter()
+            .find(|b| b.action == crate::menus::Action::SelectTool(tool))
+            .map(|b| b.rect.x)
+            .unwrap_or(l.toolbar.x),
         Open::Tool(tool) => {
             place_toolbar(l, TOOLBAR_PAD)
                 .into_iter()
@@ -921,14 +923,25 @@ pub fn row_cells(it: &crate::menus::Item, cell_w: u32) -> u32 {
 /// cheaper mistake.**
 pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
     match h {
-        Hit::Ribbon(a) => crate::ribbon::qat(l).into_iter().find(|(x,_)|*x==a).map(|(_,r)|r)
-            .or_else(|| crate::ribbon::layout(l,state).1.into_iter().find(|b|b.action==a).map(|b|b.rect)),
+        Hit::Ribbon(a) => crate::ribbon::qat(l)
+            .into_iter()
+            .find(|(x, _)| *x == a)
+            .map(|(_, r)| r)
+            .or_else(|| {
+                crate::ribbon::layout(l, state)
+                    .1
+                    .into_iter()
+                    .find(|b| b.action == a)
+                    .map(|b| b.rect)
+            }),
         Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied(),
         Hit::RibbonSearch => Some(crate::ribbon::search_rect(l)),
         Hit::RibbonLock => Some(crate::ribbon::lock_rect(l)),
         Hit::RibbonCollapse => Some(crate::ribbon::collapse_rect(l)),
         Hit::Nav(i) => l.sidebar_doc(i),
-        Hit::Tool(t) if state.ribbon && t==Tool::Overflow => Some(crate::ribbon::overflow_rect(l)),
+        Hit::Tool(t) if state.ribbon && t == Tool::Overflow => {
+            Some(crate::ribbon::overflow_rect(l))
+        }
         Hit::Tool(t) => place_toolbar(l, TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool == t)
@@ -1112,24 +1125,66 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     }
 
     if state.ribbon {
-        if state.open==Some(Open::RibbonOverflow) && overflow_rect(l).contains(x,y) { return Hit::Tool(Tool::Overflow); }
-        for (a,r) in crate::ribbon::qat(l) { if r.contains(x,y) { return Hit::Ribbon(a); } }
-        if crate::ribbon::search_rect(l).contains(x,y) { return Hit::RibbonSearch; }
-        if crate::ribbon::lock_rect(l).contains(x,y) { return Hit::RibbonLock; }
-        if l.title.contains(x,y) { return Hit::None; }
-        for (i,r) in crate::ribbon::tab_rects(l).into_iter().enumerate() { if r.contains(x,y) { return Hit::RibbonTab(i); } }
-        if crate::ribbon::collapse_rect(l).contains(x,y) { return Hit::RibbonCollapse; }
-        if l.menubar.contains(x,y) { return Hit::None; }
+        if state.open == Some(Open::RibbonOverflow) && overflow_rect(l).contains(x, y) {
+            return Hit::Tool(Tool::Overflow);
+        }
+        for (a, r) in crate::ribbon::qat(l) {
+            if r.contains(x, y) {
+                return Hit::Ribbon(a);
+            }
+        }
+        if crate::ribbon::search_rect(l).contains(x, y) {
+            return Hit::RibbonSearch;
+        }
+        if crate::ribbon::lock_rect(l).contains(x, y) {
+            return Hit::RibbonLock;
+        }
+        if l.title.contains(x, y) {
+            return Hit::None;
+        }
+        for (i, r) in crate::ribbon::tab_rects(l).into_iter().enumerate() {
+            if r.contains(x, y) {
+                return Hit::RibbonTab(i);
+            }
+        }
+        if crate::ribbon::collapse_rect(l).contains(x, y) {
+            return Hit::RibbonCollapse;
+        }
+        if l.menubar.contains(x, y) {
+            return Hit::None;
+        }
         if !state.ribbon_collapsed {
-            for b in crate::ribbon::layout(l,state).1 { if b.rect.contains(x,y) { return Hit::Ribbon(b.action); } }
-            if crate::ribbon::overflow_rect(l).contains(x,y) { return Hit::Tool(Tool::Overflow); }
+            for b in crate::ribbon::layout(l, state).1 {
+                if b.rect.contains(x, y) {
+                    return Hit::Ribbon(b.action);
+                }
+            }
+            if crate::ribbon::overflow_rect(l).contains(x, y) {
+                return Hit::Tool(Tool::Overflow);
+            }
         }
-        if l.toolbar.contains(x,y) { return Hit::None; }
+        if l.toolbar.contains(x, y) {
+            return Hit::None;
+        }
         if state.sidebar_open {
-            for i in 0..state.navigation.len() { if l.sidebar_doc(i).is_some_and(|r|r.contains(x,y)) { return Hit::Nav(i); } }
-            if l.sidebar.contains(x,y) { return Hit::None; }
+            for i in 0..state.navigation.len() {
+                if l.sidebar_doc(i).is_some_and(|r| r.contains(x, y)) {
+                    return Hit::Nav(i);
+                }
+            }
+            if l.sidebar.contains(x, y) {
+                return Hit::None;
+            }
         }
-        return if if state.paged { l.page_at(state,x,y).is_some() } else { l.page.contains(x,y) } { Hit::Page } else { Hit::None };
+        return if if state.paged {
+            l.page_at(state, x, y).is_some()
+        } else {
+            l.page.contains(x, y)
+        } {
+            Hit::Page
+        } else {
+            Hit::None
+        };
     }
 
     // **Title bar first, then the menu bar, then the toolbar**: the bands do not overlap, so the order
@@ -1183,7 +1238,11 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
     }
 
-    if if state.paged { l.page_at(state, x, y).is_some() } else { at(&l.page) } {
+    if if state.paged {
+        l.page_at(state, x, y).is_some()
+    } else {
+        at(&l.page)
+    } {
         Hit::Page
     } else {
         Hit::None

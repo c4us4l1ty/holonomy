@@ -42,7 +42,9 @@ use holonomy_assets::metric::ATLAS_BYTES;
 /// `args::tests`, not exposed as a constant. **If the clamp moves, this list is out of date and
 /// `every_legal_ppem_builds_an_atlas` will quietly stop covering the new values** — which is the
 /// one hazard in this file and the reason the list is written here rather than derived.
-const LEGAL: [u16; 17] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26];
+const LEGAL: [u16; 17] = [
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+];
 
 /// **The default, and the value part 46 arrived at.
 ///
@@ -128,7 +130,11 @@ fn the_pair_boundary_is_where_the_documentation_says() {
         "**--ppem {LARGEST_PAIRED_PPM} holds two sizes**: used {} of {ATLAS_BYTES}",
         at.atlas.used()
     );
-    assert_eq!(at.atlas.sizes().len(), 2, "**and the atlas really has two**");
+    assert_eq!(
+        at.atlas.sizes().len(),
+        2,
+        "**and the atlas really has two**"
+    );
 
     let over = atlas_plan::build(LARGEST_PAIRED_PPM + 1);
     assert!(
@@ -178,7 +184,9 @@ fn a_refusal_names_the_numbers_and_the_flag() {
     let over = LARGEST_PAIRED_PPM + 1;
     let why = atlas_plan::build(over)
         .zoom_refusal(over)
-        .unwrap_or_else(|| panic!("**--ppem {over} has one size, so there must be a refusal to explain**"));
+        .unwrap_or_else(|| {
+            panic!("**--ppem {over} has one size, so there must be a refusal to explain**")
+        });
     assert!(
         why.contains(&holonomy_assets::metric::ATLAS_BYTES.to_string()),
         "**the message carries the capacity**: {why:?}"
@@ -209,9 +217,21 @@ fn a_refusal_names_the_numbers_and_the_flag() {
 /// and nothing else in the program would notice.
 #[test]
 fn sizes_for_is_two_ascending_sizes() {
-    assert_eq!(atlas_plan::sizes_for(16), vec![16, 20], "**16 gives 16 and 20**");
-    assert_eq!(atlas_plan::sizes_for(20), vec![20, 25], "**20 gives 20 and 25**");
-    assert_eq!(atlas_plan::sizes_for(10), vec![10, 12], "**10 gives 10 and 12**");
+    assert_eq!(
+        atlas_plan::sizes_for(16),
+        vec![16, 20],
+        "**16 gives 16 and 20**"
+    );
+    assert_eq!(
+        atlas_plan::sizes_for(20),
+        vec![20, 25],
+        "**20 gives 20 and 25**"
+    );
+    assert_eq!(
+        atlas_plan::sizes_for(10),
+        vec![10, 12],
+        "**10 gives 10 and 12**"
+    );
     for base in LEGAL {
         let sizes = atlas_plan::sizes_for(base);
         assert_eq!(sizes.len(), 2, "**--ppem {base} asks for two sizes**");

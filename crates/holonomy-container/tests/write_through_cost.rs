@@ -155,7 +155,15 @@ fn sealing_one_section_is_a_pure_cpu_cost() {
         slot.as_mut_slice()[..CHUNK_PLAINTEXT].fill((i % 251) as u8);
 
         let t = Instant::now();
-        aead::seal_in_place(&k, &n_root, 1, &aead::UNSEALED, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
+        aead::seal_in_place(
+            &k,
+            &n_root,
+            1,
+            &aead::UNSEALED,
+            CHUNK_PLAINTEXT,
+            slot.as_mut_slice(),
+        )
+        .expect("seal");
         seal.push(nanos(t.elapsed()));
 
         // And the decrypt the fault path already pays for the same bytes.
@@ -279,7 +287,15 @@ fn write_throughs_charge_is_dominated_by_the_device_not_the_cipher() {
     for i in 0..SEAL_N {
         slot.as_mut_slice()[..CHUNK_PLAINTEXT].fill((i % 251) as u8);
         let t = Instant::now();
-        aead::seal_in_place(&k, &n_root, 1, &aead::UNSEALED, CHUNK_PLAINTEXT, slot.as_mut_slice()).expect("seal");
+        aead::seal_in_place(
+            &k,
+            &n_root,
+            1,
+            &aead::UNSEALED,
+            CHUNK_PLAINTEXT,
+            slot.as_mut_slice(),
+        )
+        .expect("seal");
         seal.push(nanos(t.elapsed()));
     }
     let seal_us = median_micros(seal);

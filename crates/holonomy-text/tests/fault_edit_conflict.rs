@@ -72,7 +72,8 @@ impl LeafSource for SavedDocument {
 
 fn read_at(rope: &mut Rope, source: &mut dyn LeafSource, at: usize, len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
-    rope.read_at_faulting(source, at, len, &mut out).expect("fault, then read");
+    rope.read_at_faulting(source, at, len, &mut out)
+        .expect("fault, then read");
     out
 }
 
@@ -86,19 +87,28 @@ fn an_edit_no_longer_shifts_the_fault_out_by_one_byte() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
-    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+    let mut store = SavedDocument {
+        bytes: bytes.clone(),
+        fetches: 0,
+    };
 
     let leaf = rope.leaf_len_of(0);
     let probe = leaf + 10;
 
     // Before any edit, the rope and the store agree: this is what makes the "after" meaningful.
     let before = read_at(&mut rope, &mut store, probe, 8);
-    assert_eq!(before[..], bytes[probe..probe + 8], "before an edit, the fault lands correctly");
+    assert_eq!(
+        before[..],
+        bytes[probe..probe + 8],
+        "before an edit, the fault lands correctly"
+    );
 
     // Now edit deep in the document, in a leaf that is *after* the probe leaf.
     let deep = 3 * leaf + 100;
-    rope.fault_leaf_containing(&mut store, deep).expect("fault the edit's leaf");
-    rope.set_cursor_faulting(&mut store, deep).expect("place the cursor");
+    rope.fault_leaf_containing(&mut store, deep)
+        .expect("fault the edit's leaf");
+    rope.set_cursor_faulting(&mut store, deep)
+        .expect("place the cursor");
     rope.insert_byte(b'Z').expect("insert into a resident leaf");
 
     // The insert shifted everything after it by one byte. The rope knows this; the store does not.
@@ -153,7 +163,10 @@ fn a_faulting_read_of_an_unedited_document_is_correct() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
-    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+    let mut store = SavedDocument {
+        bytes: bytes.clone(),
+        fetches: 0,
+    };
 
     // Read all over the document, in pieces, faulting as it goes.
     let mut got = Vec::new();
@@ -163,8 +176,15 @@ fn a_faulting_read_of_an_unedited_document_is_correct() {
         got.extend_from_slice(&read_at(&mut rope, &mut store, at, take));
         at += take;
     }
-    assert_eq!(got, bytes, "every byte, read in misaligned pieces, is right");
-    assert!(store.fetches > 10, "and it really faulted many times -- got {}", store.fetches);
+    assert_eq!(
+        got, bytes,
+        "every byte, read in misaligned pieces, is right"
+    );
+    assert!(
+        store.fetches > 10,
+        "and it really faulted many times -- got {}",
+        store.fetches
+    );
 }
 
 /// **Cursor moves are safe too**, for the same reason, and they are the reason `set_cursor_faulting`
@@ -174,14 +194,18 @@ fn a_faulting_cursor_move_does_not_drift_the_store() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
-    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+    let mut store = SavedDocument {
+        bytes: bytes.clone(),
+        fetches: 0,
+    };
 
     // Visit every leaf boundary. Each is a fault, and none of them may move a byte.
     let leaf = rope.leaf_len_of(0);
     let mut at = 0;
     let mut visits = 0;
     while at < n {
-        rope.set_cursor_faulting(&mut store, at).expect("place the caret");
+        rope.set_cursor_faulting(&mut store, at)
+            .expect("place the caret");
         // Read a byte at the caret and check it against the saved document. If the cursor move had
         // drifted anything, this is where it would show.
         let b = read_at(&mut rope, &mut store, at, 1);
@@ -189,8 +213,15 @@ fn a_faulting_cursor_move_does_not_drift_the_store() {
         visits += 1;
         at += leaf;
     }
-    assert!(visits >= 10, "the fixture must visit many leaves, got {visits}");
-    assert_eq!(rope.text_len(), n, "and the document is exactly as long as it started");
+    assert!(
+        visits >= 10,
+        "the fixture must visit many leaves, got {visits}"
+    );
+    assert_eq!(
+        rope.text_len(),
+        n,
+        "and the document is exactly as long as it started"
+    );
 }
 
 /// **The window still works after an edit refuses**, because refusing is the point: a refused edit
@@ -200,7 +231,10 @@ fn the_window_still_reads_correctly_after_a_mutation_refuses() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
-    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+    let mut store = SavedDocument {
+        bytes: bytes.clone(),
+        fetches: 0,
+    };
 
     // An edit into an absent leaf refuses, exactly as it did before any of this work.
     let deep = 3 * rope.leaf_len_of(0) + 100;
@@ -212,7 +246,11 @@ fn the_window_still_reads_correctly_after_a_mutation_refuses() {
 
     // The refusal left everything consistent, so a read is still right.
     let got = read_at(&mut rope, &mut store, 0, 64);
-    assert_eq!(got[..], bytes[..64], "a refused edit does not damage the document");
+    assert_eq!(
+        got[..],
+        bytes[..64],
+        "a refused edit does not damage the document"
+    );
 }
 
 /// **A refused edit leaves no phantom in the edit record**, and the phantom is invisible to a
@@ -239,14 +277,19 @@ fn a_refused_edit_leaves_no_phantom_in_the_record() {
     let n = 40_000;
     let bytes = doc(n);
     let mut rope = Rope::from_skeleton(n);
-    let mut store = SavedDocument { bytes: bytes.clone(), fetches: 0 };
+    let mut store = SavedDocument {
+        bytes: bytes.clone(),
+        fetches: 0,
+    };
 
     let leaf = rope.leaf_len_of(0);
     let deep = 3 * leaf + 100;
 
     // A click faults one leaf and puts the caret there. That is the only resident leaf.
-    rope.fault_leaf_containing(&mut store, deep).expect("fault the click's leaf");
-    rope.set_cursor_faulting(&mut store, deep).expect("place the caret");
+    rope.fault_leaf_containing(&mut store, deep)
+        .expect("fault the click's leaf");
+    rope.set_cursor_faulting(&mut store, deep)
+        .expect("place the caret");
 
     // Keystroke 1: a real insert into the resident leaf. Recorded.
     rope.insert_byte(b'A').expect("insert into a resident leaf");
@@ -262,7 +305,8 @@ fn a_refused_edit_leaves_no_phantom_in_the_record() {
     );
 
     // Keystroke 3: back in the resident leaf, one byte after keystroke 1. Recorded.
-    rope.insert_byte(b'B').expect("second insert into a resident leaf");
+    rope.insert_byte(b'B')
+        .expect("second insert into a resident leaf");
 
     // Now commit and read the whole document back. `commit` writes every leaf and clears the record,
     // so this exercises the *store*; but before commit the two resident reads below already pin the
@@ -313,8 +357,14 @@ fn a_refused_edit_leaves_no_phantom_in_the_record() {
 fn there_is_no_faulting_mutator_on_the_rope() {
     // `set_cursor_faulting` is the one `*_faulting` mutator that exists, and it moves no byte.
     let mut rope = Rope::from_skeleton(0);
-    let mut store = SavedDocument { bytes: Vec::new(), fetches: 0 };
-    assert!(rope.set_cursor_faulting(&mut store, 0).is_ok(), "the cursor move works on an empty rope");
+    let mut store = SavedDocument {
+        bytes: Vec::new(),
+        fetches: 0,
+    };
+    assert!(
+        rope.set_cursor_faulting(&mut store, 0).is_ok(),
+        "the cursor move works on an empty rope"
+    );
 
     // The rope's mutating surface that a sparse document can actually reach: nothing that writes. This
     // is checked by name rather than by signature because the point is the *inventory*, and a signature
@@ -327,6 +377,9 @@ fn there_is_no_faulting_mutator_on_the_rope() {
         "set_cursor_faulting",
     ];
     for m in faulting_methods {
-        assert!(!m.contains("insert") && !m.contains("delete"), "{m} must not write");
+        assert!(
+            !m.contains("insert") && !m.contains("delete"),
+            "{m} must not write"
+        );
     }
 }

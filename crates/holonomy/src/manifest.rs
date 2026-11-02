@@ -520,12 +520,9 @@ impl Manifest {
         // **`None` means the section could not be read**, which is not the same as "unchanged".
         let mut changed = false;
         let mut read_all = true;
-        let mut take = |m: &mut Self, section: usize| match m.recompute_section(
-            editor,
-            section,
-            source,
-            scratch,
-        ) {
+        let mut take = |m: &mut Self, section: usize| match m
+            .recompute_section(editor, section, source, scratch)
+        {
             Some(c) => changed |= c,
             None => read_all = false,
         };
@@ -1100,7 +1097,10 @@ mod tests {
         let mut e = editor_with(&base);
         let mut d = Manifest::from_text(&base);
         assert_eq!(d.sync(&mut e, 0, &mut None, &mut scratch), Sync::Unchanged);
-        assert_eq!(d.sync(&mut e, 80_000, &mut None, &mut scratch), Sync::Unchanged);
+        assert_eq!(
+            d.sync(&mut e, 80_000, &mut None, &mut scratch),
+            Sync::Unchanged
+        );
 
         // **Appending a byte is a one-section update, not a rebuild and not `Unchanged`.** Three previous
         // versions of this function got it wrong and every one of them was caught by exactly this

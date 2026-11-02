@@ -149,7 +149,9 @@ pub enum VdfError {
 impl core::fmt::Display for VdfError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SeedNotCoprime => f.write_str("seed is not coprime with N_pub (would degenerate)"),
+            Self::SeedNotCoprime => {
+                f.write_str("seed is not coprime with N_pub (would degenerate)")
+            }
             Self::ZeroSeed => f.write_str("seed reduced to zero"),
             Self::ZeroIterations => f.write_str("zero iterations"),
             Self::Uncalibrated => f.write_str(

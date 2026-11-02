@@ -356,7 +356,10 @@ fn the_bands_themselves_are_not_widgets() {
 #[test]
 fn the_title_bar_draws_only_buttons_that_do_something() {
     let l = layout();
-    let drawn: Vec<TitleButton> = place_title(&l, TITLE_PAD).into_iter().map(|(b, _)| b).collect();
+    let drawn: Vec<TitleButton> = place_title(&l, TITLE_PAD)
+        .into_iter()
+        .map(|(b, _)| b)
+        .collect();
     assert_eq!(
         drawn,
         vec![TitleButton::Cloud, TitleButton::Share],
@@ -631,7 +634,8 @@ fn the_right_hand_group_reserves_the_gaps_it_draws() {
         let want = prev.right() + if tool.separated() { SEPARATOR } else { 0 };
         let got = find(tool).x;
         assert_eq!(
-            got, want,
+            got,
+            want,
             "{} starts at {got} but {:?} ends at {} and {} a separator",
             tool.name(),
             prev,
@@ -664,7 +668,8 @@ fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
         if let Some((before, right)) = prev {
             let want = right + if p.tool.separated() { SEPARATOR } else { 0 };
             assert_eq!(
-                p.rect.x, want,
+                p.rect.x,
+                want,
                 "{} starts at {} but {} ends at {} and {} a separator",
                 p.tool.name(),
                 p.rect.x,
@@ -695,11 +700,24 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
         .collect();
     assert_eq!(
         leading,
-        vec!["undo", "print", "style", "font", "size-down", "bold", "link", "overflow", "mode"],
+        vec![
+            "undo",
+            "print",
+            "style",
+            "font",
+            "size-down",
+            "bold",
+            "link",
+            "overflow",
+            "mode"
+        ],
         "nine leading tools, seven of them left-hand: the reference's six groups"
     );
     // **Nothing at the head of the bar**, because there is no group before the first one.
-    assert!(!TOOLBAR[0].separated(), "the first tool has nothing to its left to divide from");
+    assert!(
+        !TOOLBAR[0].separated(),
+        "the first tool has nothing to its left to divide from"
+    );
     // **And nothing at the tail**, because the collapse chevron sits against the pill's curve.
     assert!(
         !TOOLBAR[TOOLBAR.len() - 1].separated(),

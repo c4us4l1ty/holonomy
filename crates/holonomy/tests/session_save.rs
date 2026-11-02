@@ -104,7 +104,10 @@ fn read_back(path: &std::path::Path) -> Vec<u8> {
     let mut at = 0usize;
     while at < len {
         let n = store
-            .copy_into((at / holonomy::manifest::SECTION_BYTES) as u32, &mut out[at..])
+            .copy_into(
+                (at / holonomy::manifest::SECTION_BYTES) as u32,
+                &mut out[at..],
+            )
             .expect("copy");
         if n == 0 {
             break;
@@ -119,7 +122,9 @@ fn read_back(path: &std::path::Path) -> Vec<u8> {
 /// session would dominate the run time and, worse, allocate inside the measured path.
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     Box::leak(Box::new(
-        holonomy_assets::build_atlas(&[16]).expect("build the atlas").0,
+        holonomy_assets::build_atlas(&[16])
+            .expect("build the atlas")
+            .0,
     ))
 }
 
@@ -182,8 +187,10 @@ fn ctrl_s(s: &mut Session<'_>, store: &mut dyn LeafSource) {
 
 fn type_a(s: &mut Session<'_>, store: &mut dyn LeafSource, n: usize) {
     for _ in 0..n {
-        s.handle_event_with(store, InputEvent::press(KEY_A)).expect("a");
-        s.handle_event_with(store, InputEvent::release(KEY_A)).expect("a up");
+        s.handle_event_with(store, InputEvent::press(KEY_A))
+            .expect("a");
+        s.handle_event_with(store, InputEvent::release(KEY_A))
+            .expect("a up");
     }
 }
 
@@ -196,7 +203,10 @@ fn ctrl_s_writes_the_edited_document_to_the_container() {
     let doc = text(20_000);
     let path = make(&doc);
     let before = read_back(&path);
-    assert_eq!(before, doc, "the fixture reads back before anything is claimed about it");
+    assert_eq!(
+        before, doc,
+        "the fixture reads back before anything is claimed about it"
+    );
 
     with_session(&path, |s, store| {
         // `Ctrl+Home` first so the insert lands at offset 0 and the expectation is a prefix rather than
@@ -257,8 +267,7 @@ fn a_second_save_of_an_unchanged_document_leaves_the_bytes_alone() {
 
         ctrl_s(s, store);
         assert_eq!(
-            s.stats.committed,
-            2,
+            s.stats.committed, 2,
             "and the second is counted as a save, not refused: a no-op and a refusal are different"
         );
         assert_eq!(
@@ -302,7 +311,10 @@ fn the_file_menu_save_row_saves_like_the_key() {
 fn editing_marks_the_document_unsaved_and_saving_clears_it() {
     let path = make(&text(8_000));
     with_session(&path, |s, store| {
-        assert!(!s.state.dirty, "a freshly opened document is not marked unsaved");
+        assert!(
+            !s.state.dirty,
+            "a freshly opened document is not marked unsaved"
+        );
         type_a(s, store, 1);
         assert!(s.state.dirty, "and one keystroke marks it");
         ctrl_s(s, store);
@@ -380,7 +392,10 @@ fn the_driver_saves_unsaved_work_before_it_exports() {
     let original = read_back(&path);
     with_session(&path, |s, store| {
         type_a(s, store, 10);
-        assert!(s.state.dirty, "there is unsaved work at the moment the driver checks");
+        assert!(
+            s.state.dirty,
+            "there is unsaved work at the moment the driver checks"
+        );
 
         // `drive()`'s order: commit, then repaint, then export.
         let written = s.commit_to(store);

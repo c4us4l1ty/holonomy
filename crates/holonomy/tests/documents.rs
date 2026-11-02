@@ -103,13 +103,20 @@ fn new_parks_the_document_that_was_open() {
 
     s.apply_action(Action::New).expect("new");
 
-    assert_eq!(s.document_count(), 2, "the document that was open is still open");
+    assert_eq!(
+        s.document_count(),
+        2,
+        "the document that was open is still open"
+    );
     assert_eq!(
         s.state.docs,
         vec!["untitled".to_string(), "field notes".to_string()],
         "**the rail lists the new document first and the parked one after it.**"
     );
-    assert_eq!(s.state.title, "untitled", "and the title bar is the one on the page");
+    assert_eq!(
+        s.state.title, "untitled",
+        "and the title bar is the one on the page"
+    );
     assert_eq!(s.state.active_doc, 0, "and it is the active row");
 }
 
@@ -148,7 +155,8 @@ fn closing_the_last_document_leaves_a_blank() {
     s.set_document("field notes");
     assert_eq!(s.document_count(), 1);
 
-    s.apply_action(Action::Close).expect("close the only document");
+    s.apply_action(Action::Close)
+        .expect("close the only document");
 
     assert_eq!(s.document_count(), 1, "a session always has a document");
     assert_eq!(s.state.title, "untitled");
@@ -234,7 +242,11 @@ fn clicking_a_rail_row_switches_the_painted_document() {
 #[test]
 fn an_open_row_is_a_request_not_an_opening() {
     let mut s = session();
-    assert_eq!(s.take_open_request(), None, "nothing asked before a row is chosen");
+    assert_eq!(
+        s.take_open_request(),
+        None,
+        "nothing asked before a row is chosen"
+    );
 
     s.apply_action(Action::Open).expect("open");
 
@@ -244,7 +256,11 @@ fn an_open_row_is_a_request_not_an_opening() {
         "**the row is the request, and it carries which of the two it was.**"
     );
     assert_eq!(s.take_open_request(), None, "and taking it once clears it");
-    assert_eq!(s.document_count(), 1, "asking for a path opened no document");
+    assert_eq!(
+        s.document_count(),
+        1,
+        "asking for a path opened no document"
+    );
 
     s.apply_action(Action::Import).expect("import");
     assert_eq!(s.take_open_request(), Some(Action::Import));

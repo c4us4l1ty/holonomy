@@ -130,7 +130,6 @@ impl LeafSource for Counting {
         }
         Ok(())
     }
-
 }
 
 /// A session over a **skeleton** rope of `len` bytes: the document exists, and none of its leaves do.
@@ -159,8 +158,13 @@ fn session(len: usize) -> Session<'static> {
 fn resident_session(len: usize, text: &[u8]) -> Session<'static> {
     let m = ChromeMetrics::DESKTOP;
     let mut ed = Editor::new();
-    ed.insert_at(0, text, SpanPolicy::GrowIntoInsert).expect("seed");
-    debug_assert_eq!(ed.text_len(), len, "the seed is the length the test asked for");
+    ed.insert_at(0, text, SpanPolicy::GrowIntoInsert)
+        .expect("seed");
+    debug_assert_eq!(
+        ed.text_len(),
+        len,
+        "the seed is the length the test asked for"
+    );
     Session::new(
         ed,
         Painter::new(atlas(), 0),
@@ -312,7 +316,8 @@ fn a_keystroke_inside_the_resident_window_faults_nothing() {
     let bytes_before = src.bytes_fetched;
 
     for c in "hello".chars() {
-        s.apply_with(Command::Insert(c), Some(&mut src)).expect("type");
+        s.apply_with(Command::Insert(c), Some(&mut src))
+            .expect("type");
     }
 
     assert_eq!(
@@ -472,7 +477,8 @@ fn a_click_past_the_resident_window_and_a_keystroke_both_work() {
     let mut src = Counting::new();
     let doc_len = src.bytes.len();
     let mut s = session(doc_len);
-    s.caret_to_faulting(0, &mut src).expect("caret at the start");
+    s.caret_to_faulting(0, &mut src)
+        .expect("caret at the start");
 
     // **The middle of the document**, which is 30 leaves in and in no resident leaf.
     let deep = LEAF * 30;
@@ -490,7 +496,10 @@ fn a_click_past_the_resident_window_and_a_keystroke_both_work() {
         before.len(),
         after.len()
     );
-    assert_eq!(after[deep], b'Z', "**and it is at the caret, not appended**");
+    assert_eq!(
+        after[deep], b'Z',
+        "**and it is at the caret, not appended**"
+    );
     let mut expected = before;
     expected.insert(deep, b'Z');
     assert_eq!(

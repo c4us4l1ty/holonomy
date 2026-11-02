@@ -54,21 +54,34 @@ const CEILING: u64 = 2 * 1024 * 1024;
 /// The binary at `path` is a static PIE.
 fn assert_static_pie(path: &Path, what: &str) {
     let b = std::fs::read(path).expect("read the release binary");
-    assert!(b.len() >= 64 && b.starts_with(b"\x7fELF"), "{what}: not ELF64");
+    assert!(
+        b.len() >= 64 && b.starts_with(b"\x7fELF"),
+        "{what}: not ELF64"
+    );
     assert_eq!(b[4], 2, "{what}: not ELFCLASS64");
     assert_eq!(b[5], 1, "{what}: not little-endian");
     let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     let u64_at = |o: usize| {
         u64::from_le_bytes([
-            b[o], b[o + 1], b[o + 2], b[o + 3], b[o + 4], b[o + 5], b[o + 6], b[o + 7],
+            b[o],
+            b[o + 1],
+            b[o + 2],
+            b[o + 3],
+            b[o + 4],
+            b[o + 5],
+            b[o + 6],
+            b[o + 7],
         ])
     };
     assert_eq!(u16_at(16), 3, "{what}: e_type is not ET_DYN (PIE)");
     let phoff = usize::try_from(u64_at(32)).expect("phoff");
     let phentsize = usize::from(u16_at(54));
     let phnum = usize::from(u16_at(56));
-    assert!(phentsize >= 56 && phnum > 0, "{what}: bad program header table");
+    assert!(
+        phentsize >= 56 && phnum > 0,
+        "{what}: bad program header table"
+    );
     let end = phoff
         .checked_add(phnum.checked_mul(phentsize).expect("phnum*phentsize"))
         .expect("phoff+phnum*phentsize");
@@ -82,7 +95,10 @@ fn assert_static_pie(path: &Path, what: &str) {
         interp |= p_type == 3; // PT_INTERP
         exec_stack |= p_type == 0x6474_e551 && (p_flags & 1) != 0; // PT_GNU_STACK + X
     }
-    assert!(!interp, "{what}: PT_INTERP present, so it asks for a dynamic loader");
+    assert!(
+        !interp,
+        "{what}: PT_INTERP present, so it asks for a dynamic loader"
+    );
     assert!(!exec_stack, "{what}: PT_GNU_STACK is executable");
     let text = String::from_utf8_lossy(&b);
     assert!(
@@ -129,7 +145,10 @@ fn the_default_release_binary_carries_no_x11_client() {
             eprintln!("skipping: {} does not exist in a debug run", path.display());
             return;
         }
-        panic!("{} does not exist; the release gate has no artifact to measure", path.display());
+        panic!(
+            "{} does not exist; the release gate has no artifact to measure",
+            path.display()
+        );
     }
     let bytes = std::fs::read(&path).expect("read the release binary");
     let text = String::from_utf8_lossy(&bytes);
@@ -204,7 +223,11 @@ fn the_release_binary_is_under_the_ceiling() {
         return;
     }
     let path = binary();
-    assert!(path.exists(), "{} does not exist; the release gate has no artifact to measure", path.display());
+    assert!(
+        path.exists(),
+        "{} does not exist; the release gate has no artifact to measure",
+        path.display()
+    );
     let size = std::fs::metadata(&path)
         .expect("stat the release binary")
         .len();
@@ -234,7 +257,10 @@ fn the_binary_is_static_pie() {
             eprintln!("skipping: {} does not exist in a debug run", path.display());
             return;
         }
-        panic!("{} does not exist; the release gate has no artifact to measure", path.display());
+        panic!(
+            "{} does not exist; the release gate has no artifact to measure",
+            path.display()
+        );
     }
     assert_static_pie(&path, "the release binary");
     println!("{} is a static PIE with no dynamic loader", path.display());
@@ -309,13 +335,23 @@ fn the_desktop_build_is_still_static_and_under_the_ceiling() {
 fn product_linker_is_pinned_and_host_linker_is_portable() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cargo/config.toml");
     let config = std::fs::read_to_string(&path).expect("read workspace cargo config");
-    let start = config.find("[target.x86_64-unknown-linux-musl]").expect("musl target section");
+    let start = config
+        .find("[target.x86_64-unknown-linux-musl]")
+        .expect("musl target section");
     let rest = &config[start..];
     let end = rest.find("\n[").unwrap_or(rest.len());
     let musl = &rest[..end];
-    assert!(musl.contains("linker = \"rust-lld\""), "the static-musl product target must keep using rustc's bundled linker");
+    assert!(
+        musl.contains("linker = \"rust-lld\""),
+        "the static-musl product target must keep using rustc's bundled linker"
+    );
     // The comment block above the net section *shows* this header as an example for the untracked
     // user config; only a real (non-comment) section would actually pin the linker.
-    let host_pinned = config.lines().any(|l| l.trim() == "[target.x86_64-unknown-linux-gnu]");
-    assert!(!host_pinned, "the tracked config must not pin a host-only absolute linker path");
+    let host_pinned = config
+        .lines()
+        .any(|l| l.trim() == "[target.x86_64-unknown-linux-gnu]");
+    assert!(
+        !host_pinned,
+        "the tracked config must not pin a host-only absolute linker path"
+    );
 }

@@ -375,7 +375,8 @@ pub fn build(
     let mut carry: Vec<u8> = Vec::with_capacity(holonomy_text::ANCHOR_BYTES.len());
     // `carry ++ slice`, rebuilt per slice. One allocation for the life of the export, and the same
     // buffer serves both roles so what the scanner sees and what the layouter is fed cannot differ.
-    let mut joined: Vec<u8> = Vec::with_capacity(crate::html::CHUNK_BYTES + holonomy_text::ANCHOR_BYTES.len());
+    let mut joined: Vec<u8> =
+        Vec::with_capacity(crate::html::CHUNK_BYTES + holonomy_text::ANCHOR_BYTES.len());
     let mut y = opts.page.height - opts.margin;
     let mut lines_on_page = 0usize;
     // The line being accumulated. It survives across runs, which is the whole point: the span map's
@@ -1281,15 +1282,7 @@ impl<'a> Layouter<'a> {
         // between two heading words is a space in a heading, and drawing it at 11 pt when the words
         // either side are at 14.85 leaves the reader to re-break a line the exporter already broke --
         // the one thing this layouter exists to prevent.
-        self.push_many(
-            &spaces,
-            face,
-            metric,
-            size,
-            0.0,
-            false,
-            false,
-        );
+        self.push_many(&spaces, face, metric, size, 0.0, false, false);
         self.width += w;
         self.held_spaces = 0;
     }
@@ -1370,7 +1363,11 @@ impl<'a> Layouter<'a> {
         // when the document ended — which is every document that does not end in a newline — would
         // never have been written at all.
         if self.pending.is_some() {
-            let size = self.pending.as_ref().map(|p| p.size).unwrap_or(self.opts.font_size);
+            let size = self
+                .pending
+                .as_ref()
+                .map(|p| p.size)
+                .unwrap_or(self.opts.font_size);
             let limit = self.limit_mils(size);
             if let Some(l) = self.commit(stats, limit) {
                 out.push(l);
@@ -1632,7 +1629,12 @@ mod tests {
         let mut l = Layouter::new(opts);
         let mut out = l.feed(
             bytes,
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         );
@@ -1655,13 +1657,23 @@ mod tests {
         let mut l = Layouter::new(&opts);
         let mut lines = l.feed(
             b"hel",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             false,
         );
         lines.extend(l.feed(
             b"lo",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             false,
         ));
@@ -1678,13 +1690,23 @@ mod tests {
         let mut l = Layouter::new(&opts);
         let mut lines = l.feed(
             b"one",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         );
         lines.extend(l.feed(
             b" two",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         ));
@@ -1706,13 +1728,23 @@ mod tests {
         // "é" is two bytes: 0xC3 0xA9. The piece ends between them.
         let mut lines = l.feed(
             b"a\xc3",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             false,
         );
         lines.extend(l.feed(
             b"\xa9b",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             false,
         ));
@@ -1724,7 +1756,8 @@ mod tests {
     }
 
     #[test]
-    fn a_newline_ends_a_line() {        let opts = PdfOptions::default();
+    fn a_newline_ends_a_line() {
+        let opts = PdfOptions::default();
         let mut stats = PdfStats::default();
         let lines = feed_all(&opts, b"ab\ncd", &mut stats);
         assert_eq!(lines.len(), 2);
@@ -1902,13 +1935,23 @@ mod tests {
         let mut l = Layouter::new(&opts);
         let mut lines = l.feed(
             b"ab",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         );
         lines.extend(l.feed(
             b"cd",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         ));
@@ -1928,7 +1971,12 @@ mod tests {
         let mut l = Layouter::new(&opts);
         let mut lines = l.feed(
             b"Chapter",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size * HEADER_SCALE, true),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size * HEADER_SCALE,
+                true,
+            ),
             &mut stats,
             true,
         );
@@ -1948,13 +1996,23 @@ mod tests {
         let mut l = Layouter::new(&opts);
         let mut lines = l.feed(
             b"Title",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size * HEADER_SCALE, true),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size * HEADER_SCALE,
+                true,
+            ),
             &mut stats,
             true,
         );
         lines.extend(l.feed(
             b" body",
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false),
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
             &mut stats,
             true,
         ));
@@ -2038,7 +2096,12 @@ mod tests {
         // **And none of the decorations changes the face either.** An underline is a stroked line
         // and a strike is a stroked line; a face here would be a *second* answer to "what does bold
         // look like", and it is how an underlined run would silently become a bold one.
-        for bit in [STYLE_UNDERLINE, STYLE_STRIKE, STYLE_SUPERSCRIPT, STYLE_SUBSCRIPT] {
+        for bit in [
+            STYLE_UNDERLINE,
+            STYLE_STRIKE,
+            STYLE_SUPERSCRIPT,
+            STYLE_SUBSCRIPT,
+        ] {
             let span = TextIntervalSpan::styled(0, 1, bit, 0);
             assert_eq!(
                 Faces::for_span(&span),
@@ -2096,8 +2159,12 @@ mod tests {
         let opts = PdfOptions::default();
         let mut stats = PdfStats::default();
         let mut l = Layouter::new(&opts);
-        let plain =
-            RunStyle::of_plain(Faces::NAMES.regular, BaseFont::Helvetica, opts.font_size, false);
+        let plain = RunStyle::of_plain(
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+        );
         let raised = RunStyle {
             rise: opts.font_size / 3.0,
             ..plain

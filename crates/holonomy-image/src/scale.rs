@@ -350,12 +350,13 @@ pub fn resample_pixels(
     // The ceiling is the size of the largest *source* the decoder admits, so every image the
     // decoder accepts can still be scaled — an identity scale of a 32-megapixel image has an
     // intermediate of exactly the source's size — and only a *shape* is refused, not a size.
-    let mid_len = (mid_stride as u64)
-        .checked_mul(src_h as u64)
-        .ok_or(PngError::IntermediateTooLarge {
-            bytes: u64::MAX,
-            cap: MAX_INTERMEDIATE_BYTES,
-        })?;
+    let mid_len =
+        (mid_stride as u64)
+            .checked_mul(src_h as u64)
+            .ok_or(PngError::IntermediateTooLarge {
+                bytes: u64::MAX,
+                cap: MAX_INTERMEDIATE_BYTES,
+            })?;
     if mid_len > MAX_INTERMEDIATE_BYTES {
         return Err(PngError::IntermediateTooLarge {
             bytes: mid_len,

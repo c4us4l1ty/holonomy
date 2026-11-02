@@ -180,7 +180,6 @@ pub mod colour {
     pub const UPGRADE_BG: u32 = 0xFFD3_E3FD;
     /// Ink on the blue pill and selected sidebar row.
     pub const UPGRADE_INK: u32 = 0xFF08_42A0;
-
 }
 
 // ---------------------------------------------------------------- the runes
@@ -599,7 +598,11 @@ impl ChromeMetrics {
         if width <= self.anchor_width && room_columns(self, width) >= cols {
             return cols;
         }
-        measure_beyond(self, width, if width <= self.anchor_width { 1 } else { cols })
+        measure_beyond(
+            self,
+            width,
+            if width <= self.anchor_width { 1 } else { cols },
+        )
     }
 }
 
@@ -625,7 +628,11 @@ const fn room_columns(m: &ChromeMetrics, width: u32) -> u32 {
     // **One column even when the room is zero**, so this cannot return zero and a caller dividing by
     // it cannot trap. A metrics with `columns: 0` is a caller's mistake and the floor turns it into
     // one column rather than into a panic three functions away.
-    if room == 0 { 1 } else { room }
+    if room == 0 {
+        1
+    } else {
+        room
+    }
 }
 
 /// **The arithmetic [`measure_for`](ChromeMetrics::measure_for) reaches above the design width, clamped
@@ -997,22 +1004,22 @@ impl Layout {
         let page_y = canvas_y + (canvas_h.saturating_sub(page_h)) / 2;
 
         // **CORRECTION, part 39: the page is clipped into the panel on *both* axes, and the right edge is the
-    // one that was not.**
-    //
-    // It read `page_w.min(m.width)`: a *width* capped at the panel's width, at an *x* that can be
-    // non-zero. **A 9 px panel with the sidebar at `min(256, 9 / 2)` = 4 puts the page at x = 4 and
-    // gives it 9 px of width, so it ends at 13 -- four pixels outside a panel nine pixels wide.**
-    // `no_chrome_box_ever_lands_outside_its_panel` found it by sweeping every size from 1x1 up.
-    //
-    // **The cap is `width - page_x`, and `height - page_y`, because that is what "inside" means for a
-    // rect that has already been moved.** Both are `saturating_sub`, so a page pushed past the edge by
-    // its own arithmetic is a zero-sized rect rather than one that wraps.
-    let page = DamageRect::new(
-        page_x,
-        page_y,
-        page_w.min(m.width.saturating_sub(page_x)),
-        page_h.min(m.height.saturating_sub(page_y)),
-    );
+        // one that was not.**
+        //
+        // It read `page_w.min(m.width)`: a *width* capped at the panel's width, at an *x* that can be
+        // non-zero. **A 9 px panel with the sidebar at `min(256, 9 / 2)` = 4 puts the page at x = 4 and
+        // gives it 9 px of width, so it ends at 13 -- four pixels outside a panel nine pixels wide.**
+        // `no_chrome_box_ever_lands_outside_its_panel` found it by sweeping every size from 1x1 up.
+        //
+        // **The cap is `width - page_x`, and `height - page_y`, because that is what "inside" means for a
+        // rect that has already been moved.** Both are `saturating_sub`, so a page pushed past the edge by
+        // its own arithmetic is a zero-sized rect rather than one that wraps.
+        let page = DamageRect::new(
+            page_x,
+            page_y,
+            page_w.min(m.width.saturating_sub(page_x)),
+            page_h.min(m.height.saturating_sub(page_y)),
+        );
         let text = DamageRect::new(
             page_x.saturating_add(m.page_pad),
             page_y.saturating_add(m.page_pad),
@@ -1092,12 +1099,18 @@ impl Layout {
     }
 
     pub fn page_padding(&self) -> u32 {
-        self.text.x.saturating_sub(self.page.x).min(self.page_height() / 3)
+        self.text
+            .x
+            .saturating_sub(self.page.x)
+            .min(self.page_height() / 3)
     }
 
     pub fn page_rows(&self) -> u32 {
-        self.page_height().saturating_sub(self.page_padding().saturating_mul(2))
-            .checked_div(self.cell_h.max(1)).unwrap_or(0).max(1)
+        self.page_height()
+            .saturating_sub(self.page_padding().saturating_mul(2))
+            .checked_div(self.cell_h.max(1))
+            .unwrap_or(0)
+            .max(1)
     }
 
     pub fn page_count(&self, total_lines: u32) -> u32 {
@@ -1107,11 +1120,17 @@ impl Layout {
     fn row_document_y(&self, line: u32) -> u64 {
         let rows = self.page_rows();
         u64::from(line / rows) * u64::from(self.page_height() + Self::PAGE_GAP)
-            + u64::from(self.page_padding()) + u64::from(line % rows) * u64::from(self.cell_h.max(1))
+            + u64::from(self.page_padding())
+            + u64::from(line % rows) * u64::from(self.cell_h.max(1))
     }
 
     fn scroll_pixels(&self, first: u32) -> u64 {
-        if first == 0 && self.canvas.height >= Self::DESK_TOP.saturating_add(self.page_padding()).saturating_add(self.cell_h) {
+        if first == 0
+            && self.canvas.height
+                >= Self::DESK_TOP
+                    .saturating_add(self.page_padding())
+                    .saturating_add(self.cell_h)
+        {
             0
         } else {
             self.row_document_y(first) + u64::from(Self::DESK_TOP)
@@ -1120,67 +1139,108 @@ impl Layout {
 
     /// Screen y of a row, ignoring block height; negative/offscreen values remain signed.
     pub fn paged_row_y(&self, first: u32, line: u32) -> i64 {
-        i64::from(self.canvas.y) + i64::from(Self::DESK_TOP)
-            + self.row_document_y(line) as i64 - self.scroll_pixels(first) as i64
+        i64::from(self.canvas.y) + i64::from(Self::DESK_TOP) + self.row_document_y(line) as i64
+            - self.scroll_pixels(first) as i64
     }
 
     /// The screen y shared by body text, caret, selection and block anchors.
     pub fn row_y(&self, state: &ChromeState, line: u32) -> Option<u32> {
         let row = line.checked_sub(state.scroll_line)?;
-        if !state.paged { return self.text.y.checked_add(state.line_heights.y(row)); }
+        if !state.paged {
+            return self.text.y.checked_add(state.line_heights.y(row));
+        }
         let y = self.paged_position(state, line);
-        if y < i64::from(self.canvas.y) || y + i64::from(self.cell_h) > i64::from(self.canvas.bottom()) { return None; }
+        if y < i64::from(self.canvas.y)
+            || y + i64::from(self.cell_h) > i64::from(self.canvas.bottom())
+        {
+            return None;
+        }
         u32::try_from(y).ok()
     }
 
     fn paged_position(&self, state: &ChromeState, line: u32) -> i64 {
         // Only earlier blocks displace this row; the base line pitch is already counted.
         let row = line.saturating_sub(state.scroll_line);
-        let extra = state.line_heights.extras.iter().take_while(|&&(at, _)| at < row)
-            .fold(0u32, |sum, &(_, height)| sum.saturating_add(height.saturating_sub(state.line_heights.pitch)));
+        let extra = state
+            .line_heights
+            .extras
+            .iter()
+            .take_while(|&&(at, _)| at < row)
+            .fold(0u32, |sum, &(_, height)| {
+                sum.saturating_add(height.saturating_sub(state.line_heights.pitch))
+            });
         self.paged_row_y(state.scroll_line, line) + i64::from(extra)
     }
 
     /// Upper bound on rows that could intersect the viewport, independent of page count.
     pub fn visible_end(&self, state: &ChromeState) -> u32 {
-        let rows = if state.paged { self.canvas.height / self.cell_h.max(1) + 2 } else { self.rows };
-        state.scroll_line.saturating_add(rows).min(state.total_lines)
+        let rows = if state.paged {
+            self.canvas.height / self.cell_h.max(1) + 2
+        } else {
+            self.rows
+        };
+        state
+            .scroll_line
+            .saturating_add(rows)
+            .min(state.total_lines)
     }
 
     /// Number of full text rows visible from the current scroll position.
     pub fn visible_rows(&self, state: &ChromeState) -> u32 {
-        if !state.paged { return self.rows.max(1); }
+        if !state.paged {
+            return self.rows.max(1);
+        }
         let first = state.scroll_line.min(state.total_lines.saturating_sub(1));
         let (mut lo, mut hi) = (first, state.total_lines);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.paged_position(state, mid) + i64::from(self.cell_h) <= i64::from(self.canvas.bottom()) {
+            if self.paged_position(state, mid) + i64::from(self.cell_h)
+                <= i64::from(self.canvas.bottom())
+            {
                 lo = mid + 1;
-            } else { hi = mid; }
+            } else {
+                hi = mid;
+            }
         }
         lo.saturating_sub(first).max(1)
     }
 
     /// Clip one physical sheet to the canvas. Geometry uses u64 for long documents.
     pub fn visible_page(&self, state: &ChromeState, page: u32) -> Option<DamageRect> {
-        if page >= self.page_count(state.total_lines) { return None; }
-        let y = i64::from(self.canvas.y) + i64::from(Self::DESK_TOP)
+        if page >= self.page_count(state.total_lines) {
+            return None;
+        }
+        let y = i64::from(self.canvas.y)
+            + i64::from(Self::DESK_TOP)
             + i64::from(page) * i64::from(self.page_height() + Self::PAGE_GAP)
             - self.scroll_pixels(state.scroll_line) as i64;
         let top = y.max(i64::from(self.canvas.y));
         let bottom = (y + i64::from(self.page_height())).min(i64::from(self.canvas.bottom()));
-        if bottom <= top { return None; }
-        Some(DamageRect::new(self.page.x, top as u32, self.page.width, (bottom - top) as u32))
+        if bottom <= top {
+            return None;
+        }
+        Some(DamageRect::new(
+            self.page.x,
+            top as u32,
+            self.page.width,
+            (bottom - top) as u32,
+        ))
     }
 
     pub fn page_at(&self, state: &ChromeState, x: i32, y: i32) -> Option<u32> {
-        if !self.canvas.contains(x, y) || x < self.page.x as i32 || x >= self.page.right() as i32 { return None; }
+        if !self.canvas.contains(x, y) || x < self.page.x as i32 || x >= self.page.right() as i32 {
+            return None;
+        }
         let doc_y = i64::from(y) - i64::from(self.canvas.y) - i64::from(Self::DESK_TOP)
             + self.scroll_pixels(state.scroll_line) as i64;
-        if doc_y < 0 { return None; }
+        if doc_y < 0 {
+            return None;
+        }
         let stride = i64::from(self.page_height() + Self::PAGE_GAP);
         let page = (doc_y / stride) as u32;
-        (page < self.page_count(state.total_lines) && doc_y % stride < i64::from(self.page_height())).then_some(page)
+        (page < self.page_count(state.total_lines)
+            && doc_y % stride < i64::from(self.page_height()))
+        .then_some(page)
     }
 
     fn paged_row_at(&self, state: &ChromeState, y: i32) -> u32 {
@@ -1190,17 +1250,23 @@ impl Layout {
             let (mut lo, mut hi) = (first, state.total_lines.max(first.saturating_add(1)));
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                if self.paged_position(state, mid) <= i64::from(y) { lo = mid + 1; } else { hi = mid; }
+                if self.paged_position(state, mid) <= i64::from(y) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
             return lo.saturating_sub(1).max(first);
         }
         let doc_y = (i64::from(y) - i64::from(self.canvas.y) - i64::from(Self::DESK_TOP)
-            + self.scroll_pixels(state.scroll_line) as i64).max(0) as u64;
+            + self.scroll_pixels(state.scroll_line) as i64)
+            .max(0) as u64;
         let stride = u64::from(self.page_height() + Self::PAGE_GAP);
         let page = (doc_y / stride).min(u64::from(self.page_count(state.total_lines) - 1));
         let within = (doc_y % stride).saturating_sub(u64::from(self.page_padding()));
         let row = (within / u64::from(self.cell_h.max(1))).min(u64::from(self.page_rows() - 1));
-        ((page * u64::from(self.page_rows()) + row).min(u64::from(state.total_lines.saturating_sub(1)))) as u32
+        ((page * u64::from(self.page_rows()) + row)
+            .min(u64::from(state.total_lines.saturating_sub(1)))) as u32
     }
 
     /// The document position a click at `(x, y)` lands on, if it landed on the page.
@@ -1312,8 +1378,13 @@ impl Layout {
     #[must_use]
     pub fn caret_at_drag(&self, state: &ChromeState, x: i32, y: i32) -> Option<(u32, u32)> {
         if state.paged {
-            if self.canvas.height == 0 { return None; }
-            let y = y.clamp(self.canvas.y as i32, self.canvas.bottom().saturating_sub(1) as i32);
+            if self.canvas.height == 0 {
+                return None;
+            }
+            let y = y.clamp(
+                self.canvas.y as i32,
+                self.canvas.bottom().saturating_sub(1) as i32,
+            );
             return Some((self.paged_row_at(state, y), self.column_at(x)));
         }
         if !self.canvas.contains(x, y) {
@@ -1325,7 +1396,9 @@ impl Layout {
             let edge_row = if y < self.canvas.y as i32 {
                 state.scroll_line
             } else {
-                state.scroll_line.saturating_add(self.rows.saturating_sub(1))
+                state
+                    .scroll_line
+                    .saturating_add(self.rows.saturating_sub(1))
             };
             let column = self.column_at(x);
             return Some((edge_row, column));
@@ -1333,7 +1406,9 @@ impl Layout {
         let row = if y < self.text.y as i32 {
             0
         } else {
-            u32::try_from(y - self.text.y as i32).ok()?.checked_div(self.cell_h)?
+            u32::try_from(y - self.text.y as i32)
+                .ok()?
+                .checked_div(self.cell_h)?
         };
         // **`min(rows - 1)`, and `rows` is never 0** -- `ChromeMetrics::rows` is derived from the
         // metrics at construction, and a zero would mean a page with no lines, which
@@ -1821,7 +1896,13 @@ impl Default for ChromeState {
     fn default() -> Self {
         Self {
             title: "Journal".to_string(),
-            ribbon: false, ribbon_tab: 1, ribbon_collapsed: false, dark: true, autosave: true, navigation: Vec::new(), ribbon_overflow: Vec::new(),
+            ribbon: false,
+            ribbon_tab: 1,
+            ribbon_collapsed: false,
+            dark: true,
+            autosave: true,
+            navigation: Vec::new(),
+            ribbon_overflow: Vec::new(),
             // **Open, which reverses a correction that was right about the arithmetic and wrong about
             // the product.**
             //
@@ -1902,11 +1983,13 @@ impl Caret {
         // the uniform product. With no tables the extras are empty and this is the old expression, so
         // the caret is in the same place it always was.
         let y = layout.row_y(state, state.caret_line)?;
-        if (!state.paged && row >= layout.rows) || if state.paged {
-            state.caret_column > layout.cells_per_row(m.cell_w) as u32
-        } else {
-            state.caret_column >= m.columns
-        } {
+        if (!state.paged && row >= layout.rows)
+            || if state.paged {
+                state.caret_column > layout.cells_per_row(m.cell_w) as u32
+            } else {
+                state.caret_column >= m.columns
+            }
+        {
             return None;
         }
         // **The pen if the session gave one, the grid if it did not.** Part 33.
@@ -2051,15 +2134,7 @@ pub fn ascending_runs(text: &str) -> Vec<AscendingRun> {
 /// **A `const`, so the order is fixed at compile time**, and `ChromeState::open_menu` is an index into
 /// this. An index rather than an enum because a menu *is* a position in this list: painting heading `i`
 /// and testing `open_menu == Some(i)` cannot disagree when both are `i`.
-pub const MENUS: &[&str] = &[
-    "File",
-    "Edit",
-    "View",
-    "Insert",
-    "Format",
-    "Tools",
-    "Help",
-];
+pub const MENUS: &[&str] = &["File", "Edit", "View", "Insert", "Format", "Tools", "Help"];
 
 /// The menu bar's heading boxes, and where the next one starts.
 ///
@@ -2225,8 +2300,16 @@ impl Chrome {
         } else {
             let h = (track * visible / total).max(Self::MIN_THUMB.min(track));
             let span = track.saturating_sub(h);
-            let last_scroll = if state.paged { total.saturating_sub(1) } else { total - visible };
-            (h, (u64::from(span) * u64::from(state.scroll_line.min(last_scroll)) / u64::from(last_scroll.max(1))) as u32)
+            let last_scroll = if state.paged {
+                total.saturating_sub(1)
+            } else {
+                total - visible
+            };
+            (
+                h,
+                (u64::from(span) * u64::from(state.scroll_line.min(last_scroll))
+                    / u64::from(last_scroll.max(1))) as u32,
+            )
         };
         DamageRect::new(rail.x, rail.y + offset, rail.width, thumb_h)
     }
@@ -2349,7 +2432,9 @@ impl Chrome {
         // full rule ink, because this is the edge where the chrome meets the document.
         let y = l.toolbar.bottom().saturating_sub(1);
         if y < l.height {
-            chrome.before.push(fill(0, y as i32, l.width, 1, colour::RULE));
+            chrome
+                .before
+                .push(fill(0, y as i32, l.width, 1, colour::RULE));
         }
         // # The ruler, rebuilt
         //
@@ -2436,13 +2521,9 @@ impl Chrome {
         // and down the sheet's face — which is why they showed up as two stray grey columns on the page
         // rather than as margin markers.
         for x in [l.text.x, l.text.right().saturating_sub(1)] {
-            chrome.before.push(fill(
-                x as i32,
-                l.ruler.y as i32,
-                1,
-                m.ruler_h,
-                colour::RULE,
-            ));
+            chrome
+                .before
+                .push(fill(x as i32, l.ruler.y as i32, 1, m.ruler_h, colour::RULE));
         }
 
         // --- the title band, the menu band, the toolbar and the sidebar. Part 19.
@@ -2504,62 +2585,77 @@ impl Chrome {
         // is a *transient* and is drawn after the counters, separated from them — so `Saved` appears
         // beside `Ln 1, Col 1  0 words  0 B` instead of instead of it.
         if !state.ribbon {
-        let counters = if state.paged {
-            let rows = l.page_rows();
-            format!("Page {} / {}  Ln {}, Col {}  {} words  {} B",
-                state.scroll_line / rows + 1, l.page_count(state.total_lines),
-                state.caret_line + 1, state.caret_column + 1, state.words, state.bytes)
-        } else {
-            format!("Ln {}, Col {}  {} words  {} B", state.caret_line + 1,
-                state.caret_column + 1, state.words, state.bytes)
-        };
-        let status_y = l.status.y + l.status.height.saturating_sub(m.cell_h) / 2;
-        let counters_x = m.cell_w as i32;
-        push_text(
-            &mut chrome.before,
-            m,
-            status_y,
-            &counters,
-            Style::REGULAR,
-            colour::INK_DIM,
-            counters_x,
-        );
-        if let Some(notice) = state.notice.as_deref().filter(|n| !n.is_empty()) {
-            // **Placed by cells, so it cannot overlap the counters**, and **clamped to what is left of
-            // the band**, so a long failure message cannot run off the panel edge. A truncated notice is
-            // better than one drawn over the dirty dot, and better than none at all — the save-failure
-            // messages in `windowed.rs` are the whole reason this region exists.
-            let gap = 2 * m.cell_w;
-            let after = counters.chars().count() as u32 * m.cell_w;
-            let notice_x = counters_x as u32 + after + gap;
-            let room = l.width.saturating_sub(notice_x).saturating_sub(4 * m.cell_w) / m.cell_w.max(1);
-            let shown = fit_to_width(notice, m.cell_w, room);
-            if !shown.is_empty() {
-                push_text(
-                    &mut chrome.before,
-                    m,
-                    status_y,
-                    &shown,
-                    Style::REGULAR,
-                    colour::INK_CHROME,
-                    notice_x as i32,
-                );
+            let counters = if state.paged {
+                let rows = l.page_rows();
+                format!(
+                    "Page {} / {}  Ln {}, Col {}  {} words  {} B",
+                    state.scroll_line / rows + 1,
+                    l.page_count(state.total_lines),
+                    state.caret_line + 1,
+                    state.caret_column + 1,
+                    state.words,
+                    state.bytes
+                )
+            } else {
+                format!(
+                    "Ln {}, Col {}  {} words  {} B",
+                    state.caret_line + 1,
+                    state.caret_column + 1,
+                    state.words,
+                    state.bytes
+                )
+            };
+            let status_y = l.status.y + l.status.height.saturating_sub(m.cell_h) / 2;
+            let counters_x = m.cell_w as i32;
+            push_text(
+                &mut chrome.before,
+                m,
+                status_y,
+                &counters,
+                Style::REGULAR,
+                colour::INK_DIM,
+                counters_x,
+            );
+            if let Some(notice) = state.notice.as_deref().filter(|n| !n.is_empty()) {
+                // **Placed by cells, so it cannot overlap the counters**, and **clamped to what is left of
+                // the band**, so a long failure message cannot run off the panel edge. A truncated notice is
+                // better than one drawn over the dirty dot, and better than none at all — the save-failure
+                // messages in `windowed.rs` are the whole reason this region exists.
+                let gap = 2 * m.cell_w;
+                let after = counters.chars().count() as u32 * m.cell_w;
+                let notice_x = counters_x as u32 + after + gap;
+                let room = l
+                    .width
+                    .saturating_sub(notice_x)
+                    .saturating_sub(4 * m.cell_w)
+                    / m.cell_w.max(1);
+                let shown = fit_to_width(notice, m.cell_w, room);
+                if !shown.is_empty() {
+                    push_text(
+                        &mut chrome.before,
+                        m,
+                        status_y,
+                        &shown,
+                        Style::REGULAR,
+                        colour::INK_CHROME,
+                        notice_x as i32,
+                    );
+                }
             }
-        }
-        if state.dirty {
-            chrome.before.push(fill(
-                // **`saturating_sub`, and it is the fourth bare subtraction in this file.**
-                // The dirty-dot sits three cells from the right edge, so a panel narrower than
-                // three cells underflows here -- and at `opt-level=0` that is a panic, in release a
-                // four-billion-pixel `i32`. The panel can be that narrow now that `for_size` takes
-                // the window's size rather than rounding up to `MIN_WIDTH`.
-                l.width.saturating_sub(m.cell_w * 3) as i32,
-                (l.status.y + 4) as i32,
-                m.cell_w,
-                m.cell_h.saturating_sub(8),
-                colour::ACTIVE,
-            ));
-        }
+            if state.dirty {
+                chrome.before.push(fill(
+                    // **`saturating_sub`, and it is the fourth bare subtraction in this file.**
+                    // The dirty-dot sits three cells from the right edge, so a panel narrower than
+                    // three cells underflows here -- and at `opt-level=0` that is a panic, in release a
+                    // four-billion-pixel `i32`. The panel can be that narrow now that `for_size` takes
+                    // the window's size rather than rounding up to `MIN_WIDTH`.
+                    l.width.saturating_sub(m.cell_w * 3) as i32,
+                    (l.status.y + 4) as i32,
+                    m.cell_w,
+                    m.cell_h.saturating_sub(8),
+                    colour::ACTIVE,
+                ));
+            }
         }
         root.before.push(chrome);
 
@@ -2610,85 +2706,117 @@ impl Chrome {
             // At most viewport-height / (page height + gap) + two partial sheets.
             let limit = (l.canvas.height / l.page_height().max(1)).saturating_add(3);
             for index in first_page.saturating_sub(1)..first_page.saturating_add(limit) {
-                let Some(sheet) = l.visible_page(state, index) else { continue; };
+                let Some(sheet) = l.visible_page(state, index) else {
+                    continue;
+                };
                 // The shadow is clipped to the desk and drawn behind the paper, including
                 // when a sheet is partially visible at either edge of the viewport.
-                let full_top = i64::from(l.canvas.y) + i64::from(Layout::DESK_TOP)
+                let full_top = i64::from(l.canvas.y)
+                    + i64::from(Layout::DESK_TOP)
                     + i64::from(index) * i64::from(l.page_height() + Layout::PAGE_GAP)
                     - l.scroll_pixels(state.scroll_line) as i64;
                 let shadow_width = 3u32.min(l.width.saturating_sub(sheet.right()));
                 if shadow_width > 0 {
-                    page.before.push(fill(sheet.right() as i32, sheet.y as i32,
-                        shadow_width, sheet.height, colour::PAGE_SHADOW));
+                    page.before.push(fill(
+                        sheet.right() as i32,
+                        sheet.y as i32,
+                        shadow_width,
+                        sheet.height,
+                        colour::PAGE_SHADOW,
+                    ));
                 }
                 let bottom = full_top + i64::from(l.page_height());
                 if bottom >= i64::from(l.canvas.y) && bottom < i64::from(l.canvas.bottom()) {
                     let shadow_h = 3u32.min(l.canvas.bottom() - bottom as u32);
-                    page.before.push(fill(sheet.x as i32, bottom as i32, sheet.width,
-                        shadow_h, colour::PAGE_SHADOW));
+                    page.before.push(fill(
+                        sheet.x as i32,
+                        bottom as i32,
+                        sheet.width,
+                        shadow_h,
+                        colour::PAGE_SHADOW,
+                    ));
                 }
-                page.before.push(fill(sheet.x as i32, sheet.y as i32, sheet.width, sheet.height, colour::PAGE));
+                page.before.push(fill(
+                    sheet.x as i32,
+                    sheet.y as i32,
+                    sheet.width,
+                    sheet.height,
+                    colour::PAGE,
+                ));
                 // Side borders remain visible on partial sheets. Horizontal borders are clipped
                 // by the sheet itself; the gap still separates consecutive pages.
                 for x in [sheet.x, sheet.right().saturating_sub(1)] {
-                    page.before.push(fill(x as i32, sheet.y as i32, 1, sheet.height, colour::RULE));
+                    page.before.push(fill(
+                        x as i32,
+                        sheet.y as i32,
+                        1,
+                        sheet.height,
+                        colour::RULE,
+                    ));
                 }
                 for y in [full_top, full_top + i64::from(l.page_height()) - 1] {
                     if y >= i64::from(l.canvas.y) && y < i64::from(l.canvas.bottom()) {
-                        page.before.push(fill(sheet.x as i32, y as i32, sheet.width, 1, colour::RULE));
+                        page.before.push(fill(
+                            sheet.x as i32,
+                            y as i32,
+                            sheet.width,
+                            1,
+                            colour::RULE,
+                        ));
                     }
                 }
             }
         } else {
-        let shadow = m.shadow.min(l.page.width).min(l.page.height);
-        // A band across the BOTTOM: same x as the sheet, starting one pixel past its bottom edge.
-        if let Some(y) = l.page.bottom().checked_add(1) {
-            if y < l.canvas.bottom() {
-                page.before.push(fill(
-                    l.page.x as i32,
-                    y as i32,
-                    l.page.width,
-                    shadow,
-                    colour::SHADOW,
-                ));
+            let shadow = m.shadow.min(l.page.width).min(l.page.height);
+            // A band across the BOTTOM: same x as the sheet, starting one pixel past its bottom edge.
+            if let Some(y) = l.page.bottom().checked_add(1) {
+                if y < l.canvas.bottom() {
+                    page.before.push(fill(
+                        l.page.x as i32,
+                        y as i32,
+                        l.page.width,
+                        shadow,
+                        colour::SHADOW,
+                    ));
+                }
             }
-        }
-        // A strip down the RIGHT: same y as the sheet, starting one pixel past its right edge.
-        if let Some(x) = l.page.right().checked_add(1) {
-            if x < l.canvas.right() {
-                page.before.push(fill(
-                    x as i32,
-                    l.page.y as i32,
-                    shadow,
-                    l.page.height,
-                    colour::SHADOW,
-                ));
+            // A strip down the RIGHT: same y as the sheet, starting one pixel past its right edge.
+            if let Some(x) = l.page.right().checked_add(1) {
+                if x < l.canvas.right() {
+                    page.before.push(fill(
+                        x as i32,
+                        l.page.y as i32,
+                        shadow,
+                        l.page.height,
+                        colour::SHADOW,
+                    ));
+                }
             }
-        }
-        page.before.push(fill(
-            l.page.x as i32,
-            l.page.y as i32,
-            l.page.width,
-            l.page.height,
-            colour::PAGE,
-        ));
-        // # The sheet's hairline border, and the one-pixel seam the shadow left behind
-        //
-        // The border is drawn on the sheet's own outermost pixels, so it has to come **after** the
-        // page fill — which it does. What it did *not* have was anything to hide the gap the old
-        // shadow left: the shadow began at `page.x + shadow` on the top row, so **one pixel at
-        // `(page.x, page.y)` and one at `(page.x, page.bottom())` were filled with the shadow colour in
-        // the corner the border does not cover**. With the shadow moved to the bottom and right there is
-        // no gap left to leave: the border occupies exactly the sheet's rim and the shadow starts one
-        // pixel outside it.
-        for (bx, by, bw, bh) in [
-            (l.page.x, l.page.y, l.page.width, 1),
-            (l.page.x, l.page.bottom().saturating_sub(1), l.page.width, 1),
-            (l.page.x, l.page.y, 1, l.page.height),
-            (l.page.right().saturating_sub(1), l.page.y, 1, l.page.height),
-        ] {
-            page.before.push(fill(bx as i32, by as i32, bw, bh, colour::RULE));
-        }
+            page.before.push(fill(
+                l.page.x as i32,
+                l.page.y as i32,
+                l.page.width,
+                l.page.height,
+                colour::PAGE,
+            ));
+            // # The sheet's hairline border, and the one-pixel seam the shadow left behind
+            //
+            // The border is drawn on the sheet's own outermost pixels, so it has to come **after** the
+            // page fill — which it does. What it did *not* have was anything to hide the gap the old
+            // shadow left: the shadow began at `page.x + shadow` on the top row, so **one pixel at
+            // `(page.x, page.y)` and one at `(page.x, page.bottom())` were filled with the shadow colour in
+            // the corner the border does not cover**. With the shadow moved to the bottom and right there is
+            // no gap left to leave: the border occupies exactly the sheet's rim and the shadow starts one
+            // pixel outside it.
+            for (bx, by, bw, bh) in [
+                (l.page.x, l.page.y, l.page.width, 1),
+                (l.page.x, l.page.bottom().saturating_sub(1), l.page.width, 1),
+                (l.page.x, l.page.y, 1, l.page.height),
+                (l.page.right().saturating_sub(1), l.page.y, 1, l.page.height),
+            ] {
+                page.before
+                    .push(fill(bx as i32, by as i32, bw, bh, colour::RULE));
+            }
         }
         // Scrollbar rail and thumb.
         page.before.push(fill(
@@ -2770,7 +2898,9 @@ fn fill(x: i32, y: i32, width: u32, height: u32, colour: u32) -> SurfaceTree {
 
 /// A rounded rectangle, as a tree node.
 fn rounded(x: i32, y: i32, width: u32, height: u32, radius: u32, colour: u32) -> SurfaceTree {
-    SurfaceTree::leaf(crate::Node::RoundRect(RoundRect::new(x, y, width, height, radius, colour)))
+    SurfaceTree::leaf(crate::Node::RoundRect(RoundRect::new(
+        x, y, width, height, radius, colour,
+    )))
 }
 
 // ---------------------------------------------------------------- pointer state
@@ -2840,11 +2970,24 @@ fn state_fill(state: &ChromeState, h: crate::widgets::Hit) -> Option<u32> {
 /// whatever room is left rather than a fixed column. A fixed column is a fixed column that a long
 /// document name eventually overflows, and overflow at the left of a title bar truncates the mark.
 fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
-    into.push(fill(0, l.title.y as i32, l.width, m.title_h, colour::CHROME));
-    let icon_size = if state.paged && m.cell_h >= 30 { 20 } else { crate::icons::SIZE };
+    into.push(fill(
+        0,
+        l.title.y as i32,
+        l.width,
+        m.title_h,
+        colour::CHROME,
+    ));
+    let icon_size = if state.paged && m.cell_h >= 30 {
+        20
+    } else {
+        crate::icons::SIZE
+    };
     let icon_y = l.title.y + m.title_h.saturating_sub(icon_size) / 2;
-    let icon = if icon_size == 20 { crate::icons::IconId::Doc.at_large(24, icon_y as i32, colour::BLUE) }
-        else { crate::icons::IconId::Doc.at(24, icon_y as i32, colour::BLUE) };
+    let icon = if icon_size == 20 {
+        crate::icons::IconId::Doc.at_large(24, icon_y as i32, colour::BLUE)
+    } else {
+        crate::icons::IconId::Doc.at(24, icon_y as i32, colour::BLUE)
+    };
     into.push(SurfaceTree::leaf(crate::Node::Icon(icon)));
     let title_x = 24 + icon_size as i32 + 12;
     let title_y = l.title.y + m.title_h.saturating_sub(m.cell_h) / 2;
@@ -2858,27 +3001,65 @@ fn paint_title(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     // so it is written with its derivation rather than as a magic 18.
     let title_room = m.cell_w.saturating_mul(crate::widgets::TITLE_START_CELLS) as i32;
     let title_cells = ((title_room - title_x - 8).max(0) as u32) / m.cell_w.max(1);
-    push_text(into, m, title_y, &fit_to_width(&state.title, m.cell_w, title_cells), Style::REGULAR, colour::INK, title_x);
+    push_text(
+        into,
+        m,
+        title_y,
+        &fit_to_width(&state.title, m.cell_w, title_cells),
+        Style::REGULAR,
+        colour::INK,
+        title_x,
+    );
 
     for (btn, r) in crate::widgets::place_title(l, crate::widgets::TITLE_PAD) {
         use crate::widgets::TitleButton as B;
         let pill = matches!(btn, B::Share | B::Upgrade);
         if pill {
-            let (bg, ink) = if btn == B::Share { (colour::SHARE_BG, colour::SHARE_INK) } else { (colour::UPGRADE_BG, colour::UPGRADE_INK) };
-            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, bg));
+            let (bg, ink) = if btn == B::Share {
+                (colour::SHARE_BG, colour::SHARE_INK)
+            } else {
+                (colour::UPGRADE_BG, colour::UPGRADE_INK)
+            };
+            into.push(rounded(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                r.height / 2,
+                bg,
+            ));
             let cy = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
             if btn == B::Share {
                 into.push(SurfaceTree::leaf(crate::Node::Icon(
-                    crate::icons::IconId::Lock.at(r.x as i32 + 12, r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2, ink),
+                    crate::icons::IconId::Lock.at(
+                        r.x as i32 + 12,
+                        r.y as i32 + (r.height.saturating_sub(crate::icons::SIZE)) as i32 / 2,
+                        ink,
+                    ),
                 )));
-                push_text(into, m, cy, "Export", Style::REGULAR, ink, r.x as i32 + 12 + crate::icons::SIZE as i32 + 6);
+                push_text(
+                    into,
+                    m,
+                    cy,
+                    "Export",
+                    Style::REGULAR,
+                    ink,
+                    r.x as i32 + 12 + crate::icons::SIZE as i32 + 6,
+                );
             } else {
                 push_text(into, m, cy, "Local", Style::REGULAR, ink, r.x as i32 + 16);
             }
             continue;
         }
         if let Some(c) = state_fill(state, crate::widgets::Hit::Title(btn)) {
-            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
+            into.push(rounded(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                r.height / 2,
+                c,
+            ));
         }
         // **`Cloud` is the only button that reaches this arm**, because `place_title` filters on
         // `TitleButton::has_action` and the pill branch above already `continue`d for `Share`. The
@@ -2920,7 +3101,14 @@ fn paint_menubar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // is on it, because it stays filled after the pointer leaves -- and a heading that lost its
         // fill the moment the pointer left would tell the user the menu had closed.
         if open {
-            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, 6, colour::PILL));
+            into.push(rounded(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                6,
+                colour::PILL,
+            ));
         } else if let Some(c) = state_fill(state, crate::widgets::Hit::Menu(i)) {
             into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, 6, c));
         }
@@ -2977,8 +3165,23 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
     let y = pop.rect.y as i32;
 
     let pal = crate::ribbon::Palette::get(state.dark);
-    let (popup_bg, popup_ink, popup_hover) = if state.ribbon { (pal.ribbon, pal.text, pal.hover) } else { (colour::POPUP, colour::INK, colour::PILL_HOVER) };
-    into.push(rounded(x + 2, y + 3, pop.rect.width, pop.rect.height, 8, if state.ribbon { pal.border } else { colour::SHADOW }));
+    let (popup_bg, popup_ink, popup_hover) = if state.ribbon {
+        (pal.ribbon, pal.text, pal.hover)
+    } else {
+        (colour::POPUP, colour::INK, colour::PILL_HOVER)
+    };
+    into.push(rounded(
+        x + 2,
+        y + 3,
+        pop.rect.width,
+        pop.rect.height,
+        8,
+        if state.ribbon {
+            pal.border
+        } else {
+            colour::SHADOW
+        },
+    ));
     into.push(rounded(x, y, pop.rect.width, pop.rect.height, 8, popup_bg));
     for (i, it) in items.iter().enumerate() {
         let Some(row) = pop.rows.get(i) else { break };
@@ -2986,7 +3189,14 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         // know where the pointer is -- it is told. A painter that re-derived the hit would be a second
         // hit test, which is the thing that has just been removed.
         if row_is_live(state, pop.open, i) {
-            into.push(rounded(row.x as i32 + 4, row.y as i32, row.width.saturating_sub(8), row.height, 6, colour::PILL_HOVER));
+            into.push(rounded(
+                row.x as i32 + 4,
+                row.y as i32,
+                row.width.saturating_sub(8),
+                row.height,
+                6,
+                colour::PILL_HOVER,
+            ));
         }
         let cy = row.y + (row.height.saturating_sub(m.cell_h)) / 2;
         let icon_y = row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2;
@@ -3044,11 +3254,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
             into,
             m,
             cy,
-            &fit_to_width(
-                it.label,
-                m.cell_w,
-                label_cells,
-            ),
+            &fit_to_width(it.label, m.cell_w, label_cells),
             Style::REGULAR,
             colour::INK,
             label_x,
@@ -3072,7 +3278,8 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                         .rect
                         .width
                         .saturating_sub(pad)
-                        .saturating_sub(acc.chars().count() as u32 * m.cell_w) as i32,
+                        .saturating_sub(acc.chars().count() as u32 * m.cell_w)
+                        as i32,
                 );
             }
         }
@@ -3124,7 +3331,9 @@ pub fn toolbar_pill(l: &Layout, placed: &[crate::widgets::Placed]) -> Option<Dam
     //
     // **The `?` on an empty row survives the change**: a toolbar with nothing placed still has no
     // surface, and `placed` is walked for that fact rather than for a coordinate.
-    placed.iter().find(|p| p.rect.width > 0 && p.rect.height > 0)?;
+    placed
+        .iter()
+        .find(|p| p.rect.width > 0 && p.rect.height > 0)?;
     let pad = crate::widgets::TOOLBAR_PAD.min(l.width / 2);
     let width = l.width.saturating_sub(pad.saturating_mul(2));
     if width == 0 {
@@ -3195,7 +3404,11 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             pill.y as i32,
             pill.width,
             pill.height,
-            if state.paged { pill.height / 2 } else { toolbar_pill_radius(pill.height) },
+            if state.paged {
+                pill.height / 2
+            } else {
+                toolbar_pill_radius(pill.height)
+            },
             colour::PILL,
         ));
     }
@@ -3253,7 +3466,14 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // which is the point of the state surface -- it is behind the thing it is a state of. Drawing
         // it after would put a rectangle over the icon and make a hovered button look pressed-in.
         if let Some(c) = state_fill(state, crate::widgets::Hit::Tool(p.tool)) {
-            into.push(rounded(p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 8, c));
+            into.push(rounded(
+                p.rect.x as i32,
+                p.rect.y as i32,
+                p.rect.width,
+                p.rect.height,
+                8,
+                c,
+            ));
         }
 
         // **An armed toggle, drawn between the hover surface and the glyph.** Part 25.
@@ -3276,14 +3496,25 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         // point: the state is the document's, not the pointer's.
         if let Some(slot) = crate::chrome::StyleFlags::slot_for(p.tool) {
             if state.styles.get(slot) {
-                into.push(rounded(p.rect.x as i32, p.rect.y as i32, p.rect.width, p.rect.height, 8, colour::PILL_ACTIVE));
+                into.push(rounded(
+                    p.rect.x as i32,
+                    p.rect.y as i32,
+                    p.rect.width,
+                    p.rect.height,
+                    8,
+                    colour::PILL_ACTIVE,
+                ));
             }
         }
 
         let cx = p.rect.x as i32;
         let cy = p.rect.y as i32;
         let large_icons = state.paged && m.cell_h >= 30;
-        let ih = if large_icons { 20 } else { crate::icons::SIZE as i32 };
+        let ih = if large_icons {
+            20
+        } else {
+            crate::icons::SIZE as i32
+        };
         let iy = cy + (p.rect.height as i32 - ih) / 2;
 
         // **The label is the outer branch, not the inner one.** The first version matched on `icon()`
@@ -3298,8 +3529,11 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             cx + (p.rect.width as i32 - ih) / 2
         };
         if let Some(icon) = p.tool.icon() {
-            let icon = if large_icons { icon.at_large(ix, iy, colour::INK_CHROME) }
-                else { icon.at(ix, iy, colour::INK_CHROME) };
+            let icon = if large_icons {
+                icon.at_large(ix, iy, colour::INK_CHROME)
+            } else {
+                icon.at(ix, iy, colour::INK_CHROME)
+            };
             into.push(SurfaceTree::leaf(crate::Node::Icon(icon)));
         }
         if p.tool.has_label() {
@@ -3367,16 +3601,66 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
     if state.ribbon {
         let t = crate::ribbon::Palette::get(state.dark);
-        into.push(fill(0,l.sidebar.y as i32,l.sidebar.width,l.sidebar.height,t.ribbon));
-        into.push(fill(l.sidebar.right().saturating_sub(1) as i32,l.sidebar.y as i32,1,l.sidebar.height,t.border));
-        push_text(into,m,l.sidebar.y+24,"Navigation",Style::BOLD,t.text,24);
-        push_text(into,m,l.sidebar.y+60,"Headings",Style::REGULAR,t.group,24);
-        for (i,(_,title)) in state.navigation.iter().enumerate() {
-            let Some(r)=l.sidebar_doc(i) else { break };
-            if state_fill(state,crate::widgets::Hit::Nav(i)).is_some() { into.push(rounded(r.x as i32,r.y as i32,r.width,r.height,5,t.hover)); }
-            push_text(into,m,r.y+(r.height.saturating_sub(m.cell_h))/2,title,Style::REGULAR,t.text,r.x as i32+24);
+        into.push(fill(
+            0,
+            l.sidebar.y as i32,
+            l.sidebar.width,
+            l.sidebar.height,
+            t.ribbon,
+        ));
+        into.push(fill(
+            l.sidebar.right().saturating_sub(1) as i32,
+            l.sidebar.y as i32,
+            1,
+            l.sidebar.height,
+            t.border,
+        ));
+        push_text(
+            into,
+            m,
+            l.sidebar.y + 24,
+            "Navigation",
+            Style::BOLD,
+            t.text,
+            24,
+        );
+        push_text(
+            into,
+            m,
+            l.sidebar.y + 60,
+            "Headings",
+            Style::REGULAR,
+            t.group,
+            24,
+        );
+        for (i, (_, title)) in state.navigation.iter().enumerate() {
+            let Some(r) = l.sidebar_doc(i) else { break };
+            if state_fill(state, crate::widgets::Hit::Nav(i)).is_some() {
+                into.push(rounded(
+                    r.x as i32, r.y as i32, r.width, r.height, 5, t.hover,
+                ));
+            }
+            push_text(
+                into,
+                m,
+                r.y + (r.height.saturating_sub(m.cell_h)) / 2,
+                title,
+                Style::REGULAR,
+                t.text,
+                r.x as i32 + 24,
+            );
         }
-        if state.navigation.is_empty() { push_text(into,m,l.sidebar.y+100,"Apply Heading 1 to add entries.",Style::REGULAR,t.group,24); }
+        if state.navigation.is_empty() {
+            push_text(
+                into,
+                m,
+                l.sidebar.y + 100,
+                "Apply Heading 1 to add entries.",
+                Style::REGULAR,
+                t.group,
+                24,
+            );
+        }
         return;
     }
     // # CORRECTION: the rail's own fill was `CHROME`
@@ -3392,8 +3676,17 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     //
     // **`a_popup_is_a_lighter_plane_than_anything_it_covers` still holds**: `POPUP` is `0xFFFF_FFFF`,
     // which is lighter than `PILL`.
-    into.push(fill(0, l.sidebar.y as i32, l.sidebar.width, l.sidebar.height,
-        if state.paged { colour::DESK } else { colour::PILL }));
+    into.push(fill(
+        0,
+        l.sidebar.y as i32,
+        l.sidebar.width,
+        l.sidebar.height,
+        if state.paged {
+            colour::DESK
+        } else {
+            colour::PILL
+        },
+    ));
     // **A rule down the rail's right edge, and the reason is the same one `BAND`'s correction gives.**
     // The panel is `colour::CHROME`, and so is the desk beside it, so the rail had no edge at all: the
     // document list and the empty space to its right read as one surface, and the sheet's left gutter
@@ -3416,12 +3709,24 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
             l.sidebar.y as i32,
             1,
             l.sidebar.height,
-            if state.paged { colour::RULE_DIM } else { colour::RULE },
+            if state.paged {
+                colour::RULE_DIM
+            } else {
+                colour::RULE
+            },
         ));
     }
-    let icon_size = if state.paged && m.cell_h >= 30 { 20 } else { crate::icons::SIZE };
+    let icon_size = if state.paged && m.cell_h >= 30 {
+        20
+    } else {
+        crate::icons::SIZE
+    };
     let icon_at = |icon: crate::icons::IconId, x, y, ink| {
-        if icon_size == 20 { icon.at_large(x, y, ink) } else { icon.at(x, y, ink) }
+        if icon_size == 20 {
+            icon.at_large(x, y, ink)
+        } else {
+            icon.at(x, y, ink)
+        }
     };
     into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
         crate::icons::IconId::ArrowLeft,
@@ -3430,7 +3735,15 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
         colour::INK_CHROME,
     ))));
     let head_y = l.sidebar_new.y + (l.sidebar_new.height.saturating_sub(m.cell_h)) / 2;
-    push_text(into, m, head_y, "Document tabs", Style::REGULAR, colour::INK, l.sidebar.x as i32 + 40);
+    push_text(
+        into,
+        m,
+        head_y,
+        "Document tabs",
+        Style::REGULAR,
+        colour::INK,
+        l.sidebar.x as i32 + 40,
+    );
     into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
         crate::icons::IconId::Plus,
         l.sidebar_new.x as i32 + (l.sidebar_new.width.saturating_sub(icon_size) / 2) as i32,
@@ -3439,27 +3752,57 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     ))));
 
     for i in 0..l.sidebar_rows as usize {
-        let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else { break };
+        let (Some(title), Some(r)) = (state.docs.get(i), l.sidebar_doc(i)) else {
+            break;
+        };
         let active = i == state.active_doc;
         if active {
-            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, colour::UPGRADE_BG));
+            into.push(rounded(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                r.height / 2,
+                colour::UPGRADE_BG,
+            ));
         } else if let Some(c) = state_fill(state, crate::widgets::Hit::Doc(i)) {
-            into.push(rounded(r.x as i32, r.y as i32, r.width, r.height, r.height / 2, c));
+            into.push(rounded(
+                r.x as i32,
+                r.y as i32,
+                r.width,
+                r.height,
+                r.height / 2,
+                c,
+            ));
         }
-        let ink = if active { colour::UPGRADE_INK } else { colour::INK_CHROME };
+        let ink = if active {
+            colour::UPGRADE_INK
+        } else {
+            colour::INK_CHROME
+        };
         into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
-            crate::icons::IconId::Doc, r.x as i32 + 16,
-            r.y as i32 + (r.height as i32 - icon_size as i32) / 2, ink,
+            crate::icons::IconId::Doc,
+            r.x as i32 + 16,
+            r.y as i32 + (r.height as i32 - icon_size as i32) / 2,
+            ink,
         ))));
         let ty = r.y + (r.height.saturating_sub(m.cell_h)) / 2;
         let tx = r.x as i32 + 16 + icon_size as i32 + 10;
-        push_text(into, m, ty,
+        push_text(
+            into,
+            m,
+            ty,
             &fit_to_width(title, m.cell_w, cells_left_of(r.right(), tx, m.cell_w)),
-            Style::REGULAR, ink, tx);
+            Style::REGULAR,
+            ink,
+            tx,
+        );
         if active {
             into.push(SurfaceTree::leaf(crate::Node::Icon(icon_at(
-                crate::icons::IconId::Overflow, r.right() as i32 - icon_size as i32 - 12,
-                r.y as i32 + (r.height as i32 - icon_size as i32) / 2, ink,
+                crate::icons::IconId::Overflow,
+                r.right() as i32 - icon_size as i32 - 12,
+                r.y as i32 + (r.height as i32 - icon_size as i32) / 2,
+                ink,
             ))));
         }
     }
@@ -3482,7 +3825,11 @@ fn fit_to_width(s: &str, cell_w: u32, max_cells: u32) -> String {
     }
     // A cut name is visibly cut. ASCII dots are used because the embedded atlas has no U+2026,
     // and a missing-glyph box in a document title would be worse than a plain truncation marker.
-    let (keep, marker) = if max_cells >= 3 { (max_cells - 3, "...") } else { (max_cells.saturating_sub(1), ".") };
+    let (keep, marker) = if max_cells >= 3 {
+        (max_cells - 3, "...")
+    } else {
+        (max_cells.saturating_sub(1), ".")
+    };
     let mut out: String = s.chars().take(keep as usize).collect();
     out.push_str(marker);
     let _ = cell_w;

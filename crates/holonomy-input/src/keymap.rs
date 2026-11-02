@@ -776,9 +776,15 @@ mod tests {
     fn italic_shortcut_does_not_replace_the_existing_image_shortcut() {
         let km = Keymap::us();
         let mut mods = ctrl();
-        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::InsertImage)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_I), &mods),
+            Some(Command::Hotkey(Hotkey::InsertImage))
+        );
         mods.update(KEY_LEFTSHIFT, 1);
-        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::Italic)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_I), &mods),
+            Some(Command::Hotkey(Hotkey::Italic))
+        );
     }
 
     #[test]
@@ -1154,6 +1160,9 @@ mod select_all_tests {
         let km = Keymap::us();
         let mut c = ModifierState::new();
         c.update(KEY_LEFTCTRL, 1);
-        assert_eq!(km.dispatch(InputEvent::press(KEY_A), &c), Some(Command::Hotkey(Hotkey::SelectAll)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_A), &c),
+            Some(Command::Hotkey(Hotkey::SelectAll))
+        );
     }
 }

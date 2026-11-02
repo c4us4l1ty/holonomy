@@ -223,7 +223,8 @@ fn run_step(
             let text = parts[1..].join(" ");
             for c in text.chars() {
                 let keysym = u32::from(c) as u32;
-                let Some((keycode, shift)) = XTest::keycode_for_keysym_shifted(conn, keysym)? else {
+                let Some((keycode, shift)) = XTest::keycode_for_keysym_shifted(conn, keysym)?
+                else {
                     eprintln!("uidrive: no keycode for {c:?}");
                     continue;
                 };
@@ -242,8 +243,14 @@ fn run_step(
             }
         }
         "resize" => {
-            let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).ok_or("resize needs a width")?;
-            let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).ok_or("resize needs a height")?;
+            let w: u32 = parts
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .ok_or("resize needs a width")?;
+            let h: u32 = parts
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .ok_or("resize needs a height")?;
             // **Through the window manager when there is one.** `ConfigureWindow` on a managed window
             // is a request the WM may override, so the measurement that matters is what the server
             // says afterwards -- which is `the_window_manager_agrees_or_the_gate_reads_it_back`.
@@ -320,7 +327,11 @@ fn at(
     // residual correction closes the loop**, because a person moving the mouse on this desktop moves
     // the pointer between two requests of ours -- measured: a click aimed at `(72, 50)` arrived at
     // `(373, 276)`, and the application was perfectly blameless.
-    let probe = |conn: &mut Conn, xtest: &XTest, rx: i16, ry: i16| -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    let probe = |conn: &mut Conn,
+                 xtest: &XTest,
+                 rx: i16,
+                 ry: i16|
+     -> Result<(i32, i32), Box<dyn std::error::Error>> {
         xtest.move_pointer(conn, root, rx, ry)?;
         std::thread::sleep(Duration::from_millis(15));
         let (pos, _) = window.pointer_position(conn)?;

@@ -216,8 +216,7 @@ fn every_tool_that_is_not_wired_is_one_of_the_six() {
     }
     let expected: Vec<&str> = STILL_INERT.iter().map(|t| t.name()).collect();
     assert_eq!(
-        inert,
-        expected,
+        inert, expected,
         "**{inert:?} are inert, and the list is {expected:?}.** Part 39 said ten; part 44 wired \
          SizeUp, SizeDown, Overflow and Mode; the count went eight -> seven when `Comment` was \
          removed rather than wired, and seven -> six when `Underline` was. A tool that has started \
@@ -244,7 +243,10 @@ fn the_size_buttons_are_the_zoom_buttons() {
          label and nothing else is the defect part 43 fixed for the zoom control."
     );
     press_tool(&mut s, "size-down");
-    assert_eq!(s.state.zoom_percent, 100, "**and SizeDown is back to 100 %**");
+    assert_eq!(
+        s.state.zoom_percent, 100,
+        "**and SizeDown is back to 100 %**"
+    );
 }
 
 /// **Both ends of the pair clamp rather than wrapping, and neither is an error.**
@@ -262,8 +264,11 @@ fn the_size_buttons_clamp_rather_than_wrapping() {
         s.state.zoom_percent, 100,
         "**SizeDown at the bottom stays at the bottom**"
     );
-    assert_eq!(s.stats.pointer_inert, 0, "**and is not counted as inert**: it pressed, and what it \
-         did was nothing further");
+    assert_eq!(
+        s.stats.pointer_inert, 0,
+        "**and is not counted as inert**: it pressed, and what it \
+         did was nothing further"
+    );
 
     press_tool(&mut s, "size-up");
     press_tool(&mut s, "size-up");
@@ -271,7 +276,10 @@ fn the_size_buttons_clamp_rather_than_wrapping() {
         s.state.zoom_percent, 125,
         "**and SizeUp at the top stays at the top** rather than wrapping to 100 %"
     );
-    assert_eq!(s.stats.pointer_inert, 0, "**and is not counted as inert either**");
+    assert_eq!(
+        s.stats.pointer_inert, 0,
+        "**and is not counted as inert either**"
+    );
 }
 
 /// **`Overflow` lists the tools that did not fit, and nothing else.**
@@ -292,7 +300,10 @@ fn the_overflow_menu_lists_the_tools_that_did_not_fit() {
     );
 
     press_tool(&mut s, "overflow");
-    eprintln!("DBG after press open={:?} inert={} chrome={}", s.state.open, s.stats.pointer_inert, s.stats.pointer_chrome);
+    eprintln!(
+        "DBG after press open={:?} inert={} chrome={}",
+        s.state.open, s.stats.pointer_inert, s.stats.pointer_chrome
+    );
     assert_eq!(
         s.state.open,
         Some(Open::Tool(Tool::Overflow)),
@@ -336,10 +347,7 @@ fn an_overflow_button_with_nothing_hidden_opens_nothing() {
     );
     press_tool(&mut s, "overflow");
     assert_eq!(s.state.open, None, "**so the button opens nothing**");
-    assert_eq!(
-        s.stats.pointer_inert, 0,
-        "**and is not counted as inert**"
-    );
+    assert_eq!(s.stats.pointer_inert, 0, "**and is not counted as inert**");
 }
 
 /// **`Mode` opens a two-row menu and switching changes the state.**

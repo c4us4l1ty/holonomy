@@ -154,7 +154,11 @@ fn session(doc_bytes: usize) -> (Session<'static>, &'static holonomy_assets::atl
     let line = "the quick brown fox jumps over the lazy dog\n";
     while editor.text_len() < doc_bytes {
         editor
-            .insert_at(editor.text_len() as u32, line.as_bytes(), SpanPolicy::GrowIntoInsert)
+            .insert_at(
+                editor.text_len() as u32,
+                line.as_bytes(),
+                SpanPolicy::GrowIntoInsert,
+            )
             .expect("room");
     }
     // Argument order is `Session::new(editor, painter, scanout, metrics)` -- `session.rs:354-359`.
@@ -273,15 +277,15 @@ fn alloc_probe_child() {
     let (pa, pr, pd) = disable();
     let paint_allocs = pa + pr + pd;
 
-    assert_eq!(edits, presses as u32, "every press should have been an edit");
+    assert_eq!(
+        edits, presses as u32,
+        "every press should have been an edit"
+    );
     println!(
         "PROBE {edit_allocs} {a} {r} {d} {edits} {} {} {} {paint_allocs}",
         s.state.words, s.state.total_lines, s.state.bytes
     );
-    println!(
-        "STATS {} {}",
-        s.stats.line_rebuilds, s.stats.line_updates
-    );
+    println!("STATS {} {}", s.stats.line_rebuilds, s.stats.line_updates);
 }
 
 /// `edit_allocs` (total), then its three components, then `edits words lines bytes`, then
@@ -326,11 +330,7 @@ fn run_probe_with(extra: &[(&str, &str)]) -> Probe {
                 .unwrap_or_else(|_| panic!("unparseable PROBE line: {line:?}"))
         })
         .collect();
-    assert_eq!(
-        v.len(),
-        9,
-        "PROBE line should have nine fields: {line:?}"
-    );
+    assert_eq!(v.len(), 9, "PROBE line should have nine fields: {line:?}");
     (
         v[0],
         v[1],
@@ -354,8 +354,7 @@ fn run_probe_with(extra: &[(&str, &str)]) -> Probe {
 fn typing_through_a_session_allocates_nothing() {
     let (total, a, r, d, edits, _w, _l, _b, _paint) = run_probe();
     assert_eq!(
-        total,
-        0,
+        total, 0,
         "typing {edits} characters through a Session performed {total} allocations \
          ({a} allocs, {r} reallocs, {d} deallocs) on a {DOC_BYTES}-byte document. FR-1.2 says \
          zero, and this is the product's edit path rather than an Editor's."

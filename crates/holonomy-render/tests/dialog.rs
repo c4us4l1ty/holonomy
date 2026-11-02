@@ -76,7 +76,10 @@ fn a_large_window_gets_a_roomier_panel_and_larger_type() {
     assert!(gl.panel.height > gs.panel.height);
     assert!(gl.field_h > gs.field_h);
     assert!(gl.pad > gs.pad);
-    assert_eq!(gl.text_size, 1, "a normal desktop dialog asks for the larger atlas size");
+    assert_eq!(
+        gl.text_size, 1,
+        "a normal desktop dialog asks for the larger atlas size"
+    );
     assert_eq!(gs.text_size, 0, "a short window stays at the chrome size");
     // The panel is still centred and never leaves the window.
     assert_eq!(gl.panel.x, (large.width - gl.panel.width) / 2);
@@ -142,5 +145,8 @@ fn choices_scroll_to_keep_the_selection_visible() {
     assert!(g.choice_start <= d.choice);
     assert!(d.choice < g.choice_start + g.visible_choices);
     let r = g.choice_rect(d.choice - g.choice_start);
-    assert_eq!(dialog::hit(&l, &d, (r.x + 8) as i32, (r.y + 8) as i32), Hit::Choice(19));
+    assert_eq!(
+        dialog::hit(&l, &d, (r.x + 8) as i32, (r.y + 8) as i32),
+        Hit::Choice(19)
+    );
 }

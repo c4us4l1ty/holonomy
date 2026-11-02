@@ -42,10 +42,12 @@
 use holonomy::session::Session;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
-use holonomy_input::{InputEvent, KEY_END, KEY_ESC, KEY_HOME, KEY_LEFTSHIFT, KEY_PAGEDOWN, KEY_PAGEUP};
+use holonomy_input::{
+    InputEvent, KEY_END, KEY_ESC, KEY_HOME, KEY_LEFTSHIFT, KEY_PAGEDOWN, KEY_PAGEUP,
+};
 use holonomy_render::chrome::ChromeMetrics;
-use holonomy_render::widgets::Open;
 use holonomy_render::widgets;
+use holonomy_render::widgets::Open;
 use holonomy_text::{Editor, SpanPolicy};
 
 /// Six short lines, so "the document" and "the caret's line" are different places and `End` on the
@@ -105,7 +107,11 @@ fn home_goes_to_the_start_of_the_carets_line_not_the_document() {
         line_start(3),
         "**Home lands at the start of line 3**, not at byte 0"
     );
-    assert_ne!(s.caret(), 0, "and specifically not at the document start, which is what it did");
+    assert_ne!(
+        s.caret(),
+        0,
+        "and specifically not at the document start, which is what it did"
+    );
 }
 
 /// **The fixture check, and it exists because a passing gate means nothing without one.**
@@ -237,7 +243,10 @@ fn page_down_moves_the_caret_by_a_screenful() {
     // end, and it would have passed with any implementation at all.
     let mut s = long_session(400);
     let rows = s.chrome_layout().rows;
-    assert!(rows > 1, "the fixture needs a panel with more than one row, got {rows}");
+    assert!(
+        rows > 1,
+        "the fixture needs a panel with more than one row, got {rows}"
+    );
 
     press(&mut s, KEY_PAGEDOWN);
 
@@ -316,7 +325,10 @@ fn escape_dismisses_an_open_menu() {
         .find(|p| p.tool.name() == "zoom")
         .expect("the zoom tool")
         .rect;
-    let (cx, cy) = ((zoom.x + zoom.width / 2) as i32, (zoom.y + zoom.height / 2) as i32);
+    let (cx, cy) = (
+        (zoom.x + zoom.width / 2) as i32,
+        (zoom.y + zoom.height / 2) as i32,
+    );
 
     click_at(&mut s, cx, cy);
     assert_eq!(

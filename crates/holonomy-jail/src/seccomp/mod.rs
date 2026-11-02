@@ -276,9 +276,8 @@ impl Program {
             // it, so `0x1_0000_0000 | SYS_read` would compile into a filter that permits
             // `read`. The production table has no such entry, but `Allowed` has public fields and
             // `Program::build` is public API.
-            let nr = u32::try_from(entry.nr).map_err(|_| SeccompError::SyscallNumberOutOfRange {
-                nr: entry.nr,
-            })?;
+            let nr = u32::try_from(entry.nr)
+                .map_err(|_| SeccompError::SyscallNumberOutOfRange { nr: entry.nr })?;
             push(&mut insns, &mut len, BPF_JMP_JEQ_K, 0, 1, nr)?;
             push(&mut insns, &mut len, BPF_RET_K, 0, 0, allow)?;
         }

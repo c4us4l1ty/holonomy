@@ -39,15 +39,37 @@ const TEXT: &str = concat!(
 /// Build a fresh independent document. Styles use the existing persisted span format.
 pub fn studio_handbook() -> Result<Editor, EditorError> {
     let mut editor = Editor::from_text(TEXT.as_bytes())?;
-    for heading in [TITLE, "Why share a studio?", "What we agree on", "Shared equipment", "Opening the studio", "Membership"] {
+    for heading in [
+        TITLE,
+        "Why share a studio?",
+        "What we agree on",
+        "Shared equipment",
+        "Opening the studio",
+        "Membership",
+    ] {
         let start = TEXT.find(heading).expect("sample heading is present") as u32;
-        editor.style_range(start, start + heading.len() as u32, STYLE_HEADER | STYLE_BOLD, 0x001A_5C75)?;
+        editor.style_range(
+            start,
+            start + heading.len() as u32,
+            STYLE_HEADER | STYLE_BOLD,
+            0x001A_5C75,
+        )?;
     }
-    for text in ["Painters", "Clean as you go.", "Label what is yours.", "Ask before you borrow.", "Quiet hours", "pay what you can"] {
+    for text in [
+        "Painters",
+        "Clean as you go.",
+        "Label what is yours.",
+        "Ask before you borrow.",
+        "Quiet hours",
+        "pay what you can",
+    ] {
         let start = TEXT.find(text).expect("sample bold text is present") as u32;
         editor.style_range(start, start + text.len() as u32, STYLE_BOLD, 0)?;
     }
-    for text in ["letterpress", "A studio is a place where unfinished things are welcome."] {
+    for text in [
+        "letterpress",
+        "A studio is a place where unfinished things are welcome.",
+    ] {
         let start = TEXT.find(text).expect("sample italic text is present") as u32;
         editor.style_range(start, start + text.len() as u32, STYLE_ITALIC, 0)?;
     }

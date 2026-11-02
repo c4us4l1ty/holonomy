@@ -658,7 +658,9 @@ fn open_input(args: &Args) -> std::io::Result<BootInput> {
     match &args.script {
         Some(path) => {
             let script = std::fs::read(path)?;
-            Ok(BootInput::Script(holonomy_input::ScriptedInputSource::new(&script)))
+            Ok(BootInput::Script(holonomy_input::ScriptedInputSource::new(
+                &script,
+            )))
         }
         None => Ok(BootInput::Evdev(
             holonomy_input::EvdevSource::open(std::path::Path::new(EVDEV_NODE))
@@ -677,9 +679,7 @@ fn drive(
 ) -> Result<(), Fail> {
     // **The input is handed in, not opened here.** The sealed path has no `openat`, so opening
     // the keyboard or reading the script at this point is `SIGSYS` and exit 137.
-    let exit = s
-        .run_with_io(bytes, input, sinks)
-        .map_err(Fail::Session)?;
+    let exit = s.run_with_io(bytes, input, sinks).map_err(Fail::Session)?;
     eprintln!(
         "holonomy: {exit:?} after {} commands, {} edits, {} frames",
         s.stats.commands, s.stats.edits, s.stats.frames
@@ -700,7 +700,11 @@ fn drive(
         eprintln!(
             "holonomy: wrote {} bytes to the container on exit ({})",
             written,
-            if written > 0 { "committed" } else { "nothing to commit" }
+            if written > 0 {
+                "committed"
+            } else {
+                "nothing to commit"
+            }
         );
     }
 

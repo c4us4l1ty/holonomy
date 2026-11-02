@@ -473,11 +473,12 @@ impl Wavefunction {
         // changed" claim is checked against a file that is already complete.
         if let Some(d) = duress {
             let (root_b, omega_b) = Self::derive(d.passphrase, &salt, vdf_iterations)?;
-            let chunks_b = chunks_for(d.content.len() as u64)
-                .map_err(|_| ContainerError::PayloadTooLarge {
+            let chunks_b = chunks_for(d.content.len() as u64).map_err(|_| {
+                ContainerError::PayloadTooLarge {
                     requested: d.content.len() as u64,
                     cap: layout::S_MAX_PAYLOAD,
-                })?;
+                }
+            })?;
             let payload_b = payload_len(chunks_b);
 
             // **Overlap is refused, not merged.** A decoy that landed on the primary's bytes would
@@ -1149,8 +1150,7 @@ impl Wavefunction {
         while done < len {
             let want = (len - done).min(IO_ALIGN as usize);
             page.wipe();
-            self.file
-                .read_exact_at(offset + done as u64, &mut page)?;
+            self.file.read_exact_at(offset + done as u64, &mut page)?;
             out[done..done + want].copy_from_slice(&page.as_slice()[..want]);
             done += want;
         }

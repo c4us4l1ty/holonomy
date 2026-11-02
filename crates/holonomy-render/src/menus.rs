@@ -255,7 +255,7 @@ impl Action {
             // spelling to keep in step.
             Action::WordCount => "word-count",
             Action::KeyboardShortcuts => "keyboard-shortcuts",
-        Action::SelectTool(_) => "select-tool",
+            Action::SelectTool(_) => "select-tool",
         }
     }
 }
@@ -397,7 +397,10 @@ const FILE: &[Item] = &[
     act("New sample", Action::NewSample),
     act("Open", Action::Open),
     act("Import", Action::Import),
-    Item { accelerator: Some("Ctrl+S"), ..act("Save", Action::Save) },
+    Item {
+        accelerator: Some("Ctrl+S"),
+        ..act("Save", Action::Save)
+    },
     act("Export", Action::Export),
     act("Close", Action::Close),
     act("Rename", Action::Rename),
@@ -406,11 +409,26 @@ const FILE: &[Item] = &[
 ];
 
 const EDIT: &[Item] = &[
-    Item { accelerator: Some("Ctrl+Z"), ..act("Undo", Action::Undo) },
-    Item { accelerator: Some("Ctrl+Y"), ..act("Redo", Action::Redo) },
-    Item { accelerator: Some("Ctrl+X"), ..act("Cut", Action::Cut) },
-    Item { accelerator: Some("Ctrl+C"), ..act("Copy", Action::Copy) },
-    Item { accelerator: Some("Ctrl+V"), ..act("Paste", Action::Paste) },
+    Item {
+        accelerator: Some("Ctrl+Z"),
+        ..act("Undo", Action::Undo)
+    },
+    Item {
+        accelerator: Some("Ctrl+Y"),
+        ..act("Redo", Action::Redo)
+    },
+    Item {
+        accelerator: Some("Ctrl+X"),
+        ..act("Cut", Action::Cut)
+    },
+    Item {
+        accelerator: Some("Ctrl+C"),
+        ..act("Copy", Action::Copy)
+    },
+    Item {
+        accelerator: Some("Ctrl+V"),
+        ..act("Paste", Action::Paste)
+    },
     act("Select all", Action::SelectAll),
 ];
 
@@ -447,8 +465,14 @@ const VIEW: &[Item] = &[
 ];
 
 const INSERT: &[Item] = &[
-    Item { action: Some(Action::InsertImage), ..sub("Image", IconId::Image) },
-    Item { action: Some(Action::InsertTable), ..sub("Table", IconId::Table) },
+    Item {
+        action: Some(Action::InsertImage),
+        ..sub("Image", IconId::Image)
+    },
+    Item {
+        action: Some(Action::InsertTable),
+        ..sub("Table", IconId::Table)
+    },
     act("Equation", Action::InsertMath),
 ];
 
@@ -473,22 +497,42 @@ const INSERT: &[Item] = &[
 /// new ones are `Alt+Shift+5`, `Ctrl+.`, `Ctrl+,` and `Ctrl+\` — none of which collided with anything,
 /// and all of which are the chords WordCraft and Google Docs both use.
 const FORMAT: &[Item] = &[
-    Item { accelerator: Some("Ctrl+B"), ..act("Bold", Action::ToggleBold) },
-    Item { accelerator: Some("Ctrl+Shift+I"), ..act("Italic", Action::ToggleItalic) },
-    Item { accelerator: Some("Ctrl+U"), ..act("Underline", Action::ToggleUnderline) },
-    Item { accelerator: Some("Alt+Shift+5"), ..act("Strikethrough", Action::ToggleStrike) },
-    Item { accelerator: Some("Ctrl+."), ..act("Superscript", Action::ToggleSuperscript) },
-    Item { accelerator: Some("Ctrl+,"), ..act("Subscript", Action::ToggleSubscript) },
-    Item { accelerator: Some("Ctrl+\\"), ..act("Clear formatting", Action::ClearFormatting) },
+    Item {
+        accelerator: Some("Ctrl+B"),
+        ..act("Bold", Action::ToggleBold)
+    },
+    Item {
+        accelerator: Some("Ctrl+Shift+I"),
+        ..act("Italic", Action::ToggleItalic)
+    },
+    Item {
+        accelerator: Some("Ctrl+U"),
+        ..act("Underline", Action::ToggleUnderline)
+    },
+    Item {
+        accelerator: Some("Alt+Shift+5"),
+        ..act("Strikethrough", Action::ToggleStrike)
+    },
+    Item {
+        accelerator: Some("Ctrl+."),
+        ..act("Superscript", Action::ToggleSuperscript)
+    },
+    Item {
+        accelerator: Some("Ctrl+,"),
+        ..act("Subscript", Action::ToggleSubscript)
+    },
+    Item {
+        accelerator: Some("Ctrl+\\"),
+        ..act("Clear formatting", Action::ClearFormatting)
+    },
 ];
 
-const TOOLS: &[Item] = &[
-    Item { accelerator: Some("Ctrl+Shift+G"), ..act("Word count", Action::WordCount) },
-];
+const TOOLS: &[Item] = &[Item {
+    accelerator: Some("Ctrl+Shift+G"),
+    ..act("Word count", Action::WordCount)
+}];
 
-const HELP: &[Item] = &[
-    act("Keyboard shortcuts", Action::KeyboardShortcuts),
-];
+const HELP: &[Item] = &[act("Keyboard shortcuts", Action::KeyboardShortcuts)];
 
 /// Every menu, in [`MENUS`](crate::chrome::MENUS) order.
 pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, HELP];
@@ -511,7 +555,14 @@ pub fn items_for(index: usize) -> &'static [Item] {
 /// than an allocation.** Part 19 stored `style_name: String` and formatted a `String` for the toolbar
 /// on *every paint*; an index into this list is a `u8` in the state and a borrow at the point of use.
 /// See `ChromeState::style_name`.
-pub const STYLES: &[&str] = &["Normal", "Heading 1", "Quote", "Title", "Subtitle", "Heading 2"];
+pub const STYLES: &[&str] = &[
+    "Normal",
+    "Heading 1",
+    "Quote",
+    "Title",
+    "Subtitle",
+    "Heading 2",
+];
 
 /// The fonts the font dropdown offers, in the order it shows them.
 ///
@@ -666,7 +717,13 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
         Tool::Mode => MODES
             .iter()
             .enumerate()
-            .map(|(i, (label, _))| chosen(label, Action::SetMode(i as u8), i == usize::from(state.mode_index)))
+            .map(|(i, (label, _))| {
+                chosen(
+                    label,
+                    Action::SetMode(i as u8),
+                    i == usize::from(state.mode_index),
+                )
+            })
             .collect(),
         // **Part 44: `Overflow` lists the tools that did not fit.** The rows carry the tool's *name*
         // and `Action::SelectTool` is what runs one -- a different shape from `Action::SetZoom`, which
@@ -701,7 +758,10 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
 /// per span and a reviewer identity**, and none of those exist; a `Suggesting` row that behaved like
 /// `Editing` under a different label would be the most dishonest thing on the toolbar — worse than
 /// the inert button it replaces, because it would *look* like it was tracking other people's edits.
-pub const MODES: &[(&str, ViewMode)] = &[("Editing", ViewMode::Editing), ("Viewing", ViewMode::Viewing)];
+pub const MODES: &[(&str, ViewMode)] = &[
+    ("Editing", ViewMode::Editing),
+    ("Viewing", ViewMode::Viewing),
+];
 
 /// What a mode is, as far as the renderer is concerned.
 ///

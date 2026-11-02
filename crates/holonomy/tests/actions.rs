@@ -814,5 +814,8 @@ fn exporting_with_no_sinks_writes_nothing_and_is_not_an_error() {
     s.apply_action(Action::Export).expect("the row's action");
     assert_eq!(s.export_all(&mut []), 0, "nothing to write to");
     assert_eq!(s.stats.exports, 0, "and nothing was exported");
-    assert_eq!(s.stats.export_failures, 0, "and nothing failed: there was nowhere to fail");
+    assert_eq!(
+        s.stats.export_failures, 0,
+        "and nothing failed: there was nowhere to fail"
+    );
 }

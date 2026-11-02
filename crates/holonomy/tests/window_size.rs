@@ -107,7 +107,10 @@ fn the_window_never_exceeds_the_screen() {
             w <= screen.0 && h <= screen.1,
             "{screen:?}: opened at {w}x{h}, which is larger than the screen"
         );
-        assert!(w >= 1 && h >= 1, "{screen:?}: and a window must have a positive extent");
+        assert!(
+            w >= 1 && h >= 1,
+            "{screen:?}: and a window must have a positive extent"
+        );
     }
 }
 
@@ -120,8 +123,16 @@ fn the_window_never_exceeds_the_screen() {
 #[test]
 fn an_unreadable_screen_opens_at_the_design_size_not_one_pixel() {
     assert_eq!(opening_size((0, 0), None), (DESIGN_W, DESIGN_H));
-    assert_eq!(opening_size((0, 1920), None).0, DESIGN_W, "a zero width alone is enough");
-    assert_eq!(opening_size((3072, 0), None).1, DESIGN_H, "and a zero height alone");
+    assert_eq!(
+        opening_size((0, 1920), None).0,
+        DESIGN_W,
+        "a zero width alone is enough"
+    );
+    assert_eq!(
+        opening_size((3072, 0), None).1,
+        DESIGN_H,
+        "and a zero height alone"
+    );
 }
 
 /// **The minimum is honoured, except where the screen cannot give it.** 1 test.
@@ -140,7 +151,11 @@ fn the_minimum_is_honoured_where_the_screen_allows_it() {
 
     // A screen with room for the minimum: the minimum is the floor.
     let (w, h) = opening_size((1920, 1080), Some((min_w, min_h)));
-    assert_eq!((w, h), (DESIGN_W, DESIGN_H), "a big screen opens at the design size");
+    assert_eq!(
+        (w, h),
+        (DESIGN_W, DESIGN_H),
+        "a big screen opens at the design size"
+    );
 
     // A screen without room: the screen wins, and the floor does not push past it.
     let (w, h) = opening_size((400, 300), Some((min_w, min_h)));
@@ -153,7 +168,11 @@ fn the_minimum_is_honoured_where_the_screen_allows_it() {
 
     // Exactly the screen, no room for a margin: one pixel, not the minimum.
     let (w, h) = opening_size((SCREEN_MARGIN, SCREEN_MARGIN), Some((min_w, min_h)));
-    assert_eq!((w, h), (1, 1), "a screen the size of the margin leaves a 1px window, honestly");
+    assert_eq!(
+        (w, h),
+        (1, 1),
+        "a screen the size of the margin leaves a 1px window, honestly"
+    );
 }
 
 /// **The margin is what it says it is, and it is not a fraction of the screen.** 1 test.
@@ -172,7 +191,11 @@ fn the_margin_is_a_fixed_number_of_pixels() {
     let (big, _) = opening_size((2000, 2000), None);
     let (small, _) = opening_size((600, 2000), None);
     assert_eq!(big, DESIGN_W, "plenty of room: the design width");
-    assert_eq!(small, 600 - SCREEN_MARGIN, "not enough: the screen minus the margin");
+    assert_eq!(
+        small,
+        600 - SCREEN_MARGIN,
+        "not enough: the screen minus the margin"
+    );
 }
 
 #[test]
@@ -181,12 +204,30 @@ fn desktop_startup_zoom_is_readable_and_respects_explicit_choices() {
     use holonomy::windowed::initial_desktop_zoom;
 
     let defaults = Args::default();
-    assert_eq!(initial_desktop_zoom((1920, 1080), (1600, 1000), &defaults), 125);
-    assert_eq!(initial_desktop_zoom((1917, 1157), (1600, 1000), &defaults), 125);
-    assert_eq!(initial_desktop_zoom((1366, 768), (1302, 704), &defaults), 100);
-    assert_eq!(initial_desktop_zoom((3840, 2160), (800, 600), &defaults), 100);
+    assert_eq!(
+        initial_desktop_zoom((1920, 1080), (1600, 1000), &defaults),
+        125
+    );
+    assert_eq!(
+        initial_desktop_zoom((1917, 1157), (1600, 1000), &defaults),
+        125
+    );
+    assert_eq!(
+        initial_desktop_zoom((1366, 768), (1302, 704), &defaults),
+        100
+    );
+    assert_eq!(
+        initial_desktop_zoom((3840, 2160), (800, 600), &defaults),
+        100
+    );
     let explicit = Args::parse(["--zoom", "100"]).unwrap();
-    assert_eq!(initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit), 100);
+    assert_eq!(
+        initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit),
+        100
+    );
     let explicit_ppem = Args::parse(["--ppem", "16"]).unwrap();
-    assert_eq!(initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit_ppem), 100);
+    assert_eq!(
+        initial_desktop_zoom((3840, 2160), (1600, 1000), &explicit_ppem),
+        100
+    );
 }

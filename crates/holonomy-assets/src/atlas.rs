@@ -244,7 +244,12 @@ impl Atlas {
         // global `line_pitch` iterates every column.
         let max_styles = crate::metric::MAX_SIZES;
         (0..(self.vertical.len() / max_styles.max(1)))
-            .map(|style| self.vertical.get(style * max_styles + hi).copied().unwrap_or((0, 0)))
+            .map(|style| {
+                self.vertical
+                    .get(style * max_styles + hi)
+                    .copied()
+                    .unwrap_or((0, 0))
+            })
             .map(|(a, d)| a.saturating_add(d))
             .max()
             .unwrap_or(0)

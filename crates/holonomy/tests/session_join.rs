@@ -70,7 +70,9 @@ fn container(content: &[u8]) -> (std::path::PathBuf, Wavefunction) {
 
 /// `n` bytes where no 16-byte window repeats, so a misaddressed read is visible rather than plausible.
 fn text(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8)
+        .collect()
 }
 
 /// **Every byte of a fully-evicted rope comes back out of the container, identical.**
@@ -92,9 +94,13 @@ fn a_fully_evicted_rope_reads_the_document_back_out_of_a_container() {
     // fetch held onto sections instead of copying out, this is where it would break.
     let mut store = SectionStore::new(&mut wf, 2);
     let mut got = vec![0u8; doc.len()];
-    rope.read_at_faulting(&mut store, 0, got.len(), &mut got).expect("read the document back");
+    rope.read_at_faulting(&mut store, 0, got.len(), &mut got)
+        .expect("read the document back");
 
-    assert_eq!(got, doc, "a fully evicted rope reads back as the identical document");
+    assert_eq!(
+        got, doc,
+        "a fully evicted rope reads back as the identical document"
+    );
     assert!(store.stats().loads > 0, "and it really did load sections");
     let _ = std::fs::remove_file(&path);
 }
@@ -122,7 +128,8 @@ fn a_leaf_straddling_a_section_boundary_is_correct() {
             // Evict it, so this cannot pass by reading bytes the rope already had.
             rope.evict_leaf(i).expect("evict");
             let mut store = SectionStore::new(&mut wf, 2);
-            rope.read_at_faulting(&mut store, start, buf.len(), &mut buf).expect("fault the straddler");
+            rope.read_at_faulting(&mut store, start, buf.len(), &mut buf)
+                .expect("fault the straddler");
             assert_eq!(
                 &buf[..],
                 &doc[start..end],
@@ -160,7 +167,10 @@ fn leaf_and_section_boundaries_do_not_tile_and_that_is_pinned() {
     );
     // And the consequence, stated as a number: 1 leaf in 17 straddles.
     let per_section = SECTION / leaf_fill;
-    assert_eq!(per_section, 17, "17 whole leaves per section, and a remainder that straddles");
+    assert_eq!(
+        per_section, 17,
+        "17 whole leaves per section, and a remainder that straddles"
+    );
     assert_eq!(SECTION - per_section * leaf_fill, SECTION % leaf_fill);
 }
 
@@ -178,7 +188,8 @@ fn reading_a_sparse_rope_keeps_residency_bounded() {
 
     let mut store = SectionStore::new(&mut wf, 2);
     let mut got = vec![0u8; doc.len()];
-    rope.read_at_faulting(&mut store, 0, got.len(), &mut got).expect("read");
+    rope.read_at_faulting(&mut store, 0, got.len(), &mut got)
+        .expect("read");
 
     assert_eq!(got, doc);
     assert_eq!(
@@ -186,8 +197,14 @@ fn reading_a_sparse_rope_keeps_residency_bounded() {
         2,
         "a 2-section budget over a 3-section document must end holding exactly 2"
     );
-    assert!(store.resident_bytes() <= 2 * SECTION, "and at most two sections of bytes");
-    assert!(store.stats().evictions > 0, "which means it really did evict while reading");
+    assert!(
+        store.resident_bytes() <= 2 * SECTION,
+        "and at most two sections of bytes"
+    );
+    assert!(
+        store.stats().evictions > 0,
+        "which means it really did evict while reading"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -214,7 +231,9 @@ fn fetching_reuses_its_buffer() {
         for i in 0..first.leaf_count() {
             first.evict_leaf(i).expect("evict");
         }
-        first.read_at_faulting(&mut store, 0, buf.len(), &mut buf).expect("first fetch");
+        first
+            .read_at_faulting(&mut store, 0, buf.len(), &mut buf)
+            .expect("first fetch");
     }
     let after_first = store.fetch_buffer_len();
     assert!(after_first > 0, "the first fetch allocates the buffer");
@@ -224,7 +243,8 @@ fn fetching_reuses_its_buffer() {
         for i in 0..keep.leaf_count() {
             keep.evict_leaf(i).expect("evict");
         }
-        keep.read_at_faulting(&mut store, 0, buf.len(), &mut buf).expect("fetch");
+        keep.read_at_faulting(&mut store, 0, buf.len(), &mut buf)
+            .expect("fetch");
     }
     assert_eq!(
         store.fetch_buffer_len(),
@@ -254,7 +274,11 @@ fn a_missing_section_is_opaque_rather_than_specific() {
     // And the store's own accounting did not move: a failed fetch is not a load.
     let loads = store.stats().loads;
     let _ = store.fetch_leaf(SECTION * 50, &mut buf);
-    assert_eq!(store.stats().loads, loads, "a failed fetch must not count as a load");
+    assert_eq!(
+        store.stats().loads,
+        loads,
+        "a failed fetch must not count as a load"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

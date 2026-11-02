@@ -41,7 +41,7 @@ use holonomy::store::NoSource;
 use holonomy::Exit;
 use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
-use holonomy_input::{Event, InputError, InputEvent, InputSource, KEY_A, Wait};
+use holonomy_input::{Event, InputError, InputEvent, InputSource, Wait, KEY_A};
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_text::{Editor, SpanPolicy};
 
@@ -186,9 +186,9 @@ fn the_wait_returns_only_when_the_device_is_readable() {
     let mut src = unsafe { holonomy_input::EvdevSource::from_raw_fd(read) };
 
     let start = std::time::Instant::now();
-    pipe.type_into(&holonomy_input::event::encode(holonomy_input::InputEvent::press(
-        holonomy_input::KEY_A,
-    )));
+    pipe.type_into(&holonomy_input::event::encode(
+        holonomy_input::InputEvent::press(holonomy_input::KEY_A),
+    ));
     assert_eq!(src.wait(5_000).expect("no error"), Wait::Ready);
     let quick = start.elapsed();
 
