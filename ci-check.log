@@ -1,57 +1,57 @@
 [1m[92m    Updating[0m crates.io index
 [1m[92m Downloading[0m crates ...
 [1m[92m  Downloaded[0m adler2 v2.0.1
-[1m[92m  Downloaded[0m block-buffer v0.12.1
-[1m[92m  Downloaded[0m base64ct v1.8.3
 [1m[92m  Downloaded[0m alloc-stdlib v0.3.0
-[1m[92m  Downloaded[0m aead v0.6.1
 [1m[92m  Downloaded[0m blake2 v0.11.0
-[1m[92m  Downloaded[0m crypto-common v0.2.2
+[1m[92m  Downloaded[0m argon2 v0.6.0
+[1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
+[1m[92m  Downloaded[0m base64ct v1.8.3
+[1m[92m  Downloaded[0m aead v0.6.1
 [1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m bitflags v2.13.2
+[1m[92m  Downloaded[0m rand_core v0.10.1
+[1m[92m  Downloaded[0m block-buffer v0.12.1
+[1m[92m  Downloaded[0m password-hash v0.6.1
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m cfg-if v1.0.5
+[1m[92m  Downloaded[0m crypto-common v0.2.2
+[1m[92m  Downloaded[0m cipher v0.5.2
+[1m[92m  Downloaded[0m cpufeatures v0.3.1
+[1m[92m  Downloaded[0m phc v0.6.1
 [1m[92m  Downloaded[0m secrecy v0.10.3
 [1m[92m  Downloaded[0m universal-hash v0.6.1
-[1m[92m  Downloaded[0m quote v1.0.47
-[1m[92m  Downloaded[0m chacha20 v0.10.2
-[1m[92m  Downloaded[0m hybrid-array v0.4.15
-[1m[92m  Downloaded[0m phc v0.6.1
-[1m[92m  Downloaded[0m tinyvec v1.13.3
-[1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
-[1m[92m  Downloaded[0m argon2 v0.6.0
-[1m[92m  Downloaded[0m bitflags v2.13.2
-[1m[92m  Downloaded[0m cmov v0.5.4
-[1m[92m  Downloaded[0m getrandom v0.4.3
-[1m[92m  Downloaded[0m miniz_oxide v0.9.1
-[1m[92m  Downloaded[0m cipher v0.5.2
-[1m[92m  Downloaded[0m typenum v1.20.1
-[1m[92m  Downloaded[0m poly1305 v0.9.1
+[1m[92m  Downloaded[0m zeroize_derive v1.5.0
 [1m[92m  Downloaded[0m inout v0.2.2
+[1m[92m  Downloaded[0m digest v0.11.3
+[1m[92m  Downloaded[0m ctutils v0.4.2
+[1m[92m  Downloaded[0m cmov v0.5.4
+[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m unicode-ident v1.0.26
 [1m[92m  Downloaded[0m zeroize v1.9.0
-[1m[92m  Downloaded[0m password-hash v0.6.1
+[1m[92m  Downloaded[0m chacha20 v0.10.2
+[1m[92m  Downloaded[0m getrandom v0.4.3
+[1m[92m  Downloaded[0m hmac v0.13.0
+[1m[92m  Downloaded[0m hybrid-array v0.4.15
+[1m[92m  Downloaded[0m poly1305 v0.9.1
+[1m[92m  Downloaded[0m ryu v1.0.23
+[1m[92m  Downloaded[0m sha2 v0.11.0
+[1m[92m  Downloaded[0m tinyvec v1.13.3
 [1m[92m  Downloaded[0m proc-macro2 v1.0.107
 [1m[92m  Downloaded[0m const-oid v0.10.2
-[1m[92m  Downloaded[0m cfg-if v1.0.5
-[1m[92m  Downloaded[0m syn v2.0.119
-[1m[92m  Downloaded[0m zeroize_derive v1.5.0
-[1m[92m  Downloaded[0m ctutils v0.4.2
 [1m[92m  Downloaded[0m chacha20poly1305 v0.11.0
-[1m[92m  Downloaded[0m rand_core v0.10.1
-[1m[92m  Downloaded[0m unicode-ident v1.0.26
-[1m[92m  Downloaded[0m ryu v1.0.23
-[1m[92m  Downloaded[0m brotli-decompressor v6.0.1
-[1m[92m  Downloaded[0m hmac v0.13.0
-[1m[92m  Downloaded[0m digest v0.11.3
-[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m miniz_oxide v0.9.1
 [1m[92m  Downloaded[0m unicode-normalization v0.1.25
-[1m[92m  Downloaded[0m ttf-parser v0.25.1
-[1m[92m  Downloaded[0m sha2 v0.11.0
-[1m[92m  Downloaded[0m cpufeatures v0.3.1
+[1m[92m  Downloaded[0m typenum v1.20.1
 [1m[92m  Downloaded[0m hkdf v0.13.0
+[1m[92m  Downloaded[0m ttf-parser v0.25.1
+[1m[92m  Downloaded[0m brotli-decompressor v6.0.1
+[1m[92m  Downloaded[0m syn v2.0.119
 [1m[92m  Downloaded[0m libc v0.2.190
 [1m[92m  Downloaded[0m pdf-writer v0.15.0
 [1m[92m   Compiling[0m libc v0.2.190
 [1m[92m   Compiling[0m getrandom v0.4.3
-[1m[92m    Checking[0m cfg-if v1.0.5
 [1m[92m    Checking[0m rand_core v0.10.1
+[1m[92m    Checking[0m cfg-if v1.0.5
 [1m[92m   Compiling[0m proc-macro2 v1.0.107
 [1m[92m   Compiling[0m unicode-ident v1.0.26
 [1m[92m   Compiling[0m quote v1.0.47
@@ -59,8 +59,8 @@
 [1m[92m    Checking[0m cmov v0.5.4
 [1m[92m    Checking[0m ctutils v0.4.2
 [1m[92m    Checking[0m const-oid v0.10.2
-[1m[92m   Compiling[0m syn v2.0.119
 [1m[92m    Checking[0m alloc-no-stdlib v3.0.0
+[1m[92m   Compiling[0m syn v2.0.119
 [1m[92m    Checking[0m hybrid-array v0.4.15
 [1m[92m    Checking[0m alloc-stdlib v0.3.0
 [1m[92m    Checking[0m brotli-decompressor v6.0.1
@@ -73,8 +73,8 @@
 [1m[92m    Checking[0m inout v0.2.2
 [1m[92m    Checking[0m base64ct v1.8.3
 [1m[92m    Checking[0m digest v0.11.3
-[1m[92m    Checking[0m blake2 v0.11.0
 [1m[92m    Checking[0m phc v0.6.1
+[1m[92m    Checking[0m blake2 v0.11.0
 [1m[92m    Checking[0m cipher v0.5.2
 [1m[92m    Checking[0m universal-hash v0.6.1
 [1m[92m    Checking[0m poly1305 v0.9.1
@@ -84,16 +84,16 @@
 [1m[92m    Checking[0m aead v0.6.1
 [1m[92m    Checking[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
 [1m[92m    Checking[0m tinyvec v1.13.3
-[1m[92m    Checking[0m chacha20poly1305 v0.11.0
 [1m[92m    Checking[0m hkdf v0.13.0
+[1m[92m    Checking[0m chacha20poly1305 v0.11.0
 [1m[92m    Checking[0m argon2 v0.6.0
 [1m[92m    Checking[0m unicode-normalization v0.1.25
 [1m[92m    Checking[0m sha2 v0.11.0
 [1m[92m    Checking[0m adler2 v2.0.1
-[1m[92m    Checking[0m memchr v2.8.3
+[1m[92m    Checking[0m bitflags v2.13.2
 [1m[92m    Checking[0m miniz_oxide v0.9.1
 [1m[92m    Checking[0m itoa v1.0.18
-[1m[92m    Checking[0m bitflags v2.13.2
+[1m[92m    Checking[0m memchr v2.8.3
 [1m[92m    Checking[0m ryu v1.0.23
 [1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
 [1m[92m    Checking[0m holonomy-x11 v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-x11)
@@ -107,8 +107,33 @@
 [1m[92m    Checking[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
 [1m[92m    Checking[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
 [1m[92m    Checking[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-crates/holonomy-render/src/icons.rs:770:1: [1m[91merror[E0774][0m: `derive` may only be applied to `struct`s, `enum`s and `union`s: not applicable here
-crates/holonomy-render/src/ribbon.rs:100:22: [1m[91merror[0m: no rules expected `::`: no rules expected this token in macro call
-crates/holonomy-render/src/ribbon.rs:102:22: [1m[91merror[0m: no rules expected `::`: no rules expected this token in macro call
-[1m[91merror[0m: could not compile `holonomy-render` (lib) due to 3 previous errors
+crates/holonomy-render/src/ribbon.rs:79:30: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:80:31: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:81:31: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:82:31: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:83:29: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:84:28: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:85:33: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:86:30: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:87:32: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:88:32: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:89:31: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:90:34: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:91:30: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:92:37: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:93:30: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:94:30: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/ribbon.rs:95:37: [1m[91merror[0m: expected one of `,`, `.`, `?`, `}`, or an operator, found `::`: expected one of `,`, `.`, `?`, `}`, or an operator
+crates/holonomy-render/src/widgets.rs:1128:56: [1m[91merror[E0425][0m: cannot find function `overflow_rect` in this scope: not found in this scope
+crates/holonomy-render/src/ribbon.rs:483:51: [1m[91merror[E0277][0m: can't compare `str` with `&str`: no implementation for `str == &str`
+crates/holonomy-render/src/ribbon.rs:485:17: [1m[91merror[E0308][0m: mismatched types: expected `Option<IconId>`, found `&Option<IconId>`
+crates/holonomy-render/src/ribbon.rs:494:32: [1m[91merror[E0277][0m: can't compare `&Action` with `Action`: no implementation for `&Action == Action`
+crates/holonomy-render/src/ribbon.rs:508:25: [1m[91merror[E0308][0m: mismatched types: expected `Action`, found `&Action`
+crates/holonomy-render/src/ribbon.rs:510:17: [1m[91merror[E0308][0m: mismatched types: expected `Option<IconId>`, found `&Option<IconId>`
+crates/holonomy-render/src/chrome.rs:3168:20: [1m[33mwarning[0m: unused variable: `popup_ink`: help: if this is intentional, prefix it with an underscore: `_popup_ink`
+crates/holonomy-render/src/chrome.rs:3168:31: [1m[33mwarning[0m: unused variable: `popup_hover`: help: if this is intentional, prefix it with an underscore: `_popup_hover`
+[1m[33mwarning[0m: `holonomy-render` (lib) generated 2 warnings
+[1m[91merror[0m: could not compile `holonomy-render` (lib) due to 40 previous errors; 2 warnings emitted
 [1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[33mwarning[0m: `holonomy-render` (lib test) generated 2 warnings (2 duplicates)
+[1m[91merror[0m: could not compile `holonomy-render` (lib test) due to 40 previous errors; 2 warnings emitted
