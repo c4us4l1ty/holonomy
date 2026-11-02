@@ -31,8 +31,18 @@ jobs:
           cargo fmt --all -- --check
       - name: Check sealed and desktop targets
         run: |
-          cargo check --workspace --all-targets
-          cargo check --workspace --all-targets --features holonomy/desktop
+          set -o pipefail
+          cargo check --workspace --all-targets --message-format=short 2>&1 | tee /tmp/check.log
+          cargo check --workspace --all-targets --features holonomy/desktop --message-format=short 2>&1 | tee -a /tmp/check.log
+      - name: Publish check diagnostics
+        if: failure()
+        run: |
+          tail -n 300 /tmp/check.log > ci-check.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci-check.log
+          git commit -m "ci: publish check diagnostics" || true
+          git push origin HEAD:arena/ca2b02bd-holonomy || true
       - name: Release tests
         run: cargo test --workspace --release -- --test-threads=1
       - name: Desktop tests
