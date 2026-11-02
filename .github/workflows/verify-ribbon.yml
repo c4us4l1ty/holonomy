@@ -57,14 +57,14 @@ jobs:
         with:
           ref: main
       - uses: dtolnay/rust-toolchain@stable
-      - name: baseline-chrome
+      - name: baseline-all
         run: |
           set -o pipefail
           mkdir -p ci-baseline
-          if cargo test -p holonomy-render --test chrome > ci-baseline/chrome.log 2>&1; then
-            echo "BASELINE chrome PASS" > ci-baseline/summary.log
+          if cargo test --workspace --no-fail-fast > ci-baseline/chrome.log 2>&1; then
+            echo "BASELINE all PASS" > ci-baseline/summary.log
           else
-            echo "BASELINE chrome FAIL" > ci-baseline/summary.log
+            echo "BASELINE all FAIL" > ci-baseline/summary.log
           fi
           grep -E "^test result|^---- |panicked at" ci-baseline/chrome.log | head -40
       - name: publish
