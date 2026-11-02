@@ -1677,7 +1677,7 @@ impl Default for ChromeState {
             active_doc: 0,
             style_index: 0,
             font_index: 0,
-            colour_index: 0,
+            colour_index: crate::menus::COLOURS.len() - 1,
             open: None,
             cursor: None,
             hover: None,

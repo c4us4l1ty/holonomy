@@ -95,3 +95,32 @@ Verification: GitHub Actions run `41324506992` on commit `28ad4a6` passed the de
 desktop-feature tests, including the new dialog geometry/paint gates and the 2 MiB artifact ceiling.
 No live interactive X11 usability test was run (`HOLONOMY_X11_LIVE=1` remains unset); the evidence is
 the automated gates plus the user's reproduced release-build symptoms.
+
+## Paragraph formatting: initial step
+
+The style menu now applies **Normal text**, **Heading**, or **Quote** to the current
+paragraph or the paragraphs touched by a selection. Heading uses the existing header
+flag (and exports as a heading), bold, and teal; the editor currently draws it at body
+size. Choosing a style on an empty paragraph arms the next text; Enter at the end of a
+heading starts normal text. The former Title, Heading 1/2/3 and Caption entries were
+removed because the model cannot represent their distinct sizes or levels. Inline bold,
+italic and colour changes preserve the other properties across mixed selections, and
+bold plus colour can be armed together. The colour menu also has a Default choice.
+
+Formatting commands now record one bounded undo/redo transaction per operation. Mixed
+runs retain their original styles on undo, and a new edit discards the redo branch.
+Paragraph presets reset inline formatting in
+the affected paragraphs; the on-screen heading is not enlarged, and the style dropdown
+is not yet derived from the caret's paragraph. Lists, page layout, navigation by headings,
+multiple heading levels, tables of contents, and rich document import remain future work.
+WordCraft is a useful reference, but its snapshot-based history and egui frontend do not
+fit Holonomy's bounded undo arena or sealed framebuffer architecture directly.
+
+`File > New sample` creates an editable copy of the studio handbook text adapted from
+WordCraft. It is saved as a new document in the unlocked desktop vault. This adaptation
+uses Holonomy's existing heading and inline-style spans; its lists and equipment entries
+are plain text, not WordCraft list or table objects. The upstream MIT license is included
+in `third_party/wordcraft/LICENSE-MIT`.
+
+`Ctrl+B` toggles bold and `Ctrl+Shift+I` toggles italic through the same selection-aware
+commands as the toolbar. `Ctrl+I` remains the existing image shortcut.

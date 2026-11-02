@@ -68,6 +68,8 @@ pub enum ActionKind {
     Insert = 0,
     /// Text was deleted. Undo re-inserts `bytes` at `offset`.
     Delete = 1,
+    /// Formatting changed without changing text. Payload contains before/after style runs.
+    Format = 2,
 }
 
 impl ActionKind {
@@ -75,6 +77,7 @@ impl ActionKind {
         match v {
             0 => Some(Self::Insert),
             1 => Some(Self::Delete),
+            2 => Some(Self::Format),
             _ => None,
         }
     }

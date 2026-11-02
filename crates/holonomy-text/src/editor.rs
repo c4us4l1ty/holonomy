@@ -344,6 +344,8 @@ pub struct Editor {
     /// That is the same shape as [`Editor::undo_assets`] with the roles of the two directions
     /// swapped, and it was the slot that the `Insert` arm of `undo` wrote into.
     redo_assets: Vec<Vec<Asset>>,
+    /// Styles of undone insertions, paired with redo insertion actions only.
+    redo_insert_styles: Vec<Vec<TextIntervalSpan>>,
 }
 
 /// Bytes of scratch [`Editor::delete_at`] keeps, covering every single-keystroke delete.
@@ -508,6 +510,7 @@ impl Editor {
             undo_tables: Vec::with_capacity(UNDO_DEPTH),
             undo_assets: Vec::with_capacity(UNDO_DEPTH),
             redo_assets: Vec::with_capacity(UNDO_DEPTH),
+            redo_insert_styles: Vec::with_capacity(UNDO_DEPTH),
             undo: UndoStack::new(),
             selection_anchor: None,
             // **Reserved once, here, rather than grown on first paste.** A paste is an edit, and
@@ -1118,6 +1121,65 @@ impl Editor {
         Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
     }
 
+    /// Apply a formatting command as one bounded undoable transaction.
+    ///
+    /// Each existing run is transformed independently, preserving mixed formatting.
+    /// History stores only offsets and style attributes, never document text. The
+    /// operation is refused before mutation if the history record will not fit.
+    pub fn format_range<F>(&mut self, start: u32, end: u32, transform: F) -> Result<bool, EditorError>
+    where
+        F: Fn(TextIntervalSpan) -> (u16, u32),
+    {
+        if start > end {
+            return Err(SpanError::InvertedRange { start, end }.into());
+        }
+        if end > self.spans.text_len() {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(start), end: u64::from(end),
+                text_len: self.spans.text_len(),
+            }.into());
+        }
+        if start == end { return Ok(false); }
+        let mut runs = self.spans.runs_in(start, end);
+        if runs.is_empty() {
+            runs.push((TextIntervalSpan::plain(start, end), start, end));
+        }
+        const RECORD_BYTES: usize = 20;
+        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        if needed > ARENA_BYTES {
+            return Err(UndoError::ActionTooLarge { len: needed, capacity: ARENA_BYTES }.into());
+        }
+        let mut record = Vec::with_capacity(needed);
+        let mut changed = false;
+        for (old, lo, hi) in runs {
+            let (flags, colour) = transform(old);
+            changed |= flags != old.style_flags || colour != old.color_rgb;
+            record.extend_from_slice(&lo.to_le_bytes());
+            record.extend_from_slice(&hi.to_le_bytes());
+            record.extend_from_slice(&old.style_flags.to_le_bytes());
+            record.extend_from_slice(&old.color_rgb.to_le_bytes());
+            record.extend_from_slice(&flags.to_le_bytes());
+            record.extend_from_slice(&colour.to_le_bytes());
+        }
+        if !changed { return Ok(false); }
+        self.undo.push(start, ActionKind::Format, &record)?;
+        self.drop_redo();
+        self.apply_format_record(&record, true)?;
+        record.zeroize();
+        Ok(true)
+    }
+
+    /// Replay before or after attributes from an internal, fixed-width history record.
+    fn apply_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
+        for run in record.chunks_exact(20) {
+            let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
+            let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
+            let (flags, colour) = if after { (u16_at(14), u32_at(16)) } else { (u16_at(8), u32_at(10)) };
+            self.spans.style_range(u32_at(0), u32_at(4), flags, colour)?;
+        }
+        Ok(())
+    }
+
     /// The style in effect at `offset`.
     #[inline]
     pub fn style_at(&self, offset: u32) -> TextIntervalSpan {
@@ -1148,7 +1210,7 @@ impl Editor {
         // The first version was a single `Option` and the second undo overwrote the first's map:
         // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
         // redo found nothing to restore, so the table map was silently never put back.
-        let table_shadow = if action.bytes.contains(&crate::table::CELL_SEPARATOR) {
+        let table_shadow = if action.kind != ActionKind::Format && action.bytes.contains(&crate::table::CELL_SEPARATOR) {
             Some(self.tables.spans().to_vec())
         } else {
             None
@@ -1158,7 +1220,17 @@ impl Editor {
         }
         self.undo_tables.push(table_shadow);
         let outcome = match action.kind {
+            ActionKind::Format => {
+                self.apply_format_record(&action.bytes, false)?;
+                EditOutcome { offset: action.offset, len: 0, kind: ActionKind::Format, line: None, lines_changed: false }
+            }
             ActionKind::Insert => {
+                // Capture inserted styles before deleting the text, for redo.
+                if self.redo_insert_styles.len() == UNDO_DEPTH {
+                    self.redo_insert_styles.remove(0);
+                }
+                self.redo_insert_styles.push(self.spans.runs_in(action.offset, action.offset + action.bytes.len() as u32)
+                    .into_iter().map(|(s, lo, hi)| TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)).collect());
                 // The action inserted these bytes, so undoing removes them.
                 self.spans
                     .apply_delete(action.offset, action.bytes.len() as u32)?;
@@ -1328,6 +1400,7 @@ impl Editor {
         // later delete restore an asset from a discarded history.
         self.undo_assets.clear();
         self.redo_assets.clear();
+        self.redo_insert_styles.clear();
         self.undo_tables.clear();
         // The redo payloads are plaintext that outlived their undo, so they get scrubbed rather than
         // dropped. `UndoAction` holds a `Vec<u8>`, and this is the only path that discards one.
@@ -1820,13 +1893,18 @@ impl Editor {
         let restore = self.undo_tables.pop().flatten();
         // **Popped from the *redo* side.** The assets a redo of an *insertion* has to put back were
         // stashed by the undo of that insertion.
-        let restore_assets = self.redo_assets.pop().unwrap_or_default();
+        let restore_assets = if action.kind == ActionKind::Insert {
+            self.redo_assets.pop().unwrap_or_default()
+        } else { Vec::new() };
+        let restore_styles = if action.kind == ActionKind::Insert {
+            self.redo_insert_styles.pop().unwrap_or_default()
+        } else { Vec::new() };
 
         // The replay in its own helper, so that *every* path out of it -- including a refusal that
         // returns early -- reaches the zeroize below. `action.bytes` is a plain `Vec`, not
         // `Zeroizing`, and these are the deleted plaintext: dropping them to the heap on an error
         // return is exactly what FR-1.2 forbids, and the old `?`-inside-the-match let it happen.
-        let replayed = self.replay_redo(&action, restore, restore_assets);
+        let replayed = self.replay_redo(&action, restore, restore_assets, restore_styles);
         let outcome = match replayed {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -1867,13 +1945,21 @@ impl Editor {
         action: &UndoAction,
         restore: Option<Vec<crate::TableSpan>>,
         restore_assets: Vec<crate::asset::Asset>,
+        restore_styles: Vec<TextIntervalSpan>,
     ) -> Result<EditOutcome, EditorError> {
         let offset = action.offset as usize;
         let len = action.bytes.len();
         let lines_changed = action.bytes.contains(&b'\n');
         match action.kind {
+            ActionKind::Format => {
+                self.apply_format_record(&action.bytes, true)?;
+                Ok(EditOutcome { offset: action.offset, len: 0, kind: ActionKind::Format, line: None, lines_changed: false })
+            }
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
+                for span in restore_styles {
+                    self.spans.style_range(span.start_byte, span.end_byte, span.style_flags, span.color_rgb)?;
+                }
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
                 if let Some(spans) = restore {
                     self.tables.replace(spans);
@@ -1993,6 +2079,7 @@ impl Editor {
         // branch gone, those stashes have no consumer** -- and leaving them would let a later
         // undo pair with a stale entry.
         self.redo_assets.clear();
+        self.redo_insert_styles.clear();
         self.undo_tables.clear();
     }
 

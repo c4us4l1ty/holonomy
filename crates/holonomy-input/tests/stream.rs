@@ -155,6 +155,7 @@ fn ctrl_hotkeys_from_a_real_two_key_press() {
         (KEY_Z, Hotkey::Undo),
         (KEY_Y, Hotkey::Redo),
         (KEY_S, Hotkey::Save),
+        (KEY_B, Hotkey::Bold),
     ] {
         let mut events = vec![InputEvent::press(KEY_LEFTCTRL)];
         events.extend(tap(code));

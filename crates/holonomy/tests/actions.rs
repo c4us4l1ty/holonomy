@@ -193,6 +193,7 @@ fn every_action_is_routed_or_accounted_for() {
         // not edit the document, it replaces it, and `adopt_document` is reachable only from the
         // session.
         Action::New,
+        Action::NewSample,
         // **Part 45: three more, and `Close` is the one that used to be the single unwired row.**
         // `Close` changes which document is painted, and `Open`/`Import` ask for a path. None of the
         // three is a keystroke the editor applies — they change what the session is painting — so
@@ -259,6 +260,7 @@ fn every_action_has_a_name() {
         Action::DocumentStart,
         Action::DocumentEnd,
         Action::New,
+        Action::NewSample,
         Action::Save,
         Action::InsertTable,
         Action::InsertImage,
@@ -313,7 +315,7 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 26,
+        with_action, 27,
         "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
          Keyboard shortcuts. Adding one changes this number."
     );
@@ -379,8 +381,8 @@ fn every_wired_menu_item_carries_an_action() {
     // went up by two because the four rows that replaced them are four rows.
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (0, 26),
-        "**0 unwired of 26 menu items** in the seven headings after out-of-scope cloud/add-on rows \
+        (0, 27),
+        "**0 unwired of 27 menu items** in the seven headings after out-of-scope cloud/add-on rows \
          were removed. Any row that reappears here is a row that draws and does nothing. Got: \
          {without:?}"
     );
@@ -560,7 +562,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     assert_eq!(b, "Inter");
     // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
     // names would have to be returned as a borrow of the state and could not be `'static`.
-    assert_eq!(menus::STYLES.len(), 7);
+    assert_eq!(menus::STYLES.len(), 3);
     // **Two, and both loaded.** The list used to be five names of which four had no face in the
     // atlas; the dropdown is now exactly the families `Session::doc_style` can actually draw.
     assert_eq!(menus::FONTS.len(), 2);

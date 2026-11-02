@@ -58,3 +58,19 @@ fn managed_clipboard_publishes_and_system_paste_is_a_request() {
     s.clear_clipboard();
     assert_eq!(s.clipboard_len(), 0);
 }
+
+#[test]
+fn sample_is_a_managed_request_and_gets_a_persistable_identity() {
+    let mut s = session();
+    s.replace_documents(vec![DocumentSnapshot { id: 1, title: "One".into(), payload: Editor::from_text(b"original").unwrap().payload().unwrap(), caret: 0, dirty: false, font_index: 0, style_index: 0, mode: 0 }]).unwrap();
+    s.apply_action(Action::NewSample).unwrap();
+    assert_eq!(s.take_document_request(), Some(DocumentRequest::NewSample));
+    assert_eq!(s.text().unwrap(), b"original");
+    s.create_sample_document(2).unwrap();
+    let docs = s.document_snapshots().unwrap();
+    assert_eq!(docs.len(), 2);
+    let sample = docs.iter().find(|d| d.id == 2).unwrap();
+    assert_eq!(sample.title, holonomy::sample::TITLE);
+    let restored = Editor::from_payload(&sample.payload).unwrap();
+    assert_ne!(restored.style_at(0).style_flags & holonomy_text::STYLE_HEADER, 0);
+}
