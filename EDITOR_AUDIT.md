@@ -652,3 +652,66 @@ Nine of those fifteen are Tier 1 or Tier 3 model fixes, not visual polish. That 
 the screenshot: the window looks unready because, for half the things it draws, there is nothing behind
 the drawing — and because the two things the eye checks first (a page on a desk, and text on a grid) are
 both wrong by construction.
+
+---
+
+# Part 5 — What was fixed, and what was not
+
+**Nothing in this section was compiled.** This sandbox has no Rust toolchain and no network route to
+one (`crates.io`, `static.rust-lang.org` and the distro mirrors are all unreachable; only `github.com`,
+`pypi`, `npm` and `files.pythonhosted.org` answer). Every change below was made by reading the call
+sites and the gates that guard them, and is **unverified by the compiler**. The commits are `9756cbc`,
+`ec690ed`, `c2fc1b6`.
+
+## Landed
+
+| Item | What changed | Where |
+|---|---|---|
+| A1, A3 | `BAND` and `CHROME` were the *same value* (`0xFFF8FAFD`), so the toolbar and status bands had no surface. `TRACK` was the same value too, and `SHADOW` was `RULE_DIM`'s. All four now differ. | `chrome.rs` `colour::` |
+| A2 | The toolbar capsule was a stadium spanning the band with ~46 % of it empty and corners bigger than the buttons. It is fitted to the placed tools, radius 8, and inset from the band. | `chrome::toolbar_pill`, `TOOLBAR_PILL_RADIUS` |
+| A3, A14 | **`hline` did not draw a hairline.** It repeated `─` once per cell and a box glyph rasterises to its whole cell, so each "rule" was a **20 px slab**. Deleted; rules are one-pixel fills, and there are four of them (title, menu, toolbar, ruler). | `chrome.rs` `Chrome::tree` |
+| A4 | A notice *replaced* `Ln/Col/words/bytes`; `set_notice("Saved")` runs on every save, so the counters were blank for the whole session. Two regions now. | `chrome.rs` status bar |
+| A5 | The sheet was flush against the rail with all slack on its right (24 px left, 200 px right), and the left gutter collapsed to **zero** once `page_w + 24 > desk`. Centred with a 16 px minimum either side. | `chrome.rs` `Layout::new` |
+| A6 | `page_h` was `canvas_h - shadow` — the sheet *was* the canvas and had no bottom margin. Now a page aspect ratio, clamped so a short window still shows a whole page. | `chrome.rs` `Layout::new` |
+| A7 | The shadow bands were **above and to the left** of the sheet (light source below-right), reading as an inset seam. Now below and right. | `chrome.rs` page layer |
+| A8, A9 | Ticks were 1×2 px in `RULE_DIM` twelve pixels from their labels. Now 5/10-column ticks in chrome ink, numbers centred in the band, full-height margin markers inside the band. | `chrome.rs` ruler |
+| A11, A12 | The sidebar defaulted open, costing the page 280 px before the user asked. Closed by default, with an edge. | `ChromeState::default`, `paint_sidebar` |
+| A13 | `TRACK` was the panel colour, so the rail was invisible. | `colour::TRACK` |
+| B1 | The 800 ms autosave ran at the *top* of the loop, i.e. between a keystroke and its frame. Timed saves now run on an idle wake after `tick` has painted; explicit saves still run before the read. | `windowed.rs` |
+| B3 | A drag dispatched and repainted one `MotionNotify` per pixel. The run is folded to its newest position — **including from the socket**, which is where the events actually are. | `conn::take_motion_run`, `read_packet_now`, `windowed.rs` |
+| B6 | Seven of eight title buttons were inert, including both pills. `place_title` draws only `Cloud` (save) and `Share` (export); a gate asserts the exact drawn set. | `widgets::TitleButton::has_action` |
+| B7 | `View > Mode` and `View > Zoom` were `sub()` headers with no action — and there is no submenu renderer at all. Replaced by four real rows. **Every menu row now carries an action (0 unwired of 26).** | `menus.rs` |
+| B10 | `Tool::Comment` had no annotation store and could never work; it is removed with its icon, mask and `TitleButton::Comments` (**34 → 33 icons, 23 → 22 tools, 8 → 7 inert** — the count the repo's own note pre-authorised). `FontSize` drew the only white rectangle on the chrome, shaped as a text input, with no setter behind it; drawn as a plain labelled button now. | `icons.rs`, `widgets.rs`, `chrome.rs` |
+| B11 | Ctrl+V waited 700 ms and then pasted the session's **own** clipboard; the real bytes arrived later and were dropped silently. The timeout reports, empty/non-UTF-8 answers are reported, and any answer completes the request. | `windowed.rs` |
+| Export | `File > Export` set `export_requested` and nothing in the windowed driver ever read it. It has a reader and writes HTML and PDF beside the vault. | `session::take_export_request`, `windowed.rs` |
+| C1 | Backspace and Delete read one byte and the counters were told about one byte, so a non-ASCII deletion drifted the word count. Both take the byte range from the same UTF-8 boundary walk that performs the delete. | `editor::backspace_range`, `session.rs` |
+
+## Not landed, and why
+
+**These are the ones that matter for the acceptance bar, and none of them is a polish item.**
+
+| Item | Why not |
+|---|---|
+| **C2** — lines past the measure are cut | Soft wrap exists (`wrap::WrapMap`) but is unwired from `emit_body_text`, and the caret, selection, `offset_of` and `column_at_pen` are **all** on the unwrapped line model. Re-pointing four interacting subsystems at a wrap map is a change that cannot be made without running the gates that measure it. |
+| **C6** — Heading 1 / Heading 2 | `style_flags` is a `u16` whose `atlas_style` maps CODE/BOLD/ITALIC/HEADER only, and `HEADER` is not reachable from any drawn control. Needs a style model, an atlas face, and a toolbar/menu surface — a feature, not a fix. |
+| **C7** — image insertion | `Action::InsertImage` writes the same fixture every time and one bad path writes U+FFFD into the document. Choosing a file needs a dialog and, in the sealed build, an `openat` the filter does not grant. |
+| **C8** — tables | Fixed 3×3, `TableSpan::MAX_COLS = 8`, no row/column operations. Same reason as C6. |
+| **B2** — the loop polls | Investigated and **the audit's diagnosis was wrong**: `Conn::ensure` `poll`s until its deadline, so the loop does not spin when idle. The lag was B3 (the queue), which is fixed. This row is retracted rather than patched. |
+| **B4** — full-window damage | Needs a damage tracker over the emitters; unverifiable without the pixel gates. |
+| **B5** — no I-beam cursor | Requires `CreateCursor`/`DefineCursor` on the X11 path and a cursor font in the sealed build. |
+| **B8** — `Format` cannot format | Bold and Italic *are* wired and do apply spans; the row is real. What is missing is that the menu does not show which is active. |
+| **B9** — the style dropdown | `Action::SetStyle` sets an index nothing reads. It needs the same style model as C6. |
+| **C3, C4, C5, C9–C14** | Model ceilings (`DocRun::MAX_BYTES`, paste ceilings, tab stops, object anchors). Each needs a model change plus its gates. |
+| **A10** | **Partly retracted.** The *click* already resolves x→column by the pen (`column_at_pen`), so a click and the drawn caret agree; the caret, selection and run boundaries all use `pen_of`, which is `advance_of`. The remaining mismatch is that the **ruler** is calibrated to `cell_w` while body text advances by the face — and the ruler has no access to the document's style spans, so making it pen-exact would need a document callback the chrome does not have. |
+| **A15, A16** | One type size for the whole chrome; no DPI awareness. `ChromeMetrics::for_size` exists and scales, so this is a design pass, not a defect fix. |
+
+## What the user should expect from this build
+
+The window should no longer read as *broken*: the bands have surfaces, the rules are one pixel, the
+toolbar capsule is the size of its tools, the sheet is centred on a desk with a shadow below it, the
+ruler is legible and numbered, the status bar shows the counters, the rail is closed, and no drawn
+control is silent except the seven tools that are recorded by name in `toolbar_wiring.rs`.
+
+**It will still not be enough to write the two documents in.** Soft wrap (C2) and headings (C6) are the
+two blockers that no amount of visual work substitutes for, and both are feature-sized. **And none of
+this has been compiled** — the first `cargo test` is the real review.
