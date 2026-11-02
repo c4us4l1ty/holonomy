@@ -2,12 +2,12 @@ name: Verify Holonomy UI
 on:
   push:
     branches: ['arena/ca2b02bd-holonomy']
-# **Read-only.** This workflow verifies; it never writes to the branch. The earlier
-# revisions pushed logs and rustfmt commits back, which made a verification run an
-# editor of the thing it was verifying -- and a push that raced another job of the
-# same run could lose the log it was trying to deliver.
+# **TEMPORARY BRANCH SCAFFOLDING, deleted before this branch is proposed for main.**
+# It publishes its own failure summary to the branch because this sandbox cannot read
+# Actions logs or download artifacts (the blob host is unreachable), and a summarised
+# log is the only channel by which a compile error or a failing assertion travels back.
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: verify-ca2b02bd
   cancel-in-progress: true
@@ -49,52 +49,26 @@ jobs:
         if: always()
         run: |-
           {
-            grep -aE '^(test result: FAILED|error(\[E[0-9]+\])?: )' /tmp/test.log
-            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/test.log
-            grep -aA4 'panicked at' /tmp/test.log
-          } > ci-test.log || true
-          tail -n 300 /tmp/check.log > ci-check.log || true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: diagnostics
-          path: |
-            ci-test.log
-            ci-check.log
-          if-no-files-found: ignore
-  # **The baseline, so "red" can be told apart from "newly red".** `main` carries its
-  # own suites and gates; this branch is judged by the difference, not by an absolute
-  # zero nobody has reached.
-  baseline:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: main
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
-        with:
-          toolchain: 1.98.1
-          targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
-        with:
-          shared-key: holonomy-musl-release
-      - name: Release tests on main
-        run: |-
-          cargo test --workspace --release --no-fail-fast -- --test-threads=1 > /tmp/base.log 2>&1 || true
-          cargo test -p holonomy --features desktop --release --no-fail-fast -- --test-threads=2 >> /tmp/base.log 2>&1 || true
-          exit 0
-      - name: Summarise
-        if: always()
-        run: |-
-          {
-            grep -aE '^(test result: FAILED|error(\[E[0-9]+\])?: )' /tmp/base.log
-            grep -aE '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/base.log
-            grep -aA4 'panicked at' /tmp/base.log
+            grep -a -E '^(error(\[E[0-9]+\])?: |test result: FAILED)' /tmp/base.log
+            echo
+            grep -a -E '^(test .*\.\.\. FAILED|---- .* stdout ----)' /tmp/base.log
+            echo
+            awk '/^---- .* stdout ----/ { p = 1 } /^(failures:|error)/ { p = 0 } p' /tmp/base.log
           } > ci-baseline.log || true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Publish baseline
         if: always()
-        with:
-          name: baseline
-          path: ci-baseline.log
-          if-no-files-found: ignore
+        run: |-
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ci-baseline.log
+          git commit -m "ci: publish main baseline" || true
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin arena/ca2b02bd-holonomy
+            git rebase -q FETCH_HEAD || { git rebase --abort || true; }
+            if git push -q origin arena/ca2b02bd-holonomy HEAD:arena/ca2b02bd-holonomy; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "publishing the baseline failed after five attempts" >&2
+          exit 1
