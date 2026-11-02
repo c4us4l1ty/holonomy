@@ -8292,15 +8292,15 @@ fn push_doc_run(
     if len == 0 {
         return;
     }
-    // **A shifted run is decided here, once, and not by its caller.** A super- or subscript's glyphs are
-    // drawn outside `[y, y + cell_h)`, so its node has to say so: `DocRun::bounds` is what any caller asks
-    // for the box, and `Session::emit_body_text` widens this line's damage from it. Two call sites pass a
-    // shift and neither knows this arithmetic, which is why it is not theirs to write.
+    // **`DocRun::styled` and not `new`, and the three trailing arguments are why.** A run that carries a
+    // baseline shift or a decoration is a different node from one that carries neither, and `new` is the
+    // constructor for the common case -- every caller of it wants `(0, DECORATION_NONE)` and four of them
+    // pass exactly that in the gap and tail arms above.
     //
-    // **`bounds` is not what the sum says.** A shift of `s` makes the run `cell_h + |s|` tall starting
-    // `|s|` above `y` for a superscript -- and `DocRun::bounds` is the function that must answer that,
-    // because the emitter's damage is computed from it and a box one line too short leaves a raised run's
-    // top third undamaged.
+    // **The box this run occupies is `DocRun::bounds`'s answer, not `cell_h`.** A shifted run draws
+    // outside its line box, and `bounds` grows the box in the direction the shift moves the glyphs; the
+    // line's damage is widened separately by `Session::line_shift`, because a *line* is damaged once for
+    // every run on it and the union belongs at the line and not here.
     tree.before
         .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
             x as i32,

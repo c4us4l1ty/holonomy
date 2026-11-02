@@ -475,8 +475,8 @@ fn a_colour_is_taken_back_by_one_undo() {
 ///
 /// * **Was:** `emit_body_text` positioned each run at `text.x + cell_x * cell_w` — the 8 px grid —
 ///   while `Painter::doc_text` advanced by the font's own metrics. **A boundary was a discontinuity.**
-/// * **Now:** both call [`Painter::advance_of`], so a run is placed where the painter would have
-///   reached, and the boundary is a join rather than a jump.
+/// * **Now:** both call `Painter::advance_at` — `advance_of` at the painter's own size — so a run is
+///   placed where the painter would have reached, and the boundary is a join rather than a jump.
 ///
 /// **The caret and the selection highlight are still on the grid and are still wrong** — that is part
 /// 30's decision, held by `tests/grid_vs_glyphs.rs`, and nothing here claims otherwise.

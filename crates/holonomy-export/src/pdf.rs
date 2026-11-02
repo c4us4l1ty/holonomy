@@ -891,13 +891,26 @@ struct Layouter<'a> {
     utf8_carry: Vec<u8>,
 }
 
-/// The face a run of spaces with no word should be drawn in: the line's last face if it has one, else
-/// the body face.
-fn pending_face(segments: &[Segment]) -> Name<'static> {
+/// **The face a run of spaces with no word should be drawn in**: the line's last face *and its metric*,
+/// if it has one, else the body face.
+///
+/// # Why the metric comes back with the name
+///
+/// **Because the two are one fact and `Segment` keeps them in two fields.** The resource name says what
+/// the reader will draw with; the metric face says how wide the exporter thinks it is. A held space
+/// pushed with `BaseFont::Helvetica`'s metrics under, say, `Courier`'s name would be measured as a
+/// Helvetica space and drawn as a monospace one — so the rule that `draw_rules` traces over it would be
+/// a different length from the space the reader renders, and the underline would stop short of the word
+/// after it or run past it.
+///
+/// **The first version returned only the name**, which is the argument `push_many` takes first and the
+/// reason the second was easy to leave at its default. It is returned as a pair now, so a caller cannot
+/// take one without the other.
+fn pending_face(segments: &[Segment]) -> (Name<'static>, BaseFont) {
     segments
         .last()
-        .map(|s| s.font)
-        .unwrap_or(Faces::NAMES.regular)
+        .map(|s| (s.font, s.metric))
+        .unwrap_or((Faces::NAMES.regular, BaseFont::Helvetica))
 }
 
 /// **The formatting of one run, as the layouter needs it.**
@@ -1178,7 +1191,9 @@ impl<'a> Layouter<'a> {
         let Some(pending) = self.pending.take() else {
             // No word open -- a run of only spaces. The held spaces still have to go somewhere, or a
             // line break would discard them; for a run that is *only* spaces they are the whole run.
-            self.flush_spaces(pending_face(&self.segments));
+            // **The line's last face and its metric**, so a space inside a mono run is measured as one.
+            let (face, metric) = pending_face(&self.segments);
+            self.flush_spaces(face, metric);
             return None;
         };
         if !self.segments.is_empty() && self.width + pending.width > limit {
@@ -1203,7 +1218,10 @@ impl<'a> Layouter<'a> {
             self.width = pending.width;
             return Some(finished);
         }
-        self.flush_spaces(pending.font);
+        // **The word's own face and metric**, not `pending_face`: the spaces belong in *front* of this
+        // word and are part of the same run, so they take its face even though the line's last segment
+        // may be a different one -- which is exactly the case at a style boundary.
+        self.flush_spaces(pending.font, pending.metric);
         self.width += pending.width;
         self.push_many(
             &pending.text,
@@ -1217,25 +1235,33 @@ impl<'a> Layouter<'a> {
         None
     }
 
-    /// Append the held spaces, at `face`.
-    fn flush_spaces(&mut self, face: Name<'static>) {
+    /// Append the held spaces, at `face`, measured as `metric`.
+    ///
+    /// **Two parameters and not one**, because the face a space is *drawn* in and the face it is
+    /// *measured* in are the same face and only `Segment` knows both. See [`pending_face`].
+    fn flush_spaces(&mut self, face: Name<'static>, metric: BaseFont) {
         if self.held_spaces == 0 {
             return;
         }
-        // One space byte per space width in the *plain* font, then scaled into the segment's face: the
-        // alternative is tracking a width per held space, and a space's width does not vary enough for
-        // that to change where anything breaks.
-        let one = u32::from(BaseFont::Helvetica.width(b' ')).max(1);
+        // **One space byte per space width in the run's own metric face**, which is the face the width
+        // is measured in and the face the reader will draw with.
+        //
+        // This used to say "in the *plain* font, then scaled into the segment's face" and pass
+        // `BaseFont::Helvetica` while the `face` argument named a different font -- two halves of one
+        // decision, disagreeing. **A mono space is twice a proportional one**, so a held width inside a
+        // `code` run measured at Helvetica's space produced twice the spaces the run wanted, and
+        // `draw_rules` then traced a rule twice the length of the text it was under.
+        let one = u32::from(metric.width(b' ')).max(1);
         let n = (self.held_spaces.div_ceil(one)) as usize;
         let spaces = vec![b' '; n];
-        let w = advance(BaseFont::Helvetica, &spaces);
+        let w = advance(metric, &spaces);
         // **Plain and unraised**, because a held space stands between two words and belongs to
         // neither: an underline across the gap between two underlined words would draw one rule where
         // the author wrote two, and `advance_of`'s discipline is the same one -- the gap is body text.
         self.push_many(
             &spaces,
             face,
-            BaseFont::Helvetica,
+            metric,
             self.opts.font_size,
             0.0,
             false,

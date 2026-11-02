@@ -493,19 +493,19 @@ fn the_newline_cell_is_highlighted_on_purpose() {
 /// arithmetic that turns "five glyphs" into pixels changed**, and it changed because the product
 /// changed underneath them.
 ///
-/// ## And the rule is `advance_of`'s, not a sum of nominals
+/// ## And the rule is the painter's, not a sum of nominals
 ///
 /// **A space takes the face's advance and a `.notdef` takes the cell**, which is the two-case rule
-/// `Painter::advance_of` exists for. `alpha bravo` has a space in it, and a gate that summed a
-/// different rule would be a third opinion about where a space is.
+/// `Painter::advance_at` exists for (`advance_of` is it at the painter's own size). `alpha bravo` has a
+/// space in it, and a gate that summed a different rule would be a third opinion about where a space is.
 fn pen(text: &str) -> u32 {
     let a = atlas();
     let ppem = a.sizes().first().copied().unwrap_or(16);
-    // **`Painter::advance_of`'s two cases, and not a sum of `advance_x`.** A blank glyph with an
+    // **The painter's two cases, and not a sum of `advance_x`.** A blank glyph with an
     // advance -- a space -- takes the face's advance; a `.notdef` and, here, the `\n` terminator
     // take the cell. **The first version of this helper summed `advance_x` alone and predicted 44 px
     // for `bravo\n` against a measured 54**, because `\n` has no advance of its own. That is the
-    // same rule `Painter::advance_of` exists for, in a fourth place, and it is written out here
+    // same rule `Painter::advance_at` exists for, in a fourth place, and it is written out here
     // because a test that calls into the product's own function would not be a test of the product.
     let cell = u32::from(
         a.metric(

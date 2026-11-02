@@ -116,8 +116,9 @@ fn move_to(x: i32, y: i32) -> Vec<Event> {
 /// **The pen position after `text`, in the Regular face at 16 ppem.** Part 33.
 ///
 /// **The two-case rule, not a sum of `advance_x`**: a blank with an advance takes it, a `.notdef`
-/// takes the cell. `Painter::advance_of` is the definition; this is the same rule written out, because
-/// a test that called the product's own function would not be a test of the product.
+/// takes the cell. `Painter::advance_at` is the definition — `advance_of` is that function at the
+/// painter's own size, and this helper measures at one explicit size — and the rule is written out here
+/// because a test that called the product's own function would not be a test of the product.
 fn pen(text: &str) -> u32 {
     let atlas: &'static holonomy_assets::atlas::Atlas = {
         static A: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =

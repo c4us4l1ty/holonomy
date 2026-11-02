@@ -601,6 +601,43 @@ fn pdf_line_structure_matches_the_document() {
     assert_eq!(text, "one\ntwo\nthree");
 }
 
+/// **A held space inside a `code` run is measured in Courier, so the text does not grow.**
+///
+/// # What this catches
+///
+/// `flush_spaces` used to convert the held space width at `BaseFont::Helvetica` while naming the run's
+/// own face -- two halves of one decision disagreeing. **Courier's space is twice Helvetica's**, so every
+/// space inside a `code` run came out as two spaces: the exported text read `a  b` where the document said
+/// `a b`, and `draw_rules` traced a rule twice the length of the text underneath it.
+///
+/// # Why the assertion is the extracted text and not a width
+///
+/// **Because the defect was invisible in every measurement that did not reconstruct the string.** The
+/// line still fitted, the page still had one line, and the extra space is a legal PDF byte. Only a reader
+/// that puts the runs back together sees the document the author wrote, which is what `extract_text` is.
+#[test]
+fn a_space_inside_a_code_run_is_one_space() {
+    // Two words, both in the code face, so the space between them is a *held* space in a Courier run --
+    // the one case the conversion used to get wrong.
+    let mut ed = Editor::from_text(b"alpha beta\n").expect("load");
+    ed.style_range(0, 10, STYLE_CODE, 0).expect("code");
+    let (bytes, text) = build_and_extract(&ed, &PdfOptions::default());
+    assert_eq!(
+        text, "alpha beta",
+        "**the code run's words must be one space apart**: a doubled space means the held width was \
+         converted in Helvetica and measured in Courier"
+    );
+    // **And the face really is Courier**, so a pass that silently fell back to Helvetica would not make
+    // the assertion above true for the wrong reason. `base_fonts` reads the `/BaseFont` entries by name,
+    // which is the helper that exists for exactly this -- `contains(&bytes, b"Courier")` would also match
+    // the string on a line that never named a resource.
+    assert!(
+        content::base_fonts(&bytes).iter().any(|f| f == "Courier"),
+        "the code run must be drawn in Courier, or this gate is comparing two Helvetica spaces: {:?}",
+        content::base_fonts(&bytes).join(", ")
+    );
+}
+
 /// A run wider than the measure overflows and is *counted*, not silently clipped.
 #[test]
 fn pdf_a_wide_measure_takes_a_whole_paragraph_on_one_line() {
