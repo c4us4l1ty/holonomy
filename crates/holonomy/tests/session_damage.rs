@@ -17,8 +17,10 @@
 //! **`PaintStats::pixels` is not a measure of how much was drawn.** It counts ~1.17 M for a rect of
 //! 107 k pixels, because it counts *emitter invocations* and not pixels; a gate written against it
 //! would be asserting a number nobody can act on. [`Session::last_damage`] is the rect the paint was
-//! actually given, **and a rect is something a person can reason about**: "a hover damages one widget"
-//! is a claim with a shape, and "the paint touched 1.17 M things" is not.
+//! asked for, **and a rect is something a person can reason about**: "a hover damages one widget"
+//! is a claim with a shape, and "the paint touched 1.17 M things" is not. Where the claim is about
+//! what an *emitter* added — a raised run's rows outside its line box — the number is
+//! [`Session::last_painted_damage`] instead, which is the same rect after the widening.
 //!
 //! | what it proves | test |
 //! | --- | --- |
@@ -665,13 +667,30 @@ fn a_superscript_widens_the_lines_damage_upward() {
     let cell_h = s.chrome_metrics().cell_h;
     let text = s.chrome_layout().text;
     let row0 = text.y;
-    // **`damage()` is what the caret move asked for; `last_damage()` is the same after a paint, and the
-    // *second* is the one that has the emitters' widening in it.** `paint_with` keeps a copy of the rect it
-    // was handed *before* the emitters union their lines into it, so a bare `apply` cannot show this — the
-    // only way to observe it is to let the session paint and then read back.
+    // **`last_painted_damage()`, and not `last_damage()`.** The latter is the rect the session *asked*
+    // for: `paint_with` keeps it before the emitters union their own lines into it, and a gate written
+    // against it would assert that the raised rows are still outside the damage and pass with
+    // `line_shift` deleted. The two numbers are the same on any frame with no shifted run in the
+    // damage, which is why the difference needs a name of its own.
+    // **One paint, asked for explicitly, because `tick` can paint twice.** After the move the caret
+    // belongs at column 1 on the line below, and `tick` then advances the blink: if the phase flipped,
+    // a *second* paint of the new caret's cell runs and overwrites `last_painted_damage` with a rect
+    // that has no shifted line in it at all. The widened rect the gate is about is the one from the
+    // move, so the gate paints exactly one frame.
     s.apply(holonomy_input::Command::Right).expect("move the caret");
-    s.tick().expect("paint the move");
-    let d = s.last_damage();
+    let asked = s.damage();
+    s.paint(Some(asked)).expect("paint the move");
+    let d = s.last_painted_damage();
+    assert_eq!(
+        s.last_damage(),
+        asked,
+        "`last_damage` is the rect the paint was handed, so it must be the one the move asked for"
+    );
+    assert!(
+        d != asked,
+        "**the emitters must widen the rect, or `line_shift` is not being asked about at all**: the \
+         paint was handed {asked:?} and walked {d:?}"
+    );
 
     assert!(
         d.y < row0,
@@ -687,6 +706,11 @@ fn a_superscript_widens_the_lines_damage_upward() {
     // `Session::baseline_shift` calls it with. Written out here rather than imported because the point of
     // the assertion is the *relationship*: a gate that called a function to predict a function's answer
     // cannot tell a wrong answer from a wrong function.
+    //
+    // **A third of the run's own cell, and this fixture's atlas has one size** (`build_atlas(&[16])`), so
+    // the run's size index clamps to 0 and that cell is the line's. A raised heading in the two-size
+    // fixture of `tests/decorations.rs` moves by a third of the *heading's* cell instead -- the shift is
+    // the run's, never the caret's line box.
     let shift = cell_h / 3;
     assert_eq!(
         row0 - d.y,

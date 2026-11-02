@@ -783,6 +783,21 @@ pub struct Session<'a> {
     /// press:  7.1 ms, damage 0,0,1600x1000, 1,170,123 px
     /// ```
     last_damage: DamageRect,
+    /// **What the last paint actually covered, after the emitters widened it.**
+    ///
+    /// [`last_damage`](Self::last_damage) is kept *before* the widening, and that is right for the
+    /// question it answers: a scoping claim is about what the session asked for, and a bounding box
+    /// that grew because a run reaches above its line says nothing about whether a hover was scoped.
+    ///
+    /// **But something has to be able to see the widening, or it is unobservable.** The whole point of
+    /// [`Session::line_shift`] is that a raised run's rows are *outside* the line box, so a gate written
+    /// against `last_damage` measures the rect that was handed in and finds the one thing the fix must
+    /// change unchanged — it would pass with the fix removed. This field is the copy taken *after* the
+    /// emitters are done with it, which is the rectangle the painter is actually given.
+    ///
+    /// The two are the same on the overwhelming majority of frames; they differ exactly when a
+    /// decoration reaches outside its line, which is what the difference is named for.
+    last_painted_damage: DamageRect,
     /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
     ///
     /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
@@ -1167,6 +1182,7 @@ impl<'a> Session<'a> {
             page_used: 0,
             last_paint: holonomy_display::paint::PaintStats::default(),
             last_damage: DamageRect::EMPTY,
+            last_painted_damage: DamageRect::EMPTY,
             table_scratch: Vec::new(),
             caret_drawn_at: None,
             math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
@@ -1446,6 +1462,20 @@ impl<'a> Session<'a> {
     /// a window or because the window is expensive, and those two need different fixes.
     pub fn last_damage(&self) -> DamageRect {
         self.last_damage
+    }
+
+    /// **The rect the last paint really walked, after the emitters widened it.**
+    ///
+    /// The difference between this and [`last_damage`](Self::last_damage) is precisely what the
+    /// emitters added: on a frame with no shifted run in the damage, nothing. On a frame whose lines
+    /// carry a superscript or a subscript, the rows outside the line boxes — which is the whole point
+    /// of [`Session::line_shift`], and invisible to `last_damage` by design.
+    ///
+    /// **A separate accessor rather than changing `last_damage`,** because both numbers are useful and
+    /// conflating them loses one. A scoping claim wants the requested rect; a gate about whether a
+    /// raised run's rows were repainted wants this one.
+    pub fn last_painted_damage(&self) -> DamageRect {
+        self.last_painted_damage
     }
 
     /// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
@@ -6515,6 +6545,10 @@ impl<'a> Session<'a> {
         // `requested` is what the *session* asked to be repainted, which is the number that says whether
         // the damage is scoped. `PaintStats::pixels` is a separate question and is what it says.
         self.last_damage = requested
+            .unwrap_or(DamageRect::new(0, 0, self.frame.width(), self.frame.height()));
+        // **And the widened one, kept beside it.** See `last_painted_damage`: `damage` is the rect the
+        // emitters have finished with, which is the rect `paint_with` above was handed.
+        self.last_painted_damage = damage
             .unwrap_or(DamageRect::new(0, 0, self.frame.width(), self.frame.height()));
         self.stats.frames += 1;
         self.stats.pixels += stats.pixels;
