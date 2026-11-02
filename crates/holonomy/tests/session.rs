@@ -541,14 +541,16 @@ fn a_resize_below_the_minimum_is_taken_at_face_value() {
     // **And the wrap the old comment was worried about really is prevented** — just not by the clamp.
     // A resize that underflows every band is the case that used to be argued for, and it is the one
     // that has to keep working.
-    s.resize(0, 0).expect("a resize to zero is not an error either");
+    s.resize(0, 0)
+        .expect("a resize to zero is not an error either");
     assert_eq!(
         (s.frame().width(), s.frame().height()),
         (1, 1),
         "**zero is clamped to one, because a zero-extent rect divides and multiplies** -- but one \
          step, not a jump to the minimum"
     );
-    s.repaint_all().expect("painting at 1x1 after a zero resize");
+    s.repaint_all()
+        .expect("painting at 1x1 after a zero resize");
 }
 
 /// Resizing to the size a window already is does nothing at all.

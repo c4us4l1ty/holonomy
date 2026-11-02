@@ -396,7 +396,10 @@ fn the_scrub_does_not_depend_on_the_derivation_having_succeeded() {
     // which was is scrubed on both paths** — this test pins the first half so the second half's
     // test cannot be satisfied by a scrub that runs unconditionally before the fill.
     take_scrubs();
-    let err = match derive_root("passphrase", &[0u8; 3], 1) { Err(e) => e, Ok(_) => panic!("a 3-byte salt must be refused") };
+    let err = match derive_root("passphrase", &[0u8; 3], 1) {
+        Err(e) => e,
+        Ok(_) => panic!("a 3-byte salt must be refused"),
+    };
     assert!(matches!(err, EnvelopeError::BadSaltLength));
     assert!(
         take_scrubs().is_empty(),

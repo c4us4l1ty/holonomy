@@ -276,12 +276,20 @@ fn a_frame_whose_deltas_overflow_saturates() {
     let mut frame = Frame::default();
     frame.fold(REL_X, i32::MAX);
     frame.fold(REL_X, 1);
-    assert_eq!(frame.dx, i32::MAX, "the sum saturates rather than wrapping or panicking");
+    assert_eq!(
+        frame.dx,
+        i32::MAX,
+        "the sum saturates rather than wrapping or panicking"
+    );
 
     let mut frame = Frame::default();
     frame.fold(REL_Y, i32::MIN);
     frame.fold(REL_Y, -1);
-    assert_eq!(frame.dy, i32::MIN, "and the same at the other end of the range");
+    assert_eq!(
+        frame.dy,
+        i32::MIN,
+        "and the same at the other end of the range"
+    );
 
     let mut frame = Frame::default();
     frame.fold(REL_WHEEL, i32::MAX);
@@ -455,7 +463,11 @@ fn a_button_records_the_kernels_own_clock() {
     else {
         panic!("a scripted button record is a Button event, got {got:?}");
     };
-    assert_eq!((button, pressed), (Button::Left, true), "the rest of the event is unchanged");
+    assert_eq!(
+        (button, pressed),
+        (Button::Left, true),
+        "the rest of the event is unchanged"
+    );
     assert_eq!(
         time_ms,
         1_700_000_000_250,

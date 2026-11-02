@@ -106,14 +106,15 @@ impl Plan {
     /// as the keystroke that does nothing.
     #[must_use]
     pub fn zoom_refusal(&self, ppem: u16) -> Option<String> {
-        (!self.has_zoom_size).then(|| {
-            format!(
+        (!self.has_zoom_size)
+            .then(|| {
+                format!(
                 "two atlas sizes need {} bytes of glyphs and the atlas holds {}, so this build has \
                  one size and zoom has nothing to switch to; --ppem 17 or smaller keeps 125 %",
                 self.refused_need, self.refused_have
             )
-        })
-        .map(|m| format!("{m} (at --ppem {ppem})"))
+            })
+            .map(|m| format!("{m} (at --ppem {ppem})"))
     }
 }
 

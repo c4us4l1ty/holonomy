@@ -474,7 +474,9 @@ mod tests {
             // borders and then stopped would look almost right.
             let horizontal = g
                 .borders()
-                .filter(|b| b.codepoint == HORIZONTAL || b.codepoint == 0x252C || b.codepoint == 0x2534)
+                .filter(|b| {
+                    b.codepoint == HORIZONTAL || b.codepoint == 0x252C || b.codepoint == 0x2534
+                })
                 .count();
             assert!(
                 horizontal >= usize::from(rows) + 1,

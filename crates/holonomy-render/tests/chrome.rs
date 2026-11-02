@@ -446,7 +446,11 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     v.push("Export".to_string());
     v.push("Local".to_string());
     v.push("Document tabs".to_string());
-    v.extend(holonomy_render::widgets::TOOLBAR.iter().map(|t| t.label(state)));
+    v.extend(
+        holonomy_render::widgets::TOOLBAR
+            .iter()
+            .map(|t| t.label(state)),
+    );
     // **The ruler's numbers, part 39.** The ruler draws `1 .. n` across the measure, one label every ten
     // columns, and they are text like any other -- **so they belong in the permission list**, and the
     // fact that they did not is how I know this gate is worth keeping: it named the ruler numbers as
@@ -1036,7 +1040,10 @@ fn the_bands_partition_the_panel_at_any_size() {
 #[test]
 fn a_panel_smaller_than_the_chrome_lays_out_at_its_own_size() {
     let m = ChromeMetrics::for_size(1, 1);
-    assert_eq!(m.width, 1, "**the width is the window's, not the minimum's**");
+    assert_eq!(
+        m.width, 1,
+        "**the width is the window's, not the minimum's**"
+    );
     assert_eq!(m.height, 1, "and the height");
 
     let l = Layout::new(&m);
@@ -1054,7 +1061,10 @@ fn a_panel_smaller_than_the_chrome_lays_out_at_its_own_size() {
         l.page.height,
         m.height
     );
-    assert_eq!(l.rows, 0, "and there is no room for a row, which is the honest answer");
+    assert_eq!(
+        l.rows, 0,
+        "and there is no room for a row, which is the honest answer"
+    );
 
     // `clamp_to` is the same rule under a different name, and the session calls it on every resize.
     assert_eq!(
@@ -1132,7 +1142,10 @@ fn no_chrome_box_ever_lands_outside_its_panel() {
             // headings laid out unconditionally, the seventh of which started at x = 596 in a panel
             // that ended at 480.
             for (i, r) in menu_boxes(&l).1.iter().enumerate() {
-                inside(r, &format!("menu heading {i} ({})", crate::chrome::MENUS[i]));
+                inside(
+                    r,
+                    &format!("menu heading {i} ({})", crate::chrome::MENUS[i]),
+                );
             }
 
             // **And the toolbar, which is placed by `widgets`, not by `Layout`.** A second placer is a
@@ -1200,7 +1213,11 @@ fn a_narrow_window_loses_the_last_menus_and_keeps_the_first() {
     );
 
     // **The named pair**, so this is a claim about specific menus and not about a count.
-    assert_eq!(MENUS[n - 1], "Tools", "**Tools is the last heading at 480 px**");
+    assert_eq!(
+        MENUS[n - 1],
+        "Tools",
+        "**Tools is the last heading at 480 px**"
+    );
     assert!(
         !shown.1.iter().any(|_| false),
         "and the bar stops there: {} of {} headings fit",
@@ -1419,7 +1436,14 @@ fn the_chrome_paints_at_every_panel_size_without_drawing_outside_itself() {
     for (w, h, containment) in (1u32..=320)
         .step_by(3)
         .flat_map(|w| [(w, 1u32, false), (w, 200, false), (w, 320, false)])
-        .chain((321u32..=2560).step_by(7).flat_map(|w| [(w, 1u32, false), (w, 320, false), (w, 200, true), (w, 800, true)]))
+        .chain((321u32..=2560).step_by(7).flat_map(|w| {
+            [
+                (w, 1u32, false),
+                (w, 320, false),
+                (w, 200, true),
+                (w, 800, true),
+            ]
+        }))
     {
         {
             let m = ChromeMetrics::for_size(w, h);
@@ -1492,7 +1516,9 @@ fn the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it() {
     }
     assert_eq!(
         numbers,
-        (1..=m.columns / 10 + 1).map(|n| n.to_string()).collect::<Vec<_>>(),
+        (1..=m.columns / 10 + 1)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>(),
         "the ruler shows {numbers:?} across a {} column measure; it should show 1..={} -- one \
          number every ten columns, left to right",
         m.columns,
@@ -1579,7 +1605,11 @@ fn a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row() {
     let m = ChromeMetrics::DESKTOP;
     let layout = Layout::new(&m);
     let cells = layout.cells_per_row(m.cell_w) as u32;
-    let state = ChromeState { paged: true, caret_column: cells, ..ChromeState::default() };
+    let state = ChromeState {
+        paged: true,
+        caret_column: cells,
+        ..ChromeState::default()
+    };
     assert!(Caret::locate(&layout, &m, &state).is_some());
 }
 
@@ -1588,14 +1618,27 @@ fn desktop_sheets_stack_with_a_gap_and_scroll_without_losing_the_previous_page()
     let m = ChromeMetrics::for_size(1280, 2400);
     let layout = Layout::new(&m);
     let per_page = layout.page_rows();
-    let mut state = ChromeState { paged: true, total_lines: per_page * 3, ..ChromeState::default() };
+    let mut state = ChromeState {
+        paged: true,
+        total_lines: per_page * 3,
+        ..ChromeState::default()
+    };
     let first = layout.visible_page(&state, 0).unwrap();
     let second = layout.visible_page(&state, 1).unwrap();
     assert!(second.y > first.bottom());
     assert_eq!(layout.page_count(state.total_lines), 3);
-    assert_eq!(layout.page_at(&state, first.x as i32 + 2, first.y as i32 + 2), Some(0));
-    assert_eq!(layout.page_at(&state, second.x as i32 + 2, second.y as i32 + 2), Some(1));
-    assert_eq!(layout.page_at(&state, first.x as i32 + 2, first.bottom() as i32 + 2), None);
+    assert_eq!(
+        layout.page_at(&state, first.x as i32 + 2, first.y as i32 + 2),
+        Some(0)
+    );
+    assert_eq!(
+        layout.page_at(&state, second.x as i32 + 2, second.y as i32 + 2),
+        Some(1)
+    );
+    assert_eq!(
+        layout.page_at(&state, first.x as i32 + 2, first.bottom() as i32 + 2),
+        None
+    );
     state.scroll_line = per_page;
     assert!(layout.visible_page(&state, 1).is_some());
     state.scroll_line = 0;
@@ -1607,17 +1650,29 @@ fn desktop_page_rows_share_one_mapping_for_caret_and_hit_testing() {
     let m = ChromeMetrics::for_size(1280, 2400);
     let layout = Layout::new(&m);
     let rows = layout.page_rows();
-    let mut state = ChromeState { paged: true, total_lines: rows * 3, ..ChromeState::default() };
+    let mut state = ChromeState {
+        paged: true,
+        total_lines: rows * 3,
+        ..ChromeState::default()
+    };
     for line in [0, rows - 1, rows, rows + 1] {
         state.caret_line = line;
         let caret = Caret::locate(&layout, &m, &state).unwrap();
-        let hit = layout.caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1).unwrap();
+        let hit = layout
+            .caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1)
+            .unwrap();
         assert_eq!(hit.0, line);
     }
     state.scroll_line = rows;
     state.caret_line = rows + 2;
     let caret = Caret::locate(&layout, &m, &state).unwrap();
-    assert_eq!(layout.caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1).unwrap().0, rows + 2);
+    assert_eq!(
+        layout
+            .caret_at_drag(&state, caret.cell.x as i32, caret.cell.y as i32 + 1)
+            .unwrap()
+            .0,
+        rows + 2
+    );
     assert!(layout.visible_page(&state, 0).is_none());
 }
 
@@ -1633,11 +1688,24 @@ fn desktop_page_capacity_does_not_depend_on_window_height() {
 fn the_paged_chrome_tree_paints_separate_visible_sheets() {
     let m = ChromeMetrics::for_size(1280, 2400);
     let c = Chrome::new(m);
-    let state = ChromeState { paged: true, total_lines: c.layout.page_rows() * 2, ..ChromeState::default() };
-    let sheets: Vec<_> = nodes(&c.tree(&state)).into_iter().filter_map(|n| match n {
-        Node::Rect(r) if r.colour == chrome::colour::PAGE && r.x == c.layout.page.x as i32 && r.width == c.layout.page.width => Some(r),
-        _ => None,
-    }).collect();
+    let state = ChromeState {
+        paged: true,
+        total_lines: c.layout.page_rows() * 2,
+        ..ChromeState::default()
+    };
+    let sheets: Vec<_> = nodes(&c.tree(&state))
+        .into_iter()
+        .filter_map(|n| match n {
+            Node::Rect(r)
+                if r.colour == chrome::colour::PAGE
+                    && r.x == c.layout.page.x as i32
+                    && r.width == c.layout.page.width =>
+            {
+                Some(r)
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(sheets.len(), 2);
     assert!(sheets[1].y > sheets[0].y + sheets[0].height as i32);
 }
@@ -1647,12 +1715,23 @@ fn many_pages_render_a_viewport_bounded_number_of_sheets() {
     let m = ChromeMetrics::for_size(1280, 900);
     let c = Chrome::new(m);
     let rows = c.layout.page_rows();
-    let state = ChromeState { paged: true, total_lines: rows * 2_000, scroll_line: rows * 1_600 + 3, ..ChromeState::default() };
+    let state = ChromeState {
+        paged: true,
+        total_lines: rows * 2_000,
+        scroll_line: rows * 1_600 + 3,
+        ..ChromeState::default()
+    };
     assert_eq!(c.layout.page_count(state.total_lines), 2_000);
     let nodes = nodes(&c.tree(&state));
     let sheets = nodes.iter().filter(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE && r.x == c.layout.page.x as i32 && r.width == c.layout.page.width)).count();
-    assert!((1..=3).contains(&sheets), "only visible sheets should be painted, got {sheets}");
-    assert!(c.layout.visible_end(&state) - state.scroll_line <= c.layout.canvas.height / c.layout.cell_h.max(1) + 2);
+    assert!(
+        (1..=3).contains(&sheets),
+        "only visible sheets should be painted, got {sheets}"
+    );
+    assert!(
+        c.layout.visible_end(&state) - state.scroll_line
+            <= c.layout.canvas.height / c.layout.cell_h.max(1) + 2
+    );
     let thumb = c.scroll_thumb(&state);
     assert!(thumb.bottom() <= c.layout.scrollbar.bottom());
 }
@@ -1663,7 +1742,11 @@ fn desktop_wheel_and_pointer_can_use_the_next_sheet() {
     let m = ChromeMetrics::for_size(1280, 2400);
     let c = Chrome::new(m);
     let rows = c.layout.page_rows();
-    let state = ChromeState { paged: true, total_lines: rows * 2, ..ChromeState::default() };
+    let state = ChromeState {
+        paged: true,
+        total_lines: rows * 2,
+        ..ChromeState::default()
+    };
     let y = c.layout.row_y(&state, rows).unwrap() + 1;
     let x = c.layout.text.x as i32;
     assert_eq!(hit(&c.layout, &state, x, y as i32), Hit::Page);
@@ -1674,7 +1757,10 @@ fn desktop_wheel_and_pointer_can_use_the_next_sheet() {
 fn a_short_canvas_scrolls_the_first_line_into_view() {
     let m = ChromeMetrics::for_size(1280, 160);
     let layout = Layout::new(&m);
-    let state = ChromeState { paged: true, ..ChromeState::default() };
+    let state = ChromeState {
+        paged: true,
+        ..ChromeState::default()
+    };
     if layout.canvas.height >= layout.cell_h {
         assert_eq!(layout.row_y(&state, 0), Some(layout.canvas.y));
     }
@@ -1698,16 +1784,25 @@ fn a_short_canvas_scrolls_the_first_line_into_view() {
 fn desktop_workspace_is_a_sheet_with_a_shadow_on_a_flat_panel() {
     use holonomy_render::{Node, SurfaceTree};
     fn collect<'a>(tree: &'a SurfaceTree, nodes: &mut Vec<&'a Node>) {
-        if let Some(n) = &tree.node { nodes.push(n); }
-        for child in tree.before.iter().chain(tree.after.iter()) { collect(child, nodes); }
+        if let Some(n) = &tree.node {
+            nodes.push(n);
+        }
+        for child in tree.before.iter().chain(tree.after.iter()) {
+            collect(child, nodes);
+        }
     }
     let chrome = Chrome::new(ChromeMetrics::DESKTOP);
-    let state = ChromeState { paged: true, ..ChromeState::default() };
+    let state = ChromeState {
+        paged: true,
+        ..ChromeState::default()
+    };
     let tree = chrome.tree(&state);
     let mut nodes = Vec::new();
     collect(&tree, &mut nodes);
     assert!(
-        nodes.iter().any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE_SHADOW)),
+        nodes
+            .iter()
+            .any(|n| matches!(n, Node::Rect(r) if r.colour == chrome::colour::PAGE_SHADOW)),
         "the sheet casts no shadow, so it is a white rectangle rather than paper"
     );
     assert!(
@@ -1743,27 +1838,50 @@ fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
         assert_eq!((large.width, large.height), (20, 20));
         for y in 0..20 {
             for x in 0..20 {
-                assert_eq!(large.coverage(x, y), small.coverage(x * SIZE / 20, y * SIZE / 20));
+                assert_eq!(
+                    large.coverage(x, y),
+                    small.coverage(x * SIZE / 20, y * SIZE / 20)
+                );
             }
         }
     }
     let m = ChromeMetrics::DESKTOP.with_line_pitch(30);
     let c = Chrome::new(m);
-    let state = ChromeState { paged: true, ..ChromeState::default() };
-    let icons: Vec<_> = nodes(&c.tree(&state)).into_iter().filter_map(|n| match n {
-        Node::Icon(i) if i.width == 20 => Some(i), _ => None,
-    }).collect();
+    let state = ChromeState {
+        paged: true,
+        ..ChromeState::default()
+    };
+    let icons: Vec<_> = nodes(&c.tree(&state))
+        .into_iter()
+        .filter_map(|n| match n {
+            Node::Icon(i) if i.width == 20 => Some(i),
+            _ => None,
+        })
+        .collect();
     assert!(!icons.is_empty());
-    assert!(icons.iter().all(|i| i.x >= 0 && i.y >= 0 && i.x as u32 + i.width <= m.width && i.y as u32 + i.height <= m.height));
+    assert!(icons.iter().all(|i| i.x >= 0
+        && i.y >= 0
+        && i.x as u32 + i.width <= m.width
+        && i.y as u32 + i.height <= m.height));
 }
 
 #[test]
 fn paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes() {
-    for (width, height) in [(640, 480), (800, 600), (1280, 800), (1920, 1080), (1280, 2400)] {
+    for (width, height) in [
+        (640, 480),
+        (800, 600),
+        (1280, 800),
+        (1920, 1080),
+        (1280, 2400),
+    ] {
         let c = Chrome::new(ChromeMetrics::for_size(width, height));
         let rows = c.layout.page_rows();
-        let state = ChromeState { paged: true, total_lines: rows * 3,
-            scroll_line: rows / 2, ..ChromeState::default() };
+        let state = ChromeState {
+            paged: true,
+            total_lines: rows * 3,
+            scroll_line: rows / 2,
+            ..ChromeState::default()
+        };
         for node in nodes(&c.tree(&state)) {
             if let Node::Rect(r) = node {
                 if r.colour == chrome::colour::PAGE_SHADOW {
@@ -1782,7 +1900,8 @@ fn paged_blocks_start_on_their_anchor_and_displace_only_following_rows() {
     let layout = Layout::new(&m);
     let h = m.cell_h;
     let state = ChromeState {
-        paged: true, total_lines: 8,
+        paged: true,
+        total_lines: 8,
         line_heights: LineHeights::from(h, &[(1, h * 4), (3, h * 2)]),
         ..ChromeState::default()
     };
@@ -1796,7 +1915,10 @@ fn paged_blocks_start_on_their_anchor_and_displace_only_following_rows() {
     assert_eq!(y3 - y2, h);
     assert_eq!(y4 - y3, h * 2);
     let x = layout.text.x as i32;
-    assert_eq!(layout.caret_at(&state, x, (y1 + h * 2) as i32).unwrap().0, 1);
+    assert_eq!(
+        layout.caret_at(&state, x, (y1 + h * 2) as i32).unwrap().0,
+        1
+    );
     assert_eq!(layout.caret_at(&state, x, (y2 + 1) as i32).unwrap().0, 2);
 }
 
@@ -1829,13 +1951,18 @@ fn the_only_band_rule_is_the_toolbar_s_underside() {
     let c = Chrome::new(ChromeMetrics::DESKTOP);
     let l = &c.layout;
     for paged in [false, true] {
-        let state = ChromeState { paged, ..ChromeState::default() };
+        let state = ChromeState {
+            paged,
+            ..ChromeState::default()
+        };
         let tree = c.tree(&state);
         // A band rule is full width; the separators and the ruler's ticks are not.
         let rules: Vec<u32> = nodes(&tree)
             .into_iter()
             .filter_map(|n| match n {
-                Node::Rect(r) if r.width == l.width && r.height == 1 && r.y >= 0 => Some(r.y as u32),
+                Node::Rect(r) if r.width == l.width && r.height == 1 && r.y >= 0 => {
+                    Some(r.y as u32)
+                }
                 _ => None,
             })
             .filter(|&y| y < l.ruler.bottom())
@@ -1865,7 +1992,10 @@ fn the_toolbar_band_is_filled_in_both_views() {
     for paged in [false, true] {
         let c = Chrome::new(ChromeMetrics::DESKTOP);
         let l = &c.layout;
-        let state = ChromeState { paged, ..ChromeState::default() };
+        let state = ChromeState {
+            paged,
+            ..ChromeState::default()
+        };
         let tree = c.tree(&state);
         assert!(
             nodes(&tree).into_iter().any(|n| matches!(n,
@@ -1893,7 +2023,11 @@ fn the_sidebar_has_a_right_edge_in_both_views() {
     for paged in [false, true] {
         let c = Chrome::new(ChromeMetrics::DESKTOP);
         let l = &c.layout;
-        let state = ChromeState { sidebar_open: true, paged, ..ChromeState::default() };
+        let state = ChromeState {
+            sidebar_open: true,
+            paged,
+            ..ChromeState::default()
+        };
         let tree = c.tree(&state);
         let x = l.sidebar.right().saturating_sub(1);
         assert!(

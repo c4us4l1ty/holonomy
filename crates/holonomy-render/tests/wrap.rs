@@ -99,7 +99,9 @@ fn a_line_that_fits_is_one_row() {
 /// would fail on `cells`.
 #[test]
 fn a_long_word_wraps_at_the_measure() {
-    let content: Vec<u8> = (0..40).map(|i| b'a' + u8::try_from(i % 26).expect("fits")).collect();
+    let content: Vec<u8> = (0..40)
+        .map(|i| b'a' + u8::try_from(i % 26).expect("fits"))
+        .collect();
     let mut bytes = content.clone();
     bytes.push(b'\n');
     let m = WrapMap::build(M, [line(0, &bytes)]);
@@ -140,8 +142,7 @@ fn the_wrap_falls_after_the_whitespace() {
     for r in m.rows() {
         if r.start < r.end {
             assert_ne!(
-                text[r.start as usize],
-                b' ',
+                text[r.start as usize], b' ',
                 "**row at byte {} starts with a space** -- the paragraph would be indented by one \
                  cell on every continuation, which is the signature of a naive wrap",
                 r.start
@@ -151,7 +152,11 @@ fn the_wrap_falls_after_the_whitespace() {
     // **And the continuation starts at column 20, not 19.** A row that broke *after* the space used
     // that space's cell, so the next row begins one column further on — and a `start_column` stuck at
     // 19 would place row 1's glyphs one cell left of where its own cells are.
-    assert_eq!(m.rows()[1].start_column, M, "**the continuation starts at column 20**");
+    assert_eq!(
+        m.rows()[1].start_column,
+        M,
+        "**the continuation starts at column 20**"
+    );
 }
 
 /// **A row that ends at a space keeps it, and that is what makes the rows tile.**
@@ -246,7 +251,11 @@ fn an_unbreakable_token_wraps_hard_and_every_byte_stays_reachable() {
     let text = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
     let content = text.strip_suffix(b"\n").expect("has a newline");
     let m = WrapMap::build(M, [line(0, text)]);
-    assert_eq!(spans(&m), vec![(0, 20, 20), (20, 40, 20)], "**two rows at the measure**");
+    assert_eq!(
+        spans(&m),
+        vec![(0, 20, 20), (20, 40, 20)],
+        "**two rows at the measure**"
+    );
     let mut covered = vec![0u32; content.len()];
     for r in m.rows() {
         for i in r.range() {
@@ -321,7 +330,11 @@ fn a_row_mixes_word_wrap_and_multi_byte_codepoints() {
 #[test]
 fn an_empty_line_is_one_row_of_zero_cells() {
     let m = WrapMap::build(M, [line(0, b"\n")]);
-    assert_eq!(spans(&m), vec![(0, 0, 0)], "**one row, zero bytes, zero cells**");
+    assert_eq!(
+        spans(&m),
+        vec![(0, 0, 0)],
+        "**one row, zero bytes, zero cells**"
+    );
     assert_eq!(m.len(), 1, "**and the row is there**");
     assert!(
         m.rows()[0].is_empty(),
@@ -362,7 +375,11 @@ fn a_leading_space_does_not_produce_an_empty_row() {
 #[test]
 fn a_line_of_only_spaces_is_one_row_that_uses_cells() {
     let m = WrapMap::build(M, [line(0, b"     \n")]);
-    assert_eq!(spans(&m), vec![(0, 5, 5)], "**one row of five cells for five spaces**");
+    assert_eq!(
+        spans(&m),
+        vec![(0, 5, 5)],
+        "**one row of five cells for five spaces**"
+    );
 }
 
 /// **Offsets are the document's own, so a window that starts mid-document is exact.**
@@ -426,8 +443,16 @@ fn a_byte_belongs_to_exactly_one_row_and_needs_no_flag() {
     let m = WrapMap::build(M, [line(0, text)]);
     assert_eq!(m.len(), 2, "**two rows**");
     // **The boundary is byte 20, and both sides resolve to the row they are drawn in.**
-    assert_eq!(m.row_at_byte(19), Some(0), "**byte 19 is row 0's last byte**");
-    assert_eq!(m.row_at_byte(20), Some(1), "**byte 20 is row 1's first byte**");
+    assert_eq!(
+        m.row_at_byte(19),
+        Some(0),
+        "**byte 19 is row 0's last byte**"
+    );
+    assert_eq!(
+        m.row_at_byte(20),
+        Some(1),
+        "**byte 20 is row 1's first byte**"
+    );
     // **And a byte past the content answers the last row, not `None`** — because that is where the
     // caret goes when you press End on the last line.
     assert_eq!(
@@ -444,7 +469,11 @@ fn a_byte_belongs_to_exactly_one_row_and_needs_no_flag() {
     // **A byte before the window is the first row**, because the map is a window and the caller
     // routinely asks about a byte above it.
     assert_eq!(m.row_at_byte(0), Some(0), "**byte 0 is row 0**");
-    assert_eq!(WrapMap::build(M, []).row_at_byte(0), None, "**an empty map answers `None`**");
+    assert_eq!(
+        WrapMap::build(M, []).row_at_byte(0),
+        None,
+        "**an empty map answers `None`**"
+    );
 }
 
 /// **`row_at_byte` is monotonic and in range, which is what makes it safe to scroll by.**
@@ -465,7 +494,10 @@ fn row_at_byte_is_monotonic_and_in_range() {
         })
         .collect();
     let map = WrapMap::build(M, lines);
-    assert!(map.len() > 40, "**the map has more rows than lines**, or it is not wrapping");
+    assert!(
+        map.len() > 40,
+        "**the map has more rows than lines**, or it is not wrapping"
+    );
     let mut last = 0usize;
     for byte in 0..u32::try_from(text.len()).unwrap_or(0) * 40 {
         let i = map
@@ -499,7 +531,11 @@ fn line_rows_is_exactly_the_line_s_own_rows() {
     let m = WrapMap::build(M, [l0, l1, l2]);
 
     let r0 = m.line_rows(0);
-    assert_eq!(r0, 0..2, "**line 0 is 22 characters, so it is two rows at a measure of 20**");
+    assert_eq!(
+        r0,
+        0..2,
+        "**line 0 is 22 characters, so it is two rows at a measure of 20**"
+    );
     let r1 = m.line_rows(1);
     assert!(
         r1.len() > 1,
@@ -509,9 +545,21 @@ fn line_rows_is_exactly_the_line_s_own_rows() {
         m.rows()[r1.clone()].iter().all(|r| r.line == 1),
         "**and every row in it is line 1's**"
     );
-    assert_eq!(m.rows()[r1.start - 1].line, 0, "**the row before it is line 0's**");
-    assert_eq!(m.rows()[r1.end].line, 2, "**and the row after it is line 2's**");
-    assert_eq!(m.line_rows(2), r1.end..m.len(), "**line 2 is what follows**");
+    assert_eq!(
+        m.rows()[r1.start - 1].line,
+        0,
+        "**the row before it is line 0's**"
+    );
+    assert_eq!(
+        m.rows()[r1.end].line,
+        2,
+        "**and the row after it is line 2's**"
+    );
+    assert_eq!(
+        m.line_rows(2),
+        r1.end..m.len(),
+        "**line 2 is what follows**"
+    );
     assert_eq!(
         m.line_rows(99),
         m.len()..m.len(),
@@ -529,7 +577,11 @@ fn line_rows_is_exactly_the_line_s_own_rows() {
 fn a_zero_measure_degrades_to_one_cell() {
     let m = WrapMap::build(0, [line(0, b"abc\n")]);
     assert_eq!(m.measure(), 1, "**the measure is one cell**");
-    assert_eq!(spans(&m), vec![(0, 1, 1), (1, 2, 1), (2, 3, 1)], "**one cell per row**");
+    assert_eq!(
+        spans(&m),
+        vec![(0, 1, 1), (1, 2, 1), (2, 3, 1)],
+        "**one cell per row**"
+    );
     assert_eq!(
         WrapMap::build(0, []).measure(),
         1,

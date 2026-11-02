@@ -286,7 +286,12 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
     // case the row loop used to ignore.
     let mut half = Frame::black(32, 32);
     let half_stats = Painter::new(&atlas(), 0)
-        .paint_with_rasters(&mut half, &tree, Some(DamageRect::new(8, 8, 8, 4)), Some(&rasters))
+        .paint_with_rasters(
+            &mut half,
+            &tree,
+            Some(DamageRect::new(8, 8, 8, 4)),
+            Some(&rasters),
+        )
         .expect("paint the top half");
     assert_eq!(
         half_stats.image_pixels, 32,
@@ -311,7 +316,12 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
     // because the two clips are one function, and this is what fails if a rewrite drops one.
     let mut side = Frame::black(32, 32);
     let side_stats = Painter::new(&atlas(), 0)
-        .paint_with_rasters(&mut side, &tree, Some(DamageRect::new(8, 8, 4, 8)), Some(&rasters))
+        .paint_with_rasters(
+            &mut side,
+            &tree,
+            Some(DamageRect::new(8, 8, 4, 8)),
+            Some(&rasters),
+        )
         .expect("paint the left half");
     assert_eq!(
         side_stats.image_pixels, 32,
@@ -331,9 +341,17 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
     // inside the damage still arrives intact.
     let mut whole = Frame::black(32, 32);
     let whole_stats = Painter::new(&atlas(), 0)
-        .paint_with_rasters(&mut whole, &tree, Some(DamageRect::new(8, 8, 8, 8)), Some(&rasters))
+        .paint_with_rasters(
+            &mut whole,
+            &tree,
+            Some(DamageRect::new(8, 8, 8, 8)),
+            Some(&rasters),
+        )
         .expect("paint the whole image");
-    assert_eq!(whole_stats.image_pixels, 64, "the whole image lands: {whole_stats:?}");
+    assert_eq!(
+        whole_stats.image_pixels, 64,
+        "the whole image lands: {whole_stats:?}"
+    );
     for y in 8..16 {
         assert!(
             whole.row(y)[8..16].iter().all(|&p| p == 0xFFFF_FFFF),
@@ -391,10 +409,7 @@ fn the_caret_is_actually_drawn_into_the_frame() {
         0,
     );
     let _ = only;
-    assert_eq!(
-        d.differing,
-        2 * u64::from(caret.height)
-    );
+    assert_eq!(d.differing, 2 * u64::from(caret.height));
 }
 
 #[test]
@@ -519,15 +534,27 @@ fn the_separators_are_drawn_from_the_table_and_not_from_the_font() {
     );
 }
 
-
 #[test]
 fn a_round_rect_fills_its_centre_and_leaves_its_corners() {
     use holonomy_render::{Node, RoundRect, SurfaceTree};
     let mut f = frame();
-    let tree = SurfaceTree::leaf(Node::RoundRect(RoundRect::new(0, 0, 32, 32, 8, 0xFFFF_FFFF)));
-    Painter::without_atlas(0).paint(&mut f, &tree, None).expect("paint");
+    let tree = SurfaceTree::leaf(Node::RoundRect(RoundRect::new(
+        0,
+        0,
+        32,
+        32,
+        8,
+        0xFFFF_FFFF,
+    )));
+    Painter::without_atlas(0)
+        .paint(&mut f, &tree, None)
+        .expect("paint");
     assert_eq!(f.pixel(16, 16), 0x00FF_FFFF, "the centre is filled");
     assert_eq!(f.pixel(16, 0), 0x00FF_FFFF, "the top centre is filled");
     assert_eq!(f.pixel(0, 0), 0x0000_0000, "the rounded corner is not");
-    assert_eq!(f.pixel(31, 31), 0x0000_0000, "and neither is the opposite corner");
+    assert_eq!(
+        f.pixel(31, 31),
+        0x0000_0000,
+        "and neither is the opposite corner"
+    );
 }

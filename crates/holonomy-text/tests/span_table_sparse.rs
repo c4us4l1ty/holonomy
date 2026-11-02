@@ -44,10 +44,13 @@ fn styled_document() -> (String, SpanMap, Vec<u8>) {
     // "# A heading\n" is 11 bytes; the bold line runs from there to the next newline.
     let h0 = 0u32;
     let h1 = 11u32;
-    let b1 = text.find("This line").unwrap() as u32 + "This line is bold and the rest is not.".len() as u32;
+    let b1 = text.find("This line").unwrap() as u32
+        + "This line is bold and the rest is not.".len() as u32;
 
     let mut spans = SpanMap::empty_over(text.len() as u32);
-    spans.style_range(h0, h1, STYLE_HEADER, 0x00FF_0000).unwrap();
+    spans
+        .style_range(h0, h1, STYLE_HEADER, 0x00FF_0000)
+        .unwrap();
     spans.style_range(h1, b1, STYLE_BOLD, 0).unwrap();
 
     let bytes = payload::encode(&text, &spans, &[], &AssetCatalog::new());
@@ -65,7 +68,11 @@ fn styling_is_recoverable_with_the_text_absent() {
 
     // Read the header. In the product this is the first section, which any window at offset 0 holds.
     let header = Header::parse(&bytes).expect("a header");
-    assert_eq!(header.text_len, text.len() as u32, "the header declares the text length");
+    assert_eq!(
+        header.text_len,
+        text.len() as u32,
+        "the header declares the text length"
+    );
 
     // Read the span table **directly**, skipping the text entirely.
     let at = usize::try_from(header.span_table_offset()).unwrap();
@@ -74,7 +81,10 @@ fn styling_is_recoverable_with_the_text_absent() {
         header.span_table_bytes() > 0,
         "and there is a span table to read -- otherwise this test proves nothing about styled bytes"
     );
-    assert!(table.len() < text.len(), "the table is smaller than the text it describes");
+    assert!(
+        table.len() < text.len(),
+        "the table is smaller than the text it describes"
+    );
 
     let recovered = SpanMap::from_spans(
         payload::read_span_table(&header, table).expect("the span table"),
@@ -84,9 +94,17 @@ fn styling_is_recoverable_with_the_text_absent() {
 
     // Byte-for-byte the same styling, from the same document, **without the text present**.
     assert_eq!(recovered.spans(), original.spans(), "identical spans");
-    assert_eq!(recovered.style_at(0).style_flags, STYLE_HEADER, "the heading is still a heading");
+    assert_eq!(
+        recovered.style_at(0).style_flags,
+        STYLE_HEADER,
+        "the heading is still a heading"
+    );
     // "# A heading\n" is 11 bytes, so the bold run starts there.
-    assert_eq!(recovered.style_at(11).style_flags, STYLE_BOLD, "and so is the bold run");
+    assert_eq!(
+        recovered.style_at(11).style_flags,
+        STYLE_BOLD,
+        "and so is the bold run"
+    );
 }
 
 /// **The offset formula is load-bearing, so it is checked rather than assumed.** If
@@ -100,11 +118,19 @@ fn the_span_table_is_where_the_layout_says_it_is() {
 
     // The declared offset is exactly one past the last text byte.
     assert_eq!(at, payload::HEADER_LEN + text.len(), "header + text");
-    assert_eq!(bytes[at - 1], *text.as_bytes().last().unwrap(), "so the byte before it is the last text byte");
+    assert_eq!(
+        bytes[at - 1],
+        *text.as_bytes().last().unwrap(),
+        "so the byte before it is the last text byte"
+    );
 
     // And the first record begins there: its `start_byte` is 0, because encode sorts.
     let first = &bytes[at..at + 16];
-    assert_eq!(u32::from_le_bytes([first[0], first[1], first[2], first[3]]), 0, "first span starts at 0");
+    assert_eq!(
+        u32::from_le_bytes([first[0], first[1], first[2], first[3]]),
+        0,
+        "first span starts at 0"
+    );
 
     // A text length that differs would move the table, so the formula is not a constant offset.
     let mut longer = String::from("x");
@@ -112,8 +138,15 @@ fn the_span_table_is_where_the_layout_says_it_is() {
     let m = SpanMap::plain(longer.len() as u32);
     let bytes2 = payload::encode(&longer, &m, &[], &AssetCatalog::new());
     let h2 = Header::parse(&bytes2).unwrap();
-    assert_eq!(h2.span_table_offset(), payload::HEADER_LEN as u64 + longer.len() as u64);
-    assert_eq!(h2.span_table_offset(), at as u64 + 1, "one more byte of text, one byte further in");
+    assert_eq!(
+        h2.span_table_offset(),
+        payload::HEADER_LEN as u64 + longer.len() as u64
+    );
+    assert_eq!(
+        h2.span_table_offset(),
+        at as u64 + 1,
+        "one more byte of text, one byte further in"
+    );
 }
 
 /// **The sparse path and the whole-payload path must produce the same map.** Two copies of a record
@@ -128,8 +161,16 @@ fn the_sparse_path_and_the_whole_payload_path_agree() {
 
     let sparse = payload::read_span_table(&header, &bytes[at..]).expect("sparse");
     let whole = payload::decode(&bytes).expect("whole").spans;
-    assert_eq!(sparse.as_slice(), whole.spans(), "the same records, from the same bytes");
-    assert_eq!(sparse.len(), header.span_count as usize, "and as many as the header declared");
+    assert_eq!(
+        sparse.as_slice(),
+        whole.spans(),
+        "the same records, from the same bytes"
+    );
+    assert_eq!(
+        sparse.len(),
+        header.span_count as usize,
+        "and as many as the header declared"
+    );
 }
 
 /// **A short table is refused, not padded.** Returning the spans that did arrive would style part of
@@ -141,15 +182,24 @@ fn a_truncated_span_table_is_refused_not_padded() {
     let header = Header::parse(&bytes).unwrap();
     let at = usize::try_from(header.span_table_offset()).unwrap();
     let need = usize::try_from(header.span_table_bytes()).unwrap();
-    assert!(need >= 32, "more than one record, so dropping one is a real truncation");
+    assert!(
+        need >= 32,
+        "more than one record, so dropping one is a real truncation"
+    );
 
     let err = payload::read_span_table(&header, &bytes[at..at + need - 16])
         .expect_err("one record short must be refused");
-    assert!(matches!(err, PayloadError::RecordOverruns { .. }), "got {err:?}");
+    assert!(
+        matches!(err, PayloadError::RecordOverruns { .. }),
+        "got {err:?}"
+    );
 
     // And nothing at all is refused the same way, rather than yielding an empty list.
     let none = payload::read_span_table(&header, &[]).expect_err("no records at all");
-    assert!(matches!(none, PayloadError::RecordOverruns { .. }), "got {none:?}");
+    assert!(
+        matches!(none, PayloadError::RecordOverruns { .. }),
+        "got {none:?}"
+    );
 }
 
 /// **A map loaded from a payload is fully *read*, and this is a correction to part 6.**
@@ -161,7 +211,11 @@ fn a_truncated_span_table_is_refused_not_padded() {
 fn a_map_from_a_payload_is_fully_read_not_partly() {
     let (text, _, bytes) = styled_document();
     let decoded = payload::decode(&bytes).expect("decode");
-    assert_eq!(decoded.spans.read_through(), text.len() as u32, "the whole document is read");
+    assert_eq!(
+        decoded.spans.read_through(),
+        text.len() as u32,
+        "the whole document is read"
+    );
     assert!(decoded.spans.is_read(0) && decoded.spans.is_read(text.len() as u32 - 1));
     assert!(
         decoded.spans.style_at_known(0).is_some(),
@@ -170,7 +224,11 @@ fn a_map_from_a_payload_is_fully_read_not_partly() {
 
     // And the contrast that makes the point: a skeleton map claims nothing.
     let skeleton = SpanMap::plain(text.len() as u32);
-    assert_eq!(skeleton.read_through(), 0, "a skeleton has read nothing, however plain it claims");
+    assert_eq!(
+        skeleton.read_through(),
+        0,
+        "a skeleton has read nothing, however plain it claims"
+    );
 }
 
 /// **The span table's cost tracks styled runs, not document bytes** — which is why it does not need
@@ -191,8 +249,15 @@ fn the_span_table_costs_runs_not_document_bytes() {
     let header = Header::parse(&bytes).unwrap();
 
     assert_eq!(header.text_len as usize, text.len(), "an 8 MiB document");
-    assert_eq!(header.span_count as usize, 6, "four styled runs plus the two plain gaps between them");
-    assert_eq!(header.span_table_bytes(), 96, "so 96 bytes of styling for 8 MiB of text");
+    assert_eq!(
+        header.span_count as usize, 6,
+        "four styled runs plus the two plain gaps between them"
+    );
+    assert_eq!(
+        header.span_table_bytes(),
+        96,
+        "so 96 bytes of styling for 8 MiB of text"
+    );
     assert!(
         header.span_table_bytes() * 1000 < header.text_len as u64,
         "three orders of magnitude apart -- the text is what has to be windowed, and it is"

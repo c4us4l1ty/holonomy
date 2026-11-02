@@ -212,11 +212,15 @@ fn the_all_list_and_the_match_agree() {
     // remaining 33 are unchanged, `mask::PRINT` still resolves, and `Tool::Print` is still wired.
     assert_eq!(
         IconId::ALL.len(),
-        33,
+        50,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. This went 34 -> 33 \
          when `Comment` was removed with `Tool::Comment` and `TitleButton::Comments`: it had no \
-         annotation store and could never work, so it was a button that lied about the product."
+         annotation store and could never work, so it was a button that lied about the product. \
+         **33 -> 50 is the Wordcraft ribbon's own set**: Clone Format, Copy, Paste, Bullets, \
+         Numbering, Align Left/Centre/Right, Indent, Outdent, Strikethrough, Subscript, \
+         Superscript, Replace, Navigation, Theme and Close, each one painted by a command that \
+         reaches an action -- which is the standard the note above sets."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.
@@ -314,7 +318,11 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
     for id in [IconId::Minus, IconId::Rule] {
         let bits = id.mask();
         let rows: Vec<u32> = (0..SIZE)
-            .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count() as u32)
+            .map(|y| {
+                (0..SIZE)
+                    .filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                    .count() as u32
+            })
             .collect();
         let widest = *rows.iter().max().unwrap();
         assert!(
@@ -349,22 +357,30 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
 fn a_plus_crosses_the_box_in_both_axes() {
     let bits = IconId::Plus.mask();
     let widest = (0..SIZE)
-        .map(|y| (0..SIZE).filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .map(|y| {
+            (0..SIZE)
+                .filter(|&x| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                .count()
+        })
         .max()
         .unwrap();
     let tallest = (0..SIZE)
-        .map(|x| (0..SIZE).filter(|&y| (bits[y as usize] >> (63 - x)) & 1 == 1).count())
+        .map(|x| {
+            (0..SIZE)
+                .filter(|&y| (bits[y as usize] >> (63 - x)) & 1 == 1)
+                .count()
+        })
         .max()
         .unwrap();
     // `SIZE / 2` is the same bar the rule test uses: an arm that does not reach half the box is an
     // arm of an outline rather than of a plus.
     assert!(
-        widest >= SIZE / 2,
+        widest >= (SIZE / 2) as usize,
         "Plus's widest row is {widest} pixels; the horizontal arm must reach at least {}",
         SIZE / 2
     );
     assert!(
-        tallest >= SIZE / 2,
+        tallest >= (SIZE / 2) as usize,
         "Plus's tallest column is {tallest} pixels; the vertical arm must reach at least {}",
         SIZE / 2
     );

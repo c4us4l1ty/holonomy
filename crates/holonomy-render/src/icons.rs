@@ -420,7 +420,6 @@ pub mod mask {
         b"................",
     ]);
 
-
     /// A frame with a sun and a mountain.
     pub static IMAGE: [u64; 16] = pack(&[
         b"................",
@@ -768,6 +767,326 @@ pub mod mask {
 /// 37 and get a mask out of the bounds of a match. Every accessor goes through [`IconId::mask`], which
 /// is exhaustive, so adding an icon is a compile error at every site that has to handle it — which is
 /// the property that makes the set safe to extend while the toolbar is still being built.
+// WordCraft-inspired line icons, pre-rasterised into the same 1-bit masks as the
+// existing set. No SVG parser, allocator or curve evaluator enters the UI path.
+pub(crate) mod wordcraft_masks {
+    use super::{pack, SIZE};
+    const fn rows(v: &[&[u8; SIZE as usize]; SIZE as usize]) -> [u64; SIZE as usize] {
+        // **Art rows, not `0`/`1` rows.** `pack` inks every byte that is not `.` or a space, so a
+        // row written as `[0, 1, 1, 0]` was *every cell inked* -- every Wordcraft icon drew as a
+        // solid block, and the two gates that caught it were `no_icon_is_mostly_ink` and
+        // `no_two_icons_share_a_mask`.
+        pack(v)
+    }
+    pub const CUT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"...##.......#...",
+        b"....#......#....",
+        b"....###...#.....",
+        b"......#..#......",
+        b"......###.......",
+        b".......##.......",
+        b"......#.###.....",
+        b"...###....###...",
+        b"..##.##..##.##..",
+        b"..#...#..#...#..",
+        b"..##.##..##.##..",
+        b"...###....###...",
+        b"................",
+        b"................",
+    ]);
+    pub const COPY: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".....#########..",
+        b".....#.......#..",
+        b".....#.......#..",
+        b"..#########..#..",
+        b"..#..#....#..#..",
+        b"..#..#....#..#..",
+        b"..#..#....#..#..",
+        b"..#..#....#..#..",
+        b"..#..#....#..#..",
+        b"..#..#########..",
+        b"..#.......#.....",
+        b"..#.......#.....",
+        b"..#########.....",
+        b"................",
+    ]);
+    pub const PASTE: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b".....######.....",
+        b".....#....#.....",
+        b"...##########...",
+        b"...#.######.#...",
+        b"...#........#...",
+        b"...#........#...",
+        b"...#........#...",
+        b"...#.######.#...",
+        b"...#........#...",
+        b"...#........#...",
+        b"...#.######.#...",
+        b"...#........#...",
+        b"...#........#...",
+        b"...##########...",
+        b"................",
+    ]);
+    pub const BULLETS: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"................",
+        b"..#...#########.",
+        b"................",
+        b"................",
+        b"................",
+        b"................",
+        b"..#...#########.",
+        b"................",
+        b"................",
+        b"................",
+        b"................",
+        b"..#...#########.",
+        b"................",
+        b"................",
+    ]);
+    pub const NUMBERING: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"..#.............",
+        b"..#...#########.",
+        b"..#.............",
+        b".###............",
+        b"................",
+        b"................",
+        b"................",
+        b".###............",
+        b"...#..#########.",
+        b".###............",
+        b"................",
+        b"................",
+        b".###............",
+        b"................",
+    ]);
+    pub const ALIGNLEFT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b".##########.....",
+        b"................",
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b".##########.....",
+        b"................",
+    ]);
+    pub const ALIGNCENTER: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b"...##########...",
+        b"................",
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b"...##########...",
+        b"................",
+    ]);
+    pub const ALIGNRIGHT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b".....##########.",
+        b"................",
+        b"................",
+        b"................",
+        b".##############.",
+        b"................",
+        b"................",
+        b"................",
+        b".....##########.",
+        b"................",
+    ]);
+    pub const INDENT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".......########.",
+        b"................",
+        b"................",
+        b".#..............",
+        b"..#....########.",
+        b"...#............",
+        b"....#...........",
+        b"...#............",
+        b"..#....########.",
+        b".#..............",
+        b"................",
+        b"................",
+        b".......########.",
+        b"................",
+    ]);
+    pub const OUTDENT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".......########.",
+        b"................",
+        b"................",
+        b"....#...........",
+        b"..###..########.",
+        b"..#.............",
+        b".##.............",
+        b"..#.............",
+        b"..###..########.",
+        b"....#...........",
+        b"................",
+        b"................",
+        b".......########.",
+        b"................",
+    ]);
+    pub const STRIKE: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"......#####.....",
+        b".....#....##....",
+        b"....#...........",
+        b".....#..........",
+        b"......#.........",
+        b".......#........",
+        b".##############.",
+        b".........#......",
+        b"..........#.....",
+        b"..........#.....",
+        b"..........#.....",
+        b"....###..#......",
+        b"......###.......",
+        b"................",
+    ]);
+    pub const SUBSCRIPT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"................",
+        b"..#......#......",
+        b"..##....##......",
+        b"....#..#........",
+        b"....####........",
+        b".....##.........",
+        b".....##.........",
+        b"....#..#........",
+        b"...##..##.......",
+        b"...#....#..####.",
+        b"..#......#...##.",
+        b"............#...",
+        b"...........##...",
+        b"...........####.",
+    ]);
+    pub const SUPERSCRIPT: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"...........####.",
+        b".............##.",
+        b"............#...",
+        b"...........##...",
+        b"..#......#.####.",
+        b"..##....##......",
+        b"....#..#........",
+        b"....####........",
+        b".....##.........",
+        b".....##.........",
+        b"....#..#........",
+        b"...##..##.......",
+        b"...#....#.......",
+        b"..#......#......",
+        b"................",
+    ]);
+    pub const REPLACE: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".########.#####.",
+        b".#......#.....#.",
+        b".#......#...#.#.",
+        b".#......#....##.",
+        b".#......#.....#.",
+        b".#......#.......",
+        b".##############.",
+        b".......#......#.",
+        b".#####.#......#.",
+        b".#.....#......#.",
+        b".#.....#......#.",
+        b".#.....#......#.",
+        b".#.....########.",
+        b"................",
+    ]);
+    pub const NAVIGATION: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b".##############.",
+        b".#...#........#.",
+        b".#...#........#.",
+        b".#...#..#####.#.",
+        b".#...#........#.",
+        b".#...#........#.",
+        b".#...#..#####.#.",
+        b".#...#........#.",
+        b".#...#........#.",
+        b".#...#..#####.#.",
+        b".#...#........#.",
+        b".#...#........#.",
+        b".##############.",
+        b"................",
+    ]);
+    pub const THEME: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"......#####.....",
+        b"....##..#.###...",
+        b"...##...#...##..",
+        b"...#....###..#..",
+        b"..#.....#.###.#.",
+        b"..#.....#.....#.",
+        b"..#.....###...#.",
+        b"..#.....#..####.",
+        b"..#.....#.....#.",
+        b"...#....##...#..",
+        b"...##...#.####..",
+        b"....##..#..##...",
+        b"......#####.....",
+        b"................",
+    ]);
+    pub const CLOSE: [u64; SIZE as usize] = rows(&[
+        b"................",
+        b"................",
+        b"................",
+        b"...#........#...",
+        b"....#.....###...",
+        b".....#....#.....",
+        b"......#.###.....",
+        b".......##.......",
+        b"......###.......",
+        b"......#..#......",
+        b"....###...#.....",
+        b"....#......#....",
+        b"...##.......#...",
+        b"................",
+        b"................",
+        b"................",
+    ]);
+}
+use wordcraft_masks as wc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum IconId {
@@ -837,6 +1156,23 @@ pub enum IconId {
     Pen,
     /// Print.
     Print,
+    Cut,
+    Copy,
+    Paste,
+    Bullets,
+    Numbering,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    Indent,
+    Outdent,
+    Strike,
+    Subscript,
+    Superscript,
+    Replace,
+    Navigation,
+    Theme,
+    Close,
 }
 
 // A slightly larger set for the desktop's higher zoom. Masks remain static and
@@ -902,6 +1238,23 @@ impl IconId {
         IconId::Search,
         IconId::Pen,
         IconId::Print,
+        IconId::Cut,
+        IconId::Copy,
+        IconId::Paste,
+        IconId::Bullets,
+        IconId::Numbering,
+        IconId::AlignLeft,
+        IconId::AlignCenter,
+        IconId::AlignRight,
+        IconId::Indent,
+        IconId::Outdent,
+        IconId::Strike,
+        IconId::Subscript,
+        IconId::Superscript,
+        IconId::Replace,
+        IconId::Navigation,
+        IconId::Theme,
+        IconId::Close,
     ];
 
     /// The mask for this icon, and its edge in pixels.
@@ -945,6 +1298,23 @@ impl IconId {
             IconId::Search => &mask::SEARCH,
             IconId::Pen => &mask::PEN,
             IconId::Print => &mask::PRINT,
+            IconId::Cut => &wc::CUT,
+            IconId::Copy => &wc::COPY,
+            IconId::Paste => &wc::PASTE,
+            IconId::Bullets => &wc::BULLETS,
+            IconId::Numbering => &wc::NUMBERING,
+            IconId::AlignLeft => &wc::ALIGNLEFT,
+            IconId::AlignCenter => &wc::ALIGNCENTER,
+            IconId::AlignRight => &wc::ALIGNRIGHT,
+            IconId::Indent => &wc::INDENT,
+            IconId::Outdent => &wc::OUTDENT,
+            IconId::Strike => &wc::STRIKE,
+            IconId::Subscript => &wc::SUBSCRIPT,
+            IconId::Superscript => &wc::SUPERSCRIPT,
+            IconId::Replace => &wc::REPLACE,
+            IconId::Navigation => &wc::NAVIGATION,
+            IconId::Theme => &wc::THEME,
+            IconId::Close => &wc::CLOSE,
         }
     }
 
@@ -969,7 +1339,14 @@ impl IconId {
     /// A 20 px desktop icon, using a compile-time enlarged mask.
     #[must_use]
     pub fn at_large(self, x: i32, y: i32, colour: u32) -> Icon {
-        Icon { bits: &LARGE_MASKS[self as usize], width: LARGE_SIZE, height: LARGE_SIZE, x, y, colour }
+        Icon {
+            bits: &LARGE_MASKS[self as usize],
+            width: LARGE_SIZE,
+            height: LARGE_SIZE,
+            x,
+            y,
+            colour,
+        }
     }
 
     /// This icon's bounds at `(x, y)`.

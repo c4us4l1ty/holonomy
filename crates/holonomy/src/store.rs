@@ -464,7 +464,8 @@ impl<'c> SectionStore<'c> {
             // Zero the staging copy: it held document plaintext a moment ago and is about to be handed back.
             buf[..len].fill(0);
             self.scratch = buf;
-            result.map_err(|_| StoreError::Read)?;            written += SECTION_BYTES.min(len);
+            result.map_err(|_| StoreError::Read)?;
+            written += SECTION_BYTES.min(len);
             // Clear *after* the write succeeded.
             if let Some(entry) = self.resident.get_mut(&section) {
                 entry.dirty = false;
@@ -648,21 +649,26 @@ pub fn open_resident(
     path: &std::path::Path,
     passphrase: &str,
 ) -> Result<(holonomy_text::Editor, String), StoreError> {
-    let file = holonomy_container::io::DirectFile::create_or_open(path).map_err(|_| StoreError::Read)?;
+    let file =
+        holonomy_container::io::DirectFile::create_or_open(path).map_err(|_| StoreError::Read)?;
     let mut opened = open_document(
         file,
         passphrase,
         holonomy_crypto::envelope::VDF_ITERATIONS,
         DEFAULT_RESIDENT_SECTIONS,
     )?;
-    let title = path
-        .file_stem()
-        .map_or_else(|| "untitled".to_string(), |s| s.to_string_lossy().into_owned());
+    let title = path.file_stem().map_or_else(
+        || "untitled".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     // **The whole document, faulted, and the scratch scrubbed.** The bytes are plaintext and the
     // `Vec` is about to leave this frame; `text_faulting` returns it rather than filling a caller's
     // buffer, so the caller is the one that has to wipe it.
     let mut store = SectionStore::new(&mut opened.container, DEFAULT_RESIDENT_SECTIONS);
-    let mut text = opened.editor.text_faulting(&mut store).map_err(|_| StoreError::Read)?;
+    let mut text = opened
+        .editor
+        .text_faulting(&mut store)
+        .map_err(|_| StoreError::Read)?;
     text.fill(0);
     // The container is dropped with `opened`, and the editor leaves fully resident.
     drop(store);

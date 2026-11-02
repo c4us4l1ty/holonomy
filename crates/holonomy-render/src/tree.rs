@@ -400,10 +400,7 @@ impl DocRun {
             x,
             y,
             self.len.saturating_mul(advance),
-            line_height
-                .max(1)
-                .saturating_add(up)
-                .saturating_add(down),
+            line_height.max(1).saturating_add(up).saturating_add(down),
         ))
     }
 }
@@ -577,7 +574,10 @@ pub struct RoundRect {
 impl RoundRect {
     /// A rounded rect.
     pub fn new(x: i32, y: i32, width: u32, height: u32, radius: u32, colour: u32) -> Self {
-        Self { rect: Rect::new(x, y, width, height, colour), radius }
+        Self {
+            rect: Rect::new(x, y, width, height, colour),
+            radius,
+        }
     }
 }
 
@@ -612,17 +612,30 @@ impl Label {
     /// Build a label, truncating `text` to [`Self::MAX_BYTES`] on a UTF-8 boundary.
     pub fn new(x: i32, y: i32, text: &str, style: Style, size: u8, colour: u32) -> Self {
         let mut end = text.len().min(Self::MAX_BYTES);
-        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
         let mut bytes = [0u8; Self::MAX_BYTES];
         bytes[..end].copy_from_slice(&text.as_bytes()[..end]);
-        Self { x, y, bytes, len: end as u8, style, size, colour }
+        Self {
+            x,
+            y,
+            bytes,
+            len: end as u8,
+            style,
+            size,
+            colour,
+        }
     }
 
     /// Valid byte count, clamped to the inline buffer even for a hand-built label.
     /// A NUL terminates the label: the unused tail of the inline buffer is zero padding.
     pub fn byte_len(&self) -> usize {
         let max = usize::from(self.len).min(Self::MAX_BYTES);
-        self.bytes[..max].iter().position(|&b| b == 0).unwrap_or(max)
+        self.bytes[..max]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(max)
     }
 
     /// The label as a string slice.
@@ -633,7 +646,9 @@ impl Label {
     /// Conservative bounds: one cell per byte, one line box tall.
     pub fn bounds(&self, advance: u32, line_height: u32) -> Option<DamageRect> {
         let len = self.byte_len();
-        if len == 0 || advance == 0 { return None; }
+        if len == 0 || advance == 0 {
+            return None;
+        }
         Some(DamageRect::new(
             self.x.max(0) as u32,
             self.y.max(0) as u32,
@@ -1369,13 +1384,19 @@ mod tests {
         // The cut lands inside a two-byte codepoint, so the whole codepoint is dropped.
         let long = format!("{}é", "a".repeat(Label::MAX_BYTES - 1));
         let l = Label::new(3, 4, &long, Style::REGULAR, 0, BLACK);
-        assert_eq!(l.len as usize, Label::MAX_BYTES - 1, "truncated to a whole codepoint");
+        assert_eq!(
+            l.len as usize,
+            Label::MAX_BYTES - 1,
+            "truncated to a whole codepoint"
+        );
         assert_eq!(l.as_str(), "a".repeat(Label::MAX_BYTES - 1));
         let b = l.bounds(8, 20).expect("non-empty");
         assert_eq!((b.x, b.y), (3, 4));
         assert_eq!(b.width, u32::from(l.len) * 8);
         assert_eq!(b.height, 20);
-        assert!(Label::new(0, 0, "", Style::REGULAR, 0, BLACK).bounds(8, 20).is_none());
+        assert!(Label::new(0, 0, "", Style::REGULAR, 0, BLACK)
+            .bounds(8, 20)
+            .is_none());
     }
 
     #[test]
@@ -1395,5 +1416,4 @@ mod tests {
         let b = n.bounds(20, 8, None).expect("non-empty");
         assert_eq!((b.x, b.y, b.width, b.height), (1, 2, 30, 10));
     }
-
 }

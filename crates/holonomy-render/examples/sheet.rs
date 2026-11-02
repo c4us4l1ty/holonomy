@@ -31,9 +31,15 @@ fn main() {
     let mut ppm = Vec::with_capacity(w * h * 3 + 32);
     ppm.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
     for p in px {
-        ppm.extend_from_slice(&[((p >> 16) & 0xFF) as u8, ((p >> 8) & 0xFF) as u8, (p & 0xFF) as u8]);
+        ppm.extend_from_slice(&[
+            ((p >> 16) & 0xFF) as u8,
+            ((p >> 8) & 0xFF) as u8,
+            (p & 0xFF) as u8,
+        ]);
     }
-    let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/sheet.ppm".into());
+    let out = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/sheet.ppm".into());
     std::fs::write(&out, &ppm).expect("write");
     println!("{out}: {w}x{h}  ({n} icons)");
 }

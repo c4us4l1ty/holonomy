@@ -56,7 +56,9 @@ fn container(content: &[u8]) -> (std::path::PathBuf, Wavefunction) {
 }
 
 fn content(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8)
+        .collect()
 }
 
 /// Read section `s` and assert it is the right bytes.
@@ -123,7 +125,10 @@ fn a_document_far_larger_than_the_budget_reads_correctly() {
         assert!(store.resident() <= 5, "section {s}");
     }
     let stats = store.stats();
-    assert_eq!(stats.loads, 41, "every section was a miss: nothing fits in a 5-section budget");
+    assert_eq!(
+        stats.loads, 41,
+        "every section was a miss: nothing fits in a 5-section budget"
+    );
     assert_eq!(
         stats.evictions, 36,
         "and 36 were evicted -- 41 loads into 5 slots is exactly 36 evictions, which is the arithmetic \\
@@ -208,7 +213,11 @@ fn the_victim_is_the_least_recently_used_section() {
     // And section 0, which was touched most recently, was not the victim.
     let before = store.stats().loads;
     store.copy_into(0, &mut buf).expect("reread 0");
-    assert_eq!(store.stats().loads, before, "section 0 was the newest and must still be resident");
+    assert_eq!(
+        store.stats().loads,
+        before,
+        "section 0 was the newest and must still be resident"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -227,7 +236,11 @@ fn a_section_already_resident_is_not_read_again() {
     for _ in 0..50 {
         store.copy_into(1, &mut buf).expect("repeat");
     }
-    assert_eq!(store.stats().loads, loads, "50 rereads of a resident section, 0 loads");
+    assert_eq!(
+        store.stats().loads,
+        loads,
+        "50 rereads of a resident section, 0 loads"
+    );
     assert_eq!(store.stats().hits, 50, "and 50 hits");
     let _ = std::fs::remove_file(&path);
 }
@@ -247,9 +260,17 @@ fn a_budget_of_zero_holds_nothing_and_still_returns_bytes() {
 
     read(&mut store, 0, &text);
     read(&mut store, 1, &text);
-    assert_eq!(store.resident(), 0, "a zero budget holds nothing, at any point");
+    assert_eq!(
+        store.resident(),
+        0,
+        "a zero budget holds nothing, at any point"
+    );
     assert_eq!(store.stats().evictions, 0, "and there is nothing to evict");
-    assert_eq!(store.stats().loads, 2, "every read was a miss, which is the cost of no cache");
+    assert_eq!(
+        store.stats().loads,
+        2,
+        "every read was a miss, which is the cost of no cache"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -274,10 +295,15 @@ fn evict_all_empties_the_store_immediately() {
     assert_eq!(store.stats().evictions, 0, "a full budget evicts nothing");
 
     store.evict_all();
-    assert_eq!(store.resident(), 0, "and the caller can see it empty before anything else happens");
+    assert_eq!(
+        store.resident(),
+        0,
+        "and the caller can see it empty before anything else happens"
+    );
     assert_eq!(store.resident_bytes(), 0);
     assert_eq!(
-        store.stats().evictions, 6,
+        store.stats().evictions,
+        6,
         "six evictions, each releasing a section"
     );
     // And the store still works afterwards, because evicting text is not a shutdown.

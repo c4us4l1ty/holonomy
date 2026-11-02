@@ -271,19 +271,20 @@ mod tests {
         let mut limits = Limits::default();
         raise_memlock_to_hard_limit(&mut limits);
 
-        let (live_soft, live_hard) = getrlimit(libc::RLIMIT_MEMLOCK).expect("getrlimit(RLIMIT_MEMLOCK)");
-        let reported = limits.memlock_soft_after.expect("soft_after was not recorded");
+        let (live_soft, live_hard) =
+            getrlimit(libc::RLIMIT_MEMLOCK).expect("getrlimit(RLIMIT_MEMLOCK)");
+        let reported = limits
+            .memlock_soft_after
+            .expect("soft_after was not recorded");
         assert!(
             reported > 0,
             "the boot prints memlock_soft_after as a MiB figure; a 0 would read as '0.00 MiB' with \
              no error, which is worse than printing nothing"
         );
         assert_eq!(
-            reported,
-            live_soft,
+            reported, live_soft,
             "boot reported {} but the process has {}",
-            reported,
-            live_soft
+            reported, live_soft
         );
         assert_eq!(
             limits.memlock_hard.expect("hard was not recorded"),
@@ -361,7 +362,9 @@ mod tests {
             .output()
             .expect("spawn the probe child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout.lines().find_map(|l| l.find("PROBE ").map(|i| &l[i + 6..]));
+        let line = stdout
+            .lines()
+            .find_map(|l| l.find("PROBE ").map(|i| &l[i + 6..]));
         let Some(line) = line else {
             panic!(
                 "the probe child printed no PROBE line.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",

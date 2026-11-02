@@ -428,7 +428,8 @@ fn shrinking_re_chaffs_the_freed_tail() {
     let omega = w.omega();
     let old = w.frame().chunk_count;
 
-    w.set_content_len(CHUNK_PLAINTEXT).expect("shrink via set_content_len");
+    w.set_content_len(CHUNK_PLAINTEXT)
+        .expect("shrink via set_content_len");
     let new = w.frame().chunk_count;
     assert!(new < old);
     assert!(
@@ -441,11 +442,15 @@ fn shrinking_re_chaffs_the_freed_tail() {
     );
     let read = w.read_content().expect("read");
     assert_eq!(read.len(), CHUNK_PLAINTEXT);
-    assert!(read.iter().all(|&b| b == b'x'), "set_content_len must keep the retained prefix");
+    assert!(
+        read.iter().all(|&b| b == b'x'),
+        "set_content_len must keep the retained prefix"
+    );
 
     w.write_content(&big).expect("regrow");
     let old = w.frame().chunk_count;
-    w.write_content(&big[..CHUNK_PLAINTEXT]).expect("shrink via write_content");
+    w.write_content(&big[..CHUNK_PLAINTEXT])
+        .expect("shrink via write_content");
     let new = w.frame().chunk_count;
     assert!(new < old);
     assert!(
@@ -458,7 +463,10 @@ fn shrinking_re_chaffs_the_freed_tail() {
     );
     let read = w.read_content().expect("read");
     assert_eq!(read.len(), CHUNK_PLAINTEXT);
-    assert!(read.iter().all(|&b| b == b'x'), "write_content must keep the retained prefix");
+    assert!(
+        read.iter().all(|&b| b == b'x'),
+        "write_content must keep the retained prefix"
+    );
     drop(w);
     let _ = std::fs::remove_file(&path);
 }

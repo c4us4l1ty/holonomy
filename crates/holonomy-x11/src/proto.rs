@@ -953,7 +953,11 @@ impl Event {
                 let time = r.u32();
                 let owner = r.u32();
                 let selection = r.u32();
-                Self::SelectionClear { time, owner, selection }
+                Self::SelectionClear {
+                    time,
+                    owner,
+                    selection,
+                }
             }
             event::SELECTION_REQUEST => {
                 let _unused = r.u8();
@@ -964,7 +968,14 @@ impl Event {
                 let selection = r.u32();
                 let target = r.u32();
                 let property = r.u32();
-                Self::SelectionRequest { time, owner, requestor, selection, target, property }
+                Self::SelectionRequest {
+                    time,
+                    owner,
+                    requestor,
+                    selection,
+                    target,
+                    property,
+                }
             }
             event::SELECTION_NOTIFY => {
                 let _unused = r.u8();
@@ -974,7 +985,13 @@ impl Event {
                 let selection = r.u32();
                 let target = r.u32();
                 let property = r.u32();
-                Self::SelectionNotify { time, requestor, selection, target, property }
+                Self::SelectionNotify {
+                    time,
+                    requestor,
+                    selection,
+                    target,
+                    property,
+                }
             }
             other => Self::Other { code: other },
         })
@@ -986,22 +1003,61 @@ mod tests {
     use super::*;
     use super::{Event, Rdr};
 
-    fn put32(buf: &mut [u8; 32], off: usize, v: u32) { buf[off..off + 4].copy_from_slice(&v.to_le_bytes()); }
+    fn put32(buf: &mut [u8; 32], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
 
     #[test]
     fn selection_events_decode_from_the_wire() {
         let mut b = [0u8; 32];
         b[0] = event::SELECTION_REQUEST;
-        put32(&mut b, 4, 100); put32(&mut b, 8, 1); put32(&mut b, 12, 2); put32(&mut b, 16, 3); put32(&mut b, 20, 4); put32(&mut b, 24, 5);
-        assert_eq!(Event::decode(&b), Some(Event::SelectionRequest { time: 100, owner: 1, requestor: 2, selection: 3, target: 4, property: 5 }));
+        put32(&mut b, 4, 100);
+        put32(&mut b, 8, 1);
+        put32(&mut b, 12, 2);
+        put32(&mut b, 16, 3);
+        put32(&mut b, 20, 4);
+        put32(&mut b, 24, 5);
+        assert_eq!(
+            Event::decode(&b),
+            Some(Event::SelectionRequest {
+                time: 100,
+                owner: 1,
+                requestor: 2,
+                selection: 3,
+                target: 4,
+                property: 5
+            })
+        );
         let mut b = [0u8; 32];
         b[0] = event::SELECTION_NOTIFY;
-        put32(&mut b, 4, 101); put32(&mut b, 8, 2); put32(&mut b, 12, 3); put32(&mut b, 16, 4); put32(&mut b, 20, 5);
-        assert_eq!(Event::decode(&b), Some(Event::SelectionNotify { time: 101, requestor: 2, selection: 3, target: 4, property: 5 }));
+        put32(&mut b, 4, 101);
+        put32(&mut b, 8, 2);
+        put32(&mut b, 12, 3);
+        put32(&mut b, 16, 4);
+        put32(&mut b, 20, 5);
+        assert_eq!(
+            Event::decode(&b),
+            Some(Event::SelectionNotify {
+                time: 101,
+                requestor: 2,
+                selection: 3,
+                target: 4,
+                property: 5
+            })
+        );
         let mut b = [0u8; 32];
         b[0] = event::SELECTION_CLEAR;
-        put32(&mut b, 4, 102); put32(&mut b, 8, 1); put32(&mut b, 12, 3);
-        assert_eq!(Event::decode(&b), Some(Event::SelectionClear { time: 102, owner: 1, selection: 3 }));
+        put32(&mut b, 4, 102);
+        put32(&mut b, 8, 1);
+        put32(&mut b, 12, 3);
+        assert_eq!(
+            Event::decode(&b),
+            Some(Event::SelectionClear {
+                time: 102,
+                owner: 1,
+                selection: 3
+            })
+        );
     }
 
     /// The length field is in words and counts the header. A client that writes the byte count here
@@ -1358,11 +1414,11 @@ mod tests {
     fn a_button_press_reads_the_button_the_time_and_the_coordinates_from_the_wire() {
         let mut p = packet(4);
         p[1] = 1; // button 1
-        // **All four bytes of the timestamp, written explicitly.** The `packet()` helper fills
-        // offset 4 with `0x04040404`, which is a fine value to read back and a poor one to read back
-        // -- `0x04040404` is also what a decoder that skipped a byte would produce for a field two
-        // bytes early. **A byte pattern that cannot be produced by an off-by-one is the whole point
-        // of writing it by hand.**
+                  // **All four bytes of the timestamp, written explicitly.** The `packet()` helper fills
+                  // offset 4 with `0x04040404`, which is a fine value to read back and a poor one to read back
+                  // -- `0x04040404` is also what a decoder that skipped a byte would produce for a field two
+                  // bytes early. **A byte pattern that cannot be produced by an off-by-one is the whole point
+                  // of writing it by hand.**
         p[4..8].copy_from_slice(&0xA1B2_C3D4u32.to_le_bytes());
         let Some(Event::ButtonPress {
             button,
@@ -1381,7 +1437,10 @@ mod tests {
         // reading it at all, each produce a different number. **The `packet()` helper's own fill
         // would not have: `0x04040404` has the same bytes at every position, so a decoder that
         // started one byte early and read three would still match.**
-        assert_eq!(time, 0xA1B2_C3D4, "**time is the little-endian u32 at offset 4**");
+        assert_eq!(
+            time, 0xA1B2_C3D4,
+            "**time is the little-endian u32 at offset 4**"
+        );
     }
     /// **`MotionNotify` reads the coordinates at 24 and 26.**
     ///

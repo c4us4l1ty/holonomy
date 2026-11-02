@@ -619,11 +619,17 @@ fn moving_off_a_button_clears_its_highlight() {
 fn clicking_a_sidebar_row_makes_it_active() {
     let mut s = session("x");
     s.set_document("one");
-    s.apply_action(holonomy_render::menus::Action::New).expect("new");
-    s.apply_action(holonomy_render::menus::Action::New).expect("new again");
+    s.apply_action(holonomy_render::menus::Action::New)
+        .expect("new");
+    s.apply_action(holonomy_render::menus::Action::New)
+        .expect("new again");
     assert_eq!(
         s.state.docs,
-        vec!["untitled".to_string(), "one".to_string(), "untitled".to_string()],
+        vec![
+            "untitled".to_string(),
+            "one".to_string(),
+            "untitled".to_string()
+        ],
         "the rail has three rows, and row 1 is the one this clicks"
     );
 

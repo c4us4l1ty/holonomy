@@ -252,7 +252,11 @@ fn the_underline_is_one_rule_and_no_extra_glyph() {
         "a document with no decoration asks the painter for no rule at all -- if the page chrome drew \
          one, the underlined count below would be measuring two things"
     );
-    assert_eq!(rules(&under), 1, "five underlined bytes are one run, so one rule");
+    assert_eq!(
+        rules(&under),
+        1,
+        "five underlined bytes are one run, so one rule"
+    );
     assert_eq!(
         glyphs(&under),
         glyphs(&plain),
@@ -417,7 +421,8 @@ fn arming_underline_styles_the_text_typed_after_it() {
     use holonomy_render::menus::Action;
     let mut s = painted("ab\n", None);
     s.caret_to(2).expect("caret after the two letters");
-    s.apply_action(Action::ToggleUnderline).expect("arm underline");
+    s.apply_action(Action::ToggleUnderline)
+        .expect("arm underline");
 
     assert_eq!(
         armed(&s),
@@ -519,7 +524,8 @@ fn clearing_stops_at_the_end_of_the_last_selected_paragraph() {
 
     // **A selection from the middle of the first paragraph to the first byte of the second**, which is
     // what a drag that stops at the start of the next line produces.
-    s.select_range(1, 4).expect("select into the second line's first byte");
+    s.select_range(1, 4)
+        .expect("select into the second line's first byte");
     s.apply_action(Action::ClearFormatting).expect("clear");
 
     assert_eq!(
@@ -701,7 +707,10 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
     let (x0, y0, x1, y1) = window(&s);
     let cell_w = s.chrome.metrics.cell_w;
     let left = s.text_rect().x;
-    debug_assert_eq!(left, x0, "the window starts at the text column, which is where cell 0 is");
+    debug_assert_eq!(
+        left, x0,
+        "the window starts at the text column, which is where cell 0 is"
+    );
     // **Each word's ink in its own columns.** `raised` occupies cells 0..6 from the text rect's left edge,
     // the two spaces are cells 6 and 7, and `flat` is cells 8..12 — both words at the body size, because
     // neither is a heading.

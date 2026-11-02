@@ -190,14 +190,20 @@ fn a_bare_i_is_still_the_letter_i() {
         Keymap::us().dispatch(InputEvent::press(holonomy_input::KEY_I), &shift),
         Some(Command::Insert('I'))
     );
-    // And Ctrl+Shift+I is an unbound combo: swallowed, never typed, never an image.
+    // **And Ctrl+Shift+I is italic, which is the one conflict this file has to state out loud.**
+    //
+    // It was an unbound combo when the image shortcut was the only thing on `I`, and this assertion
+    // said so. The Wordcraft ribbon needs an italic accelerator and `Ctrl+I` belongs to the image, so
+    // `Ctrl+Shift+I` took italic -- the same pairing Wordcraft uses, and the reason `Ctrl+I` is still
+    // the image: an accelerator that replaces a shipped one is a regression, and this file's whole
+    // subject is that `Ctrl+I` keeps reaching the image.
     let mut both = ModifierState::new();
     both.update(holonomy_input::KEY_LEFTSHIFT, 1);
     both.update(holonomy_input::KEY_LEFTCTRL, 1);
     assert_eq!(
         Keymap::us().dispatch(InputEvent::press(holonomy_input::KEY_I), &both),
-        None,
-        "Ctrl+Shift+I must be swallowed, not typed as a capital I"
+        Some(Command::Hotkey(Hotkey::Italic)),
+        "Ctrl+Shift+I is italic -- and it must be a hotkey, never a typed capital I"
     );
 }
 

@@ -96,7 +96,13 @@ impl DocLines {
                 .expect("a line that exists");
         }
         let count = lens.len();
-        Self { geo, count, paragraph_starts: Vec::new(), logical_count: count, wrap_measure: None }
+        Self {
+            geo,
+            count,
+            paragraph_starts: Vec::new(),
+            logical_count: count,
+            wrap_measure: None,
+        }
     }
 
     /// Index visual rows without inserting line breaks into the document. Each weight is a
@@ -115,20 +121,38 @@ impl DocLines {
             logical_count += 1;
         }
         let geo = Self::geometry_for_lengths(&lengths, metrics);
-        Self { geo, count: lengths.len(), paragraph_starts: starts, logical_count, wrap_measure: Some(measure) }
+        Self {
+            geo,
+            count: lengths.len(),
+            paragraph_starts: starts,
+            logical_count,
+            wrap_measure: Some(measure),
+        }
     }
 
-    fn append_wrapped(paragraph: &[u8], measure: u32, lengths: &mut Vec<u32>, starts: &mut Vec<bool>) {
+    fn append_wrapped(
+        paragraph: &[u8],
+        measure: u32,
+        lengths: &mut Vec<u32>,
+        starts: &mut Vec<bool>,
+    ) {
         // Formulae and tables use separate block renderers that expect their whole logical line.
         // Preserve their pre-existing layout until those renderers can span visual rows.
-        if paragraph.windows(2).any(|w| w == b"$$") || paragraph.contains(&holonomy_text::CELL_SEPARATOR) {
+        if paragraph.windows(2).any(|w| w == b"$$")
+            || paragraph.contains(&holonomy_text::CELL_SEPARATOR)
+        {
             lengths.push(paragraph.len() as u32);
             starts.push(true);
             return;
         }
-        let map = holonomy_render::wrap::WrapMap::build(measure, [holonomy_render::wrap::Line {
-            line: 0, start: 0, bytes: paragraph,
-        }]);
+        let map = holonomy_render::wrap::WrapMap::build(
+            measure,
+            [holonomy_render::wrap::Line {
+                line: 0,
+                start: 0,
+                bytes: paragraph,
+            }],
+        );
         let rows = map.rows();
         for (i, row) in rows.iter().enumerate() {
             let terminator = u32::from(i + 1 == rows.len() && paragraph.last() == Some(&b'\n'));
@@ -143,41 +167,75 @@ impl DocLines {
 
     /// Reflow only the edited paragraph when possible. If paragraph boundaries changed, the
     /// existing full rebuild is the conservative repair path, not an approximate index.
-    fn sync_wrapped(&mut self, editor: &Editor, expected_lines: usize, caret: usize, metrics: LineMetrics) -> Sync {
-        if expected_lines != self.logical_count { return self.rebuild(editor, metrics); }
+    fn sync_wrapped(
+        &mut self,
+        editor: &Editor,
+        expected_lines: usize,
+        caret: usize,
+        metrics: LineMetrics,
+    ) -> Sync {
+        if expected_lines != self.logical_count {
+            return self.rebuild(editor, metrics);
+        }
         let old_total = self.bytes();
         let delta = editor.text_len() as i64 - old_total as i64;
         // An equal-size replacement can have changed more than one paragraph without changing the
         // document length; do not guess which rows were affected.
-        if delta == 0 { return self.rebuild(editor, metrics); }
+        if delta == 0 {
+            return self.rebuild(editor, metrics);
+        }
         let mut chosen = None;
         for probe in [caret.saturating_sub(1), caret.min(editor.text_len())] {
-            let Some(start) = Self::paragraph_start(editor, probe) else { return self.rebuild(editor, metrics) };
+            let Some(start) = Self::paragraph_start(editor, probe) else {
+                return self.rebuild(editor, metrics);
+            };
             let row = self.geo.line_of_byte(start);
-            if row >= self.count || self.line_begin(row) != start || !self.paragraph_starts[row] { continue; }
+            if row >= self.count || self.line_begin(row) != start || !self.paragraph_starts[row] {
+                continue;
+            }
             let mut end_row = row + 1;
-            while end_row < self.count && !self.paragraph_starts[end_row] { end_row += 1; }
-            let old_end = if end_row < self.count { self.line_begin(end_row) } else { old_total };
+            while end_row < self.count && !self.paragraph_starts[end_row] {
+                end_row += 1;
+            }
+            let old_end = if end_row < self.count {
+                self.line_begin(end_row)
+            } else {
+                old_total
+            };
             let new_end = start.saturating_add(Self::line_len_from(editor, start));
             if (old_end as i64 + delta) == new_end as i64 {
                 chosen = Some((start, new_end, row, end_row));
                 break;
             }
         }
-        let Some((start, end, row, end_row)) = chosen else { return self.rebuild(editor, metrics) };
+        let Some((start, end, row, end_row)) = chosen else {
+            return self.rebuild(editor, metrics);
+        };
         let mut paragraph = vec![0; end.saturating_sub(start)];
         let ok = matches!(editor.read_into(start, &mut paragraph), Ok(n) if n == paragraph.len());
-        if !ok { paragraph.zeroize(); return self.rebuild(editor, metrics); }
+        if !ok {
+            paragraph.zeroize();
+            return self.rebuild(editor, metrics);
+        }
         let mut lengths = Vec::new();
         let mut starts = Vec::new();
-        Self::append_wrapped(&paragraph, self.wrap_measure.unwrap_or(1), &mut lengths, &mut starts);
+        Self::append_wrapped(
+            &paragraph,
+            self.wrap_measure.unwrap_or(1),
+            &mut lengths,
+            &mut starts,
+        );
         paragraph.zeroize();
         if lengths.len() == end_row - row {
             for (i, &len) in lengths.iter().enumerate() {
-                self.geo.set_line_len(row + i, len as usize).expect("an existing row");
+                self.geo
+                    .set_line_len(row + i, len as usize)
+                    .expect("an existing row");
             }
         } else {
-            let mut all: Vec<u32> = (0..self.count).map(|i| self.geo.line_len(i).unwrap_or(0) as u32).collect();
+            let mut all: Vec<u32> = (0..self.count)
+                .map(|i| self.geo.line_len(i).unwrap_or(0) as u32)
+                .collect();
             all.splice(row..end_row, lengths);
             self.paragraph_starts.splice(row..end_row, starts);
             self.geo = Self::geometry_for_lengths(&all, metrics);
@@ -195,15 +253,21 @@ impl DocLines {
             let read = editor.read_into(start, &mut buf[..len]).ok();
             let found = buf[..len].iter().rposition(|&b| b == b'\n');
             buf.zeroize();
-            if read != Some(len) { return None; }
-            if let Some(i) = found { return Some(start + i + 1); }
+            if read != Some(len) {
+                return None;
+            }
+            if let Some(i) = found {
+                return Some(start + i + 1);
+            }
             at = start;
         }
         Some(0)
     }
 
     /// Current visual measure, if this index is wrapping paragraphs.
-    pub fn wrap_measure(&self) -> Option<u32> { self.wrap_measure }
+    pub fn wrap_measure(&self) -> Option<u32> {
+        self.wrap_measure
+    }
 
     /// How many lines the document has.
     pub fn len(&self) -> usize {
@@ -307,7 +371,9 @@ impl DocLines {
         caret: usize,
         metrics: LineMetrics,
     ) -> Sync {
-        if self.wrap_measure.is_some() { return self.sync_wrapped(editor, expected_lines, caret, metrics); }
+        if self.wrap_measure.is_some() {
+            return self.sync_wrapped(editor, expected_lines, caret, metrics);
+        }
         if expected_lines != self.count {
             // A newline was added or removed. Everything after it moved, so both trees are rebuilt --
             // which is the `O(n)` the geometry documents for `resize_lines`. This is the one place a
@@ -511,24 +577,31 @@ mod tests {
         let mut lines = DocLines::build_wrapped(&e.text().unwrap(), metrics(), 8);
         for step in 0..180 {
             let at = (step * 17) % (e.text_len() + 1);
-            e.insert_at(at as u32, b"x", holonomy_text::SpanPolicy::GrowIntoInsert).unwrap();
+            e.insert_at(at as u32, b"x", holonomy_text::SpanPolicy::GrowIntoInsert)
+                .unwrap();
             let bytes = e.text().unwrap();
             lines.sync(&e, expected_lines(&bytes), at + 1, metrics());
             let fresh = DocLines::build_wrapped(&bytes, metrics(), 8);
             assert_eq!(lines.len(), fresh.len(), "edit {step}");
             for i in 0..lines.len() {
-                assert_eq!((lines.line_begin(i), lines.line_end(i)),
-                           (fresh.line_begin(i), fresh.line_end(i)), "edit {step}, row {i}");
+                assert_eq!(
+                    (lines.line_begin(i), lines.line_end(i)),
+                    (fresh.line_begin(i), fresh.line_end(i)),
+                    "edit {step}, row {i}"
+                );
             }
         }
-        e.insert_at(3, b"\n", holonomy_text::SpanPolicy::GrowIntoInsert).unwrap();
+        e.insert_at(3, b"\n", holonomy_text::SpanPolicy::GrowIntoInsert)
+            .unwrap();
         let bytes = e.text().unwrap();
         lines.sync(&e, expected_lines(&bytes), 4, metrics());
         let fresh = DocLines::build_wrapped(&bytes, metrics(), 8);
         assert_eq!(lines.len(), fresh.len());
         for i in 0..lines.len() {
-            assert_eq!((lines.line_begin(i), lines.line_end(i)),
-                       (fresh.line_begin(i), fresh.line_end(i)));
+            assert_eq!(
+                (lines.line_begin(i), lines.line_end(i)),
+                (fresh.line_begin(i), fresh.line_end(i))
+            );
         }
     }
 

@@ -14,14 +14,14 @@
 //! global allocator. See PROJECT.md §5 Phase 6 and PRD §7.1.
 
 pub mod asset;
+pub mod edit_record;
 mod editor;
 mod leaf;
 mod math_span;
-pub mod edit_record;
 pub mod payload;
 mod rope;
-mod span;
 mod selection;
+mod span;
 pub mod table;
 pub mod tables;
 pub mod undo;
@@ -29,16 +29,16 @@ pub mod undo;
 pub use asset::{
     scan_anchors, Asset, AssetCatalog, AssetError, AssetId, ANCHOR, ANCHOR_BYTES, ID_LEN,
 };
-pub use editor::{EditOutcome, Editor, EditorError, YANK_CAPACITY, STYLE_UNDO_DEPTH};
+pub use editor::{EditOutcome, Editor, EditorError, STYLE_UNDO_DEPTH, YANK_CAPACITY};
 pub use math_span::{for_each_math_span, math_span_at, math_span_count, MathSpan, DELIM, MIN_SPAN};
 pub use payload::{
     decode, encode, image_offsets, Decoded, PayloadError, FORMAT, HEADER_LEN, MAGIC,
 };
 pub use selection::SelectionRange;
 pub use span::{
-    SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_DECORATIONS,
-    STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT,
-    STYLE_UNDERLINE,
+    SpanError, SpanMap, SpanPolicy, TextIntervalSpan, STYLE_ALIGN_CENTER, STYLE_ALIGN_MASK,
+    STYLE_ALIGN_RIGHT, STYLE_BOLD, STYLE_CODE, STYLE_DECORATIONS, STYLE_HEADER, STYLE_ITALIC,
+    STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
 };
 pub use table::{Cell, ResolvedTable, TableError, TableSpan, CELL_SEPARATOR};
 pub use tables::{
@@ -49,4 +49,3 @@ pub use undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_D
 
 pub use leaf::{CagrLeaf, LeafError, CACHELINE_BYTES, GAP_MINIMUM, GAP_TARGET, LEAF_CAPACITY};
 pub use rope::{LeafSource, Rope, RopeError};
-

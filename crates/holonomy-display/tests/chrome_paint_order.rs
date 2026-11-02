@@ -100,8 +100,10 @@ fn the_toolbar_band_reaches_the_frame() {
     // **The pad is the real one, not a literal.** It said `8` here, and when `TOOLBAR_PAD` became 24
     // the toolbar was laid out for the gate at a different inset than the painter uses — so the gate
     // was probing a row that does not exist in the product and would not have noticed the pill moving.
-    let placed =
-        holonomy_render::widgets::place_toolbar(&chrome.layout, holonomy_render::widgets::TOOLBAR_PAD);
+    let placed = holonomy_render::widgets::place_toolbar(
+        &chrome.layout,
+        holonomy_render::widgets::TOOLBAR_PAD,
+    );
     let pill = holonomy_render::chrome::toolbar_pill(&chrome.layout, &placed)
         .expect("the design panel places at least one tool");
     // # The probe, and why it moved
@@ -292,8 +294,14 @@ fn the_panel_is_emitted_before_everything_else() {
             paint_order(child, out);
         }
         match t.node {
-            Some(Node::Rect(r)) => out.push((c(r.colour), r.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)))),
-            Some(Node::RoundRect(r)) => out.push((c(r.rect.colour), r.rect.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)))),
+            Some(Node::Rect(r)) => out.push((
+                c(r.colour),
+                r.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)),
+            )),
+            Some(Node::RoundRect(r)) => out.push((
+                c(r.rect.colour),
+                r.rect.bounds().unwrap_or(DamageRect::new(0, 0, 0, 0)),
+            )),
             _ => {}
         }
         for child in &t.after {
@@ -514,8 +522,12 @@ fn the_open_popup_is_visible_where_it_hangs_over_the_sidebar() {
     let panel = c(colour::PILL);
     let mut leaked = 0;
     let mut first_leak = None;
-    for y in popup.rect.y.max(side.y).saturating_add(8)..popup.rect.bottom().min(side.bottom()).saturating_sub(8) {
-        for x in popup.rect.x.max(side.x).saturating_add(8)..popup.rect.right().min(side.right()).saturating_sub(8) {
+    for y in popup.rect.y.max(side.y).saturating_add(8)
+        ..popup.rect.bottom().min(side.bottom()).saturating_sub(8)
+    {
+        for x in popup.rect.x.max(side.x).saturating_add(8)
+            ..popup.rect.right().min(side.right()).saturating_sub(8)
+        {
             if pixel(&frame, x, y) == panel {
                 leaked += 1;
                 first_leak.get_or_insert((x, y));

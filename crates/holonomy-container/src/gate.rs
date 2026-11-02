@@ -643,7 +643,11 @@ mod duress {
 
         let mut b = Wavefunction::open(&path, P_B, TEST_VDF_ITERATIONS)
             .expect("**the duress passphrase must open the container**");
-        assert_eq!(b.title(), "Shopping list", "**and mount the decoy's title**");
+        assert_eq!(
+            b.title(),
+            "Shopping list",
+            "**and mount the decoy's title**"
+        );
         let got = b.read_content().expect("read the decoy");
         assert_eq!(
             got,
@@ -676,7 +680,11 @@ mod duress {
         // Forward: P_A gets the real document.
         let mut a = Wavefunction::open(&path, P_A, TEST_VDF_ITERATIONS).expect("open with P_A");
         assert_eq!(a.title(), "Diary");
-        assert_eq!(a.read_content().expect("read"), secret, "P_A reads the primary");
+        assert_eq!(
+            a.read_content().expect("read"),
+            secret,
+            "P_A reads the primary"
+        );
         let omega_a = a.omega();
         drop(a);
 
@@ -699,7 +707,10 @@ mod duress {
         // form and failed on a correct refusal, which is the shape of a gate that checks the thing it
         // expects rather than the thing that happens.
         assert!(
-            matches!(err, ContainerError::Ring(crate::ring::RingError::Aead(_)) | ContainerError::Frame(_)),
+            matches!(
+                err,
+                ContainerError::Ring(crate::ring::RingError::Aead(_)) | ContainerError::Frame(_)
+            ),
             "and it fails by refusing to authenticate rather than by some new path: {err}"
         );
     }
@@ -753,7 +764,11 @@ mod duress {
         // can succeed.
         let mut b = Wavefunction::open(&guarded, P_B, TEST_VDF_ITERATIONS).expect("open P_B");
         let omega_b = b.omega();
-        assert_eq!(omega_a % layout::CHUNK_SLOT, 0, "the primary is slot-aligned");
+        assert_eq!(
+            omega_a % layout::CHUNK_SLOT,
+            0,
+            "the primary is slot-aligned"
+        );
         assert_eq!(omega_b % layout::CHUNK_SLOT, 0, "and so is the decoy");
         let primary = omega_a..omega_a + payload_bytes(&secret);
         let decoy_range = omega_b..omega_b + payload_bytes(d.content);
@@ -803,7 +818,10 @@ mod duress {
             "touching at a boundary is not overlapping: the primary is `[start, end)`"
         );
         assert!(!overlaps(100..200, 0..100), "nor is abutting at the front");
-        assert!(!overlaps(100..200, 400..500), "nor is being well clear of it");
+        assert!(
+            !overlaps(100..200, 400..500),
+            "nor is being well clear of it"
+        );
 
         // **And the refusal carries both ranges**, because a bare error cannot tell the caller
         // whether to move the decoy or to shrink it.
@@ -852,4 +870,3 @@ mod duress {
         (body + 1) * CHUNK_SLOT
     }
 }
-

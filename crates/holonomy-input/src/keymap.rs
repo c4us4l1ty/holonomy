@@ -220,6 +220,10 @@ pub enum Hotkey {
     /// would land if it were spelled as a character: the ctrl block runs before the character table,
     /// and that ordering is what makes `Ctrl+\` clear formatting rather than type `\`.
     ClearFormatting,
+    /// Ctrl+F. Find in the managed desktop editor.
+    Find,
+    /// Ctrl+Shift+H. Replace in the managed desktop editor.
+    Replace,
 }
 
 /// Everything the session can be asked to do by one keystroke.
@@ -401,6 +405,8 @@ impl Keymap {
                 KEY_DOT if !mods.shift() && !mods.alt() => Some(Hotkey::Superscript),
                 KEY_COMMA if !mods.shift() && !mods.alt() => Some(Hotkey::Subscript),
                 KEY_BACKSLASH if !mods.shift() && !mods.alt() => Some(Hotkey::ClearFormatting),
+                KEY_F if !mods.shift() && !mods.alt() => Some(Hotkey::Find),
+                KEY_H if mods.shift() && !mods.alt() => Some(Hotkey::Replace),
                 _ => None,
             };
             if let Some(hotkey) = binding {
@@ -770,9 +776,15 @@ mod tests {
     fn italic_shortcut_does_not_replace_the_existing_image_shortcut() {
         let km = Keymap::us();
         let mut mods = ctrl();
-        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::InsertImage)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_I), &mods),
+            Some(Command::Hotkey(Hotkey::InsertImage))
+        );
         mods.update(KEY_LEFTSHIFT, 1);
-        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::Italic)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_I), &mods),
+            Some(Command::Hotkey(Hotkey::Italic))
+        );
     }
 
     #[test]
@@ -1148,6 +1160,9 @@ mod select_all_tests {
         let km = Keymap::us();
         let mut c = ModifierState::new();
         c.update(KEY_LEFTCTRL, 1);
-        assert_eq!(km.dispatch(InputEvent::press(KEY_A), &c), Some(Command::Hotkey(Hotkey::SelectAll)));
+        assert_eq!(
+            km.dispatch(InputEvent::press(KEY_A), &c),
+            Some(Command::Hotkey(Hotkey::SelectAll))
+        );
     }
 }

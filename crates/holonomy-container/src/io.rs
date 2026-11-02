@@ -370,10 +370,7 @@ impl DirectFile {
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "short read at {offset}: got {done} of {} bytes",
-                        buf.len()
-                    ),
+                    format!("short read at {offset}: got {done} of {} bytes", buf.len()),
                 ));
             }
             done += n as usize;

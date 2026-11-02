@@ -191,7 +191,11 @@ fn the_formatting_chords_fire_and_type_nothing() {
         events.extend(tap(code));
         events.push(InputEvent::release(KEY_LEFTCTRL));
         let cmds = run_bare(&events);
-        assert_eq!(cmds, vec![Command::Hotkey(want)], "Ctrl+{code} did not fire {want:?}");
+        assert_eq!(
+            cmds,
+            vec![Command::Hotkey(want)],
+            "Ctrl+{code} did not fire {want:?}"
+        );
         assert!(
             typed(&cmds).is_empty(),
             "Ctrl+{code} typed {:?} as well as firing",
@@ -211,7 +215,11 @@ fn the_formatting_chords_fire_and_type_nothing() {
         InputEvent::release(KEY_LEFTALT),
     ];
     let cmds = run_bare(&events);
-    assert_eq!(cmds, vec![Command::Hotkey(Hotkey::Strike)], "Alt+Shift+5 is Strikethrough");
+    assert_eq!(
+        cmds,
+        vec![Command::Hotkey(Hotkey::Strike)],
+        "Alt+Shift+5 is Strikethrough"
+    );
     assert!(
         typed(&cmds).is_empty(),
         "and it must not type '%', which is what Alt+Shift+5 is on a US layout: {:?}",

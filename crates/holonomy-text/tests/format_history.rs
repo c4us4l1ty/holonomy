@@ -1,7 +1,7 @@
 use holonomy_text::{
-    ActionKind, Editor, EditorError, SpanPolicy, STYLE_BOLD, STYLE_CODE, STYLE_DECORATIONS,
-    STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT,
-    STYLE_UNDERLINE,
+    ActionKind, Editor, EditorError, SpanPolicy, STYLE_ALIGN_MASK, STYLE_BOLD, STYLE_CODE,
+    STYLE_DECORATIONS, STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT,
+    STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
 };
 
 #[test]
@@ -35,7 +35,15 @@ fn mixed_formatting_is_one_undoable_and_redoable_action() {
 fn the_decoration_bits_round_trip_through_format_undo() {
     let mut e = Editor::from_text(b"abcdefgh").unwrap();
     let all = STYLE_UNDERLINE | STYLE_STRIKE | STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT;
-    e.style_range(0, 4, STYLE_BOLD | all, 0x112233).unwrap();
+    // **`format_range`, and this used to be `style_range`.** `style_range` is the raw span setter --
+    // its own documentation says the history is [`format_range`](Editor::format_range)'s, and it
+    // pushes nothing -- so a test named *"round trip through format undo"* that opened with
+    // `style_range` had no history entry to undo and asserted its way into `NothingToUndo`. The
+    // command a toolbar's underline actually issues is `format_range`, so this is also the closer
+    // of the two to what a user does.
+    e.format_range(0, 4, |_| (STYLE_BOLD | all, 0x112233))
+        .expect("format");
+    assert_eq!(e.undo_depth(), 1, "and it is one undoable action");
     assert_eq!(e.style_at(0).style_flags, STYLE_BOLD | all);
     // **`is_header` is the one query that does not see the new bits**, and it must not: a decoration is
     // not a heading, and a heading's line height comes from `STYLE_HEADER` alone.
@@ -61,10 +69,27 @@ fn the_decoration_bits_round_trip_through_format_undo() {
     // **Every bit in `STYLE_DECORATIONS` is in `STYLE_KNOWN`**, so a file carrying an ornament is not a
     // file the importer calls corrupt.
     assert_eq!(STYLE_DECORATIONS & !STYLE_KNOWN, 0);
-    // And the three face bits that existed before are still in it, so the mask did not replace them.
+    // **And `STYLE_KNOWN` is exactly the four faces, the four ornaments and the two alignment bits.**
+    //
+    // This assertion read `STYLE_KNOWN == bold | italic | code | header | decorations` until the six
+    // style and alignment work added `STYLE_ALIGN_CENTER` and `STYLE_ALIGN_RIGHT` to the same word --
+    // which is the *point* of the mask: an aligned paragraph is formatting, and a file that carries
+    // it must not be called corrupt. **The alignment bits are named here rather than folded into
+    // `STYLE_DECORATIONS`**, because "clear formatting" must clear ornaments and must not re-align a
+    // centred paragraph.
     assert_eq!(
-        STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS,
+        STYLE_BOLD
+            | STYLE_ITALIC
+            | STYLE_CODE
+            | STYLE_HEADER
+            | STYLE_DECORATIONS
+            | STYLE_ALIGN_MASK,
         STYLE_KNOWN
+    );
+    assert_eq!(
+        STYLE_DECORATIONS & STYLE_ALIGN_MASK,
+        0,
+        "a decoration is not an alignment, so clearing ornaments leaves alignment alone"
     );
 }
 
@@ -78,7 +103,8 @@ fn the_decoration_bits_round_trip_through_format_undo() {
 fn a_decoration_boundary_splits_the_run() {
     let mut e = Editor::from_text(b"abcd").unwrap();
     e.style_range(0, 2, STYLE_BOLD, 0).unwrap();
-    e.style_range(2, 4, STYLE_BOLD | STYLE_UNDERLINE, 0).unwrap();
+    e.style_range(2, 4, STYLE_BOLD | STYLE_UNDERLINE, 0)
+        .unwrap();
     let runs = e.spans().runs_in(0, 4);
     assert_eq!(
         runs.len(),
@@ -119,7 +145,9 @@ fn no_op_and_refused_format_leave_history_and_redo_intact() {
     let mut e = Editor::from_text(b"abc").unwrap();
     e.format_range(0, 3, |_| (STYLE_BOLD, 0)).unwrap();
     e.undo().unwrap();
-    assert!(!e.format_range(0, 3, |s| (s.style_flags, s.color_rgb)).unwrap());
+    assert!(!e
+        .format_range(0, 3, |s| (s.style_flags, s.color_rgb))
+        .unwrap());
     assert!(e.format_range(0, 4, |_| (STYLE_ITALIC, 0)).is_err());
     e.redo().unwrap();
     assert_eq!(e.style_at(0).style_flags, STYLE_BOLD);
@@ -133,9 +161,18 @@ fn oversize_format_record_is_refused_before_mutation() {
     let count = holonomy_text::ARENA_BYTES / 20 + 1;
     let mut e = Editor::from_text(&vec![b'a'; count]).unwrap();
     for i in 0..count as u32 {
-        e.style_range(i, i + 1, if i % 2 == 0 { STYLE_BOLD } else { STYLE_ITALIC }, 0).unwrap();
+        e.style_range(
+            i,
+            i + 1,
+            if i % 2 == 0 { STYLE_BOLD } else { STYLE_ITALIC },
+            0,
+        )
+        .unwrap();
     }
-    assert!(matches!(e.format_range(0, count as u32, |_| (0, 0)), Err(EditorError::Undo(_))));
+    assert!(matches!(
+        e.format_range(0, count as u32, |_| (0, 0)),
+        Err(EditorError::Undo(_))
+    ));
     assert_eq!(e.undo_depth(), 0);
     assert_eq!(e.style_at(0).style_flags, STYLE_BOLD);
     assert_eq!(e.style_at(1).style_flags, STYLE_ITALIC);

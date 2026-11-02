@@ -73,7 +73,9 @@ fn unique() -> u128 {
 /// 46** if the pattern's period divides the chunk size — which is exactly the mistake the offset arithmetic
 /// invites.
 fn content(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8)
+        .collect()
 }
 
 /// The headline: every chunk of a multi-chunk document reads back byte-exact.
@@ -120,7 +122,11 @@ fn chunks_read_the_same_in_any_order() {
     for index in [4u64, 1, 3, 2] {
         let got = wf.read_chunk_into(index, &mut buf).expect("read");
         let at = (index as usize - 1) * CHUNK_PLAINTEXT;
-        assert_eq!(&buf[..got], &text[at..at + got], "chunk {index} out of order");
+        assert_eq!(
+            &buf[..got],
+            &text[at..at + got],
+            "chunk {index} out of order"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -134,7 +140,11 @@ fn the_last_chunk_is_short_and_says_so() {
     let mut buf = vec![0u8; CHUNK_PLAINTEXT];
     assert_eq!(wf.read_chunk_into(1, &mut buf).expect("1"), CHUNK_PLAINTEXT);
     assert_eq!(wf.read_chunk_into(2, &mut buf).expect("2"), CHUNK_PLAINTEXT);
-    assert_eq!(wf.read_chunk_into(3, &mut buf).expect("3"), 100, "the last 100 bytes");
+    assert_eq!(
+        wf.read_chunk_into(3, &mut buf).expect("3"),
+        100,
+        "the last 100 bytes"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -211,9 +221,14 @@ fn growing_a_document_across_a_chunk_boundary_saves() {
     );
     let before = chunks_for(text.len() as u64).expect("the fixture fits a container");
     let after = chunks_for(grown as u64).expect("the grown fixture fits too");
-    assert_eq!(after, before + 1, "the fixture crosses exactly one boundary");
+    assert_eq!(
+        after,
+        before + 1,
+        "the fixture crosses exactly one boundary"
+    );
 
-    wf.set_content_len(grown).expect("grow past the chunk boundary");
+    wf.set_content_len(grown)
+        .expect("grow past the chunk boundary");
     assert_eq!(
         wf.content_len(),
         grown as u64,
@@ -287,7 +302,10 @@ fn an_index_past_the_end_is_refused_rather_than_guessed() {
     let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
     let mut buf = vec![0u8; CHUNK_PLAINTEXT];
     // Three chunks: 0 is the frame, 1 and 2 are content.
-    assert!(wf.read_chunk_into(2, &mut buf).is_ok(), "the last chunk reads");
+    assert!(
+        wf.read_chunk_into(2, &mut buf).is_ok(),
+        "the last chunk reads"
+    );
     for index in [3u64, 4, 1_000, u64::MAX] {
         match wf.read_chunk_into(index, &mut buf) {
             Err(ContainerError::NoSuchChunk { index: i }) => assert_eq!(i, index),
@@ -336,7 +354,9 @@ fn the_first_payload_byte_is_where_the_frame_says_it_is() {
     let payload = found.expect("a payload region exists");
 
     // The frame at that offset decrypts, and its plaintext is not document text.
-    let frame_bytes = wf.read_raw(payload, holonomy_container::layout::CHUNK_PLAINTEXT).expect("read");
+    let frame_bytes = wf
+        .read_raw(payload, holonomy_container::layout::CHUNK_PLAINTEXT)
+        .expect("read");
     assert!(
         !frame_bytes.is_empty(),
         "the master frame's slot holds its sealed bytes"
@@ -402,8 +422,8 @@ fn the_formats_maximum_document_is_reachable_chunk_by_chunk() {
     // **No `as u64` on `CHUNK_SLOT`: it is already a `u64`.** The cast came from an earlier
     // type and reads as a deliberate widening; the `as usize` below is the real conversion and it
     // narrows, which is the one that can lose.
-    let max_document = (S_MAX_PAYLOAD / holonomy_container::layout::CHUNK_SLOT - 1) as usize
-        * CHUNK_PLAINTEXT;
+    let max_document =
+        (S_MAX_PAYLOAD / holonomy_container::layout::CHUNK_SLOT - 1) as usize * CHUNK_PLAINTEXT;
     let text = content(max_document);
     let (path, _wf) = container(&text);
     let wf = Wavefunction::open(&path, PASS, ITER).expect("open");
@@ -419,7 +439,11 @@ fn the_formats_maximum_document_is_reachable_chunk_by_chunk() {
         at += got;
         chunks += 1;
     }
-    assert_eq!(at, text.len(), "every byte of a maximum-size document read back");
+    assert_eq!(
+        at,
+        text.len(),
+        "every byte of a maximum-size document read back"
+    );
     // **The maximum is 8,319,008, not 8,388,608, and the 69,600-byte gap is the format's.**
     // `chunks_for(plaintext) = plaintext.div_ceil(CHUNK_PLAINTEXT) + 1` — the `+ 1` reserves a whole slot
     // for the master frame — and `payload_len(chunks) <= S_MAX_PAYLOAD` then forces

@@ -298,13 +298,31 @@ mod tests {
 ///
 /// Dead keys and `Multi_key` are returned as their keysyms so the desktop composer can see them;
 /// `layout_char` intentionally reports `None` for those.
-pub fn layout_keysym(mapping: &[Vec<u32>], min_keycode: u8, keycode: u8, state: u16) -> Option<u32> {
+pub fn layout_keysym(
+    mapping: &[Vec<u32>],
+    min_keycode: u8,
+    keycode: u8,
+    state: u16,
+) -> Option<u32> {
     let row = mapping.get(keycode.checked_sub(min_keycode)? as usize)?;
-    if row.is_empty() { return None; }
+    if row.is_empty() {
+        return None;
+    }
     let shift = state & 1 != 0;
     let altgr = state & 128 != 0;
-    let level = match (altgr, shift) { (true, false) => 2, (true, true) => 3, (false, true) => 1, _ => 0 };
-    Some(row.get(level).copied().filter(|&s| s != 0).or_else(|| row.get(level & 1).copied()).unwrap_or(row[0]))
+    let level = match (altgr, shift) {
+        (true, false) => 2,
+        (true, true) => 3,
+        (false, true) => 1,
+        _ => 0,
+    };
+    Some(
+        row.get(level)
+            .copied()
+            .filter(|&s| s != 0)
+            .or_else(|| row.get(level & 1).copied())
+            .unwrap_or(row[0]),
+    )
 }
 
 /// Translate a key through the X server's layout table. `state` is the X modifier mask.
@@ -319,18 +337,36 @@ pub fn layout_char(mapping: &[Vec<u32>], min_keycode: u8, keycode: u8, state: u1
         _ => return None,
     };
     if caps && c.is_alphabetic() {
-        let upper: Vec<char> = if shift { c.to_lowercase().collect() } else { c.to_uppercase().collect() };
-        if upper.len() == 1 { c = upper[0]; }
+        let upper: Vec<char> = if shift {
+            c.to_lowercase().collect()
+        } else {
+            c.to_uppercase().collect()
+        };
+        if upper.len() == 1 {
+            c = upper[0];
+        }
     }
-    if c.is_control() { None } else { Some(c) }
+    if c.is_control() {
+        None
+    } else {
+        Some(c)
+    }
 }
 
 /// Modifier bits as the server reports them, used to resynchronise after focus changes.
 pub fn modifier_state(state: u16) -> crate::ModifierState {
     let mut m = crate::ModifierState::new();
-    if state & 1 != 0 { m.update(crate::keymap::KEY_LEFTSHIFT, 1); }
-    if state & 4 != 0 { m.update(crate::keymap::KEY_LEFTCTRL, 1); }
-    if state & 8 != 0 { m.update(crate::keymap::KEY_LEFTALT, 1); }
-    if state & 2 != 0 { m.update(crate::keymap::KEY_CAPSLOCK, 1); }
+    if state & 1 != 0 {
+        m.update(crate::keymap::KEY_LEFTSHIFT, 1);
+    }
+    if state & 4 != 0 {
+        m.update(crate::keymap::KEY_LEFTCTRL, 1);
+    }
+    if state & 8 != 0 {
+        m.update(crate::keymap::KEY_LEFTALT, 1);
+    }
+    if state & 2 != 0 {
+        m.update(crate::keymap::KEY_CAPSLOCK, 1);
+    }
     m
 }

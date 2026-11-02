@@ -929,7 +929,8 @@ impl Editor {
         if self.undo_assets.len() == UNDO_DEPTH {
             self.undo_assets.remove(0);
         }
-        self.undo_assets.push(self.assets.remove_n(first, anchor_count));
+        self.undo_assets
+            .push(self.assets.remove_n(first, anchor_count));
         // A table whose separators have all been deleted has no cells, and `cell_count()` subtracts
         // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a later
         // keystroke walking into a zero-cell table; see `TableMap::retain_intact`.
@@ -1126,7 +1127,12 @@ impl Editor {
     /// Each existing run is transformed independently, preserving mixed formatting.
     /// History stores only offsets and style attributes, never document text. The
     /// operation is refused before mutation if the history record will not fit.
-    pub fn format_range<F>(&mut self, start: u32, end: u32, transform: F) -> Result<bool, EditorError>
+    pub fn format_range<F>(
+        &mut self,
+        start: u32,
+        end: u32,
+        transform: F,
+    ) -> Result<bool, EditorError>
     where
         F: Fn(TextIntervalSpan) -> (u16, u32),
     {
@@ -1135,11 +1141,15 @@ impl Editor {
         }
         if end > self.spans.text_len() {
             return Err(SpanError::RangeOutOfBounds {
-                start: u64::from(start), end: u64::from(end),
+                start: u64::from(start),
+                end: u64::from(end),
                 text_len: self.spans.text_len(),
-            }.into());
+            }
+            .into());
         }
-        if start == end { return Ok(false); }
+        if start == end {
+            return Ok(false);
+        }
         let mut runs = self.spans.runs_in(start, end);
         if runs.is_empty() {
             runs.push((TextIntervalSpan::plain(start, end), start, end));
@@ -1147,7 +1157,11 @@ impl Editor {
         const RECORD_BYTES: usize = 20;
         let needed = runs.len().saturating_mul(RECORD_BYTES);
         if needed > ARENA_BYTES {
-            return Err(UndoError::ActionTooLarge { len: needed, capacity: ARENA_BYTES }.into());
+            return Err(UndoError::ActionTooLarge {
+                len: needed,
+                capacity: ARENA_BYTES,
+            }
+            .into());
         }
         let mut record = Vec::with_capacity(needed);
         let mut changed = false;
@@ -1161,7 +1175,9 @@ impl Editor {
             record.extend_from_slice(&flags.to_le_bytes());
             record.extend_from_slice(&colour.to_le_bytes());
         }
-        if !changed { return Ok(false); }
+        if !changed {
+            return Ok(false);
+        }
         self.undo.push(start, ActionKind::Format, &record)?;
         self.drop_redo();
         self.apply_format_record(&record, true)?;
@@ -1174,8 +1190,13 @@ impl Editor {
         for run in record.chunks_exact(20) {
             let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
             let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
-            let (flags, colour) = if after { (u16_at(14), u32_at(16)) } else { (u16_at(8), u32_at(10)) };
-            self.spans.style_range(u32_at(0), u32_at(4), flags, colour)?;
+            let (flags, colour) = if after {
+                (u16_at(14), u32_at(16))
+            } else {
+                (u16_at(8), u32_at(10))
+            };
+            self.spans
+                .style_range(u32_at(0), u32_at(4), flags, colour)?;
         }
         Ok(())
     }
@@ -1210,7 +1231,9 @@ impl Editor {
         // The first version was a single `Option` and the second undo overwrote the first's map:
         // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
         // redo found nothing to restore, so the table map was silently never put back.
-        let table_shadow = if action.kind != ActionKind::Format && action.bytes.contains(&crate::table::CELL_SEPARATOR) {
+        let table_shadow = if action.kind != ActionKind::Format
+            && action.bytes.contains(&crate::table::CELL_SEPARATOR)
+        {
             Some(self.tables.spans().to_vec())
         } else {
             None
@@ -1222,15 +1245,28 @@ impl Editor {
         let outcome = match action.kind {
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, false)?;
-                EditOutcome { offset: action.offset, len: 0, kind: ActionKind::Format, line: None, lines_changed: false }
+                EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::Format,
+                    line: None,
+                    lines_changed: false,
+                }
             }
             ActionKind::Insert => {
                 // Capture inserted styles before deleting the text, for redo.
                 if self.redo_insert_styles.len() == UNDO_DEPTH {
                     self.redo_insert_styles.remove(0);
                 }
-                self.redo_insert_styles.push(self.spans.runs_in(action.offset, action.offset + action.bytes.len() as u32)
-                    .into_iter().map(|(s, lo, hi)| TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)).collect());
+                self.redo_insert_styles.push(
+                    self.spans
+                        .runs_in(action.offset, action.offset + action.bytes.len() as u32)
+                        .into_iter()
+                        .map(|(s, lo, hi)| {
+                            TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)
+                        })
+                        .collect(),
+                );
                 // The action inserted these bytes, so undoing removes them.
                 self.spans
                     .apply_delete(action.offset, action.bytes.len() as u32)?;
@@ -1755,7 +1791,9 @@ impl Editor {
     pub fn clear_yank(&mut self) {
         for b in self.yank.iter_mut() {
             // SAFETY: `b` is a valid aligned mutable reference into `self.yank`.
-            unsafe { core::ptr::write_volatile(b, 0); }
+            unsafe {
+                core::ptr::write_volatile(b, 0);
+            }
         }
         self.yank.clear();
     }
@@ -1895,10 +1933,14 @@ impl Editor {
         // stashed by the undo of that insertion.
         let restore_assets = if action.kind == ActionKind::Insert {
             self.redo_assets.pop().unwrap_or_default()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
         let restore_styles = if action.kind == ActionKind::Insert {
             self.redo_insert_styles.pop().unwrap_or_default()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         // The replay in its own helper, so that *every* path out of it -- including a refusal that
         // returns early -- reaches the zeroize below. `action.bytes` is a plain `Vec`, not
@@ -1953,12 +1995,23 @@ impl Editor {
         match action.kind {
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, true)?;
-                Ok(EditOutcome { offset: action.offset, len: 0, kind: ActionKind::Format, line: None, lines_changed: false })
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::Format,
+                    line: None,
+                    lines_changed: false,
+                })
             }
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
                 for span in restore_styles {
-                    self.spans.style_range(span.start_byte, span.end_byte, span.style_flags, span.color_rgb)?;
+                    self.spans.style_range(
+                        span.start_byte,
+                        span.end_byte,
+                        span.style_flags,
+                        span.color_rgb,
+                    )?;
                 }
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
                 if let Some(spans) = restore {
@@ -2006,7 +2059,8 @@ impl Editor {
                 if self.undo_assets.len() == UNDO_DEPTH {
                     self.undo_assets.remove(0);
                 }
-                self.undo_assets.push(self.assets.remove_n(first, anchor_count));
+                self.undo_assets
+                    .push(self.assets.remove_n(first, anchor_count));
                 // A table whose separators have all gone has no cells, and `cell_count()` subtracts
                 // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a
                 // later keystroke walking into a zero-cell table; same reason as in `delete_at`.

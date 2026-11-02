@@ -308,7 +308,7 @@ an argument is visible in /proc/*/cmdline to every process on the machine.";
                 "--zoom" => {
                     out.zoom = parse_u32(&flag, &value()?)?;
                     out.zoom_explicit = true;
-                },
+                }
                 "--headless" => out.headless = true,
                 "--window" => out.window = true,
                 "--display" => out.display = Some(value()?),
@@ -526,14 +526,26 @@ mod tests {
             let err = Args::parse(["--container", "x", "--ppem", value]).unwrap_err();
             assert!(matches!(err, ParseError::OutOfRange { ref flag, .. } if flag == "ppem"));
         }
-        assert_eq!(Args::parse(["--container", "x", "--ppem", "26"]).unwrap().ppem, 26);
+        assert_eq!(
+            Args::parse(["--container", "x", "--ppem", "26"])
+                .unwrap()
+                .ppem,
+            26
+        );
     }
 
     #[test]
     fn width_and_height_reject_values_above_the_documented_ceiling() {
         for flag in ["--width", "--height"] {
             let err = Args::parse(["--container", "x", flag, "7681"]).unwrap_err();
-            assert!(matches!(err, ParseError::OutOfRange { min: 1, max: 7680, .. }));
+            assert!(matches!(
+                err,
+                ParseError::OutOfRange {
+                    min: 1,
+                    max: 7680,
+                    ..
+                }
+            ));
         }
     }
 

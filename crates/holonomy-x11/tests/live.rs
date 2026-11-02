@@ -907,11 +907,12 @@ fn the_size_hints_reach_the_server_and_read_back() {
     // call used to leave both at zero while still setting the flag — so a window manager reading the
     // property was being told *this window wants to be 0 x 0*. The gate for that is
     // `tests/window_size.rs::a_flag_is_set_only_when_the_field_it_names_is_written`.
-    win.set_size_hints(&mut conn, (1024, 700), (768, 320), None).expect(
-        "**set the hints without a protocol error.** This is the assertion that would have \
+    win.set_size_hints(&mut conn, (1024, 700), (768, 320), None)
+        .expect(
+            "**set the hints without a protocol error.** This is the assertion that would have \
                 caught the `BadLength`: the request was two bytes too long and the server rejected \
                 it, and the caller threw that error away.",
-    );
+        );
 
     let h = win
         .size_hints(&mut conn)

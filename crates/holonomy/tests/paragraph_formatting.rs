@@ -25,11 +25,17 @@ fn heading_applies_to_the_current_paragraph_and_survives_payload_roundtrip() {
     let mut s = session("First paragraph\nSecond paragraph");
     s.caret_to(4).unwrap();
     s.apply_action(Action::SetStyle(1)).unwrap();
-    assert_eq!(s.editor().style_at(0).style_flags & (STYLE_HEADER | STYLE_BOLD), STYLE_HEADER | STYLE_BOLD);
+    assert_eq!(
+        s.editor().style_at(0).style_flags & (STYLE_HEADER | STYLE_BOLD),
+        STYLE_HEADER | STYLE_BOLD
+    );
     assert_eq!(s.editor().style_at(16).style_flags, 0);
     let payload = s.editor().payload().unwrap();
     let restored = Editor::from_payload(&payload).unwrap();
-    assert_eq!(restored.style_at(0).style_flags & STYLE_HEADER, STYLE_HEADER);
+    assert_eq!(
+        restored.style_at(0).style_flags & STYLE_HEADER,
+        STYLE_HEADER
+    );
     assert_eq!(restored.style_at(16).style_flags, 0);
 }
 
@@ -38,8 +44,14 @@ fn selection_styles_whole_paragraphs_without_capturing_the_next_one() {
     let mut s = session("first\nsecond\nthird");
     s.select_range(2, 13).unwrap(); // ends at the start of the third paragraph
     s.apply_action(Action::SetStyle(2)).unwrap();
-    assert_eq!(s.editor().style_at(0).style_flags & STYLE_ITALIC, STYLE_ITALIC);
-    assert_eq!(s.editor().style_at(6).style_flags & STYLE_ITALIC, STYLE_ITALIC);
+    assert_eq!(
+        s.editor().style_at(0).style_flags & STYLE_ITALIC,
+        STYLE_ITALIC
+    );
+    assert_eq!(
+        s.editor().style_at(6).style_flags & STYLE_ITALIC,
+        STYLE_ITALIC
+    );
     assert_eq!(s.editor().style_at(13).style_flags, 0);
 }
 
@@ -49,7 +61,10 @@ fn empty_paragraph_preset_affects_new_text() {
     s.apply_action(Action::SetStyle(1)).unwrap();
     s.insert_text("Title").unwrap();
     let style = s.editor().style_at(0);
-    assert_eq!(style.style_flags & (STYLE_HEADER | STYLE_BOLD), STYLE_HEADER | STYLE_BOLD);
+    assert_eq!(
+        style.style_flags & (STYLE_HEADER | STYLE_BOLD),
+        STYLE_HEADER | STYLE_BOLD
+    );
     assert_eq!(style.color_rgb, 0x001A_5C75);
 }
 
@@ -63,11 +78,20 @@ fn colour_and_inline_styles_do_not_erase_each_other() {
     s.select_range(0, 6).unwrap();
     s.apply_action(Action::SetColour(0)).unwrap();
     assert_eq!(s.editor().style_at(0).style_flags & STYLE_BOLD, STYLE_BOLD);
-    assert_eq!(s.editor().style_at(3).style_flags & STYLE_ITALIC, STYLE_ITALIC);
-    assert_eq!(s.editor().style_at(0).color_rgb, s.editor().style_at(3).color_rgb);
+    assert_eq!(
+        s.editor().style_at(3).style_flags & STYLE_ITALIC,
+        STYLE_ITALIC
+    );
+    assert_eq!(
+        s.editor().style_at(0).color_rgb,
+        s.editor().style_at(3).color_rgb
+    );
     s.apply_action(Action::ToggleBold).unwrap();
     assert_eq!(s.editor().style_at(0).style_flags & STYLE_BOLD, 0);
-    assert_eq!(s.editor().style_at(3).style_flags & STYLE_ITALIC, STYLE_ITALIC);
+    assert_eq!(
+        s.editor().style_at(3).style_flags & STYLE_ITALIC,
+        STYLE_ITALIC
+    );
     assert_ne!(s.editor().style_at(0).color_rgb, 0);
 }
 
@@ -103,12 +127,17 @@ fn enter_at_the_end_of_a_heading_starts_normal_text() {
 #[test]
 fn bold_toolbar_button_formats_the_selection() {
     use holonomy::store::NoSource;
-    use holonomy_input::{pointer::encode_record_at, RecordDecoder, BTN_LEFT, EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y};
+    use holonomy_input::{
+        pointer::encode_record_at, RecordDecoder, BTN_LEFT, EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y,
+    };
     use holonomy_render::widgets::{self, Tool};
     let mut s = session("selected text");
     s.select_range(0, 8).unwrap();
     let rect = widgets::place_toolbar(&s.chrome_layout(), widgets::TOOLBAR_PAD)
-        .into_iter().find(|p| p.tool == Tool::Bold).unwrap().rect;
+        .into_iter()
+        .find(|p| p.tool == Tool::Bold)
+        .unwrap()
+        .rect;
     let x = (rect.x + rect.width / 2) as i32;
     let y = (rect.y + rect.height / 2) as i32;
     let mut decoder = RecordDecoder::new();
@@ -118,7 +147,9 @@ fn bold_toolbar_button_formats_the_selection() {
         encode_record_at(EV_KEY, BTN_LEFT, 1, 0, 0),
         encode_record_at(EV_KEY, BTN_LEFT, 0, 0, 0),
         encode_record_at(EV_SYN, 0, 0, 0, 0),
-    ] { decoder.push(&event); }
+    ] {
+        decoder.push(&event);
+    }
     while let Some(event) = decoder.next_event() {
         s.handle_pointer(&mut NoSource, event).unwrap();
     }
@@ -143,7 +174,10 @@ fn undo_and_redo_formatting_leave_text_intact() {
 
 #[test]
 fn keyboard_bold_uses_the_same_selection_and_undo_path() {
-    use holonomy_input::{InputEvent, keymap::{KEY_B, KEY_LEFTCTRL}};
+    use holonomy_input::{
+        keymap::{KEY_B, KEY_LEFTCTRL},
+        InputEvent,
+    };
     let mut s = session("example");
     s.select_range(0, 7).unwrap();
     s.handle_event(InputEvent::press(KEY_LEFTCTRL)).unwrap();

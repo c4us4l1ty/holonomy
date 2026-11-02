@@ -18,7 +18,10 @@ fn wordcraft_sample_is_editable_and_preserves_styles_in_payload() {
     assert_eq!(e.undo_depth(), 0);
     let reopened = Editor::from_payload(&e.payload().unwrap()).unwrap();
     assert_eq!(reopened.text().unwrap(), bytes);
-    assert_eq!(reopened.style_at(heading).style_flags, e.style_at(heading).style_flags);
+    assert_eq!(
+        reopened.style_at(heading).style_flags,
+        e.style_at(heading).style_flags
+    );
 }
 
 #[test]
@@ -28,7 +31,8 @@ fn creating_a_sample_parks_the_previous_document() {
     let mut s = Session::new(
         Editor::from_text(b"previous work").unwrap(),
         Painter::new(&atlas, 0),
-        Box::new(HeadlessScanout::new(m.width, m.height)), m,
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
     );
     s.apply_action(Action::NewSample).unwrap();
     assert_eq!(s.state.title, sample::TITLE);

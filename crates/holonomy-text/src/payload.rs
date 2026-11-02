@@ -311,11 +311,7 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
     let flags = if assets.is_empty() { 0 } else { FLAG_ASSETS };
     out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(
-        &u16::try_from(records)
-            .unwrap_or(u16::MAX)
-            .to_le_bytes(),
-    );
+    out.extend_from_slice(&u16::try_from(records).unwrap_or(u16::MAX).to_le_bytes());
     out.extend_from_slice(
         &u16::try_from(tables.len())
             .unwrap_or(u16::MAX)
@@ -508,7 +504,10 @@ impl Header {
 /// bytes into records; the map's job is to decide whether the records are true. **Duplicating the
 /// validation here would give the map two ways to acquire spans**, which is the failure `from_spans`
 /// was written to prevent.
-pub fn read_span_table(header: &Header, records: &[u8]) -> Result<Vec<TextIntervalSpan>, PayloadError> {
+pub fn read_span_table(
+    header: &Header,
+    records: &[u8],
+) -> Result<Vec<TextIntervalSpan>, PayloadError> {
     let need = usize::try_from(header.span_table_bytes()).unwrap_or(usize::MAX);
     if records.len() < need {
         // **Refused, not padded.** A short table means the container is truncated or the section
@@ -710,7 +709,9 @@ pub fn decode(input: &[u8]) -> Result<Decoded, PayloadError> {
     // tables would be a payload this build cannot fully account for, and reading it as an empty
     // catalog would drop data silently -- so the flag is checked, not ignored.
     if (header.flags & FLAG_ASSETS != 0) != !assets.is_empty() {
-        return Err(PayloadError::UnknownFlags { found: header.flags });
+        return Err(PayloadError::UnknownFlags {
+            found: header.flags,
+        });
     }
 
     Ok(Decoded {

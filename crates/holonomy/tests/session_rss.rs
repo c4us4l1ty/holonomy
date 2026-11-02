@@ -246,7 +246,10 @@ fn rss_probe_child() {
             Err(()) => target /= 2,
         }
     }
-    assert!(doc_bytes > 0, "not even a one-line document would load on this host");
+    assert!(
+        doc_bytes > 0,
+        "not even a one-line document would load on this host"
+    );
 
     // Type into it, so the reading is of a session that has been used.
     for _ in 0..BURST {
@@ -301,7 +304,12 @@ struct Probe {
 fn run_probe() -> Probe {
     let exe = std::env::current_exe().expect("current test binary");
     let out = std::process::Command::new(exe)
-        .args(["--exact", "rss_probe_child", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "rss_probe_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("HOLONOMY_RSS_PROBE", "1")
         .output()
         .expect("spawn the probe child");
@@ -389,10 +397,10 @@ fn steady_state_rss_is_within_the_budget() {
     // contains are absent from the count entirely — they only appear once `tick` paints. Subtracting
     // `baseline` therefore treats an 7.83 MiB cost as if it were free, and the affine fit overshoots
     // by 3×.
-//
-// The fix is to build the fixed side out of *named consumers* rather than out of a subtraction: the
-// binary's own resident text (`baseline`, which really is fixed) plus the framebuffer and the
-// scanout's copy of it, which are fixed in size but resident only after the first paint.
+    //
+    // The fix is to build the fixed side out of *named consumers* rather than out of a subtraction: the
+    // binary's own resident text (`baseline`, which really is fixed) plus the framebuffer and the
+    // scanout's copy of it, which are fixed in size but resident only after the first paint.
     let fixed = (p.baseline + (p.frame_bytes + p.scanout_bytes) as u64) as f64 / MIB;
     // **Bytes over bytes.** An earlier version of this line divided MiB by *bytes*, which made the
     // marginal cost 2.7 × 10⁻⁶ and the affordable document 2,330,040 **MiB** — a 3 GB document in a
@@ -431,15 +439,15 @@ fn steady_state_rss_is_within_the_budget() {
     // which is a sentence about a unit error rather than about memory, and is worth recording because
     // **it is exactly the mistake §2.9.4's table made** — arithmetic that was internally consistent
     // and externally wrong.
-let affordable_bytes = affordable * MIB;
-assert!(
-    affordable_bytes >= MIN_DOCUMENT_BYTES as f64,
-    "the {BUDGET_MIB:.1} MiB budget affords only {affordable:.2} MiB of document, below the \
+    let affordable_bytes = affordable * MIB;
+    assert!(
+        affordable_bytes >= MIN_DOCUMENT_BYTES as f64,
+        "the {BUDGET_MIB:.1} MiB budget affords only {affordable:.2} MiB of document, below the \
      {:.2} MiB floor; the marginal cost is {marginal:.3} bytes per document byte, against \
      2.61 derived — Phase 12 removes doc_scratch's 1.000 and nothing should be getting worse until \
      then",
-    MIN_DOCUMENT_BYTES as f64 / MIB,
-);
+        MIN_DOCUMENT_BYTES as f64 / MIB,
+    );
 }
 
 /// The document's own cost, isolated: RSS with the document minus RSS without it.

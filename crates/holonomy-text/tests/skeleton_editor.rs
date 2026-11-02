@@ -70,7 +70,11 @@ fn a_skeleton_editor_has_every_structure_and_holds_no_bytes() {
     assert_eq!(e.text_len(), len, "the editor knows its own length");
     assert_eq!(e.resident_bytes(), 0, "and holds none of the document");
     assert_eq!(e.resident_count(), 0, "no leaf is resident");
-    assert_eq!(e.caret(), 0, "the caret starts at 0, which is a valid offset in the unread document");
+    assert_eq!(
+        e.caret(),
+        0,
+        "the caret starts at 0, which is a valid offset in the unread document"
+    );
 
     // The structures exist and are empty rather than absent: an empty `TableMap` and `AssetCatalog` are
     // the correct state for a document nothing has been read out of, and a *missing* one would be a stub.
@@ -133,15 +137,24 @@ fn a_skeleton_editor_refuses_an_edit_until_the_leaf_is_faulted_in() {
 
     // `read_into` is `&self` and cannot fault, so it refuses rather than inventing bytes.
     let mut one = [0u8; 1];
-    let err = e.read_into(0, &mut one).expect_err("an absent leaf must refuse, not return zeros");
+    let err = e
+        .read_into(0, &mut one)
+        .expect_err("an absent leaf must refuse, not return zeros");
     assert!(
-        matches!(err, holonomy_text::EditorError::Rope(RopeError::LeafAbsent { .. })),
+        matches!(
+            err,
+            holonomy_text::EditorError::Rope(RopeError::LeafAbsent { .. })
+        ),
         "expected a typed LeafAbsent, got {err:?}"
     );
 
     // And nothing was mutated by the refusal.
     assert_eq!(e.text_len(), doc.len(), "the length did not move");
-    assert_eq!(e.resident_bytes(), 0, "and nothing was faulted in behind the caller's back");
+    assert_eq!(
+        e.resident_bytes(),
+        0,
+        "and nothing was faulted in behind the caller's back"
+    );
 }
 
 /// **After faulting, the editor reads and edits exactly like a resident one** — and this is the test that
@@ -159,18 +172,29 @@ fn a_faulted_in_leaf_reads_and_edits_like_a_resident_one() {
     let mut a = [0u8; 1];
     let mut b = [0u8; 1];
     assert_eq!(resident.read_into(0, &mut b).expect("resident"), 1);
-    let mut src = VecSource { bytes: doc.clone(), fetches: 0 };
+    let mut src = VecSource {
+        bytes: doc.clone(),
+        fetches: 0,
+    };
     // **Through the editor's own faulting path, not through a rope built here.** The first version of
     // this test called a helper that constructed a *separate* `Rope` and faulted *that*, so the editor's
     // own leaves stayed absent and the very next assertion failed with `LeafAbsent`. A test that sets up
     // its own copy of the thing under test proves something about the copy.
     assert_eq!(
-        sparse.read_into_faulting(&mut src, 0, &mut a).expect("fault and read"),
+        sparse
+            .read_into_faulting(&mut src, 0, &mut a)
+            .expect("fault and read"),
         1,
         "the editor's own faulting read path works"
     );
-    assert_eq!(a[0], b[0], "and returns the same byte a resident editor does");
-    assert!(sparse.resident_bytes() > 0, "so something is genuinely resident now");
+    assert_eq!(
+        a[0], b[0],
+        "and returns the same byte a resident editor does"
+    );
+    assert!(
+        sparse.resident_bytes() > 0,
+        "so something is genuinely resident now"
+    );
 
     // And an edit into the now-resident leaf behaves the same as on a resident editor.
     // `insert_at` takes the offset directly, so there is no caret to move first. Both editors get the
@@ -199,7 +223,12 @@ fn a_skeleton_editor_peaks_below_a_from_text_editor() {
     let peak = |mode: &str| -> u64 {
         let exe = std::env::current_exe().expect("test binary");
         let out = std::process::Command::new(&exe)
-            .args(["--exact", "editor_peak_child", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "editor_peak_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(CHILD, mode)
             .output()
             .expect("spawn peak child");

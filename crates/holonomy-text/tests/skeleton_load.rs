@@ -62,7 +62,9 @@ impl LeafSource for VecSource {
 }
 
 fn text(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(131).wrapping_add(17) % 251) as u8)
+        .collect()
 }
 
 /// `VmHWM` in KiB, the kernel's peak resident set high-water mark.
@@ -109,7 +111,11 @@ fn the_spine_knows_the_document_without_holding_it() {
         // The leaves tile [0, len) with no hole and no overlap.
         let mut at = 0usize;
         for i in 0..n {
-            assert_eq!(rope.leaf_offset(i), at, "leaf {i} of a {len}-byte document starts wrong");
+            assert_eq!(
+                rope.leaf_offset(i),
+                at,
+                "leaf {i} of a {len}-byte document starts wrong"
+            );
             let l = rope.leaf_len_of(i);
             assert!(l <= FILL, "leaf {i} holds {l}, over the fill");
             at += l;
@@ -126,26 +132,45 @@ fn a_skeleton_rope_reads_identically_through_a_source() {
     let mut rope = Rope::from_skeleton(doc.len());
     assert_eq!(rope.resident_bytes(), 0);
 
-    let mut src = VecSource { bytes: doc.clone(), fetches: 0 };
+    let mut src = VecSource {
+        bytes: doc.clone(),
+        fetches: 0,
+    };
     let mut got = vec![0u8; doc.len()];
-    rope.read_at_faulting(&mut src, 0, got.len(), &mut got).expect("read");
+    rope.read_at_faulting(&mut src, 0, got.len(), &mut got)
+        .expect("read");
 
     assert_eq!(got, doc, "the document must come back byte-identical");
-    assert_eq!(rope.text_len(), doc.len(), "and the length must not have moved");
-    assert_eq!(src.fetches as usize, rope.leaf_count(), "one fetch per leaf, no more");
+    assert_eq!(
+        rope.text_len(),
+        doc.len(),
+        "and the length must not have moved"
+    );
+    assert_eq!(
+        src.fetches as usize,
+        rope.leaf_count(),
+        "one fetch per leaf, no more"
+    );
 }
 
 /// The degenerate case, because `div_ceil(0) == 0` and an empty spine would break every other method.
 #[test]
 fn an_empty_document_is_one_absent_leaf() {
     let mut rope = Rope::from_skeleton(0);
-    assert_eq!(rope.leaf_count(), 1, "an empty document is one leaf, not zero");
+    assert_eq!(
+        rope.leaf_count(),
+        1,
+        "an empty document is one leaf, not zero"
+    );
     assert_eq!(rope.text_len(), 0);
     assert_eq!(rope.resident_bytes(), 0);
     assert_eq!(rope.resident_count(), 0);
     assert_eq!(rope.leaf_len_of(0), 0);
 
-    let mut src = VecSource { bytes: Vec::new(), fetches: 0 };
+    let mut src = VecSource {
+        bytes: Vec::new(),
+        fetches: 0,
+    };
     let mut one = [0u8; 1];
     // Reading 1 byte of an empty document is out of bounds, and must be refused rather than faulted.
     assert!(rope.read_at_faulting(&mut src, 0, 1, &mut one).is_err());
@@ -226,7 +251,9 @@ fn the_spine_is_proportional_to_leaves_and_pays_no_more_than_a_resident_leaf() {
     let leaves = rope.leaf_count();
     let slot = std::mem::size_of::<holonomy_text::CagrLeaf>().max(std::mem::size_of::<usize>()) + 8;
     let spine = leaves * slot;
-    println!("{len} bytes -> {leaves} leaves -> <= {spine} B charged (resident-variant size {slot} B)");
+    println!(
+        "{len} bytes -> {leaves} leaves -> <= {spine} B charged (resident-variant size {slot} B)"
+    );
 
     assert_eq!(leaves, len.div_ceil(FILL), "one leaf per fill");
     assert_eq!(
@@ -236,8 +263,16 @@ fn the_spine_is_proportional_to_leaves_and_pays_no_more_than_a_resident_leaf() {
     );
     // The load-bearing O() claim: doubling the document doubles the leaves, and holds nothing either way.
     let twice = Rope::from_skeleton(len * 2);
-    assert_eq!(twice.leaf_count(), leaves * 2, "twice the document is twice the leaves");
-    assert_eq!(twice.resident_bytes(), 0, "and a bigger skeleton still holds nothing");
+    assert_eq!(
+        twice.leaf_count(),
+        leaves * 2,
+        "twice the document is twice the leaves"
+    );
+    assert_eq!(
+        twice.resident_bytes(),
+        0,
+        "and a bigger skeleton still holds nothing"
+    );
     assert_eq!(rope.resident_bytes(), 0, "and neither does the first");
 
     // And the fill is what sets the ratio, so this pins the relationship: halving the fill doubles the

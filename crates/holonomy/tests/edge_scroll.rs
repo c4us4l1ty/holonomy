@@ -138,19 +138,25 @@ impl Mouse {
     fn move_to(&mut self, s: &mut Session<'static>, x: i32, y: i32) {
         let (dx, dy) = (x.saturating_sub(self.at.0), y.saturating_sub(self.at.1));
         self.at = (x, y);
-        self.push(s, &[
-            holonomy_input::pointer::encode_record_at(EV_REL, REL_X, dx, 0, 0),
-            holonomy_input::pointer::encode_record_at(EV_REL, REL_Y, dy, 0, 0),
-            holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
-        ]);
+        self.push(
+            s,
+            &[
+                holonomy_input::pointer::encode_record_at(EV_REL, REL_X, dx, 0, 0),
+                holonomy_input::pointer::encode_record_at(EV_REL, REL_Y, dy, 0, 0),
+                holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
+            ],
+        );
     }
 
     /// Put the left button down.
     fn press(&mut self, s: &mut Session<'static>) {
-        self.push(s, &[
-            holonomy_input::pointer::encode_record_at(EV_KEY, BTN_LEFT, 1, 0, 0),
-            holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
-        ]);
+        self.push(
+            s,
+            &[
+                holonomy_input::pointer::encode_record_at(EV_KEY, BTN_LEFT, 1, 0, 0),
+                holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
+            ],
+        );
     }
 
     /// Let the left button up.
@@ -160,10 +166,13 @@ impl Mouse {
     /// `x, y` for a release would look like it was testing where the release happened, and nothing
     /// downstream would use it.**
     fn release(&mut self, s: &mut Session<'static>) {
-        self.push(s, &[
-            holonomy_input::pointer::encode_record_at(EV_KEY, BTN_LEFT, 0, 0, 0),
-            holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
-        ]);
+        self.push(
+            s,
+            &[
+                holonomy_input::pointer::encode_record_at(EV_KEY, BTN_LEFT, 0, 0, 0),
+                holonomy_input::pointer::encode_record_at(EV_SYN, 0, 0, 0, 0),
+            ],
+        );
     }
 
     /// Press at `(x, y)` in one gesture: move, then button down.

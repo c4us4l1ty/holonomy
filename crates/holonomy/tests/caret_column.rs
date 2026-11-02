@@ -343,7 +343,6 @@ fn a_paint_over_a_sparse_document_puts_the_caret_right() {
     use holonomy_container::io::DirectFile;
     use holonomy_container::Wavefunction;
 
-
     const PASS: &str = "correct horse battery staple";
     const ITER: u64 = holonomy_container::TEST_VDF_ITERATIONS;
 

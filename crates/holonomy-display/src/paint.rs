@@ -425,16 +425,33 @@ impl<'a> Painter<'a> {
 
     /// Fill a rounded rectangle by integer scanlines.
     fn round_rect(&mut self, frame: &mut Frame, r: RoundRect, damage: Option<DamageRect>) {
-        let rect = DamageRect::new(r.rect.x.max(0) as u32, r.rect.y.max(0) as u32, r.rect.width, r.rect.height);
-        if !intersects(rect, damage) { self.scratch.stats.rects_skipped += 1; return; }
-        let fill = match damage { Some(d) => rect.clip(&d), None => rect };
+        let rect = DamageRect::new(
+            r.rect.x.max(0) as u32,
+            r.rect.y.max(0) as u32,
+            r.rect.width,
+            r.rect.height,
+        );
+        if !intersects(rect, damage) {
+            self.scratch.stats.rects_skipped += 1;
+            return;
+        }
+        let fill = match damage {
+            Some(d) => rect.clip(&d),
+            None => rect,
+        };
         let rad = r.radius.min(r.rect.width / 2).min(r.rect.height / 2);
         let mut pixels = 0u64;
         for y in fill.y..fill.bottom() {
-            let dy = if y < rect.y + rad { rect.y + rad - y }
-                     else if y >= rect.bottom().saturating_sub(rad) { y + 1 - (rect.bottom() - rad) }
-                     else { 0 };
-            let inset = if dy == 0 { 0 } else {
+            let dy = if y < rect.y + rad {
+                rect.y + rad - y
+            } else if y >= rect.bottom().saturating_sub(rad) {
+                y + 1 - (rect.bottom() - rad)
+            } else {
+                0
+            };
+            let inset = if dy == 0 {
+                0
+            } else {
                 let d = dy.saturating_sub(1);
                 let r2 = u64::from(rad) * u64::from(rad);
                 let d2 = u64::from(d) * u64::from(d);
@@ -442,7 +459,9 @@ impl<'a> Painter<'a> {
             };
             let x0 = fill.x.max(rect.x + inset);
             let x1 = fill.right().min(rect.right().saturating_sub(inset));
-            if x1 > x0 { pixels += frame.fill_rect(x0 as i64, y as i64, x1 - x0, 1, r.rect.colour); }
+            if x1 > x0 {
+                pixels += frame.fill_rect(x0 as i64, y as i64, x1 - x0, 1, r.rect.colour);
+            }
         }
         self.scratch.stats.pixels += pixels;
         self.scratch.stats.rects += 1;
@@ -456,13 +475,19 @@ impl<'a> Painter<'a> {
     /// still draws every label instead of asking for a size that was never rasterised.
     fn label(&mut self, frame: &mut Frame, l: Label, damage: Option<DamageRect>) {
         let len = l.byte_len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let size = self.label_size(l.size);
         let cell_w = self.cell_width_at(size);
         let cell_h = self.cell_height_at(size);
         let bytes = &l.bytes[..len];
-        let whole = DamageRect::new(l.x.max(0) as u32, l.y.max(0) as u32,
-            (len as u32).saturating_mul(cell_w), cell_h);
+        let whole = DamageRect::new(
+            l.x.max(0) as u32,
+            l.y.max(0) as u32,
+            (len as u32).saturating_mul(cell_w),
+            cell_h,
+        );
         if !intersects(whole, damage) {
             self.scratch.stats.glyphs_skipped += self.count_codepoints(bytes);
             return;
@@ -478,32 +503,52 @@ impl<'a> Painter<'a> {
         let mut at = 0usize;
         while at < bytes.len() {
             let (c, used) = match std::str::from_utf8(&bytes[at..]) {
-                Ok(s) => match s.chars().next() { Some(c) => (c, c.len_utf8()), None => break },
+                Ok(s) => match s.chars().next() {
+                    Some(c) => (c, c.len_utf8()),
+                    None => break,
+                },
                 Err(e) => {
                     self.scratch.stats.missing += 1;
                     let valid = e.valid_up_to();
                     if valid > 0 {
                         let s = std::str::from_utf8(&bytes[at..at + valid]).unwrap();
-                        match s.chars().next() { Some(c) => (c, c.len_utf8()), None => break }
-                    } else { ('\u{FFFD}', e.error_len().unwrap_or(1)) }
+                        match s.chars().next() {
+                            Some(c) => (c, c.len_utf8()),
+                            None => break,
+                        }
+                    } else {
+                        ('\u{FFFD}', e.error_len().unwrap_or(1))
+                    }
                 }
             };
             at += used;
             let m = atlas.metric(u32::from(c), style, size);
             if m.is_blank() {
-                if m.advance_x > 0 { pen += i32::from(m.advance_x); }
-                else { pen += cell_w as i32; self.scratch.stats.missing += 1; }
+                if m.advance_x > 0 {
+                    pen += i32::from(m.advance_x);
+                } else {
+                    pen += cell_w as i32;
+                    self.scratch.stats.missing += 1;
+                }
                 continue;
             }
-            blit_coverage(&mut self.scratch, frame,
-                pen + i32::from(m.bearing_x), l.y + ascent - i32::from(m.bearing_y),
-                u32::from(m.width), u32::from(m.height), l.colour,
+            blit_coverage(
+                &mut self.scratch,
+                frame,
+                pen + i32::from(m.bearing_x),
+                l.y + ascent - i32::from(m.bearing_y),
+                u32::from(m.width),
+                u32::from(m.height),
+                l.colour,
                 |row, dst| {
                     let y = usize::from(m.atlas_y) + row;
                     let sx = usize::from(m.atlas_x);
                     let base = y * metric::ATLAS_STRIDE + sx;
-                    for (i, out) in dst.iter_mut().enumerate() { *out = coverage.get(base + i).copied().unwrap_or(0); }
-                });
+                    for (i, out) in dst.iter_mut().enumerate() {
+                        *out = coverage.get(base + i).copied().unwrap_or(0);
+                    }
+                },
+            );
             self.scratch.stats.glyphs += 1;
             // The metric already belongs to `size`; `advance_of` would re-read the painter's
             // current chrome size and space a larger dialog label as if it were the small one.
@@ -618,7 +663,17 @@ impl<'a> Painter<'a> {
     /// `crates/holonomy/tests/` pin the affected geometry; `phase4_gate.rs`'s atlas figures are
     /// unaffected because the atlas is unchanged -- this is purely how it is read.
     fn text(&mut self, frame: &mut Frame, run: TextRun, damage: Option<DamageRect>) {
-        self.text_cells(frame, run.x, run.y, run.first_codepoint, run.len, run.style, run.colour, damage, false);
+        self.text_cells(
+            frame,
+            run.x,
+            run.y,
+            run.first_codepoint,
+            run.len,
+            run.style,
+            run.colour,
+            damage,
+            false,
+        );
     }
 
     /// [`text`](Self::text) with the codepoint held still: `len` copies of one glyph.
@@ -677,7 +732,11 @@ impl<'a> Painter<'a> {
             // appeared to promise for an out-of-range run was never there at all.** A run that
             // does run past `0x10FFFF` is caught further down, where the atlas lookup has
             // something to say about it, and `missing` is the counter that records it.
-            let cp = if constant { first } else { first.saturating_add(k) };
+            let cp = if constant {
+                first
+            } else {
+                first.saturating_add(k)
+            };
             let x = x0 + (k as i32) * cell_w as i32;
             // One damage test for the whole glyph, box drawing included, because the damage model
             // and the cell are the same rectangle. See the note on the blit below for why this is
@@ -693,16 +752,7 @@ impl<'a> Painter<'a> {
             // width by construction, not by accident. See `box_drawing::cell_metric`, which reports
             // `width == height == cell_size(ppem)`.
             if (box_drawing::FIRST..=box_drawing::LAST).contains(&cp) {
-                if box_glyph(
-                    &mut self.scratch,
-                    frame,
-                    cp,
-                    x,
-                    y0,
-                    cell_w,
-                    cell_h,
-                    colour,
-                ) {
+                if box_glyph(&mut self.scratch, frame, cp, x, y0, cell_w, cell_h, colour) {
                     self.scratch.stats.box_glyphs += 1;
                 } else {
                     self.scratch.stats.missing += 1;
@@ -979,13 +1029,13 @@ impl<'a> Painter<'a> {
         // last glyph ended and a rule that ran past it would underline the trailing whitespace of a
         // proportional face — which reads as a selection rather than as an underline.
         if run.decorations != DocRun::DECORATION_NONE && pen > run.x {
-            let at = [(
-                DocRun::DECORATION_UNDERLINE,
-                holonomy_render::RuleAt::Underline,
-            ), (
-                DocRun::DECORATION_STRIKE,
-                holonomy_render::RuleAt::Strike,
-            )];
+            let at = [
+                (
+                    DocRun::DECORATION_UNDERLINE,
+                    holonomy_render::RuleAt::Underline,
+                ),
+                (DocRun::DECORATION_STRIKE, holonomy_render::RuleAt::Strike),
+            ];
             // **The rule follows the baseline, and the baseline is the one the glyphs were drawn on.**
             // `RuleAt::Underline`/`Strike` resolve their row from `run.y + ascent`, and `doc_text` moved
             // the baseline by adding `baseline_shift` to that same ascent -- so the rules must be asked
@@ -1088,7 +1138,12 @@ impl<'a> Painter<'a> {
     /// **Because a block rule is not relative to a line of type.** A paragraph border sits at a
     /// rectangle the layout chose, and a header's rule under a section sits under the section — neither
     /// is "somewhere in a line box". So that arm draws where it is told and the other two are resolved.
-    fn rule(&mut self, frame: &mut Frame, run: &holonomy_render::RuleRun, damage: Option<DamageRect>) {
+    fn rule(
+        &mut self,
+        frame: &mut Frame,
+        run: &holonomy_render::RuleRun,
+        damage: Option<DamageRect>,
+    ) {
         // The line's geometry, from the same source the glyphs use. `RuleAt::Block` does not read it,
         // and computing it unconditionally is one atlas lookup per rule against a branch — the
         // lookup is the cheaper of the two.
@@ -1121,7 +1176,8 @@ impl<'a> Painter<'a> {
                 // **And never past the bottom of the line box**, because a rule one pixel into the
                 // line below is a pixel the emitter's `cell_h`-tall damage rect does not cover -- it
                 // repaints on a full frame and leaves the old rule behind on a partial one.
-                ink_bottom.min(y.saturating_add(cell_h.saturating_sub(self.rule_thickness(run, cell_h))))
+                ink_bottom
+                    .min(y.saturating_add(cell_h.saturating_sub(self.rule_thickness(run, cell_h))))
             }
             // **Clamped into the line box**, because a short ascent with a small cap height would put
             // a third of it above the box's own top — a strikethrough drawn on the line above.
@@ -1155,8 +1211,13 @@ impl<'a> Painter<'a> {
             Some(d) => rect.clip(&d),
             None => rect,
         };
-        self.scratch.stats.pixels +=
-            frame.fill_rect(fill.x as i64, fill.y as i64, fill.width, fill.height, run.colour);
+        self.scratch.stats.pixels += frame.fill_rect(
+            fill.x as i64,
+            fill.y as i64,
+            fill.width,
+            fill.height,
+            run.colour,
+        );
         self.scratch.stats.rules += 1;
     }
 
@@ -1638,10 +1699,15 @@ fn atlas_style(style: holonomy_render::Style) -> AtlasStyle {
 
 /// Integer square root (floor), for rounded-rect scanlines.
 fn isqrt(n: u64) -> u64 {
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
     let mut x = n;
     let mut y = (x + 1) / 2;
-    while y < x { x = y; y = (x + n / x) / 2; }
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
     x
 }
 

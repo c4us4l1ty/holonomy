@@ -59,7 +59,11 @@ struct VecSource {
 
 impl VecSource {
     fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, fetches: 0, truncate_to: None }
+        Self {
+            bytes,
+            fetches: 0,
+            truncate_to: None,
+        }
     }
 }
 
@@ -113,7 +117,11 @@ fn evicting_a_leaf_does_not_change_the_document_length() {
     let mut rope = Rope::from_text(&text).expect("load");
     let before = rope.text_len();
     assert_eq!(before, text.len());
-    assert!(rope.leaf_count() > 3, "the fixture needs several leaves, got {}", rope.leaf_count());
+    assert!(
+        rope.leaf_count() > 3,
+        "the fixture needs several leaves, got {}",
+        rope.leaf_count()
+    );
 
     // Every leaf, last one first, so the load-bearing case is exercised first.
     let last = rope.leaf_count() - 1;
@@ -129,7 +137,11 @@ fn evicting_a_leaf_does_not_change_the_document_length() {
 
     assert_eq!(rope.resident_count(), 0, "everything is evicted");
     assert_eq!(rope.resident_bytes(), 0, "and nothing is held");
-    assert_eq!(rope.leaf_count(), last + 1, "but the spine is still the same length");
+    assert_eq!(
+        rope.leaf_count(),
+        last + 1,
+        "but the spine is still the same length"
+    );
 }
 
 /// Offsets must survive eviction, because `locate` is a binary search over `starts` and no offset should
@@ -151,8 +163,12 @@ fn offsets_are_identical_before_and_after_eviction() {
     // And the document reads back byte-for-byte through a source that does not know about leaves at all.
     let mut src = VecSource::new(text.clone());
     let mut got = vec![0u8; text.len()];
-    rope.read_at_faulting(&mut src, 0, got.len(), &mut got).expect("faulting read");
-    assert_eq!(got, text, "a fully evicted rope still reads back as the same document");
+    rope.read_at_faulting(&mut src, 0, got.len(), &mut got)
+        .expect("faulting read");
+    assert_eq!(
+        got, text,
+        "a fully evicted rope still reads back as the same document"
+    );
 }
 
 /// The `&self` path cannot fault, so it refuses — **and it names the leaf**, because that is what lets a
@@ -199,12 +215,17 @@ fn a_faulting_read_recovers_an_evicted_leaf() {
     let n = rope.leaf_len_of(target);
     let mut src = VecSource::new(text.clone());
     let mut buf = vec![0u8; n];
-    rope.read_at_faulting(&mut src, at, n, &mut buf).expect("faulting read");
+    rope.read_at_faulting(&mut src, at, n, &mut buf)
+        .expect("faulting read");
 
     assert_eq!(&buf[..n], &text[at..at + n], "right bytes");
     assert_eq!(src.fetches, 1, "one absent leaf, one fetch");
     assert!(rope.is_resident(target), "and the leaf is resident again");
-    assert_eq!(rope.text_len(), text.len(), "and the document length never moved");
+    assert_eq!(
+        rope.text_len(),
+        text.len(),
+        "and the document length never moved"
+    );
 }
 
 /// The real test: **every byte** of a rope with holes in it, read back identically, through a source whose
@@ -224,15 +245,24 @@ fn every_byte_of_a_sparse_rope_reads_identically() {
 
     let mut src = VecSource::new(text.clone());
     let mut got = vec![0u8; text.len()];
-    rope.read_at_faulting(&mut src, 0, got.len(), &mut got).expect("faulting read");
+    rope.read_at_faulting(&mut src, 0, got.len(), &mut got)
+        .expect("faulting read");
 
-    assert_eq!(rope.text_len(), text.len(), "length unchanged by all that faulting");
+    assert_eq!(
+        rope.text_len(),
+        text.len(),
+        "length unchanged by all that faulting"
+    );
     assert_eq!(
         got, text,
         "a rope with holes in it must read back as the identical document -- this is the byte-level \
          claim, and it is what an offset/index confusion fails"
     );
-    assert_eq!(rope.resident_count(), n, "the read made every leaf resident again");
+    assert_eq!(
+        rope.resident_count(),
+        n,
+        "the read made every leaf resident again"
+    );
 }
 
 /// **The destructive-delete gate must refuse to look through absence.** This is the one place where
@@ -254,7 +284,9 @@ fn the_scrub_audit_refuses_an_absent_leaf() {
         !text.contains(&ABSENT_NEEDLE),
         "the fixture must not contain the needle, or the audit can answer early"
     );
-    let err = rope.any_leaf_contains(ABSENT_NEEDLE).expect_err("must refuse, not report false");
+    let err = rope
+        .any_leaf_contains(ABSENT_NEEDLE)
+        .expect_err("must refuse, not report false");
     assert!(
         matches!(err, RopeError::LeafAbsent { leaf } if leaf == target),
         "expected LeafAbsent for leaf {target}, got {err:?}"
@@ -264,9 +296,12 @@ fn the_scrub_audit_refuses_an_absent_leaf() {
     let at = rope.leaf_offset(target);
     let mut src = VecSource::new(text.clone());
     let mut one = [0u8; 1];
-    rope.read_at_faulting(&mut src, at, 1, &mut one).expect("fault leaf back");
+    rope.read_at_faulting(&mut src, at, 1, &mut one)
+        .expect("fault leaf back");
     assert!(
-        !rope.any_leaf_contains(ABSENT_NEEDLE).expect("now answerable"),
+        !rope
+            .any_leaf_contains(ABSENT_NEEDLE)
+            .expect("now answerable"),
         "a fully resident rope answers the audit, and the answer is 'no'"
     );
 }
@@ -293,23 +328,37 @@ fn editing_an_absent_leaf_is_refused_not_applied() {
         matches!(err, Err(RopeError::LeafAbsent { leaf: _ })),
         "an edit into an absent leaf must be a typed refusal, got {err:?}"
     );
-    assert_eq!(rope.text_len(), before_len, "and must not have changed the length");
+    assert_eq!(
+        rope.text_len(),
+        before_len,
+        "and must not have changed the length"
+    );
     assert_eq!(rope.cursor(), before_cursor, "nor moved the caret");
 
     // A mutation into a *resident* leaf still works, so the refusal is about absence and not breakage.
     rope.set_cursor(0).expect("leaf 0 is resident");
-    rope.insert_byte(b'Z').expect("the resident path still edits");
-    assert_eq!(rope.text_len(), before_len + 1, "and the length grew by exactly one");
+    rope.insert_byte(b'Z')
+        .expect("the resident path still edits");
+    assert_eq!(
+        rope.text_len(),
+        before_len + 1,
+        "and the length grew by exactly one"
+    );
 
     // **And faulting the leaf in makes the same edit succeed**, which is the point of the refusal being
     // a refusal rather than a limitation: the caller has something it can do about it.
     let at = rope.leaf_offset(target);
     let mut src = VecSource::new(text.clone());
     let mut one = [0u8; 1];
-    rope.read_at_faulting(&mut src, at, 1, &mut one).expect("fault the leaf in");
+    rope.read_at_faulting(&mut src, at, 1, &mut one)
+        .expect("fault the leaf in");
     rope.set_cursor(at).expect("now the cursor can go there");
     rope.insert_byte(b'Z').expect("and the edit lands");
-    assert_eq!(rope.text_len(), before_len + 2, "two bytes added: one before, one here");
+    assert_eq!(
+        rope.text_len(),
+        before_len + 2,
+        "two bytes added: one before, one here"
+    );
 }
 
 /// A double-evict must be visible. Reporting an eviction that freed nothing would make a bug look like
@@ -321,15 +370,24 @@ fn evicting_an_absent_leaf_twice_is_an_error() {
     let first = rope.evict_leaf(1).expect("first evict");
     let resident = rope.resident_count();
 
-    let err = rope.evict_leaf(1).expect_err("second evict must be refused");
-    assert!(matches!(err, RopeError::LeafAbsent { leaf } if leaf == 1), "got {err:?}");
+    let err = rope
+        .evict_leaf(1)
+        .expect_err("second evict must be refused");
+    assert!(
+        matches!(err, RopeError::LeafAbsent { leaf } if leaf == 1),
+        "got {err:?}"
+    );
     assert_eq!(
         rope.resident_count(),
         resident,
         "the refused eviction must not have changed residency -- it freed nothing"
     );
     assert!(first > 0, "the first eviction reported {} bytes", first);
-    assert_eq!(rope.text_len(), text.len(), "and the document is still the right length");
+    assert_eq!(
+        rope.text_len(),
+        text.len(),
+        "and the document is still the right length"
+    );
 }
 
 /// A short source must be refused, not zero-filled — a zero-filled gap would read as a document full of

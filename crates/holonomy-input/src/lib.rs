@@ -39,14 +39,14 @@
 //! dependency on `holonomy-text` or `holonomy-geometry`: an input layer that could ask the document
 //! something is an input layer that has to be tested against a document.
 
+#[cfg(feature = "desktop")]
+pub mod compose;
 pub mod evdev;
 pub mod event;
 pub mod keymap;
 pub mod modifiers;
 pub mod pointer;
 pub mod source;
-#[cfg(feature = "desktop")]
-pub mod compose;
 #[cfg(feature = "desktop")]
 pub mod x11key;
 
@@ -57,12 +57,11 @@ pub use event::{
 pub use keymap::{Command, Hotkey, Keymap};
 pub use modifiers::ModifierState;
 pub use pointer::{
-    decode_record, encode_record, encode_record_at, Button, Event, Frame, Pointer, Record, BTN_LEFT,
-    BTN_MIDDLE, BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
+    decode_record, encode_record, encode_record_at, Button, Event, Frame, Pointer, Record,
+    BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, REL_WHEEL, REL_X, REL_Y,
 };
 pub use source::{
-    errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, Wait,
-    RECORDS_PER_READ,
+    errno_name, InputError, InputSource, RecordDecoder, ScriptedInputSource, Wait, RECORDS_PER_READ,
 };
 
 // The `KEY_*` constants are the crate's vocabulary. Re-exported in one glob because a caller writing a

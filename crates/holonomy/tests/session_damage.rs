@@ -677,7 +677,8 @@ fn a_superscript_widens_the_lines_damage_upward() {
     // a *second* paint of the new caret's cell runs and overwrites `last_painted_damage` with a rect
     // that has no shifted line in it at all. The widened rect the gate is about is the one from the
     // move, so the gate paints exactly one frame.
-    s.apply(holonomy_input::Command::Right).expect("move the caret");
+    s.apply(holonomy_input::Command::Right)
+        .expect("move the caret");
     let asked = s.damage();
     s.paint(Some(asked)).expect("paint the move");
     let d = s.last_painted_damage();
@@ -736,8 +737,12 @@ fn a_caret_that_moves_line_damages_the_line_it_left() {
     let mut ed = Editor::new();
     // One long line, then a second, so the caret has somewhere to go and the first line is wide enough
     // that "its tail stayed on screen" is a visible claim rather than a hypothetical.
-    ed.insert_at(0, b"alpha bravo charlie delta echo foxtrot golf\nsecond\n", SpanPolicy::GrowIntoInsert)
-        .expect("room");
+    ed.insert_at(
+        0,
+        b"alpha bravo charlie delta echo foxtrot golf\nsecond\n",
+        SpanPolicy::GrowIntoInsert,
+    )
+    .expect("room");
     let mut s = Session::new(
         ed,
         Painter::new(atlas(), 0),
@@ -793,18 +798,17 @@ fn a_caret_that_moves_line_damages_the_line_it_left() {
         "the damage is exactly the two lines the edit touched, and not more: {d:?}"
     );
     assert_eq!(
-        d.y,
-        row0,
+        d.y, row0,
         "and it starts at the top of the line the caret left: {d:?}"
     );
 
     // **And a keystroke that does not move the caret is still one row**, which is what makes this a fix
     // rather than a regression to the behaviour the rest of this file pins.
-    s.apply(holonomy_input::Command::Insert('x')).expect("type on line 1");
+    s.apply(holonomy_input::Command::Insert('x'))
+        .expect("type on line 1");
     let d = s.damage();
     assert_eq!(
-        d.height,
-        cell_h,
+        d.height, cell_h,
         "typing inside line 1 must still damage exactly one row, not two: {d:?}"
     );
 }
@@ -823,7 +827,11 @@ fn an_unchanged_dialog_is_a_no_op_and_a_changed_one_damages_only_the_panel() {
     let view = DialogView {
         title: "Unlock".into(),
         message: "Enter one passphrase.".into(),
-        fields: vec![Field { label: "Passphrase".into(), value: "***".into(), secret: true }],
+        fields: vec![Field {
+            label: "Passphrase".into(),
+            value: "***".into(),
+            secret: true,
+        }],
         focus: 0,
         error: None,
         confirm: "Unlock".into(),
@@ -842,7 +850,10 @@ fn an_unchanged_dialog_is_a_no_op_and_a_changed_one_damages_only_the_panel() {
     s.set_dialog(Some(view.clone()));
     assert_eq!(s.damage(), holonomy_render::DamageRect::EMPTY);
     s.tick().expect("idle tick");
-    assert_eq!(s.stats.frames, frames_after_open, "an unchanged dialog repainted the window");
+    assert_eq!(
+        s.stats.frames, frames_after_open,
+        "an unchanged dialog repainted the window"
+    );
 
     // A keystroke in the field damages the panel union, not the panel.
     let mut edited = view.clone();
@@ -851,8 +862,7 @@ fn an_unchanged_dialog_is_a_no_op_and_a_changed_one_damages_only_the_panel() {
     let d = s.damage();
     assert!(!d.is_empty());
     assert!(
-        u64::from(d.width) * u64::from(d.height)
-            < u64::from(full.width) * u64::from(full.height),
+        u64::from(d.width) * u64::from(d.height) < u64::from(full.width) * u64::from(full.height),
         "a modal keystroke damaged {d:?}, the whole {}x{} frame",
         full.width,
         full.height

@@ -57,7 +57,9 @@ fn unique() -> u128 {
 }
 
 fn content(n: usize) -> Vec<u8> {
-    (0..n).map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8).collect()
+    (0..n)
+        .map(|i| (i.wrapping_mul(97).wrapping_add(13) % 251) as u8)
+        .collect()
 }
 
 /// Create a container and hand back its path.
@@ -74,11 +76,16 @@ fn adopt_and_open_read_the_same_document() {
     let path = make(doc.len());
 
     let mut via_open = Wavefunction::open(&path, PASS, ITER).expect("open");
-    let mut via_adopt = Wavefunction::adopt(DirectFile::open(&path).expect("descriptor"), PASS, ITER)
-        .expect("adopt");
+    let mut via_adopt =
+        Wavefunction::adopt(DirectFile::open(&path).expect("descriptor"), PASS, ITER)
+            .expect("adopt");
 
     assert_eq!(via_open.title(), via_adopt.title(), "same title");
-    assert_eq!(via_open.content_len(), via_adopt.content_len(), "same length");
+    assert_eq!(
+        via_open.content_len(),
+        via_adopt.content_len(),
+        "same length"
+    );
     assert_eq!(via_open.omega(), via_adopt.omega(), "same derived omega");
     assert_eq!(
         via_open.read_content().expect("open read"),
@@ -99,7 +106,11 @@ fn adopt_works_on_a_descriptor_from_create_or_open() {
 
     let fd = DirectFile::create_or_open(&path).expect("create_or_open -- the boot's route");
     let mut wf = Wavefunction::adopt(fd, PASS, ITER).expect("adopt");
-    assert_eq!(wf.read_content().expect("read"), doc, "the boot's descriptor reads the document");
+    assert_eq!(
+        wf.read_content().expect("read"),
+        doc,
+        "the boot's descriptor reads the document"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -141,7 +152,10 @@ fn adopt_still_detects_a_flipped_bit() {
     // Flip a bit in the salt region, which the derive consumes.
     {
         use std::io::{Seek, SeekFrom, Write};
-        let mut f = std::fs::OpenOptions::new().write(true).open(&path).expect("open rw");
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open rw");
         f.seek(SeekFrom::Start(1)).expect("seek");
         f.write_all(&[0x80]).expect("write");
     }
@@ -167,11 +181,12 @@ fn open_is_a_delegate_to_adopt() {
     // behavioural one, and a behavioural test cannot distinguish "open delegates" from "open happens to
     // agree today".
     let src = include_str!("../src/lib.rs");
-    let open_at = src
-        .find("pub fn open(")
-        .expect("open exists");
+    let open_at = src.find("pub fn open(").expect("open exists");
     let adopt_at = src.find("pub fn adopt(").expect("adopt exists");
-    let body_start = src[open_at..].find('{').map(|i| open_at + i).expect("open body");
+    let body_start = src[open_at..]
+        .find('{')
+        .map(|i| open_at + i)
+        .expect("open body");
     // The body is the delegate and nothing else: no second `DirectFile::open` call site, no salt read.
     let body_end = src[body_start..]
         .find("\n    }")
@@ -192,7 +207,12 @@ fn open_is_a_delegate_to_adopt() {
         1,
         "`open`'s body must open the path exactly once -- the one it hands to adopt. Body: {body}"
     );
-    for forbidden in ["SALT_OFFSET", "Ring::new", "Self::derive", "decode_frame_unchecked"] {
+    for forbidden in [
+        "SALT_OFFSET",
+        "Ring::new",
+        "Self::derive",
+        "decode_frame_unchecked",
+    ] {
         assert!(
             !body.contains(forbidden),
             "`open`'s body does `{forbidden}` itself, so it is not a pure delegate and the two entry \

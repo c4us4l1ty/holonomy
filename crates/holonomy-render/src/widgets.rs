@@ -206,12 +206,7 @@ impl Tool {
     pub const fn has_dropdown(self) -> bool {
         matches!(
             self,
-            Tool::Zoom
-                | Tool::Style
-                | Tool::Font
-                | Tool::TextColour
-                | Tool::Mode
-                | Tool::Overflow
+            Tool::Zoom | Tool::Style | Tool::Font | Tool::TextColour | Tool::Mode | Tool::Overflow
         )
     }
 
@@ -221,7 +216,7 @@ impl Tool {
     ///
     /// **Measured against the labels themselves:** `Zoom` shows `zoom_label()`, whose widest value is
     /// `"400%"` at 4 codepoints; `Style` shows [`ChromeState::style_name`], whose longest entry in
-    /// [`STYLES`](crate::menus::STYLES) is `"Normal text"` at 11; `Font` shows `font_label()`, whose
+    /// [`STYLES`](crate::menus::STYLES) is `"Normal"` at 11; `Font` shows `font_label()`, whose
     /// longest entry in [`FONTS`](crate::menus::FONTS) is `"JetBrains Mono"` at 14 — longer than the
     /// 10 cells the button holds, exactly as the previous list's `"IBM Plex Mono"` was, and fitted
     /// the same way every over-long label is.
@@ -572,7 +567,8 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         }
         p.rect = fit(
             x,
-            m.toolbar.y
+            m.toolbar
+                .y
                 .saturating_add(m.toolbar.height / 2)
                 .saturating_sub(button / 2),
             w,
@@ -618,7 +614,8 @@ pub fn place_toolbar(l: &Layout, pad: u32) -> Vec<Placed> {
         r = r.saturating_sub(w);
         p.rect = fit(
             r,
-            m.toolbar.y
+            m.toolbar
+                .y
                 .saturating_add(m.toolbar.height / 2)
                 .saturating_sub(button / 2),
             w,
@@ -672,7 +669,11 @@ impl ChromeState {
         crate::menus::STYLES
             .get(self.style_index)
             .copied()
-            .unwrap_or("Normal text")
+            // **The fallback is `STYLES[0]`, spelled out, and it used to be the old name of it.**
+            // It said `"Normal text"` -- the label `STYLES[0]` carried before the six-style list
+            // renamed it to `"Normal"` -- so an out-of-range index fell back to a name no entry in
+            // the list has. Two strings that must stay equal and no compiler keeping them so.
+            .unwrap_or("Normal")
     }
 
     /// **The current mode's name.** Part 44. See [`style_name`](Self::style_name).
@@ -726,6 +727,7 @@ impl ChromeState {
 /// type says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Open {
+    RibbonOverflow,
     /// A menu-bar heading's popup, by index into [`MENUS`](crate::chrome::MENUS).
     Menu(usize),
     /// A labelled toolbar control's dropdown.
@@ -740,6 +742,7 @@ impl Open {
     /// asked `Open::Menu(0)` get different things, and neither of them knows how the other is spelled.
     pub fn items(self, state: &ChromeState) -> Vec<crate::menus::Item> {
         match self {
+            Open::RibbonOverflow => state.ribbon_overflow.clone(),
             Open::Menu(i) => crate::menus::items_for(i).to_vec(),
             Open::Tool(t) => crate::menus::dropdown_items(t, state),
         }
@@ -790,7 +793,14 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     // difference between the two, and it is why this is an `Open` rather than two functions — the
     // rows differ, the clamp is the same, and the anchor is one line.
     let anchor_x = match open {
+        Open::RibbonOverflow => crate::ribbon::overflow_rect(l).x,
         Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
+        Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
+            .1
+            .into_iter()
+            .find(|b| b.action == crate::menus::Action::SelectTool(tool))
+            .map(|b| b.rect.x)
+            .unwrap_or(l.toolbar.x),
         Open::Tool(tool) => {
             place_toolbar(l, TOOLBAR_PAD)
                 .into_iter()
@@ -800,6 +810,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         }
     };
     let anchor_y = match open {
+        Open::RibbonOverflow => l.toolbar.y + 40,
         Open::Menu(_) => l.menubar.bottom(),
         Open::Tool(_) => l.toolbar.bottom(),
     };
@@ -916,6 +927,25 @@ pub fn row_cells(it: &crate::menus::Item, cell_w: u32) -> u32 {
 /// cheaper mistake.**
 pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
     match h {
+        Hit::Ribbon(a) => crate::ribbon::qat(l)
+            .into_iter()
+            .find(|(x, _)| *x == a)
+            .map(|(_, r)| r)
+            .or_else(|| {
+                crate::ribbon::layout(l, state)
+                    .1
+                    .into_iter()
+                    .find(|b| b.action == a)
+                    .map(|b| b.rect)
+            }),
+        Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied(),
+        Hit::RibbonSearch => Some(crate::ribbon::search_rect(l)),
+        Hit::RibbonLock => Some(crate::ribbon::lock_rect(l)),
+        Hit::RibbonCollapse => Some(crate::ribbon::collapse_rect(l)),
+        Hit::Nav(i) => l.sidebar_doc(i),
+        Hit::Tool(t) if state.ribbon && t == Tool::Overflow => {
+            Some(crate::ribbon::overflow_rect(l))
+        }
         Hit::Tool(t) => place_toolbar(l, TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool == t)
@@ -941,6 +971,12 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
 /// Anything the pointer can be over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
+    Ribbon(crate::menus::Action),
+    RibbonTab(usize),
+    RibbonSearch,
+    RibbonLock,
+    RibbonCollapse,
+    Nav(usize),
     /// A toolbar button.
     Tool(Tool),
     /// A menu-bar heading, by index into [`MENUS`](crate::chrome::MENUS).
@@ -1092,6 +1128,71 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
     }
 
+    if state.ribbon {
+        if state.open == Some(Open::RibbonOverflow)
+            && crate::ribbon::overflow_rect(l).contains(x, y)
+        {
+            return Hit::Tool(Tool::Overflow);
+        }
+        for (a, r) in crate::ribbon::qat(l) {
+            if r.contains(x, y) {
+                return Hit::Ribbon(a);
+            }
+        }
+        if crate::ribbon::search_rect(l).contains(x, y) {
+            return Hit::RibbonSearch;
+        }
+        if crate::ribbon::lock_rect(l).contains(x, y) {
+            return Hit::RibbonLock;
+        }
+        if l.title.contains(x, y) {
+            return Hit::None;
+        }
+        for (i, r) in crate::ribbon::tab_rects(l).into_iter().enumerate() {
+            if r.contains(x, y) {
+                return Hit::RibbonTab(i);
+            }
+        }
+        if crate::ribbon::collapse_rect(l).contains(x, y) {
+            return Hit::RibbonCollapse;
+        }
+        if l.menubar.contains(x, y) {
+            return Hit::None;
+        }
+        if !state.ribbon_collapsed {
+            for b in crate::ribbon::layout(l, state).1 {
+                if b.rect.contains(x, y) {
+                    return Hit::Ribbon(b.action);
+                }
+            }
+            if crate::ribbon::overflow_rect(l).contains(x, y) {
+                return Hit::Tool(Tool::Overflow);
+            }
+        }
+        if l.toolbar.contains(x, y) {
+            return Hit::None;
+        }
+        if state.sidebar_open {
+            for i in 0..state.navigation.len() {
+                if l.sidebar_doc(i).is_some_and(|r| r.contains(x, y)) {
+                    return Hit::Nav(i);
+                }
+            }
+            if l.sidebar.contains(x, y) {
+                return Hit::None;
+            }
+        }
+        return if if state.paged {
+            l.page_at(state, x, y).is_some()
+        } else {
+            l.page.contains(x, y)
+        } {
+            Hit::Page
+        } else {
+            Hit::None
+        };
+    }
+
     // **Title bar first, then the menu bar, then the toolbar**: the bands do not overlap, so the order
     // is for readability rather than for correctness, and the tests assert that it does not matter.
     for (btn, r) in &place_title(l, TITLE_PAD) {
@@ -1143,7 +1244,11 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
     }
 
-    if if state.paged { l.page_at(state, x, y).is_some() } else { at(&l.page) } {
+    if if state.paged {
+        l.page_at(state, x, y).is_some()
+    } else {
+        at(&l.page)
+    } {
         Hit::Page
     } else {
         Hit::None

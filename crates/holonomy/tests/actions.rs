@@ -593,11 +593,11 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     let st = ChromeState::default();
     let a: &'static str = st.style_name();
     let b: &'static str = st.font_name();
-    assert_eq!(a, "Normal text");
+    assert_eq!(a, "Normal");
     assert_eq!(b, "Inter");
     // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
     // names would have to be returned as a borrow of the state and could not be `'static`.
-    assert_eq!(menus::STYLES.len(), 3);
+    assert_eq!(menus::STYLES.len(), 6);
     // **Two, and both loaded.** The list used to be five names of which four had no face in the
     // atlas; the dropdown is now exactly the families `Session::doc_style` can actually draw.
     assert_eq!(menus::FONTS.len(), 2);
@@ -612,7 +612,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
         font_index: 999,
         ..ChromeState::default()
     };
-    assert_eq!(oob.style_name(), "Normal text");
+    assert_eq!(oob.style_name(), "Normal");
     assert_eq!(oob.font_name(), "Inter");
     // **And one at a time, so the first assertion is not carrying the second.** Setting both and
     // checking both passes if `style_name` ignores its index entirely and reads `font_index`; the
@@ -623,7 +623,7 @@ fn the_toolbar_labels_are_borrows_not_allocations() {
     };
     assert_eq!(
         style_only.style_name(),
-        "Normal text",
+        "Normal",
         "a bad style index alone still falls back"
     );
     let font_only = ChromeState {
@@ -814,5 +814,8 @@ fn exporting_with_no_sinks_writes_nothing_and_is_not_an_error() {
     s.apply_action(Action::Export).expect("the row's action");
     assert_eq!(s.export_all(&mut []), 0, "nothing to write to");
     assert_eq!(s.stats.exports, 0, "and nothing was exported");
-    assert_eq!(s.stats.export_failures, 0, "and nothing failed: there was nowhere to fail");
+    assert_eq!(
+        s.stats.export_failures, 0,
+        "and nothing failed: there was nowhere to fail"
+    );
 }

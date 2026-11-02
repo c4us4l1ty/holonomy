@@ -86,7 +86,13 @@ fn unique() -> u128 {
 fn make(len: usize) -> PathBuf {
     let path = scratch_dir().join(format!("rss-{}-{len}.wavefunction", unique()));
     let content: Vec<u8> = (0..len)
-        .map(|i| if i % 44 == 43 { b'\n' } else { b'a' + (i % 26) as u8 })
+        .map(|i| {
+            if i % 44 == 43 {
+                b'\n'
+            } else {
+                b'a' + (i % 26) as u8
+            }
+        })
         .collect();
     Wavefunction::create(&path, PASS, "rss", &content, ITER).expect("create");
     path
@@ -101,7 +107,12 @@ fn probe(mode: &str, len: usize, budget: usize) -> (u64, u64, bool) {
     const CHILD: &str = "HOLONOMY_RSS_SPARSE";
     let exe = std::env::current_exe().expect("test binary");
     let out = std::process::Command::new(&exe)
-        .args(["--exact", "rss_sparse_child", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "rss_sparse_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD, mode)
         .env("HOLONOMY_RSS_LEN", len.to_string())
         .env("HOLONOMY_RSS_BUDGET", budget.to_string())
@@ -111,7 +122,10 @@ fn probe(mode: &str, len: usize, budget: usize) -> (u64, u64, bool) {
     let field = |k: &str| -> u64 {
         stdout
             .lines()
-            .find_map(|l| l.find(k).map(|i| l[i + k.len()..].split_whitespace().next().unwrap_or("0")))
+            .find_map(|l| {
+                l.find(k)
+                    .map(|i| l[i + k.len()..].split_whitespace().next().unwrap_or("0"))
+            })
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("child printed no {k} for {mode}/{len}:\n{stdout}"))
     };
@@ -192,7 +206,10 @@ fn the_marginal_cost_of_a_document_byte_falls_as_the_document_grows() {
         readings.push((len, peak.saturating_sub(base)));
     }
     for (len, delta) in &readings {
-        println!("{len:>9} B -> {delta:>9} B over baseline ({:.4} B/document-byte)", *delta as f64 / *len as f64);
+        println!(
+            "{len:>9} B -> {delta:>9} B over baseline ({:.4} B/document-byte)",
+            *delta as f64 / *len as f64
+        );
     }
 
     // **Monotone decrease in the marginal cost** -- the assertion the first version should have made.
@@ -287,7 +304,10 @@ fn the_sparse_path_is_cheaper_than_the_resident_path() {
     let len = 1024 * 1024;
     let (_, sparse, sparse_ok) = probe("sparse", len, DEFAULT_RESIDENT_SECTIONS);
     let (_, resident, resident_ok) = probe("resident", len, DEFAULT_RESIDENT_SECTIONS);
-    assert!(sparse_ok && resident_ok, "both paths must open a 1 MiB document to be comparable");
+    assert!(
+        sparse_ok && resident_ok,
+        "both paths must open a 1 MiB document to be comparable"
+    );
     println!("1 MiB document: sparse {sparse} B, resident {resident} B");
     assert!(
         sparse < resident,
@@ -317,7 +337,10 @@ fn the_floor_is_the_framebuffer_not_the_document() {
     let (_, fpeak, _) = probe("empty", 0, DEFAULT_RESIDENT_SECTIONS);
     let (sbase, speak, sok) = probe("sparse", 256 * 1024, DEFAULT_RESIDENT_SECTIONS);
     let (mbase, mpeak, mok) = probe("sparse", MAX_DOCUMENT, DEFAULT_RESIDENT_SECTIONS);
-    assert!(sok && mok, "both documents must open for this comparison to mean anything");
+    assert!(
+        sok && mok,
+        "both documents must open for this comparison to mean anything"
+    );
 
     let floor = fpeak;
     let small_doc = speak.saturating_sub(sbase);
@@ -368,7 +391,10 @@ fn the_floor_is_the_framebuffer_not_the_document() {
 #[test]
 fn sparse_rss_is_inside_the_sixteen_mib_budget() {
     let (_, peak, opened) = probe("sparse", MAX_DOCUMENT, DEFAULT_RESIDENT_SECTIONS);
-    assert!(opened, "the maximum document must open before its RSS can be inside anything");
+    assert!(
+        opened,
+        "the maximum document must open before its RSS can be inside anything"
+    );
     let mib = peak as f64 / MIB;
     println!("maximum document: {peak} B = {mib:.2} MiB, budget {BUDGET_MIB} MiB");
     assert!(
@@ -395,7 +421,9 @@ fn rss_sparse_child() {
 
     // The atlas, so the baseline includes it: it is present in every session.
     let _atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
-        holonomy_assets::build_atlas(&[16]).expect("build the atlas").0,
+        holonomy_assets::build_atlas(&[16])
+            .expect("build the atlas")
+            .0,
     ));
 
     let base = rss_bytes().expect("statm");
@@ -430,7 +458,13 @@ fn rss_sparse_child() {
         "resident" => {
             // The Phase 11 shape: build the whole rope from a contiguous slice.
             let content: Vec<u8> = (0..len)
-                .map(|i| if i % 44 == 43 { b'\n' } else { b'a' + (i % 26) as u8 })
+                .map(|i| {
+                    if i % 44 == 43 {
+                        b'\n'
+                    } else {
+                        b'a' + (i % 26) as u8
+                    }
+                })
                 .collect();
             if let Ok(e) = holonomy_text::Editor::from_text(&content) {
                 opened = true;
