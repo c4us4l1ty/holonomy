@@ -4435,7 +4435,7 @@ impl<'a> Session<'a> {
             if *b == b'\n' {
                 let flags = self.editor.style_at(start as u32).style_flags;
                 if flags & STYLE_HEADER != 0 && out.len() < 256 {
-                    let title = String::from_utf8_lossy(&text[start..i])
+                    let title: String = String::from_utf8_lossy(&text[start..i])
                         .chars()
                         .take(80)
                         .collect();
