@@ -1,18 +1,18 @@
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.56s
 [1m[92m     Running[0m tests/chrome.rs (target/x86_64-unknown-linux-musl/debug/deps/chrome-5d0c71c2a4c479a0)
 
 running 57 tests
 test a_caret_past_the_measure_is_absent ... ok
 test a_caret_scrolled_out_of_view_is_absent_not_clamped ... ok
-test a_long_label_splits_into_runs_within_the_run_length_limit ... ok
 test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
+test a_long_label_splits_into_runs_within_the_run_length_limit ... ok
 test a_page_wider_than_the_panel_is_clipped_not_wrapped ... ok
 test a_panel_smaller_than_its_bands_degrades_instead_of_wrapping ... ok
 test a_panel_smaller_than_the_chrome_lays_out_at_its_own_size ... ok
 test a_resize_keeps_the_type_scale_and_not_just_the_panel ... ok
-test a_resize_moves_the_page_and_never_the_line ... FAILED
 test a_short_canvas_scrolls_the_first_line_into_view ... ok
+test a_resize_moves_the_page_and_never_the_line ... FAILED
 test a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row ... ok
 test a_zero_period_would_divide_by_zero_and_is_clamped ... ok
 test an_empty_string_produces_no_runs ... ok
@@ -35,9 +35,9 @@ test the_bands_stack_with_no_gap_and_no_overlap ... ok
 test the_blink_invalidates_only_the_caret_cell ... ok
 test the_blink_is_a_square_wave_with_the_stated_period ... ok
 test the_block_runes_are_absent_so_the_chrome_does_not_use_them ... ok
-test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
 test text_runs_are_ascending_and_contiguous ... ok
 test the_caret_is_exactly_one_cell ... ok
+test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
 test the_caret_sits_on_its_column_and_row ... ok
 test the_design_page_column_is_576_px_and_says_so ... ok
 test the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window ... ok
@@ -47,11 +47,11 @@ test the_paged_chrome_tree_paints_separate_visible_sheets ... ok
 test the_only_band_rule_is_the_toolbar_s_underside ... ok
 test the_scroll_thumb_fills_the_rail_when_everything_is_visible ... ok
 test the_scroll_thumb_moves_down_as_the_view_scrolls ... ok
-test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_scroll_thumb_never_vanishes ... ok
+test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_scrollbar_is_right_of_the_page_and_inside_the_canvas ... ok
-test the_sealed_badge_appears_only_when_sealed ... ok
 test the_sidebar_has_a_right_edge_in_both_views ... ok
+test the_sealed_badge_appears_only_when_sealed ... ok
 test the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open ... FAILED
 test the_text_column_sits_inside_the_page_with_its_padding ... ok
 test the_status_line_reports_the_caret_position_one_based ... ok
@@ -65,7 +65,7 @@ failures:
 
 ---- a_resize_moves_the_page_and_never_the_line stdout ----
 
-thread 'a_resize_moves_the_page_and_never_the_line' (4450) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
+thread 'a_resize_moves_the_page_and_never_the_line' (4429) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
 assertion `left == right` failed: the page sits a fixed gutter to the right of the document-tabs rail: left gutter 596
   left: 596
  right: 304
@@ -73,7 +73,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open stdout ----
 
-thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (4493) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
+thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (4472) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
 assertion `left == right` failed: opening the sidebar puts the page a fixed gutter past the rail: 296 then 436
   left: 436
  right: 304
@@ -83,6 +83,6 @@ failures:
     a_resize_moves_the_page_and_never_the_line
     the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open
 
-test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy-render --test chrome`
