@@ -1,7 +1,7 @@
 [1m[92m   Compiling[0m libc v0.2.190
+[1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cfg-if v1.0.5
 [1m[92m   Compiling[0m typenum v1.20.1
-[1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cmov v0.5.4
 [1m[92m   Compiling[0m const-oid v0.10.2
 [1m[92m   Compiling[0m ctutils v0.4.2
@@ -10,8 +10,8 @@
 [1m[92m   Compiling[0m base64ct v1.8.3
 [1m[92m   Compiling[0m alloc-no-stdlib v3.0.0
 [1m[92m   Compiling[0m alloc-stdlib v0.3.0
-[1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m adler2 v2.0.1
+[1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m miniz_oxide v0.9.1
 [1m[92m   Compiling[0m unicode-normalization v0.1.25
 [1m[92m   Compiling[0m hybrid-array v0.4.15
@@ -25,92 +25,47 @@
 [1m[92m   Compiling[0m inout v0.2.2
 [1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m secrecy v0.10.3
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m memchr v2.8.3
-[1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m ttf-parser v0.25.1
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m ryu v1.0.23
+[1m[92m   Compiling[0m memchr v2.8.3
 [1m[92m   Compiling[0m digest v0.11.3
-[1m[92m   Compiling[0m universal-hash v0.6.1
 [1m[92m   Compiling[0m cipher v0.5.2
 [1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m hmac v0.13.0
+[1m[92m   Compiling[0m universal-hash v0.6.1
 [1m[92m   Compiling[0m poly1305 v0.9.1
 [1m[92m   Compiling[0m chacha20 v0.10.2
 [1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
+[1m[92m   Compiling[0m hmac v0.13.0
 [1m[92m   Compiling[0m aead v0.6.1
-[1m[92m   Compiling[0m argon2 v0.6.0
-[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m hkdf v0.13.0
+[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
+[1m[92m   Compiling[0m argon2 v0.6.0
 [1m[92m   Compiling[0m sha2 v0.11.0
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[92m   Compiling[0m ryu v1.0.23
-[1m[91merror[E0061][0m[1m: this function takes 8 arguments but 7 arguments were supplied[0m
-    [1m[94m--> [0mcrates/holonomy-render/src/ribbon.rs:1105:5
-     [1m[94m|[0m
-[1m[94m1105[0m [1m[94m|[0m     text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h);
-     [1m[94m|[0m     [1m[91m^^^^[0m[1m[94m----------------------------------------------------------[0m [1m[94margument #8 of type `u32` is missing[0m
-     [1m[94m|[0m
-[1m[92mnote[0m: function defined here
-    [1m[94m--> [0mcrates/holonomy-render/src/ribbon.rs:930:4
-     [1m[94m|[0m
-[1m[94m 930[0m [1m[94m|[0m fn text(
-     [1m[94m|[0m    [1m[92m^^^^[0m
-[1m[94m...[0m
-[1m[94m 938[0m [1m[94m|[0m     cell_h: u32,
-     [1m[94m|[0m     [1m[94m-----------[0m
-[1m[96mhelp[0m: provide the argument
-     [1m[94m|[0m
-[1m[94m1105[0m [1m[94m| [0m    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h[92m, /* u32 */[0m);
-     [1m[94m|[0m                                                                  [92m+++++++++++[0m
-
-[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:462:24
-    [1m[94m|[0m
-[1m[94m462[0m [1m[94m|[0m         self.title_h = by(76);
-    [1m[94m|[0m                        [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
-
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:463:23
-    [1m[94m|[0m
-[1m[94m463[0m [1m[94m|[0m         self.menu_h = by(32);
-    [1m[94m|[0m                       [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
-
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:464:52
-    [1m[94m|[0m
-[1m[94m464[0m [1m[94m|[0m         self.toolbar_h = if collapsed { 0 } else { by(112) };
-    [1m[94m|[0m                                                    [1m[91m^^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
-
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:465:24
-    [1m[94m|[0m
-[1m[94m465[0m [1m[94m|[0m         self.ruler_h = by(26);
-    [1m[94m|[0m                        [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
-
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:466:25
-    [1m[94m|[0m
-[1m[94m466[0m [1m[94m|[0m         self.status_h = by(28);
-    [1m[94m|[0m                         [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
-
+[1m[92m   Compiling[0m bitflags v2.13.2
+[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
 [1m[92m   Compiling[0m pdf-writer v0.15.0
-[1mSome errors have detailed explanations: E0015, E0061.[0m
-[1mFor more information about an error, try `rustc --explain E0015`.[0m
-[1m[91merror[0m: could not compile `holonomy-render` (lib) due to 6 previous errors
-[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
+[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
+[1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
+[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
+[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 8.30s
+[1m[92m     Running[0m tests/wordcraft_ribbon.rs (target/x86_64-unknown-linux-musl/debug/deps/wordcraft_ribbon-207c18ab30503e3a)
+
+running 8 tests
+test narrow_ribbon_overflows_instead_of_drawing_dead_buttons ... ok
+test every_ribbon_label_fits_inside_its_button ... ok
+test every_group_caption_is_inside_the_ribbon ... ok
+test no_two_ribbon_buttons_overlap ... ok
+test ribbon_tabs_do_not_touch_and_never_clip_their_labels ... ok
+test the_quick_access_row_fits_its_labels ... ok
+test the_home_tab_fits_the_window_the_product_opens ... ok
+test ribbon_buttons_and_hits_share_geometry ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

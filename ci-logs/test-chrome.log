@@ -1,68 +1,88 @@
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[91merror[E0061][0m[1m: this function takes 8 arguments but 7 arguments were supplied[0m
-    [1m[94m--> [0mcrates/holonomy-render/src/ribbon.rs:1105:5
-     [1m[94m|[0m
-[1m[94m1105[0m [1m[94m|[0m     text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h);
-     [1m[94m|[0m     [1m[91m^^^^[0m[1m[94m----------------------------------------------------------[0m [1m[94margument #8 of type `u32` is missing[0m
-     [1m[94m|[0m
-[1m[92mnote[0m: function defined here
-    [1m[94m--> [0mcrates/holonomy-render/src/ribbon.rs:930:4
-     [1m[94m|[0m
-[1m[94m 930[0m [1m[94m|[0m fn text(
-     [1m[94m|[0m    [1m[92m^^^^[0m
-[1m[94m...[0m
-[1m[94m 938[0m [1m[94m|[0m     cell_h: u32,
-     [1m[94m|[0m     [1m[94m-----------[0m
-[1m[96mhelp[0m: provide the argument
-     [1m[94m|[0m
-[1m[94m1105[0m [1m[94m| [0m    text(v, lock_rect(l), "Lock", t.on_accent, true, true, cell_h[92m, /* u32 */[0m);
-     [1m[94m|[0m                                                                  [92m+++++++++++[0m
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+[1m[92m     Running[0m tests/chrome.rs (target/x86_64-unknown-linux-musl/debug/deps/chrome-5d0c71c2a4c479a0)
 
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:462:24
-    [1m[94m|[0m
-[1m[94m462[0m [1m[94m|[0m         self.title_h = by(76);
-    [1m[94m|[0m                        [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+running 57 tests
+test a_caret_past_the_measure_is_absent ... ok
+test a_caret_scrolled_out_of_view_is_absent_not_clamped ... ok
+test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
+test a_long_label_splits_into_runs_within_the_run_length_limit ... ok
+test a_page_wider_than_the_panel_is_clipped_not_wrapped ... ok
+test a_panel_smaller_than_its_bands_degrades_instead_of_wrapping ... ok
+test a_panel_smaller_than_the_chrome_lays_out_at_its_own_size ... ok
+test a_resize_keeps_the_type_scale_and_not_just_the_panel ... ok
+test a_resize_moves_the_page_and_never_the_line ... FAILED
+test a_short_canvas_scrolls_the_first_line_into_view ... ok
+test a_wrapped_desktop_caret_can_sit_at_the_end_of_a_full_row ... ok
+test a_zero_period_would_divide_by_zero_and_is_clamped ... ok
+test a_toolbar_separator_is_inset_from_the_pill_not_from_the_button ... ok
+test an_empty_string_produces_no_runs ... ok
+test an_off_screen_caret_blinks_without_dirtying_anything ... ok
+test ascending_runs_splits_prose_because_prose_is_not_ascending ... ok
+test desktop_page_capacity_does_not_depend_on_window_height ... ok
+test desktop_page_rows_share_one_mapping_for_caret_and_hit_testing ... ok
+test desktop_sheets_stack_with_a_gap_and_scroll_without_losing_the_previous_page ... ok
+test desktop_wheel_and_pointer_can_use_the_next_sheet ... ok
+test every_rune_is_in_the_verified_table ... ok
+test desktop_workspace_is_a_sheet_with_a_shadow_on_a_flat_panel ... ok
+test hiding_the_caret_dirties_the_cell_it_erases ... ok
+test paged_blocks_start_on_their_anchor_and_displace_only_following_rows ... ok
+test many_pages_render_a_viewport_bounded_number_of_sheets ... ok
+test larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons ... ok
+test the_bands_cover_the_panel_exactly_once ... ok
+test the_bands_partition_the_panel_at_any_size ... ok
+test the_bands_stack_with_no_gap_and_no_overlap ... ok
+test the_blink_invalidates_only_the_caret_cell ... ok
+test text_runs_are_ascending_and_contiguous ... ok
+test the_blink_is_a_square_wave_with_the_stated_period ... ok
+test the_block_runes_are_absent_so_the_chrome_does_not_use_them ... ok
+test the_caret_is_exactly_one_cell ... ok
+test the_caret_sits_on_its_column_and_row ... ok
+test the_design_page_column_is_576_px_and_says_so ... ok
+test the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window ... ok
+test the_next_flip_is_when_the_phase_changes ... ok
+test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
+test the_page_is_centred_and_the_gutters_sum_to_the_panel ... ok
+test the_only_band_rule_is_the_toolbar_s_underside ... ok
+test the_paged_chrome_tree_paints_separate_visible_sheets ... ok
+test the_scroll_thumb_fills_the_rail_when_everything_is_visible ... ok
+test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
+test the_scroll_thumb_moves_down_as_the_view_scrolls ... ok
+test the_scroll_thumb_never_vanishes ... ok
+test the_scrollbar_is_right_of_the_page_and_inside_the_canvas ... ok
+test the_sidebar_has_a_right_edge_in_both_views ... ok
+test the_sealed_badge_appears_only_when_sealed ... ok
+test the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open ... FAILED
+test the_text_column_sits_inside_the_page_with_its_padding ... ok
+test the_status_line_reports_the_caret_position_one_based ... ok
+test the_toolbar_bands_are_tall_enough_for_the_type_they_hold ... ok
+test the_toolbar_band_is_filled_in_both_views ... ok
+test the_tree_is_built_for_the_state_and_covers_every_band ... ok
+test no_chrome_box_ever_lands_outside_its_panel ... ok
+test the_chrome_paints_at_every_panel_size_without_drawing_outside_itself ... ok
 
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:463:23
-    [1m[94m|[0m
-[1m[94m463[0m [1m[94m|[0m         self.menu_h = by(32);
-    [1m[94m|[0m                       [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+failures:
 
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:464:52
-    [1m[94m|[0m
-[1m[94m464[0m [1m[94m|[0m         self.toolbar_h = if collapsed { 0 } else { by(112) };
-    [1m[94m|[0m                                                    [1m[91m^^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+---- a_resize_moves_the_page_and_never_the_line stdout ----
 
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:465:24
-    [1m[94m|[0m
-[1m[94m465[0m [1m[94m|[0m         self.ruler_h = by(26);
-    [1m[94m|[0m                        [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+thread 'a_resize_moves_the_page_and_never_the_line' (4443) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
+assertion `left == right` failed: the page sits a fixed gutter to the right of the document-tabs rail: left gutter 596
+  left: 596
+ right: 304
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
-[1m[91merror[E0015][0m[1m: cannot call non-const closure in constant functions[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:466:25
-    [1m[94m|[0m
-[1m[94m466[0m [1m[94m|[0m         self.status_h = by(28);
-    [1m[94m|[0m                         [1m[91m^^^^^^[0m
-    [1m[94m|[0m
-    [1m[94m= [0m[1mnote[0m: closures need an RFC before allowed to be called in constant functions
-    [1m[94m= [0m[1mnote[0m: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+---- the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open stdout ----
 
-[1mSome errors have detailed explanations: E0015, E0061.[0m
-[1mFor more information about an error, try `rustc --explain E0015`.[0m
-[1m[91merror[0m: could not compile `holonomy-render` (lib) due to 6 previous errors
+thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (4486) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
+assertion `left == right` failed: opening the sidebar puts the page a fixed gutter past the rail: 296 then 436
+  left: 436
+ right: 304
+
+
+failures:
+    a_resize_moves_the_page_and_never_the_line
+    the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open
+
+test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+[1m[91merror[0m: test failed, to rerun pass `-p holonomy-render --test chrome`
