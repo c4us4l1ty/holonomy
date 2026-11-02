@@ -1635,7 +1635,7 @@ mod tests {
                 opts.font_size,
                 false,
             ),
-            &mut stats,
+            stats,
             true,
         );
         out.extend(l.finish(stats));
