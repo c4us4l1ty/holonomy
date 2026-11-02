@@ -51,3 +51,11 @@ RESULT test-icons PASS
 RESULT test-chrome FAIL (101)
 RESULT test-all FAIL (101)
 OVERALL=1
+RESULT fmt FAIL (1)
+RESULT check-render PASS
+RESULT check-workspace PASS
+RESULT test-ribbon PASS
+RESULT test-icons PASS
+RESULT test-chrome FAIL (101)
+RESULT test-all FAIL (101)
+OVERALL=1

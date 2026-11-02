@@ -1,39 +1,14 @@
-[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[91merror[E0053][0m[1m: method `present` has an incompatible type for trait[0m
-  [1m[94m--> [0mcrates/holonomy/tests/zz_capture.rs:14:16
-   [1m[94m|[0m
-[1m[94m14[0m [1m[94m|[0m     fn present(&self, frame: &Frame) -> Result<u64, holonomy_display::FrameError> {
-   [1m[94m|[0m                [1m[91m^^^^^[0m [1m[91mtypes differ in mutability[0m
-   [1m[94m|[0m
-   [1m[94m= [0m[1mnote[0m: expected signature `fn(&[1m[35mmut [0mKeep, &Frame) -> Result<_, _>`
-              found signature `fn(&Keep, &Frame) -> Result<_, _>`
-[1m[96mhelp[0m: change the self-receiver type to match the trait
-   [1m[94m|[0m
-[1m[94m14[0m [1m[94m| [0m    fn present(&[92mmut [0mself, frame: &Frame) -> Result<u64, holonomy_display::FrameError> {
-   [1m[94m|[0m                 [92m+++[0m
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+[1m[92m     Running[0m tests/zz_capture.rs (target/x86_64-unknown-linux-musl/debug/deps/zz_capture-55c896d4c24f8f7c)
 
-[1m[91merror[E0053][0m[1m: method `present_damage` has an incompatible type for trait[0m
-  [1m[94m--> [0mcrates/holonomy/tests/zz_capture.rs:19:9
-   [1m[94m|[0m
-[1m[94m19[0m [1m[94m|[0m         &self,
-   [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91mtypes differ in mutability[0m
-   [1m[94m|[0m
-   [1m[94m= [0m[1mnote[0m: expected signature `fn(&[1m[35mmut [0mKeep, &Frame, [1m[35mOption<holonomy_render::DamageRect>[0m) -> Result<_, _>`
-              found signature `fn(&Keep, &Frame, [1m[35mholonomy_geometry::DamageRect[0m) -> Result<_, _>`
-[1m[96mhelp[0m: change the self-receiver type to match the trait
-   [1m[94m|[0m
-[1m[94m19[0m [1m[94m| [0m        &[92mmut [0mself,
-   [1m[94m|[0m          [92m+++[0m
+running 1 test
+wrote ribbon-16-1600 1600x900
+wrote ribbon-16-1280 1280x800
+wrote ribbon-16-1024 1024x768
+wrote ribbon-20-1600 1600x900
+wrote ribbon-20-1280 1280x800
+wrote ribbon-20-1024 1024x768
+test capture ... ok
 
-[1m[91merror[E0596][0m[1m: cannot borrow `*self` as mutable, as it is behind a `&` reference[0m
-  [1m[94m--> [0mcrates/holonomy/tests/zz_capture.rs:23:9
-   [1m[94m|[0m
-[1m[94m19[0m [1m[94m|[0m         &self,
-   [1m[94m|[0m         [1m[94m-----[0m [1m[94mthis is an immutable reference[0m
-[1m[94m...[0m
-[1m[94m23[0m [1m[94m|[0m         self.present(frame)
-   [1m[94m|[0m         [1m[91m^^^^[0m [1m[91m`self` is a `&` reference, so it cannot be borrowed as mutable[0m
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
 
-[1mSome errors have detailed explanations: E0053, E0596.[0m
-[1mFor more information about an error, try `rustc --explain E0053`.[0m
-[1m[91merror[0m: could not compile `holonomy` (test "zz_capture") due to 3 previous errors
