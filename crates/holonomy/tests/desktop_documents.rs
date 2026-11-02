@@ -219,3 +219,40 @@ fn desktop_sheet_margins_shrink_when_the_window_is_narrowed() {
     s.resize(1280, 800).unwrap();
     assert_eq!(s.chrome.metrics.page_pad, large);
 }
+
+#[test]
+fn managed_insert_actions_request_input_instead_of_a_test_chart() {
+    let mut s = session();
+    s.insert_text("Before").unwrap();
+    s.apply_action(Action::InsertImage).unwrap();
+    assert_eq!(s.take_document_request(), Some(DocumentRequest::InsertImage));
+    assert_eq!(s.text().unwrap(), b"Before");
+    s.apply_action(Action::InsertTable).unwrap();
+    assert_eq!(s.take_document_request(), Some(DocumentRequest::InsertTable));
+    assert_eq!(s.text().unwrap(), b"Before");
+}
+
+#[test]
+fn managed_equation_and_image_are_separate_blocks_and_persist() {
+    let mut s = session();
+    s.insert_text("Before").unwrap();
+    s.insert_image_bytes(holonomy::TEST_CHART_PNG).unwrap();
+    s.insert_text("After").unwrap();
+    let text = s.text().unwrap();
+    assert_eq!(&text, b"Before\n\xef\xbf\xbc\nAfter");
+    s.insert_math().unwrap();
+    assert_eq!(s.text().unwrap(), b"Before\n\xef\xbf\xbc\nAfter\n$$$$\n");
+    let payload = s.editor().payload().unwrap();
+    let restored = Editor::from_payload(&payload).unwrap();
+    assert_eq!(restored.text().unwrap(), s.text().unwrap());
+    assert_eq!(restored.assets().len(), 1);
+}
+
+#[test]
+fn managed_invalid_image_does_not_change_the_document() {
+    let mut s = session();
+    s.insert_text("unchanged").unwrap();
+    assert!(s.insert_image_bytes(b"not a PNG").is_err());
+    assert_eq!(s.text().unwrap(), b"unchanged");
+    assert_eq!(s.editor().assets().len(), 0);
+}

@@ -1128,10 +1128,17 @@ impl Layout {
     pub fn row_y(&self, state: &ChromeState, line: u32) -> Option<u32> {
         let row = line.checked_sub(state.scroll_line)?;
         if !state.paged { return self.text.y.checked_add(state.line_heights.y(row)); }
-        let extra = state.line_heights.y(row).saturating_sub(row.saturating_mul(state.line_heights.pitch));
-        let y = self.paged_row_y(state.scroll_line, line) + i64::from(extra);
+        let y = self.paged_position(state, line);
         if y < i64::from(self.canvas.y) || y + i64::from(self.cell_h) > i64::from(self.canvas.bottom()) { return None; }
         u32::try_from(y).ok()
+    }
+
+    fn paged_position(&self, state: &ChromeState, line: u32) -> i64 {
+        // Only earlier blocks displace this row; the base line pitch is already counted.
+        let row = line.saturating_sub(state.scroll_line);
+        let extra = state.line_heights.extras.iter().take_while(|&&(at, _)| at < row)
+            .fold(0u32, |sum, &(_, height)| sum.saturating_add(height.saturating_sub(state.line_heights.pitch)));
+        self.paged_row_y(state.scroll_line, line) + i64::from(extra)
     }
 
     /// Upper bound on rows that could intersect the viewport, independent of page count.
@@ -1147,7 +1154,7 @@ impl Layout {
         let (mut lo, mut hi) = (first, state.total_lines);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.paged_row_y(first, mid) + i64::from(self.cell_h) <= i64::from(self.canvas.bottom()) {
+            if self.paged_position(state, mid) + i64::from(self.cell_h) <= i64::from(self.canvas.bottom()) {
                 lo = mid + 1;
             } else { hi = mid; }
         }
@@ -1177,6 +1184,16 @@ impl Layout {
     }
 
     fn paged_row_at(&self, state: &ChromeState, y: i32) -> u32 {
+        if !state.line_heights.extras.is_empty() {
+            // Clicks inside a block resolve to its anchor, not an imaginary text row.
+            let first = state.scroll_line.min(state.total_lines.saturating_sub(1));
+            let (mut lo, mut hi) = (first, state.total_lines.max(first.saturating_add(1)));
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.paged_position(state, mid) <= i64::from(y) { lo = mid + 1; } else { hi = mid; }
+            }
+            return lo.saturating_sub(1).max(first);
+        }
         let doc_y = (i64::from(y) - i64::from(self.canvas.y) - i64::from(Self::DESK_TOP)
             + self.scroll_pixels(state.scroll_line) as i64).max(0) as u64;
         let stride = u64::from(self.page_height() + Self::PAGE_GAP);

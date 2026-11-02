@@ -413,6 +413,8 @@ pub fn run(
                 }
                 DocumentRequest::OpenContainer => { form = Some(Form::open(&vault, &session)); }
                 DocumentRequest::ImportText => { form = Some(Form::import()); }
+                DocumentRequest::InsertImage => { form = Some(Form::insert_image()); }
+                DocumentRequest::InsertTable => { form = Some(Form::insert_table()); }
                 DocumentRequest::DocumentMenu(i) => {
                     session.switch_document_public(i);
                     form = Some(Form::doc_menu(session.state.title.clone(), session.active_document_id()));
@@ -702,7 +704,7 @@ fn lock(vault: &mut Option<crate::vault::Vault>, session: &mut Session<'_>, _pat
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, DocMenu }
+enum FormKind { Setup, SetupNormal, Unlock, New, Rename, Delete, Open, OpenPath, Import, InsertImage, InsertTable, DocMenu }
 #[derive(Clone)]
 struct Form {
     kind: FormKind, path: std::path::PathBuf, values: Vec<zeroize::Zeroizing<String>>,
@@ -717,6 +719,11 @@ impl Form {
     fn rename(title: String) -> Self { let mut f = Self::base(FormKind::Rename, "".into(), 1); f.values[0].push_str(&title); f }
     fn delete(title: String, id: u64) -> Self { let mut f = Self::base(FormKind::Delete, "".into(), 0); f.choices = vec![format!("Delete '{title}' permanently")]; f.target_id = id; f }
     fn import() -> Self { Self::base(FormKind::Import, "".into(), 1) }
+    fn insert_image() -> Self { Self::base(FormKind::InsertImage, "".into(), 1) }
+    fn insert_table() -> Self {
+        let mut f = Self::base(FormKind::InsertTable, "".into(), 2);
+        f.values[0].push_str("3"); f.values[1].push_str("3"); f
+    }
     fn open(vault: &Option<crate::vault::Vault>, _session: &Session<'_>) -> Self {
         let mut f = Self::base(FormKind::Open, "".into(), 1);
         if let Some(v) = vault { for d in v.documents() { f.choices.push(d.title.clone()); f.ids.push(d.id); } }
@@ -734,6 +741,8 @@ impl Form {
             FormKind::Open => ("Open", "Choose a saved document, or open another container.", vec!["Other container path (optional)"], vec![false], "Open", Some("Cancel")),
             FormKind::OpenPath => ("Open container", "The current vault is saved and locked before switching.", vec!["Container path"], vec![false], "Next", Some("Cancel")),
             FormKind::Import => ("Import text", "Import a UTF-8 text file into this unlocked space.", vec!["File path"], vec![false], "Import", Some("Cancel")),
+            FormKind::InsertImage => ("Insert image", "Enter the path to a PNG image (up to 16 MiB).", vec!["PNG file path"], vec![false], "Insert", Some("Cancel")),
+            FormKind::InsertTable => ("Insert table", "Choose rows and columns. Up to 8 columns and 10 rows.", vec!["Rows", "Columns"], vec![false, false], "Insert", Some("Cancel")),
             FormKind::DocMenu => ("Document", "Choose an action for this document.", vec![], vec![], "Choose", Some("Cancel")),
         };
         let offset = if self.kind == FormKind::SetupNormal { 2 } else { 0 };
@@ -796,6 +805,26 @@ impl Form {
                 let Some(v) = vault.as_mut() else { return Err("Unlock first.".into()); };
                 let id = v.next_id(); let title = std::path::Path::new(p).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Imported".into());
                 session.create_document(id, title); session.insert_text(text).map_err(|e| e.to_string())?; save(vault, session); Ok(None)
+            }
+            FormKind::InsertImage => {
+                use std::io::Read;
+                let p = val(0).trim();
+                if p.is_empty() { return Err("Enter a PNG file path.".into()); }
+                let file = std::fs::File::open(p).map_err(|e| e.to_string())?;
+                let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                file.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                if bytes.len() > 16 * 1024 * 1024 { return Err("PNG file exceeds 16 MiB.".into()); }
+                session.insert_image_bytes(&bytes).map_err(|e| e.to_string())?;
+                save(vault, session); Ok(None)
+            }
+            FormKind::InsertTable => {
+                let rows: u16 = val(0).trim().parse().map_err(|_| "Enter a row count from 1 to 10.")?;
+                let cols: u16 = val(1).trim().parse().map_err(|_| "Enter a column count from 1 to 8.")?;
+                if !(1..=10).contains(&rows) || !(1..=8).contains(&cols) || rows * cols < 2 {
+                    return Err("Use 1–10 rows and 1–8 columns, with at least two cells.".into());
+                }
+                session.insert_table(rows, cols).map_err(|e| e.to_string())?;
+                save(vault, session); Ok(None)
             }
             FormKind::Open => {
                 let p = val(0).trim();

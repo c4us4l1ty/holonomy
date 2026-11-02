@@ -886,7 +886,7 @@ pub struct DocumentSnapshot {
 
 /// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentRequest { Home, New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
+pub enum DocumentRequest { Home, New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, InsertImage, InsertTable, DocumentMenu(usize) }
 
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
@@ -1260,9 +1260,15 @@ impl<'a> Session<'a> {
         // directly, so it never passed through `fault_for_edit` -- and **Ctrl+M in viewing mode
         // wrote four bytes into the document**, with the refusal counter at zero.
         self.check_editable()?;
+        if self.managed_documents { self.delete_selected()?; }
         let at = self.editor.caret() as usize;
-        self.editor
-            .insert_at(at as u32, b"$$$$", SpanPolicy::GrowIntoInsert)?;
+        // In the managed editor, equations are separate blocks, so surrounding prose and
+        // other objects do not share the line claimed by the equation renderer.
+        let leading = self.managed_documents && at > 0 && self.previous_byte(at)? != Some(b'\n');
+        let bytes: &[u8] = if self.managed_documents {
+            if leading { b"\n$$$$\n" } else { b"$$$$\n" }
+        } else { b"$$$$" };
+        self.editor.insert_at(at as u32, bytes, SpanPolicy::GrowIntoInsert)?;
         self.stats.math_inserts += 1;
         // **Phase 11 item 4: `TextCounts` is folded here too, and that is a bug this caught.** This
         // path called `editor.insert_at` directly rather than going through `Session::insert`, so the
@@ -1270,9 +1276,18 @@ impl<'a> Session<'a> {
         // later as an *underflow* in a delete, several keystrokes afterwards, in a different function
         // entirely. Every path that mutates the document must fold the counts; a new one that forgets
         // will fail the same way, which is why `tests/session_counts.rs` drives all of them.
-        self.counts.after_insert(&self.editor, at, b"$$$$");
-        self.editor.caret_to(at + 2)?;
-        self.after_edit(4)
+        self.counts.after_insert(&self.editor, at, bytes);
+        self.editor.caret_to(at + usize::from(leading) + 2)?;
+        self.after_edit(bytes.len() as u32)
+    }
+
+    fn previous_byte(&self, at: usize) -> Result<Option<u8>, SessionError> {
+        let mut byte = [0u8; 1];
+        if at == 0 { return Ok(None); }
+        if self.editor.read_into(at - 1, &mut byte)? != 1 {
+            return Err(SessionError::Sink(std::io::Error::other("Could not read the insertion point")));
+        }
+        Ok(Some(byte[0]))
     }
 
     /// Insert an image at the caret, from the built-in chart.
@@ -1308,6 +1323,23 @@ impl<'a> Session<'a> {
         // directly, so it never passed through `fault_for_edit` -- and **Ctrl+I in viewing mode
         // wrote an anchor and a catalog entry into the document**, with the refusal counter at zero.
         self.check_editable()?;
+        if self.managed_documents {
+            // Validate before changing the document, including corrupt compressed data.
+            let header = holonomy_image::read_header(png)
+                .map_err(|e| SessionError::Sink(std::io::Error::other(e.to_string())))?;
+            let len = holonomy_image::decoded_len(&header);
+            if len > 16 * 1024 * 1024 {
+                return Err(SessionError::Sink(std::io::Error::other("Image exceeds the 16 MiB decoded limit")));
+            }
+            let mut decoded = zeroize::Zeroizing::new(vec![0; len]);
+            holonomy_image::decode(png, &mut decoded)
+                .map_err(|e| SessionError::Sink(std::io::Error::other(e.to_string())))?;
+            self.delete_selected()?;
+            let at = self.editor.caret() as usize;
+            if at > 0 && self.previous_byte(at)? != Some(b'\n') {
+                self.insert(b"\n", None)?;
+            }
+        }
         let at = self.editor.caret();
         // `Editor::insert_image` writes the catalog entry *before* the anchor, so a malformed PNG
         // leaves nothing behind rather than an anchor that nothing serves.
@@ -1324,7 +1356,9 @@ impl<'a> Session<'a> {
         // The *whole page* is invalidated, not one line: an image is hundreds of pixels tall and
         // `after_edit` damages `cell_h` by construction, which would leave the image's own rows stale.
         self.damage = self.chrome.full_damage();
-        self.after_edit(ANCHOR_BYTES.len() as u32)
+        self.after_edit(ANCHOR_BYTES.len() as u32)?;
+        if self.managed_documents { self.insert(b"\n", None)?; }
+        Ok(())
     }
 
     /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
@@ -1380,9 +1414,8 @@ impl<'a> Session<'a> {
         // directly, so it never passed through `fault_for_edit` -- and **Ctrl+T in viewing mode
         // wrote a table into the document**, with the refusal counter at zero.
         self.check_editable()?;
-        let span = self
-            .editor
-            .insert_table(rows, cols, self.chrome.metrics.columns)?;
+        let measure = if self.managed_documents { self.chrome.layout.cells_per_row(self.chrome.metrics.cell_w) as u32 } else { self.chrome.metrics.columns };
+        let span = self.editor.insert_table(rows, cols, measure)?;
         self.stats.table_inserts += 1;
         // Rescan rather than deltify, for the reason `insert_image_bytes` does: `Editor::insert_table`
         // does not hand back the separator bytes it wrote, and `TextCounts` needs them.
@@ -3491,6 +3524,7 @@ impl<'a> Session<'a> {
     /// `caret_to` at all rather than calling the editor from four places.
     pub fn select_at(&mut self, anchor: u32, focus: u32) -> Result<(), SessionError> {
         self.editor.select(anchor, focus)?;
+        if self.managed_documents && self.editor.table_at(focus).is_none() { self.active_cell = None; }
         self.after_selection_moves();
         Ok(())
     }
@@ -4685,15 +4719,21 @@ impl<'a> Session<'a> {
                 self.save_requested = true;
             }
             Command::Hotkey(Hotkey::InsertMath) => {
-                self.insert_math()?;
+                if self.managed_documents && self.active_cell.is_some() {
+                    self.set_notice(Some("Move outside the table to insert an equation.".into()));
+                } else { self.insert_math()?; }
             }
             Command::Hotkey(Hotkey::InsertImage) => {
-                self.insert_image()?;
+                if self.managed_documents {
+                    if self.active_cell.is_some() { self.set_notice(Some("Move outside the table to insert an image.".into())); }
+                    else { self.check_editable()?; self.document_request = Some(DocumentRequest::InsertImage); }
+                } else { self.insert_image()?; }
             }
             Command::Hotkey(Hotkey::InsertTable) => {
-                // 3 by 3: the directive's default, and the shape that divides an 80-column measure
-                // into three readable columns of 23 with the borders and padding accounted for.
-                self.insert_table(3, 3)?;
+                if self.managed_documents {
+                    if self.active_cell.is_some() { self.set_notice(Some("Move outside the table to insert another table.".into())); }
+                    else { self.check_editable()?; self.document_request = Some(DocumentRequest::InsertTable); }
+                } else { self.insert_table(3, 3)?; }
             }
             // **The clipboard.** `Copy` and `Cut` differ only in whether the selection is also
             // deleted, which is why they are one `Editor` method each rather than a flag here: the
@@ -5395,13 +5435,20 @@ impl<'a> Session<'a> {
         let first = self.state.scroll_line;
         let last = first.saturating_add(rows);
         let scroll = if self.state.paged {
-            if line < first { line } else if layout.paged_row_y(first, line) + i64::from(layout.cell_h) > i64::from(layout.canvas.bottom()) {
+            let position = |from: u32| {
+                let extra = self.state.line_heights.extras.iter().filter(|&&(row, _)| {
+                    let absolute = first.saturating_add(row);
+                    absolute >= from && absolute < line
+                }).fold(0u32, |sum, &(_, height)| sum.saturating_add(height.saturating_sub(self.state.line_heights.pitch)));
+                layout.paged_row_y(from, line) + i64::from(extra)
+            };
+            if line < first { line } else if position(first) + i64::from(layout.cell_h) > i64::from(layout.canvas.bottom()) {
                 // Find the smallest scroll that brings the caret into the canvas. The row-to-y
                 // mapping is monotonic even across page gaps, so this is logarithmic.
                 let (mut lo, mut hi) = (first, line);
                 while lo < hi {
                     let mid = lo + (hi - lo) / 2;
-                    if layout.paged_row_y(mid, line) + i64::from(layout.cell_h) <= i64::from(layout.canvas.bottom()) { hi = mid; } else { lo = mid + 1; }
+                    if position(mid) + i64::from(layout.cell_h) <= i64::from(layout.canvas.bottom()) { hi = mid; } else { lo = mid + 1; }
                 }
                 lo
             } else { first }
@@ -6316,10 +6363,8 @@ impl<'a> Session<'a> {
     /// image cache will need in 9C, and it is here first because a table's geometry is cheap: the
     /// expensive thing in 9C is a decoded raster.
     ///
-    /// Known limit, recorded rather than hidden: a table is anchored at its document line and the
-    /// lines *below* it are not offset by its height, so text after a tall table overlaps its last
-    /// row. A full block layout is a larger change than this, and pretending otherwise by drawing the
-    /// table somewhere else would be worse.
+    /// Block rows in the managed view displace later rows, but they are not yet repaginated
+    /// or split across sheets. Existing objects sharing one line can still overlap.
     fn emit_body_text(
         &mut self,
         tree: &mut SurfaceTree,
@@ -6834,31 +6879,30 @@ impl<'a> Session<'a> {
             } else { l.text.y + self.state.line_heights.y(line - first) };
             let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
 
-            // --- borders, as procedural box-drawing glyph runs on the cell grid.
-            //
-            // **`Node::Repeat` and not `Node::Text`, and this is the table half of the rule bug that
-            // was on the ruler.** A border run is "one glyph, `len` times"; a `TextRun` is "the next
-            // `len` codepoints". A three-cell top edge was `┌─┐┌─┐` on screen and `┌┬┐┌┬┐` in the wire
-            // format, which is a row of unrelated corners rather than a line.
-            for run in grid.borders() {
-                let node = Node::Repeat(holonomy_render::RepeatRun::new(
-                    run.x as i32,
-                    run.y as i32,
-                    run.codepoint,
-                    run.len,
-                    holonomy_render::Style::MONOSPACE,
-                    0,
+            // Draw continuous rules directly. Box glyphs depend on atlas advances and can
+            // leave gaps or wrap through adjacent cells at different zoom levels.
+            let left = grid.border_x_at(0).saturating_add(m.cell_w / 2);
+            let right = grid.border_x_at(span.cols).saturating_add(m.cell_w / 2);
+            let top_rule = grid.border_y_at(0).saturating_add(m.cell_h / 2);
+            let bottom = grid.border_y_at(span.rows).saturating_add(m.cell_h / 2);
+            for row in 0..=span.rows {
+                let y = grid.border_y_at(row).saturating_add(m.cell_h / 2);
+                tree.before.push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                    left as i32, y as i32, right.saturating_sub(left).saturating_add(1), 1,
                     holonomy_render::chrome::colour::INK,
-                ));
-                // A border run knows its own rectangle -- `x`, `y`, `width`, `height` are its fields,
-                // because a run is *only* a rectangle of one repeated glyph.
-                extra = union_opt(
-                    extra,
-                    Some(DamageRect::new(run.x, run.y, run.width, run.height)),
-                );
-                tree.before.push(SurfaceTree::leaf(node));
+                ))));
                 borders_drawn += 1;
             }
+            for col in 0..=span.cols {
+                let x = grid.border_x_at(col).saturating_add(m.cell_w / 2);
+                tree.before.push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                    x as i32, top_rule as i32, 1, bottom.saturating_sub(top_rule).saturating_add(1),
+                    holonomy_render::chrome::colour::INK,
+                ))));
+                borders_drawn += 1;
+            }
+            extra = union_opt(extra, Some(DamageRect::new(left, top_rule,
+                right.saturating_sub(left).saturating_add(1), bottom.saturating_sub(top_rule).saturating_add(1))));
 
             // --- cell text, clipped to each cell's content rect.
             for index in 0..span.cell_count() {
@@ -6870,20 +6914,18 @@ impl<'a> Session<'a> {
                 };
                 let content = &text[cell.start_byte as usize..cell.end_byte as usize];
                 if !content.is_empty() {
-                    // Clipped to the column width: a cell holding more characters than its column can
-                    // show is truncated rather than allowed to run into its neighbour, because a
-                    // `TextRun` has no clip rect and would otherwise overwrite the border.
+                    // PageText is filled by emit_body_text before painting. Reference the
+                    // actual UTF-8 bytes rather than a TextRun of ascending codepoints.
                     let fits = (cw / m.cell_w.max(1)).min(u32::from(TextRun::MAX_LEN)) as usize;
-                    let shown: String = content.iter().take(fits).map(|&b| b as char).collect();
-                    tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
-                        cx as i32,
-                        cy as i32,
-                        shown.chars().next().map_or(0, |c| c as u32),
-                        shown.chars().count() as u16,
-                        holonomy_render::Style::REGULAR,
-                        0,
-                        holonomy_render::chrome::colour::INK,
-                    ))));
+                    let first_line = content.iter().position(|&b| b == b'\n').unwrap_or(content.len());
+                    let shown = codepoints_upto(&content[..first_line], 0, fits);
+                    let page_start = self.lines.line_begin(first as usize);
+                    if let Some(offset) = (cell.start_byte as usize).checked_sub(page_start) {
+                        tree.before.push(SurfaceTree::leaf(Node::DocText(holonomy_render::DocRun::new(
+                            cx as i32, cy as i32, offset as u32, shown as u32,
+                            holonomy_render::Style::REGULAR, 0, holonomy_render::chrome::colour::INK,
+                        ))));
+                    }
                 }
                 cells_drawn += 1;
                 if active.is_some_and(|a| a.row == cell.row && a.col == cell.col) {

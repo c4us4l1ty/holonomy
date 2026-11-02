@@ -1739,3 +1739,27 @@ fn paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes() {
         }
     }
 }
+
+#[test]
+fn paged_blocks_start_on_their_anchor_and_displace_only_following_rows() {
+    let m = ChromeMetrics::for_size(1280, 1200);
+    let layout = Layout::new(&m);
+    let h = m.cell_h;
+    let state = ChromeState {
+        paged: true, total_lines: 8,
+        line_heights: LineHeights::from(h, &[(1, h * 4), (3, h * 2)]),
+        ..ChromeState::default()
+    };
+    let y0 = layout.row_y(&state, 0).unwrap();
+    let y1 = layout.row_y(&state, 1).unwrap();
+    let y2 = layout.row_y(&state, 2).unwrap();
+    let y3 = layout.row_y(&state, 3).unwrap();
+    let y4 = layout.row_y(&state, 4).unwrap();
+    assert_eq!(y1 - y0, h);
+    assert_eq!(y2 - y1, h * 4);
+    assert_eq!(y3 - y2, h);
+    assert_eq!(y4 - y3, h * 2);
+    let x = layout.text.x as i32;
+    assert_eq!(layout.caret_at(&state, x, (y1 + h * 2) as i32).unwrap().0, 1);
+    assert_eq!(layout.caret_at(&state, x, (y2 + 1) as i32).unwrap().0, 2);
+}

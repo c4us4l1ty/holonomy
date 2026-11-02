@@ -309,6 +309,7 @@ dependencies = [
  "holonomy-secure",
  "libc",
  "miniz_oxide",
+ "zeroize",
 ]
 
 [[package]]
