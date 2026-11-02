@@ -878,6 +878,18 @@ struct Layouter<'a> {
     pending: Option<Pending>,
     /// Width of the spaces held back before [`Layouter::pending`].
     held_spaces: u32,
+    /// **The run the held spaces came from: its face, its metric and its point size.**
+    ///
+    /// `None` when nothing is held. **A held space belongs to the run it was typed in, and that run is
+    /// gone by the time the spaces are written**: `commit` finishes the word, and only then does anything
+    /// look for one reads the *line's* last segment — which at a style boundary is the previous run. So `` `code `` followed by a space and then plain text measured the
+    /// space as a Helvetica space while the reader drew a Courier one, and a space between two heading
+    /// words was pushed at the body size. The run's rule then traced a length its own text does not have,
+    /// and the line the exporter broke was not the line the reader laid out.
+    ///
+    /// **One `Option` around all three** so the empty case is a single `None` and the three cannot be
+    /// half-set: a `face` with no `metric` is exactly the disagreement this field replaces.
+    held_run: Option<(Name<'static>, BaseFont, f32)>,
     /// **The bytes of a character the last piece ended in the middle of.**
     ///
     /// **A piece is 64 KiB of the document, and a character can straddle the edge.** The
@@ -889,28 +901,6 @@ struct Layouter<'a> {
     /// So the incomplete character is held here and completed by the next piece. The bytes are
     /// at most three, because a UTF-8 character is at most four bytes long.
     utf8_carry: Vec<u8>,
-}
-
-/// **The face a run of spaces with no word should be drawn in**: the line's last face *and its metric*,
-/// if it has one, else the body face.
-///
-/// # Why the metric comes back with the name
-///
-/// **Because the two are one fact and `Segment` keeps them in two fields.** The resource name says what
-/// the reader will draw with; the metric face says how wide the exporter thinks it is. A held space
-/// pushed with `BaseFont::Helvetica`'s metrics under, say, `Courier`'s name would be measured as a
-/// Helvetica space and drawn as a monospace one — so the rule that `draw_rules` traces over it would be
-/// a different length from the space the reader renders, and the underline would stop short of the word
-/// after it or run past it.
-///
-/// **The first version returned only the name**, which is the argument `push_many` takes first and the
-/// reason the second was easy to leave at its default. It is returned as a pair now, so a caller cannot
-/// take one without the other.
-fn pending_face(segments: &[Segment]) -> (Name<'static>, BaseFont) {
-    segments
-        .last()
-        .map(|s| (s.font, s.metric))
-        .unwrap_or((Faces::NAMES.regular, BaseFont::Helvetica))
 }
 
 /// **The formatting of one run, as the layouter needs it.**
@@ -1020,6 +1010,7 @@ impl<'a> Layouter<'a> {
             scale: 1.0,
             pending: None,
             held_spaces: 0,
+            held_run: None,
             utf8_carry: Vec::new(),
         }
     }
@@ -1109,7 +1100,10 @@ impl<'a> Layouter<'a> {
                     if let Some(l) = self.commit(stats, limit) {
                         done.push(l);
                     }
-                    self.held_spaces += advance(metric, b" ");
+                    // **The run's own face, recorded with the width.** See `held_run`: the run is over by
+                    // the time the space is written, so it has to be remembered here or inferred wrongly
+                    // from the line's last segment.
+                    self.hold(font, metric, size, advance(metric, b" "));
                     i += 1;
                     continue;
                 }
@@ -1120,7 +1114,7 @@ impl<'a> Layouter<'a> {
                     if let Some(l) = self.commit(stats, limit) {
                         done.push(l);
                     }
-                    self.held_spaces += advance(metric, &[b' '; TAB_SPACES]);
+                    self.hold(font, metric, size, advance(metric, &[b' '; TAB_SPACES]));
                     i += 1;
                     continue;
                 }
@@ -1191,9 +1185,8 @@ impl<'a> Layouter<'a> {
         let Some(pending) = self.pending.take() else {
             // No word open -- a run of only spaces. The held spaces still have to go somewhere, or a
             // line break would discard them; for a run that is *only* spaces they are the whole run.
-            // **The line's last face and its metric**, so a space inside a mono run is measured as one.
-            let (face, metric) = pending_face(&self.segments);
-            self.flush_spaces(face, metric);
+            // **The face and metric are the held run's own**, recorded when the space was typed.
+            self.flush_spaces();
             return None;
         };
         if !self.segments.is_empty() && self.width + pending.width > limit {
@@ -1218,10 +1211,10 @@ impl<'a> Layouter<'a> {
             self.width = pending.width;
             return Some(finished);
         }
-        // **The word's own face and metric**, not `pending_face`: the spaces belong in *front* of this
-        // word and are part of the same run, so they take its face even though the line's last segment
-        // may be a different one -- which is exactly the case at a style boundary.
-        self.flush_spaces(pending.font, pending.metric);
+        // **The spaces go out before this word, in the run they were typed in.** That is `held_run`'s
+        // and not `pending`'s: a space at a style boundary belongs to the run it was typed in, and taking
+        // the next word's face would draw it in a face whose glyphs it is not.
+        self.flush_spaces();
         self.width += pending.width;
         self.push_many(
             &pending.text,
@@ -1235,11 +1228,30 @@ impl<'a> Layouter<'a> {
         None
     }
 
-    /// Append the held spaces, at `face`, measured as `metric`.
+    /// **Hold one or more spaces back, with the run they came from.**
     ///
-    /// **Two parameters and not one**, because the face a space is *drawn* in and the face it is
-    /// *measured* in are the same face and only `Segment` knows both. See [`pending_face`].
-    fn flush_spaces(&mut self, face: Name<'static>, metric: BaseFont) {
+    /// The width accumulates because a run of spaces is one held stretch; the face and metric are
+    /// overwritten because a second run's spaces cannot join the first's -- `commit` runs on every space,
+    /// so anything held when a new run's space arrives was already flushed into the line.
+    fn hold(&mut self, face: Name<'static>, metric: BaseFont, size: f32, width: u32) {
+        self.held_spaces += width;
+        self.held_run = Some((face, metric, size));
+    }
+
+    /// Append the held spaces, in the run that held them.
+    ///
+    /// **No arguments: the face and the metric come from `held_run`, where the run that held them was
+    /// recorded.** A parameter pair here would be a second answer to "whose space is this", and it was
+    /// exactly that: the face used to be looked up from the line's last segment, which is not the run the
+    /// space came from.
+    fn flush_spaces(&mut self) {
+        let Some((face, metric, size)) = self.held_run.take() else {
+            // **A count with no record would lose a space**, so the invariant is asserted where it can be
+            // checked cheaply in a debug build. `hold` sets both, and nothing else moves either, so this
+            // arm is only reachable from a future field added without the record.
+            debug_assert_eq!(self.held_spaces, 0, "a held width with no held run");
+            return;
+        };
         if self.held_spaces == 0 {
             return;
         }
@@ -1258,11 +1270,16 @@ impl<'a> Layouter<'a> {
         // **Plain and unraised**, because a held space stands between two words and belongs to
         // neither: an underline across the gap between two underlined words would draw one rule where
         // the author wrote two, and `advance_of`'s discipline is the same one -- the gap is body text.
+        //
+        // **And at the held run's own size**, which was the body size until this line. A held space
+        // between two heading words is a space in a heading, and drawing it at 11 pt when the words
+        // either side are at 14.85 leaves the reader to re-break a line the exporter already broke --
+        // the one thing this layouter exists to prevent.
         self.push_many(
             &spaces,
             face,
             metric,
-            self.opts.font_size,
+            size,
             0.0,
             false,
             false,
