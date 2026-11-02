@@ -54,7 +54,7 @@ use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRu
 use holonomy_render::table::TableGrid;
 use holonomy_render::DamageRect;
 use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
-use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD, STYLE_ITALIC};
+use holonomy_text::{Editor, EditorError, SpanPolicy, ANCHOR_BYTES, STYLE_BOLD, STYLE_HEADER, STYLE_ITALIC};
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
 /// Why the session stopped.
@@ -881,7 +881,7 @@ pub struct DocumentSnapshot {
 
 /// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentRequest { New, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
+pub enum DocumentRequest { New, NewSample, Close, Rename, Delete, Lock, OpenContainer, ImportText, DocumentMenu(usize) }
 
 impl<'a> Session<'a> {
     /// A session over `editor`, painting through `painter`, presenting to `scanout`.
@@ -1927,6 +1927,13 @@ impl<'a> Session<'a> {
         Ok(out)
     }
     pub fn create_document(&mut self, id: u64, title: String) { self.adopt_new(Editor::new(), title); self.active_id = id; self.state.dirty = true; }
+    pub fn create_sample_document(&mut self, id: u64) -> Result<(), SessionError> {
+        let editor = crate::sample::studio_handbook()?;
+        self.adopt_new(editor, crate::sample::TITLE.to_string());
+        self.active_id = id;
+        self.state.dirty = true;
+        Ok(())
+    }
     pub fn rename_document(&mut self, title: String) { self.state.title = title; self.state.dirty = true; self.sync_docs(); self.invalidate(self.chrome.full_damage()); }
     pub fn open_stored_document(&mut self, id: u64, title: String, payload: &[u8], caret: u32) -> Result<(), SessionError> {
         if self.active_id == id { return Ok(()); }
@@ -2595,7 +2602,14 @@ impl<'a> Session<'a> {
                 if self.page_drag {
                     self.edge_scroll = EdgeScroll::at(&self.chrome.layout, x, y);
                 }
-                self.press(hit, x, y, bytes)?;
+                match self.press(hit, x, y, bytes) {
+                    Err(SessionError::ReadOnly) => self.set_notice(Some("Viewing mode: editing is disabled".into())),
+                    Err(SessionError::Editor(EditorError::Undo(e @ holonomy_text::UndoError::ActionTooLarge { .. }))) => {
+                        self.set_notice(Some(format!("Edit refused: {e}")));
+                    }
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
+                }
             }
             P::Button {
                 button: holonomy_input::Button::Left,
@@ -2973,31 +2987,14 @@ impl<'a> Session<'a> {
                 self.invalidate_popup_change(before);
             }
             Hit::Tool(tool) => {
-                // **An armed toggle, before the dropdown check and before `tool_command`.** Part 25.
-                //
-                // **It goes first because the alternative is two special cases.** `tool_command` maps a
-                // tool to a `Command` and `has_dropdown` says whether it opens a popup; a third
-                // question — "does this tool set a flag?" — fits alongside them as one more arm rather
-                // than as a special case inside either.
-                //
-                // **`armed_style()` then `set_armed_style()`, never a direct field write**, so the
-                // model and the chrome cannot come apart. That is the whole discipline of this part and
-                // it is one function pair.
+                // Toolbar toggles must use the same selection-aware path as menu
+                // actions; directly arming here silently ignored selected text.
                 if let Some(slot) = holonomy_render::chrome::StyleFlags::slot_for(tool) {
-                    let (bold, italic) = self.armed_style();
-                    let (bold, italic) = match slot {
-                        holonomy_render::chrome::StyleFlagsSlot::Bold => (!bold, italic),
-                        holonomy_render::chrome::StyleFlagsSlot::Italic => (bold, !italic),
+                    let action = match slot {
+                        holonomy_render::chrome::StyleFlagsSlot::Bold => holonomy_render::menus::Action::ToggleBold,
+                        holonomy_render::chrome::StyleFlagsSlot::Italic => holonomy_render::menus::Action::ToggleItalic,
                     };
-                    self.set_armed_style(bold, italic);
-                    // **The button's own box.** An armed toggle is drawn as a fill on the button
-                    // (`PILL_ACTIVE`), so the button is the only thing whose pixels changed.
-                    if let Some(r) =
-                        widgets::hit_rect(&self.chrome.layout, &self.state, widgets::Hit::Tool(tool))
-                    {
-                        self.invalidate(r);
-                    }
-                    self.stats.pointer_chrome += 1;
+                    self.apply_action(action)?;
                     return Ok(());
                 }
                 // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
@@ -3816,7 +3813,8 @@ impl<'a> Session<'a> {
         // else is armed writes `Some(0)` rather than `None`, because `None` means "inherit from the
         // character before the caret" and inheriting bold after the user turned bold off is the bug this
         // option type exists to prevent. **`None` is for a session nobody has toggled anything in.**
-        let mut f = 0u16;
+        // Inline toggles must not discard an armed paragraph's header bit.
+        let mut f = self.pending_style.unwrap_or(0) & !(STYLE_BOLD | STYLE_ITALIC);
         if bold {
             f |= STYLE_BOLD;
         }
@@ -3836,16 +3834,6 @@ impl<'a> Session<'a> {
         // the whole reason the model is an `Option`.
         let f = self.pending_style.unwrap_or(0);
         (f & STYLE_BOLD != 0, f & STYLE_ITALIC != 0)
-    }
-
-    /// **The colour armed for typed text, or 0 for "the document's default".** Part 29.
-    ///
-    /// **The colour twin of [`armed_style`](Self), and the `unwrap_or(0)` is the same shape and the
-    /// same reason:** "the user said nothing" and "the user chose the default" both read as nothing
-    /// armed, which is right for the span field -- `0` *is* the default -- and is why this returns a
-    /// plain `u32` rather than an `Option` the way `armed_style` returns two `bool`s.
-    fn armed_colour(&self) -> u32 {
-        self.pending_colour.unwrap_or(0)
     }
 
     /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
@@ -3878,7 +3866,7 @@ impl<'a> Session<'a> {
         use widgets::Tool;
         if self.managed_documents {
             let request = match action {
-                Action::New => Some(DocumentRequest::New), Action::Close => Some(DocumentRequest::Close),
+                Action::New => Some(DocumentRequest::New), Action::NewSample => Some(DocumentRequest::NewSample), Action::Close => Some(DocumentRequest::Close),
                 Action::Rename => Some(DocumentRequest::Rename), Action::Delete => Some(DocumentRequest::Delete),
                 Action::Lock => Some(DocumentRequest::Lock), Action::Open => Some(DocumentRequest::OpenContainer),
                 Action::Import => Some(DocumentRequest::ImportText), _ => None,
@@ -3894,7 +3882,7 @@ impl<'a> Session<'a> {
                 return Ok(());
             }
             Action::KeyboardShortcuts => {
-                self.set_notice(Some("Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
+                self.set_notice(Some("Ctrl+B bold · Ctrl+Shift+I italic · Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
                 return Ok(());
             }
             Action::Export => {
@@ -3968,60 +3956,36 @@ impl<'a> Session<'a> {
                 self.stats.pointer_commands += 1;
             }
             Action::ToggleBold => {
-                // **A selection means "style this range", and that takes precedence over arming.**
-                // Part 28 — the thing part 24's own note said selection would unlock.
-                //
-                // **CORRECTION, part 39: the damage follows which of the two happened.** Styling a
-                // selection repaints the page; arming the next character repaints **one toolbar
-                // button**. This was a full window either way, and "press B" is the most-pressed
-                // button in a word processor.
-                let tool = Tool::Bold;
-                if !self.style_selection(
-                    !self.armed_style().0,
-                    self.armed_style().1,
-                    self.armed_colour(),
-                )? {
-                    self.set_armed_style(!self.armed_style().0, self.armed_style().1);
-                    self.invalidate_hit(Some(widgets::Hit::Tool(tool)));
-                } else {
+                self.check_editable()?;
+                if let Some(sel) = self.editor.selection() {
+                    let enabled = self.editor.style_at(sel.start).style_flags & STYLE_BOLD == 0;
+                    self.update_selection_style(Some((STYLE_BOLD, enabled)), None)?;
                     self.damage = self.chrome.full_damage();
+                } else {
+                    self.set_armed_style(!self.armed_style().0, self.armed_style().1);
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Bold)));
                 }
                 self.stats.pointer_chrome += 1;
             }
             Action::ToggleItalic => {
-                let tool = Tool::Italic;
-                if !self.style_selection(
-                    self.armed_style().0,
-                    !self.armed_style().1,
-                    self.armed_colour(),
-                )? {
-                    self.set_armed_style(self.armed_style().0, !self.armed_style().1);
-                    self.invalidate_hit(Some(widgets::Hit::Tool(tool)));
-                } else {
+                self.check_editable()?;
+                if let Some(sel) = self.editor.selection() {
+                    let enabled = self.editor.style_at(sel.start).style_flags & STYLE_ITALIC == 0;
+                    self.update_selection_style(Some((STYLE_ITALIC, enabled)), None)?;
                     self.damage = self.chrome.full_damage();
+                } else {
+                    self.set_armed_style(self.armed_style().0, !self.armed_style().1);
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Italic)));
                 }
                 self.stats.pointer_chrome += 1;
             }
-            // **Part 29: the fourth dropdown, and the first whose value reaches the document.**
-            //
-            // **`style_selection` with a colour rather than flags**, which is why it takes the value
-            // and not an index: the session has already resolved the index through `COLOURS` and the
-            // span field wants `0x00RRGGBB`. Everything else about the rule -- a selection styles the
-            // range, no selection arms the next character -- is part 28's and is not restated here.
             Action::SetColour(i) => {
-                let n = holonomy_render::menus::COLOURS.len().saturating_sub(1);
-                let idx = usize::from(i).min(n);
-                self.state.colour_index = idx;
+                self.check_editable()?;
+                let idx = usize::from(i).min(holonomy_render::menus::COLOURS.len().saturating_sub(1));
                 let rgb = holonomy_render::menus::COLOURS[idx].1;
-                // **Arm *and* apply.** A selection is styled; with no selection the colour waits for
-                // the next character, which is what the control means with nothing selected and is
-                // part 25's rule for the two style toggles.
+                self.state.colour_index = idx;
                 self.pending_colour = Some(rgb);
-                // **Part 39: the page repaints only when there was a page to repaint.** Arming a colour
-                // with nothing selected changes the colour button and nothing else; styling a
-                // selection changes every line the selection covers.
-                let styled = self.style_selection(self.armed_style().0, self.armed_style().1, rgb)?;
-                if styled {
+                if self.update_selection_style(None, Some(rgb))? {
                     self.damage = self.chrome.full_damage();
                 } else {
                     self.invalidate_hit(Some(widgets::Hit::Tool(Tool::TextColour)));
@@ -4029,11 +3993,39 @@ impl<'a> Session<'a> {
                 self.stats.pointer_chrome += 1;
             }
             Action::SetStyle(i) => {
-                self.state.style_index =
-                    usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
-                // **The label on one button.** Part 39: this was a whole-window repaint to redraw the
-                // word `Normal text` -- 3,201,150 pixels for 120 of text.
-                self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
+                self.check_editable()?;
+                let idx = usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
+                // These are the three presets the model can actually represent. Heading is
+                // exported as a heading; on screen it uses bold and teal at the body size.
+                let (flags, colour) = match idx {
+                    1 => (STYLE_HEADER | STYLE_BOLD, 0x001A_5C75),
+                    2 => (STYLE_ITALIC, 0),
+                    _ => (0, 0),
+                };
+                let (from, to) = match self.editor.selection() {
+                    Some(sel) => (self.line_start(sel.start as usize), self.line_end_offset((sel.end - 1) as usize)),
+                    None => {
+                        let caret = self.editor.caret() as usize;
+                        (self.line_start(caret), self.line_end_offset(caret))
+                    }
+                };
+                if from < to {
+                    if self.editor.format_range(from as u32, to as u32, |_| (flags, colour))? {
+                        self.after_edit(0)?;
+                        self.damage = self.chrome.full_damage();
+                    } else {
+                        self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
+                    }
+                } else {
+                    // A zero-width span cannot represent an empty paragraph. Arm the next
+                    // text instead, using the same mechanism as the inline controls.
+                    self.pending_style = Some(flags);
+                    self.pending_colour = Some(colour);
+                    self.state.styles.bold = flags & STYLE_BOLD != 0;
+                    self.state.styles.italic = flags & STYLE_ITALIC != 0;
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
+                }
+                self.state.style_index = idx;
                 self.stats.pointer_chrome += 1;
             }
             Action::SetFont(i) => {
@@ -4065,6 +4057,10 @@ impl<'a> Session<'a> {
             // **Part 45 changed what happens to the document being replaced.** It was dropped; it is
             // now parked, because the sidebar has a row for it and `Close` and the row itself are what
             // make it reachable again.
+            Action::NewSample => {
+                self.create_sample_document(0)?;
+                self.stats.pointer_chrome += 1;
+            }
             Action::New => {
                 self.adopt_new(Editor::new(), "untitled".to_string());
                 self.stats.pointer_chrome += 1;
@@ -4344,8 +4340,12 @@ impl<'a> Session<'a> {
         // handled" is the right answer**, and `SessionStats::edits_readonly_refused` is where the
         // count lives.
         if let Err(e) = self.apply_with(command, Some(&mut *bytes)) {
-            if !matches!(e, SessionError::ReadOnly) {
-                return Err(e);
+            match e {
+                SessionError::ReadOnly => self.set_notice(Some("Viewing mode: editing is disabled".into())),
+                SessionError::Editor(EditorError::Undo(e @ holonomy_text::UndoError::ActionTooLarge { .. })) => {
+                    self.set_notice(Some(format!("Edit refused: {e}")));
+                }
+                other => return Err(other),
             }
         }
         self.tick_with(bytes)?;
@@ -4546,6 +4546,8 @@ impl<'a> Session<'a> {
             Command::ZoomIn
             | Command::ZoomOut
             | Command::ZoomReset => {}
+            Command::Hotkey(Hotkey::Bold) => self.apply_action(holonomy_render::menus::Action::ToggleBold)?,
+            Command::Hotkey(Hotkey::Italic) => self.apply_action(holonomy_render::menus::Action::ToggleItalic)?,
             Command::Hotkey(Hotkey::Undo) => self.undo()?,
             Command::Hotkey(Hotkey::Redo) => self.redo()?,
             Command::Hotkey(Hotkey::Save) => {
@@ -4729,41 +4731,32 @@ impl<'a> Session<'a> {
             self.delete_selected()?;
         }
         let at = self.editor.caret() as usize;
+        let end_of_heading = bytes == b"\n"
+            && at > self.line_start(at)
+            && at == self.line_end_offset(at)
+            && self.editor.style_at((at - 1) as u32).style_flags & STYLE_HEADER != 0;
         // `GrowIntoInsert` so typing at the end of a bold word keeps it bold, which is what a word
         // processor does and what `SpanPolicy`'s own docs argue for.
         self.editor
             .insert_at(self.editor.caret(), bytes, SpanPolicy::GrowIntoInsert)?;
         self.counts.after_insert(&self.editor, at, bytes);
-        // **Arm, applied to what was just typed.** Part 25.
-        //
-        // **Not before the insert, because `style_range` drops a zero-width range** — `SpanMap::
-        // style_range` returns `Ok(())` for `start == end` and stores nothing, so "bold the next
-        // character" cannot be a span parked at the caret. It is a field on the session, and the only
-        // place the document can show it is on bytes that exist.
-        //
-        // **After, and over `[at, at + len)`, which is the range this insert produced.** Applying it to
-        // the caret alone would bold nothing on a newline — `insert` is called for `\n` too — and
-        // applying it to the whole line would restyle text the user did not touch.
-        //
-        // **A style change is an edit**, so it goes through `after_edit` like one: it is in the undo
-        // stack, it repaints the line, and `SessionStats::edits` counts it. **Two edits per typed
-        // character when a toggle is armed, and one when none is** — which is the cost of the feature
-        // and is stated here rather than left to be noticed on the keystroke benchmark.
-        if let Some(armed) = self.pending_style.filter(|_| !bytes.is_empty()) {
-            self.editor
-                .style_range(at as u32, (at + bytes.len()) as u32, armed, 0)?;
-            self.after_edit(0)?;
+        // Both properties can be armed independently. Applying them in separate
+        // style_range calls would let the second call erase the first one.
+        if !bytes.is_empty() && (self.pending_style.is_some() || self.pending_colour.is_some()) {
+            let inherited = self.editor.style_at(at as u32);
+            self.editor.style_range(
+                at as u32,
+                (at + bytes.len()) as u32,
+                self.pending_style.unwrap_or(inherited.style_flags),
+                self.pending_colour.unwrap_or(inherited.color_rgb),
+            )?;
         }
-        // **The armed colour, over the same range, and as a second edit.** Part 29.
-        //
-        // **Separate from the style arm above rather than merged into one `style_range` call**, because
-        // they are armed independently: a user can have Bold on and no colour, or a colour and no
-        // bold. **Merging them would make one of the two un-clearable**, which is exactly the bug
-        // part 25 found when un-arming Bold left the flag at 0 and the next character came out bold.
-        if let Some(rgb) = self.pending_colour.filter(|_| !bytes.is_empty()) {
-            self.editor
-                .style_range(at as u32, (at + bytes.len()) as u32, 0, rgb)?;
-            self.after_edit(0)?;
+        if end_of_heading {
+            self.pending_style = Some(0);
+            self.pending_colour = Some(0);
+            self.state.styles.bold = false;
+            self.state.styles.italic = false;
+            self.state.style_index = 0;
         }
         self.after_edit(bytes.len() as u32)
     }
@@ -5116,6 +5109,7 @@ impl<'a> Session<'a> {
     }
 
     pub fn undo(&mut self) -> Result<(), SessionError> {
+        self.check_editable()?;
         // `NothingToUndo` is a *keymap* condition, not a document failure: pressing undo with
         // nothing to undo should be swallowed, not reported. Same for redo.
         //
@@ -5129,9 +5123,13 @@ impl<'a> Session<'a> {
         // alternative -- threading the bytes out of `UndoStack` -- would put an undo-format detail into
         // the counting path, where a format change becomes a counting bug.
         match self.editor.undo() {
-            Ok(_) => {
+            Ok(outcome) => {
                 self.recount_counts();
-                self.after_edit(0)
+                self.after_edit(0)?;
+                if outcome.kind == holonomy_text::ActionKind::Format {
+                    self.damage = self.chrome.full_damage();
+                }
+                Ok(())
             }
             Err(EditorError::NothingToUndo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -5139,10 +5137,15 @@ impl<'a> Session<'a> {
     }
 
     fn redo(&mut self) -> Result<(), SessionError> {
+        self.check_editable()?;
         match self.editor.redo() {
-            Ok(_) => {
+            Ok(outcome) => {
                 self.recount_counts();
-                self.after_edit(0)
+                self.after_edit(0)?;
+                if outcome.kind == holonomy_text::ActionKind::Format {
+                    self.damage = self.chrome.full_damage();
+                }
+                Ok(())
             }
             Err(EditorError::NothingToRedo) => Ok(()),
             Err(e) => Err(e.into()),
@@ -5269,62 +5272,22 @@ impl<'a> Session<'a> {
         self.state.scroll_line = scroll;
     }
 
-    /// **Style the selected range, or return `false` if there is nothing selected.** Part 28.
-    ///
-    /// ## Why this is what part 24 said selection would unlock
-    ///
-    /// `emit_body_text`'s own comment records the debt:
-    ///
-    /// > `Session::pending_style` is the same fact in the model and the toolbar, and it is a *pending*
-    /// > style — it is what the next character will be. Turning existing text bold needs a range, and
-    /// > there is no range to apply it to.
-    ///
-    /// **And `Editor::style_range` has taken `(start, end, flags, colour)` since phase 6.** The
-    /// function was there and correct; the model had nothing to hand it. This is the whole of what
-    /// selection buys, and it is why it was worth building rather than a highlight.
-    ///
-    /// ## Why it returns `bool` rather than acting or not
-    ///
-    /// **Because "there was nothing to style" and "styled it" are two answers to one question**, and
-    /// the caller needs to pick between arming and styling. A `()` return would force the caller to
-    /// ask `editor.selection()` again, which is the same fact read twice and could differ if anything
-    /// moved in between.
-    ///
-    /// ## Why the selection *stays* selected afterwards
-    ///
-    /// **Because restyling does not consume a selection.** Typing does; this does not. A user who
-    /// selects a paragraph, bolds it and then selects the next one has not lost anything by the first
-    /// selection being still there — and clearing it would make a second Bold press (to un-bold) do
-    /// nothing, because there would be no range left to un-bold.
-    fn style_selection(
+    /// Change one formatting property without destroying the other properties in
+    /// a mixed selection. Snapshot the runs first because styling splits the map.
+    fn update_selection_style(
         &mut self,
-        bold: bool,
-        italic: bool,
-        colour: u32,
+        flag: Option<(u16, bool)>,
+        colour: Option<u32>,
     ) -> Result<bool, SessionError> {
-        // **The read-only check, which this path used to skip entirely.** It reaches the editor
-        // directly, so it never passed through `fault_for_edit` -- and **the toolbar's Bold button
-        // restyled the selected range in viewing mode**, with the refusal counter at zero.
-        self.check_editable()?;
-        let Some(sel) = self.editor.selection() else {
-            return Ok(false);
-        };
-        let mut flags = 0u16;
-        if bold {
-            flags |= STYLE_BOLD;
-        }
-        if italic {
-            flags |= STYLE_ITALIC;
-        }
-        // **Over the selected range only, never the arming flag.** `pending_style` stays where it was:
-        // a user who has Bold armed and then selects a word and presses Bold has made the *next*
-        // character bold too, which is what every editor does and is not a decision this should make
-        // silently in either direction.
-        // **`colour` and not `0`, which is part 29.** Part 24 wired this call with a literal zero
-        // because nothing could produce anything else; `TextIntervalSpan::color_rgb` had been in the
-        // record since phase 4 with nothing to put in it.
-        self.editor.style_range(sel.start, sel.end, flags, colour)?;
-        self.after_edit(0)?;
+        let Some(sel) = self.editor.selection() else { return Ok(false); };
+        let changed = self.editor.format_range(sel.start, sel.end, |span| {
+            let mut flags = span.style_flags;
+            if let Some((bit, enabled)) = flag {
+                if enabled { flags |= bit; } else { flags &= !bit; }
+            }
+            (flags, colour.unwrap_or(span.color_rgb))
+        })?;
+        if changed { self.after_edit(0)?; }
         Ok(true)
     }
 
@@ -8243,7 +8206,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         // allowed to do that is `Session::adopt_document`, which `apply_action` reaches directly.
         // Routing it through a `Command` would hand the keymap a variant whose meaning is "discard
         // the document", which no chord asks for in this build.
-        Action::New => return None,
+        Action::New | Action::NewSample => return None,
         // **And the same for the two rows that need a path.** `Open` and `Import` are not keystrokes
         // at all: the session can ask for a path to be opened but cannot supply one, so the row is a
         // request the *window driver* answers — `apply_action` stores it, the driver calls

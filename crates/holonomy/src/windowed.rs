@@ -361,6 +361,19 @@ pub fn run(
         if let Some(req) = session.take_document_request() {
             match req {
                 DocumentRequest::New => { form = Some(Form::new_doc()); }
+                DocumentRequest::NewSample => {
+                    if let Some(v) = vault.as_ref() {
+                        let id = v.next_id();
+                        match session.create_sample_document(id) {
+                            Ok(()) => {
+                                if save(&mut vault, &mut session) {
+                                    session.set_notice(Some("Sample created. Edit your own copy.".into()));
+                                }
+                            }
+                            Err(e) => session.set_notice(Some(format!("Could not create sample: {e}"))),
+                        }
+                    }
+                }
                 DocumentRequest::Rename => { form = Some(Form::rename(session.state.title.clone())); }
                 DocumentRequest::Delete => { form = Some(Form::delete(session.state.title.clone(), session.active_document_id())); }
                 DocumentRequest::Close => {
@@ -427,8 +440,11 @@ pub fn run(
             if pending_paste.take().is_some() {
                 match std::str::from_utf8(&bytes) {
                     Ok(text) if !text.is_empty() => {
-                        session.insert_text(text).map_err(WindowedError::Session)?;
-                        last_edit = Instant::now();
+                        match session.insert_text(text) {
+                            Ok(()) => last_edit = Instant::now(),
+                            Err(crate::session::SessionError::ReadOnly) => session.set_notice(Some("Viewing mode: editing is disabled".into())),
+                            Err(e) => return Err(WindowedError::Session(e)),
+                        }
                     }
                     // **Said out loud, because the alternative is Ctrl+V doing nothing at all** — which
                     // is the report this is fixing.
@@ -470,7 +486,14 @@ pub fn run(
                 }
                 if vault.is_none() { continue; }
                 match fed {
-                    Fed::Text(text) => { session.insert_text(&text).map_err(WindowedError::Session)?; last_edit = Instant::now(); continue; }
+                    Fed::Text(text) => {
+                        match session.insert_text(&text) {
+                            Ok(()) => last_edit = Instant::now(),
+                            Err(crate::session::SessionError::ReadOnly) => session.set_notice(Some("Viewing mode: editing is disabled".into())),
+                            Err(e) => return Err(WindowedError::Session(e)),
+                        }
+                        continue;
+                    }
                     Fed::Pending => continue,
                     Fed::Pass => {}
                 }

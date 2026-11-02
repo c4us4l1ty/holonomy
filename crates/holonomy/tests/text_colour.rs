@@ -399,33 +399,7 @@ fn two_colours_on_one_line_are_two_runs_and_two_colours() {
     );
 }
 
-/// **A colour is taken back by one undo, and the page follows.**
-///
-/// ## Two corrections, and the first was mine and the second the project's
-///
-/// **This gate was first written to assert the *opposite* — that a colour survives undo.** The
-/// evidence for that was `SpanMap::style_range`'s body: it rebuilds `self.spans` and returns, with no
-/// push to the undo stack. **That reading was of the wrong half.** `Editor::style_range` is a
-/// one-line delegation *to* it, and the undo entry is pushed by `Session::style_selection`'s
-/// `after_edit`, not by the span map. Undo takes it back; `style_at(7).color_rgb` is 0 afterwards.
-///
-/// **And then this gate failed with 1,898 differing pixels *after* a full repaint**, which is what
-/// made me doubt the first conclusion a second time. **That number was the caret**: the comparison
-/// session had been parked at 0 and the undone one had the caret wherever undo left it. Part 28's
-/// fixture lesson, third recording, and the reason this file parks both carets by name.
-///
-/// ## What is still true from the wrong reading
-///
-/// **`Session::insert`'s comment remains half false.** It says of arming a style:
-///
-/// > **A style change is an edit**, so it goes through `after_edit` like one: **it is in the undo
-/// > stack**, it repaints the line, and `SessionStats::edits` counts it.
-///
-/// **The span map does not push the undo entry — the session does, by calling `after_edit`.** So the
-/// sentence is right about the outcome and wrong about the mechanism, and the mechanism is the part a
-/// reader would go looking for. `SpanMap::style_range` called directly — which is what
-/// `tests/text_colour.rs`'s own `painted` does — is **not** undoable at all, and that is worth saying
-/// somewhere other than this gate.
+/// A formatting command is its own undo entry: text must remain intact.
 #[test]
 fn a_colour_is_taken_back_by_one_undo() {
     let mut s = painted("alpha bravo charlie\n", None);
@@ -458,6 +432,7 @@ fn a_colour_is_taken_back_by_one_undo() {
         0,
         "**one undo took the colour off the span**"
     );
+    assert_eq!(s.text().unwrap(), b"alpha bravo charlie\n", "undo must not delete the prior text edit");
     // **The pixels are NOT asserted equal to the control, and the reason is measured.**
     //
     // They differ by **1,898 pixels in a box of `(0, 51, 905, 792)`** -- the bottom two rows of the

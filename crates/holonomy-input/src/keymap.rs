@@ -136,6 +136,10 @@ pub enum Hotkey {
     DocumentEnd,
     /// Ctrl+A: select the entire document.
     SelectAll,
+    /// Ctrl+B: toggle bold.
+    Bold,
+    /// Ctrl+Shift+I: toggle italic (Ctrl+I remains the image shortcut).
+    Italic,
     /// Ctrl+I. Insert an image at the caret.
     ///
     /// A hotkey rather than a [`Command`] because it carries no payload: the *bytes* come from
@@ -350,6 +354,8 @@ impl Keymap {
                 KEY_Y if !mods.shift() && !mods.alt() => Some(Hotkey::Redo),
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
                 KEY_A if !mods.shift() && !mods.alt() => Some(Hotkey::SelectAll),
+                KEY_B if !mods.shift() && !mods.alt() => Some(Hotkey::Bold),
+                KEY_I if mods.shift() && !mods.alt() => Some(Hotkey::Italic),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
@@ -363,7 +369,7 @@ impl Keymap {
             if let Some(hotkey) = binding {
                 return Some(Command::Hotkey(hotkey));
             }
-            // Ctrl+Shift+I and friends: an unbound combo. Swallowed, never typed.
+            // Unbound control combinations are swallowed, never typed.
             return None;
         }
 
@@ -702,6 +708,7 @@ mod tests {
             (KEY_Z, Hotkey::Undo),
             (KEY_Y, Hotkey::Redo),
             (KEY_S, Hotkey::Save),
+            (KEY_B, Hotkey::Bold),
         ] {
             assert_eq!(
                 km.dispatch(InputEvent::press(code), &c),
@@ -709,6 +716,15 @@ mod tests {
                 "Ctrl+{code}"
             );
         }
+    }
+
+    #[test]
+    fn italic_shortcut_does_not_replace_the_existing_image_shortcut() {
+        let km = Keymap::us();
+        let mut mods = ctrl();
+        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::InsertImage)));
+        mods.update(KEY_LEFTSHIFT, 1);
+        assert_eq!(km.dispatch(InputEvent::press(KEY_I), &mods), Some(Command::Hotkey(Hotkey::Italic)));
     }
 
     #[test]
@@ -723,9 +739,8 @@ mod tests {
         // decision rather than as a record of an unfinished one.
         //
         // The property the test still asserts is the one it was written for: **an unbound combo
-        // produces nothing, and in particular does not type the letter.** That is why `KEY_B` is still
-        // here and `KEY_C` is not.
-        for code in [KEY_B, KEY_1, KEY_SPACE, KEY_ESC] {
+        // produces nothing, and in particular does not type the letter.
+        for code in [KEY_1, KEY_SPACE, KEY_ESC] {
             assert_eq!(
                 km.dispatch(InputEvent::press(code), &c),
                 None,

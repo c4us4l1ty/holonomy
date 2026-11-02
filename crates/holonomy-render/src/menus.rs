@@ -75,6 +75,8 @@ pub enum Action {
     /// **The tree did not build without it**, because `act(\"New\", Action::New)` and the `name()` arm
     /// below both name a variant that did not exist.
     New,
+    /// Create a new editable copy of the built-in studio handbook.
+    NewSample,
     /// **Open a container from a path and make it the document this session paints.** Part 45.
     ///
     /// **The developer window only, and the reason is the seal.** The jail's seccomp filter has no
@@ -169,6 +171,7 @@ impl Action {
             Action::DocumentStart => "document-start",
             Action::DocumentEnd => "document-end",
             Action::New => "new-document",
+            Action::NewSample => "new-sample",
             Action::Open => "open",
             Action::Import => "import",
             Action::Save => "save",
@@ -335,6 +338,7 @@ const fn accel(label: &'static str, acc: &'static str) -> Item {
 // drawn as inert affordances. The sealed product has no network, add-on runtime, or spell service.
 const FILE: &[Item] = &[
     act("New", Action::New),
+    act("New sample", Action::NewSample),
     act("Open", Action::Open),
     act("Import", Action::Import),
     Item { accelerator: Some("Ctrl+S"), ..act("Save", Action::Save) },
@@ -393,8 +397,8 @@ const INSERT: &[Item] = &[
 ];
 
 const FORMAT: &[Item] = &[
-    act("Bold", Action::ToggleBold),
-    act("Italic", Action::ToggleItalic),
+    Item { accelerator: Some("Ctrl+B"), ..act("Bold", Action::ToggleBold) },
+    Item { accelerator: Some("Ctrl+Shift+I"), ..act("Italic", Action::ToggleItalic) },
 ];
 
 const TOOLS: &[Item] = &[
@@ -428,12 +432,8 @@ pub fn items_for(index: usize) -> &'static [Item] {
 /// See `ChromeState::style_name`.
 pub const STYLES: &[&str] = &[
     "Normal text",
-    "Title",
-    "Heading 1",
-    "Heading 2",
-    "Heading 3",
+    "Heading",
     "Quote",
-    "Caption",
 ];
 
 /// The fonts the font dropdown offers, in the order it shows them.
@@ -536,6 +536,7 @@ pub const COLOURS: &[(&str, u32)] = &[
     ("Amber", 0x00_C0_7A_1E),
     ("Violet", 0x00_75_4A_C0),
     ("Slate", 0x00_5A_5A_66),
+    ("Default", 0),
 ];
 
 /// The item at `(menu, row)`, if there is one.
