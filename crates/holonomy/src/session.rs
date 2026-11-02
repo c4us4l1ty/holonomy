@@ -5874,8 +5874,7 @@ impl<'a> Session<'a> {
         if let Some((start, end, prefix)) = list_prefix {
             if prefix.is_empty() {
                 self.editor.delete_at(start as u32, (end - start) as u32)?;
-                self.counts =
-                    crate::counts::TextCounts::scan(&self.editor);
+                self.counts = crate::counts::TextCounts::scan(&self.editor);
                 self.after_edit(0)?;
                 return Ok(());
             }
