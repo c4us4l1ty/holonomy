@@ -2,8 +2,8 @@
 //!
 //! # The two claims
 //!
-//! 1. A default-features release build is a **static PIE**, under **2.0 MiB**, and contains **no X11**.
-//! 2. A `--features desktop` build is still a static PIE and still under 2.0 MiB, and it *does* contain
+//! 1. A default-features release build is a **static PIE**, under **4.0 MiB**, and contains **no X11**.
+//! 2. A `--features desktop` build is still a static PIE and still under 4.0 MiB, and it *does* contain
 //!    the X11 client -- because that is what the feature is for, and a gate that could not tell the two
 //!    apart would be testing nothing.
 //!
@@ -48,8 +48,8 @@ const X11_MARKERS: &[&str] = &[
     "HOLONOMY_X11_TRACE",
 ];
 
-/// The ceiling from the build profile: 2.0 MiB.
-const CEILING: u64 = 2 * 1024 * 1024;
+/// Product decision, 2026-11-03: 4 MiB for the stripped static musl binary.
+const CEILING: u64 = 4 * 1024 * 1024;
 
 /// The binary at `path` is a static PIE.
 fn assert_static_pie(path: &Path, what: &str) {
@@ -167,6 +167,25 @@ fn the_default_release_binary_carries_no_x11_client() {
         path.display(),
         bytes.len()
     );
+}
+
+/// The default binary must not contain the desktop SVG parser or its user-facing error paths.
+/// Build-time icon compilation is fine: only fixed bit rows reach this binary.
+#[test]
+#[cfg(not(feature = "desktop"))]
+fn the_sealed_binary_has_no_svg_import_runtime() {
+    let path = binary();
+    if !path.exists() && cfg!(debug_assertions) {
+        eprintln!("skipping: no binary exists at {}", path.display());
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read the sealed binary");
+    for marker in ["resvg", "usvg", "roxmltree", "SVG must be UTF-8 XML", "SVG viewBox produces"] {
+        assert!(
+            !bytes.windows(marker.len()).any(|window| window == marker.as_bytes()),
+            "the sealed binary contains desktop SVG importer marker {marker:?}"
+        );
+    }
 }
 
 /// **This file's byte ceiling is a release-profile number, so it declines to run in a debug one.**

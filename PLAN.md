@@ -1,5 +1,11 @@
 # Holonomy → Google Docs GUI Rework Plan
 
+> **Amended 2026-11-03:** Keep this compact, light Google Docs-like layout as the
+> desktop default. The older 2 MiB/no-SVG constraints below record the earlier work;
+> the current static ceiling is 4 MiB. Trusted SVG artwork becomes static masks at
+> build time, and the unsealed desktop image dialog converts bounded user SVGs to PNG
+> before insertion. The sealed renderer's security boundaries are unchanged.
+
 ## Current state
 Phase 1 (colour retheme + Docs toolbar) — DONE, committed
 Phase 2 (suggestion mode + Suggesting ViewMode) — DONE, committed

@@ -15,6 +15,12 @@ publish.workspace = true
 holonomy-jail = { path = "../holonomy-jail" }
 holonomy-text = { path = "../holonomy-text" }
 
+[build-dependencies]
+# Only the build script parses trusted SVGs. The generated 16px/20px masks are plain .rodata;
+# the sealed renderer has no XML/parser/rasteriser dependency at runtime.
+resvg = { version = "=0.45.1", default-features = false }
+roxmltree = "0.20"
+
 [dev-dependencies]
 holonomy-assets = { path = "../holonomy-assets" }
 

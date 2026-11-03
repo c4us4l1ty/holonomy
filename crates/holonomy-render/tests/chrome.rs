@@ -1832,19 +1832,25 @@ fn desktop_workspace_is_a_sheet_with_a_shadow_on_a_flat_panel() {
 #[test]
 fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
     use holonomy_render::icons::{IconId, SIZE};
+    let mut native_svg_differences = 0;
     for &id in IconId::ALL {
         let small = id.at(0, 0, 0);
         let large = id.at_large(0, 0, 0);
         assert_eq!((large.width, large.height), (20, 20));
+        assert!(large.bits.iter().any(|&row| row != 0), "empty desktop icon {id:?}");
+        let native_svg = matches!(id, IconId::Doc | IconId::Folder | IconId::Pen | IconId::ArrowLeft);
         for y in 0..20 {
             for x in 0..20 {
-                assert_eq!(
-                    large.coverage(x, y),
-                    small.coverage(x * SIZE / 20, y * SIZE / 20)
-                );
+                let scaled = small.coverage(x * SIZE / 20, y * SIZE / 20);
+                if native_svg {
+                    native_svg_differences += u32::from(large.coverage(x, y) != scaled);
+                } else {
+                    assert_eq!(large.coverage(x, y), scaled, "legacy mask {id:?} changed");
+                }
             }
         }
     }
+    assert!(native_svg_differences > 0, "SVG artwork was nearest-neighbour scaled instead of rasterised at 20px");
     let m = ChromeMetrics::DESKTOP.with_line_pitch(30);
     let c = Chrome::new(m);
     let state = ChromeState {

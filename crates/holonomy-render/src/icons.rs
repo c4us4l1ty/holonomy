@@ -1,4 +1,4 @@
-//! **The icon set: hand-authored 1-bit masks, authored as ASCII art and packed at compile time.**
+//! **The icon set: small 1-bit masks, authored as ASCII art or trusted build-time SVG.**
 //!
 //! # Why ASCII in the source and not `.rodata`
 //!
@@ -17,7 +17,8 @@
 //!
 //! §2 of PROJECT.md records the decision: the chrome's glyphs must come from `.rodata` — no SVG runtime,
 //! no font parsing for UI chrome — and a 1-bit mask is 1 bit per pixel instead of 32, so a 16x16 icon is
-//! **32 bytes** rather than 1 KiB. Thirty icons is 960 bytes of masks.
+//! **32 bytes** rather than 1 KiB. The four SVG-authored icons also have 20 px native masks,
+//! all generated at build time; neither the XML nor its rasteriser is part of a frame.
 //!
 //! **They are not glyphs because the fonts do not contain them.** PROJECT.md §7 item 2 folded this in
 //! explicitly: Inter has no Arrows block, so `◀` `▶` `✓` `⋯` are all outside every declared font range,
@@ -45,11 +46,17 @@
 //!   chevron is a clean 45° step. Rasterising antialiased vector art down to 16 px and then thresholding
 //!   it — the first attempt at this rewrite — leaves 50 %-coverage grey on every diagonal, which
 //!   thresholds to either a lost line or a doubled one.
-//! * **Drawn, not typed.** §2 forbids an SVG runtime for chrome; this is still `&'static [u64]` built by
-//!   a `const fn`. What changed is only the *authoring* step, which is geometry rasterised to rows
-//!   rather than rows typed by hand.
+//! * **Drawn, not typed.** The sealed chrome stores only `&'static [u64]` in `.rodata`. Legacy ASCII
+//!   artwork is packed by a `const fn`; four trusted MIT-licensed WordCraft SVGs are converted into
+//!   the same rows by `build.rs` before linking. Neither path evaluates vectors in the paint loop.
 
 use crate::Icon;
+
+// Trusted WordCraft SVGs are rasterised at build time into exactly the same bit-row format as
+// the ASCII masks below. Neither their source nor resvg/usvg is linked into the sealed binary.
+mod svg_masks {
+    include!(concat!(env!("OUT_DIR"), "/svg_icons.rs"));
+}
 
 /// Icons are square, and this is their edge in pixels.
 ///
@@ -99,26 +106,6 @@ pub mod mask {
     //! The masks. One `static` per icon, each `const`-evaluated so it lands in `.rodata`.
 
     use super::pack;
-
-    /// A page with lines on it: the document, a sidebar tab, anything "open this".
-    pub static DOC: [u64; 16] = pack(&[
-        b"................",
-        b"...##########...",
-        b"...#........#...",
-        b"...#........#...",
-        b"...#.######.#...",
-        b"...#........#...",
-        b"...#........#...",
-        b"...#.######.#...",
-        b"...#........#...",
-        b"...#........#...",
-        b"...#.####...#...",
-        b"...#........#...",
-        b"...#........#...",
-        b"...#........#...",
-        b"...##########...",
-        b"................",
-    ]);
 
     /// An arrow curling left and down: undo.
     pub static UNDO: [u64; 16] = pack(&[
@@ -460,26 +447,6 @@ pub mod mask {
         b".......###......",
     ]);
 
-    /// An arrow pointing left: back, and close the sidebar.
-    pub static ARROW_LEFT: [u64; 16] = pack(&[
-        b"................",
-        b"................",
-        b"................",
-        b".......#........",
-        b"......#.........",
-        b".....#..........",
-        b"....#...........",
-        b"...#............",
-        b"..#############.",
-        b"...#............",
-        b"....#...........",
-        b".....#..........",
-        b"......#.........",
-        b".......#........",
-        b"................",
-        b"................",
-    ]);
-
     /// A five-pointed star, filled. **Deliberately not larger** -- see `no_icon_is_mostly_ink`.
     pub static STAR: [u64; 16] = pack(&[
         b"................",
@@ -495,26 +462,6 @@ pub mod mask {
         b".....######.....",
         b"....#######.....",
         b"....###...##....",
-        b"................",
-        b"................",
-        b"................",
-    ]);
-
-    /// A folder: open, save-to.
-    pub static FOLDER: [u64; 16] = pack(&[
-        b"................",
-        b"................",
-        b"................",
-        b".######.........",
-        b".#.....#........",
-        b".#......#######.",
-        b".#............#.",
-        b".#............#.",
-        b".##############.",
-        b".#............#.",
-        b".#............#.",
-        b".#............#.",
-        b".##############.",
         b"................",
         b"................",
         b"................",
@@ -717,26 +664,6 @@ pub mod mask {
         b"............#...",
         b".............#..",
         b"..............#.",
-        b"................",
-    ]);
-
-    /// A pen nib: the mode switcher.
-    pub static PEN: [u64; 16] = pack(&[
-        b"................",
-        b"...........#....",
-        b"..........#.#...",
-        b".........#...#..",
-        b"........#.#...#.",
-        b".......#...#.#..",
-        b"......#.....#...",
-        b".....#.....#....",
-        b"....#.....#.....",
-        b"...#.....#......",
-        b"..#.....#.......",
-        b"..#....#........",
-        b"..#...#.........",
-        b".#..##..........",
-        b".###............",
         b"................",
     ]);
 
@@ -1332,7 +1259,7 @@ impl IconId {
     /// module docs stops being free.
     pub const fn mask(self) -> &'static [u64] {
         match self {
-            IconId::Doc => &mask::DOC,
+            IconId::Doc => &svg_masks::DOC_16,
             IconId::Undo => &mask::UNDO,
             IconId::Redo => &mask::REDO,
             IconId::Spellcheck => &mask::SPELLCHECK,
@@ -1350,9 +1277,9 @@ impl IconId {
             IconId::Link => &mask::LINK,
             IconId::Image => &mask::IMAGE,
             IconId::Overflow => &mask::OVERFLOW,
-            IconId::ArrowLeft => &mask::ARROW_LEFT,
+            IconId::ArrowLeft => &svg_masks::ARROW_LEFT_16,
             IconId::Star => &mask::STAR,
-            IconId::Folder => &mask::FOLDER,
+            IconId::Folder => &svg_masks::FOLDER_16,
             IconId::Cloud => &mask::CLOUD,
             IconId::History => &mask::HISTORY,
             IconId::Lock => &mask::LOCK,
@@ -1363,7 +1290,7 @@ impl IconId {
             IconId::Rule => &mask::RULE,
             IconId::Tab => &mask::TAB,
             IconId::Search => &mask::SEARCH,
-            IconId::Pen => &mask::PEN,
+            IconId::Pen => &svg_masks::PEN_16,
             IconId::Print => &mask::PRINT,
             IconId::Cut => &wc::CUT,
             IconId::Copy => &wc::COPY,
@@ -1406,11 +1333,19 @@ impl IconId {
         }
     }
 
-    /// A 20 px desktop icon, using a compile-time enlarged mask.
+    /// A 20 px desktop icon. SVG-authored artwork is rasterised directly at 20 px at build time;
+    /// legacy ASCII art uses the existing compile-time enlargement. Neither costs a paint-time parse.
     #[must_use]
     pub fn at_large(self, x: i32, y: i32, colour: u32) -> Icon {
+        let bits: &'static [u64] = match self {
+            Self::Doc => &svg_masks::DOC_20,
+            Self::Folder => &svg_masks::FOLDER_20,
+            Self::Pen => &svg_masks::PEN_20,
+            Self::ArrowLeft => &svg_masks::ARROW_LEFT_20,
+            _ => &LARGE_MASKS[self as usize],
+        };
         Icon {
-            bits: &LARGE_MASKS[self as usize],
+            bits,
             width: LARGE_SIZE,
             height: LARGE_SIZE,
             x,

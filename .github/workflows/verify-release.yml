@@ -1,0 +1,47 @@
+name: Verify release and SVG boundary
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and static target
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt --target x86_64-unknown-linux-musl
+      - name: Resolve new dependencies while preserving existing lockfile pins
+        run: cargo fetch --target x86_64-unknown-linux-musl
+      - name: Keep the resolved lockfile available if this gate fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lockfile
+          path: Cargo.lock
+      - name: Check the sealed dependency boundary
+        run: |
+          mkdir -p target
+          cargo tree -p holonomy --no-default-features --edges normal > target/sealed-tree.txt
+          if grep -E '(^|[[:space:]])(resvg|usvg|roxmltree|png) v[0-9]' target/sealed-tree.txt; then
+            echo 'An SVG/XML/PNG encoder dependency is linked into the sealed runtime' >&2
+            exit 1
+          fi
+      - name: Renderer and desktop SVG integration tests
+        run: |
+          cargo test --locked -p holonomy-render
+          cargo test --locked -p holonomy --features desktop --lib
+          cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image
+      - name: Sealed, static release artifact and size gate
+        run: cargo test --locked -p holonomy --release --test release_artifact -- --nocapture
+      - name: Desktop, static release artifact and size gate
+        run: cargo test --locked -p holonomy --release --features desktop --test release_artifact -- --nocapture
+      - name: Formatting and committed dependency lockfile
+        run: |
+          cargo fmt --all -- --check
+          git diff --exit-code -- Cargo.lock

@@ -16,7 +16,7 @@
 //! | `ALL` and `mask()` cannot drift apart | [`the_all_list_and_the_match_agree`] |
 //! | and coverage is `false` outside the mask | [`coverage_is_false_outside_the_mask`] |
 
-use holonomy_render::icons::{mask, IconId, SIZE};
+use holonomy_render::icons::{IconId, SIZE};
 use holonomy_render::Icon;
 
 /// **The bit order, asserted rather than described.**
@@ -281,9 +281,9 @@ fn coverage_is_false_outside_the_mask() {
 
     // The same for a mask authored at a negative position, which is what a left-clipped toolbar button
     // produces: `bounds` clamps to 0 and `coverage` must not.
-    let icon = mask::DOC.len() as u32;
+    let mask_rows = id.mask().len() as u32;
     assert!(
-        icon > 0 && !id.at(-4, -4, 0).coverage(u32::MAX, u32::MAX),
+        mask_rows > 0 && !id.at(-4, -4, 0).coverage(u32::MAX, u32::MAX),
         "clipped icon, absurd coords"
     );
 }

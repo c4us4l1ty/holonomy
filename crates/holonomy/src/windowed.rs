@@ -1193,8 +1193,8 @@ impl Form {
             ),
             FormKind::InsertImage => (
                 "Insert image",
-                "Enter the path to a PNG image (up to 16 MiB).",
-                vec!["PNG file path"],
+                "PNG (16 MiB) or static SVG (256 KiB). SVG is converted to PNG before it enters the document.",
+                vec!["PNG or SVG file path"],
                 vec![false],
                 "Insert",
                 Some("Cancel"),
@@ -1398,7 +1398,11 @@ impl Form {
                 if p.is_empty() {
                     return Err("Enter a file path.".into());
                 }
-                let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
+                // A document cannot hold an arbitrary file. Refuse it before allocating the
+                // bytes, not after std::fs::read has exhausted the desktop's memory.
+                let bytes = crate::svg_import::read_file(
+                    std::path::Path::new(p), crate::svg_import::MAX_TEXT_BYTES,
+                )?;
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|_| "Import expects UTF-8 text.".to_string())?;
                 let Some(v) = vault.as_mut() else {
@@ -1415,19 +1419,13 @@ impl Form {
                 Ok(None)
             }
             FormKind::InsertImage => {
-                use std::io::Read;
                 let p = val(0).trim();
                 if p.is_empty() {
-                    return Err("Enter a PNG file path.".into());
+                    return Err("Enter a PNG or SVG file path.".into());
                 }
-                let file = std::fs::File::open(p).map_err(|e| e.to_string())?;
-                let mut bytes = zeroize::Zeroizing::new(Vec::new());
-                file.take(16 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if bytes.len() > 16 * 1024 * 1024 {
-                    return Err("PNG file exceeds 16 MiB.".into());
-                }
+                let bytes = crate::svg_import::load_image(std::path::Path::new(p))?;
+                // Both paths enter the *same* validated PNG insertion and undo/export path. No SVG
+                // markup is kept in the encrypted payload or parsed by the sealed painter.
                 session
                     .insert_image_bytes(&bytes)
                     .map_err(|e| e.to_string())?;

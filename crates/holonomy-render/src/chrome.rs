@@ -53,30 +53,17 @@ use crate::DamageRect;
 /// off: [`Rect`] and [`TextRun`] document their colours as `0xAARRGGBB`, so writing `0x00202020` for
 /// "opaque" would be relying on a mask three crates away.
 pub mod colour {
-    /// The panel behind everything: white in Google Docs, like the page.
-    pub const CHROME: u32 = 0xFFFF_FFFF;
+    /// The calm off-white work surface. Keep the paper white so the sheet has a visible edge.
+    pub const CHROME: u32 = 0xFFF8_FAFD;
     /// The document page.
     pub const PAGE: u32 = 0xFFFF_FFFF;
     /// The desktop writing surface around the page.
-    pub const DESK: u32 = 0xFFF5_F5F5;
+    pub const DESK: u32 = 0xFFF1_F3F4;
     /// A soft shadow beneath desktop sheets.
     pub const PAGE_SHADOW: u32 = 0xFFDC_E1E9;
-    /// A band that is one step **off** the chrome: the toolbar and the status bar.
-    ///
-    /// # CORRECTION: this was `0xFFF8_FAFD` -- the same value as [`CHROME`]
-    ///
-    /// `Chrome::tree` does push a band fill for the toolbar and the status bar
-    /// (`chrome.rs`, `let band = |y, h| fill(.., colour::BAND)`). **Both fills were invisible**, because
-    /// the colour they painted was the colour already underneath them, so the toolbar's only visible
-    /// surface was the capsule pill and the status bar had no surface at all. In a screenshot that
-    /// reads as "the toolbar is floating in the window" rather than "the toolbar is a row".
-    ///
-    /// **A step of about 12/255 in each channel, and no more.** The band has to be distinguishable from
-    /// the panel at one glance but must not compete with the pill that sits on it: `PILL` is by
-    /// definition lighter than the band, so the band cannot get lighter without colliding with it.
-    /// Since this palette is light-on-light, "off the panel" means **darker** here, which is also what
-    /// makes the toolbar read as a depressed strip with a raised control surface on it.
-    pub const BAND: u32 = 0xFFFF_FFFF;
+    /// A subtle grey band beneath the controls and status. It must differ from the off-white
+    /// chrome; otherwise those rows disappear and the buttons look as if they float on the page.
+    pub const BAND: u32 = 0xFFF1_F3F4;
     /// Rules, separators and box drawing: Google Docs' `#DADCE0` border grey.
     pub const RULE: u32 = 0xFFDA_DCE0;
     /// A rule that is *incidental* -- a tick, a gutter marker.
@@ -94,33 +81,14 @@ pub mod colour {
     /// same pill, and a selected *item* inside a popup is the same again. Three states, two colours,
     /// and the third state is carried by the pill.
     pub const INK_STRONG: u32 = 0xFF20_2124;
-    /// The raised surface: the toolbar's pill, a button, a popup, a selected sidebar row.
-    ///
-    /// **One value for all four**, because they are the same surface at different sizes. Giving each
-    /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
-    pub const PILL: u32 = 0xFFE8_F0FE;
-    /// A hovered widget, one step above [`PILL`].
-    ///
-    /// **A separate value rather than `PILL_ACTIVE` reused for hover.** The two are one step apart on
-    /// purpose: hover is "you are here" and press is "this is happening", and a menu item that looked
-    /// the same either way would not tell you which of the two your click had reached.
+    /// Resting button / sidebar surface, just above the toolbar's grey band.
+    pub const PILL: u32 = 0xFFF8_FAFD;
+    /// Hover is neutral grey; reserved blue is for *active* or document selection.
     pub const PILL_HOVER: u32 = 0xFFE8_EAED;
-    /// A held or selected widget, one step above [`PILL_HOVER`].
+    /// A held or selected widget: Google Docs' pale blue.
     pub const PILL_ACTIVE: u32 = 0xFFD2_E3FC;
-    /// **The document's selected bytes, behind the text.** Part 28.
-    ///
-    /// **A light blue and not a darker grey, and that is the one deliberate departure from this
-    /// module's palette.** Every other surface here is a step on a single grey ramp — `PILL`,
-    /// `PILL_HOVER`, `PILL_ACTIVE`, `POPUP` — because they are all chrome, and chrome on one ramp is
-    /// what makes the document read as a different kind of thing from the window around it. **A
-    /// selection is about the *document*, not the chrome**, and putting it on the ramp made it look
-    /// like another button.
-    ///
-    /// **Light rather than dark so the ink stays ink.** A dark selection behind dark text is a
-    /// contrast problem the moment the document's own colour changes, and the page background is
-    /// white. At 0xFFC8_D9F0 the worst case is a document in near-black on near-white, which is
-    /// legible at every selection the user can make.
-    pub const SELECTION: u32 = 0xFFBD_FFFF;
+    /// Selected document bytes, behind the original dark ink (rather than obscuring it).
+    pub const SELECTION: u32 = 0xFFC8_D9F0;
     /// An open menu's panel, **lighter than everything it can be drawn over**.
     ///
     /// **This is the third surface and it needed its own value**, which the first version did not

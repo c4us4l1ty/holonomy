@@ -1,5 +1,16 @@
 # PROJECT.md — Holonomy H1 build plan
 
+> **Product amendment, 2026-11-03 (overrides earlier phase-specific size/SVG exclusions):**
+> The stripped static release ceiling is **4 MiB**, not 2 MiB. Keep the sealed default
+> binary's jail, no-X11/no-openat boundary, PNG-only persisted assets, bounded image cache and
+> damage-limited painting. The unsealed desktop editor may accept *bounded static SVGs* at
+> import time; it must reject external resources and active content, rasterise only once,
+> and pass the resulting PNG through the existing validation, encryption, painting and export
+> paths. Trusted WordCraft (MIT) icon SVGs may be compiled into static 16/20 px masks at build
+> time, not parsed on a frame. The old measurements below are historical; do not present their
+> 2 MiB headroom as a current release measurement. Security parity for an unsealed desktop
+> session is **not claimed**; it requires a separate review and isolation work.
+>
 H1 is the bare-silicon Holonomy: a single static `x86_64-unknown-linux-musl` Rust binary that
 is a word processor, an encrypted container, and a sealed OS jail. It replaces H2's
 Tauri + TypeScript + SQLite stack entirely.
