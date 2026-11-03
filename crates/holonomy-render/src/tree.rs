@@ -283,6 +283,8 @@ impl DocRun {
     pub const DECORATION_UNDERLINE: u8 = 1 << 0;
     /// A rule through the run.
     pub const DECORATION_STRIKE: u8 = 1 << 1;
+    /// A green suggestion-insertion background, painted behind the run's glyphs.
+    pub const DECORATION_SUGGESTION_INSERT: u8 = 1 << 2;
 
     /// **How many pixels tall a decoration's rule is**, for the two bits above.
     ///

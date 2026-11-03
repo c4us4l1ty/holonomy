@@ -57,6 +57,7 @@ use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSou
 use holonomy_text::{
     Editor, EditorError, FontFace, SpanPolicy, ANCHOR_BYTES, FACE_BODY, FACE_MONO, STYLE_BOLD,
     STYLE_HEADER, STYLE_ITALIC, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+    STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT,
 };
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
@@ -892,12 +893,14 @@ pub struct Session<'a> {
 fn mode_index(mode: holonomy_render::menus::ViewMode) -> u8 {
     match mode {
         holonomy_render::menus::ViewMode::Editing => 0,
+        holonomy_render::menus::ViewMode::Suggesting => 2,
         holonomy_render::menus::ViewMode::Viewing => 1,
     }
 }
 fn view_mode(index: u8) -> holonomy_render::menus::ViewMode {
     match index {
         1 => holonomy_render::menus::ViewMode::Viewing,
+        2 => holonomy_render::menus::ViewMode::Suggesting,
         _ => holonomy_render::menus::ViewMode::Editing,
     }
 }
@@ -5419,6 +5422,12 @@ impl<'a> Session<'a> {
         if flags & STYLE_STRIKE != 0 {
             out |= holonomy_render::DocRun::DECORATION_STRIKE;
         }
+        if flags & STYLE_SUGGESTION_DELETE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_STRIKE;
+        }
+        if flags & STYLE_SUGGESTION_INSERT != 0 {
+            out |= holonomy_render::DocRun::DECORATION_SUGGESTION_INSERT;
+        }
         out
     }
 
@@ -6021,7 +6030,11 @@ impl<'a> Session<'a> {
         // pressed a key that does something -- it just does not do that. **`edits_readonly_refused`
         // is the counter**, and it is a new one rather than a reuse so that "the keyboard is dead in
         // viewing mode" and "the keyboard is dead" are different numbers.
-        if self.mode != holonomy_render::menus::ViewMode::Editing {
+        //
+        // **Suggesting mode is not read-only**: edits are accepted but recorded as suggestions
+        // (green insertions, strikethrough deletions) rather than committed directly. Only
+        // `Viewing` refuses.
+        if self.mode == holonomy_render::menus::ViewMode::Viewing {
             self.stats.edits_readonly_refused += 1;
             return Err(SessionError::ReadOnly);
         }
@@ -6125,9 +6138,16 @@ impl<'a> Session<'a> {
         if !bytes.is_empty()
             && (self.pending_style.is_some()
                 || self.pending_colour.is_some()
-                || self.pending_face.is_some())
+                || self.pending_face.is_some()
+                || self.mode == holonomy_render::menus::ViewMode::Suggesting)
         {
             let inherited = self.editor.style_at(at as u32);
+            let mut flags = self.pending_style.unwrap_or(inherited.style_flags);
+            // **In Suggesting mode, every inserted byte is a suggestion insertion:**
+            // drawn green and held pending accept or reject.
+            if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+                flags |= STYLE_SUGGESTION_INSERT;
+            }
             // **`style_range_faced`, and the inherited face when nothing is armed.** A `style_range` here
             // would write the *default* face over every typed character, so a character typed into the
             // middle of a monospaced run would silently come out in Inter -- the run split in two by a
@@ -6135,7 +6155,7 @@ impl<'a> Session<'a> {
             self.editor.style_range_faced(
                 at as u32,
                 (at + bytes.len()) as u32,
-                self.pending_style.unwrap_or(inherited.style_flags),
+                flags,
                 self.pending_colour.unwrap_or(inherited.color_rgb),
                 self.pending_face.unwrap_or(inherited.font_face),
             )?;
@@ -6402,12 +6422,24 @@ impl<'a> Session<'a> {
             heap = vec![0u8; len as usize];
             self.editor.read_into(start, &mut heap).unwrap_or(0)
         };
-        self.editor.delete_selection()?;
         let removed: &[u8] = if big {
             &heap[..n]
         } else {
             &self.line_scratch[..n]
         };
+        // **In Suggesting mode, deleting a selection is not a removal:** every selected byte gets
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The selection is cleared and
+        // the caret lands at `start`; the text remains visible, pending accept or reject.
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
+            self.editor.format_range(start as u32, (start + len) as u32, |span| {
+                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+            })?;
+            self.counts.after_delete(&self.editor, start, removed);
+            self.after_edit(len as u32)?;
+            return Ok(Some(len));
+        }
+        self.editor.delete_selection()?;
         self.counts.after_delete(&self.editor, start, removed);
         self.after_edit(len)?;
         Ok(Some(len))
@@ -6446,6 +6478,28 @@ impl<'a> Session<'a> {
         let Some((start, end)) = self.editor.backspace_range() else {
             return Ok(());
         };
+        // **In Suggesting mode, a deletion is not a removal:** the bytes stay, marked with
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The caret still moves to
+        // `start`, exactly as if they had been deleted — which is what makes "type, then backspace"
+        // read as "undo this insertion" rather than "strike through the previous character".
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            // A **stack** array, copied out before the style change.
+            let mut buf = [0u8; 4];
+            let want = (end - start).min(buf.len());
+            let n = self.editor.read_into(start, &mut buf[..want]).unwrap_or(0);
+            // **`format_range`, not `style_range`:** `style_range` would overwrite the run's colour
+            // with 0 (black); `format_range` reads each span and only flips the flag, keeping colour
+            // and face intact — which is what "strike through the previous character" means.
+            self.editor.format_range(start as u32, end as u32, |span| {
+                (
+                    span.style_flags | STYLE_SUGGESTION_DELETE,
+                    span.color_rgb,
+                )
+            })?;
+            self.editor.caret_to(start)?;
+            self.counts.after_delete(&self.editor, start, &buf[..n]);
+            return self.after_edit(1);
+        }
         // A **stack** array, copied out before the delete. Holding a borrow of `self.editor` across
         // the delete is E0502, and the borrow has to end there because `TextCounts` must be told the
         // bytes *after* the document has changed. Four bytes is the most one character can encode.
@@ -6488,6 +6542,19 @@ impl<'a> Session<'a> {
                 break;
             }
             len += 1;
+        }
+        // **In Suggesting mode, a forward deletion is not a removal:** the bytes stay, marked with
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The caret stays put.
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            let mut buf = [0u8; 4];
+            let want = len.min(buf.len());
+            let n = self.editor.read_into(at, &mut buf[..want]).unwrap_or(0);
+            // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
+            self.editor.format_range(at as u32, (at + len) as u32, |span| {
+                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+            })?;
+            self.counts.after_delete(&self.editor, at, &buf[..n]);
+            return self.after_edit(1);
         }
         let mut buf = [0u8; 4];
         let want = len.min(buf.len());

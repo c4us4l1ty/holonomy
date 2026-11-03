@@ -81,6 +81,14 @@ pub const STYLE_UNDERLINE: u16 = 1 << 4;
 /// Strikethrough. Bit 5. Drawn as a rule through the run's x-height. See [`STYLE_UNDERLINE`].
 pub const STYLE_STRIKE: u16 = 1 << 5;
 
+/// **Suggestion insertion. Bit 10.** Drawn with a green background when the document is in
+/// suggesting mode; the text is new and has not been accepted yet. See [`STYLE_SUGGESTION_DELETE`].
+pub const STYLE_SUGGESTION_INSERT: u16 = 1 << 10;
+
+/// **Suggestion deletion. Bit 11.** Drawn with a strikethrough and kept visible when the document is
+/// in suggesting mode; the text is old and marked for removal, awaiting accept or reject.
+pub const STYLE_SUGGESTION_DELETE: u16 = 1 << 11;
+
 /// Superscript. Bit 6. The run is drawn raised by a third of the line box.
 ///
 /// **A shift, not a smaller face**, for the same reason the two above are rules: a superscript is a
@@ -108,8 +116,9 @@ pub const STYLE_DECORATIONS: u16 =
 pub const STYLE_ALIGN_CENTER: u16 = 1 << 8;
 pub const STYLE_ALIGN_RIGHT: u16 = 1 << 9;
 pub const STYLE_ALIGN_MASK: u16 = STYLE_ALIGN_CENTER | STYLE_ALIGN_RIGHT;
+pub const STYLE_SUGGESTIONS: u16 = STYLE_SUGGESTION_INSERT | STYLE_SUGGESTION_DELETE;
 pub const STYLE_KNOWN: u16 =
-    STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK;
+    STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK | STYLE_SUGGESTIONS;
 
 /// **The font family a run is set in, as a byte, in the padding the record already had.**
 ///

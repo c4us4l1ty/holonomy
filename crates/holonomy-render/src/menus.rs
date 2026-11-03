@@ -755,17 +755,13 @@ pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeS
 
 /// The modes the mode switcher offers, and what each one means.
 ///
-/// **Two, and both are real.** `Editing` is the ordinary mode; `Viewing` is read-only — every mutator
-/// is refused and the caret still moves, which is what "viewing" means in every editor and is
-/// implementable with what this model already has.
-///
-/// **There is no `Suggesting`, and that is the interesting omission.** The reference offers it and a
-/// wireframe can offer it for free. **A suggestion mode needs a suggestion store, a provenance flag
-/// per span and a reviewer identity**, and none of those exist; a `Suggesting` row that behaved like
-/// `Editing` under a different label would be the most dishonest thing on the toolbar — worse than
-/// the inert button it replaces, because it would *look* like it was tracking other people's edits.
+/// **Three, and all are real.** `Editing` is the ordinary mode; `Viewing` is read-only — every mutator
+/// is refused and the caret still moves; `Suggesting` lets the user type and delete but records each
+/// change as a suggestion (green insertions, strikethrough deletions) rather than committing it
+/// directly. The renderer only needs names and ticks; the session decides what each mode does.
 pub const MODES: &[(&str, ViewMode)] = &[
     ("Editing", ViewMode::Editing),
+    ("Suggesting", ViewMode::Suggesting),
     ("Viewing", ViewMode::Viewing),
 ];
 
@@ -776,8 +772,11 @@ pub const MODES: &[(&str, ViewMode)] = &[
 /// and a tick on a row. **The session is the only thing that decides what a mode *does*.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
-    /// Type, delete, format.
+    /// Type, delete, format — changes commit directly to the document.
     Editing,
+    /// Type and delete, but every change is recorded as a suggestion: green insertions,
+    /// strikethrough deletions, with margin accept/reject cards.
+    Suggesting,
     /// Move the caret, select, scroll. **Refuse every edit.**
     Viewing,
 }
