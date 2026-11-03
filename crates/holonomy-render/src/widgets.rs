@@ -689,6 +689,8 @@ impl ChromeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Open {
     RibbonOverflow,
+    /// Tabs that do not fit in the ribbon's tab strip at the current width.
+    RibbonTabs,
     /// A menu-bar heading's popup, by index into [`MENUS`](crate::chrome::MENUS).
     Menu(usize),
     /// A labelled toolbar control's dropdown.
@@ -704,6 +706,21 @@ impl Open {
     pub fn items(self, state: &ChromeState) -> Vec<crate::menus::Item> {
         match self {
             Open::RibbonOverflow => state.ribbon_overflow.clone(),
+            // The entire short list is offered, so the same row index is the tab
+            // index. This also lets someone switch back after selecting a tab
+            // whose heading is hidden at the current window width.
+            Open::RibbonTabs => crate::ribbon::TABS
+                .iter()
+                .enumerate()
+                .map(|(i, &label)| crate::menus::Item {
+                    label,
+                    icon: None,
+                    accelerator: None,
+                    submenu: false,
+                    action: None, // Session handles a tab selection, not a document command.
+                    checked: i == usize::from(state.ribbon_tab),
+                })
+                .collect(),
             Open::Menu(i) => crate::menus::items_for(i).to_vec(),
             Open::Tool(t) => crate::menus::dropdown_items(t, state),
         }
@@ -755,6 +772,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     // rows differ, the clamp is the same, and the anchor is one line.
     let anchor_x = match open {
         Open::RibbonOverflow => crate::ribbon::overflow_rect(l).x,
+        Open::RibbonTabs => crate::ribbon::more_rect(l).x,
         Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
         Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
             .1
@@ -772,7 +790,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     };
     let anchor_y = match open {
         Open::RibbonOverflow => l.toolbar.y + 40,
-        Open::Menu(_) => l.menubar.bottom(),
+        Open::RibbonTabs | Open::Menu(_) => l.menubar.bottom(),
         Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
             .1
             .into_iter()
@@ -824,6 +842,34 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let y = anchor_y.min(l.height.saturating_sub(1));
     let room = l.height.saturating_sub(y).saturating_sub(pad);
     let fits = usize::try_from(room / row_h.max(1)).unwrap_or(0);
+    if open == Open::RibbonOverflow && fits > 0 {
+        // WordCraft compacts groups from the right. A single long overflow
+        // column would lose the last commands below a laptop's bottom edge;
+        // use as many complete columns as the panel has room for instead.
+        // Their rects are still the *only* source for painting and hit testing.
+        let cols_across = (l.width.saturating_sub(8) / w.max(1)).max(1) as usize;
+        let cols = items.len().div_ceil(fits).min(cols_across);
+        let per_col = items.len().div_ceil(cols).min(fits);
+        let shown = items.len().min(per_col * cols);
+        let panel_w = w.saturating_mul(cols as u32).min(l.width);
+        let x = l.width.saturating_sub(panel_w);
+        let h = (per_col as u32 * row_h + pad).min(l.height.saturating_sub(y));
+        let rows = (0..shown)
+            .map(|i| {
+                DamageRect::new(
+                    x + (i / per_col) as u32 * w,
+                    y + pad + (i % per_col) as u32 * row_h,
+                    w.min(panel_w),
+                    row_h,
+                )
+            })
+            .collect();
+        return Some(Popup {
+            rect: DamageRect::new(x, y, panel_w, h),
+            rows,
+            open,
+        });
+    }
     let shown = items.len().min(fits);
     let x = (anchor_x as i32).min(l.width as i32 - w as i32).max(0);
     let h = ((shown as u32).saturating_mul(row_h) + pad).min(l.height.saturating_sub(y));
@@ -905,7 +951,8 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
                     .find(|b| b.action == a)
                     .map(|b| b.rect)
             }),
-        Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied(),
+        Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied().filter(|r| !r.is_empty()),
+        Hit::RibbonMore => Some(crate::ribbon::more_rect(l)).filter(|r| !r.is_empty()),
         Hit::RibbonSearch => Some(crate::ribbon::search_rect(l)),
         Hit::RibbonLock => Some(crate::ribbon::lock_rect(l)),
         Hit::RibbonCollapse => Some(crate::ribbon::collapse_rect(l)),
@@ -970,6 +1017,7 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
 pub enum Hit {
     Ribbon(crate::menus::Action),
     RibbonTab(usize),
+    RibbonMore,
     RibbonSearch,
     RibbonLock,
     RibbonCollapse,
@@ -1134,7 +1182,8 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     }
 
     if state.ribbon {
-        if state.open == Some(Open::RibbonOverflow)
+        if !state.ribbon_overflow.is_empty()
+            && state.open == Some(Open::RibbonOverflow)
             && crate::ribbon::overflow_rect(l).contains(x, y)
         {
             return Hit::Tool(Tool::Overflow);
@@ -1158,6 +1207,9 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
                 return Hit::RibbonTab(i);
             }
         }
+        if crate::ribbon::more_rect(l).contains(x, y) {
+            return Hit::RibbonMore;
+        }
         if crate::ribbon::collapse_rect(l).contains(x, y) {
             return Hit::RibbonCollapse;
         }
@@ -1170,7 +1222,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
                     return Hit::Ribbon(b.action);
                 }
             }
-            if crate::ribbon::overflow_rect(l).contains(x, y) {
+            if !state.ribbon_overflow.is_empty() && crate::ribbon::overflow_rect(l).contains(x, y) {
                 return Hit::Tool(Tool::Overflow);
             }
         }

@@ -420,9 +420,9 @@ impl ChromeMetrics {
     /// and 112 - 76 = **36 px of a 102 px group was caption** because the caption was a literal 20.
     ///
     /// **This is the arithmetic, in one function, for the two callers that used to spell it out.**
-    /// The numbers are the ribbon's own design heights at 25 px of pitch -- `76`, `32`, `112`, `26`
-    /// and `28` -- so a session at 16 ppem gets exactly what shipped before and a session at 20 ppem
-    /// gets a ribbon that can hold its own labels.
+    /// The toolbar keeps its measured 112 px group budget at 25 px of pitch;
+    /// the title and tab strip use one line of text plus breathing room, rather
+    /// than scaling a 76 px empty title row into an even taller one at 125%.
     pub const fn with_ribbon_bands(mut self, ribbon: bool, collapsed: bool) -> Self {
         if !ribbon {
             return self;
@@ -434,8 +434,8 @@ impl ChromeMetrics {
             (v as u64 * cell_h as u64 / ChromeMetrics::BASE_PITCH as u64) as u32
         }
         let cell_h = self.cell_h;
-        self.title_h = by(76, cell_h);
-        self.menu_h = by(32, cell_h);
+        self.title_h = cell_h.saturating_add(30);
+        self.menu_h = cell_h.saturating_add(10);
         self.toolbar_h = if collapsed { 0 } else { by(112, cell_h) };
         // **The ruler is a line of numbers *plus* a tick strip**, and it has to be both or it is
         // neither. `by(26)` is 18 px at cell 18, which is exactly one line of type -- so a numbered
@@ -1024,8 +1024,9 @@ impl Layout {
         // rather than renamed to `_shadow`, because a value nobody reads is not a comment.
         let page_h = {
             let desk_v = (m.cell_h / 2).max(6);
-            // 11 : 8.5 in integer arithmetic, so the sheet is a portrait page whatever its measure is.
-            let by_aspect = page_w.saturating_mul(11) / 9;
+            // US Letter is 11 : 8.5 = 22 : 17. Keep the single-page chrome
+            // and the managed multi-page view in the same physical proportion.
+            let by_aspect = page_w.saturating_mul(22) / 17;
             by_aspect
                 .min(canvas_h.saturating_sub(desk_v * 2))
                 .max(m.cell_h.saturating_mul(2)) // never a zero-height sheet
@@ -1124,7 +1125,7 @@ impl Layout {
     const DESK_TOP: u32 = 16;
 
     pub fn page_height(&self) -> u32 {
-        (self.page.width.saturating_mul(11) / 9).max(self.cell_h.max(1))
+        (self.page.width.saturating_mul(22) / 17).max(self.cell_h.max(1))
     }
 
     pub fn page_padding(&self) -> u32 {
@@ -2666,6 +2667,8 @@ impl Chrome {
         // failure mode of a hit test is a button that is drawn in one place and pressed in another,
         // and the only cure is for there to be one place.
         if state.ribbon {
+            // The ribbon paints its own measured ruler over the compact ruler;
+            // do not move this before the shared ruler or duplicate its ticks.
             crate::ribbon::paint(&mut chrome.before, l, state, m.cell_h);
         } else {
             paint_title(&mut chrome.before, m, l, state);
@@ -3353,6 +3356,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         }
         let cy = row.y + (row.height.saturating_sub(m.cell_h)) / 2;
         let icon_y = row.y as i32 + (row.height.saturating_sub(crate::icons::SIZE)) as i32 / 2;
+        let row_x = row.x as i32;
         // **The tick goes in the left gutter, at a fixed offset, and the icon follows it.**
         //
         // A fixed offset and not "after whatever is there" is what makes the label column line up
@@ -3362,12 +3366,12 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         // zoom dropdown in the reference's screenshot has a tick on its current value.**
         if it.checked {
             into.push(SurfaceTree::leaf(crate::Node::Icon(
-                crate::icons::IconId::Check.at(x + pad as i32, icon_y, colour::ACTIVE),
+                crate::icons::IconId::Check.at(row_x + pad as i32, icon_y, colour::ACTIVE),
             )));
         }
         // **Then the icon, one column right of where the tick would be**, so a row with a tick and an
         // icon and a row with only an icon have their *labels* in the same place.
-        let icon_x = x + pad as i32 + 2 * m.cell_w as i32;
+        let icon_x = row_x + pad as i32 + 2 * m.cell_w as i32;
         if let Some(icon) = it.icon {
             into.push(SurfaceTree::leaf(crate::Node::Icon(
                 icon.at(icon_x, icon_y, popup_ink),
@@ -3395,7 +3399,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         const LABEL_OFFSET_CELLS: u32 = 6;
         // The gap between a label and the accelerator beside it, in cells.
         const LABEL_GAP_CELLS: u32 = 2;
-        let panel_cells = pop.rect.width / m.cell_w.max(1);
+        let panel_cells = row.width / m.cell_w.max(1);
         let label_cells = panel_cells
             .saturating_sub(LABEL_OFFSET_CELLS)
             .saturating_sub(LABEL_GAP_CELLS)
@@ -3429,12 +3433,11 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
                     // narrower than its own padding plus one character of text underflows. **Both are
                     // `saturating_sub` now**, and both were found by a gate that paints at 1x1
                     // rather than by reading the code.
-                    x + pop
-                        .rect
-                        .width
-                        .saturating_sub(pad)
-                        .saturating_sub(acc.chars().count() as u32 * m.cell_w)
-                        as i32,
+                    row_x
+                        + row.width
+                            .saturating_sub(pad)
+                            .saturating_sub(acc.chars().count() as u32 * m.cell_w)
+                            as i32,
                 );
             }
         }

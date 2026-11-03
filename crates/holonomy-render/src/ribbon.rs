@@ -31,25 +31,26 @@ pub mod tokens {
         pub const RULER_MARGIN: u32 = 0xFF2E2E2E;
     }
     pub mod light {
-        // Shared neutrals and blue with chrome.rs; the optional ribbon must not look
-        // like a second application when the user switches layouts.
-        pub const TITLE: u32 = 0xFFF8FAFD;
-        pub const RIBBON: u32 = 0xFFF1F3F4;
-        pub const CANVAS: u32 = 0xFFF1F3F4;
-        pub const BORDER: u32 = 0xFFDADCE0;
-        pub const TEXT: u32 = 0xFF202124;
-        pub const DIM: u32 = 0xFF5F6368;
-        pub const DISABLED: u32 = 0xFF9AA0A6;
-        pub const HOVER: u32 = 0xFFE8EAED;
-        pub const PRESSED: u32 = 0xFFD2E3FC;
-        pub const CHECKED: u32 = 0xFFD2E3FC;
-        pub const ACCENT: u32 = 0xFF1A73E8;
+        // WordCraft theme::Tokens::light (MIT): three distinct planes make the
+        // page, controls and desktop legible without a heavy/dark application frame.
+        // Only the unsealed desktop ribbon uses these; the sealed chrome is unchanged.
+        pub const TITLE: u32 = 0xFFF0F0F0;
+        pub const RIBBON: u32 = 0xFFF9F9F9;
+        pub const CANVAS: u32 = 0xFFE6E6E6;
+        pub const BORDER: u32 = 0xFFE1E1E1;
+        pub const TEXT: u32 = 0xFF242424;
+        pub const DIM: u32 = 0xFF616161;
+        pub const DISABLED: u32 = 0xFFA8A8A8;
+        pub const HOVER: u32 = 0xFFE6E6E6;
+        pub const PRESSED: u32 = 0xFFD6D6D6;
+        pub const CHECKED: u32 = 0xFFDDE3F8;
+        pub const ACCENT: u32 = 0xFF3B5BDB;
         pub const ON_ACCENT: u32 = 0xFFFFFFFF;
         pub const INPUT: u32 = 0xFFFFFFFF;
-        pub const INPUT_BORDER: u32 = 0xFFDADCE0;
-        pub const GROUP: u32 = 0xFF5F6368;
+        pub const INPUT_BORDER: u32 = 0xFF8A8A8A;
+        pub const GROUP: u32 = 0xFF707070;
         pub const RULER: u32 = 0xFFFFFFFF;
-        pub const RULER_MARGIN: u32 = 0xFFDADCE0;
+        pub const RULER_MARGIN: u32 = 0xFFD4D4D4;
     }
 }
 
@@ -498,20 +499,43 @@ pub fn tab_rects(l: &Layout) -> Vec<DamageRect> {
     // `File`'s box ended -- which reads as one word. The `+ 22` was the padding *and* the gap rolled
     // into one, which works only while the ink is narrower than the box it is in, and at 12 px the ink
     // was wider than the box.
-    let mut x = 12;
+    let right = collapse_rect(l).x;
+    let all_end = TABS.iter().fold(12u32, |x, name| {
+        x.saturating_add(text_w(l, name) + TAB_PAD * 2 + TAB_GAP)
+    });
+    // Reserve a real, labelled way into the tabs that did not fit. Previously
+    // `tab_rects` clipped View/Help at the window edge (and under Collapse):
+    // they were neither readable nor selectable at laptop widths.
+    let limit = if all_end.saturating_sub(TAB_GAP) <= right {
+        right
+    } else {
+        right.saturating_sub(text_w(l, "More") + TAB_PAD * 2 + TAB_GAP)
+    };
+    let mut x = 12u32;
     TABS.iter()
-        .map(|t| {
-            let w = text_w(l, t) + TAB_PAD * 2;
-            let r = DamageRect::new(
-                x.min(l.width),
-                l.menubar.y,
-                w.min(l.width.saturating_sub(x)),
-                l.menubar.height,
-            );
+        .map(|name| {
+            let w = text_w(l, name) + TAB_PAD * 2;
+            let r = if x.saturating_add(w) <= limit {
+                DamageRect::new(x, l.menubar.y, w, l.menubar.height)
+            } else {
+                DamageRect::EMPTY
+            };
             x = x.saturating_add(w).saturating_add(TAB_GAP);
             r
         })
         .collect()
+}
+
+/// The overflow tab uses the same measured text and tab height as its siblings.
+/// An empty rectangle means every tab fits and there is no false affordance.
+pub fn more_rect(l: &Layout) -> DamageRect {
+    if tab_rects(l).iter().all(|r| !r.is_empty()) {
+        return DamageRect::EMPTY;
+    }
+    let right = collapse_rect(l).x;
+    let w = text_w(l, "More") + TAB_PAD * 2;
+    let x = right.saturating_sub(w + TAB_GAP);
+    DamageRect::new(x, l.menubar.y, right.saturating_sub(x + TAB_GAP), l.menubar.height)
 }
 
 /// **The gutter a small button spends on its icon before its label may begin.**
@@ -871,25 +895,35 @@ pub fn overflow(l: &Layout, state: &ChromeState) -> Vec<crate::menus::Item> {
 /// is past the ink but not past the word**, so the two overlapped. It is `text_w` of the label plus the
 /// switch now, so the switch starts where the label ends at any cell.
 pub fn qat(l: &Layout) -> Vec<(Action, DamageRect)> {
-    let y = l.title.y + (l.title.height.saturating_sub(26)) / 2;
-    const AUTOSAVE_LABEL: &str = "AutoSave";
     const SWITCH_W: u32 = 30;
-    const SWITCH_GAP: u32 = 4;
-    let autosave = text_w(l, AUTOSAVE_LABEL) + SWITCH_W + SWITCH_GAP + 8;
-    let icon_button = 30u32.max(l.cell_w * 3);
-    [
-        (Action::ToggleAutosave, autosave),
-        (Action::Save, icon_button),
-        (Action::Undo, icon_button),
-        (Action::Redo, icon_button),
-    ]
-    .into_iter()
-    .scan(12u32, |x, (a, w)| {
-        let r = DamageRect::new(*x, y, w, 26);
-        *x += w + 4;
-        Some((a, r))
-    })
-    .collect()
+    let autosave = text_w(l, "AutoSave") + SWITCH_W + 12;
+    let icon_button = (l.cell_h + 6).max(l.cell_w * 3).min(40);
+    let mut items = Vec::new();
+    // Give the document name priority on small displays. Undo/Redo are still
+    // available from the Edit menu and Ctrl+Z/Ctrl+Y; the save control stays.
+    if l.width >= 560 {
+        items.push((Action::ToggleAutosave, autosave));
+    }
+    items.push((Action::Save, icon_button));
+    if l.width >= 1100 {
+        items.extend([(Action::Undo, icon_button), (Action::Redo, icon_button)]);
+    }
+    let h = header_control_h(l);
+    let y = l.title.y + l.title.height.saturating_sub(h) / 2;
+    items
+        .into_iter()
+        .scan(12u32, |x, (action, width)| {
+            let rect = DamageRect::new(*x, y, width, h);
+            *x = x.saturating_add(width + 4);
+            Some((action, rect))
+        })
+        .filter(|(_, r)| r.right() <= l.width && !r.is_empty())
+        .collect()
+}
+
+/// All the controls in the header use the same vertical centring and height.
+fn header_control_h(l: &Layout) -> u32 {
+    (l.cell_h + 8).min(l.title.height.saturating_sub(10))
 }
 
 /// Where the AutoSave switch sits inside the AutoSave rect, and the label's box.
@@ -907,45 +941,49 @@ pub fn autosave_switch(l: &Layout, r: DamageRect) -> (DamageRect, DamageRect) {
     let text_box = DamageRect::new(r.x, r.y, label_w.min(r.width), r.height);
     (text_box, sw)
 }
-/// The command search field, **sized to the placeholder it draws into itself**.
-///
-/// It was a fixed 244 px and the placeholder is `Find in document  Ctrl+F` -- **24 cells, which is 288 px
-/// at the 125 % this product boots into.** So the placeholder was elided to `Find in docun`, and in the
-/// screenshot the `Ctrl+F` is a separate run and the two run together as `Find in document Ctrl+F` that
-/// had to be clipped. **A field that is narrower than the text it puts in itself is a field that is
-/// always wrong**; this asks for what the string needs and lets a narrow window have what is left.
-pub fn search_rect(l: &Layout) -> DamageRect {
-    const PLACEHOLDER: &str = "Find in document  Ctrl+F";
-    // The magnifier, the text, and a little air -- see `paint`, which draws the icon in the first 28.
-    let want = text_w(l, PLACEHOLDER) + 28 + 12;
-    let lock = lock_rect(l);
-    // **Never wider than the room between the document title and the lock button**, or the field is a
-    // field drawn under another control instead of one that did not fit.
-    let right = lock.x.saturating_sub(8);
-    // **The left bound is the end of the quick-access row, read from `qat` rather than re-derived.**
-    // A second expression for "where the quick access row ends" is exactly the defect that opened
-    // this pass -- `qat`'s widths and this sum were one number written twice, and at 12 px a cell the
-    // `AutoSave` label alone was 96 px against the 112 the row had already spent.
+/// The title's entire usable interval. Paint and hit geometry both use the
+/// quick-access row and search field, so a long title cannot run under either.
+pub fn title_rect(l: &Layout) -> DamageRect {
     let left = qat(l)
         .last()
         .map_or(12, |(_, r)| r.right())
-        .saturating_add(16);
-    let w = want.min(right.saturating_sub(left));
-    DamageRect::new(
-        right.saturating_sub(w),
-        l.title.y + 6,
-        w,
-        l.title.height.saturating_sub(12).min(28),
-    )
+        .saturating_add(12);
+    let right = search_rect(l).x.saturating_sub(12);
+    DamageRect::new(left.min(l.width), l.title.y, right.saturating_sub(left), l.title.height)
 }
+
+/// A full text search field where it fits; an icon-only search button at
+/// narrower widths. Never draw a clipped placeholder or sacrifice the title.
+pub fn search_rect(l: &Layout) -> DamageRect {
+    const PLACEHOLDER: &str = "Find in document  Ctrl+F";
+    let want = text_w(l, PLACEHOLDER) + 40;
+    let left = qat(l)
+        .last()
+        .map_or(12, |(_, r)| r.right())
+        .saturating_add(12);
+    let right = lock_rect(l).x.saturating_sub(12);
+    let room = right.saturating_sub(left);
+    let title_min = text_w(l, "Untitled").saturating_add(20);
+    let width = if room >= want.saturating_add(title_min) {
+        want
+    } else {
+        // WordCraft's compact control level: the icon remains actionable and
+        // gives the document name the available space.
+        (l.cell_h + 10).min(room.saturating_sub(title_min))
+    };
+    let h = header_control_h(l);
+    DamageRect::new(right.saturating_sub(width), l.title.y + l.title.height.saturating_sub(h) / 2, width, h)
+}
+
 pub fn lock_rect(l: &Layout) -> DamageRect {
-    // **Wide enough for the word it draws, `Lock` plus its padding** -- 70 px held four of five cells.
-    let w = text_w(l, "Lock") + 20;
+    let width = text_w(l, "Lock") + 20;
+    let x = l.width.saturating_sub(width + 14);
+    let h = header_control_h(l);
     DamageRect::new(
-        l.width.saturating_sub(w + 14),
-        l.title.y + 6,
-        w,
-        l.title.height.saturating_sub(12).min(28),
+        x,
+        l.title.y + l.title.height.saturating_sub(h) / 2,
+        width.min(l.width.saturating_sub(x)),
+        h,
     )
 }
 /// **The ribbon's overflow button sits in the group row's top right, not on the ribbon's floor.**
@@ -1103,7 +1141,7 @@ fn icon(v: &mut Vec<SurfaceTree>, r: DamageRect, i: IconId, c: u32, large: bool)
         )
     } else {
         i.at(
-            r.x as i32 + 6,
+            r.x as i32 + (r.width.saturating_sub(edge) / 2) as i32,
             r.y as i32 + (r.height.saturating_sub(edge) / 2) as i32,
             c,
         )
@@ -1122,6 +1160,39 @@ fn active(a: Action, s: &ChromeState) -> bool {
         Action::ToggleRibbon => !s.ribbon_collapsed,
         _ => false,
     }
+}
+
+/// Three disjoint regions in the status bar. When a notice needs space,
+/// shorten the counters; never paint an error underneath the mode label.
+pub fn status_regions(
+    l: &Layout,
+    s: &ChromeState,
+    summary: &str,
+    mode: &str,
+) -> (DamageRect, DamageRect, DamageRect) {
+    let mode_w = text_w(l, mode).saturating_add(20);
+    let mode_x = l.width.saturating_sub(mode_w.saturating_add(12));
+    let mode_rect = DamageRect::new(
+        mode_x,
+        l.status.y,
+        mode_w.min(l.width.saturating_sub(mode_x)),
+        l.status.height,
+    );
+    let summary_x = 12.min(mode_x);
+    let available = mode_x.saturating_sub(summary_x.saturating_add(8));
+    let notice = s.notice.as_deref().is_some_and(|n| !n.is_empty());
+    let summary_w = text_w(l, summary)
+        .saturating_add(12)
+        .min(if notice { available / 2 } else { available });
+    let summary_rect = DamageRect::new(summary_x, l.status.y, summary_w, l.status.height);
+    let notice_x = summary_rect.right().saturating_add(12).min(mode_x);
+    let notice_rect = DamageRect::new(
+        notice_x,
+        l.status.y,
+        if notice { mode_x.saturating_sub(notice_x.saturating_add(8)) } else { 0 },
+        l.status.height,
+    );
+    (summary_rect, notice_rect, mode_rect)
 }
 
 /// Paint the ribbon. **`cell_w` is not optional and not a constant.**
@@ -1160,7 +1231,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
                 t.on_accent,
             );
         } else if let Some(i) = match a {
-            Action::Save => Some(IconId::Doc),
+            Action::Save => Some(IconId::Save),
             Action::Undo => Some(IconId::Undo),
             Action::Redo => Some(IconId::Redo),
             _ => None,
@@ -1168,61 +1239,47 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             icon(v, r, i, t.dim, false);
         }
     }
-    let title = format!("{} — {}", s.title, if s.dirty { "Edited" } else { "Saved" });
-    text(
-        v,
-        DamageRect::new(260, l.title.y, l.width.saturating_sub(600), l.title.height),
-        &title,
-        t.text,
-        true,
-        true,
-        cell_w,
-        cell_h,
-    );
-    round(v, search_rect(l), 5, t.input);
-    icon(
-        v,
-        DamageRect::new(
-            search_rect(l).x,
-            search_rect(l).y,
-            28,
-            search_rect(l).height,
-        ),
-        IconId::Search,
-        t.dim,
-        false,
-    );
-    // **The placeholder is only drawn where it fits.** `search_rect` asks for the room the string
-    // needs, so on a wide window this is the whole of it; on a narrow one the field is narrower than
-    // its own placeholder and drawing the first fifteen cells of it reads as a bug rather than as a
-    // hint. Below that the field is an empty search box, which is what it is when it has no room to
-    // say what it is for.
+    // "Saved" was previously painted even for an untouched document that had
+    // never been persisted. Reserve that claim for the driver's save notice.
+    let title = if s.dirty {
+        format!("{} - Unsaved changes", s.title)
+    } else {
+        s.title.clone()
+    };
+    text(v, title_rect(l), &title, t.text, true, true, cell_w, cell_h);
     let sr = search_rect(l);
-    let placeholder = "Find in document  Ctrl+F";
-    if sr.width >= text_w(l, placeholder) + 28 {
-        text(
+    if !sr.is_empty() {
+        round(v, sr, 6, t.input_border);
+        round(
             v,
-            DamageRect::new(sr.x + 28, sr.y, sr.width - 28, sr.height),
-            placeholder,
-            t.dim,
-            false,
-            false,
-            cell_w,
-            cell_h,
+            DamageRect::new(sr.x + 1, sr.y + 1, sr.width.saturating_sub(2), sr.height.saturating_sub(2)),
+            5,
+            t.input,
         );
+        let icon_box = DamageRect::new(sr.x, sr.y, 28.min(sr.width), sr.height);
+        icon(v, icon_box, IconId::Search, t.dim, false);
+        let placeholder = "Find in document  Ctrl+F";
+        if sr.width >= text_w(l, placeholder) + 40 {
+            text(
+                v,
+                DamageRect::new(sr.x + 28, sr.y, sr.width - 28, sr.height),
+                placeholder,
+                t.dim,
+                false,
+                false,
+                cell_w,
+                cell_h,
+            );
+        }
     }
-    round(v, lock_rect(l), 5, t.accent);
-    text(
-        v,
-        lock_rect(l),
-        "Lock",
-        t.on_accent,
-        true,
-        true,
-        cell_w,
-        cell_h,
-    );
-    for (i, r) in tab_rects(l).into_iter().enumerate() {
+    let lock = lock_rect(l);
+    round(v, lock, 6, t.accent);
+    text(v, lock, "Lock", t.on_accent, true, true, cell_w, cell_h);
+    let tabs = tab_rects(l);
+    for (i, r) in tabs.iter().copied().enumerate() {
+        if r.is_empty() {
+            continue;
+        }
         let selected = i == usize::from(s.ribbon_tab);
         if selected {
             round(v, r, 5, t.ribbon);
@@ -1249,6 +1306,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             cell_w,
             cell_h,
         );
+    }
+    let more = more_rect(l);
+    if !more.is_empty() {
+        let selected = tabs
+            .get(usize::from(s.ribbon_tab))
+            .is_some_and(DamageRect::is_empty);
+        if selected || s.hover == Some(crate::widgets::Hit::RibbonMore) {
+            round(v, more, 5, if selected { t.ribbon } else { t.hover });
+        }
+        text(v, more, "More", if selected { t.text } else { t.dim }, selected, true, cell_w, cell_h);
     }
     let cr = collapse_rect(l);
     icon(
@@ -1414,8 +1481,12 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             );
         }
     }
-    if !s.ribbon_collapsed {
-        icon(v, overflow_rect(l), IconId::Overflow, t.dim, false);
+    if !s.ribbon_collapsed && !s.ribbon_overflow.is_empty() {
+        let overflow = overflow_rect(l);
+        if s.hover == Some(crate::widgets::Hit::Tool(crate::widgets::Tool::Overflow)) {
+            round(v, overflow, 5, t.hover);
+        }
+        icon(v, overflow, IconId::Overflow, t.dim, false);
     }
     // # The ruler
     //
@@ -1585,51 +1656,20 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             }
         }
     }
-    // Status bar. The page/word counters remain visible alongside save notices.
+    // Status messages must not collide with the counters or the view/zoom label.
+    // On a narrow window the counters give way to a save/error notice first.
     let rows = l.page_rows();
-    let status = format!(
-        "Page {} of {}   {} words   UTF-8",
+    let summary = format!(
+        "Page {} of {}   {} words",
         s.scroll_line / rows + 1,
         l.page_count(s.total_lines),
         s.words
     );
-    text(
-        v,
-        DamageRect::new(12, l.status.y, l.width.saturating_sub(400), l.status.height),
-        &status,
-        t.text,
-        false,
-        false,
-        cell_w,
-        cell_h,
-    );
-    if let Some(n) = &s.notice {
-        text(
-            v,
-            DamageRect::new(l.width / 2, l.status.y, l.width / 2 - 180, l.status.height),
-            n,
-            t.text,
-            false,
-            true,
-            cell_w,
-            cell_h,
-        );
-    }
     let mode_zoom = format!("{}   {}%", s.mode_name(), s.zoom_percent);
-    let mz_w = text_w(l, &mode_zoom).max(180) + 20;
-    text(
-        v,
-        DamageRect::new(
-            l.width.saturating_sub(mz_w + 12),
-            l.status.y,
-            mz_w,
-            l.status.height,
-        ),
-        &mode_zoom,
-        t.text,
-        false,
-        true,
-        cell_w,
-        cell_h,
-    );
+    let (summary_box, notice_box, mode_box) = status_regions(l, s, &summary, &mode_zoom);
+    text(v, summary_box, &summary, t.dim, false, false, cell_w, cell_h);
+    if let Some(notice) = s.notice.as_deref().filter(|n| !n.is_empty()) {
+        text(v, notice_box, notice, t.text, false, false, cell_w, cell_h);
+    }
+    text(v, mode_box, &mode_zoom, t.dim, false, true, cell_w, cell_h);
 }

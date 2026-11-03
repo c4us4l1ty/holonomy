@@ -107,6 +107,26 @@ pub mod mask {
 
     use super::pack;
 
+    /// A familiar save disk in the same 1-bit stroke as the other chrome icons.
+    pub static SAVE: [u64; 16] = pack(&[
+        b"................",
+        b"..###########...",
+        b"..#.......#.#...",
+        b"..#.......#.#...",
+        b"..#.......#.#...",
+        b"..#.......#.#...",
+        b"..###########...",
+        b"..#.........#...",
+        b"..#..#####..#...",
+        b"..#..#...#..#...",
+        b"..#..#...#..#...",
+        b"..#..#...#..#...",
+        b"..#..#####..#...",
+        b"..#.........#...",
+        b"..###########...",
+        b"................",
+    ]);
+
     /// An arrow curling left and down: undo.
     pub static UNDO: [u64; 16] = pack(&[
         b"................",
@@ -1021,6 +1041,8 @@ use wordcraft_masks as wc;
 pub enum IconId {
     /// A page with lines on it.
     Doc,
+    /// Save a document.
+    Save,
     /// Undo.
     Undo,
     /// Redo.
@@ -1135,6 +1157,7 @@ impl IconId {
     /// Every icon, in declaration order.
     pub const ALL: &'static [IconId] = &[
         IconId::Doc,
+        IconId::Save,
         IconId::Undo,
         IconId::Redo,
         IconId::Spellcheck,
@@ -1195,6 +1218,7 @@ impl IconId {
     pub const fn mask(self) -> &'static [u64] {
         match self {
             IconId::Doc => &svg_masks::DOC_16,
+            IconId::Save => &mask::SAVE,
             IconId::Undo => &mask::UNDO,
             IconId::Redo => &mask::REDO,
             IconId::Spellcheck => &mask::SPELLCHECK,

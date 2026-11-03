@@ -51,7 +51,7 @@ jobs:
           if ! (cargo test --locked -p holonomy-render &&
                 cargo test --locked -p holonomy-input &&
                 cargo test --locked -p holonomy --features desktop --lib &&
-                cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image --test pointer --test toolbar_wiring) 2>&1 | tee target/rust-check.log; then
+                cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image --test pointer --test toolbar_wiring --test desktop_ui --test wordcraft_ribbon --test wordcraft_editing) 2>&1 | tee target/rust-check.log; then
             echo "::error title=Rust build or SVG test failure::$(tail -c 3800 target/rust-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             exit 1
           fi

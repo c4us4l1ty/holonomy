@@ -2080,7 +2080,11 @@ impl<'a> Session<'a> {
     pub fn set_managed_documents(&mut self, managed: bool) {
         self.managed_documents = managed;
         self.state.paged = managed;
-        self.state.ribbon = false;
+        // The managed, unsealed desktop editor uses the native WordCraft-style ribbon.
+        // The sealed session keeps its compact chrome and its existing dependency boundary.
+        self.state.ribbon = managed;
+        self.state.ribbon_tab = 1; // Home
+        self.state.ribbon_collapsed = false;
         self.state.sidebar_open = false;
         self.state.dark = false;
         let page_pad = if managed {
@@ -2094,7 +2098,10 @@ impl<'a> Session<'a> {
             ..self.chrome.metrics
         };
         self.chrome = Chrome::new(metrics);
-        self.refresh_overflow();
+        // Rebuild band heights from the *original* type metrics, not from the prior
+        // layout. This applies the ribbon at the current atlas size on first open and
+        // restores the compact bands if the session returns to sealed mode.
+        self.apply_type_scale();
         self.refresh_navigation();
         self.invalidate(self.chrome.full_damage());
         if managed {
@@ -2202,11 +2209,15 @@ impl<'a> Session<'a> {
         self.state.dirty || self.parked.iter().any(|d| d.dirty)
     }
     pub fn mark_documents_saved(&mut self) {
+        let was_dirty = self.state.dirty;
         self.state.dirty = false;
         for d in &mut self.parked {
             d.dirty = false;
         }
         self.invalidate_status_bar();
+        if was_dirty && self.state.ribbon {
+            self.invalidate(self.chrome.layout.title);
+        }
     }
     pub fn document_snapshots(
         &mut self,
@@ -2848,6 +2859,9 @@ impl<'a> Session<'a> {
         match source.commit_document(&mut self.editor) {
             Ok(written) => {
                 if written > 0 {
+                    if self.state.dirty && self.state.ribbon {
+                        self.invalidate(self.chrome.layout.title);
+                    }
                     self.state.dirty = false;
                     // **Part 39: the dirty marker is drawn in the status bar**, so clearing it changed
                     // what the bar shows and has to ask for the repaint that shows it gone.
@@ -3417,6 +3431,7 @@ impl<'a> Session<'a> {
                         widgets::Open::RibbonOverflow => {
                             widgets::Hit::Tool(widgets::Tool::Overflow)
                         }
+                        widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
                         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
                         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
                     };
@@ -3508,6 +3523,12 @@ impl<'a> Session<'a> {
                     self.invalidate(self.chrome.full_damage());
                 }
             }
+            Hit::RibbonMore => {
+                let before = self.state.open;
+                let open = widgets::Open::RibbonTabs;
+                self.state.open = (before != Some(open)).then_some(open);
+                self.invalidate_popup_change(before);
+            }
             Hit::RibbonSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
             Hit::RibbonLock => self.apply_action(holonomy_render::menus::Action::Lock)?,
             Hit::RibbonCollapse => {
@@ -3550,6 +3571,13 @@ impl<'a> Session<'a> {
                 let Some(item) = open.items(&self.state).get(row).copied() else {
                     return Ok(());
                 };
+                if open == widgets::Open::RibbonTabs {
+                    // Popup row indices equal tab indices; use the same path as
+                    // a visible tab, including File's document-library action.
+                    self.invalidate_popup_change(self.state.open);
+                    self.state.open = None;
+                    return self.press(Hit::RibbonTab(row), x, y, bytes);
+                }
                 let action = item.action;
                 // **The popup closes before the action runs, and that order is load-bearing.** An
                 // action that changes what the popup would contain -- choosing a zoom level leaves
@@ -3604,10 +3632,23 @@ impl<'a> Session<'a> {
                 // **And it is counted as `pointer_chrome`, not `pointer_inert`.** The button pressed;
                 // the button found there was nothing to show. **`pointer_inert` means a widget with no
                 // action behind it**, and there is one -- it just has nothing to do at this width.
+                // The ribbon has its own overflow *actions*, not the compact
+                // toolbar's hidden `Tool`s. Handle it before `has_dropdown()`:
+                // Overflow matches that predicate too, and otherwise opens the
+                // compact menu, which is empty in a managed document.
+                if tool == widgets::Tool::Overflow && self.state.ribbon {
+                    if self.state.ribbon_overflow.is_empty() {
+                        self.stats.pointer_chrome += 1;
+                        return Ok(());
+                    }
+                    let before = self.state.open;
+                    let open = widgets::Open::RibbonOverflow;
+                    self.state.open = (self.state.open != Some(open)).then_some(open);
+                    self.invalidate_popup_change(before);
+                    return Ok(());
+                }
                 if tool.has_dropdown()
-                    && !(tool == widgets::Tool::Overflow
-                        && !self.state.ribbon
-                        && self.state.overflow_tools.is_empty())
+                    && !(tool == widgets::Tool::Overflow && self.state.overflow_tools.is_empty())
                 {
                     // **No `pointer_chrome` here, and that is the gate `pointer.rs::
                     // every_tool_that_has_a_command_is_routed_through_it` enforcing.** Part 44 added
@@ -3622,13 +3663,6 @@ impl<'a> Session<'a> {
                     // the fix was to name the outcome, not to relax the sum.**
                     let before = self.state.open;
                     let open = widgets::Open::Tool(tool);
-                    self.state.open = (self.state.open != Some(open)).then_some(open);
-                    self.invalidate_popup_change(before);
-                    return Ok(());
-                }
-                if tool == widgets::Tool::Overflow && self.state.ribbon {
-                    let before = self.state.open;
-                    let open = widgets::Open::RibbonOverflow;
                     self.state.open = (self.state.open != Some(open)).then_some(open);
                     self.invalidate_popup_change(before);
                     return Ok(());
@@ -7508,6 +7542,9 @@ impl<'a> Session<'a> {
         // Set on *every* edit including undo and redo, because undoing back to the saved state should
         // clear the marker rather than leave it lit; the flag is cleared by a successful commit, not
         // recomputed, which is the honest direction to be wrong in.
+        if !self.state.dirty && self.state.ribbon {
+            self.invalidate(self.chrome.layout.title);
+        }
         self.state.dirty = true;
         // **The line geometry must agree with the document before anything reads it, and the caller
         // has already changed the document.** `line_index` used to count newlines, so it was correct
@@ -10537,6 +10574,7 @@ fn push_math_source(
 fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> DamageRect {
     let h = match open {
         widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
+        widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
         widgets::Open::Tool(t) => {
             widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t))
