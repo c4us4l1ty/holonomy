@@ -280,7 +280,13 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
     // Strikethrough is the fourth bool and stays false throughout this walk.
     let mut seen: Vec<(bool, bool, bool, bool)> = Vec::new();
     const TRANSITIONS: [&str; 7] = [
-        "bold", "italic", "underline", "italic", "bold", "italic", "underline",
+        "bold",
+        "italic",
+        "underline",
+        "italic",
+        "bold",
+        "italic",
+        "underline",
     ];
     for step in 0..8 {
         let flags = (

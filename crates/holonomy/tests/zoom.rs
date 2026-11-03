@@ -240,7 +240,10 @@ fn the_page_and_its_layout_do_depend_on_the_zoom() {
     // fixed left edge would instead move the entire extra width into the right gutter.
     let pa = la.page;
     let pb = lb.page;
-    assert!(pb.x < pa.x, "the wider sheet must extend left as well as right");
+    assert!(
+        pb.x < pa.x,
+        "the wider sheet must extend left as well as right"
+    );
     for (zoom, l) in [(100, la), (125, lb)] {
         let left = l.page.x - l.sidebar.width;
         let right = l.width - l.page.right();
