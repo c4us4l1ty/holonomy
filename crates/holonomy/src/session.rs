@@ -2079,9 +2079,9 @@ impl<'a> Session<'a> {
     pub fn set_managed_documents(&mut self, managed: bool) {
         self.managed_documents = managed;
         self.state.paged = managed;
-        self.state.ribbon = managed;
+        self.state.ribbon = false;
         self.state.sidebar_open = false;
-        self.state.dark = true;
+        self.state.dark = false;
         let page_pad = if managed {
             Self::desktop_page_padding(self.chrome.metrics.width)
         } else {
@@ -2092,9 +2092,6 @@ impl<'a> Session<'a> {
             sidebar_w: 0,
             ..self.chrome.metrics
         };
-        if managed {
-            metrics = metrics.with_ribbon_bands(true, false);
-        }
         self.chrome = Chrome::new(metrics);
         self.refresh_overflow();
         self.refresh_navigation();
