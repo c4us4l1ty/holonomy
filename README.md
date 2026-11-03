@@ -106,7 +106,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ---
 
-## 📜 License
-
+## License
+```
 Released under the **MIT License**. See [`LICENSE`](LICENSE) for full details.
 ```
