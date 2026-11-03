@@ -451,9 +451,9 @@ impl ChromeMetrics {
     /// and 112 - 76 = **36 px of a 102 px group was caption** because the caption was a literal 20.
     ///
     /// **This is the arithmetic, in one function, for the two callers that used to spell it out.**
-    /// The numbers are the ribbon's own design heights at 25 px of pitch ([`ribbon_design`]), so a
-    /// session at 16 ppem gets exactly what shipped before and a session at 20 ppem gets a ribbon that
-    /// can hold its own labels.
+    /// The numbers are the ribbon's own design heights at 25 px of pitch -- `76`, `32`, `112`, `26`
+    /// and `28` -- so a session at 16 ppem gets exactly what shipped before and a session at 20 ppem
+    /// gets a ribbon that can hold its own labels.
     pub const fn with_ribbon_bands(mut self, ribbon: bool, collapsed: bool) -> Self {
         if !ribbon {
             return self;
