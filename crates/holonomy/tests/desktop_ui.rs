@@ -94,8 +94,15 @@ fn managed_desktop_opens_on_home_with_a_real_paper_workspace() {
             at(l.text.x + 30, l.ruler.y + 2),
             palette.ruler & 0x00FF_FFFF
         );
+        // With Navigation open the left gutter belongs to the sidebar, so probe
+        // the desk between the rail and the sheet rather than inside the rail.
+        let desk_x = if l.sidebar.width > 0 && sheet.x > l.sidebar.right() {
+            l.sidebar.right() + (sheet.x - l.sidebar.right()) / 2
+        } else {
+            sheet.x / 2
+        };
         assert_eq!(
-            at(sheet.x / 2, sheet.y + 10),
+            at(desk_x, sheet.y + 10),
             palette.canvas & 0x00FF_FFFF,
             "desk, not chrome white"
         );
