@@ -166,13 +166,10 @@ From the Grammarly gist (gzomer, Google Docs Canvas integration), the selectors 
 
 ---
 
-## 5. CURSORS AND PRESENCE (THE MULTIPLAYER VISUALS)
+## 5. CURSORS AND PRESENCE (SINGLE-USER ONLY)
 
-- **Local caret:** the blinking `kix-cursor-caret` div at the insertion point.
-- **Remote collaborators:** each gets a painted caret at a document position `{line, char}`, in a **per-user color**, with a **floating name label** above the cursor line [Stack Overflow #9322002 (from earlier research); dev.to remote-cursor account]. Selections of remote users are also painted in their color.
-- Cursor positions travel on a **separate debounced presence channel** (~50ms debounce, newest-wins pub/sub) distinct from document operations [akshayghalme 2026 — secondary].
-- When edits occur before a caret, the position is transformed like text so carets stay glued to the right characters [singhajit.com].
-- Up to ~100 simultaneous editors are supported; at high counts the visual bottleneck is usually presence fan-out (N−1 remote carets), not text transforms [akshayghalme 2026 — secondary].
+- **Local caret:** the blinking caret at the insertion point.
+- **No remote collaborators.** This product runs inside a sealed process (`unshare(CLONE_NEWNET)`, no network syscalls) per `PRD.md` §5.5 and §8. There is no presence channel, no multi-user identity, and no OT/CRDT sync. Only the local caret is painted.
 
 ---
 
@@ -188,9 +185,9 @@ When Suggesting is on, every edit becomes a **visible proposal**:
 | **Deletion** | Original text kept with a **strikethrough** (struck through), typically green-tinted |
 | **Replacement** | Deletion strikethrough + new green text inline |
 | **Formatting change** | Marginal note describing the style change |
-| **Margin card** | A comment-like card in the right margin showing author name, timestamp, and **Accept (✓) / Reject (✗) / Comment (speech bubble)** buttons [customguide; lawxyai; go2share; docswrite] |
-| **Keyboard** | `Ctrl+Enter`/`Cmd+Enter` accept; `Ctrl+Backspace`/`Cmd+Delete` reject; `Ctrl+Alt+M`/`Cmd+Option+M` add comment [GeeksforGeks] |
-| **Bulk review** | Tools > "Review suggested edits" opens a sidebar to accept/reject all [lawxyai] |
+| **Margin card** | Not available — the comments/suggestions sidebar requires a network path and is out of scope per `PRD.md` §8. |
+| **Keyboard** | Not available — comment shortcuts require a comment backend, which is out of scope per `PRD.md` §8. |
+| **Bulk review** | Not available — the review sidebar requires a comment backend, which is out of scope per `PRD.md` §8. |
 
 Data model: each `TextRun` carries `suggestedInsertionIds[]` / `suggestedDeletionIds[]`, so suggestions are first-class elements in the document model, not overlays hacked on top [Docs API].
 
@@ -198,14 +195,9 @@ Data model: each `TextRun` carries `suggestedInsertionIds[]` / `suggestedDeletio
 
 ---
 
-## 7. COMMENTS UI
+## 7. COMMENTS UI (NOT AVAILABLE)
 
-- Highlight text, click the **speech-bubble-with-plus "Add comment" icon** (or `Ctrl+Alt+M` / `Cmd+Option+M`) → a box pops up to the **right of the highlighted text** [clearpathtech].
-- The highlighted text is visually marked; hovering/clicking reveals the comment thread.
-- Each comment shows author, timestamp, reply area, and a **Resolve** button; resolved comments are hidden or shown as resolved [clearpathtech].
-- Comments anchor to document ranges via internal `kix.<anchor-id>` anchors [Stack Overflow #29050342].
-- The right sidebar lists all comments chronologically [GeeksforGeks interface tour].
-- Comment input container class: `.docos-input` [Grammarly gist].
+- Comments are **not available** in this product. The comments sidebar, comment threads, and the "Add comment" action require an annotation store and a network path for sync, which are forbidden by `PRD.md` §5.5 (`unshare(CLONE_NEWNET)`) and §8. No comment UI is rendered.
 
 ---
 
@@ -264,4 +256,4 @@ Misspelled words get:
 
 ## 12. THE ONE-SENSE SUMMARY
 
-Google Docs looks like a clean, minimal word processor — menubar, pill-shaped light-blue toolbar, a white page framed by grey-margin rulers, a blinking 1px-wide caret, teal selection boxes, green suggestion highlights with margin accept/reject cards, comment threads on the right, red spelling squiggles, and colored remote collaborators' carets — but **every pixel of that document surface is hand-painted by JavaScript**: the browser is forbidden from wrapping text, drawing carets, or painting selections. The thing you actually type into is a hidden off-screen iframe you never see, and everything you read is produced by either hand-positioned divs (DOM era) or per-page recycled canvas tiles (canvas era), both driven by the Kix engine.
+Holonomy's Google Docs redesign — menubar, pill-shaped light-blue toolbar, a white page framed by grey-margin rulers, a blinking caret, teal selection boxes, green suggestion insertions with strikethrough deletions, red spelling squiggles — every pixel hand-painted by the renderer inside a sealed process: no network, no collaboration, no comments sidebar, no remote carets. The document surface is painted by the SSE2 blitter from the A8 glyph atlas, with the caret as a blinking absolutely positioned line and selection as a teal overlay.
