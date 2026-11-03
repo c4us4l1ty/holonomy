@@ -1,4 +1,4 @@
-//! **One widget list, painted and hit-tested.** 9 tests.
+//! **One widget list, painted and hit-tested.** 10 tests.
 //!
 //! # The hazard this file is about
 //!
@@ -24,10 +24,11 @@
 //! | the menu headings are measured, not tabulated | [`the_menu_headings_are_measured_not_tabulated`] |
 //! | **every popup row is inside its panel** | [`a_popup_row_is_inside_its_panel_and_its_panel_is_inside_the_window`] |
 //! | **and the panel is as wide as its widest row** | [`a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs`] |
+//! | a mixed font leaves the font box empty | [`a_mixed_font_selection_leaves_the_font_box_empty`] |
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{
-    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR,
+    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
 };
 
 fn layout() -> Layout {
@@ -224,7 +225,7 @@ fn every_menu_heading_is_hit_testable_at_its_own_centre() {
 fn a_point_on_a_seam_belongs_to_exactly_one_widget() {
     let l = layout();
     let st = state();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     for w in placed.windows(2) {
         // Only adjacent *left-to-right* pairs, so `right()` of one is `x` of the next.
         if w[1].rect.x != w[0].rect.right() {
@@ -723,4 +724,17 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
         !TOOLBAR[TOOLBAR.len() - 1].separated(),
         "the last tool is separated by the pill's rim, not by a rule"
     );
+}
+
+
+/// **A mixed font selection leaves the toolbar's font box blank.**
+///
+/// Google Docs and Word both show an empty font box when the selection contains more than one face;
+/// showing either family would be claiming the whole selection is in that family.
+#[test]
+fn a_mixed_font_selection_leaves_the_font_box_empty() {
+    let mut s = ChromeState::default();
+    assert_eq!(s.font_name(), "Inter");
+    s.font_mixed = true;
+    assert_eq!(s.font_name(), "");
 }

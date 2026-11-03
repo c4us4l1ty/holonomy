@@ -70,6 +70,15 @@ pub enum ActionKind {
     Delete = 1,
     /// Formatting changed without changing text. Payload contains before/after style runs.
     Format = 2,
+    /// **A face changed without changing text.** The same statement as [`Format`](Self::Format) with a
+    /// different record layout: a face edit needs one more byte per run in each direction, so its runs
+    /// are 24 bytes where a plain format's are 20.
+    ///
+    /// **A separate kind rather than a wider `Format`**, because undo and redo dispatch on the kind and
+    /// the two layouts cannot be told apart from the payload alone. Widening `Format` instead would mean
+    /// every bold-toggle record paying for a face it does not carry, and reading a log written by an
+    /// older build as garbage rather than as formatting.
+    FaceFormat = 3,
 }
 
 impl ActionKind {
@@ -78,6 +87,7 @@ impl ActionKind {
             0 => Some(Self::Insert),
             1 => Some(Self::Delete),
             2 => Some(Self::Format),
+            3 => Some(Self::FaceFormat),
             _ => None,
         }
     }

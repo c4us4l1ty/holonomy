@@ -41,9 +41,20 @@
 use crate::asset::{Asset, AssetCatalog, AssetError, AssetId};
 use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
-use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
+use crate::span::{
+    FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_BODY, FACE_COUNT,
+};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
 use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
+
+/// **The size of one *face-format* history record: `start + end + before(flags, colour, face) +
+/// after(flags, colour, face)` = `4 + 4 + (2 + 4 + 1) + (2 + 4 + 1)`.**
+///
+/// **Not 20, which is [`Editor::format_range`]'s record.** That one has no face, and its replay reads at
+/// fixed offsets, so the two lengths must not be confused: `apply_face_format_record` chunks on 24 and
+/// `apply_format_record` on 20, and a record read at the wrong width does not fail — it *misreads*, and
+/// a font undo writes somebody's colour into somebody's flags.
+const RECORD_BYTES: usize = 24;
 use zeroize::Zeroize;
 
 /// Removed-span slices retained for undoing a styled deletion.
@@ -983,16 +994,21 @@ impl Editor {
         // unconditional `collect()` over a `filter_map` takes its capacity from the iterator's upper
         // size hint *even when it yields nothing*, which is the second allocation per delete that
         // `no_alloc.rs` measures. The filter, then the `is_empty` check, is what makes that zero.
-        let styled: Vec<TextIntervalSpan> = if removed_spans
-            .iter()
-            .all(|s| s.style_flags == 0 && s.color_rgb == 0)
-        {
+        // **A run whose only attribute is its face is still styled**, and it has to be in the record:
+        // a paragraph in JetBrains Mono with no bold and no colour is the *common* case, and the filter
+        // below used to test flags and colour alone -- so deleting it and undoing lost the face, because
+        // the record was empty and the restore took the `GrowIntoInsert` guess or the plain default.
+        let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
+            s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
+        }) {
             Vec::new()
         } else {
             removed_spans
                 .iter()
                 .copied()
-                .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
+                .filter(|s| {
+                    s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY
+                })
                 .collect()
         };
         if self.style_undo.len() == STYLE_UNDO_DEPTH {
@@ -1122,6 +1138,25 @@ impl Editor {
         Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
     }
 
+    /// **Style `[start, end)` and set its face**, without a history record.
+    ///
+    /// The counterpart of [`style_range`](Self::style_range) for the insert path, which has already
+    /// recorded the *insert* and must not push a second action for the styling that came with it. The
+    /// four-argument form leaves the face alone; this one sets it, and the two exist side by side so a
+    /// caller cannot be ambiguous about which it meant.
+    pub fn style_range_faced(
+        &mut self,
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+        font_face: FontFace,
+    ) -> Result<(), EditorError> {
+        Ok(self
+            .spans
+            .style_range_faced(start, end, style_flags, color_rgb, font_face)?)
+    }
+
     /// Apply a formatting command as one bounded undoable transaction.
     ///
     /// Each existing run is transformed independently, preserving mixed formatting.
@@ -1154,8 +1189,8 @@ impl Editor {
         if runs.is_empty() {
             runs.push((TextIntervalSpan::plain(start, end), start, end));
         }
-        const RECORD_BYTES: usize = 20;
-        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        const BYTES: usize = 20;
+        let needed = runs.len().saturating_mul(BYTES);
         if needed > ARENA_BYTES {
             return Err(UndoError::ActionTooLarge {
                 len: needed,
@@ -1185,6 +1220,129 @@ impl Editor {
         Ok(true)
     }
 
+    /// **Apply a *character format* -- bits, colour and face -- as one undoable transaction.**
+    ///
+    /// # Why this exists next to [`format_range`](Self::format_range)
+    ///
+    /// **A font is not a bit and a `u16` cannot carry it**, so the transform that sets one needs a third
+    /// answer. Widening `format_range`'s closure to a triple would touch all thirteen of its callers, ten
+    /// of which have no opinion about a face -- and the two that do are the two that *apply a character
+    /// format to a selection*, which is exactly what this function is. So the triple lives here and the
+    /// pair stays where it is.
+    ///
+    /// # The history record, and the 20 bytes
+    ///
+    /// **Before and after are `start, end, flags, colour, face`** -- 21 bytes, which is why
+    /// [`RECORD_BYTES`] moved from 20 to 24. **The face has to be in the record or undo is wrong in the
+    /// direction nobody notices until a save**: `apply_format_record` replays one call per run, so a
+    /// font change whose *before* face was not recorded would undo to the body face and quietly repaint
+    /// the paragraph in the default, one undo after every font change.
+    ///
+    /// **Refused before mutation if the record will not fit**, like `format_range`: an undo that cannot
+    /// be recorded is an edit that must not happen.
+    pub fn face_format_range<F>(
+        &mut self,
+        start: u32,
+        end: u32,
+        transform: F,
+    ) -> Result<bool, EditorError>
+    where
+        F: Fn(TextIntervalSpan) -> (u16, u32, FontFace),
+    {
+        if start > end {
+            return Err(SpanError::InvertedRange { start, end }.into());
+        }
+        if end > self.spans.text_len() {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(start),
+                end: u64::from(end),
+                text_len: self.spans.text_len(),
+            }
+            .into());
+        }
+        if start == end {
+            return Ok(false);
+        }
+        let mut runs = self.spans.runs_in(start, end);
+        if runs.is_empty() {
+            runs.push((TextIntervalSpan::plain(start, end), start, end));
+        }
+        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        if needed > ARENA_BYTES {
+            return Err(UndoError::ActionTooLarge {
+                len: needed,
+                capacity: ARENA_BYTES,
+            }
+            .into());
+        }
+        let mut record = Vec::with_capacity(needed);
+        let mut changed = false;
+        for (old, lo, hi) in runs {
+            let (flags, colour, face) = transform(old);
+            // **An out-of-range face keeps the run's own**, so a corrupt request styles nothing rather
+            // than making the document unopenable. See `FACE_COUNT`.
+            let face = if face < FACE_COUNT { face } else { old.font_face };
+            changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
+            record.extend_from_slice(&lo.to_le_bytes());
+            record.extend_from_slice(&hi.to_le_bytes());
+            // **One run, laid out to `RECORD_BYTES` = 24, field by field:**
+            //
+            // | offset | width | field |
+            // |---|---|---|
+            // | 0  | 4 | start |
+            // | 4  | 4 | end |
+            // | 8  | 2 | before flags |
+            // | 10 | 4 | before colour |
+            // | 14 | 1 | before face |
+            // | 15 | 1 | pad |
+            // | 16 | 2 | after flags |
+            // | 18 | 4 | after colour |
+            // | 22 | 1 | after face |
+            // | 23 | 1 | pad |
+            //
+            // Both pads are alignment and nothing else, and **both are load-bearing**: the reader is
+            // `chunks_exact(RECORD_BYTES)`, so a run of 22 or 23 bytes makes that iterator yield *zero*
+            // chunks. The record was then pushed, the edit was marked changed, and the new style was
+            // never applied — every face change in this crate silently did nothing. A length that does
+            // not divide is a no-op, and the `debug_assert` below is the only thing that says so out
+            // loud.
+            record.extend_from_slice(&old.style_flags.to_le_bytes());
+            record.extend_from_slice(&old.color_rgb.to_le_bytes());
+            record.push(old.font_face);
+            record.push(0);
+            record.extend_from_slice(&flags.to_le_bytes());
+            record.extend_from_slice(&colour.to_le_bytes());
+            record.push(face);
+            // The last pad, offset 23. Without it the run is 23 bytes and the whole log vanishes into
+            // `chunks_exact`'s remainder.
+            record.push(0);
+            debug_assert_eq!(
+                record.len() % RECORD_BYTES,
+                0,
+                "every change is exactly {} bytes, or the reader walks past it",
+                RECORD_BYTES
+            );
+        }
+        if !changed {
+            return Ok(false);
+        }
+        // **Recorded as a face format, not as a plain one.** `undo` and `redo` dispatch on the action kind
+        // and hand a `Format` record to `apply_format_record`, which reads 20-byte runs -- so a 24-byte
+        // face log replayed through it decodes to nothing but garbage (a flags word read out of a
+        // colour, a `u32` read three bytes into a face, and a `chunks_exact(20)` that then yields one
+        // truncated run per 24 bytes). The face edit would then undo to the *wrong* style instead of to
+        // the previous one, which is worse than not undoing at all.
+        //
+        // The kind is what tells the two layouts apart, and it is why `ActionKind::FaceFormat` exists
+        // rather than the face riding in the padding of a plain format record.
+        self.undo
+            .push(start, ActionKind::FaceFormat, &record)?;
+        self.drop_redo();
+        self.apply_face_format_record(&record, true)?;
+        record.zeroize();
+        Ok(true)
+    }
+
     /// Replay before or after attributes from an internal, fixed-width history record.
     fn apply_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
         for run in record.chunks_exact(20) {
@@ -1197,6 +1355,35 @@ impl Editor {
             };
             self.spans
                 .style_range(u32_at(0), u32_at(4), flags, colour)?;
+        }
+        Ok(())
+    }
+
+    /// Replay before or after attributes, face included, from a face-format record.
+    ///
+    /// **A separate replay from [`apply_format_record`](Self::apply_format_record), and the two cannot be
+    /// one function.** Their records are different lengths -- 20 and 24 -- and `chunks_exact(20)` over a
+    /// 24-byte record does not fail, it *misreads*: every field after the first chunk lands on the wrong
+    /// byte, so a font undo would have written somebody's colour into somebody's flags. Two record kinds,
+    /// two readers, and the `RECORD_BYTES` constant is what keeps them in step.
+    fn apply_face_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
+        for run in record.chunks_exact(RECORD_BYTES) {
+            let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
+            let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
+            // before: start@0 end@4 flags@8 colour@10 face@14 pad@15
+            // after:  flags@16 colour@18 face@22
+            let (flags, colour, face) = if after {
+                (u16_at(16), u32_at(18), run[22])
+            } else {
+                (u16_at(8), u32_at(10), run[14])
+            };
+            self.spans.style_range_faced(
+                u32_at(0),
+                u32_at(4),
+                flags,
+                colour,
+                face,
+            )?;
         }
         Ok(())
     }
@@ -1231,7 +1418,10 @@ impl Editor {
         // The first version was a single `Option` and the second undo overwrote the first's map:
         // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
         // redo found nothing to restore, so the table map was silently never put back.
-        let table_shadow = if action.kind != ActionKind::Format
+        let table_shadow = if !matches!(
+            action.kind,
+            ActionKind::Format | ActionKind::FaceFormat
+        )
             && action.bytes.contains(&crate::table::CELL_SEPARATOR)
         {
             Some(self.tables.spans().to_vec())
@@ -1243,6 +1433,16 @@ impl Editor {
         }
         self.undo_tables.push(table_shadow);
         let outcome = match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, false)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                }
+            }
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, false)?;
                 EditOutcome {
@@ -1262,8 +1462,18 @@ impl Editor {
                     self.spans
                         .runs_in(action.offset, action.offset + action.bytes.len() as u32)
                         .into_iter()
+                        // **`faced`, not `styled`.** A `styled` span has `FACE_BODY` for its face, so a
+                        // redo restored the flags and the colour and put every character back in the body
+                        // face -- an edit to a monospaced word undone and redone came back in Inter, which
+                        // is the same defect as the document-wide font arriving by a different route.
                         .map(|(s, lo, hi)| {
-                            TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)
+                            TextIntervalSpan::faced(
+                                lo,
+                                hi,
+                                s.style_flags,
+                                s.color_rgb,
+                                s.font_face,
+                            )
                         })
                         .collect(),
                 );
@@ -1363,19 +1573,27 @@ impl Editor {
                         // are exactly the parts that were plain, and they are restored as plain.
                         let mut cursor = start;
                         for s in spans {
+                            // **A restored gap is plain in *every* attribute, face included.** A
+                            // `style_range(.., 0, 0)` clears the flags and the colour and leaves the
+                            // face alone, so the gap kept the `GrowIntoInsert` guess -- with the face
+                            // left behind, a deleted-and-undone plain run came back monospaced.
                             if s.start_byte > cursor {
-                                self.spans.style_range(cursor, s.start_byte, 0, 0)?;
+                                self.spans
+                                    .style_range_faced(cursor, s.start_byte, 0, 0, FACE_BODY)?;
                             }
-                            self.spans.style_range(
+                            // **`style_range_faced`, so the face comes back with the rest of the run.**
+                            self.spans.style_range_faced(
                                 s.start_byte,
                                 s.end_byte,
                                 s.style_flags,
                                 s.color_rgb,
+                                s.font_face,
                             )?;
                             cursor = s.end_byte;
                         }
                         if cursor < end {
-                            self.spans.style_range(cursor, end, 0, 0)?;
+                            self.spans
+                                .style_range_faced(cursor, end, 0, 0, FACE_BODY)?;
                         }
                     }
                     _ => {
@@ -1388,7 +1606,8 @@ impl Editor {
                         // bold run restored the text bold. Restoring a delete should restore what was
                         // deleted; `GrowIntoInsert` is the right default for the *caret* and the wrong
                         // one for *history*, and this is where the two come apart.
-                        self.spans.style_range(start, end, 0, 0)?;
+                        self.spans
+                            .style_range_faced(start, end, 0, 0, FACE_BODY)?;
                     }
                 }
                 EditOutcome {
@@ -1993,6 +2212,16 @@ impl Editor {
         let len = action.bytes.len();
         let lines_changed = action.bytes.contains(&b'\n');
         match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, true)?;
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                })
+            }
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, true)?;
                 Ok(EditOutcome {
@@ -2006,11 +2235,12 @@ impl Editor {
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
                 for span in restore_styles {
-                    self.spans.style_range(
+                    self.spans.style_range_faced(
                         span.start_byte,
                         span.end_byte,
                         span.style_flags,
                         span.color_rgb,
+                        span.font_face,
                     )?;
                 }
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
@@ -2069,16 +2299,21 @@ impl Editor {
                 // The styling this redo removed, pushed **total** so `undo`'s pop pairs one-for-one
                 // with it, exactly as `delete_at` does. `Vec::new()` allocates nothing, so an unstyled
                 // region costs only a header.
-                let styled: Vec<TextIntervalSpan> = if removed_spans
-                    .iter()
-                    .all(|s| s.style_flags == 0 && s.color_rgb == 0)
-                {
+                // Same predicate as `delete_at`'s, face included, and for the same reason: a redone
+                // delete of a monospaced run has to record the face or its undo restores Inter.
+                let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
+                    s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
+                }) {
                     Vec::new()
                 } else {
                     removed_spans
                         .iter()
                         .copied()
-                        .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
+                        .filter(|s| {
+                            s.style_flags != 0
+                                || s.color_rgb != 0
+                                || s.font_face != FACE_BODY
+                        })
                         .collect()
                 };
                 if self.style_undo.len() == STYLE_UNDO_DEPTH {

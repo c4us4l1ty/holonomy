@@ -3,7 +3,7 @@
 //! Design tokens and icon artwork adapted from storytold/wordcraft, MIT. This is
 //! deliberately not an egui port: Holonomy keeps its integer, damage-limited
 //! framebuffer renderer and its sealed, offline execution model.
-use crate::chrome::{ChromeState, Layout};
+use crate::chrome::{ChromeMetrics, ChromeState, Layout};
 use crate::icons::IconId;
 use crate::menus::Action;
 use crate::tree::{Label, Node, Rect, RoundRect, Style, SurfaceTree};
@@ -543,6 +543,28 @@ pub const CAPTION_AIR: u32 = 4;
 /// `Paste` printed on `Clipboard`, `Page break` on `Pages`, `Normal` on `Document formatting`. Six
 /// pixels is a cell's leading here -- enough that the two strips read as two, at both type scales.
 pub const CAPTION_GAP: u32 = 6;
+
+/// **How many columns apart the ruler's numbered ticks are.**
+///
+/// A ruler is a scale, and a scale's marks have to be readable. At the 16 ppem cell of 8 px a number
+/// every ten columns is 80 px apart, which leaves room for the number and enough unlabelled minor ticks
+/// between to read a position off the ruler without counting; at 20 ppem it is 120 px. **Ten is also a
+/// round number in the unit the ruler is in**, which is the only property that makes a scale easy to use.
+pub const MAJOR_RULER_COLS: u32 = 10;
+
+/// **How far the pen moves between two unlabelled ruler ticks, in columns.**
+///
+/// Four minors between majors, which is the density a 26 px band holds without the ticks merging into a
+/// grey smear — and the reason the old field's 1-px-every-10-px looked like a texture rather than a
+/// scale: it had no *unit*, so a longer tick every eighth of them counted nothing.
+pub const RULER_MINOR_STEP: u32 = 2;
+
+/// **The height of the filled triangle at each end of the text column**, in pixels.
+///
+/// Word's indent markers are about this size relative to a line of type. It is a *pixel* height and not
+/// a cell height on purpose: the marker is an ornament on the band, not type, so it must not grow with
+/// the font — and at 7 px it clears the 4 px minor tick under it at both type scales.
+pub const RULER_MARKER_H: u32 = 7;
 /// A small button with a label, and a small button with only its icon, at this type size.
 ///
 /// **Two numbers and not one, because the ribbon needs both to plan a row.** The labelled width is
@@ -971,6 +993,45 @@ fn round(v: &mut Vec<SurfaceTree>, r: DamageRect, radius: u32, c: u32) {
 /// report. **A truncation guard in the wrong unit does not truncate -- it lies, and the pixels clip.**
 ///
 /// `cell_w` is now an argument rather than a literal, and every caller passes [`Layout::cell_w`].
+/// **A ruler's number: left-aligned on the tick it labels, with no button gutter.**
+///
+/// `text` adds `SMALL_PAD / 2` at the left, because the rect a small button hands over begins at its
+/// icon's gutter -- see the comment there. A ruler has no icon, so that pad drew every number seven
+/// pixels to the right of its own tick: the scale then disagreed with the column above it, which is the
+/// one thing a ruler may not do. This is the same label without the gutter, and it is a separate
+/// function rather than a flag on `text` so the buttons keep the pad their comment argues for.
+///
+/// Drawn only where it fits: the last major of a narrow page is a tick without a number, which is what
+/// a printed ruler does rather than running its number into the gutter.
+fn ruler_number(
+    v: &mut Vec<SurfaceTree>,
+    x: u32,
+    band: DamageRect,
+    s: &str,
+    c: u32,
+    cell_w: u32,
+    cell_h: u32,
+) {
+    let advance = cell_w.max(1);
+    let w = cells(s) * advance;
+    // The band, not the text column: a number that fits in the ruler's own width is fine even if the
+    // column ends a pixel earlier, and one that does not would be clipped by the canvas below.
+    if w == 0 || x.saturating_add(w) > band.x + band.width || band.height <= cell_h / 4 {
+        return;
+    }
+    // **The baseline sits on the tick strip**, so the numbers are one line of type with the ticks under
+    // them rather than floating in the band's middle -- `text`'s centring would put a 2-digit label
+    // half a line lower than a 1-digit one at some type scales.
+    let y = band.y;
+    v.push(SurfaceTree::leaf(Node::Label(Label::new(
+        x as i32,
+        y as i32,
+        s,
+        Style::REGULAR,
+        0,
+        c,
+    ))));
+}
 fn text(
     v: &mut Vec<SurfaceTree>,
     r: DamageRect,
@@ -1351,23 +1412,106 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     if !s.ribbon_collapsed {
         icon(v, overflow_rect(l), IconId::Overflow, t.dim, false);
     }
-    // Ruler: white text measure, darker margins, integer ticks.
+    // # The ruler
+    //
+    // **A ruler in a word processor is a *measurement scale*, and this one was a decorative tick field.**
+    // It drew: the page's text column tinted one colour, the gutters beside it another, and a 1 px mark
+    // every 10 px with every eighth one longer. Nothing on it was a number, so nothing on it could be
+    // read -- a ruler whose marks have no labels is a texture, and a user looking for "where is my
+    // margin" or "how wide is this column" is answered by neither.
+    //
+    // **What every real ruler shows, and what this now draws** (Google Docs, Word and Wordcraft all
+    // agree on the first three):
+    //
+    // 1. **The text column as the light band**, and the page's padding either side as the darker gutter --
+    //    which is the geometry the page already has, so the ruler finally says where the column *is*
+    //    rather than drawing its own idea of it.
+    // 2. **Numbered major ticks**, zero at the column's left edge, labelled in **columns** -- this
+    //    document model's unit. A monospaced page has a real, exact unit; a ruler that measured in
+    //    centimetres would need a physical DPI this program does not have and cannot honestly invent.
+    //    The label is the number, so the scale is readable.
+    // 3. **Minor ticks** between them, **numbered every ten columns** with four minors between, which is
+    //    the density that stays legible at a 26 px band and a 12 px cell.
+    // 4. **The margin markers at both ends of the column**, filled triangles like Word's indent handles,
+    //    so the column's edges are findable at a glance instead of being where the tint changes.
+    //
+    // **Ticks are drawn from the column's left edge, not from the page's**, so column 0 is where text
+    // starts -- which is the only origin a writer cares about and the one the old tick field did not use.
+    let col = l.text.x;
+    let col_w = l.text.width.min(l.width.saturating_sub(col));
+    // The honest band: the page's padding to the left and right of the column, not the whole window.
     fill(v, l.ruler, t.ruler_margin);
-    fill(v, l.text_bound_x(), t.ruler);
-    let mut x = l.text.x;
-    while x < l.text.right() {
-        let major = (x - l.text.x) % 80 == 0;
-        fill(
-            v,
-            DamageRect::new(
-                x,
-                l.ruler.bottom().saturating_sub(if major { 8 } else { 4 }),
-                1,
-                if major { 8 } else { 4 },
-            ),
-            t.group,
-        );
-        x += 10;
+    fill(
+        v,
+        DamageRect::new(col, l.ruler.y, col_w, l.ruler.height),
+        t.ruler,
+    );
+    // **The scale is in cells**, so the spacing of a major tick is `MAJOR_COLS * cell_w` and the number
+    // under it is a column count. `cell_w` is the face's own advance, which is why the labels line up
+    // with the glyphs above them rather than with a guess.
+    let major_px = MAJOR_RULER_COLS * cell_w;
+    if major_px > 0 && col_w > 0 {
+        let mut c = 0u32;
+        while c * cell_w <= col_w {
+            let x = col + c * cell_w;
+            if x >= col + col_w {
+                break;
+            }
+            let major = c % MAJOR_RULER_COLS == 0;
+            // A 1 px tick, from the band's bottom, four logical pixels tall between majors and seven
+            // on them -- the proportions a printed ruler uses, and enough that the major is findable
+            // without reading its number.
+            fill(
+                v,
+                DamageRect::new(
+                    x,
+                    l.ruler.bottom().saturating_sub(if major { 7 } else { 4 }),
+                    1,
+                    if major { 7 } else { 4 },
+                ),
+                t.group,
+            );
+            // **The number, on the major only**, and above the tick rather than on it. `cell_h - 8`
+            // keeps it inside a 26 px band at both type scales; a number drawn from the band's top with
+            // a full line of type would be clipped by the canvas below it.
+            if major {
+                // **The label is the column number**, and it has to be a `String` because it is
+                // computed -- so it is built here, once per major tick. A major every ten columns over
+                // a 72-column page is eight allocations per frame; the alternative is a static table of
+                // 0..=70, which is 71 strings and *wrong* the day the measure changes.
+                //
+                // The line it is drawn on is the band minus the tick strip, so the number's own line
+                // never overlaps the ticks standing under it.
+                let numbers = DamageRect::new(
+                    l.ruler.x,
+                    l.ruler.y,
+                    l.ruler.width,
+                    l.ruler.height.saturating_sub(ChromeMetrics::RULER_TICK_H),
+                );
+                ruler_number(v, x, numbers, &format!("{c}"), t.group, cell_w, cell_h);
+            }
+            c += RULER_MINOR_STEP;
+        }
+    }
+    // **The column's two margins**, as filled triangles anchored to the band's top edge. Drawn last so
+    // nothing can cover them, and one triangle per end -- Word draws both and lets you drag them, which
+    // is the next thing this wants and not this change.
+    if col_w > 0 {
+        for (x, dir) in [(col, 1i32), (col + col_w, -1i32)] {
+            for row in 0..RULER_MARKER_H {
+                let w = RULER_MARKER_H.saturating_sub(row);
+                let left = if dir > 0 {
+                    x + (RULER_MARKER_H.saturating_sub(w)) / 2
+                } else {
+                    x.saturating_sub(w + (RULER_MARKER_H.saturating_sub(w)) / 2)
+                };
+                fill(
+                    v,
+                    DamageRect::new(left, l.ruler.y + row, w, 1),
+                    t.accent,
+                );
+            }
+        }
     }
     // Status bar. The page/word counters remain visible alongside save notices.
     let rows = l.page_rows();
@@ -1414,15 +1558,4 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         cell_w,
         cell_h,
     );
-}
-
-impl Layout {
-    fn text_bound_x(self) -> DamageRect {
-        DamageRect::new(
-            self.text.x,
-            self.ruler.y,
-            self.text.width.min(self.width.saturating_sub(self.text.x)),
-            self.ruler.height,
-        )
-    }
 }

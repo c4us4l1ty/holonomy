@@ -52,7 +52,7 @@
 
 use crate::asset::{scan_anchors, AssetCatalog, AssetError, ANCHOR_BYTES};
 use crate::math_span::{for_each_math_span, math_span_count, MathSpan};
-use crate::span::{SpanError, SpanMap, TextIntervalSpan};
+use crate::span::{SpanError, SpanMap, TextIntervalSpan, FACE_BODY, FACE_COUNT};
 use crate::table::{TableError, TableSpan};
 
 use core::fmt;
@@ -324,13 +324,20 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
         out.extend_from_slice(&s.start_byte.to_le_bytes());
         out.extend_from_slice(&s.end_byte.to_le_bytes());
         out.extend_from_slice(&s.style_flags.to_le_bytes());
-        // **The two padding bytes are written explicitly.** `TextIntervalSpan` is `#[repr(C)]` and
-        // 16 bytes: `4 + 4 + 2 + 2 pad + 4`. Writing only its four fields is 14 bytes, which reads
-        // back as `start end flags <2 bytes of the next span's start> color` -- silently, because
-        // every length in the span list is implied rather than declared. The `debug_assert` at the
-        // end of this function is what caught it; writing the pad by hand is what keeps the record
-        // 16 bytes whatever a future change to the struct's field order would do.
-        out.extend_from_slice(&[0u8; 2]);
+        // **The two padding bytes are written explicitly, and the first of them is the run's face.**
+        // `TextIntervalSpan` is `#[repr(C)]` and 16 bytes: `4 + 4 + 2 + 1 face + 1 pad + 4`. Writing
+        // only its first three fields is 10 bytes, which reads back as
+        // `start end flags <2 bytes of the next span's start> color` -- silently, because every length
+        // in the span list is implied rather than declared. The `debug_assert` at the end of this
+        // function is what caught it; writing the tail by hand is what keeps the record 16 bytes
+        // whatever a future change to the struct's field layout would do.
+        //
+        // **A face in the padding byte is free**: the byte was written as zero and read as nothing, so
+        // a document from before this field reads back as `FACE_BODY` -- the default face -- and a
+        // document written now is read by an older build as a document with no faces in it. Neither
+        // direction needs a format bump.
+        out.push(s.font_face);
+        out.push(0);
         out.extend_from_slice(&s.color_rgb.to_le_bytes());
     }
     // **And the plain tail, when the list was truncated.** Without it the span list stops short
@@ -339,7 +346,8 @@ pub fn encode(text: &str, spans: &SpanMap, tables: &[TableSpan], assets: &AssetC
         out.extend_from_slice(&tail.start_byte.to_le_bytes());
         out.extend_from_slice(&tail.end_byte.to_le_bytes());
         out.extend_from_slice(&tail.style_flags.to_le_bytes());
-        out.extend_from_slice(&[0u8; 2]);
+        out.push(tail.font_face);
+        out.push(0);
         out.extend_from_slice(&tail.color_rgb.to_le_bytes());
     }
 
@@ -523,11 +531,18 @@ pub fn read_span_table(
     let mut out = Vec::with_capacity(header.span_count as usize);
     for i in 0..header.span_count as usize {
         let s = &records[i * SPAN_BYTES..i * SPAN_BYTES + SPAN_BYTES];
-        out.push(TextIntervalSpan::styled(
+        // **The face is byte 10 and it is *clamped*, not trusted.** A record whose face byte names a
+        // family this build cannot draw is drawn in the body face -- the text is right and the face is
+        // substituted, which is the direction §7.1's forward compatibility asks to fail in. A document
+        // written before this byte existed has a zero there, which *is* `FACE_BODY`, so old files open
+        // with their default face and nothing else changes.
+        let face = s[10];
+        out.push(TextIntervalSpan::faced(
             u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
             u32::from_le_bytes([s[4], s[5], s[6], s[7]]),
             u16::from_le_bytes([s[8], s[9]]),
             u32::from_le_bytes([s[12], s[13], s[14], s[15]]),
+            if face < FACE_COUNT { face } else { FACE_BODY },
         ));
     }
     Ok(out)

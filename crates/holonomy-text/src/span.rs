@@ -111,6 +111,52 @@ pub const STYLE_ALIGN_MASK: u16 = STYLE_ALIGN_CENTER | STYLE_ALIGN_RIGHT;
 pub const STYLE_KNOWN: u16 =
     STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK;
 
+/// **The font family a run is set in, as a byte, in the padding the record already had.**
+///
+/// # Why this is not a style bit, and why it is not a `u16`
+///
+/// **Not a bit**, because a bit can say *"Jan's font"* or *"the mono face"* but not *"which of the faces
+/// this build can draw"*, and the difference is the one this whole change is about: a **character
+/// format** is a value, and a bitset is only a value while there are exactly two of it. `FONTS` has two
+/// entries today and the atlas has five faces; the next family makes a bitmask unrepresentable.
+///
+/// **Not a `u16` and not a fifth field**, because `TextIntervalSpan` is `#[repr(C)]` and exactly 16
+/// bytes: `u32 + u32 + u16 + **2 bytes of padding** + u32`. Those two bytes are written as zeros to the
+/// payload and read back as nothing, so **spending one of them on the face costs the format, the record
+/// and the arena nothing at all** -- and `size_of_is_sixteen` still holds, which is the one thing
+/// PRD.md §7.1 is emphatic about.
+///
+/// **`u8` and not the two-byte pair**, because 256 families is more than an atlas of five faces can
+/// draw and a document that names face 200 must be *readable* by a build that cannot draw it. The
+/// renderer clamps an unknown face to the body face, which is the direction to fail in: the text is
+/// right and the face is substituted, rather than the document refusing to open.
+pub type FontFace = u8;
+
+/// **The body face, and the value a run with no font of its own carries.**
+///
+/// **Zero is "the document's default face", not "Inter"**, for the same reason `color_rgb`'s zero is
+/// the default colour: a document written before fonts were per-run, and a document deliberately set
+/// to the body face, must not be distinguishable to the reader -- only to a build that has a different
+/// default. [`FontFace::FACE_MONO`] and the rest of the list live here so the model and the renderer
+/// cannot disagree about which number is which face.
+pub const FACE_BODY: FontFace = 0;
+/// The monospaced face in the atlas -- JetBrains Mono.
+///
+/// **`1` and not `STYLE_CODE`'s meaning**, which is a *semantic* mark for a code span. A code span is
+/// drawn in this face by the renderer, and a run the user set to mono by hand is drawn in it too, but
+/// the two are different statements: one says "this is code", the other says "this is set in JetBrains
+/// Mono". Clearing the formatting of a code span removes the face; clearing the face of a run that is
+/// not code leaves its `STYLE_CODE` bit alone, because that bit also feeds the exporter's `<code>`.
+pub const FACE_MONO: FontFace = 1;
+
+/// **How many faces the model defines**, so a value outside it is refused rather than stored.
+///
+/// A `u8` can hold 255 values and this build can draw two, so *"set the face to 200"* is either a
+/// corrupt record or a document from a build with more families. **The setter refuses it and keeps the
+/// face the run already had**; the *reader* clamps it to [`FACE_BODY`], because a document that cannot
+/// be opened is worse than one drawn in the wrong face. See [`FontFace`].
+pub const FACE_COUNT: FontFace = 2;
+
 /// One styled byte range.
 ///
 /// PRD.md §7.1's field list, and its widths: `color_rgb` is a `u32` holding `0x00RRGGBB`, which is
@@ -135,6 +181,16 @@ pub struct TextIntervalSpan {
     /// is the direction to fail in: the text is right and the ornament is missing, rather than the
     /// document refusing to open.
     pub style_flags: u16,
+    /// **Which face this run is set in**, one byte of the record's two padding bytes.
+    ///
+    /// [`FACE_BODY`] for a run with no font of its own, which is every run in a document written before
+    /// a font could be per-run. See [`FontFace`] for why this is a byte and not a bit.
+    pub font_face: FontFace,
+    /// **One more byte of padding, deliberately.** The record is 16 bytes and its fields account for
+    /// 14; rounding the last two up instead of reserving one of them keeps the layout that
+    /// `size_of_is_sixteen` pins, and gives the next per-run attribute a home that costs the format
+    /// nothing. Never read, always zero.
+    pub reserved: u8,
     /// `0x00RRGGBB`. Zero means "the document's default colour", not opaque black.
     pub color_rgb: u32,
 }
@@ -146,6 +202,8 @@ impl TextIntervalSpan {
             start_byte: start,
             end_byte: end,
             style_flags: 0,
+            font_face: FACE_BODY,
+            reserved: 0,
             color_rgb: 0,
         }
     }
@@ -156,8 +214,38 @@ impl TextIntervalSpan {
             start_byte: start,
             end_byte: end,
             style_flags,
+            font_face: FACE_BODY,
+            reserved: 0,
             color_rgb,
         }
+    }
+
+    /// A span in a named face, with the colour and the bits.
+    ///
+    /// **The four-argument [`styled`](Self::styled) stays**, because it is the constructor every
+    /// exporter, table and payload test already uses and a face is not what those are about. This is
+    /// the one a *font change* uses.
+    pub const fn faced(
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+        font_face: FontFace,
+    ) -> Self {
+        Self {
+            start_byte: start,
+            end_byte: end,
+            style_flags,
+            font_face,
+            reserved: 0,
+            color_rgb,
+        }
+    }
+
+    /// This span with its face replaced.
+    pub const fn with_face(mut self, font_face: FontFace) -> Self {
+        self.font_face = font_face;
+        self
     }
 
     /// Length in bytes. Saturating, so a corrupt span reports 0 rather than wrapping.
@@ -227,7 +315,14 @@ impl TextIntervalSpan {
     /// same kind of line.
     #[inline]
     pub fn same_style(&self, other: &TextIntervalSpan) -> bool {
-        self.style_flags == other.style_flags && self.color_rgb == other.color_rgb
+        // **The face is part of "same style", and forgetting it here was the one merge bug available.**
+        // `normalise` joins adjacent spans whose `same_style` agrees, so a run set to JetBrains Mono
+        // followed by one in Inter would have been joined into a single span on whichever face the
+        // first one carried -- the second half of the user's font change silently discarded, on save,
+        // with nothing to see but the font not sticking.
+        self.style_flags == other.style_flags
+            && self.color_rgb == other.color_rgb
+            && self.font_face == other.font_face
     }
 }
 
@@ -555,6 +650,8 @@ impl SpanMap {
                     start_byte: through,
                     end_byte: s.end_byte,
                     style_flags: s.style_flags,
+                    font_face: s.font_face,
+                    reserved: 0,
                     color_rgb: s.color_rgb,
                 });
                 continue;
@@ -608,7 +705,20 @@ impl SpanMap {
         };
         let s = self.spans[i];
         if s.contains(offset) {
+            // **`styled(..).with_face(..)`, and the `with_face` is the whole point.**
+            //
+            // `styled` is the four-argument constructor and it hard-codes `FACE_BODY`, so every read of
+            // a style returned the run with its face *erased*. A write and a read then disagreed with
+            // nothing to show for it: `face_format_range` stored the face correctly, and every caller
+            // that asked the document what face a run was in -- the dropdown, the painter, the payload
+            // encoder, the tests -- was told `Inter`. An attribute that cannot be read is not stored, so
+            // the font box did nothing however carefully the write path was built.
+            //
+            // Copying `s` and adjusting its bounds was the alternative and is what the first draft did;
+            // it is one field short of correct every time the record grows, which is exactly how this
+            // bug got in.
             TextIntervalSpan::styled(s.start_byte, s.end_byte, s.style_flags, s.color_rgb)
+                .with_face(s.font_face)
         } else {
             // Either `offset == text_len`, or the map is sparse because it came from
             // `empty_over`. Both mean "no styling here".
@@ -753,6 +863,13 @@ impl SpanMap {
         //   realistic number of runs on a line.
         let mut outputs = 0usize;
         let mut split: Option<(usize, TextIntervalSpan)> = None;
+        // **The face the inserted bytes inherit, read before the loop moves anything.** The run the
+        // caret is in is the one whose family the typed characters join -- that is the rule
+        // `GrowIntoInsert` implements for the flags and the colour, and the face has to follow it for
+        // the same reason. Read here rather than after the loop because the loop rewrites every
+        // boundary, and a lookup afterwards would be asking the map about a range it is midway through
+        // rebuilding.
+        let inherited_face = self.style_at(offset).font_face;
         for i in 0..self.spans.len() {
             let sp = self.spans[i];
             let (f, c) = (sp.style_flags, sp.color_rgb);
@@ -766,7 +883,12 @@ impl SpanMap {
                 } else {
                     sp.end_byte.min(offset)
                 };
-                (stop > sp.start_byte).then(|| TextIntervalSpan::styled(sp.start_byte, stop, f, c))
+                // **Every split carries the face**, or an insert into a monospaced run left the two
+                // halves of it in Inter: `styled` is four-argument and takes `FACE_BODY` for granted, so
+                // a split built with it silently un-sets the font. This is the same erasure as
+                // `style_at`'s, in the one place nobody looks -- the middle of a keystroke.
+                (stop > sp.start_byte)
+                    .then(|| TextIntervalSpan::styled(sp.start_byte, stop, f, c).with_face(sp.font_face))
             } else {
                 None
             };
@@ -780,7 +902,8 @@ impl SpanMap {
                 // different way.
                 let from = sp.start_byte.max(offset).saturating_add(len);
                 let to = sp.end_byte.saturating_add(len);
-                (to > from).then(|| TextIntervalSpan::styled(from, to, f, c))
+                (to > from)
+                    .then(|| TextIntervalSpan::styled(from, to, f, c).with_face(sp.font_face))
             } else {
                 None
             };
@@ -825,7 +948,8 @@ impl SpanMap {
                 .unwrap_or(self.spans.len());
             self.spans.insert(
                 at,
-                TextIntervalSpan::styled(offset, insert_end, inserted.0, inserted.1),
+                TextIntervalSpan::styled(offset, insert_end, inserted.0, inserted.1)
+                    .with_face(inherited_face),
             );
         }
 
@@ -900,7 +1024,7 @@ impl SpanMap {
         let any_styled = self.spans.iter().any(|s| {
             let lo = s.start_byte.max(offset);
             let hi = s.end_byte.min(delete_end);
-            hi > lo && (s.style_flags != 0 || s.color_rgb != 0)
+            hi > lo && (s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY)
         });
         let removed: Vec<TextIntervalSpan> = if any_styled {
             self.spans
@@ -909,7 +1033,11 @@ impl SpanMap {
                     let lo = s.start_byte.max(offset);
                     let hi = s.end_byte.min(delete_end);
                     if hi > lo {
-                        Some(TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb))
+                        // **Carried, because this `Vec` is what an undo of the delete restores.**
+                        Some(
+                            TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)
+                                .with_face(s.font_face),
+                        )
                     } else {
                         None
                     }
@@ -1188,6 +1316,24 @@ impl SpanMap {
         style_flags: u16,
         color_rgb: u32,
     ) -> Result<(), SpanError> {
+        self.style_range_faced(start, end, style_flags, color_rgb, FACE_COUNT)
+    }
+
+    /// **`style_range` with the face set as well**, which is what a font change is.
+    ///
+    /// The four-argument form above is the one every existing caller has and it means *"set the bits and
+    /// the colour, leave the face alone"* -- so it keeps whatever face the run already had rather than
+    /// resetting it to [`FACE_BODY`]. **A `Clear formatting` that cleared the face would be right and a
+    /// `Bold` that cleared it would be a bug**, and the difference between them is which of the two
+    /// entry points the caller chose.
+    pub fn style_range_faced(
+        &mut self,
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+        font_face: FontFace,
+    ) -> Result<(), SpanError> {
         if start > end {
             return Err(SpanError::InvertedRange { start, end });
         }
@@ -1222,24 +1368,34 @@ impl SpanMap {
             }
             // Left remnant.
             if s.start_byte < start {
-                rebuilt.push(TextIntervalSpan::styled(
+                rebuilt.push(TextIntervalSpan::faced(
                     s.start_byte,
                     start,
                     s.style_flags,
                     s.color_rgb,
+                    s.font_face,
                 ));
             }
             // The styled region itself.
             let lo = s.start_byte.max(start);
             let hi = s.end_byte.min(end);
-            rebuilt.push(TextIntervalSpan::styled(lo, hi, style_flags, color_rgb));
+            // **The face is applied through a `transform`, because a font change and a bold press are
+            // the same edit.** `apply_format_record` replays one call per run in both directions, so a
+            // function that took the face from elsewhere would undo to the wrong face.
+            let face = if font_face < FACE_COUNT {
+                font_face
+            } else {
+                s.font_face
+            };
+            rebuilt.push(TextIntervalSpan::faced(lo, hi, style_flags, color_rgb, face));
             // Right remnant.
             if s.end_byte > end {
-                rebuilt.push(TextIntervalSpan::styled(
+                rebuilt.push(TextIntervalSpan::faced(
                     end,
                     s.end_byte,
                     s.style_flags,
                     s.color_rgb,
+                    s.font_face,
                 ));
             }
         }
@@ -1252,7 +1408,7 @@ impl SpanMap {
 
     /// Remove styling from `[start, end)`, making it plain.
     pub fn clear_range(&mut self, start: u32, end: u32) -> Result<(), SpanError> {
-        self.style_range(start, end, 0, 0)
+        self.style_range_faced(start, end, 0, 0, FACE_BODY)
     }
 }
 
