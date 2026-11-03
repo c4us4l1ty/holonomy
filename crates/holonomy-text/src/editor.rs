@@ -41,7 +41,7 @@
 use crate::asset::{Asset, AssetCatalog, AssetError, AssetId};
 use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
-use crate::span::{SpanError, SpanMap, SpanPolicy, TextIntervalSpan};
+use crate::span::{FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_COUNT};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
 use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 use zeroize::Zeroize;
@@ -1122,7 +1122,14 @@ impl Editor {
         Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
     }
 
-    /// Apply a formatting command as one bounded undoable transaction.
+    /// **The size of one *face-format* history record: six fields, `4 + 4 + 2 + 4 + 1 + 2 + 4 + 1`.**
+///
+/// `start`, `end`, the *before* triple (`flags`, `colour`, `face`), then the *after* triple. **Not 20,
+/// which is `format_range`'s record**: that one has no face and its replay reads at fixed offsets, so the
+/// two lengths must not be confused -- see `apply_face_format_record`.
+const RECORD_BYTES: usize = 24;
+
+/// Apply a formatting command as one bounded undoable transaction.
     ///
     /// Each existing run is transformed independently, preserving mixed formatting.
     /// History stores only offsets and style attributes, never document text. The
@@ -1154,8 +1161,8 @@ impl Editor {
         if runs.is_empty() {
             runs.push((TextIntervalSpan::plain(start, end), start, end));
         }
-        const RECORD_BYTES: usize = 20;
-        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        const BYTES: usize = 20;
+        let needed = runs.len().saturating_mul(BYTES);
         if needed > ARENA_BYTES {
             return Err(UndoError::ActionTooLarge {
                 len: needed,
@@ -1185,6 +1192,88 @@ impl Editor {
         Ok(true)
     }
 
+    /// **Apply a *character format* -- bits, colour and face -- as one undoable transaction.**
+    ///
+    /// # Why this exists next to [`format_range`](Self::format_range)
+    ///
+    /// **A font is not a bit and a `u16` cannot carry it**, so the transform that sets one needs a third
+    /// answer. Widening `format_range`'s closure to a triple would touch all thirteen of its callers, ten
+    /// of which have no opinion about a face -- and the two that do are the two that *apply a character
+    /// format to a selection*, which is exactly what this function is. So the triple lives here and the
+    /// pair stays where it is.
+    ///
+    /// # The history record, and the 20 bytes
+    ///
+    /// **Before and after are `start, end, flags, colour, face`** -- 21 bytes, which is why
+    /// [`RECORD_BYTES`] moved from 20 to 24. **The face has to be in the record or undo is wrong in the
+    /// direction nobody notices until a save**: `apply_format_record` replays one call per run, so a
+    /// font change whose *before* face was not recorded would undo to the body face and quietly repaint
+    /// the paragraph in the default, one undo after every font change.
+    ///
+    /// **Refused before mutation if the record will not fit**, like `format_range`: an undo that cannot
+    /// be recorded is an edit that must not happen.
+    pub fn face_format_range<F>(
+        &mut self,
+        start: u32,
+        end: u32,
+        transform: F,
+    ) -> Result<bool, EditorError>
+    where
+        F: Fn(TextIntervalSpan) -> (u16, u32, FontFace),
+    {
+        if start > end {
+            return Err(SpanError::InvertedRange { start, end }.into());
+        }
+        if end > self.spans.text_len() {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(start),
+                end: u64::from(end),
+                text_len: self.spans.text_len(),
+            }
+            .into());
+        }
+        if start == end {
+            return Ok(false);
+        }
+        let mut runs = self.spans.runs_in(start, end);
+        if runs.is_empty() {
+            runs.push((TextIntervalSpan::plain(start, end), start, end));
+        }
+        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        if needed > ARENA_BYTES {
+            return Err(UndoError::ActionTooLarge {
+                len: needed,
+                capacity: ARENA_BYTES,
+            }
+            .into());
+        }
+        let mut record = Vec::with_capacity(needed);
+        let mut changed = false;
+        for (old, lo, hi) in runs {
+            let (flags, colour, face) = transform(old);
+            // **An out-of-range face keeps the run's own**, so a corrupt request styles nothing rather
+            // than making the document unopenable. See `FACE_COUNT`.
+            let face = if face < FACE_COUNT { face } else { old.font_face };
+            changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
+            record.extend_from_slice(&lo.to_le_bytes());
+            record.extend_from_slice(&hi.to_le_bytes());
+            record.extend_from_slice(&old.style_flags.to_le_bytes());
+            record.extend_from_slice(&old.color_rgb.to_le_bytes());
+            record.push(old.font_face);
+            record.extend_from_slice(&flags.to_le_bytes());
+            record.extend_from_slice(&colour.to_le_bytes());
+            record.push(face);
+        }
+        if !changed {
+            return Ok(false);
+        }
+        self.undo.push(start, ActionKind::Format, &record)?;
+        self.drop_redo();
+        self.apply_face_format_record(&record, true)?;
+        record.zeroize();
+        Ok(true)
+    }
+
     /// Replay before or after attributes from an internal, fixed-width history record.
     fn apply_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
         for run in record.chunks_exact(20) {
@@ -1197,6 +1286,34 @@ impl Editor {
             };
             self.spans
                 .style_range(u32_at(0), u32_at(4), flags, colour)?;
+        }
+        Ok(())
+    }
+
+    /// Replay before or after attributes, face included, from a face-format record.
+    ///
+    /// **A separate replay from [`apply_format_record`](Self::apply_format_record), and the two cannot be
+    /// one function.** Their records are different lengths -- 20 and 24 -- and `chunks_exact(20)` over a
+    /// 24-byte record does not fail, it *misreads*: every field after the first chunk lands on the wrong
+    /// byte, so a font undo would have written somebody's colour into somebody's flags. Two record kinds,
+    /// two readers, and the `RECORD_BYTES` constant is what keeps them in step.
+    fn apply_face_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
+        for run in record.chunks_exact(RECORD_BYTES) {
+            let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
+            let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
+            // after:  start 0, end 4, flags 8, colour 10, face 14 | before: flags 15, colour 17, face 21
+            let (flags, colour, face) = if after {
+                (u16_at(15), u32_at(17), run[21])
+            } else {
+                (u16_at(8), u32_at(10), run[14])
+            };
+            self.spans.style_range_faced(
+                u32_at(0),
+                u32_at(4),
+                flags,
+                colour,
+                face,
+            )?;
         }
         Ok(())
     }

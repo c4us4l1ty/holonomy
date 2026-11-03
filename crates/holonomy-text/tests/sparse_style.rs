@@ -23,12 +23,7 @@ use holonomy_text::{SpanError, SpanMap, TextIntervalSpan, STYLE_BOLD};
 
 /// A bold run over `[start, end)`.
 fn bold(start: u32, end: u32) -> TextIntervalSpan {
-    TextIntervalSpan {
-        start_byte: start,
-        end_byte: end,
-        style_flags: STYLE_BOLD,
-        color_rgb: 0,
-    }
+    TextIntervalSpan::styled(start, end, STYLE_BOLD, 0)
 }
 
 fn plain(start: u32, end: u32) -> TextIntervalSpan {

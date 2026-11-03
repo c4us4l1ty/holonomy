@@ -688,7 +688,14 @@ impl ChromeState {
     }
 
     /// **The current font's name. See [`style_name`](Self::style_name).
+    ///
+    /// **Empty over a mixed selection**, which is what Google Docs and Word both show. See
+    /// [`ChromeState::font_mixed`] for why an empty box is the honest answer rather than one of the two
+    /// families. `&'static str` and not `String`, so this stays off the paint path's allocator.
     pub fn font_name(&self) -> &'static str {
+        if self.font_mixed {
+            return "";
+        }
         crate::menus::FONTS
             .get(self.font_index)
             .copied()

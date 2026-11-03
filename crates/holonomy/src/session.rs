@@ -526,6 +526,17 @@ pub struct Session<'a> {
     /// the same question: `SpanMap::style_range` returns `Ok(())` for `start == end` and stores
     /// nothing, so "the next character is crimson" cannot be a zero-width span.
     pending_colour: Option<u32>,
+    /// **The face the next character typed will be set in, or `None` if the user has said nothing.**
+    ///
+    /// The third per-run attribute, and the same shape as the two above: `None` inherits from the run at
+    /// the caret, `Some(face)` arms. **Unlike the colour there is no "explicitly plain" third state**,
+    /// because a face is not a flag: `FACE_BODY` is a perfectly good face to arm, and arming it is
+    /// exactly what *"set this paragraph back to Inter"* means.
+    ///
+    /// **Why a field and not a span parked at the caret**: the same reason `pending_colour` gives --
+    /// `SpanMap::style_range` stores nothing for an empty range, so "the next character is mono" cannot
+    /// be a zero-width span. See [`Editor::face_format_range`] for the span side of the story.
+    pending_face: Option<FontFace>,
     /// The chrome geometry.
     pub chrome: Chrome,
     /// Unscaled type-dependent dimensions, so zooming in and out does not compound rounding.
@@ -1000,6 +1011,7 @@ impl<'a> Session<'a> {
         self.state.caret_line = 0;
         self.state.caret_column = 0;
         self.pending_style = None;
+        self.pending_face = None;
         self.pending_colour = None;
         self.active_cell = None;
         self.state.words = self.counts.words;
@@ -1185,6 +1197,7 @@ impl<'a> Session<'a> {
             // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
             // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
             pending_style: None,
+            pending_face: None,
             chrome,
             type_metrics,
             state,
@@ -3844,7 +3857,7 @@ impl<'a> Session<'a> {
                     .filter(|_| (at + from as u32) < run_end)
                     .map_or((self.body_style(), 0), |sp| {
                         (
-                            self.doc_style(sp.atlas_style()),
+                            self.span_style(sp),
                             self.run_size_index(sp.style_flags),
                         )
                     });
@@ -4158,7 +4171,7 @@ impl<'a> Session<'a> {
                     .filter(|_| (at + from as u32) < run_end)
                     .map_or((self.body_style(), 0), |sp| {
                         (
-                            self.doc_style(sp.atlas_style()),
+                            self.span_style(sp),
                             self.run_size_index(sp.style_flags),
                         )
                     });
@@ -4874,7 +4887,14 @@ impl<'a> Session<'a> {
                 // not a range, and "clear the formatting here" means the paragraph — which is what
                 // every word processor does and what `SetStyle` already does one line below.
                 let (from, to) = self.paragraph_range();
-                let cleared = from < to && self.editor.format_range(from, to, |_| (0, 0))?;
+                // **Clear formatting clears the *face* as well**, which is what "clear" means: every
+                // per-run attribute goes back to the paragraph's. `format_range` cannot do it -- its
+                // transform has no third answer -- so this is the face-aware form with all three
+                // cleared, and it is the one caller that wants `FACE_BODY` rather than inheritance.
+                let cleared =
+                    from < to && self
+                        .editor
+                        .face_format_range(from, to, |_| (0, 0, FACE_BODY))?;
                 // **The armed flags go with it, whether or not there was a range to clear.** Leaving
                 // `pending_style` armed after clearing would make the next character bold in a
                 // paragraph the user just asked to have no formatting at all -- and a caret in an
@@ -4888,6 +4908,9 @@ impl<'a> Session<'a> {
                 // the insert path tests for.
                 self.pending_style = None;
                 self.pending_colour = None;
+                // **And the armed face**, which is the third `Option` and the one a version of this
+                // written before fonts were per-run would not have known to reset.
+                self.pending_face = None;
                 self.state.styles = holonomy_render::chrome::StyleFlags::default();
                 // **The last `COLOURS` row, which is the automatic one.** `COLOURS` ends with
                 // `("Default", 0)`, so this is the dropdown row that agrees with the pixels: a
@@ -4918,8 +4941,20 @@ impl<'a> Session<'a> {
                 self.check_editable()?;
                 let idx =
                     usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
-                // These are the three presets the model can actually represent. Heading is
-                // exported as a heading; on screen it uses bold and teal at the body size.
+                // **A paragraph style is where a *document-wide* typography decision belongs.** The font
+                // box sets one run's family (a character format); this menu sets a paragraph's role, and
+                // the role's face is part of it. Google Docs' named styles carry a `TextStyle` -- font,
+                // size, weight, colour -- and `Normal text` is one of them, which is why *"make the whole
+                // document JetBrains Mono"* is `Select All` then this menu, and not the font box.
+                //
+                // **`Normal` carries the body face and the other five clear it**, so applying a heading
+                // to a run that had been set to mono by hand returns it to the body face: a heading's
+                // typography is the heading style's, and the style is the bigger statement. The narrow
+                // alternative -- a style that leaves a hand-set face alone -- reads as *"I set a heading
+                // and half of it stayed monospaced"*, which is a bug a user would report.
+                //
+                // **Colour stays zero for the styles that never had one.** It was already the case;
+                // writing `0` next to each is what says it was a decision rather than an omission.
                 let (flags, colour) = match idx {
                     1 => (STYLE_HEADER | STYLE_BOLD, 0x001A_5C75),
                     2 => (STYLE_ITALIC, 0),
@@ -4928,20 +4963,13 @@ impl<'a> Session<'a> {
                     5 => (STYLE_BOLD, 0x001A_5C75),
                     _ => (0, 0),
                 };
-                let (from, to) = match self.editor.selection() {
-                    Some(sel) => (
-                        self.line_start(sel.start as usize),
-                        self.line_end_offset((sel.end - 1) as usize),
-                    ),
-                    None => {
-                        let caret = self.editor.caret() as usize;
-                        (self.line_start(caret), self.line_end_offset(caret))
-                    }
-                };
+                let (from, to) = self.paragraph_range();
                 if from < to {
-                    if self
-                        .editor
-                        .format_range(from as u32, to as u32, |_| (flags, colour))?
+                    if self.editor.face_format_range(
+                        from as u32,
+                        to as u32,
+                        |_| (flags, colour, FACE_BODY),
+                    )?
                     {
                         self.after_edit(0)?;
                         self.damage = self.chrome.full_damage();
@@ -4953,6 +4981,10 @@ impl<'a> Session<'a> {
                     // text instead, using the same mechanism as the inline controls.
                     self.pending_style = Some(flags);
                     self.pending_colour = Some(colour);
+                    // **The style's face is armed with it**, for the same reason its colour is: a
+                    // heading typed into an empty paragraph must be monospaced-or-not according to the
+                    // style, not according to whatever the last font press left armed.
+                    self.pending_face = Some(FACE_BODY);
                     self.state.styles.bold = flags & STYLE_BOLD != 0;
                     self.state.styles.italic = flags & STYLE_ITALIC != 0;
                     self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
@@ -4961,19 +4993,66 @@ impl<'a> Session<'a> {
                 self.stats.pointer_chrome += 1;
             }
             Action::SetFont(i) => {
-                let before = self.state.font_index;
-                self.state.font_index =
+                self.check_editable()?;
+                let idx =
                     usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
-                // **The face applies now.** This arm used to record the index and admit that
-                // nothing else happened, because `FONTS` listed families the atlas never packed.
-                // The list now carries only loaded faces and [`doc_style`](Self::doc_style) maps
-                // the choice onto every document paint and measurement site — so a change of face
-                // moves every glyph on the page, and the honest damage for that is all of it.
-                // Re-choosing the current face still moves only the dropdown's label.
-                if self.state.font_index != before {
-                    self.damage = self.chrome.full_damage();
+                // **The face this index names, in the model's own terms.** A `usize` from the menu is a
+                // *row*; the document stores a *face*, and the two are related by the one match below
+                // rather than by a cast -- `MONO_FONT_INDEX` is 1 and `FACE_MONO` is 1 today, and the
+                // day a family is inserted above Mono those two numbers part company.
+                let face = if idx == holonomy_render::menus::MONO_FONT_INDEX {
+                    FACE_MONO
                 } else {
-                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Font)));
+                    FACE_BODY
+                };
+                // # The correction: a font is a *character format*, and this arm used to be a document
+                // # setting
+                //
+                // **`state.font_index` was read by `doc_style` for every unpainted run in the document**,
+                // so choosing JetBrains Mono in the dropdown turned the whole document monospaced --
+                // headings, body, every paragraph, whether or not anything was selected. That is not how
+                // a word processor works and it is the defect this arm is now: Google Docs' font box and
+                // Word's Font box both apply the family to **the selection**, and at a bare caret to the
+                // text typed next. **The document-wide default is a paragraph style** (`Normal text`),
+                // reached through the Styles menu, not through the font box.
+                //
+                // **So the arm now does three things and no more**: it restyles the selected (or
+                // caret's) range, it arms the next character typed with the same face, and it moves the
+                // dropdown's label. The document is not touched outside that range, which is the
+                // difference between "I set my heading to JetBrains Mono" and "I lost my whole
+                // document's typography".
+                let scope = self.face_scope();
+                let mut changed = false;
+                if scope.0 < scope.1 {
+                    // **One transaction for the whole range**, through the face-aware form: a font
+                    // change must be one undo step, and it must restore the *previous* face rather than
+                    // the default one. See `Editor::face_format_range`.
+                    changed = self.editor.face_format_range(scope.0, scope.1, |span| {
+                        (span.style_flags, span.color_rgb, face)
+                    })?;
+                }
+                // **The next character, whether or not text was restyled.** Setting the font at a bare
+                // caret has to affect what you type -- that is the half of the rule the document-wide
+                // version was accidentally getting right, and dropping it entirely would make the
+                // control do nothing at all in an empty document.
+                self.pending_face = Some(face);
+                // **The label shows the face the caret is in, which is the face that was just set.**
+                // Reading it back from the document rather than assigning `idx` is what makes the box
+                // honest when the press was a no-op: pressing `Inter` at a caret already in Inter
+                // leaves the box saying `Inter` because the text says so, not because the click did.
+                let caret_at = match self.editor.selection() {
+                    Some(sel) => sel.start,
+                    None => self.editor.caret(),
+                };
+                self.state.font_index = self.face_index_at(caret_at);
+                self.state.font_mixed = self.mixed_face();
+                // **A mixed selection shows no single face.** The box reads
+                // [`mixed_face`](Self::mixed_face) as well as the index, so a range holding two families
+                // reads blank -- Google Docs' rule, and the reason it matters is that *showing* one face
+                // over a mixed range is how a user comes to believe the whole paragraph is already in it.
+                self.damage = self.chrome.full_damage();
+                if changed {
+                    self.after_edit(0)?;
                 }
                 self.stats.pointer_chrome += 1;
             }
@@ -5137,10 +5216,97 @@ impl<'a> Session<'a> {
     /// switched and a measurement that did not would put the caret in Inter's columns over
     /// Mono's glyphs, the exact class of disagreement part 31 and part 33 existed to end.
     fn doc_style(&self, raw: u8) -> holonomy_render::Style {
-        if raw == 0 && self.state.font_index == holonomy_render::menus::MONO_FONT_INDEX {
-            holonomy_render::Style::MONOSPACE
-        } else {
-            holonomy_render::Style(raw)
+        // **The run's own face, not the toolbar's.** `raw` is this run's `atlas_style()` -- 0 regular,
+        // 1 bold, 2 italic, 3 code -- which answers *"what is this run's weight and slant"* and says
+        // nothing about *"which family"*. The family is a **character format on the run**
+        // ([`FACE_BODY`], [`FACE_MONO`]) and it comes from the span, which is why every caller passes
+        // the span and not an index off the toolbar.
+        //
+        // **The old signature took the same `u8` and read `self.state.font_index` against it**, so a
+        // change of the font dropdown changed the face of *every* run in the document that was not bold
+        // or italic -- the whole document repainted from one control, which is the defect this pass is
+        // about. Google Docs and Word both apply a font to the **selection**, and at a bare caret to the
+        // text typed next; the document-wide default is a *paragraph style*, which is a different
+        // control on a different menu.
+        holonomy_render::Style(raw)
+    }
+
+    /// **`doc_style`, for a run**: the family comes from the span's face and the weight from its bits.
+    ///
+    /// **One function, and the reason is the same one part 31 established for the pen:** the emitter,
+    /// the caret column and the click-to-column rule must all agree about which face a byte is drawn
+    /// in, and the way they agreed before was by all reading a field on the session. A per-run face is
+    /// read from the run, and there is one place that turns it into a `Style`.
+    ///
+    /// [`FACE_MONO`] overrides the body face but **not** bold or italic: no mono bold or italic is
+    /// packed, so `JetBrains Mono` + Bold draws bold Inter, which is what Wordcraft does with a family
+    /// that has one weight and what the atlas can honestly offer.
+    fn span_style(&self, span: &holonomy_text::TextIntervalSpan) -> holonomy_render::Style {
+        let raw = span.atlas_style();
+        match span.font_face {
+            FACE_MONO if raw == 0 => holonomy_render::Style::MONOSPACE,
+            _ => self.doc_style(raw),
+        }
+    }
+
+    /// **The face a run is set in, as the toolbar's font index**, so the dropdown shows the truth.
+    ///
+    /// **Google Docs shows the *current* font for the caret's position**, and shows an empty box when the
+    /// selection has more than one. This returns the index of the face at the caret, which is that rule
+    /// for the single-face case; the multi-face case is [`mixed_face`](Self::mixed_face).
+    fn face_index_at(&self, offset: u32) -> usize {
+        match self.editor.style_at(offset).font_face {
+            FACE_MONO => holonomy_render::menus::MONO_FONT_INDEX,
+            _ => 0,
+        }
+    }
+
+    /// **Whether the selection spans more than one face**, which is what makes the font box blank.
+    ///
+    /// A run-level format has no single value over a mixed range, and *showing* one is how a user comes
+    /// to believe the whole paragraph is already in that face -- and then presses it and gets an
+    /// unexpected no-op. The range is the selection, or the word the caret is in.
+    fn mixed_face(&mut self) -> bool {
+        let (from, to) = self.face_scope();
+        if from >= to {
+            return false;
+        }
+        let first = self.editor.style_at(from).font_face;
+        let mut at = from;
+        while at < to {
+            let sp = self.editor.style_at(at);
+            if sp.font_face != first {
+                return true;
+            }
+            at = sp.end_byte.min(to);
+            if at == sp.start_byte {
+                break;
+            }
+        }
+        false
+    }
+
+    /// **The byte range a font change applies to.**
+    ///
+    /// **The selection if there is one, and the word the caret is in otherwise** -- Word's rule, and
+    /// Google Docs' *"without a selection, the font applies to the text you type next"*. Between the two
+    /// the choice is: an empty selection is a *place*, and the two things a user means by *"set the font
+    /// here"* at a place are *"this word"* and *"what I type next"*. Both happen: the word is restyled
+    /// and the next character is armed with the same face ([`Session::pending_face`]).
+    fn face_scope(&mut self) -> (u32, u32) {
+        if let Some(sel) = self.editor.selection() {
+            return (sel.start, sel.end);
+        }
+        let caret = self.editor.caret();
+        // **`word_around` and not a second word-boundary routine**, which is the rule this file already
+        // arrived at for `paragraph_range`: a copy of a range calculation is wrong in a way nobody
+        // notices until a font lands on the word next door. It takes a byte source because a
+        // double-click on a non-resident line must not fault the document in; a local `NoSource` makes
+        // it best-effort, and `None` falls back to the caret, which arms the next character and styles
+        // nothing -- the same answer Google Docs gives for a click in the middle of nowhere.
+        match self.word_around(caret, &mut crate::store::NoSource) {
+            Ok(Some((from, to))) if from < to => (from, to),
+            _ => (caret, caret),
         }
     }
 
@@ -5224,9 +5390,38 @@ impl<'a> Session<'a> {
         out
     }
 
-    /// [`doc_style`](Self::doc_style) for unstyled text: the body face itself.
+    /// [`span_style`](Self::span_style) for text with no span of its own: the body face itself.
+    ///
+    /// **`FACE_BODY` and not the toolbar's row**, which is the whole correction: the fallback for a byte
+    /// outside any span is the *document's* default face, and there is no longer a control that can make
+    /// it anything else.
     fn body_style(&self) -> holonomy_render::Style {
         self.doc_style(0)
+    }
+
+    /// **The face the toolbar's font box shows: the caret's face, or `None` for a mixed range.**
+    ///
+    /// `None` is Google Docs' blank box: a range that holds two families has no single value, and
+    /// printing one of them is how a user comes to believe the whole paragraph is already in it.
+    pub fn current_face_name(&mut self) -> Option<&'static str> {
+        if self.mixed_face() {
+            return None;
+        }
+        let at = match self.editor.selection() {
+            Some(sel) => sel.start,
+            None => self.editor.caret(),
+        };
+        // **`pending_face` wins at a bare caret**, because it is the face the *next* character will be
+        // and the document therefore has no opinion yet -- the same precedence `armed_style` gives the
+        // armed bits over the inherited ones.
+        if self.editor.selection().is_none() {
+            if let Some(face) = self.pending_face {
+                return holonomy_render::menus::FONTS.get(usize::from(face)).copied();
+            }
+        }
+        holonomy_render::menus::FONTS
+            .get(self.face_index_at(at))
+            .copied()
     }
 
     /// **Re-derive the chrome's type metrics from the painter's current size.** Part 43.
@@ -5895,13 +6090,22 @@ impl<'a> Session<'a> {
         self.counts.after_insert(&self.editor, at, bytes);
         // Both properties can be armed independently. Applying them in separate
         // style_range calls would let the second call erase the first one.
-        if !bytes.is_empty() && (self.pending_style.is_some() || self.pending_colour.is_some()) {
+        if !bytes.is_empty()
+            && (self.pending_style.is_some()
+                || self.pending_colour.is_some()
+                || self.pending_face.is_some())
+        {
             let inherited = self.editor.style_at(at as u32);
-            self.editor.style_range(
+            // **`style_range_faced`, and the inherited face when nothing is armed.** A `style_range` here
+            // would write the *default* face over every typed character, so a character typed into the
+            // middle of a monospaced run would silently come out in Inter -- the run split in two by a
+            // single keystroke, which is the visible half of the same defect as the document-wide font.
+            self.editor.style_range_faced(
                 at as u32,
                 (at + bytes.len()) as u32,
                 self.pending_style.unwrap_or(inherited.style_flags),
                 self.pending_colour.unwrap_or(inherited.color_rgb),
+                self.pending_face.unwrap_or(inherited.font_face),
             )?;
         }
         if end_of_heading {
@@ -8214,7 +8418,7 @@ impl<'a> Session<'a> {
                         y,
                         at + cursor as u32,
                         run.len() as u32,
-                        self.doc_style(span.atlas_style()),
+                        self.span_style(span),
                         span_ink(&span, ink),
                         // **The three new properties, from the same span the face came from.** The
                         // size is the heading's, the shift is the super/subscript's, and the two
@@ -8230,7 +8434,7 @@ impl<'a> Session<'a> {
                     pen_x += pen_of(
                         &self.painter,
                         run,
-                        self.doc_style(span.atlas_style()),
+                        self.span_style(span),
                         // **The same size the run was emitted at**, so the next run starts where this
                         // one's glyphs ended -- see `Painter::advance_at`.
                         self.run_size_index(span.style_flags),

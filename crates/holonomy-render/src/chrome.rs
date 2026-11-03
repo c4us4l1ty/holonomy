@@ -1836,6 +1836,17 @@ pub struct ChromeState {
     pub style_index: usize,
     /// Which of [`FONTS`](crate::menus::FONTS) is current, as an index. See [`style_index`](Self::style_index).
     pub font_index: usize,
+    /// **Whether the font box shows no single family, because the selection holds more than one.**
+    ///
+    /// Google Docs leaves the font box *blank* over a mixed selection, and Word leaves it blank too.
+    /// **The reason is not decoration**: a box that prints one of the two families is a statement that
+    /// the whole range is in it, and the user's next press is then a surprise either way -- it changes
+    /// text they were told was already that face, or it does nothing where they expected a change.
+    ///
+    /// **A bool beside `font_index` rather than a sentinel in it**, because `usize::MAX` as "mixed" is
+    /// the kind of sentinel that reads as a corrupt index everywhere it is not checked -- and this field
+    /// is read by `font_name`, which has a fallback that would silently hide it.
+    pub font_mixed: bool,
     /// **Which of [`COLOURS`](crate::menus::COLOURS) is current, as an index.** Part 29.
     ///
     /// **The same index-into-a-`const`-list argument as [`style_index`](Self)**, and for the same
@@ -1969,6 +1980,7 @@ impl Default for ChromeState {
             active_doc: 0,
             style_index: 0,
             font_index: 0,
+            font_mixed: false,
             colour_index: crate::menus::COLOURS.len() - 1,
             open: None,
             cursor: None,
