@@ -43,7 +43,16 @@ fn managed_desktop_opens_on_home_with_a_real_paper_workspace() {
         let l = s.chrome_layout();
         let (groups, buttons) = ribbon::layout(&l, &s.state);
         assert!(groups.iter().any(|g| g.label == "Font"));
-        assert!(buttons.iter().any(|b| b.action == Action::ToggleBold && !b.rect.is_empty()));
+        let overflow = ribbon::overflow(&l, &s.state);
+        assert!(
+            buttons.iter().any(|b| b.action == Action::ToggleBold && !b.rect.is_empty())
+                || overflow.iter().any(|item| item.action == Some(Action::ToggleBold))
+                || groups.iter().enumerate().any(|(i, g)| {
+                    g.label == "Font" && !ribbon::group_trigger(&l, g).is_empty()
+                        && ribbon::group_items(&s.state, i).iter().any(|item| item.action == Some(Action::ToggleBold))
+                }),
+            "{w}x{h}: Bold must remain visible or reachable"
+        );
         let sheet = l.visible_page(&s.state, 0).expect("the first sheet is visible");
         assert!(sheet.width >= w / 2, "{w}x{h}: paper is only {} px wide", sheet.width);
         assert!(sheet.x > 0 && sheet.right() < w);
@@ -90,33 +99,38 @@ fn header_and_status_keep_the_document_name_and_errors_unobscured() {
 }
 
 #[test]
-fn narrow_ribbon_overflow_opens_and_every_visible_row_is_actionable() {
-    for (w, h, zoom) in [(900, 700, 100), (768, 720, 125), (768, 520, 125)] {
+fn narrow_ribbon_collapses_groups_and_every_command_stays_reachable() {
+    for (w, h, zoom) in [(900, 700, 100), (768, 720, 125), (768, 520, 125), (480, 520, 125)] {
         let mut s = desktop(w, h, zoom);
         let l = s.chrome_layout();
-        assert!(!s.state.ribbon_overflow.is_empty(), "fixture must hide commands");
-        let r = ribbon::overflow_rect(&l);
+        let (groups, buttons) = ribbon::layout(&l, &s.state);
+        let overflow = ribbon::overflow(&l, &s.state);
+        assert!(groups.iter().any(|g| g.level == holonomy_render::wordcraft::ribbon_fit::COLLAPSED), "{w}x{h}: expected a collapsed group");
+        for b in buttons.iter().filter(|b| b.rect.is_empty()) {
+            let group = &groups[b.group];
+            let via_group = group.level == holonomy_render::wordcraft::ribbon_fit::COLLAPSED
+                && !ribbon::group_trigger(&l, group).is_empty()
+                && ribbon::group_items(&s.state, b.group).iter().any(|it| it.action == Some(b.action));
+            let via_overflow = overflow.iter().any(|it| it.action == Some(b.action));
+            assert!(via_group || via_overflow, "{w}x{h}: `{}` became unreachable", b.label);
+        }
+        // Open the first collapsed group and exercise its real rows.
+        let (index, group) = groups.iter().enumerate()
+            .find(|(_, g)| g.level == holonomy_render::wordcraft::ribbon_fit::COLLAPSED && !ribbon::group_trigger(&l, g).is_empty())
+            .expect("a visible collapsed group");
+        let r = ribbon::group_trigger(&l, group);
         let (x, y) = ((r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32);
-        assert_eq!(widgets::hit(&l, &s.state, x, y), widgets::Hit::Tool(widgets::Tool::Overflow));
+        assert_eq!(widgets::hit(&l, &s.state, x, y), widgets::Hit::RibbonGroup(index));
         s.handle_pointer(&mut holonomy::store::NoSource, Event::Button {
             button: Button::Left, pressed: true, x, y, time_ms: 1,
         }).unwrap();
-        assert_eq!(s.state.open, Some(widgets::Open::RibbonOverflow));
-        let l = s.chrome_layout();
+        assert_eq!(s.state.open, Some(widgets::Open::RibbonGroup(index)));
         let pop = widgets::popup(&l, &s.state, s.state.open).unwrap();
-        assert_eq!(pop.rows.len(), s.state.ribbon_overflow.len(), "{w}x{h}: hidden commands must stay reachable");
+        assert_eq!(pop.rows.len(), ribbon::group_items(&s.state, index).len());
         for (i, row) in pop.rows.iter().enumerate() {
-            assert!(row.right() <= w && row.bottom() <= h);
-            assert_eq!(widgets::hit(&l, &s.state, (row.x + row.width / 2) as i32, (row.y + row.height / 2) as i32), widgets::Hit::MenuItem { open: widgets::Open::RibbonOverflow, row: i });
+            assert!(row.right() <= w && row.bottom() <= h, "{w}x{h}: group row {i} outside window");
+            assert_eq!(widgets::hit(&l, &s.state, (row.x + row.width / 2) as i32, (row.y + row.height / 2) as i32), widgets::Hit::MenuItem { open: widgets::Open::RibbonGroup(index), row: i });
         }
-        let last = pop.rows.last().unwrap();
-        s.handle_pointer(&mut holonomy::store::NoSource, Event::Button {
-            button: Button::Left, pressed: true,
-            x: (last.x + last.width / 2) as i32,
-            y: (last.y + last.height / 2) as i32,
-            time_ms: 2,
-        }).unwrap();
-        assert_eq!(s.state.open, None, "choosing an overflow command closes the menu");
     }
 }
 

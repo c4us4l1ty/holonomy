@@ -9,100 +9,31 @@ use crate::menus::Action;
 use crate::tree::{Label, Node, Rect, RoundRect, Style, SurfaceTree};
 use crate::DamageRect;
 
-/// WordCraft `theme::Tokens`, packed for Holonomy's framebuffer.
-pub mod tokens {
-    pub mod dark {
-        pub const TITLE: u32 = 0xFF1F1F1F;
-        pub const RIBBON: u32 = 0xFF292929;
-        pub const CANVAS: u32 = 0xFF141414;
-        pub const BORDER: u32 = 0xFF3A3A3A;
-        pub const TEXT: u32 = 0xFFEEEEEE;
-        pub const DIM: u32 = 0xFFC8C8C8;
-        pub const DISABLED: u32 = 0xFF6A6A6A;
-        pub const HOVER: u32 = 0xFF3D3D3D;
-        pub const PRESSED: u32 = 0xFF4A4A4A;
-        pub const CHECKED: u32 = 0xFF2E3A66;
-        pub const ACCENT: u32 = 0xFF7A93F0;
-        pub const ON_ACCENT: u32 = 0xFF11162E;
-        pub const INPUT: u32 = 0xFF1E1E1E;
-        pub const INPUT_BORDER: u32 = 0xFF7A7A7A;
-        pub const GROUP: u32 = 0xFFA0A0A0;
-        pub const RULER: u32 = 0xFF454545;
-        pub const RULER_MARGIN: u32 = 0xFF2E2E2E;
-    }
-    pub mod light {
-        // WordCraft theme::Tokens::light (MIT): three distinct planes make the
-        // page, controls and desktop legible without a heavy/dark application frame.
-        // Only the unsealed desktop ribbon uses these; the sealed chrome is unchanged.
-        pub const TITLE: u32 = 0xFFF0F0F0;
-        pub const RIBBON: u32 = 0xFFF9F9F9;
-        pub const CANVAS: u32 = 0xFFE6E6E6;
-        pub const BORDER: u32 = 0xFFE1E1E1;
-        pub const TEXT: u32 = 0xFF242424;
-        pub const DIM: u32 = 0xFF616161;
-        pub const DISABLED: u32 = 0xFFA8A8A8;
-        pub const HOVER: u32 = 0xFFE6E6E6;
-        pub const PRESSED: u32 = 0xFFD6D6D6;
-        pub const CHECKED: u32 = 0xFFDDE3F8;
-        pub const ACCENT: u32 = 0xFF3B5BDB;
-        pub const ON_ACCENT: u32 = 0xFFFFFFFF;
-        pub const INPUT: u32 = 0xFFFFFFFF;
-        pub const INPUT_BORDER: u32 = 0xFF8A8A8A;
-        pub const GROUP: u32 = 0xFF707070;
-        pub const RULER: u32 = 0xFFFFFFFF;
-        pub const RULER_MARGIN: u32 = 0xFFD4D4D4;
-    }
-}
+pub use crate::wordcraft::tokens;
+use crate::wordcraft::{gallery, ribbon_fit};
 
+/// The native renderer's view of WordCraft's design tokens.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    pub title: u32,
-    pub ribbon: u32,
-    pub canvas: u32,
-    pub border: u32,
-    pub text: u32,
-    pub dim: u32,
-    pub disabled: u32,
-    pub hover: u32,
-    pub pressed: u32,
-    pub checked: u32,
-    pub accent: u32,
-    pub on_accent: u32,
-    pub input: u32,
-    pub input_border: u32,
-    pub group: u32,
-    pub ruler: u32,
-    pub ruler_margin: u32,
+    pub title: u32, pub ribbon: u32, pub canvas: u32, pub border: u32,
+    pub text: u32, pub dim: u32, pub disabled: u32, pub hover: u32,
+    pub pressed: u32, pub checked: u32, pub accent: u32, pub on_accent: u32,
+    pub input: u32, pub input_border: u32, pub group: u32,
+    pub ruler: u32, pub ruler_margin: u32,
+    pub icon: u32, pub panel: u32, pub border_strong: u32,
+    pub accent_text: u32, pub tab_strip: u32, pub status_bar: u32, pub menu: u32,
 }
 impl Palette {
     pub fn get(dark: bool) -> Self {
-        macro_rules! p {
-            ($m:ident) => {
-                Self {
-                    title: tokens::$m::TITLE,
-                    ribbon: tokens::$m::RIBBON,
-                    canvas: tokens::$m::CANVAS,
-                    border: tokens::$m::BORDER,
-                    text: tokens::$m::TEXT,
-                    dim: tokens::$m::DIM,
-                    disabled: tokens::$m::DISABLED,
-                    hover: tokens::$m::HOVER,
-                    pressed: tokens::$m::PRESSED,
-                    checked: tokens::$m::CHECKED,
-                    accent: tokens::$m::ACCENT,
-                    on_accent: tokens::$m::ON_ACCENT,
-                    input: tokens::$m::INPUT,
-                    input_border: tokens::$m::INPUT_BORDER,
-                    group: tokens::$m::GROUP,
-                    ruler: tokens::$m::RULER,
-                    ruler_margin: tokens::$m::RULER_MARGIN,
-                }
-            };
-        }
-        if dark {
-            p!(dark)
-        } else {
-            p!(light)
+        let t = crate::wordcraft::tokens::Tokens::get(dark);
+        Self {
+            title: t.title_bar, ribbon: t.ribbon, canvas: t.canvas, border: t.border,
+            text: t.text, dim: t.text_dim, disabled: t.text_disabled, hover: t.hover,
+            pressed: t.pressed, checked: t.checked, accent: t.accent, on_accent: t.on_accent,
+            input: t.input, input_border: t.input_border, group: t.group_label,
+            ruler: t.ruler, ruler_margin: t.ruler_margin, icon: t.icon, panel: t.panel,
+            border_strong: t.border_strong, accent_text: t.accent_text,
+            tab_strip: t.tab_strip, status_bar: t.status_bar, menu: t.menu,
         }
     }
 }
@@ -125,11 +56,16 @@ pub struct Button {
     /// why this is a field rather than something `paint` re-derives: the *layout* decided to drop the
     /// label, so the layout has to be the one that says so.
     pub labelled: bool,
+    /// Index of the owning group, including when a responsive layout hides this button.
+    pub group: usize,
+    /// A real paragraph-style specimen rather than an ordinary text button.
+    pub style_preview: bool,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Group {
     pub label: &'static str,
     pub rect: DamageRect,
+    pub level: u8,
 }
 
 fn specs(
@@ -248,8 +184,10 @@ fn specs(
                 "Styles",
                 &[
                     (Action::SetStyle(0), "Normal", None, true),
-                    (Action::SetStyle(1), "Heading", None, true),
+                    (Action::SetStyle(1), "Heading 1", None, true),
+                    (Action::SetStyle(5), "Heading 2", None, true),
                     (Action::SetStyle(3), "Title", None, true),
+                    (Action::SetStyle(2), "Quote", None, true),
                     (Action::SetStyle(4), "Subtitle", None, true),
                 ],
             ),
@@ -268,7 +206,7 @@ fn specs(
                 &[(
                     Action::InsertPageBreak,
                     "Page break",
-                    Some(IconId::Doc),
+                    Some(IconId::PageBreak),
                     true,
                 )],
             ),
@@ -350,7 +288,7 @@ fn specs(
                 &[(
                     Action::InsertPageBreak,
                     "Page break",
-                    Some(IconId::Doc),
+                    Some(IconId::PageBreak),
                     true,
                 )],
             ),
@@ -666,221 +604,193 @@ struct Row {
 /// the Font button's width is `text_w` of [`ChromeState::font_name`] because `paint` draws the face's
 /// name there, and the row is fitted by [`Row::fit`] when the honest widths do not fit the window.
 pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
+    layout_with_limit(l, state, Some(l.width.saturating_sub(48)))
+}
+
+/// WordCraft's full -> compact -> collapsed planner, using the same measured widths
+/// for planning, painting and hit testing. Hidden commands remain in the returned
+/// button list with empty rects, so the overflow menu can enumerate them.
+fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) -> (Vec<Group>, Vec<Button>) {
     let mut groups = Vec::new();
     let mut buttons = Vec::new();
     if state.ribbon_collapsed {
         return (groups, buttons);
     }
     let tab = usize::from(state.ribbon_tab).min(TABS.len() - 1);
-    let mut x = l.toolbar.x + 10;
     let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
     let row_h = l.cell_h.saturating_add(SMALL_ROW_AIR);
-    // **The band's air is derived from the tallest thing that can go in it, not written down.**
-    //
-    // A group is at most two rows of small buttons over a caption strip. The shipped design is a
-    // 112 px band for a 96 px group at cell 25 -- 8 px of air above and below -- and the two
-    // literals that expressed that were `- 10` and `+ 7` here, which at 16 ppem spent 17 px of a
-    // 71 px band on air while the content needed 69. **The second row was clamped and the caption
-    // took the last 20**, which is `Page break` printed on `Pages` in the report.
-    let tallest = 3u32 + 2 * row_h + CAPTION_GAP + caption_h;
+    let tallest = 3 + 2 * row_h + CAPTION_GAP + caption_h;
     let inset = l.toolbar.height.saturating_sub(tallest) / 2;
     let top = l.toolbar.y + inset;
     let h = l.toolbar.height.saturating_sub(inset * 2);
-    // **The caption strip is a line of type plus enough air above it that a button's own label
-    // cannot land in it.** It was a literal 20 in `paint` against a line pitch of 25 -- at 125 % a
-    // pitch of 30 in a 20 px box drew the caption's bottom four rows *in the ruler*, which is the
-    // `Paragraph` printed over `232 234 236` in the report. Deriving it from the cell fixed that
-    // and left the second half: a large button stacks a 20 px icon over its label, its label box
-    // ran to the bottom of the group, and at 16 ppem the two strips met with nothing between them.
-    // `CAPTION_AIR` is air above the caption's glyphs; `CAPTION_GAP` is air above *that*.
-    let body_h = h.saturating_sub(caption_h.saturating_add(CAPTION_GAP));
-    // **`- 48`, and it is the overflow square's column.** `overflow_rect` occupies the last 40 px of
-    // the band, so a group's last button must end before `width - 48` or the two overlap -- which is
-    // what `widgets::hit` reported at 768 px: the middle of the overflow square answered
-    // `Ribbon(SelectTool(Font))` because the Font group had drawn over it.
-    let limit = l.width.saturating_sub(48);
-
-    // Per-group specs at the current font name, without placing anything.
-    let mut rows: Vec<Row> = Vec::new();
+    let body_h = h.saturating_sub(caption_h + CAPTION_GAP);
+    let limit = available.unwrap_or(l.width);
+    let start = l.toolbar.x + 10;
+    let mut rows = Vec::new();
     for (name, items) in specs(tab) {
-        let sm: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
-        let lg: Vec<_> = items.iter().filter(|i| i.3).copied().collect();
-        let rows_n = if sm.len() > 5 { 2 } else { 1 };
+        let small: Vec<_> = items.iter().filter(|i| !i.3).copied().collect();
+        let rows_n = if small.len() > 5 { 2 } else { 1 };
         let mut large = Vec::new();
-        for (action, label, icon, _) in lg.iter().copied() {
-            let bw = if icon.is_none() { 92 } else { LARGE_MIN };
-            // A large label is centred in the whole rect, so its box must be at least its own width.
-            let bw = bw.max(text_w(l, label).saturating_add(SMALL_PAD * 2));
+        for (action, label, icon, _) in items.iter().copied().filter(|i| i.3) {
+            let style_preview = gallery::specimen(action).is_some();
+            let bw = if style_preview { gallery::tile_width(l.cell_h) } else if icon.is_none() { 92 } else { LARGE_MIN };
+            let bw = bw.max(text_w(l, label) + SMALL_PAD * 2);
             large.push(Button {
-                action,
-                label,
-                icon,
+                action, label, icon,
                 rect: DamageRect::new(0, top + 3, bw, body_h.saturating_sub(3)),
-                large: true,
-                labelled: true,
+                large: true, labelled: true, group: 0, style_preview,
             });
         }
         let mut cols = Vec::new();
-        for pair in sm.chunks(rows_n) {
+        for pair in small.chunks(rows_n) {
             let mut col = Vec::new();
-            let (mut width, mut icon_only) = (0u32, 0u32);
+            let (mut width, mut icon_only) = (0, 0);
             for (row, (action, label, icon, _)) in pair.iter().copied().enumerate() {
                 let (bw, io) = small_widths(l, state, action, label, icon.is_some());
                 width = width.max(bw);
                 icon_only = icon_only.max(io);
                 col.push(Button {
-                    action,
-                    label,
-                    icon,
-                    // The width is replaced by the column's below; the `y` is final.
+                    action, label, icon,
                     rect: DamageRect::new(0, top + 3 + row as u32 * row_h, bw, row_h),
-                    large: false,
-                    labelled: true,
+                    large: false, labelled: true, group: 0, style_preview: false,
                 });
             }
             cols.push((col, width, icon_only));
         }
-        rows.push(Row {
-            name,
-            large,
-            cols,
-            caption_w: text_w(l, name),
-        });
+        rows.push(Row { name, large, cols, caption_w: text_w(l, name) });
     }
-
-    // **Plan the whole row before placing any of it.** The widths are now honest, so the plan can
-    // know whether the tab fits -- and if it does not, give the labels up from the right.
-    //
-    // **One width rule, used by the plan and by the placement.** That is the whole reason this is a
-    // closure rather than two loops that agree today: the defect this file opened with was two
-    // expressions for one number (the group's `cols * small_w` sum against the buttons' own widths),
-    // and a plan that measures differently from the thing it plans is that defect in a new place.
-    //
-    // `compact` is per group; a *column* inside a compact group is as wide as its widest button where
-    // **an icon-bearing button drops to its icon and a button without one keeps its label**, because
-    // an unlabelled icon-less button would be an empty square.
-    let col_w = |col: &[Button], labelled: u32, icon_only: u32, compact: bool| -> u32 {
-        col.iter()
-            .map(|b| {
-                if !compact {
-                    labelled
-                } else if b.icon.is_some() {
-                    icon_only
-                } else {
-                    labelled
-                }
-            })
-            .max()
-            .unwrap_or(0)
+    let column_width = |col: &[Button], full: u32, compact: u32, level: u8| {
+        col.iter().map(|b| if level == ribbon_fit::COMPACT && b.icon.is_some() { compact } else { full }).max().unwrap_or(0)
     };
-    let total = |rs: &[Row], from: usize| -> u32 {
-        rs.iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let mut w: u32 = r.large.iter().map(|b| b.rect.width).sum::<u32>() + GROUP_PAD;
-                for (col, labelled, icon_only) in &r.cols {
-                    w += col_w(col, *labelled, *icon_only, i >= from);
-                }
-                // **And the caption fits, or nothing does.** The overflow menu is where a group
-                // that does not fit is meant to go; a group narrower than its own name is not
-                // "compact", it is a group whose label is elided by its own layout.
-                w.max(r.caption_w + GROUP_PAD)
-            })
-            .sum()
-    };
-    let avail = limit.saturating_sub(x);
-    let mut compact_from = rows.len();
-    let mut width = total(&rows, compact_from);
-    while width > avail && compact_from > 0 {
-        compact_from -= 1;
-        width = total(&rows, compact_from);
-    }
-
-    for (gi, row) in rows.iter_mut().enumerate() {
-        let compact = gi >= compact_from;
-        let mut cols: Vec<(u32, Vec<Button>)> = Vec::new();
-        for (col, labelled, icon_only) in row.cols.drain(..) {
-            let mut col = col;
-            for b in col.iter_mut() {
-                if compact && b.icon.is_some() {
-                    b.labelled = false;
-                }
-            }
-            let cw = col_w(&col, labelled, icon_only, compact);
-            cols.push((cw, col));
+    let group_width = |row: &Row, level: u8| {
+        let caption = row.caption_w + GROUP_PAD;
+        if level == ribbon_fit::COLLAPSED {
+            return caption.max(LARGE_MIN + GROUP_PAD);
         }
-        let w = (row.large.iter().map(|b| b.rect.width).sum::<u32>()
-            + cols.iter().map(|(cw, _)| *cw).sum::<u32>()
-            + GROUP_PAD)
-            .max(row.caption_w + GROUP_PAD);
-        // **The group's own rect stops at the overflow square's column too**, not only at the panel
-        // edge. A group whose buttons were all hidden for want of room still drew a divider and a
-        // centred caption out to its *planned* width -- through the overflow square and, on a narrow
-        // window, off the panel. The caption is centred in this rect, so clamping it here is what
-        // keeps a group that did not fit from labelling itself over the control that stands in for it.
-        let gr = DamageRect::new(
-            x.min(l.width),
-            top,
-            w.min(limit.saturating_sub(x))
-                .min(l.width.saturating_sub(x)),
-            h,
-        );
-        groups.push(Group {
-            label: row.name,
-            rect: gr,
-        });
+        let mut w = GROUP_PAD;
+        let mut tiles = 0;
+        for b in &row.large {
+            let visible = !b.style_preview || level == ribbon_fit::FULL || {
+                tiles += 1;
+                tiles <= gallery::STYLE_TILES_COMPACT
+            };
+            if visible { w += b.rect.width; }
+        }
+        for (col, full, compact) in &row.cols {
+            w += column_width(col, *full, *compact, level);
+        }
+        w.max(caption)
+    };
+    let measurements: Vec<_> = rows.iter().map(|row| ribbon_fit::GroupWidths {
+        title: row.name,
+        widths: [ribbon_fit::FULL, ribbon_fit::COMPACT, ribbon_fit::COLLAPSED].map(|level| Some(group_width(row, level))),
+    }).collect();
+    let levels = ribbon_fit::plan(&measurements, available.map(|w| w.saturating_sub(start)).unwrap_or(u32::MAX));
+    let mut x = start;
+    for (gi, (row, level)) in rows.iter_mut().zip(levels).enumerate() {
+        let w = group_width(row, level);
+        let compact = level == ribbon_fit::COMPACT;
+        let gr = if available.is_some() && (x >= limit || w > limit - x) {
+            DamageRect::EMPTY
+        } else {
+            DamageRect::new(x, top, w, h)
+        };
+        groups.push(Group { label: row.name, rect: gr, level });
         let mut bx = x + 6;
+        let mut style_tile = 0;
         for mut b in row.large.drain(..) {
-            if bx + b.rect.width <= limit {
-                b.rect.x = bx;
-            } else {
+            b.group = gi;
+            let gallery_hidden = b.style_preview && compact && {
+                let hidden = style_tile >= gallery::STYLE_TILES_COMPACT;
+                style_tile += 1;
+                hidden
+            };
+            if level == ribbon_fit::COLLAPSED || gallery_hidden || gr.is_empty() || (available.is_some() && bx + b.rect.width > limit) {
                 b.rect = DamageRect::EMPTY;
+            } else {
+                b.rect.x = bx;
+                bx += b.rect.width;
             }
-            bx += b.rect.width;
             buttons.push(b);
         }
-        for (cw, col) in cols {
+        for (mut col, full, compact_w) in row.cols.drain(..) {
+            let cw = column_width(&col, full, compact_w, level);
             for mut b in col {
+                b.group = gi;
                 b.rect.width = cw;
-                if bx + cw <= limit {
-                    b.rect.x = bx;
-                } else {
+                if compact && b.icon.is_some() { b.labelled = false; }
+                if level == ribbon_fit::COLLAPSED || gr.is_empty() || (available.is_some() && bx + cw > limit) {
                     b.rect = DamageRect::EMPTY;
-                }
-                // **The last row must end above the caption strip, or the caption loses.**
-                // `body_h` is `h - caption_h`, and a two-row group is `2 * row_h` tall, so a pitch
-                // that does not fit leaves the buttons over the caption and the caption over the
-                // ruler. Clamping here rather than asserting, because a caller can hand this a
-                // `Layout` whose band is too short and the honest answer is a button a few pixels
-                // shorter, not one drawn outside its group.
-                if !b.rect.is_empty() && b.rect.bottom() > gr.y + body_h {
-                    let cut = b.rect.bottom() - (gr.y + body_h);
-                    b.rect.height = b.rect.height.saturating_sub(cut);
-                    if b.rect.height == 0 {
-                        b.rect = DamageRect::EMPTY;
+                } else {
+                    b.rect.x = bx;
+                    if b.rect.bottom() > top + body_h {
+                        b.rect.height = b.rect.height.saturating_sub(b.rect.bottom() - (top + body_h));
                     }
+                    if b.rect.height == 0 { b.rect = DamageRect::EMPTY; }
                 }
                 buttons.push(b);
             }
-            bx += cw;
+            if level != ribbon_fit::COLLAPSED { bx += cw; }
         }
         x = x.saturating_add(w);
     }
     (groups, buttons)
 }
 
+/// The whole collapsed group, in its original order. Actions stay attached to the
+/// group even when the group has no visible command buttons.
+pub fn group_items(state: &ChromeState, group: usize) -> Vec<crate::menus::Item> {
+    let tab = usize::from(state.ribbon_tab).min(TABS.len() - 1);
+    specs(tab).get(group).map(|(_, items)| items.iter().map(|&(action, label, icon, _)| crate::menus::Item {
+        label, icon, accelerator: None, submenu: false,
+        action: Some(action), checked: active(action, state),
+    }).collect()).unwrap_or_default()
+}
+
+/// The measured click target for a collapsed group's drop-down.
+pub fn group_trigger(l: &Layout, group: &Group) -> DamageRect {
+    if group.level != ribbon_fit::COLLAPSED || group.rect.is_empty() {
+        return DamageRect::EMPTY;
+    }
+    let body = group.rect.height.saturating_sub(l.cell_h + CAPTION_AIR + CAPTION_GAP);
+    DamageRect::new(group.rect.x + 4, group.rect.y + 3, group.rect.width.saturating_sub(8), body.saturating_sub(6))
+}
+
+pub fn group_icon(label: &str) -> IconId {
+    match label {
+        "Clipboard" => IconId::Paste,
+        "Font" => IconId::Bold,
+        "Paragraph" => IconId::Bullets,
+        "Styles" | "Document formatting" => IconId::Doc,
+        "Editing" => IconId::Search,
+        "Zoom" => IconId::Search,
+        "Appearance" => IconId::Theme,
+        "Tables" => IconId::Table,
+        "Illustrations" => IconId::Image,
+        _ => IconId::Overflow,
+    }
+}
+
 pub fn overflow(l: &Layout, state: &ChromeState) -> Vec<crate::menus::Item> {
-    layout(l, state)
-        .1
+    let (groups, buttons) = layout(l, state);
+    buttons
         .into_iter()
-        .filter(|b| b.rect.is_empty())
+        .filter(|b| {
+            // A visible collapsed group already has its own measured dropdown.
+            // The global overflow is for commands whose group was clipped away,
+            // or for compact-gallery tiles that have no individual trigger.
+            b.rect.is_empty()
+                && groups.get(b.group).is_none_or(|g| {
+                    g.level != ribbon_fit::COLLAPSED || g.rect.is_empty()
+                })
+        })
         .map(|b| crate::menus::Item {
             label: b.label,
             icon: b.icon,
             accelerator: None,
             submenu: false,
             action: Some(b.action),
-            checked: false,
+            checked: active(b.action, state),
         })
         .collect()
 }
@@ -1075,15 +985,16 @@ fn ruler_number(
         c,
     ))));
 }
-fn text(
-    v: &mut Vec<SurfaceTree>,
-    r: DamageRect,
-    s: &str,
-    c: u32,
-    bold: bool,
-    center: bool,
-    cell_w: u32,
-    cell_h: u32,
+pub(crate) fn text(
+    v: &mut Vec<SurfaceTree>, r: DamageRect, s: &str, c: u32,
+    bold: bool, center: bool, cell_w: u32, cell_h: u32,
+) {
+    text_styled(v, r, s, c, if bold { Style::BOLD } else { Style::REGULAR }, center, cell_w, cell_h);
+}
+
+fn text_styled(
+    v: &mut Vec<SurfaceTree>, r: DamageRect, s: &str, c: u32,
+    face: Style, center: bool, cell_w: u32, cell_h: u32,
 ) {
     let advance = cell_w.max(1);
     if r.width < advance || r.height < 8 {
@@ -1126,7 +1037,7 @@ fn text(
         x as i32,
         y as i32,
         &shown,
-        if bold { Style::BOLD } else { Style::REGULAR },
+        face,
         size,
         c,
     ))));
@@ -1160,6 +1071,27 @@ fn active(a: Action, s: &ChromeState) -> bool {
         Action::ToggleRibbon => !s.ribbon_collapsed,
         _ => false,
     }
+}
+
+/// WordCraft's Navigation pane: a search affordance, real tab targets and compact
+/// heading/page rows. Geometry is shared with `widgets::hit` and the session.
+pub fn nav_close(l: &Layout) -> DamageRect {
+    DamageRect::new(l.sidebar.right().saturating_sub(40), l.sidebar.y + 12, 28.min(l.sidebar.width), 28)
+}
+pub fn nav_search(l: &Layout) -> DamageRect {
+    DamageRect::new(l.sidebar.x + 12, l.sidebar.y + 52, l.sidebar.width.saturating_sub(24), l.cell_h + 10)
+}
+pub fn nav_tabs(l: &Layout) -> Vec<DamageRect> {
+    let w = l.sidebar.width.saturating_sub(24) / 2;
+    (0..2).map(|i| DamageRect::new(l.sidebar.x + 12 + i * w, l.sidebar.y + 98, w, l.cell_h + 8)).collect()
+}
+pub fn nav_entry_count(l: &Layout, s: &ChromeState) -> usize {
+    if s.nav_tab == 1 { l.page_count(s.total_lines) as usize } else { s.navigation.len() }
+}
+pub fn nav_rows(l: &Layout, s: &ChromeState) -> Vec<(usize, DamageRect)> {
+    let row_h = l.cell_h + 12;
+    let capacity = l.sidebar.height.saturating_sub(154) / row_h.max(1);
+    (0..nav_entry_count(l, s).min(capacity as usize)).map(|i| (i, DamageRect::new(l.sidebar.x + 8, l.sidebar.y + 146 + i as u32 * row_h, l.sidebar.width.saturating_sub(16), row_h - 2))).collect()
 }
 
 /// Three disjoint regions in the status bar. When a notice needs space,
@@ -1207,9 +1139,9 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     let t = Palette::get(s.dark);
     fill(v, DamageRect::new(0, 0, l.width, l.height), t.canvas);
     fill(v, l.title, t.title);
-    fill(v, l.menubar, t.title);
+    fill(v, l.menubar, t.tab_strip);
     fill(v, l.toolbar, t.ribbon);
-    fill(v, l.status, t.title);
+    fill(v, l.status, t.status_bar);
     fill(
         v,
         DamageRect::new(0, l.toolbar.bottom().saturating_sub(1), l.width, 1),
@@ -1344,32 +1276,20 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     // and the check at the end of `layout` is what keeps the two from meeting again.
     let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
     let (groups, buttons) = layout(l, s);
-    for g in groups {
-        fill(
-            v,
-            DamageRect::new(
-                g.rect.right(),
-                g.rect.y + 4,
-                1,
-                g.rect.height.saturating_sub(8),
-            ),
-            t.border,
-        );
-        text(
-            v,
-            DamageRect::new(
-                g.rect.x,
-                g.rect.bottom().saturating_sub(caption_h),
-                g.rect.width,
-                caption_h,
-            ),
-            g.label,
-            t.dim,
-            false,
-            true,
-            cell_w,
-            cell_h,
-        );
+    for (index, g) in groups.iter().enumerate() {
+        if g.rect.is_empty() { continue; }
+        fill(v, DamageRect::new(g.rect.right(), g.rect.y + 4, 1, g.rect.height.saturating_sub(8)), t.border);
+        if g.level == ribbon_fit::COLLAPSED {
+            let r = group_trigger(l, g);
+            let hit = crate::widgets::Hit::RibbonGroup(index);
+            let bg = if s.pressed == Some(hit) { t.pressed }
+                else if s.open == Some(crate::widgets::Open::RibbonGroup(index)) { t.checked }
+                else if s.hover == Some(hit) { t.hover } else { t.ribbon };
+            round(v, r, 4, bg);
+            icon(v, DamageRect::new(r.x, r.y, r.width, r.height.saturating_sub(l.cell_h)), group_icon(g.label), t.icon, true);
+            text(v, DamageRect::new(r.x, r.bottom().saturating_sub(l.cell_h), r.width, l.cell_h), g.label, t.text, false, true, cell_w, cell_h);
+        }
+        text(v, DamageRect::new(g.rect.x, g.rect.bottom().saturating_sub(caption_h), g.rect.width, caption_h), g.label, t.group, false, true, cell_w, cell_h);
     }
     for b in buttons {
         if b.rect.is_empty() {
@@ -1377,37 +1297,38 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         }
         let hit = crate::widgets::Hit::Ribbon(b.action);
         let on = active(b.action, s);
-        let bg = if s.pressed == Some(hit) {
-            t.pressed
-        } else if on {
-            t.checked
-        } else if s.hover == Some(hit) {
-            t.hover
-        } else {
-            t.ribbon
-        };
+        let bg = if s.pressed == Some(hit) { t.pressed }
+            else if on { t.checked }
+            else if s.hover == Some(hit) { t.hover } else { t.ribbon };
         round(v, b.rect, 4, bg);
-        let ink = if on { t.accent } else { t.text };
+        let ink = if on { t.accent_text } else { t.text };
+        if b.style_preview {
+            if let Some((sample, face, colour)) = gallery::specimen(b.action) {
+                let tile = DamageRect::new(b.rect.x + 2, b.rect.y + 2, b.rect.width.saturating_sub(4), b.rect.height.saturating_sub(4));
+                round(v, tile, 3, if on { t.accent } else { t.border_strong });
+                round(v, DamageRect::new(tile.x + 1, tile.y + 1, tile.width.saturating_sub(2), tile.height.saturating_sub(2)), 2, if on { t.checked } else { t.input });
+                let specimen_box = DamageRect::new(tile.x + 3, tile.y + 3, tile.width.saturating_sub(6), tile.height.saturating_sub(l.cell_h + 6));
+                let specimen_ink = if s.dark && colour == 0xFF242424 { t.text } else if s.dark { t.accent_text } else { colour };
+                text_styled(v, specimen_box, sample, specimen_ink, face, true, cell_w, cell_h);
+                text(v, DamageRect::new(tile.x, tile.bottom().saturating_sub(l.cell_h + 2), tile.width, l.cell_h), b.label, t.text, false, true, cell_w, cell_h);
+            }
+            continue;
+        }
         if let Some(i) = b.icon {
-            icon(
-                v,
-                if b.large {
-                    b.rect
-                } else if b.labelled {
-                    // **The icon column, which is also where `layout` said it would be.** It was a
-                    // literal 28 here and `small_w`'s arithmetic in `layout` assumed 22, so the two
-                    // disagreed about how much of a button the label had.
-                    DamageRect::new(b.rect.x, b.rect.y, ICON_GUTTER, b.rect.height)
-                } else {
-                    // **A label-less button centres its icon in the whole box**, because the box was
-                    // narrowed to the icon and the gutter no longer exists: at `x + 6` in a 38 px box
-                    // the icon sits eight pixels left of centre and a compact row reads as ragged.
-                    b.rect
-                },
-                i,
-                ink,
-                b.large,
-            );
+            let icon_box = if b.large || !b.labelled { b.rect } else { DamageRect::new(b.rect.x, b.rect.y, ICON_GUTTER, b.rect.height) };
+            icon(v, icon_box, i, if on { t.accent_text } else { t.icon }, b.large);
+        }
+        let has_menu = matches!(b.action, Action::SelectTool(_));
+        let tr = if b.large {
+            let icon_h = 25;
+            DamageRect::new(b.rect.x, b.rect.y + icon_h.min(b.rect.height), b.rect.width, b.rect.height.saturating_sub(icon_h))
+        } else {
+            let gutter = if b.icon.is_some() { ICON_GUTTER } else { 0 };
+            DamageRect::new(b.rect.x + gutter, b.rect.y, b.rect.width.saturating_sub(gutter).saturating_sub(if has_menu { CHEVRON_W } else { 0 }), b.rect.height)
+        };
+        let label = if b.action == Action::SelectTool(crate::widgets::Tool::Font) { s.font_name() } else { b.label };
+        if b.labelled {
+            text(v, tr, label, ink, false, b.large, cell_w, cell_h);
         }
         // **The chevron is measured before the label box is, because it owns the right edge.**
         let has_menu = matches!(b.action, Action::SelectTool(_));

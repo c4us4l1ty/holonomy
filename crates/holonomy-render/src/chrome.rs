@@ -1749,6 +1749,8 @@ pub struct ChromeState {
     pub ribbon: bool,
     pub ribbon_tab: u8,
     pub ribbon_collapsed: bool,
+    /// Navigation pane tab: 0 = document headings, 1 = pages.
+    pub nav_tab: u8,
     pub dark: bool,
     pub autosave: bool,
     pub navigation: Vec<(u32, String)>,
@@ -3316,13 +3318,13 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         return;
     };
     let items = pop.open.items(state);
-    let pad = 2 * m.cell_w;
+    let pad = if matches!(pop.open, crate::widgets::Open::RibbonOverflow | crate::widgets::Open::RibbonGroup(_)) { m.cell_w } else { 2 * m.cell_w };
     let x = pop.rect.x as i32;
     let y = pop.rect.y as i32;
 
     let pal = crate::ribbon::Palette::get(state.dark);
     let (popup_bg, popup_ink, popup_hover) = if state.ribbon {
-        (pal.ribbon, pal.text, pal.hover)
+        (pal.menu, pal.text, pal.hover)
     } else {
         (colour::POPUP, colour::INK, colour::PILL_HOVER)
     };
@@ -3333,7 +3335,7 @@ fn paint_popup(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state
         pop.rect.height,
         8,
         if state.ribbon {
-            pal.border
+            pal.border_strong
         } else {
             colour::SHADOW
         },
@@ -3759,65 +3761,40 @@ fn paint_toolbar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
 fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, state: &ChromeState) {
     if state.ribbon {
         let t = crate::ribbon::Palette::get(state.dark);
-        into.push(fill(
-            0,
-            l.sidebar.y as i32,
-            l.sidebar.width,
-            l.sidebar.height,
-            t.ribbon,
-        ));
-        into.push(fill(
-            l.sidebar.right().saturating_sub(1) as i32,
-            l.sidebar.y as i32,
-            1,
-            l.sidebar.height,
-            t.border,
-        ));
-        push_text(
-            into,
-            m,
-            l.sidebar.y + 24,
-            "Navigation",
-            Style::BOLD,
-            t.text,
-            24,
-        );
-        push_text(
-            into,
-            m,
-            l.sidebar.y + 60,
-            "Headings",
-            Style::REGULAR,
-            t.group,
-            24,
-        );
-        for (i, (_, title)) in state.navigation.iter().enumerate() {
-            let Some(r) = l.sidebar_doc(i) else { break };
-            if state_fill(state, crate::widgets::Hit::Nav(i)).is_some() {
-                into.push(rounded(
-                    r.x as i32, r.y as i32, r.width, r.height, 5, t.hover,
-                ));
-            }
-            push_text(
-                into,
-                m,
-                r.y + (r.height.saturating_sub(m.cell_h)) / 2,
-                title,
-                Style::REGULAR,
-                t.text,
-                r.x as i32 + 24,
-            );
+        let r = l.sidebar;
+        into.push(fill(0, r.y as i32, r.width, r.height, t.panel));
+        into.push(fill(r.right().saturating_sub(1) as i32, r.y as i32, 1, r.height, t.border));
+        crate::ribbon::text(into, DamageRect::new(r.x + 16, r.y + 12, r.width.saturating_sub(64), m.cell_h + 8), "Navigation", t.text, true, false, m.cell_w, m.cell_h);
+        let close = crate::ribbon::nav_close(l);
+        if state_fill(state, crate::widgets::Hit::NavClose).is_some() {
+            into.push(rounded(close.x as i32, close.y as i32, close.width, close.height, 4, t.hover));
         }
-        if state.navigation.is_empty() {
-            push_text(
-                into,
-                m,
-                l.sidebar.y + 100,
-                "Apply Heading 1 to add entries.",
-                Style::REGULAR,
-                t.group,
-                24,
-            );
+        into.push(SurfaceTree::leaf(Node::Icon(crate::icons::IconId::Close.at(close.x as i32 + 6, close.y as i32 + 6, t.icon))));
+        let search = crate::ribbon::nav_search(l);
+        into.push(rounded(search.x as i32, search.y as i32, search.width, search.height, 4, t.input_border));
+        into.push(rounded(search.x as i32 + 1, search.y as i32 + 1, search.width.saturating_sub(2), search.height.saturating_sub(2), 3, t.input));
+        into.push(SurfaceTree::leaf(Node::Icon(crate::icons::IconId::Search.at(search.x as i32 + 7, search.y as i32 + (search.height.saturating_sub(16) / 2) as i32, t.icon))));
+        crate::ribbon::text(into, DamageRect::new(search.x + 29, search.y, search.width.saturating_sub(33), search.height), "Search document", t.dim, false, false, m.cell_w, m.cell_h);
+        for (i, tab) in crate::ribbon::nav_tabs(l).into_iter().enumerate() {
+            let selected = usize::from(state.nav_tab) == i;
+            let bg = if selected { t.checked } else if state_fill(state, crate::widgets::Hit::NavTab(i as u8)).is_some() { t.hover } else { t.panel };
+            into.push(rounded(tab.x as i32, tab.y as i32, tab.width, tab.height, 4, bg));
+            crate::ribbon::text(into, tab, if i == 0 { "Headings" } else { "Pages" }, if selected { t.accent_text } else { t.dim }, selected, true, m.cell_w, m.cell_h);
+        }
+        let current_page = state.scroll_line / l.page_rows();
+        let active_heading = state.navigation.iter().rposition(|(line, _)| *line <= state.scroll_line);
+        for (i, row) in crate::ribbon::nav_rows(l, state) {
+            let selected = if state.nav_tab == 1 { i as u32 == current_page } else { Some(i) == active_heading };
+            let hit = crate::widgets::Hit::Nav(i);
+            let bg = if selected { t.checked } else if state_fill(state, hit).is_some() { t.hover } else { t.panel };
+            into.push(rounded(row.x as i32, row.y as i32, row.width, row.height, 4, bg));
+            let label = if state.nav_tab == 1 { format!("Page {}", i + 1) } else { state.navigation[i].1.clone() };
+            crate::ribbon::text(into, DamageRect::new(row.x + 8, row.y, row.width.saturating_sub(16), row.height), &label, if selected { t.accent_text } else { t.text }, selected, false, m.cell_w, m.cell_h);
+        }
+        if crate::ribbon::nav_entry_count(l, state) == 0 {
+            for (i, line) in ["No headings yet.", "Apply Heading 1", "to add entries."].iter().enumerate() {
+                crate::ribbon::text(into, DamageRect::new(r.x + 16, r.y + 150 + i as u32 * m.cell_h, r.width.saturating_sub(32), m.cell_h), line, t.dim, false, false, m.cell_w, m.cell_h);
+            }
         }
         return;
     }

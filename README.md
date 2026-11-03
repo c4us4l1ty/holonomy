@@ -535,9 +535,11 @@ resident, so typing past the window does not yet work. See `PROJECT.md` §7.
 
 ## Licence
 
-All rights reserved: this repository is intentionally unlicensed (`license = "UNLICENSED"`,
-`publish = false`) and there is deliberately no `LICENSE` file — absence of one is the statement,
-not an oversight. No permission is granted to use, copy, modify or distribute this code.
+Holonomy's original code is intentionally unlicensed (`license = "UNLICENSED"`,
+`publish = false`): all rights are reserved and there is deliberately no root `LICENSE` file.
+That statement does **not** override third-party licenses shipped in this repository. In
+particular, the WordCraft UI material under [`third_party/wordcraft/`](third_party/wordcraft/)
+is copied/adapted under the MIT license, with its license text and attribution preserved there.
 
 The bundled fonts are not ours and carry their own licences, which ship beside them in
 `assets/fonts/`: Inter (OFL 1.1, `Inter-LICENSE.txt`), JetBrains Mono (OFL 1.1,

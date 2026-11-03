@@ -3,7 +3,8 @@
 name: Desktop editor visual review
 on:
   push:
-    branches: [arena/34487f2a-holonomy]
+    branches: [arena/d88a3e5c-holonomy]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

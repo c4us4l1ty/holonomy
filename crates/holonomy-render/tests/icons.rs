@@ -212,7 +212,7 @@ fn the_all_list_and_the_match_agree() {
     // remaining 33 are unchanged, `mask::PRINT` still resolves, and `Tool::Print` is still wired.
     assert_eq!(
         IconId::ALL.len(),
-        51,
+        52,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. This went 34 -> 33 \
          when `Comment` was removed with `Tool::Comment` and `TitleButton::Comments`: it had no \

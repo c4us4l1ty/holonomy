@@ -691,6 +691,8 @@ pub enum Open {
     RibbonOverflow,
     /// Tabs that do not fit in the ribbon's tab strip at the current width.
     RibbonTabs,
+    /// The complete command list of a collapsed ribbon group.
+    RibbonGroup(usize),
     /// A menu-bar heading's popup, by index into [`MENUS`](crate::chrome::MENUS).
     Menu(usize),
     /// A labelled toolbar control's dropdown.
@@ -709,6 +711,7 @@ impl Open {
             // The entire short list is offered, so the same row index is the tab
             // index. This also lets someone switch back after selecting a tab
             // whose heading is hidden at the current window width.
+            Open::RibbonGroup(index) => crate::ribbon::group_items(state, index),
             Open::RibbonTabs => crate::ribbon::TABS
                 .iter()
                 .enumerate()
@@ -773,6 +776,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let anchor_x = match open {
         Open::RibbonOverflow => crate::ribbon::overflow_rect(l).x,
         Open::RibbonTabs => crate::ribbon::more_rect(l).x,
+        Open::RibbonGroup(index) => crate::ribbon::layout(l, state).0.get(index)?.rect.x,
         Open::Menu(index) => crate::chrome::menu_boxes(l).1.get(index)?.x,
         Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
             .1
@@ -791,6 +795,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let anchor_y = match open {
         Open::RibbonOverflow => l.toolbar.y + 40,
         Open::RibbonTabs | Open::Menu(_) => l.menubar.bottom(),
+        Open::RibbonGroup(_) => l.toolbar.bottom(),
         Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
             .1
             .into_iter()
@@ -800,7 +805,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         Open::Tool(_) => l.toolbar.bottom(),
     };
 
-    let pad = 2 * l.cell_w;
+    let pad = if matches!(open, Open::RibbonOverflow | Open::RibbonGroup(_)) { l.cell_w } else { 2 * l.cell_w };
     // **The width is computed over the whole row, and the whole row is more than the label.**
     //
     // # CORRECTION, part 39: the accelerator was not in it, and a menu row is not a label
@@ -842,7 +847,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let y = anchor_y.min(l.height.saturating_sub(1));
     let room = l.height.saturating_sub(y).saturating_sub(pad);
     let fits = usize::try_from(room / row_h.max(1)).unwrap_or(0);
-    if open == Open::RibbonOverflow && fits > 0 {
+    if matches!(open, Open::RibbonOverflow | Open::RibbonGroup(_)) && fits > 0 {
         // WordCraft compacts groups from the right. A single long overflow
         // column would lose the last commands below a laptop's bottom edge;
         // use as many complete columns as the panel has room for instead.
@@ -852,7 +857,7 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         let per_col = items.len().div_ceil(cols).min(fits);
         let shown = items.len().min(per_col * cols);
         let panel_w = w.saturating_mul(cols as u32).min(l.width);
-        let x = l.width.saturating_sub(panel_w);
+        let x = if matches!(open, Open::RibbonGroup(_)) { anchor_x.min(l.width.saturating_sub(panel_w)) } else { l.width.saturating_sub(panel_w) };
         let h = (per_col as u32 * row_h + pad).min(l.height.saturating_sub(y));
         let rows = (0..shown)
             .map(|i| {
@@ -953,10 +958,14 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
             }),
         Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied().filter(|r| !r.is_empty()),
         Hit::RibbonMore => Some(crate::ribbon::more_rect(l)).filter(|r| !r.is_empty()),
+        Hit::RibbonGroup(index) => crate::ribbon::layout(l, state).0.get(index).map(|g| crate::ribbon::group_trigger(l, g)).filter(|r| !r.is_empty()),
         Hit::RibbonSearch => Some(crate::ribbon::search_rect(l)),
         Hit::RibbonLock => Some(crate::ribbon::lock_rect(l)),
         Hit::RibbonCollapse => Some(crate::ribbon::collapse_rect(l)),
-        Hit::Nav(i) => l.sidebar_doc(i),
+        Hit::Nav(i) => crate::ribbon::nav_rows(l, state).into_iter().find(|(index, _)| *index == i).map(|(_, r)| r),
+        Hit::NavTab(i) => crate::ribbon::nav_tabs(l).get(usize::from(i)).copied(),
+        Hit::NavSearch => Some(crate::ribbon::nav_search(l)),
+        Hit::NavClose => Some(crate::ribbon::nav_close(l)),
         Hit::Tool(t) if state.ribbon && t == Tool::Overflow => {
             Some(crate::ribbon::overflow_rect(l))
         }
@@ -1018,6 +1027,10 @@ pub enum Hit {
     Ribbon(crate::menus::Action),
     RibbonTab(usize),
     RibbonMore,
+    RibbonGroup(usize),
+    NavTab(u8),
+    NavSearch,
+    NavClose,
     RibbonSearch,
     RibbonLock,
     RibbonCollapse,
@@ -1217,7 +1230,13 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
             return Hit::None;
         }
         if !state.ribbon_collapsed {
-            for b in crate::ribbon::layout(l, state).1 {
+            let (groups, buttons) = crate::ribbon::layout(l, state);
+            for (index, group) in groups.iter().enumerate() {
+                if crate::ribbon::group_trigger(l, group).contains(x, y) {
+                    return Hit::RibbonGroup(index);
+                }
+            }
+            for b in buttons {
                 if b.rect.contains(x, y) {
                     return Hit::Ribbon(b.action);
                 }
@@ -1230,10 +1249,13 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
             return Hit::None;
         }
         if state.sidebar_open {
-            for i in 0..state.navigation.len() {
-                if l.sidebar_doc(i).is_some_and(|r| r.contains(x, y)) {
-                    return Hit::Nav(i);
-                }
+            if crate::ribbon::nav_close(l).contains(x, y) { return Hit::NavClose; }
+            if crate::ribbon::nav_search(l).contains(x, y) { return Hit::NavSearch; }
+            for (i, r) in crate::ribbon::nav_tabs(l).into_iter().enumerate() {
+                if r.contains(x, y) { return Hit::NavTab(i as u8); }
+            }
+            for (i, r) in crate::ribbon::nav_rows(l, state) {
+                if r.contains(x, y) { return Hit::Nav(i); }
             }
             if l.sidebar.contains(x, y) {
                 return Hit::None;

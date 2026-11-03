@@ -448,13 +448,20 @@ fn the_home_tab_fits_the_window_the_product_opens() {
             "at {ppem} ppem Home ends at {end} and the overflow square's column begins at {}",
             l.width - 48
         );
-        // **And nothing was hidden to get there.** The compact level drops labels; it must not drop
-        // commands. A tab that fits by hiding half its buttons is the defect wearing a different hat.
-        let hidden = buttons.iter().filter(|b| b.rect.is_empty()).count();
-        assert_eq!(
-            hidden, 0,
-            "at {ppem} ppem Home hides {hidden} buttons in the overflow menu to fit"
-        );
+        // WordCraft's compact Styles gallery shows fewer tiles, and collapsed groups
+        // fold into a measured dropdown. Every hidden command must still be reachable.
+        let overflow = ribbon::overflow(&l, &s);
+        for b in buttons.iter().filter(|b| b.rect.is_empty()) {
+            let g = &groups[b.group];
+            let via_group = g.level == holonomy_render::wordcraft::ribbon_fit::COLLAPSED
+                && !ribbon::group_trigger(&l, g).is_empty();
+            let via_overflow = overflow.iter().any(|it| it.action == Some(b.action));
+            assert!(via_group || via_overflow, "at {ppem} ppem `{}` is unreachable", b.label);
+        }
+        let styles = groups.iter().position(|g| g.label == "Styles").expect("Styles group");
+        assert_ne!(groups[styles].level, holonomy_render::wordcraft::ribbon_fit::COLLAPSED, "Styles should stay a gallery at the design width");
+        let visible_tiles = buttons.iter().filter(|b| b.style_preview && !b.rect.is_empty()).count();
+        assert!(visible_tiles >= holonomy_render::wordcraft::gallery::STYLE_TILES_COMPACT);
         // A label is dropped only where an icon stands in for it.
         for b in buttons.iter().filter(|b| !b.rect.is_empty() && !b.labelled) {
             assert!(

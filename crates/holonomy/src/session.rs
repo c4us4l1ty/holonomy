@@ -2085,7 +2085,9 @@ impl<'a> Session<'a> {
         self.state.ribbon = managed;
         self.state.ribbon_tab = 1; // Home
         self.state.ribbon_collapsed = false;
-        self.state.sidebar_open = false;
+        let navigation = managed && self.chrome.metrics.width >= 1280;
+        self.state.sidebar_open = navigation;
+        self.state.nav_tab = 0;
         self.state.dark = false;
         let page_pad = if managed {
             Self::desktop_page_padding(self.chrome.metrics.width)
@@ -2094,7 +2096,7 @@ impl<'a> Session<'a> {
         };
         let metrics = ChromeMetrics {
             page_pad,
-            sidebar_w: 0,
+            sidebar_w: holonomy_render::chrome::sidebar_reservation(navigation),
             ..self.chrome.metrics
         };
         self.chrome = Chrome::new(metrics);
@@ -3014,7 +3016,7 @@ impl<'a> Session<'a> {
                     // **The opener is invalidated as well as the popup**, because a popup that closes
                     // takes its opener's highlight with it. Damaging only the popup would leave the
                     // heading lit with nothing drawn over it.
-                    self.invalidate(opener_rect(&l, open));
+                    self.invalidate(opener_rect(&l, &self.state, open));
                 }
             }
             P::Wheel { dy, .. } => {
@@ -3432,6 +3434,7 @@ impl<'a> Session<'a> {
                             widgets::Hit::Tool(widgets::Tool::Overflow)
                         }
                         widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
+                        widgets::Open::RibbonGroup(index) => widgets::Hit::RibbonGroup(index),
                         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
                         widgets::Open::Tool(t) => widgets::Hit::Tool(t),
                     };
@@ -3485,7 +3488,7 @@ impl<'a> Session<'a> {
             if let Some(pop) = widgets::popup(&l, &self.state, Some(open)) {
                 rect = rect.union(&pop.rect);
             }
-            rect = rect.union(&opener_rect(&l, open));
+            rect = rect.union(&opener_rect(&l, &self.state, open));
         }
         self.invalidate(rect);
     }
@@ -3529,6 +3532,12 @@ impl<'a> Session<'a> {
                 self.state.open = (before != Some(open)).then_some(open);
                 self.invalidate_popup_change(before);
             }
+            Hit::RibbonGroup(index) => {
+                let before = self.state.open;
+                let open = widgets::Open::RibbonGroup(index);
+                self.state.open = (before != Some(open)).then_some(open);
+                self.invalidate_popup_change(before);
+            }
             Hit::RibbonSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
             Hit::RibbonLock => self.apply_action(holonomy_render::menus::Action::Lock)?,
             Hit::RibbonCollapse => {
@@ -3559,10 +3568,19 @@ impl<'a> Session<'a> {
                 self.state.ruler_drag_x = Some(x);
                 self.invalidate(self.chrome.full_damage());
             }
+            Hit::NavTab(tab) => {
+                self.state.nav_tab = tab.min(1);
+                self.invalidate(self.chrome.layout.sidebar);
+            }
+            Hit::NavSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
+            Hit::NavClose => self.set_sidebar(false),
             Hit::Nav(i) => {
-                if let Some((line, _)) = self.state.navigation.get(i) {
-                    self.scroll_to(*line)?;
-                }
+                let line = if self.state.nav_tab == 1 {
+                    (i as u32).checked_mul(self.chrome.layout.page_rows())
+                } else {
+                    self.state.navigation.get(i).map(|(line, _)| *line)
+                };
+                if let Some(line) = line { self.scroll_to(line)?; }
             }
             Hit::Outline(line_idx) => {
                 self.scroll_to(line_idx)?;
@@ -3579,6 +3597,15 @@ impl<'a> Session<'a> {
                     return self.press(Hit::RibbonTab(row), x, y, bytes);
                 }
                 let action = item.action;
+                // WordCraft keeps a collapsed group's palette open while its controls
+                // are used. Ordinary menus and the global overflow still close on choice.
+                if matches!(open, widgets::Open::RibbonGroup(_)) {
+                    let before = self.state.open;
+                    if let Some(action) = action { self.apply_action(action)?; }
+                    self.state.open = Some(open);
+                    self.invalidate_popup_change(before);
+                    return Ok(());
+                }
                 // **The popup closes before the action runs, and that order is load-bearing.** An
                 // action that changes what the popup would contain -- choosing a zoom level leaves
                 // the zoom control as the thing the user is holding -- would otherwise fight with the
@@ -10571,18 +10598,17 @@ fn push_math_source(
     }
 }
 
-fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> DamageRect {
+fn opener_rect(l: &holonomy_render::chrome::Layout, state: &holonomy_render::ChromeState, open: widgets::Open) -> DamageRect {
     let h = match open {
         widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
         widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
+        widgets::Open::RibbonGroup(index) => widgets::Hit::RibbonGroup(index),
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
         widgets::Open::Tool(t) => {
             widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t))
         }
     };
-    let mut st = holonomy_render::ChromeState::default();
-    st.ribbon = true;
-    widgets::hit_rect(l, &st, h)
+    widgets::hit_rect(l, state, h)
         .or_else(|| {
             widgets::hit_rect(
                 l,

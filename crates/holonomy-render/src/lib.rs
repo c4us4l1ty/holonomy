@@ -35,6 +35,7 @@ pub mod ribbon;
 pub mod table;
 pub mod widgets;
 pub mod wrap;
+pub mod wordcraft;
 
 pub use chrome::{
     AscendingRun, Blink, Caret, Chrome, ChromeMetrics, ChromeState, Layout, LineHeights,
