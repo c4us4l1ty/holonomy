@@ -298,9 +298,7 @@ fn a_struck_run_draws_a_rule_through_its_glyphs() {
     let mut outside_rows = 0u32;
     for y in y0..y1 {
         for x in x0..x1 {
-            if plain.frame().pixel(x, y) != strike.frame().pixel(x, y)
-                && (y < pt || y > pb)
-            {
+            if plain.frame().pixel(x, y) != strike.frame().pixel(x, y) && (y < pt || y > pb) {
                 outside_rows += 1;
             }
         }

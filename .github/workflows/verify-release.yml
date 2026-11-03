@@ -97,18 +97,24 @@ jobs:
           set -o pipefail
           # Container gates use 128 MiB direct I/O and Argon2; two test threads keep
           # memory pressure bounded on hosted runners. Live X11 gates remain opt-in.
-          # Strict microsecond budgets fluctuate on shared CI hardware; keep those tests
-          # runnable on dedicated performance hardware instead of weakening their limits.
-          if cargo test --no-fail-fast --locked --workspace --release -- --test-threads=2 --skip an_edit_at_document_scale_stays_within_the_keystroke_budget --skip the_offset_map_costs_more_at_scale_and_that_is_recorded 2>&1 | tee target/workspace-check.log; then
-            echo "::notice title=Functional regression::Workspace release tests passed (host-dependent timing budgets skipped)"
+          # Timing budgets and VDF calibration depend on the *deployment* hardware, not the
+          # shared CI runner. Keep those gates runnable there without weakening their limits
+          # or adjusting the committed VDF iteration count to match a faster CI machine.
+          if cargo test --no-fail-fast --locked --workspace --release -- --test-threads=2 --skip an_edit_at_document_scale_stays_within_the_keystroke_budget --skip the_offset_map_costs_more_at_scale_and_that_is_recorded --skip the_committed_cost_still_describes_this_host 2>&1 | tee target/workspace-check.log; then
+            echo "::notice title=Functional regression::Workspace release tests passed (host-dependent timing/calibration gates skipped)"
           else
             echo "::error title=Workspace failure index::$(grep -E '(^error\[|^error:|FAILED|panicked)' target/workspace-check.log | tail -c 3800 | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             echo "::error title=Full workspace test failure::$(tail -c 3900 target/workspace-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
-            gzip -c target/workspace-check.log | base64 -w0 > /tmp/holonomy-workspace-log.b64
-            split -b 3000 -d -a 3 /tmp/holonomy-workspace-log.b64 /tmp/holonomy-workspace-part-
-            for part in /tmp/holonomy-workspace-part-*; do
-              echo "::warning title=Workspace log part ${part##*-}::$(cat "$part")"
-            done
+            # Checks retain only ten warnings per step. Preserve the failing assertions rather
+            # than the whole suite's successful test output, which would be truncated.
+            awk '/^---- .* stdout ----$/ { report=1 } report { print } /^test result: FAILED/ { report=0 }' target/workspace-check.log > target/workspace-failures.log
+            if [ -s target/workspace-failures.log ]; then
+              gzip -c target/workspace-failures.log | base64 -w0 > /tmp/holonomy-workspace-log.b64
+              split -b 3000 -d -a 3 /tmp/holonomy-workspace-log.b64 /tmp/holonomy-workspace-part-
+              for part in /tmp/holonomy-workspace-part-*; do
+                echo "::warning title=Workspace failures part ${part##*-}::$(cat "$part")"
+              done
+            fi
             exit 1
           fi
       - name: Report a formatting patch through the Checks API
