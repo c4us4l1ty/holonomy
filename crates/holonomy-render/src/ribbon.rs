@@ -3,7 +3,7 @@
 //! Design tokens and icon artwork adapted from storytold/wordcraft, MIT. This is
 //! deliberately not an egui port: Holonomy keeps its integer, damage-limited
 //! framebuffer renderer and its sealed, offline execution model.
-use crate::chrome::{ChromeState, Layout};
+use crate::chrome::{ChromeMetrics, ChromeState, Layout};
 use crate::icons::IconId;
 use crate::menus::Action;
 use crate::tree::{Label, Node, Rect, RoundRect, Style, SurfaceTree};
@@ -1435,10 +1435,15 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             // **The number, on the major only**, and above the tick rather than on it. `cell_h - 8`
             // keeps it inside a 26 px band at both type scales; a number drawn from the band's top with
             // a full line of type would be clipped by the canvas below it.
-            if major && l.ruler.height > cell_h {
+            if major {
                 text(
                     v,
-                    DamageRect::new(x.saturating_add(2), l.ruler.y, cell_w * 4, cell_h),
+                    DamageRect::new(
+                        x.saturating_add(2),
+                        l.ruler.y,
+                        cell_w * 4,
+                        l.ruler.height.saturating_sub(ChromeMetrics::RULER_TICK_H),
+                    ),
                     // **The label is the column number**, and it has to be a `&'static str`-free
                     // `String` because it is computed -- so it is built here, once per major tick, and
                     // `text` takes a slice of it. A major every ten columns over a 72-column page is

@@ -468,7 +468,13 @@ impl ChromeMetrics {
         self.title_h = by(76, cell_h);
         self.menu_h = by(32, cell_h);
         self.toolbar_h = if collapsed { 0 } else { by(112, cell_h) };
-        self.ruler_h = by(26, cell_h);
+        // **The ruler is a line of numbers *plus* a tick strip**, and it has to be both or it is
+        // neither. `by(26)` is 18 px at cell 18, which is exactly one line of type -- so a numbered
+        // tick had nowhere to put its number and the ruler was a tick field again, this time with the
+        // labels silently dropped for want of a pixel. One line plus `RULER_TICK_H` is what a ruler
+        // needs to be readable, and 26 px at the design pitch is 25 + 1, which is why the literal was
+        // always going to be tight.
+        self.ruler_h = at_least_a_line(by(26, cell_h), cell_h).saturating_add(RULER_TICK_H);
         self.status_h = by(28, cell_h);
         // **Raised to a line afterwards**, because `by` rounds down and a band under one line cannot
         // hold one -- the rule [`with_line_pitch`](Self::with_line_pitch) already enforces and that a
@@ -476,7 +482,10 @@ impl ChromeMetrics {
         self.title_h = at_least_a_line(self.title_h, self.cell_h);
         self.menu_h = at_least_a_line(self.menu_h, self.cell_h);
         self.toolbar_h = at_least_a_line(self.toolbar_h, self.cell_h);
-        self.ruler_h = at_least_a_line(self.ruler_h, self.cell_h);
+        // `ruler_h` was already raised to a line and given its tick strip above, so it is not
+        // re-clamped here -- a second `at_least_a_line` would be a no-op on a correct value and would
+        // hide a wrong one.
+
         self.status_h = at_least_a_line(self.status_h, self.cell_h);
         self
     }
@@ -488,6 +497,14 @@ impl ChromeMetrics {
     /// [`with_type_scale`](Self::with_type_scale) divides by this, so it is the one place the design's
     /// own size is written down.
     pub const BASE_PITCH: u32 = 25;
+
+    /// **The tick strip under the ruler's numbers**, in pixels.
+    ///
+    /// The ruler is a *line of numbers* over a *strip of ticks*, and the band has to hold both. Eight is
+    /// the height of a major tick plus a pixel of air, and it is a pixel constant rather than a cell
+    /// height because a tick is an ornament on the scale and not type: it must not grow with the font,
+    /// or at 200 % the ticks would be as tall as the numbers they are measuring.
+    pub const RULER_TICK_H: u32 = 8;
 
     /// **Scale the whole chrome to the type, from one measured number.**
     ///
