@@ -48,3 +48,17 @@ Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_probe.rs:25
                  );
              }
          }
+Diff in /home/runner/work/holonomy/holonomy/crates/holonomy/tests/zz_probe2.rs:6:
+ fn walk(t: &SurfaceTree, out: &mut Vec<String>) {
+     if let Some(n) = &t.node {
+         match n {
+-            Node::Label(l) => out.push(format!("LABEL x={} y={} {:?}", l.x, l.y, String::from_utf8_lossy(&l.bytes[..l.len as usize]))),
++            Node::Label(l) => out.push(format!(
++                "LABEL x={} y={} {:?}",
++                l.x,
++                l.y,
++                String::from_utf8_lossy(&l.bytes[..l.len as usize])
++            )),
+             Node::Icon(i) => out.push(format!("ICON {:?}", i)),
+             _ => {}
+         }

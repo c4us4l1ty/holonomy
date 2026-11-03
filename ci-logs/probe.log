@@ -1,4 +1,4 @@
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.02s
 [1m[92m     Running[0m tests/zz_probe.rs (target/x86_64-unknown-linux-musl/debug/deps/zz_probe-911e5adb4af93734)
 
 running 1 test
