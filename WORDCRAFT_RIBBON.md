@@ -212,6 +212,10 @@ at 16 ppem and 20 ppem, three window widths each.
 | `no_button_label_is_drawn_over_its_group_caption` | `Paste`/`Clipboard`, as **ink** rather than rects — the rects were inside the group the whole time; what overlapped was where the painter puts a centred line in the box it was handed |
 | `every_type_scale_leaves_room_for_a_two_row_group` | the band being too short, over cell heights 12..=40. **16 and 20 both happened to fit and 14 did not** — two sample points are not a sweep |
 
+**The frames are in the repository**: `docs/images/ribbon-tabs-16ppem.png` is all seven tabs at 16 ppem
+and 1,600 px, rendered from the real `Session` at the commit this section describes. It is the artefact
+to check §7 against, and it is why "looked at" now means something specific.
+
 **What is still not verified.** The ribbon has been *looked at* at 16 and 20 ppem and three widths by
 an agent, from dumped pixels, not by the person who reported the screenshot. Hover, press, the overflow
 popup, the open menus and the dialog paths were not in any frame. And the frames were rendered at
