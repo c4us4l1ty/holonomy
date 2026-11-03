@@ -48,9 +48,12 @@ fn shot(name: &str, w: u32, h: u32, ppem: u16, tab: u8) {
         width: w,
         height: h,
         ..ChromeMetrics::DESKTOP
-    };
+    }
+    .with_ribbon_bands(true, false);
     let editor = holonomy_text::Editor::from_text(b"Hello\n").expect("editor");
     let mut s = Session::new(editor, Painter::new(atlas, 0), Box::new(keep.clone()), m);
+    // The metrics carry the ribbon's bands, and the layout is derived from them, so the ribbon is
+    // drawn inside the band it was planned for.
     s.state.ribbon = true;
     s.state.ribbon_tab = tab;
     s.paint(None).expect("paint");
