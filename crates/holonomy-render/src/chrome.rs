@@ -2539,6 +2539,49 @@ impl Chrome {
         //
         // Because a number is a label for the marks below it and the eye reads the two as one object.
         // Pinned to the top of the band it is a float of digits with a dotted line somewhere beneath.
+        // ## Google Docs ruler anatomy
+        //
+        // 1. **Grey margin zones** left of the left margin and right of the right margin — the area
+        //    where no type can go. Painted `RULE` grey on the ruler band.
+        // 2. **White live zone** between the margins — where text lives. Painted `CHROME` (white).
+        // 3. **Blue inverted-triangle indent markers** at left/right indent positions.
+        // 4. **Blue first-line indent rectangle** at the first-line indent position.
+        // 5. **Column ticks and numbers** over the live zone only, in `#5F6368` ink.
+        //
+        // The live zone runs from `l.text.x` (page edge + padding) to `l.text.right()`. Margins are
+        // the ruler band outside that span.
+
+        // --- 1. Margin zones: grey outside the live zone ---
+        // Left margin zone: from ruler's left edge to the text start.
+        if l.text.x > 0 {
+            chrome.before.push(fill(
+                0,
+                l.ruler.y as i32,
+                l.text.x,
+                m.ruler_h,
+                colour::RULE,
+            ));
+        }
+        // Right margin zone: from text end to ruler's right edge.
+        let ruler_right = l.ruler.right();
+        if l.text.right() < ruler_right {
+            chrome.before.push(fill(
+                l.text.right() as i32,
+                l.ruler.y as i32,
+                ruler_right.saturating_sub(l.text.right()),
+                m.ruler_h,
+                colour::RULE,
+            ));
+        }
+        // --- 2. Live zone: white between the margins ---
+        chrome.before.push(fill(
+            l.text.x as i32,
+            l.ruler.y as i32,
+            l.text.width,
+            m.ruler_h,
+            colour::CHROME,
+        ));
+
         let tick_bottom = l.ruler.bottom().saturating_sub(1);
         // **A five-column minor tick and a ten-column major one**, so the eye can count without the
         // band becoming a comb. `MINOR_EVERY` divides `MAJOR_EVERY` or the majors land off the minors.
@@ -2555,9 +2598,9 @@ impl Chrome {
             // so the inference had nothing to pin the type to: `height.saturating_sub(1)` is a method
             // call on an ambiguous numeric type, which is an error (E0689) rather than a coercion.
             let (height, ink): (u32, u32) = if major {
-                (7, colour::INK_CHROME)
+                (7, colour::BLUE)
             } else {
-                (3, colour::RULE)
+                (3, colour::BLUE)
             };
             chrome.before.push(fill(
                 x as i32,
@@ -2587,21 +2630,48 @@ impl Chrome {
                         label_y,
                         &n,
                         Style::REGULAR,
-                        colour::INK_DIM,
+                        colour::BLUE,
                         (x + w / 2).saturating_sub(w / 2) as i32,
                     );
                 }
             }
             col += MINOR_EVERY;
         }
-        // **The measure's two edges, full height, in the rule ink.** They were `RULE_DIM` and drawn
-        // *below* the band (`l.ruler.bottom()` for `ruler_h` pixels), i.e. outside the ruler entirely
-        // and down the sheet's face — which is why they showed up as two stray grey columns on the page
-        // rather than as margin markers.
-        for x in [l.text.x, l.text.right().saturating_sub(1)] {
-            chrome
-                .before
-                .push(fill(x as i32, l.ruler.y as i32, 1, m.ruler_h, colour::RULE));
+        // --- 3 & 4. Blue indent markers ---
+        // Left indent marker: inverted triangle at the left edge of the live zone.
+        // Drawn as a 3-pixel-wide blue triangle pointing down.
+        let indent_w = 3u32;
+        let indent_h = 6u32;
+        if l.text.x >= indent_w {
+            // Triangle: widest at top, narrowest at bottom
+            for row in 0..indent_h {
+                let width = indent_w.saturating_sub(row * indent_w / indent_h);
+                let x = l.text.x as i32 - width as i32 / 2;
+                let y = l.ruler.y as i32 + row as i32;
+                chrome.before.push(fill(x, y, width, 1, colour::BLUE));
+            }
+        }
+        // Right indent marker: inverted triangle at the right edge of the live zone.
+        if l.text.right() + indent_w <= l.width {
+            for row in 0..indent_h {
+                let width = indent_w.saturating_sub(row * indent_w / indent_h);
+                let x = l.text.right() as i32 - width as i32 / 2;
+                let y = l.ruler.y as i32 + row as i32;
+                chrome.before.push(fill(x, y, width, 1, colour::BLUE));
+            }
+        }
+        // First-line indent marker: small blue rectangle at first-line indent position.
+        // For now, drawn at the same position as the left indent (default: no first-line indent).
+        // A real implementation would track the paragraph's first-line indent separately.
+        let first_line_h = 2u32;
+        if l.text.x >= first_line_h {
+            chrome.before.push(fill(
+                l.text.x as i32 - first_line_h as i32 / 2,
+                (l.ruler.y + m.ruler_h.saturating_sub(first_line_h)) as i32,
+                first_line_h,
+                first_line_h,
+                colour::BLUE,
+            ));
         }
 
         // --- the title band, the menu band, the toolbar and the sidebar. Part 19.

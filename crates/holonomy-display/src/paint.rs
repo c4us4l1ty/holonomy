@@ -1079,6 +1079,21 @@ impl<'a> Painter<'a> {
                     damage,
                 );
             }
+            // **Red squiggle under misspelled words.** Drawn below the baseline, one pixel per cell
+            // waving up and down in a 3-step cycle. Only for `DECORATION_SPELLING`.
+            if run.decorations & holonomy_render::DocRun::DECORATION_SPELLING != 0 && pen > run.x {
+                let squiggle_y = ruled_y + 2;
+                let width = (pen - run.x) as u32;
+                let mut x = run.x;
+                let mut phase = 0u32;
+                while x < run.x + width as i32 {
+                    let y = squiggle_y + if phase % 3 == 1 { -1 } else { 0 };
+                    frame.fill_rect(x as i64, y as i64, 1, 1, 0xFFEA_4335);
+                    x += 1;
+                    phase += 1;
+                }
+                self.scratch.stats.rects += width;
+            }
         }
     }
 

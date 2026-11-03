@@ -89,6 +89,10 @@ pub const STYLE_SUGGESTION_INSERT: u16 = 1 << 10;
 /// in suggesting mode; the text is old and marked for removal, awaiting accept or reject.
 pub const STYLE_SUGGESTION_DELETE: u16 = 1 << 11;
 
+/// **Spelling error. Bit 12.** Drawn with a red squiggle underneath when the word is not in the
+/// dictionary. The word itself draws in the document's ink; only the squiggle is red.
+pub const STYLE_SPELLING: u16 = 1 << 12;
+
 /// Superscript. Bit 6. The run is drawn raised by a third of the line box.
 ///
 /// **A shift, not a smaller face**, for the same reason the two above are rules: a superscript is a
@@ -117,8 +121,14 @@ pub const STYLE_ALIGN_CENTER: u16 = 1 << 8;
 pub const STYLE_ALIGN_RIGHT: u16 = 1 << 9;
 pub const STYLE_ALIGN_MASK: u16 = STYLE_ALIGN_CENTER | STYLE_ALIGN_RIGHT;
 pub const STYLE_SUGGESTIONS: u16 = STYLE_SUGGESTION_INSERT | STYLE_SUGGESTION_DELETE;
-pub const STYLE_KNOWN: u16 =
-    STYLE_BOLD | STYLE_ITALIC | STYLE_CODE | STYLE_HEADER | STYLE_DECORATIONS | STYLE_ALIGN_MASK | STYLE_SUGGESTIONS;
+pub const STYLE_KNOWN: u16 = STYLE_BOLD
+    | STYLE_ITALIC
+    | STYLE_CODE
+    | STYLE_HEADER
+    | STYLE_DECORATIONS
+    | STYLE_ALIGN_MASK
+    | STYLE_SUGGESTIONS
+    | STYLE_SPELLING;
 
 /// **The font family a run is set in, as a byte, in the padding the record already had.**
 ///
