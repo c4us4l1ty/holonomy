@@ -48,8 +48,15 @@ fn state() -> ChromeState {
 #[test]
 fn every_widget_has_a_rect_inside_the_panel() {
     let l = layout();
-    for p in place_toolbar(&l, 8) {
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
+    let mut visible = 0;
+    for p in placed {
         let r = p.rect;
+        if r.is_empty() {
+            // Narrow rows hide this tool and put it in Overflow; an empty rectangle is not drawn.
+            continue;
+        }
+        visible += 1;
         assert!(
             r.x + r.width <= l.width && r.y + r.height <= l.height,
             "{} is at {:?} with the panel {}x{}: it runs off the panel",
@@ -72,12 +79,25 @@ fn every_widget_has_a_rect_inside_the_panel() {
             l.toolbar.bottom()
         );
     }
+    assert!(visible >= 12, "too few controls are visible at the design width: {visible}");
     for (b, r) in place_title(&l, TITLE_PAD) {
         assert!(
             r.x + r.width <= l.width && r.bottom() <= l.title.bottom(),
             "{b:?} runs off the title band"
         );
     }
+}
+
+/// Image insertion is a primary action, including for desktop SVGs. It must not vanish into
+/// Overflow at the design width while placeholder controls take all the available space.
+#[test]
+fn image_insertion_is_visible_in_the_desktop_toolbar() {
+    let l = layout();
+    let image = place_toolbar(&l, TOOLBAR_PAD)
+        .into_iter()
+        .find(|p| p.tool == Tool::Image)
+        .expect("image belongs to toolbar");
+    assert!(!image.rect.is_empty(), "image insertion was hidden at the design width");
 }
 
 /// **No two toolbar widgets overlap.**
@@ -92,7 +112,7 @@ fn every_widget_has_a_rect_inside_the_panel() {
 #[test]
 fn no_two_widgets_overlap() {
     let l = layout();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     for (i, a) in placed.iter().enumerate() {
         for b in placed.iter().skip(i + 1) {
             let overlap_x = a.rect.x < b.rect.right() && b.rect.x < a.rect.right();
@@ -133,7 +153,7 @@ fn no_two_widgets_overlap() {
 fn hit_agrees_with_where_the_widget_was_drawn() {
     let l = layout();
     let st = state();
-    for p in place_toolbar(&l, 8) {
+    for p in place_toolbar(&l, TOOLBAR_PAD).into_iter().filter(|p| !p.rect.is_empty()) {
         let cx = (p.rect.x + p.rect.width / 2) as i32;
         let cy = (p.rect.y + p.rect.height / 2) as i32;
         assert_eq!(
@@ -616,7 +636,7 @@ fn a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs() {
 #[test]
 fn the_right_hand_group_reserves_the_gaps_it_draws() {
     let l = layout();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     let find = |tool| {
         placed
             .iter()
@@ -658,7 +678,7 @@ fn the_right_hand_group_reserves_the_gaps_it_draws() {
 fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
     let l = layout();
     let mut prev: Option<(Tool, u32)> = None;
-    for p in place_toolbar(&l, 8) {
+    for p in place_toolbar(&l, TOOLBAR_PAD) {
         // The right-hand group is laid out from the right and is covered above.
         if matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;

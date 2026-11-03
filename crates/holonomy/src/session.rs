@@ -1193,9 +1193,7 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode
-                        | widgets::Tool::Collapse
-                        | widgets::Tool::Overflow
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
                 ) && (p.rect.width == 0 || p.rect.height == 0)
             })
             .map(|p| p.tool)
@@ -1984,9 +1982,7 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode
-                        | widgets::Tool::Collapse
-                        | widgets::Tool::Overflow
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
                 )
             })
             .filter(|p| p.rect.width == 0 || p.rect.height == 0)

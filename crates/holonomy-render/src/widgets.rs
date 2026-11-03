@@ -350,9 +350,10 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::Underline,
     Tool::Strikethrough,
     Tool::TextColour,
+    // Keep image insertion visible before the lower-priority controls spill into Overflow.
+    Tool::Image,
     Tool::Highlight,
     Tool::Link,
-    Tool::Image,
     Tool::Overflow,
     Tool::Mode,
     Tool::Collapse,
