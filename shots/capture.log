@@ -1,7 +1,7 @@
 [1m[92m   Compiling[0m libc v0.2.190
 [1m[92m   Compiling[0m typenum v1.20.1
-[1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cfg-if v1.0.5
+[1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cmov v0.5.4
 [1m[92m   Compiling[0m const-oid v0.10.2
 [1m[92m   Compiling[0m ctutils v0.4.2
@@ -10,8 +10,8 @@
 [1m[92m   Compiling[0m base64ct v1.8.3
 [1m[92m   Compiling[0m alloc-no-stdlib v3.0.0
 [1m[92m   Compiling[0m alloc-stdlib v0.3.0
-[1m[92m   Compiling[0m adler2 v2.0.1
 [1m[92m   Compiling[0m tinyvec v1.13.3
+[1m[92m   Compiling[0m adler2 v2.0.1
 [1m[92m   Compiling[0m miniz_oxide v0.9.1
 [1m[92m   Compiling[0m unicode-normalization v0.1.25
 [1m[92m   Compiling[0m hybrid-array v0.4.15
@@ -26,36 +26,42 @@
 [1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m secrecy v0.10.3
 [1m[92m   Compiling[0m ttf-parser v0.25.1
-[1m[92m   Compiling[0m bitflags v2.13.2
-[1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m memchr v2.8.3
 [1m[92m   Compiling[0m digest v0.11.3
-[1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
 [1m[92m   Compiling[0m universal-hash v0.6.1
 [1m[92m   Compiling[0m cipher v0.5.2
+[1m[92m   Compiling[0m blake2 v0.11.0
+[1m[92m   Compiling[0m hmac v0.13.0
 [1m[92m   Compiling[0m poly1305 v0.9.1
 [1m[92m   Compiling[0m chacha20 v0.10.2
-[1m[92m   Compiling[0m hmac v0.13.0
+[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
 [1m[92m   Compiling[0m aead v0.6.1
-[1m[92m   Compiling[0m hkdf v0.13.0
 [1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m argon2 v0.6.0
+[1m[92m   Compiling[0m hkdf v0.13.0
 [1m[92m   Compiling[0m sha2 v0.11.0
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[91merror[E0425][0m[1m: cannot find value `RULER_TICK_H` in this scope[0m
-   [1m[94m--> [0mcrates/holonomy-render/src/chrome.rs:477:79
-    [1m[94m|[0m
-[1m[94m477[0m [1m[94m|[0m         self.ruler_h = at_least_a_line(by(26, cell_h), cell_h).saturating_add(RULER_TICK_H);
-    [1m[94m|[0m                                                                               [1m[91m^^^^^^^^^^^^[0m [1m[91mnot found in this scope[0m
-    [1m[94m|[0m
-[1m[96mhelp[0m: consider using the associated constant on `Self`
-    [1m[94m|[0m
-[1m[94m477[0m [1m[94m| [0m        self.ruler_h = at_least_a_line(by(26, cell_h), cell_h).saturating_add([92mSelf::[0mRULER_TICK_H);
-    [1m[94m|[0m                                                                               [92m++++++[0m
-
-[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m ryu v1.0.23
+[1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
-[1mFor more information about this error, try `rustc --explain E0425`.[0m
-[1m[91merror[0m: could not compile `holonomy-render` (lib) due to 1 previous error
-[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[92m   Compiling[0m pdf-writer v0.15.0
+[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
+[1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
+[1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
+[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
+[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 8.30s
+[1m[92m     Running[0m tests/zz_capture.rs (target/x86_64-unknown-linux-musl/debug/deps/zz_capture-55c896d4c24f8f7c)
+
+running 1 test
+wrote doc-16-1600
+wrote doc-20-1280
+wrote doc-16-1024
+test capture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
