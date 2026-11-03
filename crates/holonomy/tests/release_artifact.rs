@@ -180,9 +180,17 @@ fn the_sealed_binary_has_no_svg_import_runtime() {
         return;
     }
     let bytes = std::fs::read(&path).expect("read the sealed binary");
-    for marker in ["resvg", "usvg", "roxmltree", "SVG must be UTF-8 XML", "SVG viewBox produces"] {
+    for marker in [
+        "resvg",
+        "usvg",
+        "roxmltree",
+        "SVG must be UTF-8 XML",
+        "SVG viewBox produces",
+    ] {
         assert!(
-            !bytes.windows(marker.len()).any(|window| window == marker.as_bytes()),
+            !bytes
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()),
             "the sealed binary contains desktop SVG importer marker {marker:?}"
         );
     }

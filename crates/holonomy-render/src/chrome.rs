@@ -2198,7 +2198,9 @@ pub fn ascending_runs(text: &str) -> Vec<AscendingRun> {
 /// **A `const`, so the order is fixed at compile time**, and `ChromeState::open_menu` is an index into
 /// this. An index rather than an enum because a menu *is* a position in this list: painting heading `i`
 /// and testing `open_menu == Some(i)` cannot disagree when both are `i`.
-pub const MENUS: &[&str] = &["File", "Edit", "View", "Insert", "Format", "Tools", "Table", "Help"];
+pub const MENUS: &[&str] = &[
+    "File", "Edit", "View", "Insert", "Format", "Tools", "Table", "Help",
+];
 
 /// The menu bar's heading boxes, and where the next one starts.
 ///
@@ -2540,13 +2542,9 @@ impl Chrome {
         // --- 1. Margin zones: grey outside the live zone ---
         // Left margin zone: from ruler's left edge to the text start.
         if l.text.x > 0 {
-            chrome.before.push(fill(
-                0,
-                l.ruler.y as i32,
-                l.text.x,
-                m.ruler_h,
-                colour::RULE,
-            ));
+            chrome
+                .before
+                .push(fill(0, l.ruler.y as i32, l.text.x, m.ruler_h, colour::RULE));
         }
         // Right margin zone: from text end to ruler's right edge.
         let ruler_right = l.ruler.right();
@@ -2989,17 +2987,19 @@ impl Chrome {
                 // Drawn in `#5F6368` (chrome ink) so it reads as a suggestion, not committed text.
                 // Only when the caret is visible (blink on), so the suggestion and caret blink
                 // together like a single insertion point.
-                        if let Some(compose) = state.pending_compose.as_deref() {
+                if let Some(compose) = state.pending_compose.as_deref() {
                     if !compose.is_empty() {
                         let compose_x = caret.cell.x + 2;
-                        overlay.before.push(SurfaceTree::leaf(Node::Label(Label::new(
-                            compose_x as i32,
-                            caret.cell.y as i32,
-                            compose,
-                            Style::REGULAR,
-                            0,
-                            colour::INK_CHROME,
-                        ))));
+                        overlay
+                            .before
+                            .push(SurfaceTree::leaf(Node::Label(Label::new(
+                                compose_x as i32,
+                                caret.cell.y as i32,
+                                compose,
+                                Style::REGULAR,
+                                0,
+                                colour::INK_CHROME,
+                            ))));
                     }
                 }
             }
@@ -3965,7 +3965,8 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
     let outline_y = if state.docs.is_empty() {
         l.sidebar.y + 120
     } else {
-        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40).max(l.sidebar.y as i32 + 80) as u32
+        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40)
+            .max(l.sidebar.y as i32 + 80) as u32
     };
     if !state.outline.is_empty() {
         push_text(
@@ -4003,7 +4004,11 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 m,
                 ty,
                 text,
-                if *level == 0 { Style::BOLD } else { Style::REGULAR },
+                if *level == 0 {
+                    Style::BOLD
+                } else {
+                    Style::REGULAR
+                },
                 colour::INK_CHROME,
                 tx,
             );

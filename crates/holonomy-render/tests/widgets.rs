@@ -727,7 +727,6 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
     );
 }
 
-
 /// **A mixed font selection leaves the toolbar's font box blank.**
 ///
 /// Google Docs and Word both show an empty font box when the selection contains more than one face;
@@ -761,34 +760,13 @@ fn ruler_hit_testing_identifies_margins_and_indents() {
     let ruler_bot = l.ruler.bottom() as i32;
     let mid_y = ruler_top + (l.ruler.height as i32) / 2;
 
-    assert_eq!(
-        hit(&l, &st, col, ruler_top + 2),
-        Hit::RulerFirstLineIndent
-    );
-    assert_eq!(
-        hit(&l, &st, col, ruler_bot - 3),
-        Hit::RulerLeftIndent
-    );
-    assert_eq!(
-        hit(&l, &st, col, mid_y),
-        Hit::RulerLeftMargin
-    );
-    assert_eq!(
-        hit(&l, &st, col - 20, mid_y),
-        Hit::RulerLeftMargin
-    );
-    assert_eq!(
-        hit(&l, &st, right, ruler_bot - 3),
-        Hit::RulerRightIndent
-    );
-    assert_eq!(
-        hit(&l, &st, right + 20, mid_y),
-        Hit::RulerRightMargin
-    );
-    assert_eq!(
-        hit(&l, &st, col + 50, mid_y),
-        Hit::None
-    );
+    assert_eq!(hit(&l, &st, col, ruler_top + 2), Hit::RulerFirstLineIndent);
+    assert_eq!(hit(&l, &st, col, ruler_bot - 3), Hit::RulerLeftIndent);
+    assert_eq!(hit(&l, &st, col, mid_y), Hit::RulerLeftMargin);
+    assert_eq!(hit(&l, &st, col - 20, mid_y), Hit::RulerLeftMargin);
+    assert_eq!(hit(&l, &st, right, ruler_bot - 3), Hit::RulerRightIndent);
+    assert_eq!(hit(&l, &st, right + 20, mid_y), Hit::RulerRightMargin);
+    assert_eq!(hit(&l, &st, col + 50, mid_y), Hit::None);
 
     for h in [
         Hit::RulerLeftMargin,

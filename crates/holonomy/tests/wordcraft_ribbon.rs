@@ -491,5 +491,8 @@ fn ruler_drag_draws_guide_line() {
         }
         _ => false,
     });
-    assert!(has_guide, "guide line must be painted when ruler_drag_x is set");
+    assert!(
+        has_guide,
+        "guide line must be painted when ruler_drag_x is set"
+    );
 }

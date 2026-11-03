@@ -1843,8 +1843,14 @@ fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
         let small = id.at(0, 0, 0);
         let large = id.at_large(0, 0, 0);
         assert_eq!((large.width, large.height), (20, 20));
-        assert!(large.bits.iter().any(|&row| row != 0), "empty desktop icon {id:?}");
-        let native_svg = matches!(id, IconId::Doc | IconId::Folder | IconId::Pen | IconId::ArrowLeft);
+        assert!(
+            large.bits.iter().any(|&row| row != 0),
+            "empty desktop icon {id:?}"
+        );
+        let native_svg = matches!(
+            id,
+            IconId::Doc | IconId::Folder | IconId::Pen | IconId::ArrowLeft
+        );
         for y in 0..20 {
             for x in 0..20 {
                 let scaled = small.coverage(x * SIZE / 20, y * SIZE / 20);
@@ -1856,7 +1862,10 @@ fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
             }
         }
     }
-    assert!(native_svg_differences > 0, "SVG artwork was nearest-neighbour scaled instead of rasterised at 20px");
+    assert!(
+        native_svg_differences > 0,
+        "SVG artwork was nearest-neighbour scaled instead of rasterised at 20px"
+    );
     let m = ChromeMetrics::DESKTOP.with_line_pitch(30);
     let c = Chrome::new(m);
     let state = ChromeState {

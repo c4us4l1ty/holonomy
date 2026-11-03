@@ -106,7 +106,8 @@ fn the_ruler_is_numbered_in_columns_from_zero() {
         .collect();
     let got: Vec<String> = in_ruler.iter().map(|(_, t)| t.clone()).collect();
     assert_eq!(
-        got, expected,
+        got,
+        expected,
         "the majors are every {} columns and each one is labelled with its number",
         ribbon::MAJOR_RULER_COLS
     );

@@ -170,6 +170,7 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
 /// seven now because the tool is gone: no annotation store, no anchor range, no author, so nothing this
 /// session could ever do with it. See `icons.rs`'s count note.
 ///
+/// The duplicate toolbar Share was also inert and is gone; title-bar Share is the actual export.
 /// **Six since `Underline` was wired**, and the *length of this array is the gate's second claim*: a tool
 /// that starts working while its name stays here fails the equality below rather than sitting in the
 /// list quietly, and a tool that stops working fails it from the other side. This array is written in

@@ -1501,8 +1501,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     // Margin boundaries and draggable indent markers matching Google Docs and Word.
     if col_w > 0 {
         // Vertical boundary lines between page margin gutters and body text
-        fill(v, DamageRect::new(col, l.ruler.y, 1, l.ruler.height), t.border);
-        fill(v, DamageRect::new(col + col_w, l.ruler.y, 1, l.ruler.height), t.border);
+        fill(
+            v,
+            DamageRect::new(col, l.ruler.y, 1, l.ruler.height),
+            t.border,
+        );
+        fill(
+            v,
+            DamageRect::new(col + col_w, l.ruler.y, 1, l.ruler.height),
+            t.border,
+        );
 
         // First Line Indent: downward triangle at top of left margin
         let fl_x = if s.pressed == Some(crate::widgets::Hit::RulerFirstLineIndent) {
@@ -1537,11 +1545,17 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         let rect_h = 4u32;
         let rect_left = li_x.saturating_sub(rect_w / 2);
         let rect_top = l.ruler.bottom().saturating_sub(rect_h);
-        fill(v, DamageRect::new(rect_left, rect_top, rect_w, rect_h), t.accent);
+        fill(
+            v,
+            DamageRect::new(rect_left, rect_top, rect_w, rect_h),
+            t.accent,
+        );
 
         // Right Indent: upward triangle at bottom of right margin
         let ri_x = if s.pressed == Some(crate::widgets::Hit::RulerRightIndent) {
-            s.ruler_drag_x.map(|dx| dx.max(0) as u32).unwrap_or(col + col_w)
+            s.ruler_drag_x
+                .map(|dx| dx.max(0) as u32)
+                .unwrap_or(col + col_w)
         } else {
             col + col_w
         };

@@ -1401,7 +1401,8 @@ impl Form {
                 // A document cannot hold an arbitrary file. Refuse it before allocating the
                 // bytes, not after std::fs::read has exhausted the desktop's memory.
                 let bytes = crate::svg_import::read_file(
-                    std::path::Path::new(p), crate::svg_import::MAX_TEXT_BYTES,
+                    std::path::Path::new(p),
+                    crate::svg_import::MAX_TEXT_BYTES,
                 )?;
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|_| "Import expects UTF-8 text.".to_string())?;

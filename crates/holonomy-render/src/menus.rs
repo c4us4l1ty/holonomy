@@ -194,10 +194,6 @@ pub enum Action {
     ToggleAutosave,
     ToggleNavigation,
     InsertPageBreak,
-    /// **Open the comments sidebar, or add a comment at the caret.** Google Docs' comment button.
-    ToggleComment,
-    /// **Share the document:** open the sharing dialog (or report that sharing is sealed).
-    Share,
 }
 
 impl Action {
@@ -260,8 +256,6 @@ impl Action {
             Action::WordCount => "word-count",
             Action::KeyboardShortcuts => "keyboard-shortcuts",
             Action::SelectTool(_) => "select-tool",
-            Action::ToggleComment => "toggle-comment",
-            Action::Share => "share",
         }
     }
 }

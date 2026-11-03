@@ -998,17 +998,16 @@ impl Editor {
         // a paragraph in JetBrains Mono with no bold and no colour is the *common* case, and the filter
         // below used to test flags and colour alone -- so deleting it and undoing lost the face, because
         // the record was empty and the restore took the `GrowIntoInsert` guess or the plain default.
-        let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
-            s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
-        }) {
+        let styled: Vec<TextIntervalSpan> = if removed_spans
+            .iter()
+            .all(|s| s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY)
+        {
             Vec::new()
         } else {
             removed_spans
                 .iter()
                 .copied()
-                .filter(|s| {
-                    s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY
-                })
+                .filter(|s| s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY)
                 .collect()
         };
         if self.style_undo.len() == STYLE_UNDO_DEPTH {
@@ -1281,7 +1280,11 @@ impl Editor {
             let (flags, colour, face) = transform(old);
             // **An out-of-range face keeps the run's own**, so a corrupt request styles nothing rather
             // than making the document unopenable. See `FACE_COUNT`.
-            let face = if face < FACE_COUNT { face } else { old.font_face };
+            let face = if face < FACE_COUNT {
+                face
+            } else {
+                old.font_face
+            };
             changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
             record.extend_from_slice(&lo.to_le_bytes());
             record.extend_from_slice(&hi.to_le_bytes());
@@ -1335,8 +1338,7 @@ impl Editor {
         //
         // The kind is what tells the two layouts apart, and it is why `ActionKind::FaceFormat` exists
         // rather than the face riding in the padding of a plain format record.
-        self.undo
-            .push(start, ActionKind::FaceFormat, &record)?;
+        self.undo.push(start, ActionKind::FaceFormat, &record)?;
         self.drop_redo();
         self.apply_face_format_record(&record, true)?;
         record.zeroize();
@@ -1377,13 +1379,8 @@ impl Editor {
             } else {
                 (u16_at(8), u32_at(10), run[14])
             };
-            self.spans.style_range_faced(
-                u32_at(0),
-                u32_at(4),
-                flags,
-                colour,
-                face,
-            )?;
+            self.spans
+                .style_range_faced(u32_at(0), u32_at(4), flags, colour, face)?;
         }
         Ok(())
     }
@@ -1418,10 +1415,7 @@ impl Editor {
         // The first version was a single `Option` and the second undo overwrote the first's map:
         // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
         // redo found nothing to restore, so the table map was silently never put back.
-        let table_shadow = if !matches!(
-            action.kind,
-            ActionKind::Format | ActionKind::FaceFormat
-        )
+        let table_shadow = if !matches!(action.kind, ActionKind::Format | ActionKind::FaceFormat)
             && action.bytes.contains(&crate::table::CELL_SEPARATOR)
         {
             Some(self.tables.spans().to_vec())
@@ -1467,13 +1461,7 @@ impl Editor {
                         // face -- an edit to a monospaced word undone and redone came back in Inter, which
                         // is the same defect as the document-wide font arriving by a different route.
                         .map(|(s, lo, hi)| {
-                            TextIntervalSpan::faced(
-                                lo,
-                                hi,
-                                s.style_flags,
-                                s.color_rgb,
-                                s.font_face,
-                            )
+                            TextIntervalSpan::faced(lo, hi, s.style_flags, s.color_rgb, s.font_face)
                         })
                         .collect(),
                 );
@@ -1578,8 +1566,13 @@ impl Editor {
                             // face alone, so the gap kept the `GrowIntoInsert` guess -- with the face
                             // left behind, a deleted-and-undone plain run came back monospaced.
                             if s.start_byte > cursor {
-                                self.spans
-                                    .style_range_faced(cursor, s.start_byte, 0, 0, FACE_BODY)?;
+                                self.spans.style_range_faced(
+                                    cursor,
+                                    s.start_byte,
+                                    0,
+                                    0,
+                                    FACE_BODY,
+                                )?;
                             }
                             // **`style_range_faced`, so the face comes back with the rest of the run.**
                             self.spans.style_range_faced(
@@ -1592,8 +1585,7 @@ impl Editor {
                             cursor = s.end_byte;
                         }
                         if cursor < end {
-                            self.spans
-                                .style_range_faced(cursor, end, 0, 0, FACE_BODY)?;
+                            self.spans.style_range_faced(cursor, end, 0, 0, FACE_BODY)?;
                         }
                     }
                     _ => {
@@ -1606,8 +1598,7 @@ impl Editor {
                         // bold run restored the text bold. Restoring a delete should restore what was
                         // deleted; `GrowIntoInsert` is the right default for the *caret* and the wrong
                         // one for *history*, and this is where the two come apart.
-                        self.spans
-                            .style_range_faced(start, end, 0, 0, FACE_BODY)?;
+                        self.spans.style_range_faced(start, end, 0, 0, FACE_BODY)?;
                     }
                 }
                 EditOutcome {
@@ -2301,18 +2292,17 @@ impl Editor {
                 // region costs only a header.
                 // Same predicate as `delete_at`'s, face included, and for the same reason: a redone
                 // delete of a monospaced run has to record the face or its undo restores Inter.
-                let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
-                    s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
-                }) {
+                let styled: Vec<TextIntervalSpan> = if removed_spans
+                    .iter()
+                    .all(|s| s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY)
+                {
                     Vec::new()
                 } else {
                     removed_spans
                         .iter()
                         .copied()
                         .filter(|s| {
-                            s.style_flags != 0
-                                || s.color_rgb != 0
-                                || s.font_face != FACE_BODY
+                            s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY
                         })
                         .collect()
                 };

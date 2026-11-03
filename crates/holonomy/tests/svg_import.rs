@@ -26,10 +26,16 @@ fn svg_persists_and_exports_as_png_without_keeping_any_xml() {
     assert!(session.image_cache_pixels(0).is_some(), "image is resident");
 
     let payload = session.editor().payload().expect("serialize");
-    assert!(!payload.windows(4).any(|w| w == b"<svg"), "source markup was never persisted");
+    assert!(
+        !payload.windows(4).any(|w| w == b"<svg"),
+        "source markup was never persisted"
+    );
     let restored = Editor::from_payload(&payload).expect("deserialize");
     assert_eq!(restored.assets().len(), 1);
-    assert_eq!(restored.assets().get(0).unwrap().png.as_slice(), png.as_slice());
+    assert_eq!(
+        restored.assets().get(0).unwrap().png.as_slice(),
+        png.as_slice()
+    );
 
     let mut html = Vec::new();
     holonomy_export::write(&restored, &mut html, Format::Html, "Test").expect("HTML export");

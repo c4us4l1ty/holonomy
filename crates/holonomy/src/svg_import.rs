@@ -51,7 +51,10 @@ pub fn read_file(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>, String
         return Err("Choose a regular file, not a directory, device or pipe.".into());
     }
     if metadata.len() > limit as u64 {
-        return Err(format!("File exceeds the {} KiB import limit.", limit / 1024));
+        return Err(format!(
+            "File exceeds the {} KiB import limit.",
+            limit / 1024
+        ));
     }
     read_capped(file, limit).map_err(|e| format!("Could not read {}: {e}", path.display()))
 }
@@ -62,7 +65,10 @@ fn read_capped<R: Read>(reader: R, limit: usize) -> io::Result<Zeroizing<Vec<u8>
         .take((limit as u64).saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "file exceeds import limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds import limit",
+        ));
     }
     Ok(bytes)
 }
@@ -152,7 +158,13 @@ pub fn rasterize_svg(source: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
 /// Fit a small icon at a useful size without upscaling a page-size graphic, and bound both the
 /// longest edge and total pixels *before* allocating. PNG catalog dimensions are u16, too.
 fn target_size(w: f32, h: f32) -> Result<(u32, u32), String> {
-    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 || w > 1_000_000.0 || h > 1_000_000.0 {
+    if !w.is_finite()
+        || !h.is_finite()
+        || w <= 0.0
+        || h <= 0.0
+        || w > 1_000_000.0
+        || h > 1_000_000.0
+    {
         return Err("SVG needs finite, positive dimensions no larger than 1,000,000.".into());
     }
     let (w, h) = (f64::from(w), f64::from(h));
@@ -174,7 +186,10 @@ fn target_size(w: f32, h: f32) -> Result<(u32, u32), String> {
 fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
     let root = doc.root_element();
     if root.tag_name().name() != "svg"
-        || !matches!(root.tag_name().namespace(), None | Some("http://www.w3.org/2000/svg"))
+        || !matches!(
+            root.tag_name().namespace(),
+            None | Some("http://www.w3.org/2000/svg")
+        )
     {
         return Err("Expected an SVG root element.".into());
     }
@@ -187,22 +202,43 @@ fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
         if node.ancestors().count() > MAX_DEPTH {
             return Err(format!("SVG nesting exceeds {MAX_DEPTH} levels."));
         }
-        if !matches!(node.tag_name().namespace(), None | Some("http://www.w3.org/2000/svg")) {
+        if !matches!(
+            node.tag_name().namespace(),
+            None | Some("http://www.w3.org/2000/svg")
+        ) {
             return Err("SVG contains an element in an unsupported namespace.".into());
         }
         let tag = node.tag_name().name();
         if !matches!(
             tag,
-            "svg" | "g" | "defs" | "path" | "rect" | "circle" | "ellipse" | "line"
-                | "polyline" | "polygon" | "linearGradient" | "radialGradient" | "stop"
-                | "clipPath" | "title" | "desc"
+            "svg"
+                | "g"
+                | "defs"
+                | "path"
+                | "rect"
+                | "circle"
+                | "ellipse"
+                | "line"
+                | "polyline"
+                | "polygon"
+                | "linearGradient"
+                | "radialGradient"
+                | "stop"
+                | "clipPath"
+                | "title"
+                | "desc"
         ) {
-            return Err(format!("SVG <{tag}> is not in the safe static-vector subset."));
+            return Err(format!(
+                "SVG <{tag}> is not in the safe static-vector subset."
+            ));
         }
         for attr in node.attributes() {
             let name = attr.name();
             let value = attr.value();
-            if name.get(..2).is_some_and(|prefix| prefix.eq_ignore_ascii_case("on")) {
+            if name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("on"))
+            {
                 return Err("SVG event handlers are not supported.".into());
             }
             if name == "href" && (!value.starts_with('#') || value.len() < 2) {
@@ -211,7 +247,10 @@ fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
             if name == "base" && attr.namespace() == Some("http://www.w3.org/XML/1998/namespace") {
                 return Err("SVG xml:base is not supported.".into());
             }
-            if matches!(name, "filter" | "mask" | "marker-start" | "marker-mid" | "marker-end") {
+            if matches!(
+                name,
+                "filter" | "mask" | "marker-start" | "marker-mid" | "marker-end"
+            ) {
                 return Err(format!("SVG {name} effects are not supported."));
             }
             if !internal_urls_only(value) {
@@ -228,16 +267,38 @@ fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
 /// Inline CSS must only style static geometry. Without a property allowlist a `<path>` could
 /// request a filter, mask or external resource *without* using a banned SVG element.
 fn static_inline_style(style: &str) -> bool {
-    for declaration in style.split(';').map(str::trim).filter(|part| !part.is_empty()) {
-        let Some((property, value)) = declaration.split_once(':') else { return false };
-        if value.trim().is_empty() || !matches!(
-            property.trim(),
-            "fill" | "fill-rule" | "fill-opacity" | "stroke" | "stroke-width"
-                | "stroke-linecap" | "stroke-linejoin" | "stroke-miterlimit"
-                | "stroke-dasharray" | "stroke-dashoffset" | "stroke-opacity"
-                | "opacity" | "color" | "stop-color" | "stop-opacity"
-                | "clip-path" | "clip-rule" | "display" | "visibility"
-        ) {
+    for declaration in style
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let Some((property, value)) = declaration.split_once(':') else {
+            return false;
+        };
+        if value.trim().is_empty()
+            || !matches!(
+                property.trim(),
+                "fill"
+                    | "fill-rule"
+                    | "fill-opacity"
+                    | "stroke"
+                    | "stroke-width"
+                    | "stroke-linecap"
+                    | "stroke-linejoin"
+                    | "stroke-miterlimit"
+                    | "stroke-dasharray"
+                    | "stroke-dashoffset"
+                    | "stroke-opacity"
+                    | "opacity"
+                    | "color"
+                    | "stop-color"
+                    | "stop-opacity"
+                    | "clip-path"
+                    | "clip-rule"
+                    | "display"
+                    | "visibility"
+            )
+        {
             return false;
         }
     }
@@ -254,11 +315,15 @@ fn internal_urls_only(value: &str) -> bool {
     let mut tail = lower.as_str();
     while let Some(start) = tail.find("url(") {
         let remaining = &tail[start + 4..];
-        let Some(end) = remaining.find(')') else { return false };
+        let Some(end) = remaining.find(')') else {
+            return false;
+        };
         let fragment = remaining[..end].trim().trim_matches(&['\'', '"'][..]);
         if !fragment.starts_with('#')
             || fragment.len() < 2
-            || !fragment[1..].bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b':'))
+            || !fragment[1..]
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b':'))
         {
             return false;
         }
@@ -306,21 +371,36 @@ mod tests {
 
     #[test]
     fn bounded_reads_and_geometry_refuse_excessive_resources() {
-        assert!(read_capped(std::io::Cursor::new(vec![b'x'; MAX_SVG_BYTES + 1]), MAX_SVG_BYTES).is_err());
+        assert!(read_capped(
+            std::io::Cursor::new(vec![b'x'; MAX_SVG_BYTES + 1]),
+            MAX_SVG_BYTES
+        )
+        .is_err());
         assert!(rasterize_svg(&vec![b'x'; MAX_SVG_BYTES + 1]).is_err());
         assert!(target_size(f32::INFINITY, 12.0).is_err());
         assert!(target_size(1_000_001.0, 1.0).is_err());
         assert_eq!(target_size(24.0, 24.0).unwrap(), (256, 256));
         assert!(u64::from(target_size(999_999.0, 999_999.0).unwrap().0).pow(2) <= MAX_PIXELS);
-        let deep = format!("<svg>{}</svg>", "<g>".repeat(MAX_DEPTH) + &"</g>".repeat(MAX_DEPTH));
+        let deep = format!(
+            "<svg>{}</svg>",
+            "<g>".repeat(MAX_DEPTH) + &"</g>".repeat(MAX_DEPTH)
+        );
         assert!(rasterize_svg(deep.as_bytes()).is_err());
     }
 
     #[test]
     fn inline_css_is_static_vector_only() {
-        assert!(static_inline_style("fill:#1a73e8; stroke: black; stroke-width: 2"));
+        assert!(static_inline_style(
+            "fill:#1a73e8; stroke: black; stroke-width: 2"
+        ));
         assert!(static_inline_style("fill:url(#shade); opacity:0.75"));
-        for bad in ["filter:url(#blur)", "mask:url(#mask)", "font-family:Arial", "fill", "fill:"] {
+        for bad in [
+            "filter:url(#blur)",
+            "mask:url(#mask)",
+            "font-family:Arial",
+            "fill",
+            "fill:",
+        ] {
             assert!(!static_inline_style(bad), "accepted CSS: {bad}");
         }
     }
@@ -354,7 +434,13 @@ mod tests {
         for ok in ["url(#ink)", "fill:url( '#gradient-2' )", "#ink"] {
             assert!(internal_urls_only(ok), "{ok}");
         }
-        for bad in ["url(https://example.org/x)", "url(file.svg#ink)", "@import 'file.css'", "url(data:image/png;base64,AAAA)", "url(#)" ] {
+        for bad in [
+            "url(https://example.org/x)",
+            "url(file.svg#ink)",
+            "@import 'file.css'",
+            "url(data:image/png;base64,AAAA)",
+            "url(#)",
+        ] {
             assert!(!internal_urls_only(bad), "{bad}");
         }
     }

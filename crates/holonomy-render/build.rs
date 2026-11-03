@@ -19,12 +19,16 @@ const ICONS: &[(&str, &str)] = &[
 
 fn main() {
     let base = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let mut output = String::from("// Generated from MIT-licensed WordCraft artwork. Do not edit.\n");
+    let mut output =
+        String::from("// Generated from MIT-licensed WordCraft artwork. Do not edit.\n");
     for &(name, source) in ICONS {
         println!("cargo:rerun-if-changed={source}");
         let path = base.join(source);
         let bytes = std::fs::read(&path).expect("read checked-in SVG icon");
-        assert!(bytes.len() <= 2048, "trusted UI icon has grown beyond its small vector budget");
+        assert!(
+            bytes.len() <= 2048,
+            "trusted UI icon has grown beyond its small vector budget"
+        );
         let xml = std::str::from_utf8(&bytes).expect("icon is UTF-8");
         let doc = roxmltree::Document::parse(xml).expect("icon XML is valid and has no DTD");
         assert_eq!(doc.root_element().tag_name().name(), "svg");
@@ -32,9 +36,15 @@ fn main() {
         // WordCraft icons have only SVG and path nodes, no stylesheet, filters, linked images or text.
         for node in doc.descendants().filter(|node| node.is_element()) {
             assert!(matches!(node.tag_name().name(), "svg" | "path"));
-            assert!(matches!(node.tag_name().namespace(), None | Some("http://www.w3.org/2000/svg")));
+            assert!(matches!(
+                node.tag_name().namespace(),
+                None | Some("http://www.w3.org/2000/svg")
+            ));
             for attr in node.attributes() {
-                assert!(attr.namespace().is_none(), "namespaced attributes are not UI art");
+                assert!(
+                    attr.namespace().is_none(),
+                    "namespaced attributes are not UI art"
+                );
                 assert!(!attr.name().starts_with("on") && !matches!(attr.name(), "href" | "style"));
                 assert!(!attr.value().to_ascii_lowercase().contains("url("));
             }

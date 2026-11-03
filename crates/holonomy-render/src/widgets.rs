@@ -75,12 +75,8 @@ pub enum Tool {
     Highlight,
     /// Link.
     Link,
-    /// Comment: open the comments sidebar / add a comment.
-    Comment,
     /// Image.
     Image,
-    /// Share: the prominent blue Share button at the far right.
-    Share,
     /// Overflow: the rest of the toolbar.
     Overflow,
     /// The mode switcher, at the right.
@@ -113,9 +109,7 @@ impl Tool {
             Tool::TextColour => Some(IconId::TextColour),
             Tool::Highlight => Some(IconId::Highlight),
             Tool::Link => Some(IconId::Link),
-            Tool::Comment => Some(IconId::Comment),
             Tool::Image => Some(IconId::Image),
-            Tool::Share => Some(IconId::Share),
             Tool::Overflow => Some(IconId::Overflow),
             Tool::Mode => Some(IconId::Pen),
             Tool::Collapse => Some(IconId::ChevronUp),
@@ -175,9 +169,7 @@ impl Tool {
             Tool::TextColour => "text-colour",
             Tool::Highlight => "highlight",
             Tool::Link => "link",
-            Tool::Comment => "comment",
             Tool::Image => "image",
-            Tool::Share => "share",
             Tool::Overflow => "overflow",
             Tool::Mode => "mode",
             Tool::Collapse => "collapse",
@@ -360,11 +352,9 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::TextColour,
     Tool::Highlight,
     Tool::Link,
-    Tool::Comment,
     Tool::Image,
     Tool::Overflow,
     Tool::Mode,
-    Tool::Share,
     Tool::Collapse,
 ];
 
@@ -1341,7 +1331,8 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
     let outline_y = if state.docs.is_empty() {
         l.sidebar.y + 120
     } else {
-        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40).max(l.sidebar.y as i32 + 80) as u32
+        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40)
+            .max(l.sidebar.y as i32 + 80) as u32
     };
     if !state.outline.is_empty() {
         let mut row = outline_y + l.cell_h + 12;

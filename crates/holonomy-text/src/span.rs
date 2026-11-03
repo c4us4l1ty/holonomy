@@ -906,8 +906,9 @@ impl SpanMap {
                 // halves of it in Inter: `styled` is four-argument and takes `FACE_BODY` for granted, so
                 // a split built with it silently un-sets the font. This is the same erasure as
                 // `style_at`'s, in the one place nobody looks -- the middle of a keystroke.
-                (stop > sp.start_byte)
-                    .then(|| TextIntervalSpan::styled(sp.start_byte, stop, f, c).with_face(sp.font_face))
+                (stop > sp.start_byte).then(|| {
+                    TextIntervalSpan::styled(sp.start_byte, stop, f, c).with_face(sp.font_face)
+                })
             } else {
                 None
             };
@@ -1406,7 +1407,13 @@ impl SpanMap {
             } else {
                 s.font_face
             };
-            rebuilt.push(TextIntervalSpan::faced(lo, hi, style_flags, color_rgb, face));
+            rebuilt.push(TextIntervalSpan::faced(
+                lo,
+                hi,
+                style_flags,
+                color_rgb,
+                face,
+            ));
             // Right remnant.
             if s.end_byte > end {
                 rebuilt.push(TextIntervalSpan::faced(

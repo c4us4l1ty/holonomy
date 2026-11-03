@@ -491,10 +491,10 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `opened` and not here. The first version of this assertion expected `["zoom", "bold", "italic"]`
     // and the compiler was right: a dropdown's opener has changed nothing yet.
     //
-    // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 22 tools:
-    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **5 open a dropdown**
-    // (Zoom, Style, Font, TextColour, Mode), 7 change chrome state (Bold, Italic, Underline, the zoom
-    // pair and Overflow), and the remaining six are inert.
+    // **The real list now has 23 tools:** Undo, Redo, Image, Print and Strikethrough run commands;
+    // Collapse changes sidebar state; Zoom, Style, Font, TextColour and Mode open dropdowns; the
+    // remaining toolbar controls either change chrome state or are the six named inert controls.
+    // The duplicated Comment and Share toolbar buttons were removed; title-bar Share exports.
     //
     // **The leading number said 21 and the categories said 3 + 1 + 4 + 2**, which left thirteen inert —
     // neither matched the `22` asserted below nor the seven this file measures. The prose had drifted
@@ -515,16 +515,14 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // **And it was seven until `Underline` was wired**: `STYLE_UNDERLINE` is in the document model, the
     // button arms it, the painter draws a rule and the export writes a `<u>`, so the button is no
     // longer a widget with nothing behind it.
-    // **The arithmetic follows: 22 tools, so 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
-    // 7 chrome changes and 6 inert leaves nothing unaccounted for.**
+    // The 23-item list includes later Print and Strikethrough wiring, not just the older three
+    // document commands; these are not inert even though this test measures only chrome and inert.
     assert_eq!(
         widgets::TOOLBAR.len(),
-        22,
-        "**twenty-two tools.** This was twenty-three while `Tool::Comment` was still on the bar: it had \
-         no annotation store -- no list, no anchor range, no author -- so it could never work, and a \
-         button that will never work is a lie about the product. `Tool::Print` went the other way and \
-         was given `Action::Export` to do. The count is asserted separately so that the inert \
-         arithmetic below cannot be quietly wrong on both sides."
+        23,
+        "The toolbar has 23 real controls, including the later Strikethrough button. The inert \
+         Comment and Share tools were removed rather than leaving two buttons which could never work; \
+         the title-bar Share still exports the document. A new control requires a deliberate action."
     );
     // **Eight.** Four buttons left the inert list in part 44, each with a decision
     // behind it:
@@ -549,10 +547,8 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     assert_eq!(
         inert.len(),
         6,
-        "**six inert buttons**, which is 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 7 \
-         chrome changes. The list is {inert:?}. Part 44 removed four from this list and each removal \
-         came with a recorded decision; the fifth left the toolbar altogether when `Comment` was \
-         removed; the sixth started working when `Underline` did."
+        "**six inert buttons**, not stub actions that silently do nothing. The list is {inert:?}; \
+         Comment and Share were removed from the toolbar and the title-bar Share remains a real export."
     );
 }
 
