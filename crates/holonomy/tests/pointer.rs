@@ -480,11 +480,11 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
             "bold",
             "italic",
             "underline",
+            "strikethrough",
             "overflow"
         ],
-        "**and the tools that change chrome state are exactly these, in toolbar order.** Bold, Italic \
-         and Underline arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty \
-         menu. A seventh would mean something else started claiming to work without a decision."
+        "the inline marks arm a style, SizeDown and SizeUp change zoom, and Overflow \
+         finds no hidden tools at the design width; got {chrome:?}"
     );
     // **Zoom, Style and Font are not in that list, and their absence is the point.** They *open a
     // dropdown* and return before anything is applied, so they are counted by the routing gate's
