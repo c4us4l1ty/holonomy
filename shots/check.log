@@ -8,46 +8,46 @@ info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install d
 [1m[92m Downloading[0m crates ...
 [1m[92m  Downloaded[0m adler2 v2.0.1
 [1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
-[1m[92m  Downloaded[0m block-buffer v0.12.1
 [1m[92m  Downloaded[0m alloc-stdlib v0.3.0
-[1m[92m  Downloaded[0m base64ct v1.8.3
 [1m[92m  Downloaded[0m aead v0.6.1
 [1m[92m  Downloaded[0m argon2 v0.6.0
-[1m[92m  Downloaded[0m blake2 v0.11.0
-[1m[92m  Downloaded[0m bitflags v2.13.2
-[1m[92m  Downloaded[0m secrecy v0.10.3
 [1m[92m  Downloaded[0m chacha20 v0.10.2
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m const-oid v0.10.2
 [1m[92m  Downloaded[0m cpufeatures v0.3.1
 [1m[92m  Downloaded[0m crypto-common v0.2.2
-[1m[92m  Downloaded[0m universal-hash v0.6.1
-[1m[92m  Downloaded[0m cipher v0.5.2
 [1m[92m  Downloaded[0m zeroize_derive v1.5.0
-[1m[92m  Downloaded[0m cfg-if v1.0.5
-[1m[92m  Downloaded[0m password-hash v0.6.1
-[1m[92m  Downloaded[0m itoa v1.0.18
-[1m[92m  Downloaded[0m phc v0.6.1
-[1m[92m  Downloaded[0m digest v0.11.3
+[1m[92m  Downloaded[0m secrecy v0.10.3
+[1m[92m  Downloaded[0m universal-hash v0.6.1
 [1m[92m  Downloaded[0m inout v0.2.2
-[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m digest v0.11.3
+[1m[92m  Downloaded[0m block-buffer v0.12.1
+[1m[92m  Downloaded[0m password-hash v0.6.1
+[1m[92m  Downloaded[0m cfg-if v1.0.5
+[1m[92m  Downloaded[0m base64ct v1.8.3
+[1m[92m  Downloaded[0m cipher v0.5.2
+[1m[92m  Downloaded[0m ctutils v0.4.2
+[1m[92m  Downloaded[0m cmov v0.5.4
 [1m[92m  Downloaded[0m zeroize v1.9.0
+[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m phc v0.6.1
+[1m[92m  Downloaded[0m hmac v0.13.0
+[1m[92m  Downloaded[0m sha2 v0.11.0
+[1m[92m  Downloaded[0m hybrid-array v0.4.15
+[1m[92m  Downloaded[0m bitflags v2.13.2
 [1m[92m  Downloaded[0m poly1305 v0.9.1
 [1m[92m  Downloaded[0m rand_core v0.10.1
-[1m[92m  Downloaded[0m sha2 v0.11.0
-[1m[92m  Downloaded[0m cmov v0.5.4
-[1m[92m  Downloaded[0m hmac v0.13.0
-[1m[92m  Downloaded[0m hybrid-array v0.4.15
+[1m[92m  Downloaded[0m blake2 v0.11.0
 [1m[92m  Downloaded[0m unicode-ident v1.0.26
-[1m[92m  Downloaded[0m ctutils v0.4.2
 [1m[92m  Downloaded[0m getrandom v0.4.3
 [1m[92m  Downloaded[0m ryu v1.0.23
-[1m[92m  Downloaded[0m proc-macro2 v1.0.107
 [1m[92m  Downloaded[0m tinyvec v1.13.3
-[1m[92m  Downloaded[0m const-oid v0.10.2
+[1m[92m  Downloaded[0m proc-macro2 v1.0.107
 [1m[92m  Downloaded[0m chacha20poly1305 v0.11.0
-[1m[92m  Downloaded[0m memchr v2.8.3
 [1m[92m  Downloaded[0m miniz_oxide v0.9.1
-[1m[92m  Downloaded[0m typenum v1.20.1
+[1m[92m  Downloaded[0m memchr v2.8.3
 [1m[92m  Downloaded[0m unicode-normalization v0.1.25
+[1m[92m  Downloaded[0m typenum v1.20.1
 [1m[92m  Downloaded[0m hkdf v0.13.0
 [1m[92m  Downloaded[0m ttf-parser v0.25.1
 [1m[92m  Downloaded[0m brotli-decompressor v6.0.1
@@ -68,8 +68,8 @@ info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install d
 [1m[92m    Checking[0m alloc-no-stdlib v3.0.0
 [1m[92m    Checking[0m alloc-stdlib v0.3.0
 [1m[92m   Compiling[0m syn v2.0.119
-[1m[92m    Checking[0m brotli-decompressor v6.0.1
 [1m[92m    Checking[0m hybrid-array v0.4.15
+[1m[92m    Checking[0m brotli-decompressor v6.0.1
 [1m[92m    Checking[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
 [1m[92m    Checking[0m crypto-common v0.2.2
 [1m[92m    Checking[0m block-buffer v0.12.1
@@ -78,13 +78,13 @@ info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install d
 [1m[92m    Checking[0m cpufeatures v0.3.1
 [1m[92m    Checking[0m inout v0.2.2
 [1m[92m    Checking[0m base64ct v1.8.3
-[1m[92m    Checking[0m phc v0.6.1
 [1m[92m    Checking[0m digest v0.11.3
+[1m[92m    Checking[0m phc v0.6.1
 [1m[92m    Checking[0m blake2 v0.11.0
 [1m[92m    Checking[0m cipher v0.5.2
 [1m[92m    Checking[0m universal-hash v0.6.1
-[1m[92m    Checking[0m chacha20 v0.10.2
 [1m[92m    Checking[0m poly1305 v0.9.1
+[1m[92m    Checking[0m chacha20 v0.10.2
 [1m[92m    Checking[0m password-hash v0.6.1
 [1m[92m    Checking[0m hmac v0.13.0
 [1m[92m    Checking[0m aead v0.6.1
@@ -96,10 +96,10 @@ info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install d
 [1m[92m    Checking[0m unicode-normalization v0.1.25
 [1m[92m    Checking[0m sha2 v0.11.0
 [1m[92m    Checking[0m adler2 v2.0.1
-[1m[92m    Checking[0m ryu v1.0.23
 [1m[92m    Checking[0m miniz_oxide v0.9.1
-[1m[92m    Checking[0m bitflags v2.13.2
 [1m[92m    Checking[0m itoa v1.0.18
+[1m[92m    Checking[0m ryu v1.0.23
+[1m[92m    Checking[0m bitflags v2.13.2
 [1m[92m    Checking[0m memchr v2.8.3
 [1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
 [1m[92m    Checking[0m holonomy-x11 v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-x11)
@@ -111,13 +111,32 @@ info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install d
 [1m[92m    Checking[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
 [1m[92m    Checking[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
 [1m[92m    Checking[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[91merror[E0425][0m[1m: cannot find value `sp` in this scope[0m
-   [1m[94m--> [0mcrates/holonomy-text/src/span.rs:945:32
-    [1m[94m|[0m
-[1m[94m945[0m [1m[94m|[0m                     .with_face(sp.font_face),
-    [1m[94m|[0m                                [1m[91m^^[0m [1m[91mnot found in this scope[0m
-
 [1m[92m    Checking[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
-[1mFor more information about this error, try `rustc --explain E0425`.[0m
-[1m[91merror[0m: could not compile `holonomy-text` (lib) due to 1 previous error
-[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[92m    Checking[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
+[1m[92m    Checking[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m    Checking[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
+[1m[92m    Checking[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
+[1m[33mwarning[0m[1m: unnecessary parentheses around closure body[0m
+   [1m[94m--> [0mcrates/holonomy-render/tests/icons.rs:341:30
+    [1m[94m|[0m
+[1m[94m341[0m [1m[94m|[0m             .filter(|(y, _)| (*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest))
+    [1m[94m|[0m                              [1m[33m^[0m                                                      [1m[33m^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+[1m[96mhelp[0m: remove these parentheses
+    [1m[94m|[0m
+[1m[94m341[0m [91m- [0m            .filter(|(y, _)| [91m([0m*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest[91m)[0m)
+[1m[94m341[0m [92m+ [0m            .filter(|(y, _)| *y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest)
+    [1m[94m|[0m
+
+[1m[33mwarning[0m: `holonomy-render` (test "icons") generated 1 warning (run `cargo fix --test "icons" -p holonomy-render` to apply 1 suggestion)
+[1m[33mwarning[0m[1m: unused import: `HeadlessScanout`[0m
+  [1m[94m--> [0mcrates/holonomy/tests/ruler.rs:18:40
+   [1m[94m|[0m
+[1m[94m18[0m [1m[94m|[0m use holonomy_display::{paint::Painter, HeadlessScanout};
+   [1m[94m|[0m                                        [1m[33m^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m: `holonomy` (test "ruler") generated 1 warning (run `cargo fix --test "ruler" -p holonomy` to apply 1 suggestion)
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 12.27s
