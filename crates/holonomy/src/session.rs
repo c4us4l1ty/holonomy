@@ -445,6 +445,16 @@ pub struct ExportSink {
     pub path: String,
 }
 
+/// An active ruler drag interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulerDrag {
+    LeftMargin,
+    RightMargin,
+    FirstLineIndent,
+    LeftIndent,
+    RightIndent,
+}
+
 /// An editor, its chrome, and the loop.
 pub struct Session<'a> {
     /// The document.
@@ -579,6 +589,8 @@ pub struct Session<'a> {
     page_drag: bool,
     /// Pointer offset within a dragged desktop scrollbar thumb.
     scrollbar_drag: Option<i32>,
+    /// Active ruler drag gesture, if any.
+    ruler_drag: Option<RulerDrag>,
     /// **The click that came before this one, and how many clicks in a row it was.** Part 41.
     ///
     /// ## Why the session keeps this and not the chrome
@@ -1208,6 +1220,7 @@ impl<'a> Session<'a> {
             mods: ModifierState::new(),
             page_drag: false,
             scrollbar_drag: None,
+            ruler_drag: None,
             clicks: None,
             mode: holonomy_render::menus::ViewMode::Editing,
             edge_scroll: None,
@@ -2938,6 +2951,11 @@ impl<'a> Session<'a> {
                 // **And it returns, because hover is not what this event is for.** The pointer is
                 // captured by the drag: highlighting a toolbar button the user is dragging past would
                 // be a lie about what is being pressed. `tick_with` below still runs.
+                if let Some(drag) = self.ruler_drag {
+                    self.drag_ruler_to(drag, x, y, bytes)?;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
                 if self.page_drag {
                     // **The auto-scroll is armed *before* the drag extends, and that order is the
                     // feature.** Reaching the bottom of the window is how a user says "keep going",
@@ -3087,6 +3105,11 @@ impl<'a> Session<'a> {
                 // only read while `page_drag` is set, so leaving it set would be harmless -- and a
                 // field that is harmless when it is wrong is a field nobody has to keep correct.
                 self.edge_scroll = None;
+                if self.ruler_drag.is_some() {
+                    self.ruler_drag = None;
+                    self.state.ruler_drag_x = None;
+                    self.invalidate(self.chrome.full_damage());
+                }
             }
             // **Right and middle buttons are not bound, and are counted as nothing.**
             //
@@ -3135,6 +3158,65 @@ impl<'a> Session<'a> {
         // preceded it: the user who double-clicked a word and then dragged past it is extending a
         // selection, not selecting the line they started on.
         self.click_page(bytes, x, y, true, 1)
+    }
+
+    /// Update page margins or paragraph indents from a ruler drag gesture.
+    fn drag_ruler_to(
+        &mut self,
+        drag: RulerDrag,
+        x: i32,
+        _y: i32,
+        _bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        self.state.ruler_drag_x = Some(x);
+        let cell_w = self.chrome.metrics.cell_w.max(1);
+        match drag {
+            RulerDrag::LeftMargin => {
+                let page_x = self.chrome.layout.page.x as i32;
+                let raw_pad = (x - page_x).max(16).min(self.chrome.layout.page.width as i32 / 3);
+                let snapped = ((raw_pad as u32) / cell_w) * cell_w;
+                let new_pad = snapped.max(16);
+                if new_pad != self.chrome.metrics.page_pad {
+                    self.chrome.metrics.page_pad = new_pad;
+                    let metrics = self.chrome.metrics;
+                    self.chrome = Chrome::new(metrics);
+                    if self.managed_documents {
+                        self.reflow_for_measure();
+                    }
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::RightMargin => {
+                let page_right = self.chrome.layout.page.right() as i32;
+                let raw_pad = (page_right - x).max(16).min(self.chrome.layout.page.width as i32 / 3);
+                let snapped = ((raw_pad as u32) / cell_w) * cell_w;
+                let new_pad = snapped.max(16);
+                if new_pad != self.chrome.metrics.page_pad {
+                    self.chrome.metrics.page_pad = new_pad;
+                    let metrics = self.chrome.metrics;
+                    self.chrome = Chrome::new(metrics);
+                    if self.managed_documents {
+                        self.reflow_for_measure();
+                    }
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::FirstLineIndent | RulerDrag::LeftIndent => {
+                let text_x = self.chrome.layout.text.x as i32;
+                let delta = x - text_x;
+                let step = (4 * cell_w) as i32;
+                if delta >= step {
+                    self.apply_action(holonomy_render::menus::Action::Indent)?;
+                } else if delta <= -step {
+                    self.apply_action(holonomy_render::menus::Action::Outdent)?;
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::RightIndent => {
+                self.invalidate(self.chrome.full_damage());
+            }
+        }
+        Ok(())
     }
 
     /// **Scroll the document if the drag is at the top or bottom edge.** Part 41.
@@ -3427,6 +3509,31 @@ impl<'a> Session<'a> {
             Hit::RibbonLock => self.apply_action(holonomy_render::menus::Action::Lock)?,
             Hit::RibbonCollapse => {
                 self.apply_action(holonomy_render::menus::Action::ToggleRibbon)?
+            }
+            Hit::RulerLeftMargin => {
+                self.ruler_drag = Some(RulerDrag::LeftMargin);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerRightMargin => {
+                self.ruler_drag = Some(RulerDrag::RightMargin);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerFirstLineIndent => {
+                self.ruler_drag = Some(RulerDrag::FirstLineIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerLeftIndent => {
+                self.ruler_drag = Some(RulerDrag::LeftIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerRightIndent => {
+                self.ruler_drag = Some(RulerDrag::RightIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
             }
             Hit::Nav(i) => {
                 if let Some((line, _)) = self.state.navigation.get(i) {
@@ -3792,8 +3899,35 @@ impl<'a> Session<'a> {
         let start = self.lines.line_begin(line as usize) as u32;
         let end = self.lines.line_end(line as usize) as u32;
         let align = if self.managed_documents {
-            let text = self.editor.text().unwrap_or_default();
-            self.line_align_offset(start, &text[start as usize..end as usize])
+            let flags = self.editor.style_at(start).style_flags;
+            if (flags & holonomy_text::STYLE_ALIGN_MASK) != 0 {
+                let len = (end.saturating_sub(start)) as usize;
+                let mut small_buf = [0u8; 256];
+                if len <= small_buf.len() {
+                    if self
+                        .editor
+                        .read_into_faulting(source, start as usize, &mut small_buf[..len])
+                        .is_ok()
+                    {
+                        self.line_align_offset(start, &small_buf[..len])
+                    } else {
+                        0
+                    }
+                } else {
+                    let mut line_buf = vec![0u8; len];
+                    if self
+                        .editor
+                        .read_into_faulting(source, start as usize, &mut line_buf)
+                        .is_ok()
+                    {
+                        self.line_align_offset(start, &line_buf)
+                    } else {
+                        0
+                    }
+                }
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -10222,13 +10356,21 @@ fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> Dama
     let h = match open {
         widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
-        widgets::Open::Tool(t) => widgets::Hit::Tool(t),
+        widgets::Open::Tool(t) => widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t)),
     };
-    // **The value, not a binding returned on the next line.** `r` was assigned and returned
-    // immediately; **and the `ChromeState::default()` is deliberate** -- this is a *geometry*
-    // question about where a widget sits, and a state with nothing hovered and no popup open is the
-    // one that answers it.
-    widgets::hit_rect(l, &holonomy_render::ChromeState::default(), h)
+    let mut st = holonomy_render::ChromeState::default();
+    st.ribbon = true;
+    widgets::hit_rect(l, &st, h)
+        .or_else(|| {
+            widgets::hit_rect(
+                l,
+                &holonomy_render::ChromeState::default(),
+                widgets::Hit::Tool(match open {
+                    widgets::Open::Tool(t) => t,
+                    _ => widgets::Tool::Overflow,
+                }),
+            )
+        })
         .unwrap_or(DamageRect::new(0, 0, 0, 0))
 }
 

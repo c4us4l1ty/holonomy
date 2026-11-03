@@ -819,6 +819,12 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
     let anchor_y = match open {
         Open::RibbonOverflow => l.toolbar.y + 40,
         Open::Menu(_) => l.menubar.bottom(),
+        Open::Tool(tool) if state.ribbon => crate::ribbon::layout(l, state)
+            .1
+            .into_iter()
+            .find(|b| b.action == crate::menus::Action::SelectTool(tool))
+            .map(|b| b.rect.bottom())
+            .unwrap_or(l.toolbar.bottom()),
         Open::Tool(_) => l.toolbar.bottom(),
     };
 
@@ -966,6 +972,36 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
         Hit::Doc(i) | Hit::DocMenu(i) => l.sidebar_doc(i),
         Hit::NewDoc => state.sidebar_open.then_some(l.sidebar_new),
         Hit::SidebarBack => state.sidebar_open.then_some(l.sidebar_back),
+        Hit::RulerLeftMargin => Some(DamageRect::new(
+            l.text.x.saturating_sub(6),
+            l.ruler.y,
+            12,
+            l.ruler.height,
+        )),
+        Hit::RulerRightMargin => Some(DamageRect::new(
+            (l.text.x + l.text.width.min(l.width.saturating_sub(l.text.x))).saturating_sub(6),
+            l.ruler.y,
+            12,
+            l.ruler.height,
+        )),
+        Hit::RulerFirstLineIndent => Some(DamageRect::new(
+            l.text.x.saturating_sub(6),
+            l.ruler.y,
+            12,
+            l.ruler.height / 2,
+        )),
+        Hit::RulerLeftIndent => Some(DamageRect::new(
+            l.text.x.saturating_sub(6),
+            l.ruler.y + l.ruler.height / 2,
+            12,
+            l.ruler.height / 2,
+        )),
+        Hit::RulerRightIndent => Some(DamageRect::new(
+            (l.text.x + l.text.width.min(l.width.saturating_sub(l.text.x))).saturating_sub(6),
+            l.ruler.y + l.ruler.height / 2,
+            12,
+            l.ruler.height / 2,
+        )),
         // **A widget that is not drawn has no rect.** `Page` is the body text -- a hover there would
         // mean outlining the whole page, which is not an affordance any reference has -- and `Dismiss`
         // is the chrome's own chevron, drawn as part of the collapse button rather than on its own.
@@ -1005,6 +1041,12 @@ pub enum Hit {
     NewDoc,
     /// The sidebar's back arrow.
     SidebarBack,
+    /// Draggable ruler scales and markers.
+    RulerLeftMargin,
+    RulerRightMargin,
+    RulerFirstLineIndent,
+    RulerLeftIndent,
+    RulerRightIndent,
     /// The toolbar's dismiss affordance, i.e. the chevron on the collapse button.
     Dismiss,
     /// The page's text column: the caret goes here.
@@ -1188,6 +1230,33 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
             if l.sidebar.contains(x, y) {
                 return Hit::None;
             }
+        }
+        if l.ruler.contains(x, y) {
+            let col = l.text.x as i32;
+            let col_w = l.text.width.min(l.width.saturating_sub(l.text.x)) as i32;
+            let right = col + col_w;
+            let mid_y = l.ruler.y as i32 + (l.ruler.height as i32) / 2;
+
+            if (x - col).abs() <= 8 {
+                if y < mid_y {
+                    return Hit::RulerFirstLineIndent;
+                } else if y >= l.ruler.bottom() as i32 - 7 {
+                    return Hit::RulerLeftIndent;
+                } else {
+                    return Hit::RulerLeftMargin;
+                }
+            } else if (x - right).abs() <= 8 {
+                if y >= mid_y {
+                    return Hit::RulerRightIndent;
+                } else {
+                    return Hit::RulerRightMargin;
+                }
+            } else if x < col {
+                return Hit::RulerLeftMargin;
+            } else if x > right {
+                return Hit::RulerRightMargin;
+            }
+            return Hit::None;
         }
         return if if state.paged {
             l.page_at(state, x, y).is_some()

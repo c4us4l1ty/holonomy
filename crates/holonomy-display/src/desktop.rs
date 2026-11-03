@@ -433,19 +433,26 @@ impl Desktop {
     /// Returns `None` when the queue's oldest event is not a motion event, so the driver can tell
     /// "nothing more to fold" from "folded up to a click".
     pub fn take_motion_run(&mut self) -> Option<Event> {
-        if let Some(ev) = self.events.pop_front() {
-            if matches!(ev, Event::MotionNotify { .. }) {
-                // **The driver's queue is the only one that matters**, and it is the one that is
-                // private to this type: `Desktop` buffers events so that a `ConfigureNotify` this
-                // layer synthesised and one the server sent are seen in the order they happened.
-                // Anything folded here has not been looked at yet, so dropping it reorders nothing.
-                if let Some(newer) = self.conn.take_motion_run() {
-                    return Some(newer);
-                }
+        if let Some(front) = self.events.front() {
+            if !matches!(front, Event::MotionNotify { .. }) {
+                return None;
             }
-            self.events.push_front(ev);
         }
-        None
+        let mut last = None;
+        while let Some(ev) = self.events.pop_front() {
+            if matches!(ev, Event::MotionNotify { .. }) {
+                last = Some(ev);
+            } else {
+                self.events.push_front(ev);
+                break;
+            }
+        }
+        if self.events.is_empty() {
+            if let Some(newer) = self.conn.take_motion_run() {
+                last = Some(newer);
+            }
+        }
+        last
     }
 
     /// Take the keyboard focus. A click handler calls this, because a window manager may take the focus
