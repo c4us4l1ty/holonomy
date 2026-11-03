@@ -209,7 +209,7 @@ fn navigation_pane_switches_between_headings_and_pages_and_closes() {
     );
     assert!(matches!(
         s.take_document_request(),
-        Some(holonomy::DocumentRequest::Find)
+        Some(holonomy::session::DocumentRequest::Find)
     ));
 }
 

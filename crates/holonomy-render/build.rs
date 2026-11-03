@@ -20,7 +20,6 @@ const ICONS: &[(&str, &str)] = &[
     ("WC_COPY", "assets/icons/wordcraft-copy.svg"),
     ("WC_SAVE", "assets/icons/wordcraft-save.svg"),
     ("WC_SEARCH", "assets/icons/wordcraft-search.svg"),
-    ("WC_FIND", "assets/icons/wordcraft-find.svg"),
     ("WC_BULLETS", "assets/icons/wordcraft-bullets.svg"),
     ("WC_ALIGN_LEFT", "assets/icons/wordcraft-align-left.svg"),
     ("WC_ALIGN_CENTER", "assets/icons/wordcraft-align-center.svg"),

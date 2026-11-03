@@ -864,7 +864,7 @@ pub fn group_items(state: &ChromeState, group: usize) -> Vec<crate::menus::Item>
 }
 
 /// The measured click target for a collapsed group's drop-down.
-pub fn group_trigger(l: &Layout, group: &Group) -> DamageRect {
+pub fn group_trigger(_l: &Layout, group: &Group) -> DamageRect {
     if group.level != ribbon_fit::COLLAPSED || group.rect.is_empty() {
         return DamageRect::EMPTY;
     }
