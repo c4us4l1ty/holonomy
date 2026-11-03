@@ -1843,6 +1843,16 @@ pub struct ChromeState {
     /// this needs a boolean and a rectangle that is either there or is not. The animation is not worth
     /// a per-frame layout on a panel where the sidebar is 208 px wide.
     pub sidebar_open: bool,
+    /// **Document outline: one entry per heading-style line, for the left outline slider.**
+    ///
+    /// Each entry is `(heading_text, line_index, level)`. Level 0 is the document title,
+    /// level 1 is Heading 1, level 2 is Heading 2, and so on. The session rebuilds this
+    /// after every edit by scanning the document for `STYLE_HEADER` runs.
+    ///
+    /// **Only headings, not every paragraph.** The outline is a navigation aid, and a document
+    /// with every paragraph in it is a list the user has to scroll — which is what the outline
+    /// exists to replace. Indentation in the sidebar follows `level`.
+    pub outline: Vec<(String, u32, u8)>,
     /// The documents in the sidebar: their titles, not their models.
     ///
     /// **Titles, and that is the whole of the boundary.** `Session` owns the documents; the chrome owns
@@ -2004,6 +2014,7 @@ impl Default for ChromeState {
             // measure. That is the trade the reference makes, and "the document list is visible" beats
             // "the page is 280 px wider" for an editor whose whole point is several documents.
             sidebar_open: true,
+            outline: Vec::new(),
             docs: Vec::new(),
             active_doc: 0,
             style_index: 0,
@@ -3979,6 +3990,66 @@ fn paint_sidebar(into: &mut Vec<SurfaceTree>, m: &ChromeMetrics, l: &Layout, sta
                 ink,
             ))));
         }
+    }
+
+    // --- Document outline: headings from STYLE_HEADER runs, for navigating long documents.
+    let outline_y = if state.docs.is_empty() {
+        l.sidebar.y + 120
+    } else {
+        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40).max(l.sidebar.y as i32 + 80) as u32
+    };
+    if !state.outline.is_empty() {
+        push_text(
+            into,
+            m,
+            outline_y,
+            "Document outline",
+            Style::BOLD,
+            colour::INK_CHROME,
+            l.sidebar.x as i32 + 24,
+        );
+        let mut row = outline_y + m.cell_h + 12;
+        let sidebar_w = l.sidebar.width as i32;
+        for (text, line_idx, level) in &state.outline {
+            if row + m.cell_h > l.sidebar.bottom() {
+                break;
+            }
+            let indent = level.saturating_sub(1) * 20;
+            let tx = l.sidebar.x as i32 + 24 + indent as i32;
+            let ty = row;
+            let fill_x = l.sidebar.x as i32 + 16 + indent as i32;
+            let fill_w = sidebar_w - 32 - indent as i32;
+            if state_fill(state, crate::widgets::Hit::Outline(*line_idx)).is_some() {
+                into.push(rounded(
+                    fill_x,
+                    ty as i32 - 2,
+                    fill_w.max(4) as u32,
+                    m.cell_h + 4,
+                    4,
+                    colour::PILL_HOVER,
+                ));
+            }
+            push_text(
+                into,
+                m,
+                ty,
+                text,
+                if *level == 0 { Style::BOLD } else { Style::REGULAR },
+                colour::INK_CHROME,
+                tx,
+            );
+            row += m.cell_h + 4;
+        }
+    } else if state.docs.is_empty() {
+        push_text(
+            into,
+            m,
+            outline_y,
+            "Apply Heading 1 to add entries.",
+            Style::REGULAR,
+            colour::INK_DIM,
+            l.sidebar.x as i32 + 24,
+        );
     }
 }
 

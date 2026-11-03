@@ -3554,6 +3554,9 @@ impl<'a> Session<'a> {
                     self.scroll_to(*line)?;
                 }
             }
+            Hit::Outline(line_idx) => {
+                self.scroll_to(line_idx)?;
+            }
             Hit::MenuItem { open, row } => {
                 let Some(item) = open.items(&self.state).get(row).copied() else {
                     return Ok(());
@@ -7735,6 +7738,69 @@ impl<'a> Session<'a> {
         self.state.bytes = self.editor.text_len() as u32;
         self.state.words = self.counts.words;
         self.state.total_lines = self.lines.len() as u32;
+        // **Document outline: rebuild after every edit so the left slider stays current.**
+        // Scan every line's first byte for header styling; heading paragraphs carry the flag on
+        // every byte, so checking the line start is sufficient. O(lines) per edit, which is far
+        // cheaper than the O(document) word count this already does.
+        self.state.outline.clear();
+        let mut scratch = Vec::new();
+        for line_idx in 0..self.lines.len() {
+            let begin = self.lines.line_begin(line_idx);
+            let end = self.lines.line_end(line_idx);
+            if begin >= end {
+                continue;
+            }
+            let span = self.editor.style_at(begin as u32);
+            let is_header = span.style_flags & STYLE_HEADER != 0;
+            // Heading 2 carries STYLE_BOLD with the heading blue but no STYLE_HEADER flag.
+            let is_heading2 = span.style_flags & STYLE_BOLD != 0
+                && span.colour_rgb == 0x001A_5C75;
+            if !is_header && !is_heading2 {
+                continue;
+            }
+            let line_len = end.saturating_sub(begin);
+            // Strip a trailing newline.
+            let text_len = if line_len > 0 && self.editor.text_len() > begin as u64 {
+                let last = begin + line_len - 1;
+                if last < self.editor.text_len() as usize {
+                    let mut byte = [0u8; 1];
+                    if self.editor.read_into(last, &mut byte).is_ok() && byte[0] == b'\n' {
+                        line_len - 1
+                    } else {
+                        line_len
+                    }
+                } else {
+                    line_len
+                }
+            } else {
+                line_len
+            };
+            if text_len == 0 {
+                continue;
+            }
+            scratch.resize(text_len, 0);
+            if self.editor.read_into(begin, &mut scratch).is_err() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&scratch).trim_end().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let level = if is_heading2 {
+                2u8
+            } else if span.style_flags & STYLE_ITALIC != 0 {
+                // Title (STYLE_HEADER | STYLE_BOLD, no colour) vs Subtitle (STYLE_HEADER | STYLE_ITALIC)
+                // Both are header-level; Subtitle is deeper.
+                2u8
+            } else {
+                1u8
+            };
+            self.state.outline.push((text, line_idx as u32, level));
+        }
+        // **The outline changed, so the sidebar needs a repaint.** The sidebar is painted into
+        // root.before in chrome::tree, and without this damage its new heading entries would not
+        // appear until some other edit damaged that region.
+        self.invalidate(self.chrome.layout.sidebar);
         // **Part 39: the numbers these three fields hold are drawn in the status bar**, so publishing
         // them is half of changing what it shows -- and the other half is asking for the repaint. A
         // word count that is correct in the state and stale on the screen is the defect this line fixes.
