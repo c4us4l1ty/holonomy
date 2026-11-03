@@ -76,8 +76,14 @@ The user compiles on their own machine; this sandbox has no `cargo`, no `rustc` 
   ran past its button into the next one (`Int`/`Ital` read as one word, `Supe x`, `Subs`), the tab
   strip read `HomeInsert`, the Styles tiles overlapped the Editing group, and the group captions were
   drawn over the ruler's number row. **All five symptoms were one defect** — see §6.
-* **Even after that fix, no pixel of the *corrected* ribbon has been seen.** The geometry is now
-  checked by gates at both type scales (§6), but whether it *looks* like Wordcraft is still untested.
+* **The corrected ribbon has now been seen too — and looking at it found three more defects that every
+  gate passed** (§7). Rendering the real `Session` to a `Frame` and reviewing all seven tabs at both
+  type scales and three widths is what caught them; no gate could have, because each was a number the
+  layout had computed cleanly and *wrongly*. Those three are fixed and gated.
+* **What is still unseen: the corrected ribbon in a real window.** The frames came from a `Frame` at
+  `with_ribbon_bands`, not from X11 `GetImage`, and nothing interactive — hover, press, the overflow
+  popup, an open menu, a dialog — was in a frame. The seal is intact either way: this is a
+  software-rasterised frame, not a GPU path.
 * **Interactive behaviours are untested on a real X11 session**: tab switching, collapse, the overflow
   popup at a narrow width, the search box, `Ctrl+F`/`Ctrl+Shift+H`, drag-select with the new
   alignment offsets, and idle autosave. The compile gate does not exercise them.
@@ -170,3 +176,44 @@ the scale the product boots into:
 
 **Still not verified:** that the corrected ribbon *looks* right. The gates assert geometry, not
 appearance, and there is still no display attached to this sandbox.
+
+## 7. The ribbon was looked at, and it was still wrong
+
+**§3 said the corrected ribbon had never been seen. It has now been seen, and looking at it found
+three defects that every gate in §6 passed.** That is the honest lesson of this section: a gate that
+asserts a *number* the layout computed cannot catch a defect that is a number the layout computed
+*wrongly*. The frames were produced by rendering the real `Session` to a `Frame` and dumping PPM —
+no display and no GPU, so the seal is intact — and the review was a contact sheet of all seven tabs
+at 16 ppem and 20 ppem, three window widths each.
+
+| What the frame showed | What the numbers said |
+|---|---|
+| `Illustr…` — the *group caption*, not a button label | the `Illustrations` group was 92 px wide and its caption is 104 px of type. The group's width was the sum of its **buttons**, so a group whose name is longer than its content centred that name in a box too small to hold it |
+| `Paste` printed on `Clipboard`, `Page break` on `Pages`, `Normal` on `Document formatting` | a large button stacks a 20 px icon over its label and its label box ran to the **bottom** of the group, where the caption's box began: two strips of 20 px type in a 70 px group with nothing between them. `every_group_caption_is_inside_the_ribbon` passed throughout, because both rects *were* inside the group |
+| only the top strip of small buttons visible on Home at 16 ppem | the band's air was two literals, `- 10` and `+ 7` — **17 px of a 71 px band**, while a caption strip plus two rows needs 69. The second row was clamped away and the caption took the last 20 |
+
+**What changed.**
+
+* A group is `max(buttons, caption)` wide. That is the whole rule, and it is asserted per group rather
+  than spot-checked on the caption that was reported.
+* `CAPTION_GAP` reserves air between a button's content box and the caption's strip. It is read by
+  `layout` and by `paint` — one constant, both readers, which is the discipline the rest of this file
+  arrived at the hard way.
+* The band's inset is **derived from the tallest group that can go in the band** rather than written
+  down: `inset = (band − (3 + 2·row_h + CAPTION_GAP + caption_h)) / 2`. At cell 25 it reproduces the
+  shipped 96 px group in a 112 px band exactly, and it now leaves room at *every* cell height from 12
+  to 40 — where the old literals did not even leave room at 14.
+
+**Two new gates**, plus one that is a sweep rather than two points:
+
+| Gate | The defect it would have caught |
+|---|---|
+| `every_group_caption_fits_inside_its_group` | `Illustr…` |
+| `no_button_label_is_drawn_over_its_group_caption` | `Paste`/`Clipboard`, as **ink** rather than rects — the rects were inside the group the whole time; what overlapped was where the painter puts a centred line in the box it was handed |
+| `every_type_scale_leaves_room_for_a_two_row_group` | the band being too short, over cell heights 12..=40. **16 and 20 both happened to fit and 14 did not** — two sample points are not a sweep |
+
+**What is still not verified.** The ribbon has been *looked at* at 16 and 20 ppem and three widths by
+an agent, from dumped pixels, not by the person who reported the screenshot. Hover, press, the overflow
+popup, the open menus and the dialog paths were not in any frame. And the frames were rendered at
+`ChromeMetrics::with_ribbon_bands`, not through a window — so anything that depends on a real X11
+`GetImage` (colour depth, the shadow, the compositor) is still unseen.
