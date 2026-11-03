@@ -1,6 +1,6 @@
-[1m[92m   Compiling[0m cfg-if v1.0.5
-[1m[92m   Compiling[0m typenum v1.20.1
 [1m[92m   Compiling[0m libc v0.2.190
+[1m[92m   Compiling[0m typenum v1.20.1
+[1m[92m   Compiling[0m cfg-if v1.0.5
 [1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cmov v0.5.4
 [1m[92m   Compiling[0m const-oid v0.10.2
@@ -10,8 +10,8 @@
 [1m[92m   Compiling[0m base64ct v1.8.3
 [1m[92m   Compiling[0m alloc-no-stdlib v3.0.0
 [1m[92m   Compiling[0m alloc-stdlib v0.3.0
-[1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m adler2 v2.0.1
+[1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m miniz_oxide v0.9.1
 [1m[92m   Compiling[0m unicode-normalization v0.1.25
 [1m[92m   Compiling[0m hybrid-array v0.4.15
@@ -25,104 +25,104 @@
 [1m[92m   Compiling[0m inout v0.2.2
 [1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m secrecy v0.10.3
-[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m ryu v1.0.23
+[1m[92m   Compiling[0m itoa v1.0.18
 [1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m ttf-parser v0.25.1
+[1m[92m   Compiling[0m memchr v2.8.3
 [1m[92m   Compiling[0m digest v0.11.3
 [1m[92m   Compiling[0m universal-hash v0.6.1
 [1m[92m   Compiling[0m cipher v0.5.2
-[1m[92m   Compiling[0m poly1305 v0.9.1
 [1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m chacha20 v0.10.2
-[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
 [1m[92m   Compiling[0m hmac v0.13.0
+[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
+[1m[92m   Compiling[0m chacha20 v0.10.2
+[1m[92m   Compiling[0m poly1305 v0.9.1
 [1m[92m   Compiling[0m aead v0.6.1
 [1m[92m   Compiling[0m hkdf v0.13.0
-[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m argon2 v0.6.0
+[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m sha2 v0.11.0
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m itoa v1.0.18
 [1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
-[1m[92m   Compiling[0m pdf-writer v0.15.0
-[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
 [1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m pdf-writer v0.15.0
 [1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
 [1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
-[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
 [1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
+[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
 [1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 6.39s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 8.56s
 [1m[92m     Running[0m tests/font_scope.rs (target/x86_64-unknown-linux-musl/debug/deps/font_scope-9063aebf3a9568f7)
 
 running 8 tests
-test a_paragraph_style_sets_the_face ... FAILED
 test a_font_change_is_one_undo_step ... FAILED
 test a_face_survives_a_payload_roundtrip ... FAILED
-test clear_formatting_clears_the_face ... FAILED
-test one_word_set_to_mono_leaves_the_rest_in_inter ... FAILED
+test a_paragraph_style_sets_the_face ... FAILED
 test the_face_is_recorded_on_the_run ... FAILED
-test a_caret_with_no_selection_arms_the_next ... FAILED
+test one_word_set_to_mono_leaves_the_rest_in_inter ... FAILED
+test clear_formatting_clears_the_face ... FAILED
 test two_faces_do_not_merge ... FAILED
+test a_caret_with_no_selection_arms_the_next ... FAILED
 
 failures:
 
----- a_paragraph_style_sets_the_face stdout ----
-
-thread 'a_paragraph_style_sets_the_face' (3949) panicked at crates/holonomy/tests/font_scope.rs:171:5:
-assertion `left == right` failed
-  left: 0
- right: 1
-
 ---- a_font_change_is_one_undo_step stdout ----
 
-thread 'a_font_change_is_one_undo_step' (3948) panicked at crates/holonomy/tests/font_scope.rs:113:5:
-assertion `left == right` failed: one font change is one undo step
-  left: 0
- right: 1
+thread 'a_font_change_is_one_undo_step' (4172) panicked at crates/holonomy-text/src/editor.rs:1298:13:
+assertion `left == right` failed
+  left: 23
+ right: 0
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- a_face_survives_a_payload_roundtrip stdout ----
 
-thread 'a_face_survives_a_payload_roundtrip' (3947) panicked at crates/holonomy/tests/font_scope.rs:159:5:
+thread 'a_face_survives_a_payload_roundtrip' (4171) panicked at crates/holonomy-text/src/editor.rs:1298:13:
 assertion `left == right` failed
-  left: 0
- right: 1
+  left: 23
+ right: 0
 
----- clear_formatting_clears_the_face stdout ----
+---- a_paragraph_style_sets_the_face stdout ----
 
-thread 'clear_formatting_clears_the_face' (3950) panicked at crates/holonomy/tests/font_scope.rs:193:5:
+thread 'a_paragraph_style_sets_the_face' (4173) panicked at crates/holonomy-text/src/editor.rs:1298:13:
 assertion `left == right` failed
-  left: 0
- right: 1
-
----- one_word_set_to_mono_leaves_the_rest_in_inter stdout ----
-
-thread 'one_word_set_to_mono_leaves_the_rest_in_inter' (3951) panicked at crates/holonomy/tests/font_scope.rs:55:5:
-assertion `left == right` failed: the selection is the run the font box acts on
-  left: 0
- right: 1
+  left: 23
+ right: 0
 
 ---- the_face_is_recorded_on_the_run stdout ----
 
-thread 'the_face_is_recorded_on_the_run' (3952) panicked at crates/holonomy/tests/font_scope.rs:205:5:
+thread 'the_face_is_recorded_on_the_run' (4176) panicked at crates/holonomy-text/src/editor.rs:1298:13:
 assertion `left == right` failed
-  left: 0
- right: 1
+  left: 23
+ right: 0
 
----- a_caret_with_no_selection_arms_the_next stdout ----
+---- one_word_set_to_mono_leaves_the_rest_in_inter stdout ----
 
-thread 'a_caret_with_no_selection_arms_the_next' (3946) panicked at crates/holonomy/tests/font_scope.rs:90:5:
-assertion `left == right` failed: the armed face is applied to the text typed after it
-  left: 0
- right: 1
+thread 'one_word_set_to_mono_leaves_the_rest_in_inter' (4175) panicked at crates/holonomy-text/src/editor.rs:1298:13:
+assertion `left == right` failed
+  left: 23
+ right: 0
+
+---- clear_formatting_clears_the_face stdout ----
+
+thread 'clear_formatting_clears_the_face' (4174) panicked at crates/holonomy-text/src/editor.rs:1298:13:
+assertion `left == right` failed
+  left: 23
+ right: 0
 
 ---- two_faces_do_not_merge stdout ----
 
-thread 'two_faces_do_not_merge' (3953) panicked at crates/holonomy/tests/font_scope.rs:133:5:
+thread 'two_faces_do_not_merge' (4177) panicked at crates/holonomy-text/src/editor.rs:1298:13:
 assertion `left == right` failed
+  left: 23
+ right: 0
+
+---- a_caret_with_no_selection_arms_the_next stdout ----
+
+thread 'a_caret_with_no_selection_arms_the_next' (4170) panicked at crates/holonomy/tests/font_scope.rs:90:5:
+assertion `left == right` failed: the armed face is applied to the text typed after it
   left: 0
  right: 1
 
@@ -137,6 +137,6 @@ failures:
     the_face_is_recorded_on_the_run
     two_faces_do_not_merge
 
-test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy --test font_scope`
