@@ -5,7 +5,9 @@ The coordinates below are copied from the MIT-licensed original in
 third_party/wordcraft/upstream/icons.rs at ae5c65b9dd11faf359ce039a2a487e57e3d824a2.
 This is an offline authoring tool, not a runtime dependency. Accent colours become
 ink in Holonomy's 1-bit atlas; transparent/tinted fills that fall below its alpha
-threshold are omitted. Text-bearing icons retain Holonomy's existing atlas masks.
+threshold are omitted. A few dense fills/strokes are lightened to meet Holonomy's
+16 px ink budget while preserving the upstream composition. Text-bearing icons
+retain Holonomy's existing atlas masks.
 Run from the repository root: python3 tools/port_wordcraft_icons.py
 """
 from pathlib import Path
@@ -26,7 +28,7 @@ def lines(x0, x1, ys): return [line((x0, y), (x1, y)) for y in ys]
 
 # Names are WordCraft's; values are its original 20x20 Pen coordinates.
 ICONS = {
-    "paste": [rect(4,3.5,14,17), frect(7,2,11,5), rect(9,8,17.5,18.5), *lines(10.8,15.8,[11,13.5,16])],
+    "paste": [rect(4,3.5,14,17), frect(7,2,11,5), rect(9,8,17.5,18.5), *lines(10.8,15.8,[11.5,15])],
     "cut": [circle(6,15,2.5), circle(14,15,2.5), line((7.5,13),(14,3)), line((12.5,13),(6,3))],
     "copy": [rect(3.5,3,12.5,14), rect(7.5,6.5,16.5,17.5)],
     "save": [closed((3,3),(14,3),(17,6),(17,17),(3,17)), frect(6,3,13,7.5), rect(6,11,14,17)],
@@ -38,11 +40,11 @@ ICONS = {
     "align-right": [*lines(3,17,[4,10,16]), *lines(8,17,[7,13])],
     "indent": [*lines(9,17,[7,10,13]), *lines(3,17,[3.5,16.5]), fill((3,7),(3,13),(6.5,10))],
     "outdent": [*lines(9,17,[7,10,13]), *lines(3,17,[3.5,16.5]), fill((6.5,7),(6.5,13),(3,10))],
-    "table": [frect(3,3,17,7), rect(3,3,17,17), line((3,7),(17,7)), line((3,12),(17,12)), line((8,3),(8,17)), line((12.5,3),(12.5,17))],
-    "picture": [rect(3,4.5,17,15.5), fill((4.5,14),(8.5,8.5),(12,14)), fill((10,14),(13,10.5),(15.5,14)), fcircle(13.5,7,1.3)],
+    "table": [rect(3,3,17,17), line((3,7),(17,7)), line((3,12),(17,12)), line((8,3),(8,17))],
+    "picture": [rect(3.5,5,16.5,15), fill((5,13.5),(8.5,9),(11.5,13.5)), fill((10,13.5),(12.5,10.5),(15,13.5)), fcircle(13.5,7.5,1.2)],
     "page-break": [line((4,2),(4,7),(16,7),(16,2)), line((4,18),(4,13),(16,13),(16,18)), line((2,10),(18,10))],
-    "navigation": [rect(3,3,17,17), frect(3,3,8,17)],
-    "theme": [frect(10,3.5,17.5,16.5), rect(2.5,3.5,17.5,16.5), line((2.5,6.5),(10,6.5))],
+    "navigation": [rect(3,3,17,17), frect(3,3,7,17)],
+    "theme": [frect(11,3.5,17.5,16.5), rect(2.5,3.5,17.5,16.5), line((2.5,6.5),(11,6.5))],
     "close": [line((5,5),(15,15)), line((15,5),(5,15))],
     "chevron-up": [line((4,13),(10,7),(16,13))],
     "chevron-down": [line((4,7),(10,13),(16,7))],
