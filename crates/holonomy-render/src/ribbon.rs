@@ -536,6 +536,13 @@ pub const GROUP_PAD: u32 = 16;
 /// the defect that put the caption in the ruler: `paint` gave the strip a literal 20 px and `layout`
 /// gave the buttons everything above `bottom - 20`.
 pub const CAPTION_AIR: u32 = 4;
+/// **Air between a group's buttons and its caption's strip**, over and above [`CAPTION_AIR`].
+///
+/// A large button stacks its icon over its label and its label box ran to the *bottom* of the
+/// group, so at 16 ppem a group's last strip of type and its caption met with nothing between them:
+/// `Paste` printed on `Clipboard`, `Page break` on `Pages`, `Normal` on `Document formatting`. Six
+/// pixels is a cell's leading here -- enough that the two strips read as two, at both type scales.
+pub const CAPTION_GAP: u32 = 6;
 /// A small button with a label, and a small button with only its icon, at this type size.
 ///
 /// **Two numbers and not one, because the ribbon needs both to plan a row.** The labelled width is
@@ -578,6 +585,15 @@ struct Row {
     large: Vec<Button>,
     /// One small column: the buttons stacked in it, and their labelled and icon-only widths.
     cols: Vec<(Vec<Button>, u32, u32)>,
+    /// **The caption's own width, because a group cannot be narrower than the name under it.**
+    ///
+    /// The group's width was the sum of its buttons, and a group whose *label* is longer than its
+    /// content therefore centred that label in a box too small to hold it: `Illustrations` over a
+    /// single 68 px `Picture` button is 104 px of type in a 92 px group, so the painter's honest
+    /// elision produced `Illustr…` -- **the very symptom this pass set out to remove**, on a tab
+    /// nobody had looked at yet. A group is its caption's width or its buttons' width, whichever is
+    /// greater; that is the whole rule.
+    caption_w: u32,
 }
 
 /// One layout pass is the authority for both ink and pointer targets.
@@ -606,15 +622,27 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
     }
     let tab = usize::from(state.ribbon_tab).min(TABS.len() - 1);
     let mut x = l.toolbar.x + 10;
-    let top = l.toolbar.y + 7;
-    let h = l.toolbar.height.saturating_sub(10);
-    // **The caption strip is a line of type, so it is as tall as one.** It was a literal 20 in
-    // `paint` against a line pitch of 25 -- and at 125 % a pitch of 30 in a 20 px box is a caption
-    // whose bottom four rows are drawn *in the ruler*, which is the `Paragraph` printed over
-    // `232 234 236` in the report.
     let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
     let row_h = l.cell_h.saturating_add(SMALL_ROW_AIR);
-    let body_h = h.saturating_sub(caption_h);
+    // **The band's air is derived from the tallest thing that can go in it, not written down.**
+    //
+    // A group is at most two rows of small buttons over a caption strip. The shipped design is a
+    // 112 px band for a 96 px group at cell 25 -- 8 px of air above and below -- and the two
+    // literals that expressed that were `- 10` and `+ 7` here, which at 16 ppem spent 17 px of a
+    // 71 px band on air while the content needed 69. **The second row was clamped and the caption
+    // took the last 20**, which is `Page break` printed on `Pages` in the report.
+    let tallest = 3u32 + 2 * row_h + CAPTION_GAP + caption_h;
+    let inset = l.toolbar.height.saturating_sub(tallest) / 2;
+    let top = l.toolbar.y + inset;
+    let h = l.toolbar.height.saturating_sub(inset * 2);
+    // **The caption strip is a line of type plus enough air above it that a button's own label
+    // cannot land in it.** It was a literal 20 in `paint` against a line pitch of 25 -- at 125 % a
+    // pitch of 30 in a 20 px box drew the caption's bottom four rows *in the ruler*, which is the
+    // `Paragraph` printed over `232 234 236` in the report. Deriving it from the cell fixed that
+    // and left the second half: a large button stacks a 20 px icon over its label, its label box
+    // ran to the bottom of the group, and at 16 ppem the two strips met with nothing between them.
+    // `CAPTION_AIR` is air above the caption's glyphs; `CAPTION_GAP` is air above *that*.
+    let body_h = h.saturating_sub(caption_h.saturating_add(CAPTION_GAP));
     // **`- 48`, and it is the overflow square's column.** `overflow_rect` occupies the last 40 px of
     // the band, so a group's last button must end before `width - 48` or the two overlap -- which is
     // what `widgets::hit` reported at 768 px: the middle of the overflow square answered
@@ -661,7 +689,12 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
             }
             cols.push((col, width, icon_only));
         }
-        rows.push(Row { name, large, cols });
+        rows.push(Row {
+            name,
+            large,
+            cols,
+            caption_w: text_w(l, name),
+        });
     }
 
     // **Plan the whole row before placing any of it.** The widths are now honest, so the plan can
@@ -697,7 +730,10 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
                 for (col, labelled, icon_only) in &r.cols {
                     w += col_w(col, *labelled, *icon_only, i >= from);
                 }
-                w
+                // **And the caption fits, or nothing does.** The overflow menu is where a group
+                // that does not fit is meant to go; a group narrower than its own name is not
+                // "compact", it is a group whose label is elided by its own layout.
+                w.max(r.caption_w + GROUP_PAD)
             })
             .sum()
     };
@@ -722,9 +758,10 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
             let cw = col_w(&col, labelled, icon_only, compact);
             cols.push((cw, col));
         }
-        let w = row.large.iter().map(|b| b.rect.width).sum::<u32>()
+        let w = (row.large.iter().map(|b| b.rect.width).sum::<u32>()
             + cols.iter().map(|(cw, _)| *cw).sum::<u32>()
-            + GROUP_PAD;
+            + GROUP_PAD)
+            .max(row.caption_w + GROUP_PAD);
         // **The group's own rect stops at the overflow square's column too**, not only at the panel
         // edge. A group whose buttons were all hidden for want of room still drew a divider and a
         // centred caption out to its *planned* width -- through the overflow square and, on a narrow

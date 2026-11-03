@@ -226,6 +226,127 @@ fn every_group_caption_is_inside_the_ribbon() {
     }
 }
 
+/// **A group is never narrower than the caption under it.**
+///
+/// The group's width was the sum of its buttons, so a group whose *name* is longer than its content
+/// centred that name in a box too small to hold it: `Illustrations` over a single 68 px `Picture`
+/// button is 104 px of type in a 92 px group, and the painter's honest elision printed `Illustr…`.
+/// **That is the same defect this pass was opened for, on a tab nobody had looked at** -- so the
+/// rule is asserted per group rather than spot-checked on the one caption that was reported.
+#[test]
+fn every_group_caption_fits_inside_its_group() {
+    for ppem in [16, 20] {
+        let m = at(ppem);
+        let l = Layout::new(&m);
+        let cell_w = ribbon::advance(&l);
+        for tab in 1..ribbon::TABS.len() {
+            let s = ribbon_state(tab as u8);
+            let (groups, _) = ribbon::layout(&l, &s);
+            for g in &groups {
+                if g.rect.width == 0 {
+                    continue;
+                }
+                let need = g.label.chars().count() as u32 * cell_w;
+                assert!(
+                    need <= g.rect.width,
+                    "at {ppem} ppem, tab {tab}: the `{}` caption is {need} px of type in a {} px \
+                     group, so the painter elides it",
+                    g.label,
+                    g.rect.width
+                );
+            }
+        }
+    }
+}
+
+/// **A button's label never reaches into its group's caption strip.**
+///
+/// `Paste` printed on `Clipboard`, `Page break` on `Pages`, `Normal` on `Document formatting`: a
+/// large button stacks a 20 px icon over its label, its label box ran to the bottom of the group,
+/// and the caption's box began at the same place. Two strips of 20 px type in a 70 px group, with
+/// nothing between them.
+///
+/// **This is asserted as ink, not as rects**, because the rects were "inside the group" the whole
+/// time -- what overlapped was where the painter puts the glyphs, which is a centred line inside the
+/// box it was handed. The assertion is that the two line boxes are disjoint.
+#[test]
+fn no_button_label_is_drawn_over_its_group_caption() {
+    for ppem in [16, 20] {
+        let m = at(ppem);
+        let l = Layout::new(&m);
+        let cell_h = l.cell_h;
+        for tab in 1..ribbon::TABS.len() {
+            let s = ribbon_state(tab as u8);
+            let (groups, buttons) = ribbon::layout(&l, &s);
+            for g in &groups {
+                if g.rect.width == 0 || g.rect.is_empty() {
+                    continue;
+                }
+                let caption_h = cell_h + ribbon::CAPTION_AIR;
+                // Where `paint` puts the caption's glyphs: a centred line in the strip.
+                let cap_top = g.rect.bottom() - caption_h + (caption_h - cell_h) / 2;
+                for b in buttons.iter().filter(|b| !b.rect.is_empty() && b.labelled) {
+                    let inside = b.rect.x >= g.rect.x && b.rect.right() <= g.rect.right();
+                    if !inside {
+                        continue;
+                    }
+                    // And where it puts the button's: a centred line in the label's box.
+                    let label_top = b.rect.bottom() - cell_h.min(b.rect.height)
+                        + (cell_h.min(b.rect.height) - cell_h) / 2;
+                    let label_top = label_top.min(b.rect.y);
+                    assert!(
+                        label_top + cell_h <= cap_top,
+                        "at {ppem} ppem, tab {tab}: `{}`'s label occupies {label_top}..{} and \
+                         `{}`'s caption begins at {cap_top} -- the two strips of type overlap",
+                        b.label,
+                        label_top + cell_h,
+                        g.label
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **The type scale is a sweep, not two points.**
+///
+/// The ribbon's band is `112 / 25` of the cell, and its content is a caption strip plus two rows --
+/// so the group's height is a *step* function of the scale while the band is a *line*. Twelve
+/// per-cent steps sample it too coarsely: 16 and 20 ppem both happened to leave room, and 14 did
+/// not. Every cell height a face can produce is asserted instead.
+#[test]
+fn every_type_scale_leaves_room_for_a_two_row_group() {
+    for cell_h in 12u32..=40 {
+        let mut m = at(16);
+        m.cell_h = cell_h;
+        m = m.with_ribbon_bands(true, false);
+        let l = Layout::new(&m);
+        let s = ribbon_state(1);
+        let (groups, buttons) = ribbon::layout(&l, &s);
+        for g in &groups {
+            if g.rect.is_empty() {
+                continue;
+            }
+            let caption_h = cell_h + ribbon::CAPTION_AIR;
+            let caption_top = g.rect.bottom() - caption_h;
+            for b in buttons.iter().filter(|b| !b.rect.is_empty() && b.labelled) {
+                let inside = b.rect.x >= g.rect.x && b.rect.right() <= g.rect.right();
+                if !inside {
+                    continue;
+                }
+                assert!(
+                    b.rect.bottom() <= caption_top,
+                    "at cell_h {cell_h}: `{}` ends at {} and `{}`'s strip begins at \
+                     {caption_top} -- the band is too short for the content it holds",
+                    b.label,
+                    b.rect.bottom(),
+                    g.label
+                );
+            }
+        }
+    }
+}
+
 /// **The tab strip has a gap between every pair of tabs, and every label fits its tab.**
 ///
 /// `Home` and `Insert` were laid 54 and 70 px apart while their ink was 120 px wide, so the strip
