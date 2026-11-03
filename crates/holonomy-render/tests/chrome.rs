@@ -442,6 +442,19 @@ fn chrome_labels(state: &ChromeState) -> Vec<String> {
     // data: a gate that hard-coded "Journal" would fail the moment a session had a different
     // document, and would be wrong for the right reason.
     v.extend(state.docs.iter().cloned());
+    if state.ribbon {
+        v.push("Navigation".to_string());
+        v.push("Headings".to_string());
+        v.extend(state.navigation.iter().map(|(_, title)| title.clone()));
+        if state.navigation.is_empty() {
+            v.push("Apply Heading 1 to add entries.".to_string());
+        }
+    } else if state.outline.is_empty() && state.docs.is_empty() {
+        v.push("Apply Heading 1 to add entries.".to_string());
+    } else if !state.outline.is_empty() {
+        v.push("Document outline".to_string());
+        v.extend(state.outline.iter().map(|(title, _, _)| title.clone()));
+    }
     v.extend(chrome::MENUS.iter().map(|m| (*m).to_string()));
     v.push("Export".to_string());
     v.push("Local".to_string());
@@ -956,13 +969,14 @@ fn a_resize_moves_the_page_and_never_the_line() {
         a.gutter_right,
         b.gutter_right
     );
-    // **Centred within the desk**, which is what part 39 changed: the left gutter is the sidebar *plus*
-    // half the desk, so it is the two halves that are equal, not the two gutters as they stand.
-    assert_eq!(
-        b.gutter_left,
-        large.sidebar_w.min(large.width / 2) + 24,
-        "the page sits a fixed gutter to the right of the document-tabs rail: left gutter {}",
-        b.gutter_left
+    // **Centred within the desk**, not a fixed gap from the sidebar. The right side gets a single
+    // remainder pixel if the desk is odd; a resize must never leave all the slack on one side.
+    let rail = large.sidebar_w.min(large.width / 2);
+    let left_desk = b.gutter_left - rail;
+    assert!(
+        left_desk.abs_diff(b.gutter_right) <= 1,
+        "desk is not centred around the page: left {left_desk}, right {}",
+        b.gutter_right
     );
 }
 /// The bands always partition the whole panel, at every size the chrome accepts.
@@ -1573,25 +1587,17 @@ fn the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open() {
         open.page.x,
         closed.page.x
     );
-    // **Half the sidebar, and not all of it — because the page is centred in the *desk*.**
-    //
-    // ```text
-    // closed:  desk = 1280,  page 672 wide,  left = (1280 - 672) / 2 = 304
-    // open:    desk = 1024,  page 672 wide,  left = 256 + (1024 - 672) / 2 = 432
-    // ```
-    //
-    // **The first version of this assertion said the page moves by the sidebar's *width*, and it does
-    // not.** Reserving 256 px out of the panel's right-hand end would move the page 256; reserving it
-    // out of the left end and re-centring moves it half as far, because the desk shrinks on one side
-    // only. **Which of the two is right is a design question, and re-centring is the answer**: it is
-    // what makes the page *stay* in the middle of what is left, which is what the reference does when
-    // the sidebar opens.
+    // The sheet is centred within the *remaining* desk, so opening a 280 px rail shifts the
+    // sheet 140 px rather than pinning it to a hard-coded 24 px gap from the rail.
     assert_eq!(
         open.page.x,
-        m.sidebar_w + 24,
-        "opening the sidebar puts the page a fixed gutter past the rail: {} then {}",
-        closed.page.x,
-        open.page.x
+        m.sidebar_w + (m.width - m.sidebar_w - open.page.width) / 2,
+        "opening the sidebar should centre the sheet in the remaining desk"
+    );
+    assert_eq!(
+        open.page.x - closed.page.x,
+        m.sidebar_w / 2,
+        "opening a sidebar should shift the page by half the reservation"
     );
     assert_eq!(
         open.text.width, closed.text.width,

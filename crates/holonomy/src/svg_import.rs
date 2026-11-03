@@ -293,7 +293,7 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><script>bad()</script></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><text>not supported</text></svg>"#,
-            r#"<svg xmlns="http://www.w3.org/2000/svg"><use href="#shape"/></svg>"#,
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><use href="#shape"/></svg>"##,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><path style="fill:url(file:///etc/passwd)"/></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><rect filter="url(#shadow)"/></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="filter:url(#shadow)"/></svg>"#,

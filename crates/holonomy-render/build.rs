@@ -24,8 +24,21 @@ fn main() {
         println!("cargo:rerun-if-changed={source}");
         let path = base.join(source);
         let bytes = std::fs::read(&path).expect("read checked-in SVG icon");
+        assert!(bytes.len() <= 2048, "trusted UI icon has grown beyond its small vector budget");
         let xml = std::str::from_utf8(&bytes).expect("icon is UTF-8");
         let doc = roxmltree::Document::parse(xml).expect("icon XML is valid and has no DTD");
+        assert_eq!(doc.root_element().tag_name().name(), "svg");
+        // Keep this *authoring format* narrower than even the desktop import subset. Checked-in
+        // WordCraft icons have only SVG and path nodes, no stylesheet, filters, linked images or text.
+        for node in doc.descendants().filter(|node| node.is_element()) {
+            assert!(matches!(node.tag_name().name(), "svg" | "path"));
+            assert!(matches!(node.tag_name().namespace(), None | Some("http://www.w3.org/2000/svg")));
+            for attr in node.attributes() {
+                assert!(attr.namespace().is_none(), "namespaced attributes are not UI art");
+                assert!(!attr.name().starts_with("on") && !matches!(attr.name(), "href" | "style"));
+                assert!(!attr.value().to_ascii_lowercase().contains("url("));
+            }
+        }
         let mut options = usvg::Options::default();
         options.image_href_resolver = usvg::ImageHrefResolver {
             resolve_data: Box::new(|_, _, _| None),
