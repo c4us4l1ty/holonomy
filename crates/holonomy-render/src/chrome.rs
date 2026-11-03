@@ -1924,6 +1924,9 @@ pub struct ChromeState {
     pub styles: StyleFlags,
     /// Whether the caret is currently drawn. Driven by [`Blink`].
     pub caret_visible: bool,
+    /// **Smart Compose: the pending grey prediction, or `None`.** Painted inline after the caret
+    /// in grey by the tree emitter; accepted with Tab or Right arrow.
+    pub pending_compose: Option<String>,
     /// **The selected byte range, or `None`.** Part 28.
     ///
     /// ## Why a range of document offsets and not a list of rectangles
@@ -2028,6 +2031,7 @@ impl Default for ChromeState {
             paged: false,
             styles: StyleFlags::default(),
             caret_visible: true,
+            pending_compose: None,
             selection: None,
             line_heights: LineHeights::uniform(0),
         }
@@ -2988,8 +2992,9 @@ impl Chrome {
         ));
         root.before.push(page);
 
-        // --- layer 3: the document overlay — the caret. (The selection is a document emitter and
-        // travels with the text it belongs to; see `Session::emit_body_text`.)
+        // --- layer 3: the document overlay — the caret, then Smart Compose.
+        // (The selection is a document emitter and travels with the text it belongs to; see
+        // `Session::emit_body_text`.)
         let mut overlay = SurfaceTree::group();
         if state.caret_visible {
             if let Some(caret) = Caret::locate(l, m, state) {
@@ -3001,6 +3006,22 @@ impl Chrome {
                     caret.cell.height,
                     colour::CARET,
                 ));
+                // **Smart Compose: paint the grey inline prediction immediately after the caret.**
+                // Drawn in `#5F6368` (chrome ink) so it reads as a suggestion, not committed text.
+                // Only when the caret is visible (blink on), so the suggestion and caret blink
+                // together like a single insertion point.
+                        if let Some(compose) = state.pending_compose.as_deref() {
+                    if !compose.is_empty() {
+                        let compose_x = caret.cell.x + 2;
+                        overlay.before.push(SurfaceTree::leaf(Node::Label(Label::new(
+                            compose_x as i32,
+                            caret.cell.y as i32,
+                            compose,
+                            Style::REGULAR,
+                            colour::INK_CHROME,
+                        ))));
+                    }
+                }
             }
         }
         root.before.push(overlay);

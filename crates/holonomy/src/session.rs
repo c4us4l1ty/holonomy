@@ -548,6 +548,10 @@ pub struct Session<'a> {
     /// `SpanMap::style_range` stores nothing for an empty range, so "the next character is mono" cannot
     /// be a zero-width span. See [`Editor::face_format_range`] for the span side of the story.
     pending_face: Option<FontFace>,
+    /// **Smart Compose: an inline grey prediction shown after the caret.** Set by the compose
+    /// engine (a stub for now), accepted with Tab or right-arrow, dismissed by any other key.
+    /// Only shown in Editing or Suggesting mode, never in Viewing.
+    pending_compose: Option<String>,
     /// The chrome geometry.
     pub chrome: Chrome,
     /// Unscaled type-dependent dimensions, so zooming in and out does not compound rounding.
@@ -1216,6 +1220,7 @@ impl<'a> Session<'a> {
             // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
             pending_style: None,
             pending_face: None,
+            pending_compose: None,
             chrome,
             type_metrics,
             state,
@@ -4499,6 +4504,18 @@ impl<'a> Session<'a> {
         self.pending_style
     }
 
+    /// **Smart Compose: the pending grey prediction, or None.** The compose engine sets this;
+    /// the renderer paints it inline after the caret in grey; Tab or Right arrow accepts it.
+    pub fn pending_compose(&self) -> Option<&str> {
+        self.pending_compose.as_deref()
+    }
+
+    /// **Smart Compose: set the pending prediction.** Called by the compose engine (a stub for
+    /// now; a real implementation would query a language model). Clears on any non-accept keystroke.
+    pub fn set_compose(&mut self, text: String) {
+        self.pending_compose = Some(text);
+    }
+
     /// Arm or disarm a style toggle at the caret, in the model and in the chrome at once.
     ///
     /// **One function for both halves, and that is the whole reason this part exists in this shape.**
@@ -5836,6 +5853,15 @@ impl<'a> Session<'a> {
         source: Option<&mut dyn holonomy_text::LeafSource>,
     ) -> Result<(), SessionError> {
         let mut source = source;
+        // **Smart Compose dismissal.** Any keystroke other than Tab (accept) or Right (accept)
+        // dismisses the pending grey prediction without inserting it. This is what makes the
+        // prediction feel like a suggestion rather than a commitment: keep typing and it goes away.
+        if self.pending_compose.is_some() {
+            let accepts = matches!(command, Command::Tab | Command::Right);
+            if !accepts {
+                self.pending_compose = None;
+            }
+        }
         match command {
             Command::Insert(c) => {
                 // A stack buffer, not a `Vec`. Phase 11: this was `encode_utf8(&mut buf).as_bytes()
@@ -5865,7 +5891,12 @@ impl<'a> Session<'a> {
             // tab stop while contributing nothing to any column count, so a status bar reporting
             // "Col 9" for four spaces would be describing a tab stop rather than a column.
             Command::Tab => {
-                if self.active_cell.is_some() {
+                // **Smart Compose: accept the grey prediction with Tab.** If a compose suggestion is
+                // pending, insert it and clear the pending state. Otherwise, Tab inserts four spaces
+                // (or navigates a table cell).
+                if let Some(text) = self.pending_compose.take() {
+                    self.insert(text.as_bytes(), source.take())?;
+                } else if self.active_cell.is_some() {
                     self.nav(holonomy_text::tab)?;
                 } else {
                     self.insert(b"    ", source.take())?;
@@ -5892,7 +5923,16 @@ impl<'a> Session<'a> {
             Command::Up if self.active_cell.is_some() => self.nav(holonomy_text::up)?,
             Command::Down if self.active_cell.is_some() => self.nav(holonomy_text::down)?,
             Command::Left => self.move_caret(-1)?,
-            Command::Right => self.move_caret(1)?,
+            Command::Right => {
+                // **Smart Compose: accept the grey prediction with Right arrow too.** Matches Google
+                // Docs, where Tab or right arrow commits the inline suggestion. The dismissal logic
+                // in `apply_with` already skipped Right, so `pending_compose` is still `Some` here.
+                if let Some(text) = self.pending_compose.take() {
+                    self.insert(text.as_bytes(), source.take())?;
+                } else {
+                    self.move_caret(1)?;
+                }
+            }
             Command::Up => self.move_line(-1)?,
             Command::Down => self.move_line(1)?,
             // **Home and End are line bounds.** They were `caret_to(0)` and `caret_to(text_len)` -- the
@@ -7799,6 +7839,10 @@ impl<'a> Session<'a> {
             }
             self.sync_selection();
         }
+        // **Smart Compose: sync the pending prediction to the chrome state** so the tree emitter
+        // can paint it inline after the caret. Done on every paint so a pending compose survives
+        // across frames until accepted or dismissed.
+        self.state.pending_compose = self.pending_compose.clone();
         let mut tree = match &self.home {
             Some(home) => holonomy_render::home::tree(&self.chrome.layout, home),
             None => self.chrome.tree(&self.state),
