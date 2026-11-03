@@ -20,19 +20,18 @@ fn main() {
     // existed** -- the same shape as part 22's `caret_line` and part 28's `move_line`: two ways to say
     // one thing, and nobody checking whether they agreed.
     let extra = std::env::args()
-        .skip(1)
+        .skip(2) // output path is not document text
         .find(|a| !a.starts_with("--"))
         .unwrap_or_default();
-    // **`--ppem=N`, and the same default as the product.** Part 32 made the type size the thing that
-    // makes the application bigger, and a screenshot example pinned at 16 ppem would have gone on
-    // producing pictures of a design the product no longer ships. The 26 ppem ceiling is measured:
-    // `build_atlas(&[28])` returns `AtlasFull { need: 406_068, have: 458_752 }`.
+    // `--desktop` takes the real managed-document path at the product's 16/20
+    // ppem zoom pair. The unflagged historical compact-chrome fixture is kept.
+    let desktop = std::env::args().any(|a| a == "--desktop");
     let ppem = std::env::args()
-        .find(|a| a.starts_with("--ppem="))
-        .and_then(|a| a.trim_start_matches("--ppem=").parse::<u16>().ok())
-        .unwrap_or(24);
+        .find_map(|a| a.strip_prefix("--ppem=").and_then(|v| v.parse::<u16>().ok()))
+        .unwrap_or(if desktop { 16 } else { 24 });
+    let sizes = if desktop && ppem == 16 { vec![16, 20] } else { vec![ppem] };
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
-        holonomy_assets::build_atlas(&[ppem]).expect("atlas").0,
+        holonomy_assets::build_atlas(&sizes).expect("atlas").0,
     ));
     // `--size=WxH`, so a screenshot can show a panel other than the design width. Part 27 made the
     // measure follow the panel above 1,280 px, and a picture of only the design width would not show it.
@@ -46,7 +45,7 @@ fn main() {
     }
     let mut ed = Editor::new();
     let mut i = 1;
-    while ed.text_len() < 900 {
+    while !desktop && ed.text_len() < 900 {
         let line = format!("The quick brown fox jumps over the lazy dog, line {i}.\n");
         ed.insert_at(
             ed.text_len() as u32,
@@ -56,7 +55,7 @@ fn main() {
         .expect("room");
         i += 1;
     }
-    if !extra.is_empty() {
+    if !desktop && !extra.is_empty() {
         ed.insert_at(0, extra.as_bytes(), SpanPolicy::GrowIntoInsert)
             .ok();
     }
@@ -66,15 +65,31 @@ fn main() {
         Box::new(HeadlessScanout::new(m.width, m.height)),
         m,
     );
-    // Populate the state the new chrome draws: a document list, and an open menu when asked for.
-    s.state.docs = vec![
-        "Journal".into(),
-        "Notes on the container".into(),
-        "Field report".into(),
-        "Meeting minutes".into(),
-    ];
-    s.state.active_doc = 3;
-    s.state.sidebar_open = true;
+    if desktop {
+        s.set_managed_documents(true);
+        if std::env::args().any(|a| a == "--sample") {
+            s.create_sample_document(1).expect("studio handbook");
+        } else {
+            s.create_document(1, "Untitled".into());
+        }
+        if !extra.is_empty() {
+            s.insert_text(&extra).expect("document text");
+        }
+        let zoom = std::env::args()
+            .find_map(|a| a.strip_prefix("--zoom=").and_then(|v| v.parse::<u32>().ok()))
+            .unwrap_or(if m.width >= 1800 { 125 } else { 100 });
+        s.set_zoom(zoom).expect("desktop zoom available in this atlas");
+    } else {
+        // Preserve the original compact-chrome fixture for sealed UI probes.
+        s.state.docs = vec![
+            "Journal".into(),
+            "Notes on the container".into(),
+            "Field report".into(),
+            "Meeting minutes".into(),
+        ];
+        s.state.active_doc = 3;
+        s.state.sidebar_open = true;
+    }
     // `--popup=MENU` opens a menu bar popup and `--dropdown=TOOL` opens a toolbar dropdown, so a
     // screenshot can show the two overlay states the reference captures.
     for arg in std::env::args().skip(1) {
