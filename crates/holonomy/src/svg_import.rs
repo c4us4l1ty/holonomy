@@ -5,8 +5,9 @@
 //! existing image path. There is no SVG parser, XML input, font lookup, external resource resolver,
 //! network access or curve evaluation in the sealed binary or in a repaint.
 //!
-//! The preflight is deliberately stricter than SVG: no DTD/entities, script, foreignObject, text
-//! (the fontless renderer cannot draw it), images, filters, CSS stylesheets, animation or <use>.
+//! The preflight is deliberately stricter than SVG: no DTDs, XML stylesheet instructions,
+//! scripts, foreignObject, text (the fontless renderer cannot draw it), images, filters,
+//! CSS stylesheets, animation or <use>. Numeric and predefined XML character references are fine.
 //! An unsupported construct is an error, *not* an invisible element in a seemingly successful
 //! import. Internal paint-server references such as `fill="url(#gradient)"` are allowed. The usvg
 //! image resolver is also set to deny *both* data and string URLs: a future preflight relaxation
@@ -193,6 +194,11 @@ fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
     {
         return Err("Expected an SVG root element.".into());
     }
+    // XML stylesheet processing instructions are not SVG elements; the element allowlist below
+    // would otherwise silently accept them. Refuse all PIs before handing the tree to usvg.
+    if doc.descendants().any(|node| node.is_pi()) {
+        return Err("SVG XML processing instructions are not supported.".into());
+    }
     let mut count = 0;
     for node in doc.descendants().filter(|n| n.is_element()) {
         count += 1;
@@ -363,6 +369,8 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg"><rect filter="url(#shadow)"/></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="filter:url(#shadow)"/></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><rect mask="url(#shape)"/></svg>"#,
+            r#"<?xml-stylesheet type="text/css" href="https://example.org/style.css"?><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><?custom code?><rect width="1" height="1"/></svg>"#,
             r#"<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"/>"#,
         ] {
             assert!(rasterize_svg(bad.as_bytes()).is_err(), "accepted: {bad}");

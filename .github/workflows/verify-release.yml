@@ -80,9 +80,10 @@ jobs:
           set -o pipefail
           # Container gates use 128 MiB direct I/O and Argon2; two test threads keep
           # memory pressure bounded on hosted runners. Live X11 gates remain opt-in.
-          if cargo test --locked --workspace --release -- --test-threads=2 2>&1 | tee target/workspace-check.log; then
+          if cargo test --no-fail-fast --locked --workspace --release -- --test-threads=2 2>&1 | tee target/workspace-check.log; then
             echo "::notice title=Full regression::Workspace release tests passed"
           else
+            echo "::error title=Workspace failure index::$(grep -E '(^error\[|^error:|FAILED|panicked)' target/workspace-check.log | tail -c 3800 | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             echo "::error title=Full workspace test failure::$(tail -c 3900 target/workspace-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             exit 1
           fi
