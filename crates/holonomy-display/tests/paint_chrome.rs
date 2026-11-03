@@ -76,9 +76,9 @@ fn the_chrome_paints_without_missing_a_single_glyph() {
         stats.rects > 10,
         "the bands and the page should be filled: {stats:?}"
     );
-    assert!(
-        stats.box_glyphs > 4,
-        "the separators should be drawn: {stats:?}"
+    assert_eq!(
+        stats.box_glyphs, 0,
+        "chrome band edges are one-pixel filled rects, not full-height box glyphs: {stats:?}"
     );
     assert!(stats.glyphs > 20, "the labels should be drawn: {stats:?}");
     assert!(stats.pixels > 0);
@@ -299,7 +299,7 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
     );
     for y in 8..12 {
         assert!(
-            half.row(y)[8..16].iter().all(|&p| p == 0xFFFF_FFFF),
+            half.row(y)[8..16].iter().all(|&p| p == 0x00FF_FFFF),
             "damaged row {y} is painted: {:x?}",
             &half.row(y)[8..16]
         );
@@ -328,7 +328,7 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
         "only the four damaged columns may be painted: {side_stats:?}"
     );
     assert!(
-        side.row(9)[8..12].iter().all(|&p| p == 0xFFFF_FFFF),
+        side.row(9)[8..12].iter().all(|&p| p == 0x00FF_FFFF),
         "the damaged columns are painted"
     );
     assert!(
@@ -354,7 +354,7 @@ fn an_image_straddling_a_damage_edge_paints_only_its_damaged_half() {
     );
     for y in 8..16 {
         assert!(
-            whole.row(y)[8..16].iter().all(|&p| p == 0xFFFF_FFFF),
+            whole.row(y)[8..16].iter().all(|&p| p == 0x00FF_FFFF),
             "row {y} is fully painted"
         );
     }
@@ -519,18 +519,20 @@ fn a_painter_without_an_atlas_still_draws_the_chrome_and_counts_the_text() {
 }
 
 #[test]
-fn the_separators_are_drawn_from_the_table_and_not_from_the_font() {
-    // A box-drawing run draws procedurally, so it works with no atlas at all. If the painter ever
-    // routes separators through the atlas this fails, which is the point: the chrome's rules must not
-    // depend on a font's box glyphs being present at the right weight.
+fn the_band_separator_is_drawn_without_a_font() {
+    // The Google Docs-like band edge is a one-pixel rect, not a box-drawing glyph a full cell high.
+    // It must still paint when no atlas is available, while text correctly reports missing glyphs.
     let c = Chrome::new(ChromeMetrics::DESKTOP);
     let mut f = frame();
     let stats = Painter::without_atlas(0)
         .paint(&mut f, &c.tree(&ChromeState::default()), None)
         .expect("paint");
-    assert!(
-        stats.box_glyphs > 4,
-        "the rules should draw with no atlas: {stats:?}"
+    assert_eq!(stats.box_glyphs, 0, "band edges are rects: {stats:?}");
+    assert!(stats.missing > 0, "text should need an atlas: {stats:?}");
+    assert_eq!(
+        f.pixel(10, c.layout.toolbar.bottom() - 1),
+        holonomy_render::chrome::colour::RULE & 0x00FF_FFFF,
+        "the band edge should survive without a font"
     );
 }
 

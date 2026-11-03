@@ -1,7 +1,8 @@
 use holonomy_text::{
     ActionKind, Editor, EditorError, SpanPolicy, STYLE_ALIGN_MASK, STYLE_BOLD, STYLE_CODE,
-    STYLE_DECORATIONS, STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_STRIKE, STYLE_SUBSCRIPT,
-    STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+    STYLE_DECORATIONS, STYLE_HEADER, STYLE_ITALIC, STYLE_KNOWN, STYLE_SPELLING, STYLE_STRIKE,
+    STYLE_SUBSCRIPT, STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT, STYLE_SUPERSCRIPT,
+    STYLE_UNDERLINE,
 };
 
 #[test]
@@ -69,21 +70,19 @@ fn the_decoration_bits_round_trip_through_format_undo() {
     // **Every bit in `STYLE_DECORATIONS` is in `STYLE_KNOWN`**, so a file carrying an ornament is not a
     // file the importer calls corrupt.
     assert_eq!(STYLE_DECORATIONS & !STYLE_KNOWN, 0);
-    // **And `STYLE_KNOWN` is exactly the four faces, the four ornaments and the two alignment bits.**
-    //
-    // This assertion read `STYLE_KNOWN == bold | italic | code | header | decorations` until the six
-    // style and alignment work added `STYLE_ALIGN_CENTER` and `STYLE_ALIGN_RIGHT` to the same word --
-    // which is the *point* of the mask: an aligned paragraph is formatting, and a file that carries
-    // it must not be called corrupt. **The alignment bits are named here rather than folded into
-    // `STYLE_DECORATIONS`**, because "clear formatting" must clear ornaments and must not re-align a
-    // centred paragraph.
+    // `STYLE_KNOWN` includes faces, ornaments, alignment, suggestion tracking, and spelling.
+    // A saved suggestion or spelling mark must not be rejected as corrupt; neither is a decoration
+    // that the "clear formatting" command should erase. Keep every supported bit explicit here.
     assert_eq!(
         STYLE_BOLD
             | STYLE_ITALIC
             | STYLE_CODE
             | STYLE_HEADER
             | STYLE_DECORATIONS
-            | STYLE_ALIGN_MASK,
+            | STYLE_ALIGN_MASK
+            | STYLE_SUGGESTION_INSERT
+            | STYLE_SUGGESTION_DELETE
+            | STYLE_SPELLING,
         STYLE_KNOWN
     );
     assert_eq!(

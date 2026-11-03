@@ -106,7 +106,10 @@ The suite has four tiers, and knowing which one you are in saves a failed first 
 
 Several gates assert wall-clock latency (`session_latency.rs`, `write_through_cost.rs`,
 `holonomy-text/tests/latency.rs`); on a loaded or throttled machine those can fail without anything
-being wrong with the code. Re-run them on a quiet host before treating a failure as real.
+being wrong with the code. Re-run them on a quiet host before treating a failure as real. CI's
+workspace **functional** gate skips two host-dependent microsecond assertions (the session's 500 µs
+edit budget and the text offset-map scaling measurement); it does not lower their budgets. Run the
+unfiltered command above on dedicated performance hardware before making performance claims.
 
 ## Layout
 

@@ -81,8 +81,9 @@ pub mod colour {
     /// same pill, and a selected *item* inside a popup is the same again. Three states, two colours,
     /// and the third state is carried by the pill.
     pub const INK_STRONG: u32 = 0xFF20_2124;
-    /// Resting button / sidebar surface, just above the toolbar's grey band.
-    pub const PILL: u32 = 0xFFF8_FAFD;
+    /// A pale blue resting button/sidebar surface, distinct from the off-white panel and grey band.
+    /// Keeping it distinct makes the toolbar controls visible before hover or selection.
+    pub const PILL: u32 = 0xFFF3_F7FF;
     /// Hover is neutral grey; reserved blue is for *active* or document selection.
     pub const PILL_HOVER: u32 = 0xFFE8_EAED;
     /// A held or selected widget: Google Docs' pale blue.
@@ -137,7 +138,7 @@ pub mod colour {
     /// desk was the same colour as a divider, and at one pixel wide it read as neither. The band is
     /// still flat and still one pixel (`ChromeMetrics::shadow`), which is the honest limit of a blitter
     /// with no alpha; what changed is that the one pixel is now a step the eye can see.
-    pub const SHADOW: u32 = 0xFFDA_DCE0;
+    pub const SHADOW: u32 = 0xFFC0_C6CE;
     /// Google blue, for the document mark and active accents.
     pub const BLUE: u32 = 0xFF1A_73E8;
     /// The cyan Share/Export pill.

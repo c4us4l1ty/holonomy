@@ -109,7 +109,11 @@ fn armed_bold_and_colour_are_both_applied() {
 #[test]
 fn viewing_mode_refuses_paragraph_formatting() {
     let mut s = session("text");
-    s.apply_action(Action::SetMode(1)).unwrap();
+    let viewing = holonomy_render::menus::MODES
+        .iter()
+        .position(|&(_, mode)| mode == holonomy_render::menus::ViewMode::Viewing)
+        .expect("viewing mode exists");
+    s.apply_action(Action::SetMode(viewing as u8)).unwrap();
     assert!(s.apply_action(Action::SetStyle(1)).is_err());
     assert_eq!(s.editor().style_at(0).style_flags, 0);
 }

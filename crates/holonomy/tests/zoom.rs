@@ -236,16 +236,19 @@ fn the_page_and_its_layout_do_depend_on_the_zoom() {
         l_page_width(&a),
         l_page_width(&b)
     );
-    // **And it is still centred**, because `Layout::new` centres it in `width - sidebar_w` and a
-    // zoom that moved the sheet to the left of the window would be a second visible defect.
-    let pa = a.chrome_layout().page;
-    let pb = b.chrome_layout().page;
-    assert_eq!(
-        pa.x, pb.x,
-        "**and both pages keep the same left edge** -- {} and {}. The Plan chrome keeps the sheet \
-         a fixed gutter past the document-tabs rail, so a wider page grows to the right.",
-        pa.x, pb.x
-    );
+    // **It remains centred in the desk**: as the sheet widens, both gutters shrink together. A
+    // fixed left edge would instead move the entire extra width into the right gutter.
+    let pa = la.page;
+    let pb = lb.page;
+    assert!(pb.x < pa.x, "the wider sheet must extend left as well as right");
+    for (zoom, l) in [(100, la), (125, lb)] {
+        let left = l.page.x - l.sidebar.width;
+        let right = l.width - l.page.right();
+        assert!(
+            left.abs_diff(right) <= 1,
+            "at {zoom}% the page is not centred in the desk: {left} px left, {right} px right"
+        );
+    }
 }
 
 /// **CORRECTION to `every_pixel_that_changes_when_the_zoom_changes_is_the_zoom_label`.**

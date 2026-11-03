@@ -113,6 +113,8 @@ fn painted_at(text: &str, style: Option<(u32, u32, u16)>, size: u8) -> Session<'
         m,
     );
     s.caret_to(0).expect("park the caret");
+    // These gates measure the document's ink, not the insertion caret's independent line.
+    s.state.caret_visible = false;
     s.repaint_all().expect("paint");
     s
 }
@@ -165,14 +167,23 @@ fn window(s: &Session<'_>) -> (u32, u32, u32, u32) {
 /// The ink extent inside [`window`]: `(top, bottom, left, right)`, or `None` if nothing drew.
 ///
 /// **All four edges, because the four decorations move three different ones.** An underline extends the
-/// bottom, a strike stays inside the glyphs, and a shift moves the top *and* the bottom together — so a
-/// measurement that only looked at the bottom could not tell an underline from a subscript.
+/// bottom, a strike stays inside the glyphs, and a shift moves the top *and* the bottom together.
+/// A white page is *nonzero* too; treating every nonzero pixel as ink made these boxes follow the page
+/// instead of the glyphs, masking all four styles when the layout moved to a light canvas. Restrict
+/// the probe to dark ink (including antialiased edges), excluding the page, desk and unpainted black.
+fn is_ink(pixel: u32) -> bool {
+    pixel != 0
+        && ((pixel >> 16) & 0xff) < 128
+        && ((pixel >> 8) & 0xff) < 128
+        && (pixel & 0xff) < 128
+}
+
 fn ink_box(s: &Session<'_>) -> Option<(u32, u32, u32, u32)> {
     let (x0, y0, x1, y1) = window(s);
     let (mut top, mut left, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for y in y0..y1 {
         for x in x0..x1 {
-            if s.frame().pixel(x, y) != 0 {
+            if is_ink(s.frame().pixel(x, y)) {
                 top = top.min(y);
                 bottom = bottom.max(y);
                 left = left.min(x);
@@ -718,7 +729,7 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
         let (mut top, mut bottom) = (u32::MAX, 0u32);
         for y in y0..y1 {
             for x in (left + from * cell_w)..(left + to * cell_w).min(x1) {
-                if s.frame().pixel(x, y) != 0 {
+                if is_ink(s.frame().pixel(x, y)) {
                     top = top.min(y);
                     bottom = bottom.max(y);
                 }
@@ -781,12 +792,12 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
 fn a_heading_line_reserves_the_heading_s_height() {
     // The same two-line document twice: line 0 is a heading in one of them, and line 1 is identical in
     // both. **Two lines and not one**, because the claim is about the lines *below* the heading.
-    let plain = painted_at("Title\nbody\n", None, 1);
-    let head = painted_at("Title\nbody\n", Some((0, 5, STYLE_HEADER)), 1);
+    let plain = painted_at("Title\nbody\n", None, 0);
+    let head = painted_at("Title\nbody\n", Some((0, 5, STYLE_HEADER)), 0);
 
-    // **Both sessions use the atlas's second size as their own**, which is what a zoomed session looks
-    // like and the only configuration where `run_size_index` resolves to a different pitch than
-    // `ChromeMetrics::cell_h`.
+    // Both sessions use the 16 ppem body size. A heading uses the atlas's second, 20 ppem size;
+    // zooming the *whole* session to that size would make both line pitches equal and erase the
+    // height difference this gate is intended to measure.
     let heights = |s: &Session<'_>| {
         let h = &s.state.line_heights;
         (h.y(0), h.y(1), h.height(0))
