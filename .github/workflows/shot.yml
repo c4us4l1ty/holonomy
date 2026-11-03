@@ -1,0 +1,35 @@
+name: shot
+on: [push]
+permissions:
+  contents: write
+jobs:
+  shot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: render
+        run: |
+          mkdir -p shots
+          cargo test -p holonomy --test zz_capture -- --nocapture > shots/capture.log 2>&1 || true
+          tail -20 shots/capture.log
+          python3 -m pip install --quiet pillow
+          cat > /tmp/topng.py <<'PY'
+          import glob, os
+          from PIL import Image
+          for p in sorted(glob.glob('/tmp/shot/*.ppm')):
+              im = Image.open(p)
+              stem = os.path.basename(p)[:-4]
+              im.save('shots/%s.png' % stem)
+              print(stem, im.size)
+          PY
+          python3 /tmp/topng.py
+      - name: publish
+        if: always()
+        run: |
+          git config user.name ci
+          git config user.email ci@example.invalid
+          git add -f shots
+          git commit --allow-empty -m "ci: shots [skip ci]" || true
+          git push
