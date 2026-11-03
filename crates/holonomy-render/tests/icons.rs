@@ -212,7 +212,7 @@ fn the_all_list_and_the_match_agree() {
     // remaining 33 are unchanged, `mask::PRINT` still resolves, and `Tool::Print` is still wired.
     assert_eq!(
         IconId::ALL.len(),
-        50,
+        51,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. This went 34 -> 33 \
          when `Comment` was removed with `Tool::Comment` and `TitleButton::Comments`: it had no \
@@ -220,7 +220,10 @@ fn the_all_list_and_the_match_agree() {
          **33 -> 50 is the Wordcraft ribbon's own set**: Clone Format, Copy, Paste, Bullets, \
          Numbering, Align Left/Centre/Right, Indent, Outdent, Strikethrough, Subscript, \
          Superscript, Replace, Navigation, Theme and Close, each one painted by a command that \
-         reaches an action -- which is the standard the note above sets."
+         reaches an action -- which is the standard the note above sets. \
+         **50 -> 51 is `Select`**: the ribbon drew `Select all` with `Check`, and a tick beside \
+         `Find` and `Replace` reads as *done* rather than as *select*, so the Editing group ended on \
+         a mark that appeared to confirm the two buttons before it."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.

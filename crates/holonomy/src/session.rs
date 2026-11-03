@@ -1874,14 +1874,10 @@ impl<'a> Session<'a> {
     ///
     /// Returns whether the size actually changed.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, SessionError> {
+        // **`clamp_to(width, height)` keeps the type scale (part 36) and the ribbon's bands are then
+        // derived from it** rather than replaced with the design's literals.
         let mut metrics = self.chrome.metrics.clamp_to(width, height);
-        if self.state.ribbon {
-            metrics.title_h = 76;
-            metrics.menu_h = 32;
-            metrics.toolbar_h = if self.state.ribbon_collapsed { 0 } else { 112 };
-            metrics.ruler_h = 26;
-            metrics.status_h = 28;
-        }
+        metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
         if self.managed_documents {
             metrics.page_pad = Self::desktop_page_padding(metrics.width);
         }
@@ -2070,11 +2066,7 @@ impl<'a> Session<'a> {
             ..self.chrome.metrics
         };
         if managed {
-            metrics.title_h = 76;
-            metrics.menu_h = 32;
-            metrics.toolbar_h = 112;
-            metrics.ruler_h = 26;
-            metrics.status_h = 28;
+            metrics = metrics.with_ribbon_bands(true, false);
         }
         self.chrome = Chrome::new(metrics);
         self.refresh_overflow();
@@ -4716,8 +4708,14 @@ impl<'a> Session<'a> {
             }
             Action::ToggleRibbon => {
                 self.state.ribbon_collapsed = !self.state.ribbon_collapsed;
-                let mut m = self.chrome.metrics;
-                m.toolbar_h = if self.state.ribbon_collapsed { 0 } else { 112 };
+                // **The same derivation as `resize` and `apply_type_scale`.** This was a fourth copy
+                // of the `112`, so collapsing and re-expanding the ribbon at 125 % brought back a
+                // band sized for 16 ppem -- the collapsed state was right and the state you came
+                // back to was 20 % too short.
+                let m = self
+                    .chrome
+                    .metrics
+                    .with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
                 self.chrome = Chrome::new(m);
                 self.reflow_for_measure();
                 self.refresh_overflow();
@@ -5269,18 +5267,11 @@ impl<'a> Session<'a> {
         .with_cell_width(self.painter.cell_width())
         .with_type_scale(u32::from(pitch))
         .with_line_pitch(u32::from(pitch));
-        let metrics = if self.state.ribbon {
-            ChromeMetrics {
-                title_h: 76,
-                menu_h: 32,
-                toolbar_h: if self.state.ribbon_collapsed { 0 } else { 112 },
-                ruler_h: 26,
-                status_h: 28,
-                ..metrics
-            }
-        } else {
-            metrics
-        };
+        // **The ribbon's bands are derived from the type, not written over it.** See
+        // `ChromeMetrics::with_ribbon_bands`: these were five literals applied *after*
+        // `with_type_scale`, so at 125 % -- the shipping default -- the ribbon was 20 % too short
+        // for the type it held.
+        let metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
         // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
         // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
         // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and

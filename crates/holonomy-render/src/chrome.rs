@@ -438,6 +438,49 @@ impl ChromeMetrics {
         self
     }
 
+    /// **The ribbon's five bands, derived from the type -- the one place they are written.**
+    ///
+    /// # CORRECTION, part 46: the ribbon's bands were literals, and they were literals *after* the
+    /// type scale
+    ///
+    /// [`with_type_scale`](Self::with_type_scale) multiplies every band by `pitch / 25`, which is the
+    /// whole point of it -- and then `Session::apply_type_scale` and `Session::resize` **overwrote the
+    /// result with `title_h: 76, menu_h: 32, toolbar_h: 112, ruler_h: 26, status_h: 28`.** So at the
+    /// 125 % this product boots into the type was 30 px a line in bands built for 25: the ribbon's
+    /// group row, its caption strip, the tab strip and the quick-access row were all 20 % too short,
+    /// and 112 - 76 = **36 px of a 102 px group was caption** because the caption was a literal 20.
+    ///
+    /// **This is the arithmetic, in one function, for the two callers that used to spell it out.**
+    /// The numbers are the ribbon's own design heights at 25 px of pitch -- `76`, `32`, `112`, `26`
+    /// and `28` -- so a session at 16 ppem gets exactly what shipped before and a session at 20 ppem
+    /// gets a ribbon that can hold its own labels.
+    pub const fn with_ribbon_bands(mut self, ribbon: bool, collapsed: bool) -> Self {
+        if !ribbon {
+            return self;
+        }
+        // **A free `const fn`, not a closure.** "Cannot call non-const closure in constant functions"
+        // (E0015) is what the compiler said about the closure this was written as first, and
+        // `with_type_scale` above only gets away with its own because it is not `const`.
+        const fn by(v: u32, cell_h: u32) -> u32 {
+            (v as u64 * cell_h as u64 / ChromeMetrics::BASE_PITCH as u64) as u32
+        }
+        let cell_h = self.cell_h;
+        self.title_h = by(76, cell_h);
+        self.menu_h = by(32, cell_h);
+        self.toolbar_h = if collapsed { 0 } else { by(112, cell_h) };
+        self.ruler_h = by(26, cell_h);
+        self.status_h = by(28, cell_h);
+        // **Raised to a line afterwards**, because `by` rounds down and a band under one line cannot
+        // hold one -- the rule [`with_line_pitch`](Self::with_line_pitch) already enforces and that a
+        // literal set silently broke.
+        self.title_h = at_least_a_line(self.title_h, self.cell_h);
+        self.menu_h = at_least_a_line(self.menu_h, self.cell_h);
+        self.toolbar_h = at_least_a_line(self.toolbar_h, self.cell_h);
+        self.ruler_h = at_least_a_line(self.ruler_h, self.cell_h);
+        self.status_h = at_least_a_line(self.status_h, self.cell_h);
+        self
+    }
+
     /// **The line pitch of the 16 ppem design these constants were chosen at.**
     ///
     /// **Measured, not guessed: `Atlas::line_pitch()` over the packed faces at 16 ppem is 25** -- 20 px
