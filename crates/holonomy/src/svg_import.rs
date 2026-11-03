@@ -347,6 +347,11 @@ mod tests {
     #[test]
     fn a_static_vector_is_png_with_the_right_size_and_alpha() {
         let output = rasterize_svg(SVG.as_bytes()).unwrap();
+        let xml_decl = format!("<?xml version=\"1.0\"?>{SVG}");
+        assert!(
+            rasterize_svg(xml_decl.as_bytes()).is_ok(),
+            "a normal XML declaration is not a stylesheet instruction"
+        );
         let header = holonomy_image::read_header(&output).unwrap();
         assert_eq!((header.width, header.height), (256, 128));
         let mut decoded = vec![0; holonomy_image::decoded_len(&header)];
