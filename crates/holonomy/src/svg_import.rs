@@ -211,12 +211,37 @@ fn preflight(doc: &roxmltree::Document<'_>) -> Result<(), String> {
             if name == "base" && attr.namespace() == Some("http://www.w3.org/XML/1998/namespace") {
                 return Err("SVG xml:base is not supported.".into());
             }
+            if matches!(name, "filter" | "mask" | "marker-start" | "marker-mid" | "marker-end") {
+                return Err(format!("SVG {name} effects are not supported."));
+            }
             if !internal_urls_only(value) {
                 return Err("SVG external URLs and CSS imports are not supported.".into());
+            }
+            if name == "style" && !static_inline_style(value) {
+                return Err("SVG inline CSS contains an unsupported property.".into());
             }
         }
     }
     Ok(())
+}
+
+/// Inline CSS must only style static geometry. Without a property allowlist a `<path>` could
+/// request a filter, mask or external resource *without* using a banned SVG element.
+fn static_inline_style(style: &str) -> bool {
+    for declaration in style.split(';').map(str::trim).filter(|part| !part.is_empty()) {
+        let Some((property, value)) = declaration.split_once(':') else { return false };
+        if value.trim().is_empty() || !matches!(
+            property.trim(),
+            "fill" | "fill-rule" | "fill-opacity" | "stroke" | "stroke-width"
+                | "stroke-linecap" | "stroke-linejoin" | "stroke-miterlimit"
+                | "stroke-dasharray" | "stroke-dashoffset" | "stroke-opacity"
+                | "opacity" | "color" | "stop-color" | "stop-opacity"
+                | "clip-path" | "clip-rule" | "display" | "visibility"
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 /// URL syntax used in gradients/clip paths. Any non-fragment reference fails closed; disabling
@@ -270,6 +295,9 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg"><text>not supported</text></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><use href="#shape"/></svg>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg"><path style="fill:url(file:///etc/passwd)"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect filter="url(#shadow)"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="filter:url(#shadow)"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect mask="url(#shape)"/></svg>"#,
             r#"<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"/>"#,
         ] {
             assert!(rasterize_svg(bad.as_bytes()).is_err(), "accepted: {bad}");
@@ -286,6 +314,15 @@ mod tests {
         assert!(u64::from(target_size(999_999.0, 999_999.0).unwrap().0).pow(2) <= MAX_PIXELS);
         let deep = format!("<svg>{}</svg>", "<g>".repeat(MAX_DEPTH) + &"</g>".repeat(MAX_DEPTH));
         assert!(rasterize_svg(deep.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn inline_css_is_static_vector_only() {
+        assert!(static_inline_style("fill:#1a73e8; stroke: black; stroke-width: 2"));
+        assert!(static_inline_style("fill:url(#shade); opacity:0.75"));
+        for bad in ["filter:url(#blur)", "mask:url(#mask)", "font-family:Arial", "fill", "fill:"] {
+            assert!(!static_inline_style(bad), "accepted CSS: {bad}");
+        }
     }
 
     #[test]

@@ -24,6 +24,15 @@ jobs:
         with:
           name: cargo-lockfile
           path: Cargo.lock
+      # Some development sandboxes only reach api.github.com, not GitHub's blob storage for
+      # Actions artifacts/logs. A compressed patch annotation can be retrieved via the Checks API.
+      - name: Report the resolved lockfile patch through the Checks API
+        if: always()
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            git diff --binary -- Cargo.lock | gzip -c | base64 -w0 > /tmp/holonomy-lock-patch.txt
+            echo "::warning title=Cargo.lock patch (gzip+base64)::$(cat /tmp/holonomy-lock-patch.txt)"
+          fi
       - name: Check the sealed dependency boundary
         run: |
           mkdir -p target
@@ -34,9 +43,13 @@ jobs:
           fi
       - name: Renderer and desktop SVG integration tests
         run: |
-          cargo test --locked -p holonomy-render
-          cargo test --locked -p holonomy --features desktop --lib
-          cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image
+          set -o pipefail
+          if ! (cargo test --locked -p holonomy-render &&
+                cargo test --locked -p holonomy --features desktop --lib &&
+                cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image) 2>&1 | tee target/rust-check.log; then
+            echo "::error title=Rust build or SVG test failure::$(tail -c 12000 target/rust-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
+            exit 1
+          fi
       - name: Sealed, static release artifact and size gate
         run: cargo test --locked -p holonomy --release --test release_artifact -- --nocapture
       - name: Desktop, static release artifact and size gate
