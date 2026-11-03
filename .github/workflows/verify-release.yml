@@ -49,12 +49,14 @@ jobs:
         run: |
           set -o pipefail
           if ! (cargo test --locked -p holonomy-render &&
+                cargo test --locked -p holonomy-input &&
                 cargo test --locked -p holonomy --features desktop --lib &&
                 cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image --test pointer --test toolbar_wiring) 2>&1 | tee target/rust-check.log; then
             echo "::error title=Rust build or SVG test failure::$(tail -c 3800 target/rust-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             exit 1
           fi
       - name: Sealed, static release artifact and size gate
+        if: always()
         run: |
           set -o pipefail
           if cargo test --locked -p holonomy --release --test release_artifact -- --nocapture 2>&1 | tee target/release-sealed.log; then
@@ -64,6 +66,7 @@ jobs:
             exit 1
           fi
       - name: Desktop, static release artifact and size gate
+        if: always()
         run: |
           set -o pipefail
           if cargo test --locked -p holonomy --release --features desktop --test release_artifact -- --nocapture 2>&1 | tee target/release-desktop.log; then

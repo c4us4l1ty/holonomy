@@ -140,16 +140,11 @@ pub enum Hotkey {
     Bold,
     /// Ctrl+I: toggle italic, matching Google Docs.
     Italic,
-    /// Ctrl+I. Insert an image at the caret.
+    /// Insert an image at the caret, requested by the toolbar or Insert menu.
     ///
-    /// A hotkey rather than a [`Command`] because it carries no payload: the *bytes* come from
-    /// whatever the product can offer, which is a session fact, and a keymap that carried image bytes
-    /// would be a keymap holding a file.
-    ///
-    /// Ctrl+I rather than a bare `i` because the bare letter is a character. Every other block-level
-    /// insertion is bound this way for the same reason -- Ctrl+T for a table, Ctrl+M for a formula --
-    /// and the pattern is that inserting a block is an *action*, while inserting a character is
-    /// *typing*.
+    /// This command has no bytes in it. In the sealed demo the source is a bundled PNG;
+    /// in the desktop UI it opens a file request for a PNG or a bounded SVG import.
+    /// Ctrl+I is reserved for italic, following familiar document-editor shortcuts.
     InsertImage,
     /// **Ctrl+C.** Copy the selection into the editor's yank buffer.
     ///
@@ -388,7 +383,7 @@ impl Keymap {
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
                 KEY_A if !mods.shift() && !mods.alt() => Some(Hotkey::SelectAll),
                 KEY_B if !mods.shift() && !mods.alt() => Some(Hotkey::Bold),
-                KEY_I if !mods.shift() && !mods.alt() => Some(Hotkey::Italic),
+                KEY_I if !mods.alt() => Some(Hotkey::Italic),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
