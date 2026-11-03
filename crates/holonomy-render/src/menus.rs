@@ -537,10 +537,12 @@ const TOOLS: &[Item] = &[Item {
     ..act("Word count", Action::WordCount)
 }];
 
+const TABLE: &[Item] = &[act("Insert table", Action::InsertTable)];
+
 const HELP: &[Item] = &[act("Keyboard shortcuts", Action::KeyboardShortcuts)];
 
 /// Every menu, in [`MENUS`](crate::chrome::MENUS) order.
-pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, HELP];
+pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, TABLE, HELP];
 
 /// The items for heading `index`, or an empty slice.
 ///

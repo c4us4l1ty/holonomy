@@ -342,7 +342,7 @@ fn every_wired_menu_item_carries_an_action() {
         }
     }
     assert_eq!(
-        with_action, 33,
+        with_action, 34,
         "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
          Keyboard shortcuts, and the five text-formatting rows that made `Format` a real menu -- \
          Underline, Strikethrough, Superscript, Subscript and Clear formatting. Adding one changes \
@@ -416,8 +416,8 @@ fn every_wired_menu_item_carries_an_action() {
     // went up by two because the four rows that replaced them are four rows.
     assert_eq!(
         (without.len(), without.len() + with_action),
-        (0, 33),
-        "**0 unwired of 33 menu items** in the seven headings after out-of-scope cloud/add-on rows \
+        (0, 34),
+        "**0 unwired of 34 menu items** in the eight headings after out-of-scope cloud/add-on rows \
          were removed. Any row that reappears here is a row that draws and does nothing. Got: \
          {without:?}"
     );
