@@ -285,6 +285,8 @@ impl DocRun {
     pub const DECORATION_STRIKE: u8 = 1 << 1;
     /// A green suggestion-insertion background, painted behind the run's glyphs.
     pub const DECORATION_SUGGESTION_INSERT: u8 = 1 << 2;
+    /// A red squiggle under the run's glyphs, for a spelling error.
+    pub const DECORATION_SPELLING: u8 = 1 << 3;
 
     /// **How many pixels tall a decoration's rule is**, for the two bits above.
     ///

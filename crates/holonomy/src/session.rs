@@ -57,7 +57,7 @@ use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSou
 use holonomy_text::{
     Editor, EditorError, FontFace, SpanPolicy, ANCHOR_BYTES, FACE_BODY, FACE_MONO, STYLE_BOLD,
     STYLE_HEADER, STYLE_ITALIC, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
-    STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT,
+    STYLE_SPELLING, STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT,
 };
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
@@ -5561,6 +5561,9 @@ impl<'a> Session<'a> {
         }
         if flags & STYLE_SUGGESTION_INSERT != 0 {
             out |= holonomy_render::DocRun::DECORATION_SUGGESTION_INSERT;
+        }
+        if flags & STYLE_SPELLING != 0 {
+            out |= holonomy_render::DocRun::DECORATION_SPELLING;
         }
         out
     }

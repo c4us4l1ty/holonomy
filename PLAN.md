@@ -2,7 +2,8 @@
 
 ## Current state
 Phase 1 (colour retheme + Docs toolbar) — DONE, committed
-Phase 2 (suggestion mode + Suggesting ViewMode) — IN PROGRESS
+Phase 2 (suggestion mode + Suggesting ViewMode) — DONE, committed
+Phase 3 (rulers + spelling squiggles) — IN PROGRESS
 
 ## Constraints (in force)
 - 2 MiB static musl binary ceiling (current 1,478,456 bytes → ~619 KB headroom)
@@ -31,35 +32,41 @@ Phase 2 (suggestion mode + Suggesting ViewMode) — IN PROGRESS
 
 **Ribbon bypass:** `chrome.rs::tree()` already bypasses Wordcraft ribbon when `state.ribbon == false` (default). Single Docs toolbar row is active.
 
-### ✅ Phase 2a: Suggesting ViewMode — DONE
+### ✅ Phase 2: Suggesting ViewMode — DONE
 **Files:** menus.rs, session.rs, span.rs, tree.rs, paint.rs
 
 **menus.rs:** Added `ViewMode::Suggesting` variant + `("Suggesting", ViewMode::Suggesting)` to MODES (index 2)
 **session.rs:** Updated `mode_index`/`view_mode` for 3 modes; `check_editable` allows Suggesting edits (only Viewing refuses)
 
-**span.rs:** Added `STYLE_SUGGESTION_INSERT` (bit 10) and `STYLE_SUGGESTION_DELETE` (bit 11); added to `STYLE_KNOWN` via `STYLE_SUGGESTIONS`
+**span.rs:** Added `STYLE_SUGGESTION_INSERT` (bit 10), `STYLE_SUGGESTION_DELETE` (bit 11), `STYLE_SPELLING` (bit 12); all added to `STYLE_KNOWN`
 
-**tree.rs:** Added `DECORATION_SUGGESTION_INSERT` (bit 2) to DocRun
+**tree.rs:** Added `DECORATION_SUGGESTION_INSERT` (bit 2), `DECORATION_SPELLING` (bit 3) to DocRun
 
 **session.rs routing:**
-- `decorations()` maps STYLE_SUGGESTION_DELETE→DECORATION_STRIKE, STYLE_SUGGESTION_INSERT→DECORATION_SUGGESTION_INSERT
+- `decorations()` maps suggestion/spelling style flags to DocRun decorations
 - `insert()`: applies STYLE_SUGGESTION_INSERT to inserted bytes in Suggesting mode
-- `backspace()`: applies STYLE_SUGGESTION_DELETE via format_range (preserves colour) in Suggesting mode
-- `delete_forward()`: same for forward delete
-- `delete_selected()`: same for selection delete
+- `backspace()`/`delete_forward()`/`delete_selected()`: apply STYLE_SUGGESTION_DELETE via format_range (preserves colour) in Suggesting mode
 
-**paint.rs:** Draws light green (#D4FDD4) background behind suggestion insertion runs
+**paint.rs:** 
+- Light green (#D4FDD4) background behind suggestion insertion runs
+- Red (#EA4335) squiggle under spelling-error runs
 
-### Remaining Phase 2 work
-- Comments sidebar (right panel with comment list)
-- Margin accept/reject cards for suggestions
-- Suggesting mode indicator in toolbar (mode dropdown already shows 3 options)
+### ✅ Phase 3a: Google Docs rulers — DONE
+**File:** chrome.rs
 
-### Phase 3: Polish
-- Rulers: grey margin zones + white live zone + blue indent markers
-- Smart Compose: inline grey predictions
-- Spelling: red squiggle SVG underlines
-- Caret: blinking absolutely positioned (blink already exists)
+**Ruler anatomy:**
+1. Grey margin zones (RULE grey) left of text.x and right of text.right()
+2. White live zone (CHROME white) between margins
+3. Blue column ticks (minor every 5 cols, major every 10 cols)
+4. Blue numbers every 10 columns over live zone
+5. Blue inverted-triangle indent markers at left/right edges of live zone
+6. Blue first-line indent rectangle
+
+### Remaining Phase 3 work
+- Smart Compose: inline grey predictions (stub with pending_compose field)
+- Caret: blinking absolutely positioned (blink already exists, just needs Docs styling)
+- Comments sidebar (right panel)
+- Margin accept/reject cards
 
 ---
 
