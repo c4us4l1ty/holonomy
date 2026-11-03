@@ -1319,7 +1319,17 @@ impl Editor {
         if !changed {
             return Ok(false);
         }
-        self.undo.push(start, ActionKind::Format, &record)?;
+        // **Recorded as a face format, not as a plain one.** `undo` and `redo` dispatch on the action kind
+        // and hand a `Format` record to `apply_format_record`, which reads 20-byte runs -- so a 24-byte
+        // face log replayed through it decodes to nothing but garbage (a flags word read out of a
+        // colour, a `u32` read three bytes into a face, and a `chunks_exact(20)` that then yields one
+        // truncated run per 24 bytes). The face edit would then undo to the *wrong* style instead of to
+        // the previous one, which is worse than not undoing at all.
+        //
+        // The kind is what tells the two layouts apart, and it is why `ActionKind::FaceFormat` exists
+        // rather than the face riding in the padding of a plain format record.
+        self.undo
+            .push(start, ActionKind::FaceFormat, &record)?;
         self.drop_redo();
         self.apply_face_format_record(&record, true)?;
         record.zeroize();
@@ -1401,7 +1411,10 @@ impl Editor {
         // The first version was a single `Option` and the second undo overwrote the first's map:
         // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
         // redo found nothing to restore, so the table map was silently never put back.
-        let table_shadow = if action.kind != ActionKind::Format
+        let table_shadow = if !matches!(
+            action.kind,
+            ActionKind::Format | ActionKind::FaceFormat
+        )
             && action.bytes.contains(&crate::table::CELL_SEPARATOR)
         {
             Some(self.tables.spans().to_vec())
@@ -1413,6 +1426,16 @@ impl Editor {
         }
         self.undo_tables.push(table_shadow);
         let outcome = match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, false)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                }
+            }
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, false)?;
                 EditOutcome {
@@ -1432,8 +1455,18 @@ impl Editor {
                     self.spans
                         .runs_in(action.offset, action.offset + action.bytes.len() as u32)
                         .into_iter()
+                        // **`faced`, not `styled`.** A `styled` span has `FACE_BODY` for its face, so a
+                        // redo restored the flags and the colour and put every character back in the body
+                        // face -- an edit to a monospaced word undone and redone came back in Inter, which
+                        // is the same defect as the document-wide font arriving by a different route.
                         .map(|(s, lo, hi)| {
-                            TextIntervalSpan::styled(lo, hi, s.style_flags, s.color_rgb)
+                            TextIntervalSpan::faced(
+                                lo,
+                                hi,
+                                s.style_flags,
+                                s.color_rgb,
+                                s.font_face,
+                            )
                         })
                         .collect(),
                 );
@@ -2163,6 +2196,16 @@ impl Editor {
         let len = action.bytes.len();
         let lines_changed = action.bytes.contains(&b'\n');
         match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, true)?;
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                })
+            }
             ActionKind::Format => {
                 self.apply_format_record(&action.bytes, true)?;
                 Ok(EditOutcome {
@@ -2176,11 +2219,12 @@ impl Editor {
             ActionKind::Insert => {
                 self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
                 for span in restore_styles {
-                    self.spans.style_range(
+                    self.spans.style_range_faced(
                         span.start_byte,
                         span.end_byte,
                         span.style_flags,
                         span.color_rgb,
+                        span.font_face,
                     )?;
                 }
                 // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
