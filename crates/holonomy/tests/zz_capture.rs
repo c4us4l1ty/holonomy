@@ -35,6 +35,10 @@ fn capture() {
         let mut s = Session::new(editor, Painter::new(atlas, 0), Box::new(keep.clone()), m);
         s.state.ribbon = true;
         s.state.ribbon_tab = 1;
+        // **The regression the user reported**: put the caret in the FIRST word only and set mono.
+        // Before the fix this repainted the whole document; the frame should show one word mono.
+        s.caret_to(3).unwrap();
+        s.apply_action(holonomy_render::menus::Action::SetFont(1)).unwrap();
         s.paint(None).unwrap();
         let f = keep.last.borrow().clone().unwrap();
         let mut out = std::fs::File::create(format!("/tmp/shot/doc-{ppem}-{w}.ppm")).unwrap();

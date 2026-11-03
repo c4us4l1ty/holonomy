@@ -14,6 +14,9 @@ jobs:
           mkdir -p shots
           cargo check --workspace --all-targets > shots/check.log 2>&1 || true
           tail -60 shots/check.log
+          cargo test -p holonomy --test font_scope > shots/font.log 2>&1 || true
+          cargo test -p holonomy --test ruler > shots/ruler.log 2>&1 || true
+          grep -E "^test |^test result|panicked at|assertion" shots/font.log shots/ruler.log | tail -60
           cargo test -p holonomy --test zz_capture -- --nocapture > shots/capture.log 2>&1 || true
           tail -20 shots/capture.log
           python3 -m pip install --quiet pillow
