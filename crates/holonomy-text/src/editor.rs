@@ -1606,7 +1606,8 @@ impl Editor {
                         // bold run restored the text bold. Restoring a delete should restore what was
                         // deleted; `GrowIntoInsert` is the right default for the *caret* and the wrong
                         // one for *history*, and this is where the two come apart.
-                        self.spans.style_range(start, end, 0, 0)?;
+                        self.spans
+                            .style_range_faced(start, end, 0, 0, FACE_BODY)?;
                     }
                 }
                 EditOutcome {

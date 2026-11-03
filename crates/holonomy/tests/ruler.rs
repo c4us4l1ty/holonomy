@@ -15,7 +15,7 @@
 //! edge), **numbered majors** at a spacing that stays legible, and **room for the numbers** in the band
 //! it draws into.
 
-use holonomy_display::{paint::Painter, HeadlessScanout};
+use holonomy_display::paint::Painter;
 use holonomy_render::chrome::{ChromeMetrics, ChromeState, Layout};
 use holonomy_render::ribbon;
 use holonomy_render::{Node, SurfaceTree};

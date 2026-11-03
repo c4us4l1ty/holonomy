@@ -1024,7 +1024,7 @@ impl SpanMap {
         let any_styled = self.spans.iter().any(|s| {
             let lo = s.start_byte.max(offset);
             let hi = s.end_byte.min(delete_end);
-            hi > lo && (s.style_flags != 0 || s.color_rgb != 0)
+            hi > lo && (s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY)
         });
         let removed: Vec<TextIntervalSpan> = if any_styled {
             self.spans
@@ -1316,7 +1316,7 @@ impl SpanMap {
         style_flags: u16,
         color_rgb: u32,
     ) -> Result<(), SpanError> {
-        self.style_range_faced(start, end, style_flags, color_rgb, FACE_BODY)
+        self.style_range_faced(start, end, style_flags, color_rgb, FACE_COUNT)
     }
 
     /// **`style_range` with the face set as well**, which is what a font change is.
@@ -1408,7 +1408,7 @@ impl SpanMap {
 
     /// Remove styling from `[start, end)`, making it plain.
     pub fn clear_range(&mut self, start: u32, end: u32) -> Result<(), SpanError> {
-        self.style_range(start, end, 0, 0)
+        self.style_range_faced(start, end, 0, 0, FACE_BODY)
     }
 }
 
