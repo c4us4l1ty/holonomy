@@ -8366,7 +8366,7 @@ impl<'a> Session<'a> {
             // accident. See `pen_of`.
             let mut pen_x: u32 = 0;
             let mut cursor = 0usize; // byte index into `seg`
-            for (span, lo, hi) in &runs {
+            for (span, lo, hi) in runs {
                 // **`span` drives every property of the run it produces** -- face, size, ink,
                 // baseline shift and the two rules -- and `runs` iterates an owned `Vec` (`page_runs`),
                 // so nothing here borrows the editor and the `&self` calls below are all readable.
