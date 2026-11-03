@@ -1166,7 +1166,9 @@ fn no_chrome_box_ever_lands_outside_its_panel() {
             // second thing that can overflow, and the toolbar's own row of icons is what part 32 and
             // part 36 were both about. `place_toolbar` is included here rather than trusted because a
             // gate that only checks `Layout` cannot see it at all.
-            for p in holonomy_render::widgets::place_toolbar(&l, holonomy_render::widgets::TOOLBAR_PAD) {
+            for p in
+                holonomy_render::widgets::place_toolbar(&l, holonomy_render::widgets::TOOLBAR_PAD)
+            {
                 inside(&p.rect, &format!("toolbar item {:?}", p.tool));
             }
 

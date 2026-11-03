@@ -1397,21 +1397,15 @@ impl<'a> Session<'a> {
         Ok(Some(byte[0]))
     }
 
-    /// Insert an image at the caret, from the built-in chart.
+    /// Insert the bundled PNG test chart at the caret in the sealed demo.
     ///
-    /// # Where the bytes come from, and why that is stated rather than hidden
-    ///
-    /// From a PNG committed to this repository and `include_bytes!`-ed. **Not** from a file the user
-    /// chose, and not from the network, because FR-5.1's `unshare(CLONE_NEWNET)` forbids the second and
-    /// the sealed 50-syscall allowlist forbids the first: there is no `openat` on a user-chosen path in
-    /// the jail. A real "insert image from disk" is therefore a Phase 13 question, where §4's windowed
-    /// document model brings a read path with it.
-    ///
-    /// Everything *else* is real end to end, and it is the part worth testing: a keystroke becomes a
-    /// U+FFFC anchor, a BLAKE2b content address, a catalog entry in the payload's tail, a PNG decode, a
-    /// fixed-point downscale to page-column width, a `SecureBlock` in the Iceberg cache, a
-    /// `Node::Image`, an integer blit, a displacement of every line below it, and -- in
-    /// `holonomy-export` -- a `<img>` and an `/XObject`. The only thing stubbed is the file dialog.
+    /// The sealed process cannot open a user-chosen path after its filesystem and syscall
+    /// restrictions are installed. The unsealed desktop instead requests a file using
+    /// [`DocumentRequest::InsertImage`], validates PNG or bounded SVG at the UI boundary, and
+    /// calls [`insert_image_bytes`](Self::insert_image_bytes) with PNG bytes. Both modes then use
+    /// the same document image path: a U+FFFC anchor, content address, catalog entry, PNG decode,
+    /// fixed-point page-column downscale, secure cache block, image node, and integer blit.
+    /// Exports use the same PNG as an HTML image or PDF image object.
     ///
     /// The chart is 1920x1080 on purpose. §2.9.3's scaler runs on *every* image precisely because the
     /// cache holds page-column-width rasters, so a fixture at or below the column width would never
@@ -6033,7 +6027,12 @@ impl<'a> Session<'a> {
                     self.set_notice(Some("Move outside the table to insert an image.".into()));
                 } else {
                     self.check_editable()?;
-                    self.insert_image()?;
+                    if self.managed_documents {
+                        // Desktop input is chosen and validated outside the sealed session.
+                        self.document_request = Some(DocumentRequest::InsertImage);
+                    } else {
+                        self.insert_image()?;
+                    }
                 }
             }
             Command::Hotkey(Hotkey::InsertTable) => {

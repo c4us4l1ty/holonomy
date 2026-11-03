@@ -79,7 +79,10 @@ fn every_widget_has_a_rect_inside_the_panel() {
             l.toolbar.bottom()
         );
     }
-    assert!(visible >= 12, "too few controls are visible at the design width: {visible}");
+    assert!(
+        visible >= 12,
+        "too few controls are visible at the design width: {visible}"
+    );
     for (b, r) in place_title(&l, TITLE_PAD) {
         assert!(
             r.x + r.width <= l.width && r.bottom() <= l.title.bottom(),
@@ -97,7 +100,10 @@ fn image_insertion_is_visible_in_the_desktop_toolbar() {
         .into_iter()
         .find(|p| p.tool == Tool::Image)
         .expect("image belongs to toolbar");
-    assert!(!image.rect.is_empty(), "image insertion was hidden at the design width");
+    assert!(
+        !image.rect.is_empty(),
+        "image insertion was hidden at the design width"
+    );
 }
 
 /// **No two toolbar widgets overlap.**
@@ -153,7 +159,10 @@ fn no_two_widgets_overlap() {
 fn hit_agrees_with_where_the_widget_was_drawn() {
     let l = layout();
     let st = state();
-    for p in place_toolbar(&l, TOOLBAR_PAD).into_iter().filter(|p| !p.rect.is_empty()) {
+    for p in place_toolbar(&l, TOOLBAR_PAD)
+        .into_iter()
+        .filter(|p| !p.rect.is_empty())
+    {
         let cx = (p.rect.x + p.rect.width / 2) as i32;
         let cy = (p.rect.y + p.rect.height / 2) as i32;
         assert_eq!(
