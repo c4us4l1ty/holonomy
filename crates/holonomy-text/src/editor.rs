@@ -44,6 +44,15 @@ use crate::rope::{Rope, RopeError};
 use crate::span::{FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_COUNT};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
 use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
+
+/// **The size of one *face-format* history record: `start + end + before(flags, colour, face) +
+/// after(flags, colour, face)` = `4 + 4 + (2 + 4 + 1) + (2 + 4 + 1)`.**
+///
+/// **Not 20, which is [`Editor::format_range`]'s record.** That one has no face, and its replay reads at
+/// fixed offsets, so the two lengths must not be confused: `apply_face_format_record` chunks on 24 and
+/// `apply_format_record` on 20, and a record read at the wrong width does not fail — it *misreads*, and
+/// a font undo writes somebody's colour into somebody's flags.
+const RECORD_BYTES: usize = 24;
 use zeroize::Zeroize;
 
 /// Removed-span slices retained for undoing a styled deletion.
@@ -1122,14 +1131,7 @@ impl Editor {
         Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
     }
 
-    /// **The size of one *face-format* history record: six fields, `4 + 4 + 2 + 4 + 1 + 2 + 4 + 1`.**
-///
-/// `start`, `end`, the *before* triple (`flags`, `colour`, `face`), then the *after* triple. **Not 20,
-/// which is `format_range`'s record**: that one has no face and its replay reads at fixed offsets, so the
-/// two lengths must not be confused -- see `apply_face_format_record`.
-const RECORD_BYTES: usize = 24;
-
-/// Apply a formatting command as one bounded undoable transaction.
+    /// Apply a formatting command as one bounded undoable transaction.
     ///
     /// Each existing run is transformed independently, preserving mixed formatting.
     /// History stores only offsets and style attributes, never document text. The
