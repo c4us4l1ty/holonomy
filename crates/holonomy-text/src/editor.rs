@@ -1278,16 +1278,27 @@ impl Editor {
             changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
             record.extend_from_slice(&lo.to_le_bytes());
             record.extend_from_slice(&hi.to_le_bytes());
-            // **Twenty-two bytes of run, laid out to `RECORD_BYTES`.** Before: start@0 end@4
-            // flags@8 colour@10 face@14, then a pad byte, then after: flags@16 colour@18 face@22.
+            // **One run, laid out to `RECORD_BYTES` = 24, field by field:**
             //
-            // The pad is not decoration. `apply_face_format_record` walks the log with
-            // `chunks_exact(RECORD_BYTES)`, and a run written in 22 bytes makes that iterator yield
-            // **zero** chunks -- so the record was pushed, the edit was recorded as changed, and the
-            // new style was never applied. Every face change in this crate did nothing at all, which is
-            // exactly what the first version of this code did and why the font tests failed on the
-            // model before they failed on the screen. A length that does not divide is a silent no-op,
-            // and `RECORD_BYTES` is the one place the two halves agree.
+            // | offset | width | field |
+            // |---|---|---|
+            // | 0  | 4 | start |
+            // | 4  | 4 | end |
+            // | 8  | 2 | before flags |
+            // | 10 | 4 | before colour |
+            // | 14 | 1 | before face |
+            // | 15 | 1 | pad |
+            // | 16 | 2 | after flags |
+            // | 18 | 4 | after colour |
+            // | 22 | 1 | after face |
+            // | 23 | 1 | pad |
+            //
+            // Both pads are alignment and nothing else, and **both are load-bearing**: the reader is
+            // `chunks_exact(RECORD_BYTES)`, so a run of 22 or 23 bytes makes that iterator yield *zero*
+            // chunks. The record was then pushed, the edit was marked changed, and the new style was
+            // never applied — every face change in this crate silently did nothing. A length that does
+            // not divide is a no-op, and the `debug_assert` below is the only thing that says so out
+            // loud.
             record.extend_from_slice(&old.style_flags.to_le_bytes());
             record.extend_from_slice(&old.color_rgb.to_le_bytes());
             record.push(old.font_face);
@@ -1295,7 +1306,15 @@ impl Editor {
             record.extend_from_slice(&flags.to_le_bytes());
             record.extend_from_slice(&colour.to_le_bytes());
             record.push(face);
-            debug_assert_eq!(record.len() % RECORD_BYTES, 0);
+            // The last pad, offset 23. Without it the run is 23 bytes and the whole log vanishes into
+            // `chunks_exact`'s remainder.
+            record.push(0);
+            debug_assert_eq!(
+                record.len() % RECORD_BYTES,
+                0,
+                "every change is exactly {} bytes, or the reader walks past it",
+                RECORD_BYTES
+            );
         }
         if !changed {
             return Ok(false);
