@@ -42,7 +42,7 @@
 //!
 //! [`TextRun`]: crate::TextRun
 
-use crate::tree::{Label, Rect, RoundRect, Style, SurfaceTree, TextRun};
+use crate::tree::{Label, Node, Rect, RoundRect, Style, SurfaceTree, TextRun};
 use crate::DamageRect;
 
 // ---------------------------------------------------------------- the palette
@@ -3029,6 +3029,7 @@ impl Chrome {
                             caret.cell.y as i32,
                             compose,
                             Style::REGULAR,
+                            0,
                             colour::INK_CHROME,
                         ))));
                     }
