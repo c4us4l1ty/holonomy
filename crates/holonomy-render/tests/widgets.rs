@@ -28,7 +28,8 @@
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{
-    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
+    hit, hit_rect, place_title, place_toolbar, popup, Hit, Open, TitleButton, Tool, SEPARATOR,
+    TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
 };
 
 fn layout() -> Layout {
@@ -816,9 +817,9 @@ fn tool_popup_in_ribbon_anchors_to_ribbon_button() {
 
     let p = popup(&l, &st, Some(Open::Tool(Tool::Font))).expect("font popup exists");
     assert!(
-        p.frame.y >= l.ribbon.y,
-        "popup frame y {} is above ribbon y {}",
+        p.frame.y >= l.toolbar.y,
+        "popup frame y {} is above ribbon toolbar y {}",
         p.frame.y,
-        l.ribbon.y
+        l.toolbar.y
     );
 }

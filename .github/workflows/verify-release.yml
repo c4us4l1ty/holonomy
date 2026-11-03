@@ -31,7 +31,11 @@ jobs:
         run: |
           if ! git diff --quiet -- Cargo.lock; then
             git diff --binary -- Cargo.lock | gzip -c | base64 -w0 > /tmp/holonomy-lock-patch.txt
-            echo "::warning title=Cargo.lock patch (gzip+base64)::$(cat /tmp/holonomy-lock-patch.txt)"
+            # GitHub truncates a single check annotation at 4096 chars.
+            split -b 3000 -d -a 3 /tmp/holonomy-lock-patch.txt /tmp/holonomy-lock-part-
+            for part in /tmp/holonomy-lock-part-*; do
+              echo "::warning title=Cargo.lock patch part ${part##*-}::$(cat "$part")"
+            done
           fi
       - name: Check the sealed dependency boundary
         run: |
