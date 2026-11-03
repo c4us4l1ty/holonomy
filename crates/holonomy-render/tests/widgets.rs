@@ -738,3 +738,87 @@ fn a_mixed_font_selection_leaves_the_font_box_empty() {
     s.font_mixed = true;
     assert_eq!(s.font_name(), "");
 }
+
+#[test]
+fn ruler_hit_testing_identifies_margins_and_indents() {
+    let m = ChromeMetrics {
+        width: 1280,
+        height: 800,
+        cell_w: 8,
+        cell_h: 18,
+        ..ChromeMetrics::DESKTOP
+    }
+    .with_ribbon_bands(true, false);
+    let l = Layout::new(&m);
+    let mut st = ChromeState::default();
+    st.ribbon = true;
+
+    let col = l.text.x as i32;
+    let col_w = l.text.width.min(l.width.saturating_sub(l.text.x)) as i32;
+    let right = col + col_w;
+    let ruler_top = l.ruler.y as i32;
+    let ruler_bot = l.ruler.bottom() as i32;
+    let mid_y = ruler_top + (l.ruler.height as i32) / 2;
+
+    assert_eq!(
+        hit(&l, &st, col, ruler_top + 2),
+        Hit::RulerFirstLineIndent
+    );
+    assert_eq!(
+        hit(&l, &st, col, ruler_bot - 3),
+        Hit::RulerLeftIndent
+    );
+    assert_eq!(
+        hit(&l, &st, col, mid_y),
+        Hit::RulerLeftMargin
+    );
+    assert_eq!(
+        hit(&l, &st, col - 20, mid_y),
+        Hit::RulerLeftMargin
+    );
+    assert_eq!(
+        hit(&l, &st, right, ruler_bot - 3),
+        Hit::RulerRightIndent
+    );
+    assert_eq!(
+        hit(&l, &st, right + 20, mid_y),
+        Hit::RulerRightMargin
+    );
+    assert_eq!(
+        hit(&l, &st, col + 50, mid_y),
+        Hit::None
+    );
+
+    for h in [
+        Hit::RulerLeftMargin,
+        Hit::RulerRightMargin,
+        Hit::RulerFirstLineIndent,
+        Hit::RulerLeftIndent,
+        Hit::RulerRightIndent,
+    ] {
+        assert!(hit_rect(&l, &st, h).is_some());
+    }
+}
+
+#[test]
+fn tool_popup_in_ribbon_anchors_to_ribbon_button() {
+    let m = ChromeMetrics {
+        width: 1280,
+        height: 800,
+        cell_w: 8,
+        cell_h: 18,
+        ..ChromeMetrics::DESKTOP
+    }
+    .with_ribbon_bands(true, false);
+    let l = Layout::new(&m);
+    let mut st = ChromeState::default();
+    st.ribbon = true;
+
+    let p = popup(&l, &st, Some(Open::Tool(Tool::Font))).expect("font popup exists");
+    assert!(
+        p.frame.y >= l.ribbon.y,
+        "popup frame y {} is above ribbon y {}",
+        p.frame.y,
+        l.ribbon.y
+    );
+}

@@ -221,3 +221,28 @@ an agent, from dumped pixels, not by the person who reported the screenshot. Hov
 popup, the open menus and the dialog paths were not in any frame. And the frames were rendered at
 `ChromeMetrics::with_ribbon_bands`, not through a window — so anything that depends on a real X11
 `GetImage` (colour depth, the shadow, the compositor) is still unseen.
+
+---
+
+## 8. Selection Latency, Button Proportions, Dropdown Anchoring, and Draggable Ruler
+
+### The defects diagnosed
+
+1. **Selection drag latency and motion flooding:**
+   - In `Desktop::take_motion_run`, socket motion coalescing only ran if `self.events` already had an event buffered at its head. If `self.events` was empty, `Desktop::take_motion_run` returned `None` without checking `conn.take_motion_run()`, bypassing X11 motion run compression during active mouse drags.
+   - On every motion event during text selection drag, `column_at_pen` called `self.editor.text().unwrap_or_default()`, allocating and copying the entire document buffer repeatedly.
+2. **Text sizing, button overlap, and dropdown misalignment:**
+   - Proportional Inter font strings ("Strikethrough", "Font color") were tight in monospace-budgeted cells, spilling ink into adjacent small buttons.
+   - `widgets::popup` anchored tool popups to `l.toolbar.bottom()`, which placed ribbon dropdowns at the non-ribbon toolbar position. In `Session::opener_rect`, ribbon tool openers resolved to the non-ribbon toolbar rect at `x = 336`, leaving stale damaged regions.
+   - Status bar mode and zoom counter box was fixed at 150 px, clipping longer mode labels and zoom percentages, and ruler numbers used faint group text.
+3. **Static ruler scales:**
+   - Word and Google Docs provide draggable indent markers (First-Line Indent top triangle, Hanging Indent bottom triangle, Left Indent base rectangle, and Right Indent triangle) and draggable margins with a vertical alignment guide line during active drag. The ruler lacked hit testing, gesture tracking, and interactive reflow.
+
+### The changes made
+
+- `Desktop::take_motion_run` now exhausts buffered motion notify events and folds newly arrived motions from `conn.take_motion_run()` even when `self.events` is initially empty, while properly respecting non-motion event boundaries.
+- `column_at_pen` tests `STYLE_ALIGN_MASK` before reading and reads only the affected line through stack/chunk buffers rather than copying the entire document rope.
+- `ribbon::text_w` allocates proportional headroom `(c * adv * 5 / 4).max(c * adv + 4)` so proportional fonts never overflow button boundaries.
+- `widgets::popup` checks `state.ribbon` and anchors tool popups to the active ribbon button's `rect.bottom()`, and `opener_rect` maps ribbon tool openers to their ribbon button rects.
+- Draggable ruler markers (First Line Indent, Hanging Indent, Left Indent, and Right Indent) and page margin boundaries with hit testing (`Hit::Ruler*`), full gesture dragging, active vertical guide line rendering, and margin updates with `reflow_for_measure()`.
+- High-contrast ruler numbers (`t.text`) and status bar text, and dynamically measured status bar zoom/mode rect.

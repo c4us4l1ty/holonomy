@@ -480,7 +480,10 @@ pub fn cells(s: &str) -> u32 {
 
 /// The pixel width of `s` in this layout's cell.
 pub fn text_w(l: &Layout, s: &str) -> u32 {
-    cells(s) * advance(l)
+    let c = cells(s);
+    let adv = advance(l);
+    // Allocate proportional headroom so text never overflows its container.
+    (c * adv * 5 / 4).max(c * adv + 4)
 }
 
 /// Horizontal padding either side of a tab's label, and the gap between two tabs.
@@ -1292,7 +1295,7 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
                 caption_h,
             ),
             g.label,
-            t.group,
+            t.dim,
             false,
             true,
             cell_w,
@@ -1488,26 +1491,79 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
                     l.ruler.width,
                     l.ruler.height.saturating_sub(ChromeMetrics::RULER_TICK_H),
                 );
-                ruler_number(v, x, numbers, &format!("{c}"), t.group, cell_w, cell_h);
+                ruler_number(v, x, numbers, &format!("{c}"), t.text, cell_w, cell_h);
             }
             c += RULER_MINOR_STEP;
         }
     }
-    // **The column's two margins**, as filled triangles anchored to the band's top edge. Drawn last so
-    // nothing can cover them, and one triangle per end -- Word draws both and lets you drag them, which
-    // is the next thing this wants and not this change.
+    // Margin boundaries and draggable indent markers matching Google Docs and Word.
     if col_w > 0 {
-        for (x, dir) in [(col, 1i32), (col + col_w, -1i32)] {
-            for row in 0..RULER_MARKER_H {
-                let w = RULER_MARKER_H.saturating_sub(row);
-                let left = if dir > 0 {
-                    x + (RULER_MARKER_H.saturating_sub(w)) / 2
-                } else {
-                    x.saturating_sub(w + (RULER_MARKER_H.saturating_sub(w)) / 2)
-                };
+        // Vertical boundary lines between page margin gutters and body text
+        fill(v, DamageRect::new(col, l.ruler.y, 1, l.ruler.height), t.border);
+        fill(v, DamageRect::new(col + col_w, l.ruler.y, 1, l.ruler.height), t.border);
+
+        // First Line Indent: downward triangle at top of left margin
+        let fl_x = if s.pressed == Some(crate::widgets::Hit::RulerFirstLineIndent) {
+            s.ruler_drag_x.map(|dx| dx.max(0) as u32).unwrap_or(col)
+        } else {
+            col
+        };
+        let fl_h = 7u32;
+        for row in 0..fl_h {
+            let w = (fl_h - row) * 2 - 1;
+            let left = fl_x.saturating_sub(w / 2);
+            fill(v, DamageRect::new(left, l.ruler.y + row, w, 1), t.accent);
+        }
+
+        // Hanging Indent: upward triangle at bottom of left margin
+        let li_x = if s.pressed == Some(crate::widgets::Hit::RulerLeftIndent) {
+            s.ruler_drag_x.map(|dx| dx.max(0) as u32).unwrap_or(col)
+        } else {
+            col
+        };
+        let hi_h = 6u32;
+        let hi_bottom = l.ruler.bottom().saturating_sub(5);
+        for row in 0..hi_h {
+            let w = (row + 1) * 2 - 1;
+            let left = li_x.saturating_sub(w / 2);
+            let y = hi_bottom.saturating_sub(hi_h - row);
+            fill(v, DamageRect::new(left, y, w, 1), t.accent);
+        }
+
+        // Left Indent: base rectangle under hanging indent triangle
+        let rect_w = 11u32;
+        let rect_h = 4u32;
+        let rect_left = li_x.saturating_sub(rect_w / 2);
+        let rect_top = l.ruler.bottom().saturating_sub(rect_h);
+        fill(v, DamageRect::new(rect_left, rect_top, rect_w, rect_h), t.accent);
+
+        // Right Indent: upward triangle at bottom of right margin
+        let ri_x = if s.pressed == Some(crate::widgets::Hit::RulerRightIndent) {
+            s.ruler_drag_x.map(|dx| dx.max(0) as u32).unwrap_or(col + col_w)
+        } else {
+            col + col_w
+        };
+        let ri_h = 8u32;
+        let ri_bottom = l.ruler.bottom().saturating_sub(1);
+        for row in 0..ri_h {
+            let w = (row + 1) * 2 - 1;
+            let left = ri_x.saturating_sub(w / 2);
+            let y = ri_bottom.saturating_sub(ri_h - row);
+            fill(v, DamageRect::new(left, y, w, 1), t.accent);
+        }
+
+        // Active drag guide line extending through the page
+        if let Some(drag_x) = s.ruler_drag_x {
+            if drag_x >= 0 && (drag_x as u32) < l.width {
+                let gx = drag_x as u32;
                 fill(
                     v,
-                    DamageRect::new(left, l.ruler.y + row, w, 1),
+                    DamageRect::new(
+                        gx,
+                        l.ruler.bottom(),
+                        1,
+                        l.height.saturating_sub(l.ruler.bottom()),
+                    ),
                     t.accent,
                 );
             }
@@ -1523,9 +1579,9 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     );
     text(
         v,
-        DamageRect::new(8, l.status.y, l.width.saturating_sub(360), l.status.height),
+        DamageRect::new(12, l.status.y, l.width.saturating_sub(400), l.status.height),
         &status,
-        t.dim,
+        t.text,
         false,
         false,
         cell_w,
@@ -1536,23 +1592,25 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             v,
             DamageRect::new(l.width / 2, l.status.y, l.width / 2 - 180, l.status.height),
             n,
-            t.dim,
+            t.text,
             false,
             true,
             cell_w,
             cell_h,
         );
     }
+    let mode_zoom = format!("{}   {}%", s.mode_name(), s.zoom_percent);
+    let mz_w = text_w(l, &mode_zoom).max(180) + 20;
     text(
         v,
         DamageRect::new(
-            l.width.saturating_sub(170),
+            l.width.saturating_sub(mz_w + 12),
             l.status.y,
-            150,
+            mz_w,
             l.status.height,
         ),
-        &format!("{}   {}%", s.mode_name(), s.zoom_percent),
-        t.dim,
+        &mode_zoom,
+        t.text,
         false,
         true,
         cell_w,

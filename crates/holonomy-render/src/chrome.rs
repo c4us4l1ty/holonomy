@@ -1803,6 +1803,8 @@ pub struct ChromeState {
     pub caret_line: u32,
     /// Caret column, 0-based.
     pub caret_column: u32,
+    /// Active ruler drag coordinate, if any.
+    pub ruler_drag_x: Option<i32>,
 
     /// **Where the caret's pen is on its line, in pixels from the text column's left edge.** Part 33.
     ///
@@ -2010,6 +2012,7 @@ impl Default for ChromeState {
             caret_line: 0,
             caret_column: 0,
             caret_pen_x: None,
+            ruler_drag_x: None,
             words: 0,
             bytes: 0,
             dirty: false,

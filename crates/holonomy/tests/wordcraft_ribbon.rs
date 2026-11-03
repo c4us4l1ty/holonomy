@@ -465,3 +465,31 @@ fn the_home_tab_fits_the_window_the_product_opens() {
         }
     }
 }
+
+#[test]
+fn ruler_drag_draws_guide_line() {
+    let m = ChromeMetrics {
+        width: 1280,
+        height: 800,
+        cell_w: 8,
+        cell_h: 18,
+        ..ChromeMetrics::DESKTOP
+    }
+    .with_ribbon_bands(true, false);
+    let l = Layout::new(&m);
+    let mut s = ribbon_state(1);
+    s.ruler_drag_x = Some(350);
+    let mut v = Vec::new();
+    ribbon::paint(&mut v, &l, &s, l.cell_h);
+
+    let has_guide = v.iter().any(|node| match &node.node {
+        Some(holonomy_render::Node::Solid(r)) => {
+            r.x == 350
+                && r.y == l.ruler.bottom()
+                && r.width == 1
+                && r.height == l.height.saturating_sub(l.ruler.bottom())
+        }
+        _ => false,
+    });
+    assert!(has_guide, "guide line must be painted when ruler_drag_x is set");
+}
