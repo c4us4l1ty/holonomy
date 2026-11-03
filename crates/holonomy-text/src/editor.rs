@@ -1278,12 +1278,24 @@ impl Editor {
             changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
             record.extend_from_slice(&lo.to_le_bytes());
             record.extend_from_slice(&hi.to_le_bytes());
+            // **Twenty-two bytes of run, laid out to `RECORD_BYTES`.** Before: start@0 end@4
+            // flags@8 colour@10 face@14, then a pad byte, then after: flags@16 colour@18 face@22.
+            //
+            // The pad is not decoration. `apply_face_format_record` walks the log with
+            // `chunks_exact(RECORD_BYTES)`, and a run written in 22 bytes makes that iterator yield
+            // **zero** chunks -- so the record was pushed, the edit was recorded as changed, and the
+            // new style was never applied. Every face change in this crate did nothing at all, which is
+            // exactly what the first version of this code did and why the font tests failed on the
+            // model before they failed on the screen. A length that does not divide is a silent no-op,
+            // and `RECORD_BYTES` is the one place the two halves agree.
             record.extend_from_slice(&old.style_flags.to_le_bytes());
             record.extend_from_slice(&old.color_rgb.to_le_bytes());
             record.push(old.font_face);
+            record.push(0);
             record.extend_from_slice(&flags.to_le_bytes());
             record.extend_from_slice(&colour.to_le_bytes());
             record.push(face);
+            debug_assert_eq!(record.len() % RECORD_BYTES, 0);
         }
         if !changed {
             return Ok(false);
@@ -1322,9 +1334,10 @@ impl Editor {
         for run in record.chunks_exact(RECORD_BYTES) {
             let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
             let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
-            // after:  start 0, end 4, flags 8, colour 10, face 14 | before: flags 15, colour 17, face 21
+            // before: start@0 end@4 flags@8 colour@10 face@14 pad@15
+            // after:  flags@16 colour@18 face@22
             let (flags, colour, face) = if after {
-                (u16_at(15), u32_at(17), run[21])
+                (u16_at(16), u32_at(18), run[22])
             } else {
                 (u16_at(8), u32_at(10), run[14])
             };

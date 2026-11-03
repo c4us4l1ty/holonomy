@@ -993,6 +993,45 @@ fn round(v: &mut Vec<SurfaceTree>, r: DamageRect, radius: u32, c: u32) {
 /// report. **A truncation guard in the wrong unit does not truncate -- it lies, and the pixels clip.**
 ///
 /// `cell_w` is now an argument rather than a literal, and every caller passes [`Layout::cell_w`].
+/// **A ruler's number: left-aligned on the tick it labels, with no button gutter.**
+///
+/// `text` adds `SMALL_PAD / 2` at the left, because the rect a small button hands over begins at its
+/// icon's gutter -- see the comment there. A ruler has no icon, so that pad drew every number seven
+/// pixels to the right of its own tick: the scale then disagreed with the column above it, which is the
+/// one thing a ruler may not do. This is the same label without the gutter, and it is a separate
+/// function rather than a flag on `text` so the buttons keep the pad their comment argues for.
+///
+/// Drawn only where it fits: the last major of a narrow page is a tick without a number, which is what
+/// a printed ruler does rather than running its number into the gutter.
+fn ruler_number(
+    v: &mut Vec<SurfaceTree>,
+    x: u32,
+    band: DamageRect,
+    s: &str,
+    c: u32,
+    cell_w: u32,
+    cell_h: u32,
+) {
+    let advance = cell_w.max(1);
+    let w = cells(s) * advance;
+    // The band, not the text column: a number that fits in the ruler's own width is fine even if the
+    // column ends a pixel earlier, and one that does not would be clipped by the canvas below.
+    if w == 0 || x.saturating_add(w) > band.x + band.width || band.height <= cell_h / 4 {
+        return;
+    }
+    // **The baseline sits on the tick strip**, so the numbers are one line of type with the ticks under
+    // them rather than floating in the band's middle -- `text`'s centring would put a 2-digit label
+    // half a line lower than a 1-digit one at some type scales.
+    let y = band.y;
+    v.push(SurfaceTree::leaf(Node::Label(Label::new(
+        x as i32,
+        y as i32,
+        s,
+        Style::REGULAR,
+        0,
+        c,
+    ))));
+}
 fn text(
     v: &mut Vec<SurfaceTree>,
     r: DamageRect,
@@ -1436,26 +1475,20 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
             // keeps it inside a 26 px band at both type scales; a number drawn from the band's top with
             // a full line of type would be clipped by the canvas below it.
             if major {
-                text(
-                    v,
-                    DamageRect::new(
-                        x.saturating_add(2),
-                        l.ruler.y,
-                        cell_w * 4,
-                        l.ruler.height.saturating_sub(ChromeMetrics::RULER_TICK_H),
-                    ),
-                    // **The label is the column number**, and it has to be a `&'static str`-free
-                    // `String` because it is computed -- so it is built here, once per major tick, and
-                    // `text` takes a slice of it. A major every ten columns over a 72-column page is
-                    // eight allocations per frame; the alternative is a static table of 0..=70, which
-                    // is 71 strings and *wrong* the day the measure changes.
-                    &format!("{c}"),
-                    t.group,
-                    false,
-                    false,
-                    cell_w,
-                    cell_h,
+                // **The label is the column number**, and it has to be a `String` because it is
+                // computed -- so it is built here, once per major tick. A major every ten columns over
+                // a 72-column page is eight allocations per frame; the alternative is a static table of
+                // 0..=70, which is 71 strings and *wrong* the day the measure changes.
+                //
+                // The line it is drawn on is the band minus the tick strip, so the number's own line
+                // never overlaps the ticks standing under it.
+                let numbers = DamageRect::new(
+                    l.ruler.x,
+                    l.ruler.y,
+                    l.ruler.width,
+                    l.ruler.height.saturating_sub(ChromeMetrics::RULER_TICK_H),
                 );
+                ruler_number(v, x, numbers, &format!("{c}"), t.group, cell_w, cell_h);
             }
             c += RULER_MINOR_STEP;
         }
