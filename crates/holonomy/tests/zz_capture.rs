@@ -4,6 +4,7 @@ use holonomy_display::paint::Painter;
 use holonomy_display::{Frame, Scanout};
 use holonomy_render::chrome::ChromeMetrics;
 
+#[derive(Clone)]
 struct Keep {
     last: std::rc::Rc<std::cell::RefCell<Option<Frame>>>,
     size: (u32, u32),
