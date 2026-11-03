@@ -487,16 +487,15 @@ const INSERT: &[Item] = &[
 /// | row | chord | what it does |
 /// |---|---|---|
 /// | Bold | `Ctrl+B` | `STYLE_BOLD` |
-/// | Italic | `Ctrl+Shift+I` | `STYLE_ITALIC` |
+/// | Italic | `Ctrl+I` | `STYLE_ITALIC` |
 /// | Underline | `Ctrl+U` | `STYLE_UNDERLINE`, drawn as a rule by the painter |
 /// | Strikethrough | `Alt+Shift+5` | `STYLE_STRIKE` |
 /// | Superscript | `Ctrl+.` | `STYLE_SUPERSCRIPT`, a raised baseline |
 /// | Subscript | `Ctrl+,` | `STYLE_SUBSCRIPT`, a lowered one |
 /// | Clear formatting | `Ctrl+\` | every bit back to zero |
 ///
-/// **`Ctrl+Shift+I` for italic and not `Ctrl+I`,** because `Ctrl+I` inserts an image in this program
-/// and has since Phase 9 — see `Hotkey::Italic`. That deviation is old, it is deliberate, and the
-/// accelerator column says what the program actually binds rather than what the reference does.
+/// **`Ctrl+I` for italic**, matching Google Docs. The accelerator column says what the program
+/// actually binds rather than what the reference does.
 ///
 /// **Every chord here is bound in `keymap.rs`**, which is the rule this file has always followed: an
 /// accelerator printed beside a row that does nothing is the kind of lie a menu is best at. The four
@@ -508,7 +507,7 @@ const FORMAT: &[Item] = &[
         ..act("Bold", Action::ToggleBold)
     },
     Item {
-        accelerator: Some("Ctrl+Shift+I"),
+        accelerator: Some("Ctrl+I"),
         ..act("Italic", Action::ToggleItalic)
     },
     Item {
