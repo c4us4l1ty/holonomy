@@ -157,7 +157,8 @@ fn ctrl_i_formats_text_and_the_insert_image_command_still_inserts_an_image() {
     );
     assert_eq!(s.assets().len(), 0, "and so is its asset");
 
-    s.apply(cmd.expect("ctrl+i decodes")).expect("toggle italic");
+    s.apply(cmd.expect("ctrl+i decodes"))
+        .expect("toggle italic");
     assert_eq!(s.stats.image_inserts, 1, "italic must not insert a chart");
     assert_eq!(s.assets().len(), 0);
     // The menu/toolbar still has an image command; the sealed demo supplies its bundled PNG.

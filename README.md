@@ -151,7 +151,8 @@ type into on an ordinary desktop without `sudo` — is the designated target.
 `Ctrl+T` inserts a 3×3 table and Tab moves between cells. `Ctrl+M` inserts an inline formula: with the
 caret outside it the box draws as compiled math — glyphs from Noto Sans Math for the symbols, Inter
 Italic for the variables, and 1 px integer fills for the fraction bars and radical overlines — and with
-the caret inside it expands in place to the raw LaTeX in monospace. `Ctrl+I` inserts an image.
+the caret inside it expands in place to the raw LaTeX in monospace. `Ctrl+I` toggles italic;
+choose **Insert > Image** or the image toolbar button to insert a picture.
 
 **Images.** The container format is frozen, so an image lives in the document payload's tail as a
 content-addressed catalog entry — `BLAKE2b | w u16 | h u16 | len | PNG` — and its *position* is a
@@ -160,12 +161,14 @@ implementation detail: the frozen entry shape has nowhere to record which anchor
 the pairing is positional whether it is wanted or not, and a character in the text is the one anchor
 that survives every edit for free. Decoded rasters are page-column-width (§2.9.3's arithmetic), held
 in an Iceberg cache bounded at 8.0 MiB with a ±1-page window, and scrubbed on eviction before the next
-frame. In the **sealed** path, `Ctrl+I` inserts a bundled chart because the allowlist has no
-`openat` on a user path. The **desktop** image dialog accepts a PNG file or a bounded static SVG,
-which is converted to PNG before insertion. No SVG source survives in the encrypted document.
+frame. In the **sealed** path, the image action inserts a bundled chart because the allowlist
+has no `openat` on a user path. The **desktop** image dialog accepts a PNG file or a bounded
+static SVG, which is converted to PNG before insertion. No SVG source survives in the encrypted document.
 
-**Historical Phase 9C cost.** 1,439,288 B against the *then* 2 MiB ceiling. That is not a measurement
-of the amended 4 MiB build; run the release-artifact gate for the current number.
+**Current static release sizes.** The pinned musl CI run `41651444311` measured 1,863,000 B
+for the sealed/default binary and 3,333,880 B for the SVG-enabled desktop binary. Both pass the
+4,194,304 B ceiling; the desktop build has 860,424 B of headroom. The historical Phase 9C
+measurement (1,439,288 B under the former 2 MiB limit) is not a measurement of this build.
 
 **Historical Phase 9C measurement:** 1,335 tests passed in release across 102 test binaries at
 that point. It is **not** a test result for this amended SVG build. 175 files / 97,684 lines under

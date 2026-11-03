@@ -246,24 +246,26 @@ fn an_overflow_button_with_nothing_hidden_opens_nothing() {
     assert_eq!(s.stats.pointer_inert, 0, "**and is not counted as inert**");
 }
 
-/// **`Mode` opens a two-row menu and switching changes the state.**
+/// **`Mode` opens Editing, Suggesting and Viewing, and switching changes the state.**
 #[test]
-fn the_mode_button_opens_a_two_row_menu() {
+fn the_mode_button_opens_a_three_row_menu() {
     let mut s = session();
     press_tool(&mut s, "mode");
     assert_eq!(s.state.open, Some(Open::Tool(Tool::Mode)), "**Mode opens**");
 
     let items = Open::Tool(Tool::Mode).items(&s.state);
-    assert_eq!(items.len(), 2, "**two rows: Editing and Viewing**");
+    assert_eq!(items.len(), 3, "Editing, Suggesting and Viewing all have rows");
     assert_eq!(items[0].label, "Editing");
-    assert!(items[0].checked, "**and Editing is the one that is on**");
-    assert!(!items[1].checked);
+    assert_eq!(items[1].label, "Suggesting");
+    assert_eq!(items[2].label, "Viewing");
+    assert!(items[0].checked, "Editing starts active");
+    assert!(!items[1].checked && !items[2].checked);
 
-    // **Choose the second row, through the real popup hit test.**
+    // Choose Viewing through the real popup hit test, not by writing the mode directly.
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("the mode popup has rows");
-    press_rect(&mut s, pop.rows[1]);
-    assert_eq!(s.state.mode_index, 1, "**the state moved**");
+    press_rect(&mut s, pop.rows[2]);
+    assert_eq!(s.state.mode_index, 2, "**the state moved**");
     assert_eq!(s.mode_name(), "Viewing", "**and the mode name follows**");
     assert_eq!(s.state.open, None, "**and the menu closed**");
 }
@@ -286,7 +288,7 @@ fn viewing_mode_refuses_every_edit_and_counts_it() {
     press_tool(&mut s, "mode");
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("rows");
-    press_rect(&mut s, pop.rows[1]);
+    press_rect(&mut s, pop.rows[2]);
     assert_eq!(s.mode_name(), "Viewing");
 
     // **Typing, backspace and delete-forward.**
@@ -322,7 +324,8 @@ fn viewing_mode_still_moves_the_caret() {
     press_tool(&mut s, "mode");
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("rows");
-    press_rect(&mut s, pop.rows[1]);
+    press_rect(&mut s, pop.rows[2]);
+    assert_eq!(s.mode_name(), "Viewing");
 
     // **Two moves, so "the caret still moves" is a measurement rather than a tautology.** One move
     // from 6 that lands back on 6 would pass a gate that only compared to the start.

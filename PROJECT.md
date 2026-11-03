@@ -7,8 +7,10 @@
 > import time; it must reject external resources and active content, rasterise only once,
 > and pass the resulting PNG through the existing validation, encryption, painting and export
 > paths. Trusted WordCraft (MIT) icon SVGs may be compiled into static 16/20 px masks at build
-> time, not parsed on a frame. The old measurements below are historical; do not present their
-> 2 MiB headroom as a current release measurement. Security parity for an unsealed desktop
+> time, not parsed on a frame. Ctrl+I now toggles italic; image insertion uses the toolbar or
+> Insert menu. CI run `41651444311` measured stripped static builds at 1,863,000 B sealed
+> and 3,333,880 B desktop. The old measurements below are historical; do not present their
+> 2 MiB headroom as current headroom. Security parity for an unsealed desktop
 > session is **not claimed**; it requires a separate review and isolation work.
 >
 H1 is the bare-silicon Holonomy: a single static `x86_64-unknown-linux-musl` Rust binary that

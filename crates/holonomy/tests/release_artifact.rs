@@ -109,13 +109,11 @@ fn assert_static_pie(path: &Path, what: &str) {
 
 /// A default-features release binary has none of the X11 client in it.
 ///
-/// Measured on this host after Phase 9B: 1,101,944 bytes, static PIE, and zero of the five markers.
-/// The desktop build of the same source is 1,192,824 bytes -- 90,880 more, which is the whole crate.
-///
-/// Both are well inside the 2,097,152 ceiling: 995,208 bytes of room for the default and 904,328 for
-/// the desktop build. Phase 9B's whole cost was 69,472 bytes on the default build, and it came *down*
-/// on the asset side -- the pruned math face removed 22,468 bytes of compressed payload, which is more
-/// than the parser, the layout and the wiring added.
+/// Current measurement from the pinned musl CI build at `7d919ec` (run `41651444311`):
+/// 1,863,000 bytes sealed/default and 3,333,880 bytes desktop with import-time SVG support.
+/// Both are static PIE and below the 4,194,304-byte ceiling; the sealed build excludes X11.
+/// Phase 9B's 1,101,944/1,192,824-byte measurements used the old feature set and old 2 MiB
+/// limit, and are historical rather than a claim about this build.
 ///
 /// # CORRECTION, part 39: this gate is `#[cfg]`d to the run it can actually say something about
 ///
