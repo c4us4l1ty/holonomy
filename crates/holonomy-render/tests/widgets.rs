@@ -28,7 +28,7 @@
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{
-    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR,
+    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
 };
 
 fn layout() -> Layout {
@@ -225,7 +225,7 @@ fn every_menu_heading_is_hit_testable_at_its_own_centre() {
 fn a_point_on_a_seam_belongs_to_exactly_one_widget() {
     let l = layout();
     let st = state();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     for w in placed.windows(2) {
         // Only adjacent *left-to-right* pairs, so `right()` of one is `x` of the next.
         if w[1].rect.x != w[0].rect.right() {
