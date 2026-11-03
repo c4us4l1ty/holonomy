@@ -1,21 +1,12 @@
 [1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.17s
 [1m[92m     Running[0m tests/zz_capture.rs (target/x86_64-unknown-linux-musl/debug/deps/zz_capture-55c896d4c24f8f7c)
 
 running 1 test
+wrote doc-16-1600
+wrote doc-20-1280
+wrote doc-16-1024
+test capture ... ok
 
-thread 'capture' (4227) panicked at crates/holonomy-text/src/editor.rs:1298:13:
-assertion `left == right` failed
-  left: 23
- right: 0
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-test capture ... FAILED
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
 
-failures:
-
-failures:
-    capture
-
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
-
-[1m[91merror[0m: test failed, to rerun pass `-p holonomy --test zz_capture`
