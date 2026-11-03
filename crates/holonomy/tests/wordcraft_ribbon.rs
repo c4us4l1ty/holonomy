@@ -47,9 +47,20 @@ fn narrow_ribbon_overflows_instead_of_drawing_dead_buttons() {
         ribbon: true,
         ..ChromeState::default()
     };
-    let (_, buttons) = ribbon::layout(&l, &s);
-    let hidden = buttons.iter().filter(|b| b.rect.is_empty()).count();
-    assert_eq!(ribbon::overflow(&l, &s).len(), hidden);
+    let (groups, buttons) = ribbon::layout(&l, &s);
+    let overflow = ribbon::overflow(&l, &s);
+    // WordCraft folds a narrow group into its own dropdown; the global overflow
+    // only carries commands whose group was clipped away or hidden gallery tiles.
+    for b in buttons.iter().filter(|b| b.rect.is_empty()) {
+        let g = &groups[b.group];
+        let via_group = g.level == holonomy_render::wordcraft::ribbon_fit::COLLAPSED
+            && !ribbon::group_trigger(&l, g).is_empty()
+            && ribbon::group_items(&s, b.group)
+                .iter()
+                .any(|it| it.action == Some(b.action));
+        let via_overflow = overflow.iter().any(|it| it.action == Some(b.action));
+        assert!(via_group || via_overflow, "`{}` became unreachable", b.label);
+    }
     for b in buttons.iter().filter(|b| !b.rect.is_empty()) {
         assert!(b.rect.right() <= l.width);
     }
