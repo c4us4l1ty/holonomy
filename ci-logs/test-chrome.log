@@ -5,8 +5,8 @@
 running 57 tests
 test a_caret_past_the_measure_is_absent ... ok
 test a_caret_scrolled_out_of_view_is_absent_not_clamped ... ok
-test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
 test a_long_label_splits_into_runs_within_the_run_length_limit ... ok
+test a_narrow_window_loses_the_last_menus_and_keeps_the_first ... ok
 test a_page_wider_than_the_panel_is_clipped_not_wrapped ... ok
 test a_panel_smaller_than_its_bands_degrades_instead_of_wrapping ... ok
 test a_panel_smaller_than_the_chrome_lays_out_at_its_own_size ... ok
@@ -18,8 +18,8 @@ test a_zero_period_would_divide_by_zero_and_is_clamped ... ok
 test an_empty_string_produces_no_runs ... ok
 test an_off_screen_caret_blinks_without_dirtying_anything ... ok
 test ascending_runs_splits_prose_because_prose_is_not_ascending ... ok
-test desktop_page_capacity_does_not_depend_on_window_height ... ok
 test a_toolbar_separator_is_inset_from_the_pill_not_from_the_button ... ok
+test desktop_page_capacity_does_not_depend_on_window_height ... ok
 test desktop_page_rows_share_one_mapping_for_caret_and_hit_testing ... ok
 test desktop_sheets_stack_with_a_gap_and_scroll_without_losing_the_previous_page ... ok
 test desktop_wheel_and_pointer_can_use_the_next_sheet ... ok
@@ -38,8 +38,8 @@ test the_block_runes_are_absent_so_the_chrome_does_not_use_them ... ok
 test text_runs_are_ascending_and_contiguous ... ok
 test the_caret_is_exactly_one_cell ... ok
 test the_caret_sits_on_its_column_and_row ... ok
-test the_design_page_column_is_576_px_and_says_so ... ok
 test paged_sheets_and_shadows_stay_within_the_canvas_at_various_sizes ... ok
+test the_design_page_column_is_576_px_and_says_so ... ok
 test the_measure_is_seventy_two_columns_and_does_not_grow_with_the_window ... ok
 test the_next_flip_is_when_the_phase_changes ... ok
 test the_page_is_centred_and_the_gutters_sum_to_the_panel ... ok
@@ -47,12 +47,12 @@ test the_paged_chrome_tree_paints_separate_visible_sheets ... ok
 test the_only_band_rule_is_the_toolbar_s_underside ... ok
 test the_scroll_thumb_fills_the_rail_when_everything_is_visible ... ok
 test the_scroll_thumb_moves_down_as_the_view_scrolls ... ok
-test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_scroll_thumb_never_vanishes ... ok
 test the_scrollbar_is_right_of_the_page_and_inside_the_canvas ... ok
+test the_ruler_is_numbered_across_the_measure_and_the_numbers_stay_inside_it ... ok
 test the_sealed_badge_appears_only_when_sealed ... ok
-test the_sidebar_has_a_right_edge_in_both_views ... ok
 test the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open ... FAILED
+test the_sidebar_has_a_right_edge_in_both_views ... ok
 test the_text_column_sits_inside_the_page_with_its_padding ... ok
 test the_status_line_reports_the_caret_position_one_based ... ok
 test the_toolbar_bands_are_tall_enough_for_the_type_they_hold ... ok
@@ -65,7 +65,7 @@ failures:
 
 ---- a_resize_moves_the_page_and_never_the_line stdout ----
 
-thread 'a_resize_moves_the_page_and_never_the_line' (4234) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
+thread 'a_resize_moves_the_page_and_never_the_line' (4225) panicked at crates/holonomy-render/tests/chrome.rs:961:5:
 assertion `left == right` failed: the page sits a fixed gutter to the right of the document-tabs rail: left gutter 596
   left: 596
  right: 304
@@ -73,7 +73,7 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 ---- the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open stdout ----
 
-thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (4277) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
+thread 'the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open' (4268) panicked at crates/holonomy-render/tests/chrome.rs:1589:5:
 assertion `left == right` failed: opening the sidebar puts the page a fixed gutter past the rail: 296 then 436
   left: 436
  right: 304
@@ -83,6 +83,6 @@ failures:
     a_resize_moves_the_page_and_never_the_line
     the_sidebar_reservation_is_the_sidebar_width_only_while_it_is_open
 
-test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: FAILED. 55 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
 [1m[91merror[0m: test failed, to rerun pass `-p holonomy-render --test chrome`
