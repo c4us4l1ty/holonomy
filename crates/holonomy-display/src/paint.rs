@@ -938,6 +938,20 @@ impl<'a> Painter<'a> {
             return;
         }
 
+        // **Suggestion insertions draw a light green background behind their glyphs.** The fill
+        // covers the run's whole box, so the green extends to the cell width even for trailing
+        // spaces — matching how Google Docs tints the whole inserted run.
+        if run.decorations & holonomy_render::DocRun::DECORATION_SUGGESTION_INSERT != 0 {
+            frame.fill_rect(
+                whole.x as i64,
+                whole.y as i64,
+                whole.width as i64,
+                whole.height as i64,
+                0xFFD4_FDD4,
+            );
+            self.scratch.stats.rects += 1;
+        }
+
         let Some(atlas) = self.atlas else {
             self.scratch.stats.missing += self.count_codepoints(bytes);
             return;
