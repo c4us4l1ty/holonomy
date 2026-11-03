@@ -4829,7 +4829,7 @@ impl<'a> Session<'a> {
                 return Ok(());
             }
             Action::KeyboardShortcuts => {
-                self.set_notice(Some("Ctrl+B bold · Ctrl+Shift+I italic · Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
+                self.set_notice(Some("Ctrl+B bold · Ctrl+I italic · Ctrl+U underline · Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
                 return Ok(());
             }
             Action::Export => {
@@ -5920,14 +5920,10 @@ impl<'a> Session<'a> {
                 }
             }
             Command::Hotkey(Hotkey::InsertImage) => {
-                if self.managed_documents {
-                    if self.active_cell.is_some() {
-                        self.set_notice(Some("Move outside the table to insert an image.".into()));
-                    } else {
-                        self.check_editable()?;
-                        self.document_request = Some(DocumentRequest::InsertImage);
-                    }
+                if self.active_cell.is_some() {
+                    self.set_notice(Some("Move outside the table to insert an image.".into()));
                 } else {
+                    self.check_editable()?;
                     self.insert_image()?;
                 }
             }

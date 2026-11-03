@@ -138,7 +138,7 @@ pub enum Hotkey {
     SelectAll,
     /// Ctrl+B: toggle bold.
     Bold,
-    /// Ctrl+Shift+I: toggle italic (Ctrl+I remains the image shortcut).
+    /// Ctrl+I: toggle italic, matching Google Docs.
     Italic,
     /// Ctrl+I. Insert an image at the caret.
     ///
@@ -388,12 +388,11 @@ impl Keymap {
                 KEY_S if !mods.shift() && !mods.alt() => Some(Hotkey::Save),
                 KEY_A if !mods.shift() && !mods.alt() => Some(Hotkey::SelectAll),
                 KEY_B if !mods.shift() && !mods.alt() => Some(Hotkey::Bold),
-                KEY_I if mods.shift() && !mods.alt() => Some(Hotkey::Italic),
+                KEY_I if !mods.shift() && !mods.alt() => Some(Hotkey::Italic),
                 KEY_HOME if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentStart),
                 KEY_END if !mods.shift() && !mods.alt() => Some(Hotkey::DocumentEnd),
                 KEY_T if !mods.shift() && !mods.alt() => Some(Hotkey::InsertTable),
                 KEY_M if !mods.shift() && !mods.alt() => Some(Hotkey::InsertMath),
-                KEY_I if !mods.shift() && !mods.alt() => Some(Hotkey::InsertImage),
                 KEY_C if !mods.shift() && !mods.alt() => Some(Hotkey::Copy),
                 KEY_X if !mods.shift() && !mods.alt() => Some(Hotkey::Cut),
                 KEY_V if !mods.shift() && !mods.alt() => Some(Hotkey::Paste),
@@ -773,13 +772,14 @@ mod tests {
     }
 
     #[test]
-    fn italic_shortcut_does_not_replace_the_existing_image_shortcut() {
+    fn italic_shortcut_is_ctrl_i() {
         let km = Keymap::us();
         let mut mods = ctrl();
         assert_eq!(
             km.dispatch(InputEvent::press(KEY_I), &mods),
-            Some(Command::Hotkey(Hotkey::InsertImage))
+            Some(Command::Hotkey(Hotkey::Italic))
         );
+        // Shift does not change it: Ctrl+Shift+I is also italic, not a different command.
         mods.update(KEY_LEFTSHIFT, 1);
         assert_eq!(
             km.dispatch(InputEvent::press(KEY_I), &mods),
