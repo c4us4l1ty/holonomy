@@ -8418,7 +8418,7 @@ impl<'a> Session<'a> {
                         y,
                         at + cursor as u32,
                         run.len() as u32,
-                        self.span_style(span),
+                        self.span_style(&span),
                         span_ink(&span, ink),
                         // **The three new properties, from the same span the face came from.** The
                         // size is the heading's, the shift is the super/subscript's, and the two
@@ -8434,7 +8434,7 @@ impl<'a> Session<'a> {
                     pen_x += pen_of(
                         &self.painter,
                         run,
-                        self.span_style(span),
+                        self.span_style(&span),
                         // **The same size the run was emitted at**, so the next run starts where this
                         // one's glyphs ended -- see `Painter::advance_at`.
                         self.run_size_index(span.style_flags),
