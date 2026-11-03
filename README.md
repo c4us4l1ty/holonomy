@@ -1,4 +1,4 @@
-# 🌌 HOLONOMY (`v5.0.0-OMEGA`)
+# HOLONOMY (`v5.0.0-OMEGA`)
 ### The Post-Quantum, Zero-Plaintext-In-Silicon Rich Document Fortress
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 
 ---
 
-## 📖 Overview & The `.wavefunction` Cloud Workflow
+## Overview & The `.wavefunction` Cloud Workflow
 
 Traditional high-security workflows force an impossible choice: either reboot your computer into an air-gapped Live-USB OS (disrupting your daily workflow), or back up encrypted documents to cloud storage (Google Drive, Dropbox, S3) where revision history diffing ($T_0 \oplus T_1$), quantum harvest-now-decrypt-later attacks, host-OS screen scrapers (Windows Recall / `BitBlt`), and RAM dumpers compromise your data.
 
@@ -22,7 +22,7 @@ Traditional high-security workflows force an impossible choice: either reboot yo
 
 ---
 
-## ⚡ The 7 Singularity Breakthroughs of `v5.0.0-OMEGA`
+## The 7 Singularity Breakthroughs of `v5.0.0-OMEGA`
 
 ### 1. Homomorphic Visual-Cryptographic Cut-Through (*Zero Plaintext in Silicon*)
 In every conventional application, viewing an encrypted document requires decrypting the text in RAM or CPU registers before rendering it to the screen—where it is vulnerable to `/proc/$PID/mem` dumps, DMA attacks, and preemptive OS kernel context switches (`FXSAVE` dumping `xmm` registers into kernel slab memory).
@@ -59,7 +59,7 @@ Traditional anti-debugging checks (`if (is_debugger_present()) exit()`) are triv
 
 ---
 
-## 🛠️ Open-Source Repositories & Inspirations
+## Open-Source Repositories & Inspirations
 
 Holonomy stands on the shoulders of the open-source Rust cryptography and systems ecosystem. We directly vendor, adapt, and draw architectural inspiration from the following repositories:
 
@@ -78,7 +78,7 @@ Holonomy stands on the shoulders of the open-source Rust cryptography and system
 
 ---
 
-## 🚀 Quick Start & Operational Workflow
+## Quick Start & Operational Workflow
 
 ### 1. Build the Stripped Static Binary
 ```bash
@@ -99,7 +99,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ---
 
-## 🏛️ Authorship & Architectural Credits
+## Authorship & Architectural Credits
 
 * **Product & Vision Lead:** Holonomy Core Creator — Conceived the `.wavefunction` cloud-entangled security workflow, the [`storytold/wordcraft`](https://github.com/storytold/wordcraft) UI integration, and the Post-Quantum hardware-umbilical paradigm.
 * **Principal Singularity Systems & Cryptographic Co-Architect:** **Gemini (Google DeepMind)** — Executed the `v5.0.0-OMEGA` adversarial teardown and co-architected the *Homomorphic Visual-Cryptographic Cut-Through* pipeline, *Constant-Variance Smooth-Pursuit Oculomotor Cryptography (`SPOC`)*, *Branchless Wavefunction Collapse on Observation*, *Two-Phase `CMT-4` `ML-KEM-1024` Root Capsule*, *21-Bit Feistel 1:1 USB Entanglement with $RS(255,223)$ Self-Healing*, and the *Cross-Process `memfd_secret` Sentinel*.
