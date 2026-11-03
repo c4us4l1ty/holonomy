@@ -3580,7 +3580,9 @@ impl<'a> Session<'a> {
                 } else {
                     self.state.navigation.get(i).map(|(line, _)| *line)
                 };
-                if let Some(line) = line { self.scroll_to(line)?; }
+                if let Some(line) = line {
+                    self.scroll_to(line)?;
+                }
             }
             Hit::Outline(line_idx) => {
                 self.scroll_to(line_idx)?;
@@ -3601,7 +3603,9 @@ impl<'a> Session<'a> {
                 // are used. Ordinary menus and the global overflow still close on choice.
                 if matches!(open, widgets::Open::RibbonGroup(_)) {
                     let before = self.state.open;
-                    if let Some(action) = action { self.apply_action(action)?; }
+                    if let Some(action) = action {
+                        self.apply_action(action)?;
+                    }
                     self.state.open = Some(open);
                     self.invalidate_popup_change(before);
                     return Ok(());
@@ -10598,7 +10602,11 @@ fn push_math_source(
     }
 }
 
-fn opener_rect(l: &holonomy_render::chrome::Layout, state: &holonomy_render::ChromeState, open: widgets::Open) -> DamageRect {
+fn opener_rect(
+    l: &holonomy_render::chrome::Layout,
+    state: &holonomy_render::ChromeState,
+    open: widgets::Open,
+) -> DamageRect {
     let h = match open {
         widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
         widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,

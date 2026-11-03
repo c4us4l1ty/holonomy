@@ -805,7 +805,11 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         Open::Tool(_) => l.toolbar.bottom(),
     };
 
-    let pad = if matches!(open, Open::RibbonOverflow | Open::RibbonGroup(_)) { l.cell_w } else { 2 * l.cell_w };
+    let pad = if matches!(open, Open::RibbonOverflow | Open::RibbonGroup(_)) {
+        l.cell_w
+    } else {
+        2 * l.cell_w
+    };
     // **The width is computed over the whole row, and the whole row is more than the label.**
     //
     // # CORRECTION, part 39: the accelerator was not in it, and a menu row is not a label
@@ -857,7 +861,11 @@ pub fn popup(l: &Layout, state: &ChromeState, open: Option<Open>) -> Option<Popu
         let per_col = items.len().div_ceil(cols).min(fits);
         let shown = items.len().min(per_col * cols);
         let panel_w = w.saturating_mul(cols as u32).min(l.width);
-        let x = if matches!(open, Open::RibbonGroup(_)) { anchor_x.min(l.width.saturating_sub(panel_w)) } else { l.width.saturating_sub(panel_w) };
+        let x = if matches!(open, Open::RibbonGroup(_)) {
+            anchor_x.min(l.width.saturating_sub(panel_w))
+        } else {
+            l.width.saturating_sub(panel_w)
+        };
         let h = (per_col as u32 * row_h + pad).min(l.height.saturating_sub(y));
         let rows = (0..shown)
             .map(|i| {
@@ -956,13 +964,23 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
                     .find(|b| b.action == a)
                     .map(|b| b.rect)
             }),
-        Hit::RibbonTab(i) => crate::ribbon::tab_rects(l).get(i).copied().filter(|r| !r.is_empty()),
+        Hit::RibbonTab(i) => crate::ribbon::tab_rects(l)
+            .get(i)
+            .copied()
+            .filter(|r| !r.is_empty()),
         Hit::RibbonMore => Some(crate::ribbon::more_rect(l)).filter(|r| !r.is_empty()),
-        Hit::RibbonGroup(index) => crate::ribbon::layout(l, state).0.get(index).map(|g| crate::ribbon::group_trigger(l, g)).filter(|r| !r.is_empty()),
+        Hit::RibbonGroup(index) => crate::ribbon::layout(l, state)
+            .0
+            .get(index)
+            .map(|g| crate::ribbon::group_trigger(l, g))
+            .filter(|r| !r.is_empty()),
         Hit::RibbonSearch => Some(crate::ribbon::search_rect(l)),
         Hit::RibbonLock => Some(crate::ribbon::lock_rect(l)),
         Hit::RibbonCollapse => Some(crate::ribbon::collapse_rect(l)),
-        Hit::Nav(i) => crate::ribbon::nav_rows(l, state).into_iter().find(|(index, _)| *index == i).map(|(_, r)| r),
+        Hit::Nav(i) => crate::ribbon::nav_rows(l, state)
+            .into_iter()
+            .find(|(index, _)| *index == i)
+            .map(|(_, r)| r),
         Hit::NavTab(i) => crate::ribbon::nav_tabs(l).get(usize::from(i)).copied(),
         Hit::NavSearch => Some(crate::ribbon::nav_search(l)),
         Hit::NavClose => Some(crate::ribbon::nav_close(l)),
@@ -1249,13 +1267,21 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
             return Hit::None;
         }
         if state.sidebar_open {
-            if crate::ribbon::nav_close(l).contains(x, y) { return Hit::NavClose; }
-            if crate::ribbon::nav_search(l).contains(x, y) { return Hit::NavSearch; }
+            if crate::ribbon::nav_close(l).contains(x, y) {
+                return Hit::NavClose;
+            }
+            if crate::ribbon::nav_search(l).contains(x, y) {
+                return Hit::NavSearch;
+            }
             for (i, r) in crate::ribbon::nav_tabs(l).into_iter().enumerate() {
-                if r.contains(x, y) { return Hit::NavTab(i as u8); }
+                if r.contains(x, y) {
+                    return Hit::NavTab(i as u8);
+                }
             }
             for (i, r) in crate::ribbon::nav_rows(l, state) {
-                if r.contains(x, y) { return Hit::Nav(i); }
+                if r.contains(x, y) {
+                    return Hit::Nav(i);
+                }
             }
             if l.sidebar.contains(x, y) {
                 return Hit::None;

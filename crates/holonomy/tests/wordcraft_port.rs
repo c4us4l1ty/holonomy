@@ -14,7 +14,11 @@ fn atlas() -> &'static holonomy_assets::atlas::Atlas {
 }
 
 fn desktop(width: u32, height: u32, zoom: u32) -> Session<'static> {
-    let m = ChromeMetrics { width, height, ..ChromeMetrics::DESKTOP };
+    let m = ChromeMetrics {
+        width,
+        height,
+        ..ChromeMetrics::DESKTOP
+    };
     let mut s = Session::new(
         Editor::new(),
         Painter::new(atlas(), 0),
@@ -28,9 +32,17 @@ fn desktop(width: u32, height: u32, zoom: u32) -> Session<'static> {
 }
 
 fn click(s: &mut Session<'_>, x: u32, y: u32, time_ms: u64) {
-    s.handle_pointer(&mut holonomy::store::NoSource, Event::Button {
-        button: Button::Left, pressed: true, x: x as i32, y: y as i32, time_ms,
-    }).unwrap();
+    s.handle_pointer(
+        &mut holonomy::store::NoSource,
+        Event::Button {
+            button: Button::Left,
+            pressed: true,
+            x: x as i32,
+            y: y as i32,
+            time_ms,
+        },
+    )
+    .unwrap();
 }
 
 #[test]
@@ -54,8 +66,13 @@ fn native_palette_is_the_upstream_token_set() {
 #[test]
 fn every_tab_keeps_hidden_commands_reachable_at_every_width() {
     for (w, h, zoom) in [
-        (1920, 1080, 125), (1600, 900, 125), (1280, 800, 100),
-        (900, 700, 100), (768, 520, 125), (600, 600, 100), (480, 520, 125),
+        (1920, 1080, 125),
+        (1600, 900, 125),
+        (1280, 800, 100),
+        (900, 700, 100),
+        (768, 520, 125),
+        (600, 600, 100),
+        (480, 520, 125),
     ] {
         let mut s = desktop(w, h, zoom);
         for tab in 1..ribbon::TABS.len() as u8 {
@@ -65,15 +82,25 @@ fn every_tab_keeps_hidden_commands_reachable_at_every_width() {
             let (groups, buttons) = ribbon::layout(&l, &s.state);
             let overflow = ribbon::overflow(&l, &s.state);
             for b in buttons.iter().filter(|b| !b.rect.is_empty()) {
-                assert!(b.rect.right() <= l.width && b.rect.bottom() <= l.toolbar.bottom(), "{w}x{h} tab {tab}: `{}` outside ribbon", b.label);
+                assert!(
+                    b.rect.right() <= l.width && b.rect.bottom() <= l.toolbar.bottom(),
+                    "{w}x{h} tab {tab}: `{}` outside ribbon",
+                    b.label
+                );
             }
             for b in buttons.iter().filter(|b| b.rect.is_empty()) {
                 let g = &groups[b.group];
                 let via_group = g.level == wordcraft::ribbon_fit::COLLAPSED
                     && !ribbon::group_trigger(&l, g).is_empty()
-                    && ribbon::group_items(&s.state, b.group).iter().any(|it| it.action == Some(b.action));
+                    && ribbon::group_items(&s.state, b.group)
+                        .iter()
+                        .any(|it| it.action == Some(b.action));
                 let via_overflow = overflow.iter().any(|it| it.action == Some(b.action));
-                assert!(via_group || via_overflow, "{w}x{h} tab {tab}: `{}` unreachable", b.label);
+                assert!(
+                    via_group || via_overflow,
+                    "{w}x{h} tab {tab}: `{}` unreachable",
+                    b.label
+                );
             }
         }
     }
@@ -84,18 +111,28 @@ fn collapsed_group_popup_runs_a_command_and_stays_open() {
     let mut s = desktop(768, 720, 125);
     let l = s.chrome_layout();
     let (groups, _) = ribbon::layout(&l, &s.state);
-    let (index, group) = groups.iter().enumerate()
+    let (index, group) = groups
+        .iter()
+        .enumerate()
         .find(|(_, g)| g.label == "Font" && g.level == wordcraft::ribbon_fit::COLLAPSED)
         .expect("Font collapses at 768 px / 125%");
     let r = ribbon::group_trigger(&l, group);
     click(&mut s, r.x + r.width / 2, r.y + r.height / 2, 1);
     assert_eq!(s.state.open, Some(widgets::Open::RibbonGroup(index)));
     let pop = widgets::popup(&l, &s.state, s.state.open).unwrap();
-    let row = pop.rows.iter().enumerate()
+    let row = pop
+        .rows
+        .iter()
+        .enumerate()
         .find(|(i, _)| ribbon::group_items(&s.state, index)[*i].action == Some(Action::ToggleBold))
-        .map(|(_, r)| *r).expect("Bold row");
+        .map(|(_, r)| *r)
+        .expect("Bold row");
     click(&mut s, row.x + row.width / 2, row.y + row.height / 2, 2);
-    assert_eq!(s.state.open, Some(widgets::Open::RibbonGroup(index)), "group palette stays open");
+    assert_eq!(
+        s.state.open,
+        Some(widgets::Open::RibbonGroup(index)),
+        "group palette stays open"
+    );
     assert!(s.state.styles.bold, "Bold command ran");
     click(&mut s, r.x + r.width / 2, r.y + r.height / 2, 3);
     assert_eq!(s.state.open, None, "trigger toggles the palette closed");
@@ -108,10 +145,17 @@ fn styles_gallery_applies_a_real_persisted_style() {
     s.select_range(0, s.text_len()).unwrap();
     let l = s.chrome_layout();
     let (_, buttons) = ribbon::layout(&l, &s.state);
-    let tile = buttons.iter().find(|b| b.action == Action::SetStyle(1) && !b.rect.is_empty())
+    let tile = buttons
+        .iter()
+        .find(|b| b.action == Action::SetStyle(1) && !b.rect.is_empty())
         .expect("Heading 1 tile visible in the compact gallery");
     assert!(tile.style_preview);
-    click(&mut s, tile.rect.x + tile.rect.width / 2, tile.rect.y + tile.rect.height / 2, 1);
+    click(
+        &mut s,
+        tile.rect.x + tile.rect.width / 2,
+        tile.rect.y + tile.rect.height / 2,
+        1,
+    );
     assert_eq!(s.state.style_index, 1);
     let flags = s.editor().style_at(0).style_flags;
     assert_ne!(flags & holonomy_text::STYLE_HEADER, 0);
@@ -129,9 +173,17 @@ fn navigation_pane_switches_between_headings_and_pages_and_closes() {
     assert!(!s.state.navigation.is_empty());
     let l = s.chrome_layout();
     let tabs = ribbon::nav_tabs(&l);
-    click(&mut s, tabs[1].x + tabs[1].width / 2, tabs[1].y + tabs[1].height / 2, 1);
+    click(
+        &mut s,
+        tabs[1].x + tabs[1].width / 2,
+        tabs[1].y + tabs[1].height / 2,
+        1,
+    );
     assert_eq!(s.state.nav_tab, 1);
-    assert_eq!(ribbon::nav_entry_count(&l, &s.state), l.page_count(s.state.total_lines) as usize);
+    assert_eq!(
+        ribbon::nav_entry_count(&l, &s.state),
+        l.page_count(s.state.total_lines) as usize
+    );
     let rows = ribbon::nav_rows(&l, &s.state);
     if rows.len() > 1 {
         let (_, r) = rows[1];
@@ -139,13 +191,26 @@ fn navigation_pane_switches_between_headings_and_pages_and_closes() {
         assert!(s.state.scroll_line >= l.page_rows());
     }
     let close = ribbon::nav_close(&l);
-    click(&mut s, close.x + close.width / 2, close.y + close.height / 2, 3);
+    click(
+        &mut s,
+        close.x + close.width / 2,
+        close.y + close.height / 2,
+        3,
+    );
     assert!(!s.state.sidebar_open);
     s.apply_action(Action::ToggleNavigation).unwrap();
     let l = s.chrome_layout();
     let search = ribbon::nav_search(&l);
-    click(&mut s, search.x + search.width / 2, search.y + search.height / 2, 4);
-    assert!(matches!(s.take_document_request(), Some(holonomy::DocumentRequest::Find)));
+    click(
+        &mut s,
+        search.x + search.width / 2,
+        search.y + search.height / 2,
+        4,
+    );
+    assert!(matches!(
+        s.take_document_request(),
+        Some(holonomy::DocumentRequest::Find)
+    ));
 }
 
 #[test]

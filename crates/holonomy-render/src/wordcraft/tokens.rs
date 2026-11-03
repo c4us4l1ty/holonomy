@@ -102,7 +102,11 @@ impl Tokens {
     }
 
     pub const fn get(dark: bool) -> Self {
-        if dark { Self::dark() } else { Self::light() }
+        if dark {
+            Self::dark()
+        } else {
+            Self::light()
+        }
     }
 }
 

@@ -27,9 +27,16 @@ fn main() {
     // ppem zoom pair. The unflagged historical compact-chrome fixture is kept.
     let desktop = std::env::args().any(|a| a == "--desktop");
     let ppem = std::env::args()
-        .find_map(|a| a.strip_prefix("--ppem=").and_then(|v| v.parse::<u16>().ok()))
+        .find_map(|a| {
+            a.strip_prefix("--ppem=")
+                .and_then(|v| v.parse::<u16>().ok())
+        })
         .unwrap_or(if desktop { 16 } else { 24 });
-    let sizes = if desktop && ppem == 16 { vec![16, 20] } else { vec![ppem] };
+    let sizes = if desktop && ppem == 16 {
+        vec![16, 20]
+    } else {
+        vec![ppem]
+    };
     let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
         holonomy_assets::build_atlas(&sizes).expect("atlas").0,
     ));
@@ -76,9 +83,13 @@ fn main() {
             s.insert_text(&extra).expect("document text");
         }
         let zoom = std::env::args()
-            .find_map(|a| a.strip_prefix("--zoom=").and_then(|v| v.parse::<u32>().ok()))
+            .find_map(|a| {
+                a.strip_prefix("--zoom=")
+                    .and_then(|v| v.parse::<u32>().ok())
+            })
             .unwrap_or(if m.width >= 1800 { 125 } else { 100 });
-        s.set_zoom(zoom).expect("desktop zoom available in this atlas");
+        s.set_zoom(zoom)
+            .expect("desktop zoom available in this atlas");
     } else {
         // Preserve the original compact-chrome fixture for sealed UI probes.
         s.state.docs = vec![

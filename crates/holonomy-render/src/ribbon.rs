@@ -15,25 +15,59 @@ use crate::wordcraft::{gallery, ribbon_fit};
 /// The native renderer's view of WordCraft's design tokens.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    pub title: u32, pub ribbon: u32, pub canvas: u32, pub border: u32,
-    pub text: u32, pub dim: u32, pub disabled: u32, pub hover: u32,
-    pub pressed: u32, pub checked: u32, pub accent: u32, pub on_accent: u32,
-    pub input: u32, pub input_border: u32, pub group: u32,
-    pub ruler: u32, pub ruler_margin: u32,
-    pub icon: u32, pub panel: u32, pub border_strong: u32,
-    pub accent_text: u32, pub tab_strip: u32, pub status_bar: u32, pub menu: u32,
+    pub title: u32,
+    pub ribbon: u32,
+    pub canvas: u32,
+    pub border: u32,
+    pub text: u32,
+    pub dim: u32,
+    pub disabled: u32,
+    pub hover: u32,
+    pub pressed: u32,
+    pub checked: u32,
+    pub accent: u32,
+    pub on_accent: u32,
+    pub input: u32,
+    pub input_border: u32,
+    pub group: u32,
+    pub ruler: u32,
+    pub ruler_margin: u32,
+    pub icon: u32,
+    pub panel: u32,
+    pub border_strong: u32,
+    pub accent_text: u32,
+    pub tab_strip: u32,
+    pub status_bar: u32,
+    pub menu: u32,
 }
 impl Palette {
     pub fn get(dark: bool) -> Self {
         let t = crate::wordcraft::tokens::Tokens::get(dark);
         Self {
-            title: t.title_bar, ribbon: t.ribbon, canvas: t.canvas, border: t.border,
-            text: t.text, dim: t.text_dim, disabled: t.text_disabled, hover: t.hover,
-            pressed: t.pressed, checked: t.checked, accent: t.accent, on_accent: t.on_accent,
-            input: t.input, input_border: t.input_border, group: t.group_label,
-            ruler: t.ruler, ruler_margin: t.ruler_margin, icon: t.icon, panel: t.panel,
-            border_strong: t.border_strong, accent_text: t.accent_text,
-            tab_strip: t.tab_strip, status_bar: t.status_bar, menu: t.menu,
+            title: t.title_bar,
+            ribbon: t.ribbon,
+            canvas: t.canvas,
+            border: t.border,
+            text: t.text,
+            dim: t.text_dim,
+            disabled: t.text_disabled,
+            hover: t.hover,
+            pressed: t.pressed,
+            checked: t.checked,
+            accent: t.accent,
+            on_accent: t.on_accent,
+            input: t.input,
+            input_border: t.input_border,
+            group: t.group_label,
+            ruler: t.ruler,
+            ruler_margin: t.ruler_margin,
+            icon: t.icon,
+            panel: t.panel,
+            border_strong: t.border_strong,
+            accent_text: t.accent_text,
+            tab_strip: t.tab_strip,
+            status_bar: t.status_bar,
+            menu: t.menu,
         }
     }
 }
@@ -473,7 +507,12 @@ pub fn more_rect(l: &Layout) -> DamageRect {
     let right = collapse_rect(l).x;
     let w = text_w(l, "More") + TAB_PAD * 2;
     let x = right.saturating_sub(w + TAB_GAP);
-    DamageRect::new(x, l.menubar.y, right.saturating_sub(x + TAB_GAP), l.menubar.height)
+    DamageRect::new(
+        x,
+        l.menubar.y,
+        right.saturating_sub(x + TAB_GAP),
+        l.menubar.height,
+    )
 }
 
 /// **The gutter a small button spends on its icon before its label may begin.**
@@ -610,7 +649,11 @@ pub fn layout(l: &Layout, state: &ChromeState) -> (Vec<Group>, Vec<Button>) {
 /// WordCraft's full -> compact -> collapsed planner, using the same measured widths
 /// for planning, painting and hit testing. Hidden commands remain in the returned
 /// button list with empty rects, so the overflow menu can enumerate them.
-fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) -> (Vec<Group>, Vec<Button>) {
+fn layout_with_limit(
+    l: &Layout,
+    state: &ChromeState,
+    available: Option<u32>,
+) -> (Vec<Group>, Vec<Button>) {
     let mut groups = Vec::new();
     let mut buttons = Vec::new();
     if state.ribbon_collapsed {
@@ -633,12 +676,23 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
         let mut large = Vec::new();
         for (action, label, icon, _) in items.iter().copied().filter(|i| i.3) {
             let style_preview = gallery::specimen(action).is_some();
-            let bw = if style_preview { gallery::tile_width(l.cell_h) } else if icon.is_none() { 92 } else { LARGE_MIN };
+            let bw = if style_preview {
+                gallery::tile_width(l.cell_h)
+            } else if icon.is_none() {
+                92
+            } else {
+                LARGE_MIN
+            };
             let bw = bw.max(text_w(l, label) + SMALL_PAD * 2);
             large.push(Button {
-                action, label, icon,
+                action,
+                label,
+                icon,
                 rect: DamageRect::new(0, top + 3, bw, body_h.saturating_sub(3)),
-                large: true, labelled: true, group: 0, style_preview,
+                large: true,
+                labelled: true,
+                group: 0,
+                style_preview,
             });
         }
         let mut cols = Vec::new();
@@ -650,17 +704,36 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
                 width = width.max(bw);
                 icon_only = icon_only.max(io);
                 col.push(Button {
-                    action, label, icon,
+                    action,
+                    label,
+                    icon,
                     rect: DamageRect::new(0, top + 3 + row as u32 * row_h, bw, row_h),
-                    large: false, labelled: true, group: 0, style_preview: false,
+                    large: false,
+                    labelled: true,
+                    group: 0,
+                    style_preview: false,
                 });
             }
             cols.push((col, width, icon_only));
         }
-        rows.push(Row { name, large, cols, caption_w: text_w(l, name) });
+        rows.push(Row {
+            name,
+            large,
+            cols,
+            caption_w: text_w(l, name),
+        });
     }
     let column_width = |col: &[Button], full: u32, compact: u32, level: u8| {
-        col.iter().map(|b| if level == ribbon_fit::COMPACT && b.icon.is_some() { compact } else { full }).max().unwrap_or(0)
+        col.iter()
+            .map(|b| {
+                if level == ribbon_fit::COMPACT && b.icon.is_some() {
+                    compact
+                } else {
+                    full
+                }
+            })
+            .max()
+            .unwrap_or(0)
     };
     let group_width = |row: &Row, level: u8| {
         let caption = row.caption_w + GROUP_PAD;
@@ -674,18 +747,29 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
                 tiles += 1;
                 tiles <= gallery::STYLE_TILES_COMPACT
             };
-            if visible { w += b.rect.width; }
+            if visible {
+                w += b.rect.width;
+            }
         }
         for (col, full, compact) in &row.cols {
             w += column_width(col, *full, *compact, level);
         }
         w.max(caption)
     };
-    let measurements: Vec<_> = rows.iter().map(|row| ribbon_fit::GroupWidths {
-        title: row.name,
-        widths: [ribbon_fit::FULL, ribbon_fit::COMPACT, ribbon_fit::COLLAPSED].map(|level| Some(group_width(row, level))),
-    }).collect();
-    let levels = ribbon_fit::plan(&measurements, available.map(|w| w.saturating_sub(start)).unwrap_or(u32::MAX));
+    let measurements: Vec<_> = rows
+        .iter()
+        .map(|row| ribbon_fit::GroupWidths {
+            title: row.name,
+            widths: [ribbon_fit::FULL, ribbon_fit::COMPACT, ribbon_fit::COLLAPSED]
+                .map(|level| Some(group_width(row, level))),
+        })
+        .collect();
+    let levels = ribbon_fit::plan(
+        &measurements,
+        available
+            .map(|w| w.saturating_sub(start))
+            .unwrap_or(u32::MAX),
+    );
     let mut x = start;
     for (gi, (row, level)) in rows.iter_mut().zip(levels).enumerate() {
         let w = group_width(row, level);
@@ -695,7 +779,11 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
         } else {
             DamageRect::new(x, top, w, h)
         };
-        groups.push(Group { label: row.name, rect: gr, level });
+        groups.push(Group {
+            label: row.name,
+            rect: gr,
+            level,
+        });
         let mut bx = x + 6;
         let mut style_tile = 0;
         for mut b in row.large.drain(..) {
@@ -705,7 +793,11 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
                 style_tile += 1;
                 hidden
             };
-            if level == ribbon_fit::COLLAPSED || gallery_hidden || gr.is_empty() || (available.is_some() && bx + b.rect.width > limit) {
+            if level == ribbon_fit::COLLAPSED
+                || gallery_hidden
+                || gr.is_empty()
+                || (available.is_some() && bx + b.rect.width > limit)
+            {
                 b.rect = DamageRect::EMPTY;
             } else {
                 b.rect.x = bx;
@@ -713,24 +805,36 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
             }
             buttons.push(b);
         }
-        for (mut col, full, compact_w) in row.cols.drain(..) {
+        for (col, full, compact_w) in row.cols.drain(..) {
             let cw = column_width(&col, full, compact_w, level);
             for mut b in col {
                 b.group = gi;
                 b.rect.width = cw;
-                if compact && b.icon.is_some() { b.labelled = false; }
-                if level == ribbon_fit::COLLAPSED || gr.is_empty() || (available.is_some() && bx + cw > limit) {
+                if compact && b.icon.is_some() {
+                    b.labelled = false;
+                }
+                if level == ribbon_fit::COLLAPSED
+                    || gr.is_empty()
+                    || (available.is_some() && bx + cw > limit)
+                {
                     b.rect = DamageRect::EMPTY;
                 } else {
                     b.rect.x = bx;
                     if b.rect.bottom() > top + body_h {
-                        b.rect.height = b.rect.height.saturating_sub(b.rect.bottom() - (top + body_h));
+                        b.rect.height = b
+                            .rect
+                            .height
+                            .saturating_sub(b.rect.bottom() - (top + body_h));
                     }
-                    if b.rect.height == 0 { b.rect = DamageRect::EMPTY; }
+                    if b.rect.height == 0 {
+                        b.rect = DamageRect::EMPTY;
+                    }
                 }
                 buttons.push(b);
             }
-            if level != ribbon_fit::COLLAPSED { bx += cw; }
+            if level != ribbon_fit::COLLAPSED {
+                bx += cw;
+            }
         }
         x = x.saturating_add(w);
     }
@@ -741,10 +845,22 @@ fn layout_with_limit(l: &Layout, state: &ChromeState, available: Option<u32>) ->
 /// group even when the group has no visible command buttons.
 pub fn group_items(state: &ChromeState, group: usize) -> Vec<crate::menus::Item> {
     let tab = usize::from(state.ribbon_tab).min(TABS.len() - 1);
-    specs(tab).get(group).map(|(_, items)| items.iter().map(|&(action, label, icon, _)| crate::menus::Item {
-        label, icon, accelerator: None, submenu: false,
-        action: Some(action), checked: active(action, state),
-    }).collect()).unwrap_or_default()
+    specs(tab)
+        .get(group)
+        .map(|(_, items)| {
+            items
+                .iter()
+                .map(|&(action, label, icon, _)| crate::menus::Item {
+                    label,
+                    icon,
+                    accelerator: None,
+                    submenu: false,
+                    action: Some(action),
+                    checked: active(action, state),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The measured click target for a collapsed group's drop-down.
@@ -752,8 +868,16 @@ pub fn group_trigger(l: &Layout, group: &Group) -> DamageRect {
     if group.level != ribbon_fit::COLLAPSED || group.rect.is_empty() {
         return DamageRect::EMPTY;
     }
-    let body = group.rect.height.saturating_sub(l.cell_h + CAPTION_AIR + CAPTION_GAP);
-    DamageRect::new(group.rect.x + 4, group.rect.y + 3, group.rect.width.saturating_sub(8), body.saturating_sub(6))
+    let body = group
+        .rect
+        .height
+        .saturating_sub(l.cell_h + CAPTION_AIR + CAPTION_GAP);
+    DamageRect::new(
+        group.rect.x + 4,
+        group.rect.y + 3,
+        group.rect.width.saturating_sub(8),
+        body.saturating_sub(6),
+    )
 }
 
 pub fn group_icon(label: &str) -> IconId {
@@ -780,9 +904,9 @@ pub fn overflow(l: &Layout, state: &ChromeState) -> Vec<crate::menus::Item> {
             // The global overflow is for commands whose group was clipped away,
             // or for compact-gallery tiles that have no individual trigger.
             b.rect.is_empty()
-                && groups.get(b.group).is_none_or(|g| {
-                    g.level != ribbon_fit::COLLAPSED || g.rect.is_empty()
-                })
+                && groups
+                    .get(b.group)
+                    .is_none_or(|g| g.level != ribbon_fit::COLLAPSED || g.rect.is_empty())
         })
         .map(|b| crate::menus::Item {
             label: b.label,
@@ -859,7 +983,12 @@ pub fn title_rect(l: &Layout) -> DamageRect {
         .map_or(12, |(_, r)| r.right())
         .saturating_add(12);
     let right = search_rect(l).x.saturating_sub(12);
-    DamageRect::new(left.min(l.width), l.title.y, right.saturating_sub(left), l.title.height)
+    DamageRect::new(
+        left.min(l.width),
+        l.title.y,
+        right.saturating_sub(left),
+        l.title.height,
+    )
 }
 
 /// A full text search field where it fits; an icon-only search button at
@@ -882,7 +1011,12 @@ pub fn search_rect(l: &Layout) -> DamageRect {
         (l.cell_h + 10).min(room.saturating_sub(title_min))
     };
     let h = header_control_h(l);
-    DamageRect::new(right.saturating_sub(width), l.title.y + l.title.height.saturating_sub(h) / 2, width, h)
+    DamageRect::new(
+        right.saturating_sub(width),
+        l.title.y + l.title.height.saturating_sub(h) / 2,
+        width,
+        h,
+    )
 }
 
 pub fn lock_rect(l: &Layout) -> DamageRect {
@@ -986,15 +1120,36 @@ fn ruler_number(
     ))));
 }
 pub(crate) fn text(
-    v: &mut Vec<SurfaceTree>, r: DamageRect, s: &str, c: u32,
-    bold: bool, center: bool, cell_w: u32, cell_h: u32,
+    v: &mut Vec<SurfaceTree>,
+    r: DamageRect,
+    s: &str,
+    c: u32,
+    bold: bool,
+    center: bool,
+    cell_w: u32,
+    cell_h: u32,
 ) {
-    text_styled(v, r, s, c, if bold { Style::BOLD } else { Style::REGULAR }, center, cell_w, cell_h);
+    text_styled(
+        v,
+        r,
+        s,
+        c,
+        if bold { Style::BOLD } else { Style::REGULAR },
+        center,
+        cell_w,
+        cell_h,
+    );
 }
 
 fn text_styled(
-    v: &mut Vec<SurfaceTree>, r: DamageRect, s: &str, c: u32,
-    face: Style, center: bool, cell_w: u32, cell_h: u32,
+    v: &mut Vec<SurfaceTree>,
+    r: DamageRect,
+    s: &str,
+    c: u32,
+    face: Style,
+    center: bool,
+    cell_w: u32,
+    cell_h: u32,
 ) {
     let advance = cell_w.max(1);
     if r.width < advance || r.height < 8 {
@@ -1034,12 +1189,7 @@ fn text_styled(
         };
     let y = r.y + r.height.saturating_sub(cell_h.min(r.height)) / 2;
     v.push(SurfaceTree::leaf(Node::Label(Label::new(
-        x as i32,
-        y as i32,
-        &shown,
-        face,
-        size,
-        c,
+        x as i32, y as i32, &shown, face, size, c,
     ))));
 }
 fn icon(v: &mut Vec<SurfaceTree>, r: DamageRect, i: IconId, c: u32, large: bool) {
@@ -1076,22 +1226,50 @@ fn active(a: Action, s: &ChromeState) -> bool {
 /// WordCraft's Navigation pane: a search affordance, real tab targets and compact
 /// heading/page rows. Geometry is shared with `widgets::hit` and the session.
 pub fn nav_close(l: &Layout) -> DamageRect {
-    DamageRect::new(l.sidebar.right().saturating_sub(40), l.sidebar.y + 12, 28.min(l.sidebar.width), 28)
+    DamageRect::new(
+        l.sidebar.right().saturating_sub(40),
+        l.sidebar.y + 12,
+        28.min(l.sidebar.width),
+        28,
+    )
 }
 pub fn nav_search(l: &Layout) -> DamageRect {
-    DamageRect::new(l.sidebar.x + 12, l.sidebar.y + 52, l.sidebar.width.saturating_sub(24), l.cell_h + 10)
+    DamageRect::new(
+        l.sidebar.x + 12,
+        l.sidebar.y + 52,
+        l.sidebar.width.saturating_sub(24),
+        l.cell_h + 10,
+    )
 }
 pub fn nav_tabs(l: &Layout) -> Vec<DamageRect> {
     let w = l.sidebar.width.saturating_sub(24) / 2;
-    (0..2).map(|i| DamageRect::new(l.sidebar.x + 12 + i * w, l.sidebar.y + 98, w, l.cell_h + 8)).collect()
+    (0..2)
+        .map(|i| DamageRect::new(l.sidebar.x + 12 + i * w, l.sidebar.y + 98, w, l.cell_h + 8))
+        .collect()
 }
 pub fn nav_entry_count(l: &Layout, s: &ChromeState) -> usize {
-    if s.nav_tab == 1 { l.page_count(s.total_lines) as usize } else { s.navigation.len() }
+    if s.nav_tab == 1 {
+        l.page_count(s.total_lines) as usize
+    } else {
+        s.navigation.len()
+    }
 }
 pub fn nav_rows(l: &Layout, s: &ChromeState) -> Vec<(usize, DamageRect)> {
     let row_h = l.cell_h + 12;
     let capacity = l.sidebar.height.saturating_sub(154) / row_h.max(1);
-    (0..nav_entry_count(l, s).min(capacity as usize)).map(|i| (i, DamageRect::new(l.sidebar.x + 8, l.sidebar.y + 146 + i as u32 * row_h, l.sidebar.width.saturating_sub(16), row_h - 2))).collect()
+    (0..nav_entry_count(l, s).min(capacity as usize))
+        .map(|i| {
+            (
+                i,
+                DamageRect::new(
+                    l.sidebar.x + 8,
+                    l.sidebar.y + 146 + i as u32 * row_h,
+                    l.sidebar.width.saturating_sub(16),
+                    row_h - 2,
+                ),
+            )
+        })
+        .collect()
 }
 
 /// Three disjoint regions in the status bar. When a notice needs space,
@@ -1113,15 +1291,20 @@ pub fn status_regions(
     let summary_x = 12.min(mode_x);
     let available = mode_x.saturating_sub(summary_x.saturating_add(8));
     let notice = s.notice.as_deref().is_some_and(|n| !n.is_empty());
-    let summary_w = text_w(l, summary)
-        .saturating_add(12)
-        .min(if notice { available / 2 } else { available });
+    let summary_w =
+        text_w(l, summary)
+            .saturating_add(12)
+            .min(if notice { available / 2 } else { available });
     let summary_rect = DamageRect::new(summary_x, l.status.y, summary_w, l.status.height);
     let notice_x = summary_rect.right().saturating_add(12).min(mode_x);
     let notice_rect = DamageRect::new(
         notice_x,
         l.status.y,
-        if notice { mode_x.saturating_sub(notice_x.saturating_add(8)) } else { 0 },
+        if notice {
+            mode_x.saturating_sub(notice_x.saturating_add(8))
+        } else {
+            0
+        },
         l.status.height,
     );
     (summary_rect, notice_rect, mode_rect)
@@ -1184,7 +1367,12 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         round(v, sr, 6, t.input_border);
         round(
             v,
-            DamageRect::new(sr.x + 1, sr.y + 1, sr.width.saturating_sub(2), sr.height.saturating_sub(2)),
+            DamageRect::new(
+                sr.x + 1,
+                sr.y + 1,
+                sr.width.saturating_sub(2),
+                sr.height.saturating_sub(2),
+            ),
             5,
             t.input,
         );
@@ -1247,7 +1435,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         if selected || s.hover == Some(crate::widgets::Hit::RibbonMore) {
             round(v, more, 5, if selected { t.ribbon } else { t.hover });
         }
-        text(v, more, "More", if selected { t.text } else { t.dim }, selected, true, cell_w, cell_h);
+        text(
+            v,
+            more,
+            "More",
+            if selected { t.text } else { t.dim },
+            selected,
+            true,
+            cell_w,
+            cell_h,
+        );
     }
     let cr = collapse_rect(l);
     icon(
@@ -1277,19 +1474,65 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     let caption_h = l.cell_h.saturating_add(CAPTION_AIR);
     let (groups, buttons) = layout(l, s);
     for (index, g) in groups.iter().enumerate() {
-        if g.rect.is_empty() { continue; }
-        fill(v, DamageRect::new(g.rect.right(), g.rect.y + 4, 1, g.rect.height.saturating_sub(8)), t.border);
+        if g.rect.is_empty() {
+            continue;
+        }
+        fill(
+            v,
+            DamageRect::new(
+                g.rect.right(),
+                g.rect.y + 4,
+                1,
+                g.rect.height.saturating_sub(8),
+            ),
+            t.border,
+        );
         if g.level == ribbon_fit::COLLAPSED {
             let r = group_trigger(l, g);
             let hit = crate::widgets::Hit::RibbonGroup(index);
-            let bg = if s.pressed == Some(hit) { t.pressed }
-                else if s.open == Some(crate::widgets::Open::RibbonGroup(index)) { t.checked }
-                else if s.hover == Some(hit) { t.hover } else { t.ribbon };
+            let bg = if s.pressed == Some(hit) {
+                t.pressed
+            } else if s.open == Some(crate::widgets::Open::RibbonGroup(index)) {
+                t.checked
+            } else if s.hover == Some(hit) {
+                t.hover
+            } else {
+                t.ribbon
+            };
             round(v, r, 4, bg);
-            icon(v, DamageRect::new(r.x, r.y, r.width, r.height.saturating_sub(l.cell_h)), group_icon(g.label), t.icon, true);
-            text(v, DamageRect::new(r.x, r.bottom().saturating_sub(l.cell_h), r.width, l.cell_h), g.label, t.text, false, true, cell_w, cell_h);
+            icon(
+                v,
+                DamageRect::new(r.x, r.y, r.width, r.height.saturating_sub(l.cell_h)),
+                group_icon(g.label),
+                t.icon,
+                true,
+            );
+            text(
+                v,
+                DamageRect::new(r.x, r.bottom().saturating_sub(l.cell_h), r.width, l.cell_h),
+                g.label,
+                t.text,
+                false,
+                true,
+                cell_w,
+                cell_h,
+            );
         }
-        text(v, DamageRect::new(g.rect.x, g.rect.bottom().saturating_sub(caption_h), g.rect.width, caption_h), g.label, t.group, false, true, cell_w, cell_h);
+        text(
+            v,
+            DamageRect::new(
+                g.rect.x,
+                g.rect.bottom().saturating_sub(caption_h),
+                g.rect.width,
+                caption_h,
+            ),
+            g.label,
+            t.group,
+            false,
+            true,
+            cell_w,
+            cell_h,
+        );
     }
     for b in buttons {
         if b.rect.is_empty() {
@@ -1297,36 +1540,118 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         }
         let hit = crate::widgets::Hit::Ribbon(b.action);
         let on = active(b.action, s);
-        let bg = if s.pressed == Some(hit) { t.pressed }
-            else if on { t.checked }
-            else if s.hover == Some(hit) { t.hover } else { t.ribbon };
+        let bg = if s.pressed == Some(hit) {
+            t.pressed
+        } else if on {
+            t.checked
+        } else if s.hover == Some(hit) {
+            t.hover
+        } else {
+            t.ribbon
+        };
         round(v, b.rect, 4, bg);
         let ink = if on { t.accent_text } else { t.text };
         if b.style_preview {
             if let Some((sample, face, colour)) = gallery::specimen(b.action) {
-                let tile = DamageRect::new(b.rect.x + 2, b.rect.y + 2, b.rect.width.saturating_sub(4), b.rect.height.saturating_sub(4));
+                let tile = DamageRect::new(
+                    b.rect.x + 2,
+                    b.rect.y + 2,
+                    b.rect.width.saturating_sub(4),
+                    b.rect.height.saturating_sub(4),
+                );
                 round(v, tile, 3, if on { t.accent } else { t.border_strong });
-                round(v, DamageRect::new(tile.x + 1, tile.y + 1, tile.width.saturating_sub(2), tile.height.saturating_sub(2)), 2, if on { t.checked } else { t.input });
-                let specimen_box = DamageRect::new(tile.x + 3, tile.y + 3, tile.width.saturating_sub(6), tile.height.saturating_sub(l.cell_h + 6));
-                let specimen_ink = if s.dark && colour == 0xFF242424 { t.text } else if s.dark { t.accent_text } else { colour };
-                text_styled(v, specimen_box, sample, specimen_ink, face, true, cell_w, cell_h);
-                text(v, DamageRect::new(tile.x, tile.bottom().saturating_sub(l.cell_h + 2), tile.width, l.cell_h), b.label, t.text, false, true, cell_w, cell_h);
+                round(
+                    v,
+                    DamageRect::new(
+                        tile.x + 1,
+                        tile.y + 1,
+                        tile.width.saturating_sub(2),
+                        tile.height.saturating_sub(2),
+                    ),
+                    2,
+                    if on { t.checked } else { t.input },
+                );
+                let specimen_box = DamageRect::new(
+                    tile.x + 3,
+                    tile.y + 3,
+                    tile.width.saturating_sub(6),
+                    tile.height.saturating_sub(l.cell_h + 6),
+                );
+                let specimen_ink = if s.dark && colour == 0xFF242424 {
+                    t.text
+                } else if s.dark {
+                    t.accent_text
+                } else {
+                    colour
+                };
+                text_styled(
+                    v,
+                    specimen_box,
+                    sample,
+                    specimen_ink,
+                    face,
+                    true,
+                    cell_w,
+                    cell_h,
+                );
+                text(
+                    v,
+                    DamageRect::new(
+                        tile.x,
+                        tile.bottom().saturating_sub(l.cell_h + 2),
+                        tile.width,
+                        l.cell_h,
+                    ),
+                    b.label,
+                    t.text,
+                    false,
+                    true,
+                    cell_w,
+                    cell_h,
+                );
             }
             continue;
         }
         if let Some(i) = b.icon {
-            let icon_box = if b.large || !b.labelled { b.rect } else { DamageRect::new(b.rect.x, b.rect.y, ICON_GUTTER, b.rect.height) };
-            icon(v, icon_box, i, if on { t.accent_text } else { t.icon }, b.large);
+            let icon_box = if b.large || !b.labelled {
+                b.rect
+            } else {
+                DamageRect::new(b.rect.x, b.rect.y, ICON_GUTTER, b.rect.height)
+            };
+            icon(
+                v,
+                icon_box,
+                i,
+                if on { t.accent_text } else { t.icon },
+                b.large,
+            );
         }
         let has_menu = matches!(b.action, Action::SelectTool(_));
         let tr = if b.large {
             let icon_h = 25;
-            DamageRect::new(b.rect.x, b.rect.y + icon_h.min(b.rect.height), b.rect.width, b.rect.height.saturating_sub(icon_h))
+            DamageRect::new(
+                b.rect.x,
+                b.rect.y + icon_h.min(b.rect.height),
+                b.rect.width,
+                b.rect.height.saturating_sub(icon_h),
+            )
         } else {
             let gutter = if b.icon.is_some() { ICON_GUTTER } else { 0 };
-            DamageRect::new(b.rect.x + gutter, b.rect.y, b.rect.width.saturating_sub(gutter).saturating_sub(if has_menu { CHEVRON_W } else { 0 }), b.rect.height)
+            DamageRect::new(
+                b.rect.x + gutter,
+                b.rect.y,
+                b.rect
+                    .width
+                    .saturating_sub(gutter)
+                    .saturating_sub(if has_menu { CHEVRON_W } else { 0 }),
+                b.rect.height,
+            )
         };
-        let label = if b.action == Action::SelectTool(crate::widgets::Tool::Font) { s.font_name() } else { b.label };
+        let label = if b.action == Action::SelectTool(crate::widgets::Tool::Font) {
+            s.font_name()
+        } else {
+            b.label
+        };
         if b.labelled {
             text(v, tr, label, ink, false, b.large, cell_w, cell_h);
         }
@@ -1588,7 +1913,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     );
     let mode_zoom = format!("{}   {}%", s.mode_name(), s.zoom_percent);
     let (summary_box, notice_box, mode_box) = status_regions(l, s, &summary, &mode_zoom);
-    text(v, summary_box, &summary, t.dim, false, false, cell_w, cell_h);
+    text(
+        v,
+        summary_box,
+        &summary,
+        t.dim,
+        false,
+        false,
+        cell_w,
+        cell_h,
+    );
     if let Some(notice) = s.notice.as_deref().filter(|n| !n.is_empty()) {
         text(v, notice_box, notice, t.text, false, false, cell_w, cell_h);
     }

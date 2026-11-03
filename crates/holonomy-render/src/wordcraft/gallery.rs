@@ -29,5 +29,8 @@ pub fn tile_width(cell_h: u32) -> u32 {
 }
 
 pub fn specimen(action: Action) -> Option<(&'static str, Style, u32)> {
-    TILES.iter().find(|(a, ..)| *a == action).map(|(_, _, face, colour)| (SAMPLE, *face, *colour))
+    TILES
+        .iter()
+        .find(|(a, ..)| *a == action)
+        .map(|(_, _, face, colour)| (SAMPLE, *face, *colour))
 }
