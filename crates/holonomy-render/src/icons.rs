@@ -387,26 +387,6 @@ pub mod mask {
         b"................",
     ]);
 
-    /// Two links of a chain.
-    pub static LINK: [u64; 16] = pack(&[
-        b"................",
-        b"................",
-        b"................",
-        b"................",
-        b"................",
-        b".##############.",
-        b".#......#.....#.",
-        b".#......#.....#.",
-        b".#......#.....#.",
-        b".#......#.....#.",
-        b".##############.",
-        b"................",
-        b"................",
-        b"................",
-        b"................",
-        b"................",
-    ]);
-
     /// A frame with a sun and a mountain.
     pub static IMAGE: [u64; 16] = pack(&[
         b"................",
@@ -1069,8 +1049,6 @@ pub enum IconId {
     TextColour,
     /// Highlight.
     Highlight,
-    /// Link.
-    Link,
     /// Image.
     Image,
     /// Overflow.
@@ -1171,7 +1149,6 @@ impl IconId {
         IconId::Underline,
         IconId::TextColour,
         IconId::Highlight,
-        IconId::Link,
         IconId::Image,
         IconId::Overflow,
         IconId::ArrowLeft,
@@ -1232,7 +1209,6 @@ impl IconId {
             IconId::Underline => &mask::UNDERLINE,
             IconId::TextColour => &mask::TEXT_COLOUR,
             IconId::Highlight => &mask::HIGHLIGHT,
-            IconId::Link => &mask::LINK,
             IconId::Image => &mask::IMAGE,
             IconId::Overflow => &mask::OVERFLOW,
             IconId::ArrowLeft => &svg_masks::ARROW_LEFT_16,

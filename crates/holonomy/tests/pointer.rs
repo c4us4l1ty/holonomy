@@ -491,64 +491,19 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
     // `opened` and not here. The first version of this assertion expected `["zoom", "bold", "italic"]`
     // and the compiler was right: a dropdown's opener has changed nothing yet.
     //
-    // **The real list now has 23 tools:** Undo, Redo, Image, Print and Strikethrough run commands;
-    // Collapse changes sidebar state; Zoom, Style, Font, TextColour and Mode open dropdowns; the
-    // remaining toolbar controls either change chrome state or are the six named inert controls.
-    // The duplicated Comment and Share toolbar buttons were removed; title-bar Share exports.
-    //
-    // **The leading number said 21 and the categories said 3 + 1 + 4 + 2**, which left thirteen inert —
-    // neither matched the `22` asserted below nor the seven this file measures. The prose had drifted
-    // two parts behind the code, which is the failure mode of writing arithmetic in a comment: it is
-    // checked by nothing. The two assertions below are the arithmetic; this paragraph is the index.
-    //
-    // **Eleven, and it was twelve until part 29.** `Tool::TextColour` joined `has_dropdown` and opened
-    // a palette of six colours, which put it in the same category as Zoom and **took it out of the
-    // inert list** -- the first of the twelve to leave it. **The list in the assertion message is the
-    // evidence** and it no longer contains `text-colour`; everything else is where it was.
-    //
-    // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
-    // reason the comment above gives: opening a popup has applied nothing yet.
-    // **Six inert, and it was eight until `Tool::Comment` was removed.** Part 33's `Tool::Print`
-    // was given `Action::Export` to do rather than taken off the toolbar; part 46's `Tool::Comment`
-    // was intended to go, never did, and is now gone. **The removal is why the tool count moved and
-    // not the inert count alone.**
-    // **And it was seven until `Underline` was wired**: `STYLE_UNDERLINE` is in the document model, the
-    // button arms it, the painter draws a rule and the export writes a `<u>`, so the button is no
-    // longer a widget with nothing behind it.
-    // The 23-item list includes later Print and Strikethrough wiring, not just the older three
-    // document commands; these are not inert even though this test measures only chrome and inert.
+    // A removed fake control cannot occupy space or be counted as a successful press.
+    // The remaining placeholders are explicitly counted below and in toolbar_wiring.rs.
     assert_eq!(
         widgets::TOOLBAR.len(),
-        23,
-        "The toolbar has 23 real controls, including the later Strikethrough button. The inert \
-         Comment and Share tools were removed rather than leaving two buttons which could never work; \
-         the title-bar Share still exports the document. A new control requires a deliberate action."
+        22,
+        "22 controls, including Image and Strikethrough; fake Comment, Share and Link buttons \
+         must not return without a backing action."
     );
-    // **Eight.** Four buttons left the inert list in part 44, each with a decision
-    // behind it:
-    //
-    // | left | part | what it is now |
-    // |---|---|---|
-    // | `size-down`, `size-up` | 44 | the zoom pair, reached from the toolbar |
-    // | `mode` | 44 | a two-row switcher -- **a fifth dropdown** |
-    // | `overflow` | 44 | a menu of the tools that did not fit |
-    //
-    // **The arithmetic, restated: 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 chrome
-    // changes leaves the 7 above.**
-    // Two of those five are new categories this part created rather than new members of an old one --
-    // `mode` made the dropdown count five, and `overflow` is a chrome change that changes nothing at
-    // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
-    //
-    // **The list in the message is the evidence.** It is [`search`, `spellcheck`, `paint-format`,
-    // `font-size`, `highlight`, `link`] -- six, not seven -- and every one of them needs a model this
-    // program does not have (a search query, a dictionary, a format model, a size list the atlas can
-    // back, a highlight colour, a URL). `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six`
-    // records them by name, with a reason for each.
+    // Only the five placeholders named by toolbar_wiring.rs may count as inert.
     assert_eq!(
         inert.len(),
-        6,
-        "**six inert buttons**, not stub actions that silently do nothing. The list is {inert:?}; \
-         Comment and Share were removed from the toolbar and the title-bar Share remains a real export."
+        5,
+        "the five known placeholders are the only inert controls: {inert:?}"
     );
 }
 
