@@ -41,7 +41,9 @@
 use crate::asset::{Asset, AssetCatalog, AssetError, AssetId};
 use crate::payload::{self, PayloadError};
 use crate::rope::{Rope, RopeError};
-use crate::span::{FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_COUNT};
+use crate::span::{
+    FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_BODY, FACE_COUNT,
+};
 use crate::tables::{col_widths_for, TableMap, TableMapError};
 use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
 
@@ -992,16 +994,21 @@ impl Editor {
         // unconditional `collect()` over a `filter_map` takes its capacity from the iterator's upper
         // size hint *even when it yields nothing*, which is the second allocation per delete that
         // `no_alloc.rs` measures. The filter, then the `is_empty` check, is what makes that zero.
-        let styled: Vec<TextIntervalSpan> = if removed_spans
-            .iter()
-            .all(|s| s.style_flags == 0 && s.color_rgb == 0)
-        {
+        // **A run whose only attribute is its face is still styled**, and it has to be in the record:
+        // a paragraph in JetBrains Mono with no bold and no colour is the *common* case, and the filter
+        // below used to test flags and colour alone -- so deleting it and undoing lost the face, because
+        // the record was empty and the restore took the `GrowIntoInsert` guess or the plain default.
+        let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
+            s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
+        }) {
             Vec::new()
         } else {
             removed_spans
                 .iter()
                 .copied()
-                .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
+                .filter(|s| {
+                    s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY
+                })
                 .collect()
         };
         if self.style_undo.len() == STYLE_UNDO_DEPTH {
@@ -1566,19 +1573,27 @@ impl Editor {
                         // are exactly the parts that were plain, and they are restored as plain.
                         let mut cursor = start;
                         for s in spans {
+                            // **A restored gap is plain in *every* attribute, face included.** A
+                            // `style_range(.., 0, 0)` clears the flags and the colour and leaves the
+                            // face alone, so the gap kept the `GrowIntoInsert` guess -- with the face
+                            // left behind, a deleted-and-undone plain run came back monospaced.
                             if s.start_byte > cursor {
-                                self.spans.style_range(cursor, s.start_byte, 0, 0)?;
+                                self.spans
+                                    .style_range_faced(cursor, s.start_byte, 0, 0, FACE_BODY)?;
                             }
-                            self.spans.style_range(
+                            // **`style_range_faced`, so the face comes back with the rest of the run.**
+                            self.spans.style_range_faced(
                                 s.start_byte,
                                 s.end_byte,
                                 s.style_flags,
                                 s.color_rgb,
+                                s.font_face,
                             )?;
                             cursor = s.end_byte;
                         }
                         if cursor < end {
-                            self.spans.style_range(cursor, end, 0, 0)?;
+                            self.spans
+                                .style_range_faced(cursor, end, 0, 0, FACE_BODY)?;
                         }
                     }
                     _ => {
@@ -2283,16 +2298,21 @@ impl Editor {
                 // The styling this redo removed, pushed **total** so `undo`'s pop pairs one-for-one
                 // with it, exactly as `delete_at` does. `Vec::new()` allocates nothing, so an unstyled
                 // region costs only a header.
-                let styled: Vec<TextIntervalSpan> = if removed_spans
-                    .iter()
-                    .all(|s| s.style_flags == 0 && s.color_rgb == 0)
-                {
+                // Same predicate as `delete_at`'s, face included, and for the same reason: a redone
+                // delete of a monospaced run has to record the face or its undo restores Inter.
+                let styled: Vec<TextIntervalSpan> = if removed_spans.iter().all(|s| {
+                    s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY
+                }) {
                     Vec::new()
                 } else {
                     removed_spans
                         .iter()
                         .copied()
-                        .filter(|s| s.style_flags != 0 || s.color_rgb != 0)
+                        .filter(|s| {
+                            s.style_flags != 0
+                                || s.color_rgb != 0
+                                || s.font_face != FACE_BODY
+                        })
                         .collect()
                 };
                 if self.style_undo.len() == STYLE_UNDO_DEPTH {
