@@ -1,128 +1,69 @@
-info: syncing channel updates for 1.98.1-x86_64-unknown-linux-gnu
-info: latest update on 2026-09-03 for version 1.98.1 (48a229cea 2026-09-01)
-info: downloading 6 components
-warn: the missing active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been auto-installed
-warn: this might cause rustup commands to take longer time to finish than expected
-info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
-[1m[92m    Updating[0m crates.io index
-[1m[92m Downloading[0m crates ...
-[1m[92m  Downloaded[0m aead v0.6.1
-[1m[92m  Downloaded[0m bitflags v2.13.2
-[1m[92m  Downloaded[0m adler2 v2.0.1
-[1m[92m  Downloaded[0m argon2 v0.6.0
-[1m[92m  Downloaded[0m alloc-no-stdlib v3.0.0
-[1m[92m  Downloaded[0m alloc-stdlib v0.3.0
-[1m[92m  Downloaded[0m base64ct v1.8.3
-[1m[92m  Downloaded[0m block-buffer v0.12.1
-[1m[92m  Downloaded[0m blake2 v0.11.0
-[1m[92m  Downloaded[0m cfg-if v1.0.5
-[1m[92m  Downloaded[0m rand_core v0.10.1
-[1m[92m  Downloaded[0m tinyvec v1.13.3
-[1m[92m  Downloaded[0m inout v0.2.2
-[1m[92m  Downloaded[0m zeroize_derive v1.5.0
-[1m[92m  Downloaded[0m crypto-common v0.2.2
-[1m[92m  Downloaded[0m cpufeatures v0.3.1
-[1m[92m  Downloaded[0m password-hash v0.6.1
-[1m[92m  Downloaded[0m universal-hash v0.6.1
-[1m[92m  Downloaded[0m itoa v1.0.18
-[1m[92m  Downloaded[0m getrandom v0.4.3
-[1m[92m  Downloaded[0m secrecy v0.10.3
-[1m[92m  Downloaded[0m cipher v0.5.2
-[1m[92m  Downloaded[0m cmov v0.5.4
-[1m[92m  Downloaded[0m phc v0.6.1
-[1m[92m  Downloaded[0m zeroize v1.9.0
-[1m[92m  Downloaded[0m ctutils v0.4.2
-[1m[92m  Downloaded[0m digest v0.11.3
-[1m[92m  Downloaded[0m poly1305 v0.9.1
-[1m[92m  Downloaded[0m memchr v2.8.3
-[1m[92m  Downloaded[0m quote v1.0.47
-[1m[92m  Downloaded[0m hybrid-array v0.4.15
-[1m[92m  Downloaded[0m sha2 v0.11.0
-[1m[92m  Downloaded[0m chacha20 v0.10.2
-[1m[92m  Downloaded[0m hmac v0.13.0
-[1m[92m  Downloaded[0m ryu v1.0.23
-[1m[92m  Downloaded[0m unicode-ident v1.0.26
-[1m[92m  Downloaded[0m const-oid v0.10.2
-[1m[92m  Downloaded[0m proc-macro2 v1.0.107
-[1m[92m  Downloaded[0m chacha20poly1305 v0.11.0
-[1m[92m  Downloaded[0m miniz_oxide v0.9.1
-[1m[92m  Downloaded[0m typenum v1.20.1
-[1m[92m  Downloaded[0m unicode-normalization v0.1.25
-[1m[92m  Downloaded[0m hkdf v0.13.0
-[1m[92m  Downloaded[0m ttf-parser v0.25.1
-[1m[92m  Downloaded[0m brotli-decompressor v6.0.1
-[1m[92m  Downloaded[0m syn v2.0.119
-[1m[92m  Downloaded[0m libc v0.2.190
-[1m[92m  Downloaded[0m pdf-writer v0.15.0
 [1m[92m   Compiling[0m libc v0.2.190
-[1m[92m   Compiling[0m getrandom v0.4.3
 [1m[92m   Compiling[0m cfg-if v1.0.5
 [1m[92m   Compiling[0m typenum v1.20.1
 [1m[92m   Compiling[0m rand_core v0.10.1
 [1m[92m   Compiling[0m cmov v0.5.4
-[1m[92m   Compiling[0m proc-macro2 v1.0.107
-[1m[92m   Compiling[0m ctutils v0.4.2
-[1m[92m   Compiling[0m quote v1.0.47
-[1m[92m   Compiling[0m unicode-ident v1.0.26
 [1m[92m   Compiling[0m const-oid v0.10.2
+[1m[92m   Compiling[0m ctutils v0.4.2
+[1m[92m   Compiling[0m zeroize v1.9.0
 [1m[92m   Compiling[0m cpufeatures v0.3.1
 [1m[92m   Compiling[0m base64ct v1.8.3
-[1m[92m   Compiling[0m hybrid-array v0.4.15
-[1m[92m   Compiling[0m syn v2.0.119
 [1m[92m   Compiling[0m alloc-no-stdlib v3.0.0
 [1m[92m   Compiling[0m alloc-stdlib v0.3.0
-[1m[92m   Compiling[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
-[1m[92m   Compiling[0m block-buffer v0.12.1
-[1m[92m   Compiling[0m crypto-common v0.2.2
-[1m[92m   Compiling[0m inout v0.2.2
-[1m[92m   Compiling[0m phc v0.6.1
-[1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m adler2 v2.0.1
 [1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m miniz_oxide v0.9.1
+[1m[92m   Compiling[0m unicode-normalization v0.1.25
+[1m[92m   Compiling[0m hybrid-array v0.4.15
+[1m[92m   Compiling[0m getrandom v0.4.3
+[1m[92m   Compiling[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
+[1m[92m   Compiling[0m phc v0.6.1
+[1m[92m   Compiling[0m brotli-decompressor v6.0.1
+[1m[92m   Compiling[0m crypto-common v0.2.2
+[1m[92m   Compiling[0m block-buffer v0.12.1
+[1m[92m   Compiling[0m holonomy-secure v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-secure)
+[1m[92m   Compiling[0m inout v0.2.2
+[1m[92m   Compiling[0m password-hash v0.6.1
+[1m[92m   Compiling[0m secrecy v0.10.3
+[1m[92m   Compiling[0m ttf-parser v0.25.1
+[1m[92m   Compiling[0m ryu v1.0.23
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m memchr v2.8.3
 [1m[92m   Compiling[0m digest v0.11.3
-[1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m cipher v0.5.2
 [1m[92m   Compiling[0m universal-hash v0.6.1
-[1m[92m   Compiling[0m poly1305 v0.9.1
-[1m[92m   Compiling[0m chacha20 v0.10.2
+[1m[92m   Compiling[0m cipher v0.5.2
+[1m[92m   Compiling[0m blake2 v0.11.0
 [1m[92m   Compiling[0m hmac v0.13.0
+[1m[92m   Compiling[0m chacha20 v0.10.2
+[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
+[1m[91merror[E0425][0m[1m: cannot find value `RECORD_BYTES` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy-text/src/editor.rs:1242:48
+     [1m[94m|[0m
+[1m[94m1242[0m [1m[94m|[0m         let needed = runs.len().saturating_mul(RECORD_BYTES);
+     [1m[94m|[0m                                                [1m[91m^^^^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+     [1m[94m|[0m
+[1m[96mhelp[0m: consider using the associated constant on `Self`
+     [1m[94m|[0m
+[1m[94m1242[0m [1m[94m| [0m        let needed = runs.len().saturating_mul([92mSelf::[0mRECORD_BYTES);
+     [1m[94m|[0m                                                [92m++++++[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `RECORD_BYTES` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy-text/src/editor.rs:1301:40
+     [1m[94m|[0m
+[1m[94m1301[0m [1m[94m|[0m         for run in record.chunks_exact(RECORD_BYTES) {
+     [1m[94m|[0m                                        [1m[91m^^^^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+     [1m[94m|[0m
+[1m[96mhelp[0m: consider using the associated constant on `Self`
+     [1m[94m|[0m
+[1m[94m1301[0m [1m[94m| [0m        for run in record.chunks_exact([92mSelf::[0mRECORD_BYTES) {
+     [1m[94m|[0m                                        [92m++++++[0m
+
+[1m[92m   Compiling[0m poly1305 v0.9.1
 [1m[92m   Compiling[0m aead v0.6.1
 [1m[92m   Compiling[0m hkdf v0.13.0
 [1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m argon2 v0.6.0
 [1m[92m   Compiling[0m sha2 v0.11.0
-[1m[92m   Compiling[0m unicode-normalization v0.1.25
-[1m[92m   Compiling[0m brotli-decompressor v6.0.1
-[1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m bitflags v2.13.2
-[1m[92m   Compiling[0m memchr v2.8.3
-[1m[92m   Compiling[0m ttf-parser v0.25.1
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m pdf-writer v0.15.0
-[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
-[1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
-[1m[92m   Compiling[0m zeroize_derive v1.5.0
-[1m[92m   Compiling[0m zeroize v1.9.0
-[1m[92m   Compiling[0m holonomy-secure v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-secure)
-[1m[92m   Compiling[0m secrecy v0.10.3
-[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
-[1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
-[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
-[1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
-[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
-[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 11.74s
-[1m[92m     Running[0m tests/zz_capture.rs (target/x86_64-unknown-linux-musl/debug/deps/zz_capture-55c896d4c24f8f7c)
-
-running 1 test
-wrote doc-16-1600
-wrote doc-20-1280
-wrote doc-16-1024
-test capture ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
-
+[1mFor more information about this error, try `rustc --explain E0425`.[0m
+[1m[91merror[0m: could not compile `holonomy-text` (lib) due to 2 previous errors
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
