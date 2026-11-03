@@ -1,0 +1,10805 @@
+//! The session: an [`Editor`], a [`Chrome`], a [`Scanout`], an [`InputSource`], and the loop that
+//! connects them.
+//!
+//! # Why this is a library and not just a `main`
+//!
+//! **The jail cannot be booted from a `#[test]`.** `unshare(CLONE_NEWUSER)` returns `EINVAL` in any
+//! multi-threaded process, and libtest always spawns a thread. So the boot chain has to be entered
+//! from a single-threaded `main`, which is [`crate::args`]'s and `main.rs`'s job.
+//!
+//! That split would normally mean the interesting half of the program is untestable. So the *loop*
+//! lives here and takes its input source and its sinks as parameters: the integration gate drives
+//! [`Session::run`] in-process with a [`ScriptedInputSource`] and pre-opened files, and `main.rs`
+//! drives the identical code with an [`EvdevSource`] and descriptors opened during boot. The only
+//! thing the gate does not cover is the `unshare` itself, which is covered by
+//! `holonomy-jail`'s own tests.
+//!
+//! # The loop's shape
+//!
+//! ```text
+//!   for each event from the source:
+//!       dispatch to a Command          (code-based keymap; hotkeys first)
+//!       apply the Command              (editor + geometry)
+//!       repaint what the edit damaged  (one line, or one cell for a caret flip)
+//!   then: export, commit, or tear down
+//! ```
+//!
+//! Two properties the shape exists for:
+//!
+//! * **The repaint is damage-limited.** An edit damages its line's box; a caret flip damages one
+//!   cell. Everything else on screen keeps the pixels it already had. FR-3.4.
+//! * **A frame with no damage is not painted.** The loop asks the [`Blink`] for damage and skips
+//!   the paint when there is none, which is what makes a 60fps loop cost nothing between blinks.
+//!
+//! # Sinks are pre-opened, always
+//!
+//! [`Session::export`] writes to a [`std::fs::File`] the *caller* opened. The session never opens
+//! anything, because inside the jail there is no `open` -- see
+//! [`holonomy_jail::seccomp::table::ALLOWLIST`]. An exporter that reached for a path would work in
+//! every test and fail as a `SIGSYS` and an exit 137 the first time it ran sealed.
+
+use std::fs::File;
+use std::io::Write;
+
+use crate::counts::TextCounts;
+use crate::doclines::{DocLines, Sync};
+use holonomy_display::paint::Painter;
+use holonomy_display::{Frame, FrameError, Scanout};
+use holonomy_export::{Format, Report};
+use holonomy_image::IcebergCache;
+use holonomy_input::{Command, Hotkey, InputSource, Keymap, ModifierState};
+use holonomy_render::chrome::{Blink, Caret, Chrome, ChromeMetrics, ChromeState};
+use holonomy_render::math::{self, MathNode};
+use holonomy_render::math_layout::{layout_boxed, MathLayout, MathMetrics, MathRun};
+use holonomy_render::table::TableGrid;
+use holonomy_render::DamageRect;
+use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
+use holonomy_text::{
+    Editor, EditorError, FontFace, SpanPolicy, ANCHOR_BYTES, FACE_BODY, FACE_MONO, STYLE_BOLD,
+    STYLE_HEADER, STYLE_ITALIC, STYLE_SPELLING, STYLE_STRIKE, STYLE_SUBSCRIPT,
+    STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+};
+use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
+
+/// Why the session stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The input stream ended and the caller asked to keep going.
+    StreamEnded,
+    /// Ctrl+Q.
+    Quit,
+}
+
+/// Why a session operation failed.
+#[derive(Debug)]
+pub enum SessionError {
+    /// The document refused the edit.
+    Editor(EditorError),
+    /// A frame or scanout operation failed.
+    Display(holonomy_display::FrameError),
+    /// Something asked for the cell the caret is in, and the caret is not in a table.
+    ///
+    /// Its own variant rather than a `TableError`, because the answer is not "the table is malformed"
+    /// -- it is "there is no table here", which is a question about the caret and not about a span.
+    NotInTable {
+        /// Where the caret actually is.
+        offset: u32,
+    },
+    /// A table's structure did not match the bytes it claims.
+    Table(holonomy_text::TableError),
+    /// An export failed.
+    Export(holonomy_export::ExportError),
+    /// A sink refused the write.
+    Sink(std::io::Error),
+    /// A zoom was asked for that this session's atlas was not built at. Part 43.
+    ///
+    /// **Its own variant rather than a silent clamp.** A zoom control that snapped 200 % to 125 %
+    /// would leave `state.zoom_percent` holding a number the pixels disagree with, and the only way
+    /// to find out which is right is to compare the label to the type -- **which is exactly the
+    /// comparison a typed error makes impossible to get wrong.**
+    ///
+    /// ## What it carries, and why only the percentage
+    ///
+    /// **The percentage that was asked for.** Not the list of sizes that exist: `menus::ZOOMS` is
+    /// already `pub`, so a caller that wants to know what *is* available reads it, and a `Display`
+    /// that had to consult the session would be a cycle.
+    ZoomUnavailable {
+        /// What was asked for, in per-cent.
+        percent: u32,
+    },
+    /// An edit was attempted while the session was in a read-only mode. Part 44.
+    ///
+    /// ## Why an error and not a silent no-op
+    ///
+    /// **Because a keystroke that does nothing is the defect this project keeps finding.** Part 42's
+    /// was exactly that: typing past the resident window failed in silence. **A viewing mode where
+    /// typing is silently dropped is the same bug with a different cause.**
+    ///
+    /// ## And why not "the caret blinks and nothing happens"
+    ///
+    /// **Because that is what a crashed application looks like.** The error is what lets
+    /// `windowed.rs` put something in the status bar and what makes the refusal countable.
+    ReadOnly,
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Editor(e) => write!(f, "{e}"),
+            Self::Display(e) => write!(f, "{e}"),
+            Self::Export(e) => write!(f, "{e}"),
+            Self::Sink(e) => write!(f, "{e}"),
+            Self::NotInTable { offset } => write!(
+                f,
+                "the caret at byte {offset} is not inside a table, so there is no cell to act on"
+            ),
+            Self::Table(e) => write!(f, "{e}"),
+            // **"A read-only mode" and not the mode's name.** `Display` has no session to ask, and a
+            // `SessionError` that had to carry a `&'static str` to name the mode would be a second
+            // copy of `menus::MODES` -- a table that already exists and is the one to read.
+            // **The caller that wants to say which mode has `Session::mode_name`.**
+            Self::ReadOnly => write!(f, "the session is in a read-only mode, which does not edit"),
+            // **The message says what *is* available, not just what was asked for.** A caller who
+            // asks for 200 % and gets "no" has to go and read `menus::ZOOMS` to find out why; this
+            // tells them in the error they are already printing.
+            Self::ZoomUnavailable { percent } => write!(
+                f,
+                "no zoom at {percent}%: the atlas was built at \
+                 {}[, and each extra size costs 14,080 bytes of metric table against a 512 KiB \
+                 ceiling, so two is the most that fit]",
+                holonomy_render::menus::ZOOMS
+                    .iter()
+                    .map(|&(_, z)| format!("{z}%"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+impl From<holonomy_text::TableError> for SessionError {
+    fn from(e: holonomy_text::TableError) -> Self {
+        Self::Table(e)
+    }
+}
+
+impl From<holonomy_text::TableMapError> for SessionError {
+    fn from(e: holonomy_text::TableMapError) -> Self {
+        match e {
+            holonomy_text::TableMapError::Table(t) => Self::Table(t),
+            holonomy_text::TableMapError::Editor(ed) => Self::Editor(ed),
+            // An overlap is a bug in the caller's span, and it is reported as one rather than as a
+            // `TableError` the caller did not produce.
+            holonomy_text::TableMapError::Overlap { start, after } => {
+                Self::Table(holonomy_text::TableError::StructureMismatch {
+                    expected: after,
+                    found: start,
+                })
+            }
+        }
+    }
+}
+
+impl From<EditorError> for SessionError {
+    fn from(e: EditorError) -> Self {
+        Self::Editor(e)
+    }
+}
+impl From<holonomy_display::FrameError> for SessionError {
+    fn from(e: holonomy_display::FrameError) -> Self {
+        Self::Display(e)
+    }
+}
+impl From<holonomy_export::ExportError> for SessionError {
+    fn from(e: holonomy_export::ExportError) -> Self {
+        Self::Export(e)
+    }
+}
+impl From<std::io::Error> for SessionError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Sink(e)
+    }
+}
+impl From<holonomy_input::InputError> for SessionError {
+    fn from(e: holonomy_input::InputError) -> Self {
+        // `Read` carries a bare `errno`, so it becomes the `io::Error` that errno describes rather
+        // than a new variant saying the same thing twice. `Eof` is *not* an error for a source that
+        // runs to exhaustion -- `InputSource::next_event` returns `None` for that -- so the `Eof`
+        // arm here only fires when a record was truncated mid-read, which genuinely is a fault and
+        // gets `UnexpectedEof`.
+        session_io(e)
+    }
+}
+
+/// What the loop did, for a status line and for the gate's assertions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionStats {
+    /// Commands applied, including movement and navigation.
+    pub commands: u32,
+    /// **Edits refused because the session was in a read-only mode.** Part 44.
+    ///
+    /// **Its own counter rather than `pointer_inert`, and the difference is the whole point.**
+    /// `pointer_inert` is "a widget was pressed and nothing is behind it" -- a defect the project is
+    /// trying to drive to zero. **This is "a key was pressed and a policy said no"**, which is correct
+    /// behaviour, and a gate that asserted `pointer_inert == 0` after typing in viewing mode would be
+    /// asserting that the mode does not exist.
+    ///
+    /// **Counted in `Session::fault_for_edit`, which every mutator goes through**, so it covers
+    /// typing, backspace, delete-forward and every range-styling action — one number for all of them.
+    pub edits_readonly_refused: u32,
+    /// Edits that changed the document.
+    pub edits: u32,
+    /// Edits that changed exactly one line's length, so the geometry was a `O(log n)` point update.
+    ///
+    /// Phase 11. Paired with [`SessionStats::line_rebuilds`] this is the honest answer to "how much of
+    /// the keystroke path is still `O(document)`": a rebuild is one per newline typed, and everything
+    /// else is one point update.
+    pub line_updates: u32,
+    /// Edits that added or removed a newline, so both Fenwick trees were rebuilt. `O(n)`.
+    ///
+    /// `LineGeometry::resize_lines` rebuilds rather than inserting because a Fenwick tree supports point
+    /// updates, not insertion, and it says so itself. Typing a letter is a point update; pressing Enter
+    /// is a rebuild. That asymmetry is the design.
+    pub line_rebuilds: u32,
+    /// Frames painted.
+    pub frames: u32,
+    /// Pixels written across all frames.
+    pub pixels: u64,
+    /// Exports performed.
+    pub exports: u32,
+    /// **Copies that put something in the yank buffer.**
+    ///
+    /// `copies + cuts` is every time the buffer changed; `clipboard_noops` is every time a clipboard
+    /// key was pressed with nothing to act on. **The second number is the interesting one** — a
+    /// product where most `Ctrl+C` presses are no-ops has a selection problem, and without the counter
+    /// that is invisible.
+    pub copies: u32,
+    /// Cuts that removed a selection and put it in the yank buffer.
+    pub cuts: u32,
+    /// Pastes that inserted at least one byte.
+    pub pastes: u32,
+    /// Clipboard keystrokes that had nothing to do — no selection, or an empty yank buffer.
+    pub clipboard_noops: u32,
+    /// Export attempts that failed.
+    ///
+    /// Kept apart from `exports` because the two are otherwise indistinguishable from outside: a menu
+    /// row that reported nothing either way is indistinguishable from one that works.
+    pub export_failures: u32,
+    /// `Ctrl+S` presses seen.
+    ///
+    /// **Requests, not saves.** `saves` counts the key; `committed` counts the attempts that finished
+    /// and `commit_failures` the ones that did not. Before the save was wired they were the same number
+    /// by construction, because nothing else could happen.
+    pub saves: u32,
+    /// Commits that completed. Phase 15.
+    ///
+    /// `committed >= saves` is **not** an invariant and `saves > committed` is not a bug: a `Ctrl+S` on
+    /// a session with no container behind it reports `committed` too, with `bytes_committed` of zero.
+    pub committed: u32,
+    /// Commit attempts that failed.
+    ///
+    /// Kept apart from `committed` because the difference is invisible from outside — both leave the
+    /// same pixels on screen — and a disk that is briefly full is exactly the case a number should make
+    /// visible.
+    pub commit_failures: u32,
+    /// Bytes handed to the container across all commits.
+    pub bytes_committed: u64,
+    /// Commands the keymap produced that the session had no action for.
+    ///
+    /// Counted rather than ignored: a keymap that starts producing commands the session does not
+    /// understand is a keymap/session mismatch, and it should be visible rather than a silent no-op.
+    pub unhandled: u32,
+    /// Tables inserted by `Ctrl+T` or [`Session::insert_table`].
+    pub table_inserts: u32,
+    /// Cell navigations that actually moved.
+    pub table_navs: u32,
+    /// Navigations that asked for a cell that does not exist -- Up from the first row, and so on.
+    ///
+    /// Counted rather than ignored, because a number that is unexpectedly large means the navigation
+    /// rules and the table's shape disagree, which is otherwise invisible: the keystroke simply does
+    /// nothing.
+    pub table_nav_nowhere: u32,
+    /// Newlines inserted inside a cell.
+    pub table_newlines: u32,
+    /// Table cells drawn in the last paint.
+    pub table_cells_drawn: u32,
+    /// Document lines the body-text emitter drew in the last paint. Phase 12.
+    ///
+    /// **The number that answers "is anything on the page".** Zero with a non-empty document means the
+    /// emitter is not running or every line was culled; a document with text on it says so here. Before
+    /// Phase 12 this was always zero, because nothing drew the document's own words.
+    pub lines_drawn: u32,
+    /// Document *bytes* turned into [`DocRun`]s in the last paint. Phase 12.
+    ///
+    /// **Bytes, not glyphs**, and the distinction is deliberate. A line of `é` is two bytes per glyph, so
+    /// a byte count overstates the glyph count by up to 4x. `PaintStats::doc_glyphs` holds the glyph
+    /// figure from the blitter's side, and the two are different numbers answering different questions:
+    /// "how much of the document was on the page" and "how many glyphs were drawn". Asserting them equal
+    /// would be asserting that the document is ASCII.
+    pub glyphs_drawn: u32,
+    /// Border runs drawn in the last paint.
+    pub table_borders_drawn: u32,
+    /// Section-manifest updates, from [`crate::manifest::Sync::OneSection`]. Phase 13.
+    ///
+    /// **Two per keystroke is the expected steady state**, not a smell: [`Manifest::sync`] re-measures the
+    /// caret's section and the last one, because a byte appended at the end belongs to the last section and
+    /// no line count would say so. The gate that asserts this is `tests/session_manifest.rs`'s
+    /// `a_keystroke_updates_sections_and_never_rebuilds_one`.
+    pub section_updates: u64,
+    /// Section-manifest rebuilds, from [`crate::manifest::Sync::Rebuilt`]. Phase 13.
+    ///
+    /// **Should be about one keystroke in forty**, on the newline. A number much above that means
+    /// boundaries are moving on ordinary keystrokes, which is the fixed-size-section tax and would be worth
+    /// a different section size.
+    pub section_rebuilds: u64,
+    /// Images inserted by `Ctrl+I` or [`Session::insert_image`].
+    pub image_inserts: u32,
+    /// Image nodes emitted in the last paint.
+    pub images_drawn: u32,
+    /// Rasters decoded into the Iceberg cache, across the session's life.
+    ///
+    /// The scaler ran on every one of them: §2.9.3's cache holds page-column-width rasters, so a
+    /// 1920x1080 source is a downscale before it is ever resident. Counted rather than inferred from
+    /// a timer, which is what §2.9.3 asks for.
+    pub images_decoded: u32,
+    /// Rasters the Iceberg cache scrubbed and released, across the session's life.
+    pub images_evicted: u32,
+    /// Formulas inserted by `Ctrl+M` or [`Session::insert_math`].
+    pub math_inserts: u32,
+    /// Formulas drawn as a *compiled* layout in the last paint.
+    ///
+    /// The compiled/raw split is the whole of the focused-vs-unfocused rule, so it is a count rather
+    /// than a detail: a formula that should have compiled and did not is invisible on screen as
+    /// anything except "it looks like source", which is also what a formula being edited looks like.
+    pub math_compiled: u32,
+    /// Formulas drawn as raw LaTeX in the last paint, because the caret is inside them.
+    pub math_raw: u32,
+    /// Procedural fills drawn in the last paint: fraction bars and radical overlies.
+    pub math_rules: u32,
+    /// Formulas that failed to parse and fell back to raw LaTeX while the caret was elsewhere.
+    ///
+    /// Counted because a parse error is otherwise *invisible by design*: `math.rs` renders an
+    /// unparseable formula as its own source, which is exactly what an edited one looks like. Without
+    /// this counter, a formula that stopped compiling three edits ago would sit there looking fine.
+    pub math_parse_errors: u32,
+
+    // ---------------------------------------------------------------- pointer, part 20
+    //
+    // **Four counters, and the reason there are four is that "clicks" is not a useful number.**
+    //
+    // A chrome with twenty-one toolbar buttons, eight menus and a sidebar in front of a session whose
+    // document model has no bold, no colour and no font size is going to have a lot of buttons that
+    // are drawn, hovered, pressed and do nothing. **A single counter would make that indistinguishable
+    // from a broken routing path** -- both would read "clicks happened, nothing happened". These four
+    // separate the three that work from the one that does not.
+    /// Pointer events delivered, of every kind.
+    ///
+    /// **Every kind, including motion**, so this is the mouse's event rate rather than a click count.
+    /// A 125 Hz mouse over the toolbar produces this number in the hundreds per second; the other
+    /// three are what make that not alarming.
+    pub pointer_events: u64,
+    /// Presses that landed on a widget.
+    pub pointer_presses: u32,
+    /// Presses that produced a [`Command`] the session applied.
+    ///
+    /// **The routing works if this is non-zero.** Every gate in `tests/pointer.rs` that asserts a
+    /// click did something asserts this moved.
+    pub pointer_commands: u32,
+    /// Presses on a widget that has no action behind it yet.
+    ///
+    /// **The honest number for this build, and it is large.** Bold, italic, underline, the font
+    /// controls, print, spellcheck and most menu items are buttons with nothing behind them, because
+    /// the document model has no representation for any of them. **Counted rather than swallowed**
+    /// because a count that is zero would mean either that every button works or that nothing is
+    /// being hit-tested, and those need to be distinguishable.
+    pub pointer_inert: u32,
+    /// Presses that changed the chrome's state and nothing else.
+    ///
+    /// # Why this exists, and what part 21 got wrong
+    ///
+    /// Part 21 routed the three dropdowns — zoom, style, font — through `apply_action` and counted each
+    /// as `pointer_commands`. **That was wrong by that field's own definition**, which says *presses that
+    /// produced a `Command` the session applied*: none of the three produces a `Command` at all, and
+    /// `apply_action` handles them before `action_command` is ever reached.
+    ///
+    /// **So the counter was claiming a document edit that did not happen.** The four alternatives a press
+    /// can have — a command, a chrome-state change, a toggle, or nothing — need four counters, and this
+    /// is the third. Zeroing it would mean "no button changes anything about the window", which is a
+    /// different and less useful claim than "no button edits the document".
+    ///
+    /// **The three that land here are not doing nothing**, which is the whole reason this is not
+    /// `pointer_inert`: choosing a face changes the toolbar's label, choosing a style changes the style
+    /// control's label, and choosing a zoom changes the zoom label — and **part 23 measured that last one
+    /// and found it is the *only* pixel that moves.** `tests/zoom.rs` is the measurement.
+    pub pointer_chrome: u32,
+    /// Paints that asked the span map for the visible page's styled runs.
+    ///
+    /// **Part 26, and it exists because "once per paint" was a comment and not a number.** Part 24
+    /// called `SpanMap::runs_in` once per *line*, so a forty-line page paid forty heap allocations and
+    /// forty walks of the span list per frame. The call is hoisted out of the loop now, and this counts
+    /// it, so `one_span_query_serves_the_whole_page` can assert the shape rather than trust it.
+    ///
+    /// **A paint increments this by one**, whatever the page holds and however deep in the document it
+    /// is. A gate that watched it climb with the line count would pass on a one-line page, which is
+    /// exactly the fixture mistake this project has now made four times.
+    pub span_queries: u32,
+    /// Caret moves whose column was computed by walking text rather than by subtracting offsets.
+    ///
+    /// **A measurement, not a warning.** Part 22 added a scan over the caret's line prefix to count
+    /// UTF-8 scalars, and the first thing it had to answer was "does this fire on every keystroke, or
+    /// only when the caret is not at a column boundary?" — so the number is there rather than asserted
+    /// from reading the code. **A caret at the start of its line does no scan at all** and is not
+    /// counted, which is what makes the difference visible: `DocumentStart`, `Home`, and typing at the
+    /// beginning of a line all leave this at zero.
+    pub caret_column_scans: u32,
+}
+
+/// A pre-opened export sink.
+pub struct ExportSink {
+    /// The format to write.
+    pub format: Format,
+    /// Where to write it. Opened by the caller, before the jail.
+    pub file: File,
+    /// Human-readable name, for logs.
+    pub path: String,
+}
+
+/// An active ruler drag interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulerDrag {
+    LeftMargin,
+    RightMargin,
+    FirstLineIndent,
+    LeftIndent,
+    RightIndent,
+}
+
+/// An editor, its chrome, and the loop.
+pub struct Session<'a> {
+    /// The document.
+    ///
+    /// **Private as of part 16**, and that is the fix rather than a style choice. Assigning
+    /// `session.editor = opened.editor` compiles, runs, and leaves a session whose `DocLines`,
+    /// `Manifest` and `TextCounts` describe the *previous* document -- which is what the product did for
+    /// its entire life, painting one empty line over a real document. See
+    /// [`adopt_document`](Self::adopt_document); the only supported way to put a document in here.
+    ///
+    /// **Read access is unchanged**, because a dozen gates and the export path read it and none of them
+    /// can corrupt the session by looking.
+    editor: Editor,
+    /// **Every other document this session has open, in the order it was parked.** See
+    /// [`ParkedDocument`]. **Empty in every build until part 45**, and the document a session starts
+    /// with is `editor`, not an entry here.
+    parked: Vec<ParkedDocument>,
+    active_id: u64,
+    managed_documents: bool,
+    document_request: Option<DocumentRequest>,
+    notice: Option<String>,
+    dialog: Option<holonomy_render::dialog::DialogView>,
+    home: Option<holonomy_render::home::View>,
+    /// **A `File > Open` or `File > Import` waiting for a path, and which of the two it was.**
+    ///
+    /// **A request rather than an opening, for the same reason the export is one:** the path is
+    /// something the *window driver* has and the session does not — the sealed jail has no `openat`
+    /// and the developer window has no file dialog, so the row can only ask. `Session::apply_action`
+    /// stores the action here and `Session::take_open_request` hands it back to the driver, which is
+    /// the one place that can turn it into a path.
+    open_request: Option<holonomy_render::menus::Action>,
+    /// Bumped whenever the internal yank buffer changes, so the desktop driver can publish it to X11.
+    clipboard_generation: u64,
+    /// A managed desktop paste is answered by the window driver from the X selection.
+    paste_request: bool,
+    /// The style flags armed at the caret, or 0 for none. **Part 25.**
+    ///
+    /// **A field and not a zero-width span**, because `SpanMap::style_range` returns `Ok(())` for
+    /// `start == end` and stores nothing — so "the next character typed is bold" has nowhere to live in
+    /// the span map, and had to live here. The check was worth doing before designing around it.
+    ///
+    /// **`holonomy_text`'s `STYLE_BOLD` and `STYLE_ITALIC` are the values**, not `1` and `2`: the
+    /// chrome's [`ChromeState::styles`](holonomy_render::ChromeState::styles) is a pair of bools and this
+    /// is a bit set, and the two must agree. `armed_style` is the one function that reads both and
+    /// `set_armed_style` the one that writes them, so the agreement is not a convention.
+    ///
+    /// # Why this is an `Option` and not a `u16`, which is the whole design of part 25
+    ///
+    /// **`Session::insert` uses `SpanPolicy::GrowIntoInsert`** — "a span ending exactly at the insertion
+    /// point grows and inserted text inherits the *preceding* span's style" — and it does so for a good
+    /// reason that predates any toggle: *typing at the end of a bold word should keep it bold.*
+    ///
+    /// **That and a Bold button cannot both be expressed by a flag.** With a plain `u16` that starts at
+    /// 0, turning Bold off leaves the flag at 0, the insert inherits bold from the character before the
+    /// caret, and **the button says off while the next character comes out bold.** The first version of
+    /// this part had exactly that bug and `disarming_stops_the_next_character_being_bold` caught it.
+    ///
+    /// So there are **three** states and not two:
+    ///
+    /// | `pending_style` | meaning | the insert |
+    /// |---|---|---|
+    /// | `None` | the user has expressed nothing | inherits, `GrowIntoInsert` wins |
+    /// | `Some(flags)` with flags | armed | restyled to `flags` |
+    /// | `Some(0)` | **explicitly plain** | restyled to plain, overriding inheritance |
+    ///
+    /// **And `ChromeState::styles`' two bools can express it**, because the bools answer "is this on" and
+    /// the `Option` answers "has the user said anything". `Some(0)` shows as both buttons off, which is
+    /// correct: the user is looking at "not bold", and what they cannot see is the `Option` behind it.
+    pending_style: Option<u16>,
+    /// **The colour the next character typed will be, or `None` if the user has said nothing.**
+    /// Part 29.
+    ///
+    /// **`Option<u32>` for the same reason [`pending_style`](Self) is an `Option<u16>`**, and with the
+    /// same three states: `None` inherit, `Some(rgb)` arm, **`Some(0)` is *not* "plain"** -- `0` is
+    /// what the span field calls "the document's default colour", so writing `Some(0)` and writing
+    /// `None` mean the same thing and the distinction would be a lie.
+    ///
+    /// **Why a field and not a span parked at the caret**, which is the reasoning part 25 recorded for
+    /// the same question: `SpanMap::style_range` returns `Ok(())` for `start == end` and stores
+    /// nothing, so "the next character is crimson" cannot be a zero-width span.
+    pending_colour: Option<u32>,
+    /// **The face the next character typed will be set in, or `None` if the user has said nothing.**
+    ///
+    /// The third per-run attribute, and the same shape as the two above: `None` inherits from the run at
+    /// the caret, `Some(face)` arms. **Unlike the colour there is no "explicitly plain" third state**,
+    /// because a face is not a flag: `FACE_BODY` is a perfectly good face to arm, and arming it is
+    /// exactly what *"set this paragraph back to Inter"* means.
+    ///
+    /// **Why a field and not a span parked at the caret**: the same reason `pending_colour` gives --
+    /// `SpanMap::style_range` stores nothing for an empty range, so "the next character is mono" cannot
+    /// be a zero-width span. See [`Editor::face_format_range`] for the span side of the story.
+    pending_face: Option<FontFace>,
+    /// **Smart Compose: an inline grey prediction shown after the caret.** Set by the compose
+    /// engine (a stub for now), accepted with Tab or right-arrow, dismissed by any other key.
+    /// Only shown in Editing or Suggesting mode, never in Viewing.
+    pending_compose: Option<String>,
+    /// The chrome geometry.
+    pub chrome: Chrome,
+    /// Unscaled type-dependent dimensions, so zooming in and out does not compound rounding.
+    type_metrics: ChromeMetrics,
+    /// What the chrome shows.
+    pub state: ChromeState,
+    /// The framebuffer.
+    frame: Frame,
+    /// The presentation target.
+    ///
+    /// A trait object rather than a `HeadlessScanout`, so the same loop can present to the PPM backend,
+    /// to a DRM panel, or to the developer window. The cost is one pointer indirection per frame, which
+    /// is nothing next to rasterising one, and the gain is that `main.rs` chooses a backend in one place
+    /// instead of the session knowing what a panel is.
+    ///
+    /// `Box<dyn Scanout>` rather than `Box<dyn Scanout + 'a>`, because `Scanout: Any` and `Any` is
+    /// `'static`. Every backend here owns its resources and outlives the session, so nothing is lost.
+    scanout: Box<dyn Scanout>,
+    /// The painter, borrowing the atlas.
+    painter: Painter<'a>,
+    /// The keymap. Zero-sized and stateless.
+    keymap: Keymap,
+    /// Modifiers currently held.
+    mods: ModifierState,
+    /// **Whether a page drag is in progress.** Part 28.
+    ///
+    /// ## Why a flag and not a drag *state*
+    ///
+    /// **Because the anchor is already in the editor.** A drag needs to know two things — where it
+    /// started, and whether it is still going — and `Editor::selection_anchor` is the first. **A second
+    /// copy of the anchor here would be a second thing that can disagree with the first**, which is the
+    /// defect part 22 found in `ChromeState` and part 24 nearly found again.
+    ///
+    /// ## Why the flag is a field and not `pressed.is_some()`
+    ///
+    /// **Because `pressed` is about the chrome and this is about the document.** They happen to both
+    /// start on a left press, and coupling them would mean a press on a toolbar button that the user
+    /// then dragged back over the page would start selecting text. **The flag is set only by a press
+    /// that landed on the page**, and nothing else touches it.
+    page_drag: bool,
+    /// Pointer offset within a dragged desktop scrollbar thumb.
+    scrollbar_drag: Option<i32>,
+    /// Active ruler drag gesture, if any.
+    ruler_drag: Option<RulerDrag>,
+    /// **The click that came before this one, and how many clicks in a row it was.** Part 41.
+    ///
+    /// ## Why the session keeps this and not the chrome
+    ///
+    /// **Because the answer is about time and position and neither of those is chrome.** The chrome
+    /// is told what the pointer is over; it is not told how many times the pointer has been pressed
+    /// in the last 400 ms, and it should not be: a `u32` and an `Option` on `Session` is a private
+    /// detail of the gesture and putting it on `ChromeState` would make it something a paint could
+    /// read and a state file could hold.
+    ///
+    /// ## Why `None` and not a count of 0
+    ///
+    /// **Because "no click yet" and "one click" are different questions and a `u32` of 0 answers
+    /// neither.** A triple-click is `Some(.., 3)`, and the *next* press after it is a single click
+    /// again -- which is what clearing it on a timeout does.
+    ///
+    /// ## What the timestamp is
+    ///
+    /// **The source's own clock, never this process's.** See
+    /// `holonomy_input::pointer::Event::Button::time_ms`: X11 and evdev stamp differently, and the
+    /// only question asked of the number is whether the *difference* between two of them is small.
+    clicks: Option<Click>,
+    /// **The mode the session is in, and the model's copy of it.** Part 44.
+    ///
+    /// ## Why this and not `state.mode_index`
+    ///
+    /// **Because the chrome holds a number for display and the session needs the thing.** Every other
+    /// chrome-selection (`style_index`, `font_index`, `colour_index`) is the same arrangement and the
+    /// same argument: the index is what the state file stores and the label is derived from it,
+    /// **and the model keeps its own copy** so that reading the mode on a mutating path does not
+    /// require re-deriving it from a `u8` through a table.
+    ///
+    /// ## `Viewing` is enforced where the edits are, not where the button is
+    ///
+    /// **`fault_for_edit` is the choke point** (part 42 put it there and every mutator goes through
+    /// it), so refusing here refuses typing, backspace, delete-forward and every action that styles
+    /// a range — **in one place**, rather than one place per command. That is the reason it is not
+    /// implemented as `if self.state.mode == Viewing { return }` in twenty match arms.
+    pub mode: holonomy_render::menus::ViewMode,
+    /// **The pointer's position at the top or bottom edge of the page, if it is there.**
+    ///
+    /// Part 41. **This is the state an auto-scroll needs and the only state it needs**: which way to
+    /// scroll, and how far in, both of which are functions of `(x, y)`. **`None` is not "idle"** —
+    /// it is "not at an edge", and the flag below is what says the drag is still running.
+    edge_scroll: Option<EdgeScroll>,
+    /// The caret blink.
+    blink: Blink,
+    /// Counters.
+    pub stats: SessionStats,
+    /// Damage accumulated since the last paint.
+    damage: DamageRect,
+    /// **The status bar's own damage, and why it is not `damage`.**
+    ///
+    /// # CORRECTION, part 39: the status bar never repainted
+    ///
+    /// **Measured in the live window, by typing:** 122 characters on the page and a status bar reading
+    /// **`Ln 1, Col 1  0 words  0 B`**; after the fix the same document reads **`Col 123  23 words
+    /// 122 B`**. The counts were correct in the state --
+    /// `publish_counts` ran on every edit -- and the pixels were from the first frame. `after_edit`
+    /// damages `line_box(caret_line)`, which is one text row, **and the status bar is not in it.**
+    ///
+    /// **A word count that does not count words, and a `Col 1` that never moves, is the chrome lying
+    /// about the document.** It survived every gate because every gate asserts what the session
+    /// *emits*; the emitter had the right numbers and nothing asked whether they were *drawn*.
+    ///
+    /// ## Why it is a second field and not a union into `damage`
+    ///
+    /// **Because the union is a bounding box and the status bar is at the bottom of the window.**
+    /// `reconcile_caret` damages the caret's cell -- a 54x50 rect in the middle of the page -- and
+    /// `reconcile_caret` is the funnel every caret move goes through, including every keystroke.
+    /// Unioning a rect at `y = 978` with one at `y = 200` gives **1,280x800: the whole window, on the
+    /// path NFR-1.1 budgets at 0.50 ms.** So the status bar is carried beside the damage and painted
+    /// as its own clipped pass, which costs one 1,280x22 repaint instead of a full frame.
+    ///
+    /// ## Why it is not "always repaint the status bar"
+    ///
+    /// **Because that is 28,160 px per frame against a keystroke's ~2,700, on every caret blink tick
+    /// and on every frame where nothing at all changed.** The status bar's text changes when the caret
+    /// moves, when the counts change and when the dirty marker clears -- and
+    /// [`invalidate_status_bar`](Self::invalidate_status_bar) is called from exactly those three
+    /// places: `reconcile_caret`, `publish_counts` and the commit.
+    status_damage: DamageRect,
+    /// What the last paint did with [`status_damage`](Self::status_damage), for the same reason
+    /// [`last_damage`](Self::last_damage) exists: *pending* and *painted* are two different questions,
+    /// and a gate asking "what did that keystroke repaint" must not be answered by what is still queued.
+    last_status: DamageRect,
+    /// Which table cell the caret is in, if it is in one. Phase 9A.
+    ///
+    /// `None` means the caret is in ordinary text, which is the only thing that was possible before
+    /// 9A and is the case every non-table keystroke takes. `Some` means Tab, Shift+Tab, Enter and the
+    /// four arrows are being interpreted by `holonomy_text`'s navigation rules instead of by the
+    /// document.
+    ///
+    /// It is a cursor rather than just the caret offset because the rules are about *cells*, and
+    /// "the cell above" cannot be answered from a byte offset without re-walking the separators on
+    /// every keystroke. Eight bytes, `Copy`, and the caret offset is recoverable from it.
+    active_cell: Option<TableCursor>,
+    /// Whether a table's *shape* changed since the last paint, as opposed to its content.
+    ///
+    /// This is what makes per-cell damage possible. Typing in a cell only changes that cell's pixels,
+    /// so the next paint only needs that cell's rectangle; but inserting a table or appending a row
+    /// moves every border line, so the whole grid is stale. One flag rather than a comparison of
+    /// shapes, because comparing them would mean re-deriving every table twice per keystroke to
+    /// discover what one `set` already knows.
+    tables_shape_dirty: bool,
+    /// A commit was asked for and has not been performed yet.
+    ///
+    /// **Why a flag and not a direct call.** `apply` is `pub` and 40-odd gates call it directly, and it
+    /// takes no `LeafSource` — giving it one would touch every one of them to wire a save that only the
+    /// loop can perform, since a commit needs the container and the editor mutably at once and the
+    /// container is not reachable from `&mut self`. So `apply` records the *request* and [`run_with`] —
+    /// which holds both — performs it. The flag is cleared by `mem::take` before the work, so a commit
+    /// that fails leaves no request queued behind it: the document stays dirty and the next `Ctrl+S` is
+    /// a fresh attempt rather than a retry of one that already failed.
+    save_requested: bool,
+    /// An export was asked for and has not been performed yet.
+    ///
+    /// **The same shape as [`save_requested`](Self::save_requested), and for the same reason**, but
+    /// with one difference that is worth naming: a commit needs only the editor and a byte source,
+    /// which `handle_event_with` is already given, while **an export needs the sinks**, and those are
+    /// opened at boot by `main.rs` and live in `SessionContext`. So the request is drained by
+    /// [`run_with_io`](Self::run_with_io), which is handed them.
+    export_requested: bool,
+    /// Line geometry in document byte coordinates, for `O(log n)` line lookup. Phase 11.
+    ///
+    /// Replaces the newline-counting scans in [`Session::line_start`] and [`Session::line_index`], which
+    /// were `O(bytes before the caret)` and ran on every keystroke. See [`crate::doclines`] for why the
+    /// terminator convention is this module's problem and not `LineGeometry`'s.
+    lines: DocLines,
+    /// The document's sections: where they are, how tall they are, and what they contain. Phase 13.
+    ///
+    /// **The reason this field earns 6 MiB.** `Manifest::span_total` answers *"does this document contain
+    /// a formula, a table or an image?"* without reading it, and four emitters ask that question before
+    /// deciding whether to read the document at all. A document with none of them — which is most
+    /// documents, and all 97% of a book — answers zero from **1,164 bytes of structure**.
+    ///
+    /// Phase 12 could not remove `doc_scratch` because *"does this document contain any math"* could not
+    /// be asked without reading the bytes to find the `$$`. This is the answer to that, and it is a
+    /// question about structure rather than content, which is what a manifest is.
+    manifest: crate::manifest::Manifest,
+    /// Scratch for [`Manifest::sync`]'s two section reads. Phase 13.
+    ///
+    /// Sized to [`crate::manifest::SECTION_BYTES`] and allocated once, like `line_scratch`: a scratch that
+    /// grows on the keystroke path is one allocation per growth, and two section reads per keystroke is
+    /// exactly the place where that would show up. `sync_manifest` takes it with `mem::take` because
+    /// `Manifest::sync` needs `&mut Vec<u8>` and `&self.editor` at the same time, and both are fields of
+    /// `self` — a borrow-checker consequence worth naming rather than working around with a clone.
+    manifest_scratch: Vec<u8>,
+    /// The status bar's word and line totals, maintained as deltas. Phase 11 item 4.
+    ///
+    /// Built by a full scan at construction and folded forward by every edit whose bytes the caller
+    /// knows. `undo` and `redo` rescan — see [`Session::undo`] for why that is deliberate.
+    counts: TextCounts,
+    /// Scratch for the whole document, reused across paints. Phase 11.
+    ///
+    /// Every paint-path function that needs the document's bytes -- `emit_tables`, `emit_math`,
+    /// `emit_images`, `publish_line_heights`, `image_blocks` -- called `Editor::text()`, which
+    /// allocates a `Vec` the size of the document. Five allocations of 6.4 MiB per keystroke, on the
+    /// paint path, is what `tests/session_no_alloc.rs` measured before this field existed.
+    ///
+    /// A field rather than a local for the reason [`Session::table_scratch`] exists: a local array
+    /// passed to `read_into` escapes and is promoted to the heap, which turns one allocation per
+    /// session into one per paint. Grown only when the document outgrows it, so steady-state typing
+    /// into a document does not reallocate.
+    doc_scratch: Vec<u8>,
+    /// Scratch for **one page's worth** of document text, for [`Session::emit_body_text`]. Phase 12.
+    ///
+    /// Sized to [`LINE_SCRATCH_BYTES`] = 48 KiB, which is `Layout::rows` (43) x `DocRun::MAX_BYTES`
+    /// (1,024) rounded up. **This is the buffer that replaces reading the whole document to draw it.**
+    ///
+    /// `doc_scratch` above is whole-document and exists because `emit_tables`, `emit_math`,
+    /// `emit_images`, `publish_line_heights` and `image_blocks` all want random access across the whole
+    /// text. Body text does not: it wants the 43 lines that are on screen. So it gets its own buffer,
+    /// sized to the page, and the 6 MiB that `doc_scratch` costs on a 6 MiB document becomes 48 KiB for
+    /// the part of the paint that draws the document's own words.
+    ///
+    /// **Allocated once, at construction**, and never grown: a line longer than the page's measure is
+    /// drawn truncated (see `emit_body_text`), so a longer line cannot make this grow. If a later phase
+    /// makes wrapping work, this becomes the buffer that grows to the longest *wrapped* line, which is
+    /// still bounded by the page measure and not by the document.
+    line_scratch: Vec<u8>,
+    /// How much of [`Session::line_scratch`] the last body-text emit filled. Phase 12.
+    ///
+    /// **A separate field rather than `line_scratch.len()`, and part 35 is why it matters twice.**
+    /// Phase 12 added it because `emit_body_text` truncated the buffer to what it read, so `len()` was
+    /// the last page's size and the two were indistinguishable at the call site. Part 35 removed the
+    /// `truncate`, so `len()` is now the buffer's invariant again -- **and the bug was the `truncate`:
+    /// the next paint compared a fresh line against the previous page's length and emitted nothing.**
+    ///
+    /// **This field is now the only way to ask how much of the buffer is live**, which is the same
+    /// relation phase 12 was reaching for.
+    page_used: usize,
+    /// What the last [`Session::paint`] did, kept whole. Phase 12.
+    ///
+    /// `paint` folds three of `PaintStats`' fields into `SessionStats` as running totals and would drop
+    /// the rest on the floor. The dropped ones are exactly the ones a gate needs —
+    /// [`PaintStats::doc_glyphs`](holonomy_display::paint::PaintStats::doc_glyphs),
+    /// `runs_missing`, `runs_truncated` — because they say what is *on the page now* rather than what
+    /// has been drawn over the session's life.
+    last_paint: holonomy_display::paint::PaintStats,
+    /// The rectangle the last paint was given, kept after [`Self::damage`] has been cleared.
+    ///
+    /// **`Session::damage` is the *accumulated* damage and is empty the moment a paint consumes it**,
+    /// which is exactly when anybody wants to look at it. **This is the measurement of what the last
+    /// frame actually covered**, and it is the number that separates "the damage was scoped and the
+    /// frame is still expensive" from "the damage was the whole frame" — the two look identical in a
+    /// screenshot and in a frame count, and *"the buttons lag"* is a claim about only one of them.
+    ///
+    /// Measured on this host, part 39, at 1,600 x 1,000 with the popup changes scoped:
+    ///
+    /// ```text
+    /// press: 18.5 ms, damage 0,0,1600x1000, 3,201,150 px
+    /// press:  7.1 ms, damage 0,0,1600x1000, 1,170,123 px
+    /// ```
+    last_damage: DamageRect,
+    /// **What the last paint actually covered, after the emitters widened it.**
+    ///
+    /// [`last_damage`](Self::last_damage) is kept *before* the widening, and that is right for the
+    /// question it answers: a scoping claim is about what the session asked for, and a bounding box
+    /// that grew because a run reaches above its line says nothing about whether a hover was scoped.
+    ///
+    /// **But something has to be able to see the widening, or it is unobservable.** The whole point of
+    /// [`Session::line_shift`] is that a raised run's rows are *outside* the line box, so a gate written
+    /// against `last_damage` measures the rect that was handed in and finds the one thing the fix must
+    /// change unchanged — it would pass with the fix removed. This field is the copy taken *after* the
+    /// emitters are done with it, which is the rectangle the painter is actually given.
+    ///
+    /// The two are the same on the overwhelming majority of frames; they differ exactly when a
+    /// decoration reaches outside its line, which is what the difference is named for.
+    last_painted_damage: DamageRect,
+    /// Scratch for [`Session::with_table`], so reading a table's bytes does not copy the document.
+    ///
+    /// Sized to the widest table in the document, recomputed when a table is inserted or a row is
+    /// appended. A field rather than a local because a local array passed to `read_into` **escapes**
+    /// and is promoted to the heap by the compiler -- which is the same trap
+    /// [`holonomy_text::Editor::delete_scratch`] documents, measured rather than assumed: the
+    /// allocation then happens once per call instead of once per session, so it is invisible in a rate
+    /// and visible in a count.
+    table_scratch: Vec<u8>,
+    /// Where the caret was last drawn, so it can be erased.
+    caret_drawn_at: Option<DamageRect>,
+    /// Reusable buffer for the compiled formula's runs.
+    ///
+    /// Sized once and cleared per paint, for the reason [`Session::table_scratch`] exists and stated
+    /// at greater length there: a local `MathLayout` would be promoted to the heap by the compiler and
+    /// the allocation would then happen once per paint rather than once per session -- invisible in a
+    /// rate, visible in a count. `tests/session_math.rs` asserts this field's capacity is unchanged
+    /// across a compile.
+    math_scratch: MathLayout,
+    /// Page-column-width rasters for the pages near the viewport. Phase 9C.
+    ///
+    /// Owns every decoded pixel in the process, which is why it is here and not in the painter: the
+    /// budget §2.9.4 charges 8.0 MiB to is this field's, and a gate asserts it through
+    /// [`Session::image_cache_bytes`].
+    ///
+    /// A direct field rather than behind the `RasterSource` trait object the painter holds, because the
+    /// painter borrows it *per frame* -- the cache is mutated between frames and the painter must not
+    /// hold a borrow across a mutation. `Painter::paint_with_rasters` takes it per call for exactly
+    /// that reason.
+    images: IcebergCache,
+    /// The native-size buffer a PNG decodes into, reused across decodes.
+    ///
+    /// **Transient, and deliberately outside the cache's accounting** -- the same bargain
+    /// `holonomy_image::scale` makes for its horizontal-pass intermediate, and for the same reason: a
+    /// 1920x1080 source needs 8.3 MB to decode into, it is freed before the frame is presented, and
+    /// counting it against the 8.0 MiB image budget would double-count a buffer that never coexists
+    /// with the resident rasters it feeds.
+    ///
+    /// A field rather than a local because a local `Vec` passed to `decode` **escapes** and is promoted
+    /// to the heap, which is the same trap [`Session::table_scratch`] documents: the allocation would
+    /// then happen once per decode rather than once per session -- invisible in a rate, visible in a
+    /// count.
+    image_decode_scratch: Vec<u8>,
+    /// The page-column-width buffer a resample produces, reused across decodes.
+    ///
+    /// A field for the same reason as `image_decode_scratch`, and this one *is* resident: its contents
+    /// are handed to `IcebergCache::insert`, which copies them into a `SecureBlock`. So it is a
+    /// transient copy of a resident buffer, and it is sized to one raster.
+    image_resample_scratch: Vec<u8>,
+    /// The page column's width in pixels: the width every raster is downscaled to. Phase 9C, §2.9.3.
+    image_column_width: u32,
+    /// The compiled source a formula is compiled from, reused across paints.
+    ///
+    /// Separate from `math_scratch` because it is a different lifetime: this is the *input* to
+    /// `math::parse`, which allocates an AST, and the AST is dropped at the end of each paint. The
+    /// buffer avoids re-allocating the string; the AST itself is one allocation per formula per paint,
+    /// which `math.rs`'s header argues is acceptable and which the zero-allocation requirement is
+    /// explicitly about the *layout*, not the parse.
+    math_source: Vec<u8>,
+}
+
+/// A document this session has open but is not painting.
+///
+/// # Why the list exists, and what is *not* in it
+///
+/// **[`Session::editor`] is the document on the page; this is every other document the session has.**
+/// The sidebar draws a row per document and the File menu has three rows that act on the list, and
+/// neither works if the session can only ever hold one.
+///
+/// **Every entry is fully resident, and that is what makes parking safe.** [`Session::adopt_document`]
+/// reads the whole document once through [`holonomy_text::Editor::text_faulting`], which faults every
+/// leaf in, so a document that has been adopted needs no container to be adopted again:
+/// [`Session::close_active`] and [`Session::switch_document`] re-adopt a parked editor over
+/// [`crate::store::NoSource`] and cannot miss.
+///
+/// **A document that had *not* been adopted would need its container, and a container cannot live
+/// here.** The sealed path's is borrowed by the paint path's store, which lives outside the session
+/// (`SessionContext::container_file` in `main.rs`), and the developer window is the same story. **So
+/// the rule is the one the code already follows: a document is parked only after it has been
+/// adopted, and nothing here ever parks a skeleton.**
+fn mode_index(mode: holonomy_render::menus::ViewMode) -> u8 {
+    match mode {
+        holonomy_render::menus::ViewMode::Editing => 0,
+        holonomy_render::menus::ViewMode::Suggesting => 2,
+        holonomy_render::menus::ViewMode::Viewing => 1,
+    }
+}
+fn view_mode(index: u8) -> holonomy_render::menus::ViewMode {
+    match index {
+        1 => holonomy_render::menus::ViewMode::Viewing,
+        2 => holonomy_render::menus::ViewMode::Suggesting,
+        _ => holonomy_render::menus::ViewMode::Editing,
+    }
+}
+
+pub struct ParkedDocument {
+    editor: holonomy_text::Editor,
+    title: String,
+    id: u64,
+    dirty: bool,
+    font_index: usize,
+    style_index: usize,
+    mode: holonomy_render::menus::ViewMode,
+}
+
+/// A complete resident document, including its full HDOC payload rather than flattened text.
+#[derive(Clone)]
+pub struct DocumentSnapshot {
+    pub id: u64,
+    pub title: String,
+    pub payload: Vec<u8>,
+    pub caret: u32,
+    pub dirty: bool,
+    pub font_index: usize,
+    pub style_index: usize,
+    pub mode: u8,
+}
+
+/// A lifecycle operation the desktop driver must confirm/persist before the session performs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentRequest {
+    Home,
+    New,
+    NewSample,
+    Close,
+    Rename,
+    Delete,
+    Lock,
+    OpenContainer,
+    ImportText,
+    InsertImage,
+    InsertTable,
+    Find,
+    Replace,
+    DocumentMenu(usize),
+}
+
+impl<'a> Session<'a> {
+    /// A session over `editor`, painting through `painter`, presenting to `scanout`.
+    pub fn new(
+        editor: Editor,
+        painter: Painter<'a>,
+        scanout: Box<dyn Scanout>,
+        metrics: ChromeMetrics,
+    ) -> Self {
+        Self::new_with(
+            editor,
+            painter,
+            scanout,
+            metrics,
+            &mut crate::store::NoSource,
+        )
+    }
+
+    /// Replace the editor with an opened one, and rebuild everything derived from the document.
+    ///
+    /// # Why this exists rather than assigning `session.editor = opened.editor`
+    ///
+    /// **Because that assignment is the bug.** A `Session` is built before the passphrase exists -- it has
+    /// to be, because it is built before `seccomp` -- so it is constructed over `Editor::new()`, and the
+    /// container's document is dropped in afterwards. `DocLines`, `Manifest` and `TextCounts` were all
+    /// built from the **empty** editor at construction and were never rebuilt, so `total_lines` stayed 1
+    /// and `emit_body_text` drew a single empty line.
+    ///
+    /// **It was invisible for the same reason it is easy to reintroduce**: `Editor::new()` and an opened
+    /// editor are both `Editor`, the field is public, and every in-memory gate assigns documents through
+    /// `Editor::insert_at` on a session that was built with the document already in it. **No gate was
+    /// ever in the state this product is in**, which is constructed empty and given a document later.
+    ///
+    /// So the field is private now, and this is the only way in. **The whole-document read happens here**,
+    /// once, through `bytes` -- which is why the two are one parameter rather than two steps a caller
+    /// could get wrong.
+    pub fn adopt_document(
+        &mut self,
+        mut editor: Editor,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut text = editor
+            .text_faulting(bytes)
+            .map_err(|_| crate::store::StoreError::Read)?;
+        self.lines = if self.managed_documents {
+            DocLines::build_wrapped(
+                &text,
+                holonomy_geometry::LineMetrics::default(),
+                self.wrap_measure(),
+            )
+        } else {
+            DocLines::build(&text, holonomy_geometry::LineMetrics::default())
+        };
+        self.manifest = crate::manifest::Manifest::from_text(&text);
+        self.counts = TextCounts::scan_bytes(&text);
+        text.fill(0);
+
+        self.editor = editor;
+        self.scrollbar_drag = None;
+        self.state.dirty = false;
+        self.state.font_index = 0;
+        self.state.style_index = 0;
+        self.mode = holonomy_render::menus::ViewMode::Editing;
+        self.state.mode_index = 0;
+        self.state.selection = None;
+        self.state.caret_line = 0;
+        self.state.caret_column = 0;
+        self.pending_style = None;
+        self.pending_face = None;
+        self.pending_colour = None;
+        self.active_cell = None;
+        self.state.words = self.counts.words;
+        self.state.total_lines = self.lines.len() as u32;
+        self.state.bytes = self.editor.text_len() as u32;
+        self.state.scroll_line = 0;
+        self.caret_drawn_at = None;
+        self.refresh_navigation();
+        if self.state.paged {
+            let _ = self.reconcile_caret();
+            self.scroll_line_into_view(self.state.caret_line);
+        }
+        // **A full repaint, not a damage-limited one.** The frame holds the *previous* document's
+        // pixels and there is no relationship between them and this one's, so a damage-limited pass
+        // would leave the old document's words on screen with the new one's geometry.
+        self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// [`new`](Self::new) against a document whose bytes may not be resident. **The product's constructor.**
+    ///
+    /// # Why this exists, and the failure it fixes is worth the whole paragraph
+    ///
+    /// `new` built three things from the document's bytes -- [`DocLines`], [`Manifest`] and
+    /// [`TextCounts`] -- and each read the **whole** document through `&self`. On a container-backed
+    /// document larger than the resident window that read returns `LeafAbsent`, and the code's
+    /// `unwrap_or_default()` turned it into **an empty geometry over a non-empty document**.
+    ///
+    /// **The symptom was a session that reported one line and painted no body text**, on a document that
+    /// was in fact 450 KB of text sitting in the container. Every in-memory gate passed, because on an
+    /// in-memory editor the whole-document read always succeeds -- so the entire test suite could be green
+    /// and the product could not open a document at all. `tests/session_open_document.rs`'s
+    /// `text_past_the_first_window_is_drawn_not_counted` is the gate, and it is the *first* test in this
+    /// project that could have caught it, because it is the first one whose document does not fit in the
+    /// window.
+    ///
+    /// **The failure was silent because a default is a plausible answer.** An empty `DocLines` is a valid
+    /// `DocLines`; it is only wrong in combination with a non-empty `text_len`, and nothing checked that
+    /// combination.
+    pub fn new_with(
+        mut editor: Editor,
+        painter: Painter<'a>,
+        scanout: Box<dyn Scanout>,
+        metrics: ChromeMetrics,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Self {
+        // # The line pitch comes from the faces, not from the constant
+        //
+        // `ChromeMetrics::DESKTOP.cell_h` is 18, which is `16 ppem + 2` -- an arithmetic identity with
+        // nothing to do with the fonts. The packed faces need 20 px (Inter), 22 (JetBrains Mono) and
+        // 24 (Noto Sans Math) of ascent-plus-descent at 16 ppem, so an 18 px line box cannot contain
+        // their ink at *any* baseline placement. Every caller here -- `publish_line_heights`,
+        // `emit_math`, the table grid, the damage rects -- positions and damages by `cell_h`, so the
+        // one place that can set it correctly from real metrics is where the session first meets the
+        // atlas it will paint from.
+        //
+        // The constant stays 18 as the **no-atlas** fallback, which is the same value
+        // `Painter::cell_height` falls back to. A chrome-only frame draws procedural box-drawing
+        // glyphs sized to the cell, so it needs the fallback to be self-consistent, not
+        // typographically correct -- and the two agreeing is the point.
+        //
+        // Part 32 adds the second half. `with_line_pitch` only *raised* bands to fit the type; it left
+        // the type at 16 ppem and the measure at `cell_w = 8`, so rasterising at a larger ppem grew the
+        // glyphs into bands that did not grow with them. `with_type_scale` scales every dimension that
+        // describes type, from the same measured pitch, and leaves the furniture alone.
+        let type_metrics = metrics;
+        let metrics = match painter
+            .atlas()
+            .and_then(|a| painter.size().map(|size| a.line_pitch_at(size)))
+            .filter(|&p| p > 0)
+        {
+            Some(pitch) => metrics
+                // **The cell from the face, and not the 8 the constant carries.** `cell_width()` reads
+                // the Monospace face's own advance out of the atlas -- 10 at 16 ppem, 14 at 24 -- which
+                // is the measure's true unit and was 20 % narrow before part 32.
+                .with_cell_width(painter.cell_width())
+                .with_type_scale(u32::from(pitch))
+                .with_line_pitch(u32::from(pitch)),
+            None => metrics,
+        };
+        // **The sidebar's reservation follows its flag, at construction as everywhere else.** Part 39:
+        // `Layout::new` centres the page in `width - sidebar_w`, so a caller that handed in the design
+        // metrics *and* turned the sidebar off would otherwise get a 208 px band of nothing down the
+        // left-hand side. One rule, applied here and in `set_sidebar`, and a gate asserts the two agree
+        // after every toggle.
+        let metrics = ChromeMetrics {
+            sidebar_w: holonomy_render::chrome::sidebar_reservation(
+                ChromeState::default().sidebar_open,
+            ),
+            ..metrics
+        };
+        let chrome = Chrome::new(metrics);
+        publish_atlas(painter.atlas(), painter.size_index());
+        let frame = Frame::black(metrics.width, metrics.height);
+        // Built before `editor` moves into the struct below, since it reads the document.
+        //
+        // From the *document*, not from an empty one. A rebuild is `O(document)` and `LineGeometry`'s
+        // docs call it the cost of typing a newline; it must not also be the cost of the *first*
+        // keystroke in a session, which is exactly what happens if the geometry starts as an empty
+        // document's -- the first `sync_lines` sees a line-count mismatch and rebuilds.
+        //
+        // **One read at open, shared.** `DocLines` and `Manifest` are both built from the document's bytes
+        // and both need all of them, so they share a single `editor.text()`. This is the *open* path, so
+        // the whole-document read is correct here: it happens once, before the first frame, and it is what
+        // lets neither structure ever need it again.
+        //
+        // **One read, faulting, shared by all three.** `DocLines` and `Manifest` both need the whole
+        // document and `TextCounts::scan` wants to walk it too, so this is the one place that pays for
+        // it. `text_faulting` rather than `text` is the part 16 change.
+        let (lines, manifest, counts) = {
+            let mut text = editor.text_faulting(bytes).unwrap_or_default();
+            let built = (
+                DocLines::build(&text, holonomy_geometry::LineMetrics::default()),
+                crate::manifest::Manifest::from_text(&text),
+                TextCounts::scan_bytes(&text),
+            );
+            // **Zeroed before it drops.** This is the entire document in plaintext and the block is
+            // about to end, handing the page back to the allocator where a later allocation could read
+            // it. Doing it here rather than behind a `Drop` keeps it visible at the one place that
+            // holds the bytes.
+            text.fill(0);
+            built
+        };
+        // **The cross-check that would have caught the bug above.** A document with bytes has at least one
+        // line, so `total_lines == 1 && text_len > 0` is the exact shape of "the whole-document read
+        // failed and the default stood in". It is a `debug_assert` rather than a hard one because a
+        // source that genuinely cannot produce bytes should degrade to an empty view rather than refuse
+        // to start -- but **the product path is covered**, so in a release build the pair is only
+        // visible through `total_lines()`, which `tests/session_open_document.rs` asserts on.
+        debug_assert!(
+            counts.lines() > 0 || editor.text_len() == 0,
+            "a document with bytes has lines: total_lines={} text_len={}",
+            counts.lines(),
+            editor.text_len()
+        );
+        let mut state = ChromeState {
+            // The document's first line is on screen at the caret's line.
+            scroll_line: 0,
+            // **The document's real totals, not `Default`'s.** `ChromeState::default()` has
+            // `total_lines: 1` and `words: 0`, which is right for an empty document and wrong for every
+            // other one -- and it stayed wrong until the first edit, because `publish_counts` runs from
+            // `after_edit` and nothing called it at construction.
+            //
+            // Phase 12 made that visible for the first time: `emit_body_text` clamps its line loop to
+            // `total_lines`, so a session opened on a three-line document drew **one** line and stopped.
+            // Before Phase 12 nothing read `total_lines` for drawing, only for the status bar, so the bug
+            // was a status bar reading "1 line" on a document with three -- wrong, and unnoticed, because
+            // every gate started from an empty document or made an edit first.
+            words: counts.words,
+            total_lines: counts.lines(),
+            bytes: editor.text_len() as u32,
+            ..ChromeState::default()
+        };
+        // **Part 44: the overflow list is seeded here, before the struct is built, because it is a
+        // function of the layout and not of the session.** `Chrome::new` already computed every
+        // rect -- including the zero-width ones -- so this is reading what exists rather than
+        // deciding anything, **and doing it here means a fresh session already has a correct menu**
+        // rather than one that fills in on the first resize.
+        state.overflow_tools = widgets::place_toolbar(&chrome.layout, widgets::TOOLBAR_PAD)
+            .into_iter()
+            .filter(|p| {
+                !matches!(
+                    p.tool,
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                ) && (p.rect.width == 0 || p.rect.height == 0)
+            })
+            .map(|p| p.tool)
+            .collect();
+        let mut s = Self {
+            editor,
+            // **No second document yet.** A session starts with the one it was built over; `New`,
+            // `Open` and `Import` are what put entries here.
+            parked: Vec::new(),
+            active_id: 0,
+            managed_documents: false,
+            document_request: None,
+            notice: None,
+            dialog: None,
+            home: None,
+            // **Nothing asked for a path yet.**
+            open_request: None,
+            clipboard_generation: 0,
+            paste_request: false,
+            // **0, and the chrome's `styles` is `StyleFlags::default()`** — two copies of "nothing is
+            // armed", and `armed_style_is_zero_on_a_fresh_session` is what says they are not drifting.
+            pending_style: None,
+            pending_face: None,
+            pending_compose: None,
+            chrome,
+            type_metrics,
+            state,
+            frame,
+            scanout,
+            painter,
+            keymap: Keymap::us(),
+            mods: ModifierState::new(),
+            page_drag: false,
+            scrollbar_drag: None,
+            ruler_drag: None,
+            clicks: None,
+            mode: holonomy_render::menus::ViewMode::Editing,
+            edge_scroll: None,
+            pending_colour: None,
+            blink: Blink::new(Blink::DEFAULT_PERIOD),
+            stats: SessionStats::default(),
+            damage: DamageRect::EMPTY,
+            // **Part 39.** A fresh session has painted nothing, so it has asked for nothing.
+            status_damage: DamageRect::EMPTY,
+            last_status: DamageRect::EMPTY,
+            active_cell: None,
+            tables_shape_dirty: false,
+            save_requested: false,
+            export_requested: false,
+            // Built from the document; see the comment at the `DocLines::build` call above.
+            lines,
+            manifest,
+            manifest_scratch: vec![0u8; crate::manifest::SECTION_BYTES],
+            counts,
+            doc_scratch: Vec::new(),
+            // Allocated once at construction, not on first use: the first paint happens during
+            // construction's caller, and a `Vec` that grows on the paint path is one allocation per
+            // growth on a path that paints per keystroke. See the field's docs for why this is separate
+            // from `doc_scratch`.
+            line_scratch: vec![0u8; LINE_SCRATCH_BYTES],
+            page_used: 0,
+            last_paint: holonomy_display::paint::PaintStats::default(),
+            last_damage: DamageRect::EMPTY,
+            last_painted_damage: DamageRect::EMPTY,
+            table_scratch: Vec::new(),
+            caret_drawn_at: None,
+            math_scratch: MathLayout::with_capacity(MATH_RUN_CAPACITY),
+            math_source: Vec::new(),
+            images: IcebergCache::new(),
+            image_decode_scratch: Vec::new(),
+            image_resample_scratch: Vec::new(),
+            // The page column is `metrics.width` minus the chrome's side bands, and `Layout::text`
+            // has already worked it out. 640 is §2.9.3's figure for an 80-column page at a 1280 px
+            // window, and `max(1)` keeps a degenerate layout from producing a zero-width resample --
+            // which would be a division by zero inside `holonomy_image::scale::axis_map`.
+            image_column_width: u32::max(chrome.layout.text.width, 1),
+        };
+        // **The chrome's caret is reconciled with the editor's, and this was a real desync.**
+        //
+        // `state` above is `..ChromeState::default()`, so `caret_line` and `caret_column` were 0 — while
+        // `editor.caret()` is wherever the document builder left it, which for every gate that seeds a
+        // document with `insert_at` is **the end of the document**. So a session opened on a three-line
+        // document reported "line 0, column 0" and **drew the caret at the top-left of the page** while
+        // the model said the end of the last line.
+        //
+        // **It was invisible for twelve phases because `caret_column` was a byte count and `Caret::locate`
+        // multiplied it by `cell_w`; both were 0, so the arithmetic agreed with itself.** Part 22 started
+        // computing the column from the editor's actual caret and it surfaced immediately, as
+        // `a_space_advances_the_pen_rather_than_stacking_glyphs` failing by exactly one cell on `"a a"`
+        // against `"aa"` — **the caret ink at the end of one line and not the other.** That gate was
+        // measuring ink extent and found a caret it had never been able to see.
+        //
+        // **Reconcile, and do not move.** Part 28.
+        //
+        // **It used to be `caret_to(s.editor.caret())`,** which is the same reconciliation *plus* a
+        // caret move -- and a move, as of part 28, scrolls the page to follow the caret. Since
+        // `insert_at` leaves the caret at the end of the document, **a new session opened scrolled to
+        // its last line.** `scrolling_moves_the_ink_to_the_row_the_geometry_says` caught it as a first
+        // page of 63 glyphs against 66: the first page had quietly become the last.
+        //
+        // **`reconcile_caret`, which is the tail of `caret_to` without the move.** The editor's caret is
+        // where it is and the chrome now agrees with it -- part 22's property, unchanged -- while the
+        // page stays at the top, which is what opening a document means.
+        s.reconcile_caret()
+            .expect("reconciling at the editor's own position cannot fail");
+        s
+    }
+
+    /// Capacity of the reusable run buffer, so a gate can assert it did not grow.
+    ///
+    /// Read-only, and for the same reason [`Session::damage`] is: the zero-allocation requirement is
+    /// about the *count* of allocations, and a count can only be asserted through an accessor. Reading
+    /// `runs.capacity()` from outside would mean exposing the buffer itself.
+    pub fn math_run_capacity(&self) -> usize {
+        self.math_scratch.runs.capacity()
+    }
+
+    /// The formula the caret is inside, if it is inside one.
+    ///
+    /// Read-only and derived, like [`Session::active_cell`]: the answer comes from scanning the
+    /// document's bytes for `$$` pairs, so there is no stored state that could disagree with the text.
+    /// A gate can ask "is the caret in a formula, and what is its LaTeX?" without the session being
+    /// able to be told the answer.
+    pub fn active_math(&self) -> Option<MathSpan> {
+        let caret = self.editor.caret();
+        let text = self.editor.text().ok()?;
+        holonomy_text::math_span_at(&text, caret)
+    }
+
+    /// The LaTeX of the formula the caret is in.
+    ///
+    /// For a gate that wants to assert what was typed. Returns `None` when the caret is not in a
+    /// formula, which is the ordinary case.
+    pub fn active_math_source(&self) -> Result<Option<Vec<u8>>, SessionError> {
+        let Some(span) = self.active_math() else {
+            return Ok(None);
+        };
+        let text = self.editor.text()?;
+        Ok(Some(text[span.inner()].to_vec()))
+    }
+
+    /// Insert an empty formula at the caret and put the caret inside it.
+    ///
+    /// This is `Ctrl+M`. It writes **four** bytes -- `$$$$` -- and leaves the caret at `start + 2`.
+    ///
+    /// **Four, not two.** Two would give the user an opening delimiter and no way to see where the
+    /// formula ends; four makes the span exist the instant the key is pressed, so `Ctrl+M` then `\sqrt
+    /// {x}` then Right shows a compiled radical rather than a `$$` that does nothing until someone
+    /// remembers to close it. The alternative -- two bytes and a "closed by typing the next `$$`"
+    /// rule -- makes the first keystroke's effect depend on a rule the user has not been told.
+    ///
+    /// The caret lands between the delimiters rather than after them, because a person who has just
+    /// asked for a formula wants to type one. That is the same argument as
+    /// [`Session::insert_table`]'s first-cell placement, and it is the reason this method moves the
+    /// caret at all rather than inserting and returning.
+    pub fn insert_math(&mut self) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+M in viewing mode
+        // wrote four bytes into the document**, with the refusal counter at zero.
+        self.check_editable()?;
+        if self.managed_documents {
+            self.delete_selected()?;
+        }
+        let at = self.editor.caret() as usize;
+        // In the managed editor, equations are separate blocks, so surrounding prose and
+        // other objects do not share the line claimed by the equation renderer.
+        let leading = self.managed_documents && at > 0 && self.previous_byte(at)? != Some(b'\n');
+        let bytes: &[u8] = if self.managed_documents {
+            if leading {
+                b"\n$$$$\n"
+            } else {
+                b"$$$$\n"
+            }
+        } else {
+            b"$$$$"
+        };
+        self.editor
+            .insert_at(at as u32, bytes, SpanPolicy::GrowIntoInsert)?;
+        self.stats.math_inserts += 1;
+        // **Phase 11 item 4: `TextCounts` is folded here too, and that is a bug this caught.** This
+        // path called `editor.insert_at` directly rather than going through `Session::insert`, so the
+        // word and line totals silently stopped tracking the document -- and the failure surfaced
+        // later as an *underflow* in a delete, several keystrokes afterwards, in a different function
+        // entirely. Every path that mutates the document must fold the counts; a new one that forgets
+        // will fail the same way, which is why `tests/session_counts.rs` drives all of them.
+        self.counts.after_insert(&self.editor, at, bytes);
+        self.editor.caret_to(at + usize::from(leading) + 2)?;
+        self.after_edit(bytes.len() as u32)
+    }
+
+    fn previous_byte(&self, at: usize) -> Result<Option<u8>, SessionError> {
+        let mut byte = [0u8; 1];
+        if at == 0 {
+            return Ok(None);
+        }
+        if self.editor.read_into(at - 1, &mut byte)? != 1 {
+            return Err(SessionError::Sink(std::io::Error::other(
+                "Could not read the insertion point",
+            )));
+        }
+        Ok(Some(byte[0]))
+    }
+
+    /// Insert the bundled PNG test chart at the caret in the sealed demo.
+    ///
+    /// The sealed process cannot open a user-chosen path after its filesystem and syscall
+    /// restrictions are installed. The unsealed desktop instead requests a file using
+    /// [`DocumentRequest::InsertImage`], validates PNG or bounded SVG at the UI boundary, and
+    /// calls [`insert_image_bytes`](Self::insert_image_bytes) with PNG bytes. Both modes then use
+    /// the same document image path: a U+FFFC anchor, content address, catalog entry, PNG decode,
+    /// fixed-point page-column downscale, secure cache block, image node, and integer blit.
+    /// Exports use the same PNG as an HTML image or PDF image object.
+    ///
+    /// The chart is 1920x1080 on purpose. §2.9.3's scaler runs on *every* image precisely because the
+    /// cache holds page-column-width rasters, so a fixture at or below the column width would never
+    /// exercise it at all.
+    pub fn insert_image(&mut self) -> Result<(), SessionError> {
+        self.insert_image_bytes(TEST_CHART_PNG)
+    }
+
+    /// Insert `png` as an image at the caret.
+    ///
+    /// The same path as [`insert_image`](Self::insert_image) with the bytes supplied, so a test can use
+    /// a fixture of its own and a future file picker can use the same code without either being a
+    /// special case.
+    pub fn insert_image_bytes(&mut self, png: &[u8]) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+I in viewing mode
+        // wrote an anchor and a catalog entry into the document**, with the refusal counter at zero.
+        self.check_editable()?;
+        if self.managed_documents {
+            // Validate before changing the document, including corrupt compressed data.
+            let header = holonomy_image::read_header(png)
+                .map_err(|e| SessionError::Sink(std::io::Error::other(e.to_string())))?;
+            let len = holonomy_image::decoded_len(&header);
+            if len > 16 * 1024 * 1024 {
+                return Err(SessionError::Sink(std::io::Error::other(
+                    "Image exceeds the 16 MiB decoded limit",
+                )));
+            }
+            let mut decoded = zeroize::Zeroizing::new(vec![0; len]);
+            holonomy_image::decode(png, &mut decoded)
+                .map_err(|e| SessionError::Sink(std::io::Error::other(e.to_string())))?;
+            self.delete_selected()?;
+            let at = self.editor.caret() as usize;
+            if at > 0 && self.previous_byte(at)? != Some(b'\n') {
+                self.insert(b"\n", None)?;
+            }
+        }
+        let at = self.editor.caret();
+        // `Editor::insert_image` writes the catalog entry *before* the anchor, so a malformed PNG
+        // leaves nothing behind rather than an anchor that nothing serves.
+        self.editor.insert_image(at, png)?;
+        self.stats.image_inserts += 1;
+        // Rescan rather than deltify: `Editor::insert_image` writes an anchor whose bytes are not
+        // returned to the caller, and `TextCounts` needs them. One rescan for one Ctrl+Image is the
+        // right trade -- see `Session::undo` for the same argument.
+        self.counts = TextCounts::scan(&self.editor);
+        // The caret moves past the anchor, so the next keystroke types after the image rather than
+        // inside it. `insert_at` already moved it; this makes the intent explicit and survives a
+        // change to how `insert_at` places the cursor.
+        self.editor.caret_to(at as usize + ANCHOR_BYTES.len())?;
+        // The *whole page* is invalidated, not one line: an image is hundreds of pixels tall and
+        // `after_edit` damages `cell_h` by construction, which would leave the image's own rows stale.
+        self.damage = self.chrome.full_damage();
+        self.after_edit(ANCHOR_BYTES.len() as u32)?;
+        if self.managed_documents {
+            self.insert(b"\n", None)?;
+        }
+        Ok(())
+    }
+
+    /// The chrome, for a gate that needs the page's geometry -- the text rectangle, the row pitch --
+    /// to check where something was drawn.
+    pub fn chrome(&self) -> &holonomy_render::chrome::Chrome {
+        &self.chrome
+    }
+
+    /// Which table cell the caret is in, if it is.
+    ///
+    /// Read-only, for the same reason [`Session::damage`] is: a gate needs to ask where the caret is,
+    /// and a caller that could *set* it would be able to put the caret somewhere the document's bytes
+    /// disagree with.
+    pub fn active_cell(&self) -> Option<TableCursor> {
+        self.active_cell
+    }
+
+    /// The table containing the caret, if it is in one.
+    pub fn active_table(&self) -> Option<TableSpan> {
+        self.active_cell?;
+        self.editor.table_at(self.editor.caret())
+    }
+
+    /// The bytes of the cell the caret is in, for a gate to read what was typed into it.
+    pub fn active_cell_text(&self) -> Result<Vec<u8>, SessionError> {
+        let cur = self.active_cell.ok_or_else(|| SessionError::NotInTable {
+            offset: self.editor.caret(),
+        })?;
+        let span = self
+            .editor
+            .table_at(self.editor.caret())
+            .ok_or(SessionError::NotInTable {
+                offset: self.editor.caret(),
+            })?;
+        let text = self.editor.text()?;
+        let t = ResolvedTable::new(span, &text)?;
+        let cell = t.cell_at(span.cell_index(cur.row, cur.col))?;
+        let start = cell.start_byte + cur.offset_in_cell.min(cell.len());
+        Ok(text[start as usize..cell.end_byte as usize].to_vec())
+    }
+
+    /// Insert a table of `rows` by `cols` at the caret, and put the caret in cell `(0, 0)`.
+    ///
+    /// This is `Ctrl+T`, and the dimensions come from the caller rather than being written here: the
+    /// keymap says *how many* columns, and the measure -- which only this layer knows -- says how wide
+    /// they are. `col_widths_for` does that arithmetic.
+    ///
+    /// The caret goes to the first cell rather than staying where the insertion started, because a
+    /// person who has just asked for a table wants to type into it, and the insertion point is the
+    /// table's first *separator*, which is not inside any cell.
+    pub fn insert_table(&mut self, rows: u16, cols: u16) -> Result<(), SessionError> {
+        // **The read-only check, which this path used to skip entirely.** It reaches the editor
+        // directly, so it never passed through `fault_for_edit` -- and **Ctrl+T in viewing mode
+        // wrote a table into the document**, with the refusal counter at zero.
+        self.check_editable()?;
+        let measure = if self.managed_documents {
+            self.chrome.layout.cells_per_row(self.chrome.metrics.cell_w) as u32
+        } else {
+            self.chrome.metrics.columns
+        };
+        let span = self.editor.insert_table(rows, cols, measure)?;
+        self.stats.table_inserts += 1;
+        // Rescan rather than deltify, for the reason `insert_image_bytes` does: `Editor::insert_table`
+        // does not hand back the separator bytes it wrote, and `TextCounts` needs them.
+        self.counts = TextCounts::scan(&self.editor);
+        self.tables_shape_dirty = true;
+        self.enter_cell(span, 0, 0, 0)?;
+        self.after_edit(0)
+    }
+
+    /// What the last paint did, from the painter's side. Phase 12.
+    ///
+    /// **Separate from [`SessionStats`], which accumulates.** `SessionStats::pixels` and `glyphs_drawn` are
+    /// totals across the session's life; `PaintStats` is one frame. A document with text on it answers
+    /// different questions under each — "how much has this session drawn" and "what is on the screen right
+    /// now" — and Phase 12's gate needs the second. `Session::paint` folds most of it into `SessionStats` and
+    /// would otherwise drop the rest, so this keeps the whole struct.
+    pub fn paint_stats(&self) -> &holonomy_display::paint::PaintStats {
+        &self.last_paint
+    }
+
+    /// The rectangle the last paint was given, as `DamageRect::EMPTY` when nothing has been painted.
+    ///
+    /// **The measurement behind "the buttons lag".** [`Self::damage`] is the accumulator and this is
+    /// the spend; a driver that prints both can say whether a slow click is slow because the damage is
+    /// a window or because the window is expensive, and those two need different fixes.
+    pub fn last_damage(&self) -> DamageRect {
+        self.last_damage
+    }
+
+    /// **The rect the last paint really walked, after the emitters widened it.**
+    ///
+    /// The difference between this and [`last_damage`](Self::last_damage) is precisely what the
+    /// emitters added: on a frame with no shifted run in the damage, nothing. On a frame whose lines
+    /// carry a superscript or a subscript, the rows outside the line boxes — which is the whole point
+    /// of [`Session::line_shift`], and invisible to `last_damage` by design.
+    ///
+    /// **A separate accessor rather than changing `last_damage`,** because both numbers are useful and
+    /// conflating them loses one. A scoping claim wants the requested rect; a gate about whether a
+    /// raised run's rows were repainted wants this one.
+    pub fn last_painted_damage(&self) -> DamageRect {
+        self.last_painted_damage
+    }
+
+    /// The page's geometry, for a caller that wants to look at it rather than at the whole chrome.
+    ///
+    /// `Chrome::layout` is a public field on a public field, so this is a convenience rather than a necessity
+    /// — but `layout.text` is four chained field accesses, and a gate that measures ink inside the text
+    /// column writes it nine times.
+    pub fn text_rect(&self) -> DamageRect {
+        self.chrome.layout.text
+    }
+
+    /// The document's section manifest. Phase 13.
+    ///
+    /// **Public so the gate can ask it the question four emitters ask.** [`crate::manifest::Manifest::span_total`]
+    /// answers *"does this document contain a formula, a table or an image?"* without reading it, which is the
+    /// capability Phase 12 named as the blocker it could not remove — and `tests/session_manifest.rs` holds
+    /// both directions down: prose must not allocate the whole-document buffer, and a document with a formula
+    /// must.
+    pub fn manifest(&self) -> &crate::manifest::Manifest {
+        &self.manifest
+    }
+
+    /// How many bytes of the page buffer the last body-text emit read. Phase 12.
+    ///
+    /// **Public so the gate can assert the emitter reads a page and not a document** -- the claim
+    /// `the_body_text_emitter_reads_one_page_and_not_the_document` makes, and the one Phase 12's memory
+    /// story rests on.
+    pub fn page_used(&self) -> usize {
+        self.page_used
+    }
+
+    /// Capacity of the body-text buffer, in bytes. Phase 12.
+    ///
+    /// **Public so the gate can assert it stays page-sized.** `tests/session_body_text.rs` paints a 1 MiB
+    /// document and then checks this is still [`LINE_SCRATCH_BYTES`] — because a buffer that grows on the
+    /// paint path is one allocation per paint, and RSS is `tests/session_rss.rs`'s business while this is the
+    /// narrower claim that Phase 12 actually changed.
+    pub fn line_scratch_capacity(&self) -> usize {
+        self.line_scratch.capacity()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Read access to the document
+    //
+    // **These exist because `editor` is private, and the privacy is the point.** `session.editor =
+    // opened.editor` compiled, ran, and left a session whose `DocLines`, `Manifest` and `TextCounts`
+    // described an *empty* document — the product painted one blank line over a real file for its entire
+    // life. See [`adopt_document`](Self::adopt_document).
+    //
+    // **Reads stay open.** A reader cannot leave the session inconsistent; a writer can and did. So the
+    // field is closed and every use of it is a named accessor, which is also what lets each one say why
+    // it is safe.
+    // ---------------------------------------------------------------------------
+
+    /// The document's bytes, for a caller that needs the whole thing — the export path, the window's
+    /// title, a gate.
+    ///
+    /// **A read accessor rather than a public field, and that is the difference between the two.**
+    /// [`adopt_document`](Self::adopt_document) exists because *assigning* the field left the geometry
+    /// stale; reading it is harmless, and making it private would only have pushed every reader to add a
+    /// method for the same thing. **The asymmetry is deliberate: reads open, writes are mediated.**
+    pub fn text(&self) -> Result<Vec<u8>, holonomy_text::EditorError> {
+        self.editor.text()
+    }
+
+    /// The document's length in bytes.
+    ///
+    /// **`u32`, not `Result`**, because `Editor::text_len` cannot fail — the rope's length is arithmetic
+    /// over leaf lengths and every leaf has one whether resident or not. An earlier draft of this
+    /// accessor returned `Result` and the compiler found four call sites doing arithmetic on it.
+    pub fn text_len(&self) -> u32 {
+        self.editor.text_len() as u32
+    }
+
+    /// Select `[from, to)`, which is what a drag does.
+    ///
+    /// **A named accessor rather than `editor_mut().select(..)` at each call site**, because the
+    /// clipboard gates need to set up a selection the way a user would and `editor_mut` is documented
+    /// as an escape hatch. `Editor::select` alone is *not* enough either: a selection made through it
+    /// never reaches `reconcile_caret`, so the paint path would draw no highlight for a selection the
+    /// model holds — **which is the same "two places state is written" defect part 22 found in
+    /// `caret_line`, in a different field.**
+    pub fn select_range(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
+        self.editor.select(from, to)?;
+        self.reconcile_caret()
+    }
+
+    /// Whether a selection exists, for the clipboard gates and the paint path.
+    pub fn has_selection(&self) -> bool {
+        self.editor.has_selection()
+    }
+
+    /// **How much is in the yank buffer.**
+    ///
+    /// Read-only and public because a copy is otherwise invisible from outside: `Ctrl+C` changes no
+    /// pixels, no document and no status-bar number, so without this there is no way to ask whether
+    /// it did anything.
+    pub fn clipboard_len(&self) -> usize {
+        self.editor.yanked().len()
+    }
+
+    /// The current internal clipboard bytes, for the desktop driver to publish.
+    pub fn clipboard_bytes(&self) -> &[u8] {
+        self.editor.yanked()
+    }
+
+    /// Changes whenever copy/cut replaces the internal clipboard.
+    pub fn clipboard_generation(&self) -> u64 {
+        self.clipboard_generation
+    }
+
+    /// Take a pending system-paste request (managed desktop only).
+    pub fn take_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.paste_request)
+    }
+
+    /// Paste the internal yank buffer even in managed mode; used as the fallback when no X selection
+    /// answers a system paste.
+    pub fn paste_internal(&mut self) -> Result<(), SessionError> {
+        let managed = self.managed_documents;
+        self.managed_documents = false;
+        let r = self.apply_with(
+            Command::Hotkey(Hotkey::Paste),
+            Some(&mut crate::store::NoSource),
+        );
+        self.managed_documents = managed;
+        r
+    }
+
+    /// Scrub the internal clipboard. The desktop driver also releases the X selection.
+    pub fn clear_clipboard(&mut self) {
+        self.editor.clear_yank();
+    }
+
+    /// The editor, mutably — for a gate that needs to drive the document directly.
+    ///
+    /// # This is an escape hatch, and it is narrow on purpose
+    ///
+    /// **Editing through it is fine. Replacing the document through it is what broke the product**, and
+    /// that is `adopt_document`'s job because it rebuilds the three structures that describe the bytes.
+    ///
+    /// So the rule is: **mutate through this, never assign.** Every mutation goes through
+    /// [`Editor`](holonomy_text::Editor)'s own paths, which record into the edit record and update the
+    /// geometry -- the session's `after_edit` then reconciles what a raw editor call cannot. A gate that
+    /// types into a document needs this; no production path does, which is why it is not used by one.
+    pub fn editor_mut(&mut self) -> &mut Editor {
+        &mut self.editor
+    }
+
+    /// The editor, for reading — **and part 24 is why this exists.**
+    ///
+    /// **A gate could not previously ask the session what styling it held.** `editor_mut` was the only
+    /// accessor and it needs `&mut self`, so the only way to look was to borrow mutably and give the
+    /// borrow back, which reads as a gate that wants to change something when it wants to read something.
+    ///
+    /// **Read-only, and the read-only part is the point.** [`Editor::spans`] hands out `&SpanMap`, and
+    /// `SpanMap` has no interior mutability on its read paths — `style_at` and `runs_in` are `&self` — so
+    /// this accessor cannot corrupt the session by looking. That is the same property
+    /// [`editor_mut`](Self::editor_mut)'s own note gives for read access, stated here because this is the
+    /// accessor that makes it true.
+    pub fn editor(&self) -> &Editor {
+        &self.editor
+    }
+
+    /// The caret's byte offset.
+    pub fn caret(&self) -> u32 {
+        self.editor.caret()
+    }
+
+    /// The caret's line and column, for a status bar and for a driver's hit testing.
+    ///
+    /// **Two accessors rather than one `Option<(u32, u32)>`,** because both halves are always
+    /// available and a pair of `u32`s that can be `None` is a `None` that is never `Some`. A gate
+    /// asserting a click landed on row 1 column 3 should not have to unwrap anything, and neither
+    /// should a driver that wants to draw its own cursor.
+    pub fn caret_line(&self) -> u32 {
+        self.state.caret_line
+    }
+
+    /// The caret's column within its line. See [`Session::caret_line`].
+    pub fn caret_column(&self) -> u32 {
+        self.state.caret_column
+    }
+
+    /// The chrome's computed layout.
+    ///
+    /// **Public because a driver needs it to turn panel coordinates into something it can act on**,
+    /// and part 20's `hit_rect` and `caret_at` are only half a feature without a way to ask where
+    /// anything is. It is a copy of a `Copy` struct, so a caller that wants it per event pays
+    /// thirty-two bytes rather than a heap allocation.
+    pub fn chrome_layout(&self) -> holonomy_render::chrome::Layout {
+        self.chrome.layout
+    }
+
+    /// The document's images, in document order.
+    pub fn assets(&self) -> &holonomy_text::AssetCatalog {
+        self.editor.assets()
+    }
+
+    /// The byte offset of every image anchor, in document order.
+    ///
+    /// **A `Result`, because the editor scans the document for the anchor bytes** and that scan is a
+    /// whole-document read. On a container-backed document it needs a source, which is why this is a
+    /// gate-level accessor and not something the paint path uses — `emit_images` goes through the
+    /// manifest instead, which is O(styled runs).
+    pub fn image_anchors(&self) -> Result<Vec<u32>, holonomy_text::EditorError> {
+        self.editor.image_anchors()
+    }
+
+    /// How many leaves currently hold their bytes.
+    pub fn leaf_count(&self) -> usize {
+        self.editor.leaf_count()
+    }
+
+    /// How many lines the document has, as the geometry counts them.
+    ///
+    /// **The geometry's answer, not a scan.** `DocLines` is built at open for the whole document from
+    /// offsets alone, so this is O(1) and available before a single byte has been read. That is what
+    /// makes "scroll to the end" usable on a document whose bytes are not resident -- a line count that
+    /// needed the bytes would defeat the point of windowing.
+    pub fn total_lines(&self) -> u32 {
+        self.state.total_lines
+    }
+    /// Scroll so that `line` is the first visible line. Phase 12's gate.
+    pub fn scroll_to(&mut self, line: u32) -> Result<(), SessionError> {
+        self.state.scroll_line = line.min(self.state.total_lines.saturating_sub(1));
+        self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// Capacity of the whole-document scratch buffer, in bytes.
+    ///
+    /// **Public as of Phase 11** so the RSS gate can name this consumer. It is the largest single
+    /// allocation outside the framebuffer and the leaves, and §2.9.4's table did not have it at all —
+    /// which is the same class of omission as the missing 3.906 MiB framebuffer, found the same way:
+    /// by measuring instead of adding up. See [`Session::doc_scratch`] for what it is for and when it
+    /// goes away.
+    pub fn doc_scratch_capacity(&self) -> usize {
+        self.doc_scratch.capacity()
+    }
+
+    /// The damage accumulated since the last paint: what the next `paint` will touch.
+    ///
+    /// Read-only. A caller that wants a repaint asks for one with [`Session::repaint_all`]; a caller
+    /// that wants to *narrow* the next paint has no business doing it, because the accumulated damage
+    /// is the union of every edit's damage and dropping part of it drops a repaint with it.
+    pub fn damage(&self) -> DamageRect {
+        self.damage
+    }
+
+    /// The current frame.
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+
+    /// The frame's size, as `(width, height)`.
+    ///
+    /// **A pair rather than the frame, because the driver that reports a resize is asking "did the
+    /// session's picture change size", not "give me four megabytes of pixels".** `windowed.rs` prints
+    /// it next to the server's own numbers under `HOLONOMY_WINDOW_TRACE`, which is the only place the
+    /// two can be compared.
+    pub fn frame_size(&self) -> (u32, u32) {
+        self.frame.size()
+    }
+
+    /// The chrome's metrics, for a driver that has to describe the layout it is presenting.
+    ///
+    /// **Read-only and by value, like [`chrome_layout`](Self::chrome_layout).** The window driver needs
+    /// the panel's width to decide whether a resize it has been told about is one the chrome has already
+    /// laid out for, and a `&ChromeMetrics` that outlived the session would be a borrow of a field the
+    /// resize replaces.
+    pub fn chrome_metrics(&self) -> holonomy_render::chrome::ChromeMetrics {
+        self.chrome.metrics
+    }
+
+    /// The presentation target, for a caller that wants to describe it.
+    pub fn scanout(&self) -> &dyn Scanout {
+        self.scanout.as_ref()
+    }
+
+    /// The presentation target, mutably.
+    ///
+    /// For a driver that both presents *through* the backend and *reads from* it: the developer window's
+    /// events arrive on the same socket its frames go out on, and the session owns the socket. The
+    /// driver downcasts this to its own backend type and reads the events between frames.
+    pub fn scanout_mut(&mut self) -> &mut dyn Scanout {
+        self.scanout.as_mut()
+    }
+
+    /// Write the current frame to `sink` as a binary PPM. Returns the bytes written.
+    ///
+    /// **On the session, not on the scanout**, because the frame is the session's. `HeadlessScanout`
+    /// keeps its own copy so a caller can inspect what was presented, and its `dump` reads that copy --
+    /// which for a window or a panel does not exist. Writing `self.frame` is the same bytes for every
+    /// backend, and it means the gate's visual baseline does not depend on which backend the test chose.
+    pub fn dump_ppm<W: Write>(&self, sink: &mut W) -> Result<u64, SessionError> {
+        Ok(self.frame.to_ppm(sink)?)
+    }
+
+    /// Write the current frame to a pre-opened file, for a sealed session that cannot open anything.
+    pub fn dump_ppm_to_file(&self, file: &mut File) -> Result<u64, SessionError> {
+        let mut w = std::io::BufWriter::new(file);
+        let n = self.dump_ppm(&mut w)?;
+        w.flush()?;
+        Ok(n)
+    }
+
+    /// Change the size of everything, and mark all of it stale.
+    ///
+    /// # One method, because there are two halves and the order is load-bearing
+    ///
+    /// The frame is the session's; the target is the backend's; and [`Scanout::present`] refuses a frame
+    /// whose size differs from the backend's. So a resize has to change both, and it has to change the
+    /// backend *first* -- and this is the only place that knows so. A caller that resized the session
+    /// alone would get every subsequent paint refused as a `SizeMismatch`, which is the exact failure
+    /// this had before the order lived here.
+    ///
+    /// Afterwards the two are checked against each other. A backend with a genuinely fixed size -- a DRM
+    /// panel -- declines to resize, and then the session must *not* resize either, so the frame and the
+    /// panel stay the size they were and the caller gets `false`. That is the answer for a target whose
+    /// size is its mode, and it is better than rebuilding a 4 MiB frame that can never be presented.
+    ///
+    /// What is rebuilt, when it happens: a frame of the new size, `ChromeMetrics` at the new size, and
+    /// the `SurfaceTree` the painter walks. The text does not move, the caret does not move, and no edit
+    /// is undone -- only the picture of the document changes, and the measure is fixed, so even the line
+    /// breaks do not move. See [`ChromeMetrics::for_size`].
+    ///
+    /// The whole new frame is marked stale, because a resize is one of the two events (the other is an
+    /// `Expose`) where diffing damage rectangles is not cheaper than redrawing: the damage from before
+    /// the resize describes the *old* geometry, so none of it covers the new pixels.
+    ///
+    /// A size smaller than the chrome needs is clamped by [`ChromeMetrics::for_size`] rather than
+    /// refused: a window dragged to nothing should show the smallest thing it can, not an error.
+    ///
+    /// Returns whether the size actually changed.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, SessionError> {
+        // **`clamp_to(width, height)` keeps the type scale (part 36) and the ribbon's bands are then
+        // derived from it** rather than replaced with the design's literals.
+        let mut metrics = self.chrome.metrics.clamp_to(width, height);
+        metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
+        if self.managed_documents {
+            metrics.page_pad = Self::desktop_page_padding(metrics.width);
+        }
+        let (w, h) = (metrics.width, metrics.height);
+        if (w, h) == (self.frame.width(), self.frame.height()) {
+            return Ok(false);
+        }
+        // The backend first, so that a backend which declines leaves the session untouched.
+        if !self.scanout.resize(w, h)? {
+            return Ok(false);
+        }
+        if (self.scanout.width(), self.scanout.height()) != (w, h) {
+            // A backend that claims to have resized and then disagrees is worse than one that
+            // declined, because every paint from here on fails with a `SizeMismatch` and the reason is
+            // not visible anywhere. So it is reported, and the session stays at the old size.
+            return Err(SessionError::Display(FrameError::SizeMismatch {
+                want: (w, h),
+                got: (self.scanout.width(), self.scanout.height()),
+            }));
+        }
+        self.chrome = Chrome::new(metrics);
+        self.reflow_for_measure();
+        // **The overflow menu is part of the layout, so it is recomputed wherever the layout is.**
+        // **Here and in `set_zoom`, and nowhere else**: those are the only two things that build a
+        // new `Chrome`. A resize that did not would leave the menu offering tools that now fit.
+        self.refresh_overflow();
+        self.frame = Frame::black(w, h);
+        self.damage = DamageRect::new(0, 0, w, h);
+        Ok(true)
+    }
+
+    /// **Recompute `state.overflow_tools` from the toolbar's own layout.** Part 44.
+    ///
+    /// ## Where the answer comes from, and why it is not a second computation
+    ///
+    /// **`place_toolbar` already knows.** Its own comment says it: *"A tool with no room left gets a
+    /// zero-width rect, which `DamageRect::contains` answers `false` for at every point — so a
+    /// hidden tool is also an unclickable one."* **A zero-width rect is the definition of "did not
+    /// fit", and it is already computed**; re-deriving it from the button width and the panel width
+    /// would be a second rule to keep in step with the first, and it would be wrong the moment the
+    /// separators moved.
+    ///
+    /// ## `Mode` and `Collapse` are excluded
+    ///
+    /// **Because they are in the right-hand group and are placed from the right edge**, so their
+    /// rects are non-zero whenever the panel is wide enough to hold them — **and when it is not,
+    /// they are the last things to be dropped**, which is correct: the collapse button and the mode
+    /// switcher are the two a user needs most in a small window. **They are excluded here for the
+    /// same reason they are excluded from `place_toolbar`'s left group.**
+    ///
+    /// ## When it runs
+    ///
+    /// **On every resize and on every zoom**, and nowhere else. Those are the two operations that
+    /// change `Layout`, and a gate that watched the counter on a keystroke would see it move for no
+    /// reason. `a_narrow_toolbar_puts_the_hidden_tools_in_the_overflow_menu` is the gate.
+    pub fn refresh_overflow(&mut self) {
+        let l = self.chrome.layout;
+        if self.state.ribbon {
+            self.state.ribbon_overflow = holonomy_render::ribbon::overflow(&l, &self.state);
+            return;
+        }
+        let hidden: Vec<widgets::Tool> = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
+            .into_iter()
+            // **`Overflow` is excluded too, and the reason is its role.** Part 44 put it in the
+            // right-hand group and gave the right-hand group priority over the left-hand one, so it
+            // has a rect on any panel wide enough to hold it — **and if it did not, a menu listing
+            // itself would be a menu whose only reachable row is the one that cannot be pressed.**
+            .filter(|p| {
+                !matches!(
+                    p.tool,
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                )
+            })
+            .filter(|p| p.rect.width == 0 || p.rect.height == 0)
+            .map(|p| p.tool)
+            .collect();
+        if hidden != self.state.overflow_tools {
+            self.state.overflow_tools = hidden;
+        }
+    }
+
+    /// **The zoom percentage `steps` places away from where the session is.** Part 44.
+    ///
+    /// ## Why a rank walk and not a percentage offset
+    ///
+    /// **Because the percentages are not evenly spaced** -- 100 and 125 with nothing between them --
+    /// so "the next one up" is the next *row of `ZOOMS`*, and `+25` would leave the table and be
+    /// refused. **A rank walk is also what makes the two ends behave**: stepping past the last row
+    /// returns the last row, so SizeUp at 125 % is a no-op rather than an error, and a button that
+    /// errors when you press it twice is worse than one that does nothing.
+    ///
+    /// **Clamped, not wrapped.** Wrapping would make SizeUp at 125 % jump to 100 %, which is a
+    /// zoom control that moves the wrong way.
+    fn zoom_step(&self, steps: i32) -> u32 {
+        let current = holonomy_render::menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == self.state.zoom_percent)
+            .unwrap_or(0) as i32;
+        let next = (current + steps).clamp(0, holonomy_render::menus::ZOOMS.len() as i32 - 1);
+        holonomy_render::menus::ZOOMS[next as usize].1
+    }
+
+    /// The mode's name, for the status bar and for an error message.
+    ///
+    /// **A `Session` method and not a `ChromeState` one**, because the chrome holds the index and
+    /// the model holds the mode, and a caller asking this question usually has one of the two.
+    #[must_use]
+    pub fn mode_name(&self) -> &'static str {
+        self.state.mode_name()
+    }
+
+    /// Name the document this session has open, and put it in the sidebar.
+    ///
+    /// # CORRECTION, part 39: the sidebar was drawn empty
+    ///
+    /// **`ChromeState::docs` starts empty and nothing ever filled it**, so the "Document tabs" rail was
+    /// 208 px of nothing down the left of the window with a header and no rows — which is what the
+    /// reference's sidebar is not, and which reads as a broken panel rather than as an empty one.
+    ///
+    /// **It is set here, from the one document the session actually has.** The tempting alternative is
+    /// to invent three more rows so the rail *looks* like the reference's: **that is a sidebar that
+    /// lies**, and a row that cannot be opened is worse than a row that is absent, because a person
+    /// clicks it. There is one document, so there is one row, and the rail says so.
+    ///
+    /// **The title and the row are set together**, for the same reason
+    /// [`set_sidebar`](Self::set_sidebar) sets a flag and a reservation: they are one fact — *what is
+    /// open* — and a title bar saying `untitled` above a tab saying `notes.wavefunction` is two answers
+    /// to one question.
+    pub fn set_document(&mut self, name: &str) {
+        if self.state.title == name && self.state.docs.len() == 1 {
+            return;
+        }
+        self.state.title = name.to_string();
+        // **The list is the one document this names.** `set_document` is *\"the session has exactly one
+        // document and it is called this\"*, which is what a driver says at startup and what
+        // `the_title_and_the_one_document_row_are_the_same_fact` holds. A parked document has no name
+        // to keep here, so it goes with the list rather than being renamed underneath it.
+        self.parked.clear();
+        self.sync_docs();
+        self.invalidate(self.chrome.full_damage());
+    }
+
+    /// **Rebuild the sidebar's list from the painted document and the parked ones.**
+    ///
+    /// **The painted document is row 0 and the parked ones follow, in the order they were parked.**
+    /// That is one fact — *what is open, in what order* — written in one place, because a title bar
+    /// naming one document over a rail naming another is the defect part 39 recorded.
+    fn sync_docs(&mut self) {
+        self.state.docs.clear();
+        self.state.docs.push(self.state.title.clone());
+        for d in &self.parked {
+            self.state.docs.push(d.title.clone());
+        }
+        self.state.active_doc = 0;
+    }
+
+    /// How many documents this session has open, the painted one included.
+    #[must_use]
+    pub fn document_count(&self) -> usize {
+        self.parked.len() + 1
+    }
+
+    /// **Park the document this session is painting and adopt `editor` in its place.**
+    ///
+    /// **The one supported way to change which document is on the page.** `Session::editor` is private
+    /// and [`adopt_document`](Self::adopt_document) is the only function allowed to write it, so a
+    /// caller cannot leave the geometry, the manifest and the counts describing the *previous*
+    /// document — the defect part 16 fixed, and the reason this is a method rather than a field write.
+    ///
+    /// **The document being replaced is parked, not dropped**: it is still open, and the sidebar has a
+    /// row for it.
+    pub fn set_managed_documents(&mut self, managed: bool) {
+        self.managed_documents = managed;
+        self.state.paged = managed;
+        // The managed, unsealed desktop editor uses the native WordCraft-style ribbon.
+        // The sealed session keeps its compact chrome and its existing dependency boundary.
+        self.state.ribbon = managed;
+        self.state.ribbon_tab = 1; // Home
+        self.state.ribbon_collapsed = false;
+        let navigation = managed && self.chrome.metrics.width >= 1280;
+        self.state.sidebar_open = navigation;
+        self.state.nav_tab = 0;
+        self.state.dark = false;
+        let page_pad = if managed {
+            Self::desktop_page_padding(self.chrome.metrics.width)
+        } else {
+            self.type_metrics.page_pad
+        };
+        let metrics = ChromeMetrics {
+            page_pad,
+            sidebar_w: holonomy_render::chrome::sidebar_reservation(navigation),
+            ..self.chrome.metrics
+        };
+        self.chrome = Chrome::new(metrics);
+        // Rebuild band heights from the *original* type metrics, not from the prior
+        // layout. This applies the ribbon at the current atlas size on first open and
+        // restores the compact bands if the session returns to sealed mode.
+        self.apply_type_scale();
+        self.refresh_navigation();
+        self.invalidate(self.chrome.full_damage());
+        if managed {
+            self.reflow_for_measure();
+        } else if let Ok(mut text) = self.editor.text() {
+            let anchor = self.lines.line_begin(self.state.scroll_line as usize);
+            self.lines = DocLines::build(&text, holonomy_geometry::LineMetrics::default());
+            use zeroize::Zeroize;
+            text.zeroize();
+            self.state.total_lines = self.lines.len() as u32;
+            self.state.scroll_line = self.lines.line_of(anchor);
+            let _ = self.reconcile_caret();
+            self.invalidate(self.chrome.full_damage());
+        }
+    }
+
+    // Print-like desktop margins which shrink with a narrow viewport. The sealed
+    // surface retains the caller's original metrics.
+    fn desktop_page_padding(width: u32) -> u32 {
+        96.min(width / 12)
+    }
+
+    fn wrap_measure(&self) -> u32 {
+        self.chrome.layout.cells_per_row(self.chrome.metrics.cell_w) as u32
+    }
+
+    /// Rebuild on a measure change only. Anchor the viewport by its document byte, not its old
+    /// row number, so resizing a long document does not jump to an unrelated paragraph.
+    fn reflow_for_measure(&mut self) {
+        if !self.managed_documents {
+            return;
+        }
+        let measure = self.wrap_measure();
+        if self.lines.wrap_measure() == Some(measure) {
+            return;
+        }
+        let anchor = self.lines.line_begin(self.state.scroll_line as usize);
+        if let Ok(mut text) = self.editor.text() {
+            self.lines =
+                DocLines::build_wrapped(&text, holonomy_geometry::LineMetrics::default(), measure);
+            use zeroize::Zeroize;
+            text.zeroize();
+            self.state.total_lines = self.lines.len() as u32;
+            self.state.scroll_line = self.lines.line_of(anchor);
+            let _ = self.reconcile_caret();
+            self.invalidate(self.chrome.full_damage());
+        }
+    }
+    pub fn take_document_request(&mut self) -> Option<DocumentRequest> {
+        self.document_request.take()
+    }
+    /// Display or dismiss the desktop library, without changing the active document.
+    pub fn set_home(&mut self, view: Option<holonomy_render::home::View>) {
+        self.scrollbar_drag = None;
+        self.home = view;
+        self.state.open = None;
+        self.invalidate(self.chrome.full_damage());
+    }
+    pub fn home(&self) -> Option<&holonomy_render::home::View> {
+        self.home.as_ref()
+    }
+    pub fn take_save_request(&mut self) -> bool {
+        std::mem::take(&mut self.save_requested)
+    }
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
+        self.state.notice = self.notice.clone();
+        if let Some(home) = self.home.as_mut() {
+            home.notice = self.notice.clone();
+            self.invalidate(self.chrome.full_damage());
+        } else {
+            self.invalidate_status_bar();
+        }
+    }
+    /// Show, update, or dismiss the modal dialog.
+    ///
+    /// Damage is scoped to what actually changed. An identical view is a no-op, so a driver that
+    /// re-syncs the form every loop iteration does not repaint the window at the event-wait cadence.
+    /// While a dialog stays open, only the union of the old and new panel rects is stale (the scrim
+    /// behind it is unchanged); appearing or disappearing touches the whole window because the scrim
+    /// covers it. This is FR-3.4's "no full-screen redraw during typing" applied to modal input.
+    pub fn set_dialog(&mut self, dialog: Option<holonomy_render::dialog::DialogView>) {
+        if self.dialog == dialog {
+            return;
+        }
+        let damage = match (&self.dialog, &dialog) {
+            (Some(old), Some(new)) => {
+                let layout = self.chrome.layout;
+                let a = holonomy_render::dialog::geometry(&layout, old).panel;
+                let b = holonomy_render::dialog::geometry(&layout, new).panel;
+                a.union(&b)
+            }
+            _ => self.chrome.full_damage(),
+        };
+        self.dialog = dialog;
+        self.invalidate(damage);
+    }
+    pub fn clear_image_cache(&mut self) {
+        self.images.clear();
+    }
+    pub fn active_document_id(&self) -> u64 {
+        self.active_id
+    }
+    pub fn has_unsaved_documents(&self) -> bool {
+        self.state.dirty || self.parked.iter().any(|d| d.dirty)
+    }
+    pub fn mark_documents_saved(&mut self) {
+        let was_dirty = self.state.dirty;
+        self.state.dirty = false;
+        for d in &mut self.parked {
+            d.dirty = false;
+        }
+        self.invalidate_status_bar();
+        if was_dirty && self.state.ribbon {
+            self.invalidate(self.chrome.layout.title);
+        }
+    }
+    pub fn document_snapshots(
+        &mut self,
+    ) -> Result<Vec<DocumentSnapshot>, holonomy_text::EditorError> {
+        let mut out = Vec::with_capacity(self.parked.len() + usize::from(self.active_id != 0));
+        if self.active_id != 0 {
+            out.push(DocumentSnapshot {
+                id: self.active_id,
+                title: self.state.title.clone(),
+                payload: self.editor.payload()?,
+                caret: self.editor.caret(),
+                dirty: self.state.dirty,
+                font_index: self.state.font_index,
+                style_index: self.state.style_index,
+                mode: self.state.mode_index as u8,
+            });
+        }
+        for d in &mut self.parked {
+            if d.id == 0 {
+                continue;
+            }
+            out.push(DocumentSnapshot {
+                id: d.id,
+                title: d.title.clone(),
+                payload: d.editor.payload()?,
+                caret: d.editor.caret(),
+                dirty: d.dirty,
+                font_index: d.font_index,
+                style_index: d.style_index,
+                mode: mode_index(d.mode) as u8,
+            });
+        }
+        Ok(out)
+    }
+    pub fn create_document(&mut self, id: u64, title: String) {
+        self.adopt_new(Editor::new(), title);
+        self.active_id = id;
+        self.state.dirty = true;
+    }
+    pub fn create_sample_document(&mut self, id: u64) -> Result<(), SessionError> {
+        let editor = crate::sample::studio_handbook()?;
+        self.adopt_new(editor, crate::sample::TITLE.to_string());
+        self.active_id = id;
+        self.state.dirty = true;
+        Ok(())
+    }
+    pub fn rename_document(&mut self, title: String) {
+        self.state.title = title;
+        self.state.dirty = true;
+        self.sync_docs();
+        self.invalidate(self.chrome.full_damage());
+    }
+    pub fn open_stored_document(
+        &mut self,
+        id: u64,
+        title: String,
+        payload: &[u8],
+        caret: u32,
+    ) -> Result<(), SessionError> {
+        if self.active_id == id {
+            return Ok(());
+        }
+        if let Some(i) = self.parked.iter().position(|d| d.id == id) {
+            self.switch_document(i + 1);
+            return Ok(());
+        }
+        let mut editor = Editor::from_payload(payload)?;
+        editor.caret_to(caret as usize)?;
+        self.adopt_new(editor, title);
+        self.active_id = id;
+        self.reconcile_caret()?;
+        Ok(())
+    }
+    pub fn close_document(&mut self, id: u64) {
+        if self.active_id == id {
+            self.close_active();
+        } else {
+            self.parked.retain(|d| d.id != id);
+            self.sync_docs();
+        }
+    }
+    pub fn remove_document(&mut self, id: u64) {
+        self.close_document(id);
+    }
+    pub fn replace_documents(&mut self, docs: Vec<DocumentSnapshot>) -> Result<(), SessionError> {
+        self.parked.clear();
+        self.images.clear();
+        let mut iter = docs.into_iter();
+        let (editor, title, id, dirty, font, style, mode) = match iter.next() {
+            Some(d) => {
+                let mut e = Editor::from_payload(&d.payload)?;
+                e.caret_to(d.caret as usize)?;
+                (
+                    e,
+                    d.title,
+                    d.id,
+                    d.dirty,
+                    d.font_index,
+                    d.style_index,
+                    d.mode,
+                )
+            }
+            None => (Editor::new(), "No document".into(), 0, false, 0, 0, 0),
+        };
+        self.adopt_document(editor, &mut crate::store::NoSource)
+            .map_err(|_| SessionError::Sink(std::io::Error::other("could not adopt document")))?;
+        self.state.title = title;
+        self.active_id = id;
+        self.state.dirty = dirty;
+        self.state.font_index = font;
+        self.state.style_index = style;
+        self.state.mode_index = mode;
+        self.mode = view_mode(mode);
+        for d in iter {
+            let mut editor = Editor::from_payload(&d.payload)?;
+            editor.caret_to(d.caret as usize)?;
+            self.parked.push(ParkedDocument {
+                editor,
+                title: d.title,
+                id: d.id,
+                dirty: d.dirty,
+                font_index: d.font_index,
+                style_index: d.style_index,
+                mode: view_mode(d.mode),
+            });
+        }
+        self.sync_docs();
+        self.reconcile_caret()?;
+        self.invalidate(self.chrome.full_damage());
+        Ok(())
+    }
+    pub fn reset_modifiers(&mut self) {
+        self.mods = ModifierState::new();
+    }
+    pub fn sync_modifiers(&mut self, mods: ModifierState) {
+        self.mods = mods;
+    }
+    pub fn insert_text(&mut self, text: &str) -> Result<(), SessionError> {
+        for c in text.chars() {
+            self.apply_with(Command::Insert(c), Some(&mut crate::store::NoSource))?;
+        }
+        self.tick()?;
+        Ok(())
+    }
+
+    fn adopt_new(&mut self, editor: Editor, title: String) {
+        let parked = std::mem::replace(&mut self.editor, Editor::new());
+        self.parked.push(ParkedDocument {
+            editor: parked,
+            title: self.state.title.clone(),
+            id: self.active_id,
+            dirty: self.state.dirty,
+            font_index: self.state.font_index,
+            style_index: self.state.style_index,
+            mode: self.mode,
+        });
+        // A blank editor has no leaves to fault, so this cannot fail; the result is dropped rather than
+        // unwrapped because a `New` that panicked would take the whole session down to open a blank page.
+        let _ = self.adopt_document(editor, &mut crate::store::NoSource);
+        self.state.title = title;
+        self.sync_docs();
+    }
+
+    /// **Close the document this session is painting.**
+    ///
+    /// **The most recently parked document becomes the painted one; with none parked, the session
+    /// continues with a fresh blank.** That is what closing the last document means, and it is the
+    /// document `New` would have opened — so a session never ends up with nothing to paint.
+    fn close_active(&mut self) {
+        match self.parked.pop() {
+            Some(doc) => {
+                // The document being closed leaves with its editor. It is fully resident, so it needs
+                // nothing else, and dropping the editor is the whole of the close.
+                let _ = std::mem::replace(&mut self.editor, Editor::new());
+                let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
+                self.state.title = doc.title;
+                self.active_id = doc.id;
+                self.state.dirty = doc.dirty;
+                self.state.font_index = doc.font_index;
+                self.state.style_index = doc.style_index;
+                self.mode = doc.mode;
+                self.state.mode_index = mode_index(doc.mode);
+            }
+            None => {
+                let _ = self.adopt_document(Editor::new(), &mut crate::store::NoSource);
+                self.state.title = "untitled".to_string();
+                self.active_id = 0;
+            }
+        }
+        self.sync_docs();
+    }
+
+    /// **Switch the painted document to the parked one at `index`.**
+    ///
+    /// **`index` is an index into the sidebar's list, not into [`parked`](Self::parked)**: row 0 is the
+    /// document already painted and the rows after it are the parked ones in order. **A request for
+    /// row 0 is not an error** and does nothing, which is what a second click on the active row is.
+    ///
+    /// **The document being switched away from is parked, not dropped** — switching is not closing.
+    /// It takes the place in the list the new document vacated, so the other rows keep their order.
+    pub fn switch_document_public(&mut self, index: usize) {
+        self.switch_document(index);
+    }
+    fn switch_document(&mut self, index: usize) {
+        if index == 0 || index > self.parked.len() {
+            return;
+        }
+        // Row `index` is parked entry `index - 1`: row 0 is the painted document.
+        let doc = self.parked.remove(index - 1);
+        let current = std::mem::replace(&mut self.editor, Editor::new());
+        self.parked.insert(
+            index - 1,
+            ParkedDocument {
+                editor: current,
+                title: self.state.title.clone(),
+                id: self.active_id,
+                dirty: self.state.dirty,
+                font_index: self.state.font_index,
+                style_index: self.state.style_index,
+                mode: self.mode,
+            },
+        );
+        let _ = self.adopt_document(doc.editor, &mut crate::store::NoSource);
+        self.state.title = doc.title;
+        self.active_id = doc.id;
+        self.state.dirty = doc.dirty;
+        self.state.font_index = doc.font_index;
+        self.state.style_index = doc.style_index;
+        self.mode = doc.mode;
+        self.state.mode_index = mode_index(doc.mode);
+        self.sync_docs();
+    }
+
+    /// **Take a pending `File > Open` / `File > Import`, so a driver can act on it.**
+    ///
+    /// **A driver call, not a session one.** The session can ask for a path to be opened but cannot
+    /// supply one — the sealed jail has no `openat` and the developer window has no file dialog. The
+    /// window driver is the one place that can turn this into a path, so it is the one that calls this
+    /// and then [`open_path`](Self::open_path) or [`import_path`](Self::import_path).
+    #[must_use]
+    pub fn take_open_request(&mut self) -> Option<holonomy_render::menus::Action> {
+        self.open_request.take()
+    }
+
+    /// **Open the container at `path` and make it the painted document.**
+    ///
+    /// # The developer window only
+    ///
+    /// **The caller checks `ChromeState::sealed` before this is reached, and `apply_action` does.**
+    /// The jail's seccomp filter has no `openat` on a user path, so an open under the seal is `SIGSYS`
+    /// and exit 137; the row is refused by name rather than letting that happen.
+    ///
+    /// # The document is read whole, and the container is dropped
+    ///
+    /// **[`crate::store::open_resident`] faults every leaf before this returns**, so the editor is
+    /// fully resident and needs no container — which is what lets the developer window keep painting
+    /// through `NoSource` and what makes the document parkable like any other. **The cost is that a
+    /// document larger than memory cannot be opened here**; the sealed path's sparse load is the
+    /// product's, and the developer window is not the product.
+    pub fn open_path(
+        &mut self,
+        path: &std::path::Path,
+        passphrase: &str,
+    ) -> Result<(), SessionError> {
+        let (editor, title) = crate::store::open_resident(path, passphrase).map_err(|_| {
+            SessionError::Sink(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "could not open the container",
+            ))
+        })?;
+        self.adopt_new(editor, title);
+        Ok(())
+    }
+
+    /// **Open the container at `path` and add it to the list, leaving the painted document alone.**
+    ///
+    /// **`Import`, and the one difference from [`open_path`](Self::open_path).** The new document is
+    /// parked rather than adopted, so the document on the page does not move — which is what makes the
+    /// row a way to accumulate documents rather than a way to switch to one.
+    pub fn import_path(
+        &mut self,
+        path: &std::path::Path,
+        passphrase: &str,
+    ) -> Result<(), SessionError> {
+        let (editor, title) = crate::store::open_resident(path, passphrase).map_err(|_| {
+            SessionError::Sink(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "could not open the container",
+            ))
+        })?;
+        self.parked.push(ParkedDocument {
+            editor,
+            title,
+            id: 0,
+            dirty: false,
+            font_index: 0,
+            style_index: 0,
+            mode: holonomy_render::menus::ViewMode::Editing,
+        });
+        self.sync_docs();
+        self.invalidate(self.chrome.full_damage());
+        Ok(())
+    }
+
+    /// Open or close the document-tabs sidebar, and re-lay the chrome for it.
+    ///
+    /// # Why this is one function and not a field write
+    ///
+    /// **Because "the sidebar is drawn" and "the sidebar's width is reserved" are one fact**, and
+    /// before part 39 they were two: `ChromeState::sidebar_open` said whether to draw it and
+    /// `ChromeMetrics::sidebar_w` said how much of the canvas to leave for it. A closed sidebar still
+    /// reserved 208 px, so the page sat 208 px to the right of a window with nothing down its left
+    /// edge — and the two could not be put back in step by a caller, because the reservation was
+    /// buried in the metrics a `Layout` was built from.
+    ///
+    /// # Why the layout is rebuilt rather than painted around
+    ///
+    /// **Because the page's position is a function of the reservation** — `Layout::new` centres the page
+    /// in `width - sidebar_w` — so the chrome has to be recomputed. It is one `Chrome::new` on a
+    /// toggle, and it is the whole reason the reference's page slides right when the sidebar opens
+    /// rather than being covered by it.
+    ///
+    /// **A no-op when nothing changed**, so a caller can pass the desired state rather than toggle it.
+    pub fn set_sidebar(&mut self, open: bool) {
+        let reservation = holonomy_render::chrome::sidebar_reservation(open);
+        if self.state.sidebar_open == open && self.chrome.metrics.sidebar_w == reservation {
+            return;
+        }
+        self.state.sidebar_open = open;
+        let metrics = ChromeMetrics {
+            sidebar_w: reservation,
+            ..self.chrome.metrics
+        };
+        self.chrome = Chrome::new(metrics);
+        self.reflow_for_measure();
+        // **Part 44: the sidebar takes 256 px away from the toolbar.** Collapsing it does not change
+        // the toolbar's own width -- the toolbar spans the panel and the sidebar overlays it -- so
+        // this call is belt and braces rather than a fix. **It is here because the rule is "every
+        // place that builds a new `Chrome` recomputes the overflow"**, and a rule with a list of its
+        // own call sites is a rule that will be half-remembered.
+        self.refresh_overflow();
+        self.invalidate(self.chrome.full_damage());
+    }
+
+    /// Paint everything and present. The first frame has no damage yet, so it is forced.
+    pub fn repaint_all(&mut self) -> Result<(), SessionError> {
+        let damage = Some(self.chrome.full_damage());
+        self.caret_drawn_at = None;
+        self.paint_with(damage, &mut crate::store::NoSource)
+    }
+
+    /// [`repaint_all`](Self::repaint_all) against a byte source. **The product's first paint.**
+    ///
+    /// **The `caret_drawn_at` reset is copied from `repaint_all` rather than shared, and it matters.**
+    /// That field is the "the caret is already where I left it" cache; a full repaint erases the caret with
+    /// the page's text, so the cache is a lie until it is cleared. Dropping the line here would make the
+    /// first paint of a freshly opened document skip the caret blink -- a small bug, and exactly the kind
+    /// that a copy-paste shim introduces.
+    pub fn repaint_all_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        let damage = Some(self.chrome.full_damage());
+        self.caret_drawn_at = None;
+        self.paint_with(damage, bytes)
+    }
+
+    /// Run `source` to exhaustion, or until Ctrl+Q.
+    ///
+    /// Returns why it stopped. Every command is counted, so a stream that produced nothing shows up
+    /// as `stats.commands == 0` rather than as silence.
+    pub fn run(&mut self, source: &mut dyn InputSource) -> Result<Exit, SessionError> {
+        self.run_with(&mut crate::store::NoSource, source)
+    }
+
+    /// [`run`](Self::run) over a document whose bytes may not be resident.
+    ///
+    /// **This is the product's loop.** `run` is the same loop with a
+    /// [`NoSource`](crate::store::NoSource), which is correct for an in-memory editor and cannot fetch.
+    ///
+    /// The name `run_with` rather than a parameter on `run` is deliberate: an input source is what the
+    /// loop *reads*, and a byte source is what it *reads the document through*. Overloading one name for
+    /// two unrelated roles is how a caller ends up passing the wrong one.
+    pub fn run_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        source: &mut dyn InputSource,
+    ) -> Result<Exit, SessionError> {
+        self.run_with_io(bytes, source, &mut [])
+    }
+
+    /// [`run_with`](Self::run_with) with the boot-opened export sinks, so **File > Export does
+    /// something**.
+    ///
+    /// # Why a separate method rather than a third parameter
+    ///
+    /// `run_with` has 40-odd gate call sites and `run` delegates to it. **Adding a parameter would put
+    /// an `&mut []` at every one of them** to describe a capability most of them have no use for — and
+    /// a gate that silently exports to nothing because it passed an empty slice is a gate that is
+    /// testing something other than what it says.
+    ///
+    /// The name says what is added rather than what it is: `_io` for the pre-opened **i/o** the session
+    /// does not own. **The jail has no `openat` on a user path**, so these files were opened before
+    /// sealing and there is no way for the session to create one; this is the shape that constraint
+    /// forces, not a design preference.
+    ///
+    /// # What the sinks are
+    ///
+    /// `--export-html out.html` and `--export-pdf out.pdf` at boot. An empty slice — the default, and
+    /// what every gate passes — means **Export is a no-op rather than an error**, which is the same
+    /// rule `LeafSource::commit_document`'s default follows and for the same reason: "there is nowhere
+    /// to write" is a fact about the configuration, not a failure.
+    pub fn run_with_io(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        source: &mut dyn InputSource,
+        sinks: &mut [ExportSink],
+    ) -> Result<Exit, SessionError> {
+        // **The loop branches on the event's kind, and that is the whole of what part 20 changed
+        // here.** A key goes to `handle_event_with`, which folds the modifier state and dispatches
+        // through the keymap. A pointer event goes to `handle_pointer`, which hit-tests against the
+        // chrome. **They share the `tick_with` afterwards**, because a hover highlight and a keystroke
+        // both need the frame's damage drained and both need the blink advanced -- which is the
+        // existing reason that call is outside the branch and not inside each arm.
+        // **A `while let` and not a `loop` with a `break`.** The loop's only exit condition was
+        // `next_or_wait` answering `None`, which is exactly what `while let` says -- **and the `loop`
+        // form put three statements of real work at the bottom of the body where a reader looking for
+        // the exit has to scroll past them.** The `?` stays on the `while let`: a read error is a
+        // failure of the stream, not an end of it.
+        while let Some(event) = self.next_or_wait(source, bytes)? {
+            match event {
+                holonomy_input::Event::Key(k) => {
+                    if let Some(exit) = self.handle_event_with(bytes, k)? {
+                        return Ok(exit);
+                    }
+                }
+                pointer => {
+                    self.handle_pointer(bytes, pointer)?;
+                }
+            }
+            // The blink may want a repaint even with no input.
+            self.tick_with(bytes)?;
+            // **The export is drained here rather than in `apply` for the reason the commit is:**
+            // the sinks live in `SessionContext` and are not reachable from `&mut self`. And it is
+            // drained *after* the commit above rather than instead of it — **a user who hits Export
+            // with unsaved work gets both**, and gets the file to match what is on screen.
+            if std::mem::take(&mut self.export_requested) {
+                self.export_all(sinks);
+            }
+        }
+        Ok(Exit::StreamEnded)
+    }
+
+    /// **How long [`run_with_io`](Self::run_with_io) waits for input.** FR-3.5, NFR-1.2.
+    ///
+    /// # `-1` is indefinite, and that is what NFR-1.2 asks for
+    ///
+    /// ```text
+    /// | idle CPU | NFR-1.2 | <= 0.001%, process blocked in `epoll_wait` |
+    /// ```
+    ///
+    /// **Half of that sentence is a measurement and half is a mechanism, and the mechanism is this
+    /// constant.** `epoll_wait`'s negative timeout blocks in the kernel until a descriptor is ready,
+    /// which is the only way a process reaches 0.001 % of a core: any periodic wake-up at all is a
+    /// floor, and a 100 ms tick is already ~0.02 %, twenty times the budget.
+    ///
+    /// `clock_nanosleep` is allowlisted for a "frame pacer", so a timer was available. **It is not
+    /// used**, and the reason is the number above rather than a preference for sleeping.
+    ///
+    /// # What it costs: the caret does not blink at idle, and that is not free
+    ///
+    /// [`holonomy_render::chrome::Blink`] counts **frames**, and its `DEFAULT_PERIOD` of 30 is
+    /// documented as *"half a second at 60 fps"*. **A frame is a loop iteration here**, so a caret
+    /// that blinks on schedule needs the loop to iterate 60 times a second — which is 0.12 % of a
+    /// core, a hundred and twenty times the budget, and the spin NFR-1.2 exists to forbid.
+    ///
+    /// **The two requirements cannot both be met by this loop as it is written, and picking the
+    /// budget is picking the requirement.** The budget wins, because a caret that stops blinking when
+    /// nobody is typing is invisible to everyone and a laptop that spins is not.
+    ///
+    /// **The consequence is recorded rather than discovered later:** the sealed session's caret holds
+    /// its last phase while the session is idle, and it advances normally on every keystroke, because
+    /// each event is followed by a `tick_with`.
+    ///
+    /// ### The fix, and why it is not in this change
+    ///
+    /// `Blink` should be driven by `CLOCK_MONOTONIC` rather than by iteration count — and the allowlist
+    /// already permits `clock_gettime`, so no new syscall is needed. That is a change to
+    /// `holonomy-render`'s most-defended invariant (its docs argue for the frame counter at length,
+    /// and a gate asserts which frame flips), so it wants its own change with its own gate rather than
+    /// arriving inside a loop fix.
+    ///
+    /// ### And the driver this one does not match
+    ///
+    /// `windowed.rs` waits [`EVENT_WAIT`](crate::windowed::EVENT_WAIT) instead, and its caret does blink
+    /// at idle. **That driver computes `Blink::DEFAULT_PERIOD / 4` = `30 / 4` = 7 ms**, treating a
+    /// frame count as a millisecond count, while its own comment says *"a blink period of 500 ms
+    /// divided by four"* — which would be 125 ms. **The comment describes the design and the code does
+    /// something else by a factor of eighteen.** Not fixed here; it is in
+    /// `crates/holonomy/src/windowed.rs` behind the `desktop` feature, and the sealed path is the one
+    /// FR-3.5 is about.
+    pub const EVENT_WAIT_MS: i32 = -1;
+
+    /// **The next event, or `None` when the stream really has ended.**
+    ///
+    /// # Why this is not `source.next_event()` in the loop condition
+    ///
+    /// It was, and it is the defect this whole method exists for.
+    ///
+    /// [`InputSource::next_event`] documents `None` as *a closed stream*, and `ScriptedInputSource`
+    /// honours that. **`EvdevSource` could not express "quiet right now"**, because the device is
+    /// `O_NONBLOCK` and a read on a quiet node returns `EAGAIN`, which it mapped to `None`. The loop
+    /// read `None` as end-of-stream and **returned `Exit::StreamEnded`** — so the sealed editor ran
+    /// until the user stopped typing, and then quit, silently, with its unsaved work committed and
+    /// nothing to say why.
+    ///
+    /// That is NFR-1.2's idle-CPU requirement failing in the *other* direction from how it reads: the
+    /// loop did not burn a core waiting for input, it refused to wait at all.
+    ///
+    /// # The three cases
+    ///
+    /// * an event — returned;
+    /// * nothing, and the source **can wait** — `wait` blocks up to [`EVENT_WAIT_MS`], the loop
+    ///   ticks (the blink may be due), and then asks the source again;
+    /// * nothing, and the source says it is over — `None`.
+    fn next_or_wait(
+        &mut self,
+        source: &mut dyn InputSource,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<Option<holonomy_input::Event>, SessionError> {
+        loop {
+            if let Some(event) = source.next_event().map_err(session_io)? {
+                return Ok(Some(event));
+            }
+            match source.wait(Self::EVENT_WAIT_MS).map_err(session_io)? {
+                holonomy_input::Wait::Ended => return Ok(None),
+                holonomy_input::Wait::Ready => {
+                    // **A spurious wake-up, a signal, or a timeout.** `Ready` means "call
+                    // `next_event` again", not "the stream ended". Returning `None` here made
+                    // `run_with_io` exit on the first `EINTR`/timeout even though the device was
+                    // still open. Tick for the blink/damage, then keep waiting.
+                    self.tick_with(bytes)?;
+                }
+            }
+        }
+    }
+
+    /// Write the document to every sink in `sinks`, reporting how many were written.
+    ///
+    /// **An empty slice is a no-op, not a failure.** It is the default for every gate, and a gate
+    /// driving a session with no export configured must not see an error from a menu row.
+    ///
+    /// **A failing sink does not stop the others.** A read-only filesystem on one path says nothing
+    /// about a second destination, and the alternative — abort on the first — turns two independent
+    /// exports into one that succeeds or one that does not exist.
+    ///
+    /// # The export happens after a commit, and never before
+    ///
+    /// An exported file is a copy of what is in memory, whether or not it is on disk. **Exporting
+    /// first and committing second would produce a file that is one revision behind the container**, and
+    /// nothing in either artefact would say so.
+    pub fn export_all(&mut self, sinks: &mut [ExportSink]) -> usize {
+        let mut written = 0usize;
+        for sink in sinks.iter_mut() {
+            match self.export(sink, "holonomy") {
+                Ok(report) => {
+                    written += 1;
+                    eprintln!(
+                        "holonomy: exported {} bytes of {} to {}",
+                        report.bytes,
+                        holonomy_export::Format::extension(sink.format),
+                        sink.path
+                    );
+                }
+                Err(e) => {
+                    eprintln!("holonomy: export to {} failed: {e}", sink.path);
+                    self.stats.export_failures += 1;
+                }
+            }
+        }
+        written
+    }
+
+    /// Whether a commit has been asked for and not yet performed.
+    ///
+    /// **A reader, not a writer, and that is the point.** `apply` sets the request and
+    /// [`handle_event_with`](Self::handle_event_with) clears it; nothing else may. A gate can therefore
+    /// ask "did the menu row reach the same place the key does" **without performing a commit**, which
+    /// is what makes that question answerable at all — a test that had to save to observe the save
+    /// could not tell a routed request from a routed-and-completed one.
+    pub fn save_requested(&self) -> bool {
+        self.save_requested
+    }
+
+    /// Take the pending export request: `true` if a row asked for one since the last call.
+    ///
+    /// **The windowed driver's reader, and it did not exist.** [`export_requested`](Self::export_requested)
+    /// was the only accessor, and a reader that does not clear is a reader no driver can act on without
+    /// asking the same question forever — so `windowed.rs` never asked at all, and the File > Export row
+    /// was inert there while `run_with_io`'s drain worked. **Two drivers, one drain.**
+    pub fn take_export_request(&mut self) -> bool {
+        std::mem::take(&mut self.export_requested)
+    }
+
+    /// Whether an export has been asked for and not yet performed.
+    ///
+    /// **The export twin of [`save_requested`](Self::save_requested)**, and a reader for the same
+    /// reason: the sinks are outside the session, so the row can only set a request, and a gate that
+    /// has to perform an export to observe that a row asked for one is testing the wrong half.
+    pub fn export_requested(&self) -> bool {
+        self.export_requested
+    }
+
+    /// Write the document to `source` and report the outcome.
+    ///
+    /// # What `0` means, and why it is not a failure
+    ///
+    /// A source that does not own the document returns `Ok(0)` — a `NoSource` session, or an editor
+    /// with no container behind it. **Comparing against `editor.text_len()` is how a caller tells a
+    /// save from a no-op**, which is exactly what the empty-document case needs: pressing `Ctrl+S` on
+    /// a session with nothing behind it must not be an error.
+    ///
+    /// # The dirty flag is cleared only on a real write
+    ///
+    /// A failed commit leaves `state.dirty` set, so the status bar keeps showing unsaved work — which is
+    /// the whole value of the flag. **Clearing it unconditionally would make a failed save look like a
+    /// successful one**, and this is the only place that distinction is visible: the bytes are gone from
+    /// the screen either way.
+    ///
+    /// # It reports rather than returns
+    ///
+    /// A commit failure is not a `SessionError`. `Ctrl+S` is a background action with no caller waiting
+    /// on a value, and propagating it would abort a session over a disk that is briefly full. The
+    /// message goes to stderr — the channel every other boot-time diagnostic uses — and the counts land
+    /// in [`SessionStats`] where a gate can read them.
+    pub fn commit_to(&mut self, source: &mut dyn holonomy_text::LeafSource) -> usize {
+        // **No cast: `text_len` answers a `usize` already.**
+        let want = self.editor.text_len();
+        match source.commit_document(&mut self.editor) {
+            Ok(written) => {
+                if written > 0 {
+                    if self.state.dirty && self.state.ribbon {
+                        self.invalidate(self.chrome.layout.title);
+                    }
+                    self.state.dirty = false;
+                    // **Part 39: the dirty marker is drawn in the status bar**, so clearing it changed
+                    // what the bar shows and has to ask for the repaint that shows it gone.
+                    self.invalidate_status_bar();
+                }
+                self.stats.committed += 1;
+                self.stats.bytes_committed += written as u64;
+                written
+            }
+            Err(_) => {
+                // **Reported, not counted as a save.** `stats.saves` counts requests; this counts
+                // attempts that failed, which is a different number and the one worth trending.
+                self.stats.commit_failures += 1;
+                eprintln!(
+                    "holonomy: the document could not be written ({want} bytes); it is still unsaved"
+                );
+                0
+            }
+        }
+    }
+
+    /// Fold one pointer event into the chrome and act on it.
+    ///
+    /// # What this is, structurally
+    ///
+    /// **Three cases, in the order the hardware produces them**: a motion event moves the pointer and
+    /// recomputes what is under it; a press marks the widget and acts; a release clears the mark. A
+    /// wheel is a fourth and it does not go through the widget list at all -- it scrolls, which is a
+    /// property of the document rather than of a control.
+    ///
+    /// # Why motion damages two rects and not one
+    ///
+    /// Moving the pointer changes *two* things on screen: the widget it left stops being hovered, and
+    /// the one it arrived at starts. Damaging only the new one leaves a button lit under a pointer
+    /// that is somewhere else, **and that stale highlight is permanent** because nothing else will
+    /// ever invalidate it. So the damage is the union of the old hover's rect and the new one's, which
+    /// is why [`widgets::hit_rect`] exists: without the inverse of `hit`, the only way to invalidate a
+    /// widget you have just left is to repaint the whole panel, at 1,024,000 pixels, on every mouse
+    /// movement.
+    pub fn handle_pointer(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        event: holonomy_input::Event,
+    ) -> Result<(), SessionError> {
+        use holonomy_input::Event as P;
+        self.stats.pointer_events += 1;
+        let Some((x, y)) = event.position() else {
+            // A key, which cannot reach here: `run_with` branches before calling. **And `position()`
+            // returning `None` for a key is the assertion that they are different kinds of thing.**
+            return Ok(());
+        };
+
+        if self.state.paged && self.home.is_none() {
+            match event {
+                P::Motion { .. } if self.scrollbar_drag.is_some() => {
+                    self.seek_scrollbar(y);
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                P::Button {
+                    button: holonomy_input::Button::Left,
+                    pressed: true,
+                    ..
+                } if self.state.open.is_none() && self.chrome.layout.scrollbar.contains(x, y) => {
+                    let thumb = self.chrome.scroll_thumb(&self.state);
+                    let offset = if thumb.contains(x, y) {
+                        y - thumb.y as i32
+                    } else {
+                        (thumb.height / 2) as i32
+                    };
+                    self.scrollbar_drag = Some(offset);
+                    self.seek_scrollbar(y);
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                P::Button {
+                    button: holonomy_input::Button::Left,
+                    pressed: false,
+                    ..
+                } if self.scrollbar_drag.is_some() => {
+                    self.scrollbar_drag = None;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        match event {
+            P::Motion { .. } => {
+                // **A drag in progress extends the selection, before anything else here.** Part 28.
+                //
+                // **First, and outside the "nothing changed" early return below**, because that return
+                // is about hover and cursor position and a drag moves the pointer without changing
+                // either: dragging along one row of text keeps `hover` at `Page` and — after the
+                // first event — `cursor` at the new x, so the early return is false; but the *first*
+                // motion of a drag can land on the pixel the press was on, and then both are equal and
+                // the return fires. **A selection that does not grow on the event where the pointer has
+                // not yet moved is not a selection that can be dragged at all.**
+                //
+                // **And it returns, because hover is not what this event is for.** The pointer is
+                // captured by the drag: highlighting a toolbar button the user is dragging past would
+                // be a lie about what is being pressed. `tick_with` below still runs.
+                if let Some(drag) = self.ruler_drag {
+                    self.drag_ruler_to(drag, x, y, bytes)?;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                if self.page_drag {
+                    // **The auto-scroll is armed *before* the drag extends, and that order is the
+                    // feature.** Reaching the bottom of the window is how a user says "keep going",
+                    // and if the extension happens first the selection is one line behind the pointer
+                    // on the very tick that starts the scroll. **One line behind, growing by one line
+                    // per tick, is a lag the user reads as "it is not working".**
+                    self.edge_scroll = EdgeScroll::at(&self.chrome.layout, x, y);
+                    self.drag_to(x, y, bytes)?;
+                    self.step_edge_scroll(x, y, bytes)?;
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                let before = self.state.hover;
+                // **`hover_at` returns `Hit`, and `Hit::None` becomes `None` here rather than being
+                // stored as a `Some(Hit::None)`.** The `Option` answers "is the pointer over
+                // anything", and a `Some(Hit::None)` would make every caller that compares against
+                // `None` wrong in a way no type checker catches -- `state.hover == None` would be
+                // false while the pointer was over nothing, and the emitters would all draw hover
+                // states for nothing.
+                let after = match self.hover_at(x, y) {
+                    widgets::Hit::None => None,
+                    h => widgets::hit_rect(&self.chrome.layout, &self.state, h).map(|_| h),
+                };
+                if before == after && self.state.cursor == Some((x, y)) {
+                    return Ok(());
+                }
+                self.state.cursor = Some((x, y));
+                self.state.hover = after;
+                for h in [before, after].into_iter().flatten() {
+                    if let Some(r) = widgets::hit_rect(&self.chrome.layout, &self.state, h) {
+                        self.invalidate(r);
+                    }
+                }
+                // **The popup, in full, whenever a menu is open.** Hover inside a popup changes one
+                // row; hover *outside* one closes it, and closing it redraws the popup and the
+                // heading it was hanging from. Neither is inside a widget's rect, so neither is
+                // covered by the loop above.
+                if let Some(open) = self.state.open {
+                    let l = self.chrome.layout;
+                    if let Some(pop) = widgets::popup(&l, &self.state, Some(open)) {
+                        self.invalidate(pop.rect);
+                    }
+                    // **The opener is invalidated as well as the popup**, because a popup that closes
+                    // takes its opener's highlight with it. Damaging only the popup would leave the
+                    // heading lit with nothing drawn over it.
+                    self.invalidate(opener_rect(&l, &self.state, open));
+                }
+            }
+            P::Wheel { dy, .. } => {
+                // **Only over the page.** A wheel over a popup should scroll the popup, which does not
+                // scroll, and a wheel over the sidebar should scroll the sidebar, which does not
+                // either. Scrolling the document under an open popup would move the thing the user is
+                // reading while the menu they are choosing from stays put.
+                let over_page = if self.state.paged {
+                    self.state.open.is_none()
+                        && self.chrome.layout.canvas.contains(x, y)
+                        && !(self.state.sidebar_open && self.chrome.layout.sidebar.contains(x, y))
+                } else {
+                    widgets::hit(&self.chrome.layout, &self.state, x, y) == widgets::Hit::Page
+                };
+                if over_page && dy != 0 {
+                    // Both evdev and X11 use a positive notch for wheel-up.
+                    self.scroll_by(-i64::from(dy) * 3);
+                }
+            }
+            P::Button {
+                button,
+                pressed: true,
+                time_ms,
+                ..
+            } => {
+                self.stats.pointer_presses += 1;
+                // **The left button is the only one that reaches the chrome at all**, and that was
+                // already true below; it is stated here because the arm now has to *not* fire for
+                // button 2 while still counting the press. **`let Some(button) = button.into_left()`**
+                // -- there is no such method, so: an early return with the counter left alone.
+                if button != holonomy_input::Button::Left {
+                    self.tick_with(bytes)?;
+                    return Ok(());
+                }
+                let hit = self.hover_at(x, y);
+                let was = self.state.pressed;
+                self.state.pressed = (hit != widgets::Hit::None).then_some(hit);
+                // **The pressed fill is drawn on the widget, so the widget is what is damaged — the
+                // one that was held and the one that now is.** Nothing else in the chrome changes
+                // on a press, and this arm used to rely on `press`'s full repaint to catch it, which
+                // is the same full repaint that made every click cost a whole window of socket.
+                self.invalidate_hit(was);
+                self.invalidate_hit(self.state.pressed);
+                // **Arm the drag before `press` runs**, because `press` is what plants the anchor and
+                // the flag has to be set by the time the pointer starts moving. Only a press that
+                // landed *on the page* arms it: a press on a toolbar button that the user then drags
+                // back over the page must not start selecting text.
+                self.page_drag = hit == widgets::Hit::Page;
+                // **Counted on every press, not only on the page, and not only on the left button.**
+                // The cheap and correct thing is to fold *every* press into one running count and let
+                // `Click::next` decide: a press far away in space or time is its own first click, so
+                // a click on the toolbar and then a click on the word under it cannot add up. **The
+                // alternative -- counting only page presses -- means a press somewhere else has to
+                // clear the count, which is a second rule to get right.**
+                if button == holonomy_input::Button::Left {
+                    self.clicks = Some(Click::next(self.clicks, time_ms, x, y));
+                }
+                // **The auto-scroll arms on the press, not on the first motion.** A drag that
+                // starts at the last visible line and never moves has to scroll: the user is
+                // already past the end.
+                if self.page_drag {
+                    self.edge_scroll = EdgeScroll::at(&self.chrome.layout, x, y);
+                }
+                match self.press(hit, x, y, bytes) {
+                    Err(SessionError::ReadOnly) => {
+                        self.set_notice(Some("Viewing mode: editing is disabled".into()))
+                    }
+                    Err(SessionError::Editor(EditorError::Undo(
+                        e @ holonomy_text::UndoError::ActionTooLarge { .. },
+                    ))) => {
+                        self.set_notice(Some(format!("Edit refused: {e}")));
+                    }
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
+                }
+            }
+            P::Button {
+                button: holonomy_input::Button::Left,
+                pressed: false,
+                ..
+            } => {
+                // **The release clears `pressed` and does nothing else.** A click is decided on the
+                // *press*, not the release, and that is what makes a drag off a button not fire it --
+                // the button is pressed when the pointer is on it, `pressed` is cleared by the
+                // release wherever it happened, and the command was already applied. **A
+                // release-driven model would need a drag threshold**, and a threshold is a guess about
+                // how far is far enough; deciding on the press needs no guess.
+                //
+                // **The widget that was held is damaged, so it stops looking held.** It was
+                // invalidated on the way down and this is the way back up; the full repaint that used
+                // to sit here painted a window to erase one 26 px square.
+                let was = self.state.pressed;
+                self.state.pressed = None;
+                self.invalidate_hit(was);
+                // **The drag ends here and the selection is kept.** Part 28. No threshold, for the
+                // reason the press decision has none: a drag that never moved planted an anchor equal
+                // to the caret, which the model already reports as no selection, so "did the user
+                // select anything" is answered by the selection rather than by a distance.
+                self.page_drag = false;
+                // **The auto-scroll stops with the drag, and not one tick later.** `edge_scroll` is
+                // only read while `page_drag` is set, so leaving it set would be harmless -- and a
+                // field that is harmless when it is wrong is a field nobody has to keep correct.
+                self.edge_scroll = None;
+                if self.ruler_drag.is_some() {
+                    self.ruler_drag = None;
+                    self.state.ruler_drag_x = None;
+                    self.invalidate(self.chrome.full_damage());
+                }
+            }
+            // **Right and middle buttons are not bound, and are counted as nothing.**
+            //
+            // Not as `pointer_inert`: that counter is about a *widget* that has no action, and this is
+            // a button that was never going to have one. A context menu is the obvious future and it
+            // is not this build.
+            _ => {}
+        }
+        self.tick_with(bytes)?;
+        Ok(())
+    }
+
+    /// **Extend the selection to wherever the pointer is now.** Part 28.
+    ///
+    /// ## Why this reuses `click_page` rather than duplicating it
+    ///
+    /// **Because a drag's far end is a click with shift held**, and the only difference between them
+    /// is the `extend` flag and the fact that a drag must not close a menu or touch `pressed`. The
+    /// hit test, `caret_at`, the column arithmetic and `offset_of` are all the same, and **a second
+    /// copy of that chain would be four more lines that have to agree with the first.**
+    ///
+    /// ## Why a drag is not clipped to the page
+    ///
+    /// **Because `caret_at` already answers for any point**, including one above the first visible row
+    /// — `Layout::caret_at` takes `scroll_line` into account — so dragging past the top or the bottom
+    /// of the window selects to the top or the bottom of what is *visible* and no further. **That is
+    /// the honest behaviour and it is recorded rather than fixed**: auto-scroll at the edge is a
+    /// feature, and this is where it would go.
+    ///
+    /// ## Why the release does not clear the selection
+    ///
+    /// **Because the user chose it.** Everywhere else in this file a pointer event ends a gesture and
+    /// leaves no trace — the release of a button applies it and forgets. A selection is the opposite:
+    /// it outlives the gesture, because the next thing the user does is *type over it*. `page_drag`
+    /// going false on the release is the end of the gesture; the selection is not part of it.
+    fn drag_to(
+        &mut self,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        // **`click_page(.., true)` — and `extend` unconditionally rather than reading shift.** A drag
+        // extends whether or not shift is down, because that is what a drag *is*. Reading the
+        // modifier here would mean shift-free drags silently select nothing.
+        // **`1`, and not the session's own click count.** A drag is one gesture however many presses
+        // preceded it: the user who double-clicked a word and then dragged past it is extending a
+        // selection, not selecting the line they started on.
+        self.click_page(bytes, x, y, true, 1)
+    }
+
+    /// Update page margins or paragraph indents from a ruler drag gesture.
+    fn drag_ruler_to(
+        &mut self,
+        drag: RulerDrag,
+        x: i32,
+        _y: i32,
+        _bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        self.state.ruler_drag_x = Some(x);
+        let cell_w = self.chrome.metrics.cell_w.max(1);
+        match drag {
+            RulerDrag::LeftMargin => {
+                let page_x = self.chrome.layout.page.x as i32;
+                let raw_pad = (x - page_x)
+                    .max(16)
+                    .min(self.chrome.layout.page.width as i32 / 3);
+                let snapped = ((raw_pad as u32) / cell_w) * cell_w;
+                let new_pad = snapped.max(16);
+                if new_pad != self.chrome.metrics.page_pad {
+                    self.chrome.metrics.page_pad = new_pad;
+                    let metrics = self.chrome.metrics;
+                    self.chrome = Chrome::new(metrics);
+                    if self.managed_documents {
+                        self.reflow_for_measure();
+                    }
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::RightMargin => {
+                let page_right = self.chrome.layout.page.right() as i32;
+                let raw_pad = (page_right - x)
+                    .max(16)
+                    .min(self.chrome.layout.page.width as i32 / 3);
+                let snapped = ((raw_pad as u32) / cell_w) * cell_w;
+                let new_pad = snapped.max(16);
+                if new_pad != self.chrome.metrics.page_pad {
+                    self.chrome.metrics.page_pad = new_pad;
+                    let metrics = self.chrome.metrics;
+                    self.chrome = Chrome::new(metrics);
+                    if self.managed_documents {
+                        self.reflow_for_measure();
+                    }
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::FirstLineIndent | RulerDrag::LeftIndent => {
+                let text_x = self.chrome.layout.text.x as i32;
+                let delta = x - text_x;
+                let step = (4 * cell_w) as i32;
+                if delta >= step {
+                    self.apply_action(holonomy_render::menus::Action::Indent)?;
+                } else if delta <= -step {
+                    self.apply_action(holonomy_render::menus::Action::Outdent)?;
+                }
+                self.invalidate(self.chrome.full_damage());
+            }
+            RulerDrag::RightIndent => {
+                self.invalidate(self.chrome.full_damage());
+            }
+        }
+        Ok(())
+    }
+
+    /// **Scroll the document if the drag is at the top or bottom edge.** Part 41.
+    ///
+    /// # Why this is called on *motion* and not on a timer
+    ///
+    /// **Because on a timer it would need a timer.** The sealed loop blocks in `epoll_wait` with
+    /// `EVENT_WAIT_MS = -1`, and part 39's note on `EVENT_WAIT` is explicit that a periodic wake-up
+    /// costs twenty times NFR-1.2's idle-CPU budget -- **and an auto-scroll that stops when the
+    /// pointer stops moving is an auto-scroll that does not work**, because a pointer held at the
+    /// bottom edge is by definition not moving.
+    ///
+    /// # What that leaves, and it is a real limitation
+    ///
+    /// **The page scrolls on every motion event while the pointer is within `EDGE_DEPTH` of an
+    /// edge, and does not scroll while the pointer is there and still.** Holding at the edge does
+    /// nothing. **The fix is a `CLOCK_MONOTONIC` timer armed only while a drag is at an edge**, and
+    /// it is not in this change: it needs a budget, and NFR-1.2's 0.001 % is a budget for *idle*,
+    /// not for *dragging*, so the number to spend has to be argued rather than borrowed.
+    ///
+    /// **What is built here is the half that needs no clock**, which is the half that has to be right
+    /// either way: which pixels are an edge, how fast each is, and that the drag is re-aimed after
+    /// the scroll rather than before. `crates/holonomy/tests/edge_scroll.rs` holds all three and
+    /// names the held-at-the-edge case as not-working.
+    fn step_edge_scroll(
+        &mut self,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        if let Some(edge) = self.edge_scroll.filter(|_| self.page_drag) {
+            let lines = edge.lines();
+            if lines != 0 {
+                self.scroll_by(i64::from(lines));
+                // **The drag is re-aimed at the pointer *after* the scroll, not before.**
+                //
+                // `caret_at` takes `scroll_line` into account, so scrolling and *then* asking where
+                // the pointer is gives the row the pointer is over *now* -- while asking first and
+                // scrolling after extends the selection to the row that has just scrolled away.
+                // **The order is the feature, and both orders are one line.**
+                //
+                // **The pointer position is a parameter and not `state.cursor`.** That field is
+                // written by the *hover* path, and a drag returns from the hover path before it
+                // gets there -- so reading it here answered `None` and the re-aim silently did
+                // nothing. **The caller has the coordinates; it is the only place that does.**
+                self.drag_to(x, y, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **The word containing `at`, as `(start, end)`, or `None` if the line cannot be read.**
+    ///
+    /// ## What a word is here, exactly
+    ///
+    /// **A run of `is_alphanumeric()` bytes, extended to nothing else.** Not a Unicode word --
+    /// `char::is_alphanumeric` on a UTF-8 document is a grapheme walk, and a grapheme walk inside a
+    /// 64-byte scratch buffer over a *line* is a second parser next to the one that put the line
+    /// there. **The measure is ASCII, the body face is ASCII in every fixture, and the rule is the
+    /// one that is cheap and total**: letters and digits and `_` and nothing else.
+    ///
+    /// **Bytes, not characters.** For ASCII the two are the same, and for anything else the rule
+    /// below stops at the first byte that is not alphanumeric -- which is the correct answer for a
+    /// *word* in an editor whose word-wrap is not built, because wrapping a line at its first
+    /// non-ASCII byte is not worse than not selecting the word at all.
+    ///
+    /// ## Why it returns `None` rather than an empty range
+    ///
+    /// **Because "there is no word here" and "the line is not readable" are different answers.**
+    /// A click on a run of spaces has no word, and `None` makes the caller do a single click -- which
+    /// is right. A line that will not fault in *also* gives `None` here, and the caller cannot tell
+    /// them apart, which is recorded: a double-click on a non-resident line places a caret rather
+    /// than a word. `crates/holonomy/tests/click_count.rs::a_double_click_on_an_unreadable_line_places_a_caret`
+    /// is what says so rather than leaving it to be found.
+    fn word_around(
+        &mut self,
+        at: u32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<Option<(u32, u32)>, SessionError> {
+        // **`DocLines::line_of`, which is `u32` already.** Going through `self.geo.line_of_byte`
+        // would reach past the wrapper for no gain and would need an `as u32` this does not.
+        let line = self.lines.line_of(at as usize);
+        let start = self.lines.line_begin(line as usize) as u32;
+        let end = self.lines.line_end(line as usize) as u32;
+        if end <= start {
+            return Ok(None);
+        }
+        // **One pass over one line, in 64-byte chunks through a stack buffer.** The same shape as
+        // `column_at_pen` and `refresh_caret_pen`, and for the same reason: the document is
+        // faulting and a whole line may not be resident.
+        let mut buf = [0u8; 64];
+        // **`run_start` and not a pair of bounds.** The question is "which maximal run of word bytes
+        // contains `at`", and a run is open-ended until a non-word byte closes it -- so one `Option`
+        // is the state and the closing byte is the answer. **The first version tracked
+        // `(word_start, word_end)` and closed the run on the first non-word byte *after* `at`,** which
+        // silently ran every earlier word on the line into one: a double-click on `bravo` returned
+        // `0..11` -- `alpha bravo` -- and the gate caught it on its first run.
+        let mut run_start = None;
+        let mut pos = start;
+        while pos < end {
+            let n = usize::try_from(end - pos).unwrap_or(0).min(buf.len());
+            if self
+                .editor
+                .read_into_faulting(bytes, pos as usize, &mut buf[..n])
+                .is_err()
+            {
+                return Ok(None);
+            }
+            for (i, &b) in buf[..n].iter().enumerate() {
+                let off = pos + i as u32;
+                if is_word_byte(b) {
+                    run_start.get_or_insert(off);
+                } else if let Some(from) = run_start.take() {
+                    // **The run closed at `off`, and the click is inside it if `from <= at < off`.**
+                    // **`at < off` and not `at <= off`**: `off` is itself a non-word byte, so a click
+                    // that lands on the *space after* a word is not a click in the word. That is the
+                    // rule `a_double_click_on_a_space_selects_nothing` holds, and it is the difference
+                    // between a word-selection and the word next door.
+                    if from <= at && at < off {
+                        return Ok(Some((from, off)));
+                    }
+                }
+            }
+            pos += n as u32;
+        }
+        // **The last word on the line, which no non-word byte ever closed.**
+        //
+        // `charlie` is the end of the fixture and is followed by `\n`, which the loop *does* see --
+        // so this arm only fires for a line whose last byte is a word byte, which is the case the
+        // fixture's `\n` hides. **It is here because a document does not have to end in a newline**,
+        // and an editor that cannot select the last word of a file with no trailing newline is broken
+        // in a way that only shows on files nobody has looked at.
+        match run_start {
+            Some(from) if from <= at && at < end => Ok(Some((from, end))),
+            _ => Ok(None),
+        }
+    }
+
+    /// **The whole line `line`, as `(start, end)`, with the newline left out.**
+    ///
+    /// ## The newline is excluded, and that is the whole point of this function
+    ///
+    /// **`DocLines::line_end` is one past the last byte *of the stored range*, and the stored range
+    /// includes the `\n`.** So the obvious implementation -- `line_begin..line_end` -- selects the
+    /// newline, and the very next thing a user does with a triple-click is type to replace the line,
+    /// **which would then eat the line break and join this line to the next one.** The usual sequence
+    /// is triple-click, type; a triple-click that breaks it is worse than no triple-click.
+    ///
+    /// ## How the newline is identified, and why by reading and not by trusting the geometry
+    ///
+    /// **`self.editor.read_into(end - 1)` and check it is `\n`.** The geometry index knows where the
+    /// line ends and not what is there; **the one byte at the boundary is what decides**, and reading
+    /// it is the difference between a gate that can be written and a comment that says `end - 1`.
+    ///
+    /// **A read that fails leaves the end alone.** If the last byte cannot be read then the range is
+    /// the whole line, which over-selects by one byte rather than under-selecting -- **and a
+    /// triple-click is never load-bearing enough for a byte either way to matter.**
+    fn line_around(&mut self, line: u32) -> Option<(u32, u32)> {
+        let l = line as usize;
+        if l >= self.lines.len() {
+            return None;
+        }
+        let begin = self.lines.line_begin(l) as u32;
+        let mut end = self.lines.line_end(l) as u32;
+        if end > begin {
+            let mut last = [0u8; 1];
+            if self
+                .editor
+                .read_into((end - 1) as usize, &mut last)
+                .is_ok_and(|n| n == 1 && last[0] == b'\n')
+            {
+                end -= 1;
+            }
+        }
+        Some((begin, end))
+    }
+
+    /// What is under `(x, y)`, with the open menu's grab applied.
+    ///
+    /// # The grab
+    ///
+    /// **A menu that is open swallows everything that is not one of its rows.** While a popup is down,
+    /// a pointer over the toolbar highlights nothing and a press there dismisses the menu without
+    /// pressing the button. Without this, opening a menu and clicking away would also click whatever
+    /// was underneath -- which is the single most irritating thing a menu can do, and it is invisible
+    /// in every test that only ever clicks the popup.
+    fn hover_at(&self, x: i32, y: i32) -> widgets::Hit {
+        let l = &self.chrome.layout;
+        if let Some(open) = self.state.open {
+            match widgets::popup(l, &self.state, Some(open)).and_then(|p| p.row_at(x, y)) {
+                Some(row) => return widgets::Hit::MenuItem { open, row },
+                // The thing that opened it is still live: hovering it and pressing it toggles it.
+                None => {
+                    let opener = match open {
+                        widgets::Open::RibbonOverflow => {
+                            widgets::Hit::Tool(widgets::Tool::Overflow)
+                        }
+                        widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
+                        widgets::Open::RibbonGroup(index) => widgets::Hit::RibbonGroup(index),
+                        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
+                        widgets::Open::Tool(t) => widgets::Hit::Tool(t),
+                    };
+                    if widgets::hit(l, &self.state, x, y) == opener {
+                        return opener;
+                    }
+                    return widgets::Hit::None;
+                }
+            }
+        }
+        widgets::hit(l, &self.state, x, y)
+    }
+
+    /// Damage whatever rectangle `hit` is drawn at, if it is drawn at all.
+    ///
+    /// **One call site per event kind rather than a match at each one**, because
+    /// [`widgets::hit_rect`] already answers "where is this drawn" for every variant — including the
+    /// ones that are not drawn, which answer `None` and invalidate nothing. That is the whole reason
+    /// the inverse lookup exists: a pointer event has to be able to say what it changed without the
+    /// session keeping a second copy of the geometry.
+    #[inline]
+    fn invalidate_hit(&mut self, hit: Option<widgets::Hit>) {
+        if let Some(r) = hit.and_then(|h| widgets::hit_rect(&self.chrome.layout, &self.state, h)) {
+            self.invalidate(r);
+        }
+    }
+
+    /// **The rectangles a change to `state.open` can move pixels in.**
+    ///
+    /// # Why this is not `self.chrome.full_damage()`
+    ///
+    /// **Because a full repaint of a 1,600 x 1,000 window is 6.4 MB over a socket for a menu that is
+    /// 300 x 200.** Every press on the menu bar did exactly that — *"the buttons lag"* — and the fix is
+    /// not a faster full repaint, it is **not repainting what did not change**. A popup appears, moves
+    /// and disappears as a unit, so the damage is: the panel that was on screen, the panel that is, and
+    /// the opener's own box, which lights up while its menu is down and goes out again when it closes.
+    ///
+    /// # Why the *old* popup is included as well as the new one
+    ///
+    /// **Because the rect is computed from the state that is current now**, and a zoom row's tick or a
+    /// style row's label can make the panel a pixel narrower than it was. Invaldating only what is there
+    /// now leaves a one-pixel band of the old panel along its edge, which is exactly the kind of thing
+    /// that reads as "the menu left a smudge".
+    ///
+    /// **Both rects for `before` and for `self.state.open`**, so a caller passes what the popup was and
+    /// does not have to remember to invalidate the new one.
+    fn invalidate_popup_change(&mut self, before: Option<widgets::Open>) {
+        let l = self.chrome.layout;
+        let mut rect = DamageRect::EMPTY;
+        for open in [before, self.state.open].into_iter().flatten() {
+            if let Some(pop) = widgets::popup(&l, &self.state, Some(open)) {
+                rect = rect.union(&pop.rect);
+            }
+            rect = rect.union(&opener_rect(&l, &self.state, open));
+        }
+        self.invalidate(rect);
+    }
+
+    /// Act on a press.
+    ///
+    /// **The menu first, and it is the only branch that closes a menu.** Everything else either runs a
+    /// command or leaves the menu alone; the dismissal lives here so there is exactly one place where
+    /// "a menu is open and this is not a row" becomes "the menu is closed".
+    ///
+    /// **`x` and `y` are parameters rather than read off the event**, because the press is decided on
+    /// the widget the *press* was over, and a `Hit` carries no position -- it is a small enum and
+    /// giving every variant an `x, y` would put four numbers on the twenty-one `Tool` cases for the
+    /// sake of one of them. The page is the only widget whose action needs a position, and it is the
+    /// only branch that reads them.
+    fn press(
+        &mut self,
+        hit: widgets::Hit,
+        x: i32,
+        y: i32,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        use widgets::{Hit, Tool};
+        match hit {
+            Hit::Ribbon(action) => {
+                self.apply_action(action)?;
+            }
+            Hit::RibbonTab(i) => {
+                if i == 0 {
+                    self.apply_action(holonomy_render::menus::Action::Home)?;
+                } else {
+                    self.state.ribbon_tab = i as u8;
+                    self.state.open = None;
+                    self.refresh_overflow();
+                    self.invalidate(self.chrome.full_damage());
+                }
+            }
+            Hit::RibbonMore => {
+                let before = self.state.open;
+                let open = widgets::Open::RibbonTabs;
+                self.state.open = (before != Some(open)).then_some(open);
+                self.invalidate_popup_change(before);
+            }
+            Hit::RibbonGroup(index) => {
+                let before = self.state.open;
+                let open = widgets::Open::RibbonGroup(index);
+                self.state.open = (before != Some(open)).then_some(open);
+                self.invalidate_popup_change(before);
+            }
+            Hit::RibbonSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
+            Hit::RibbonLock => self.apply_action(holonomy_render::menus::Action::Lock)?,
+            Hit::RibbonCollapse => {
+                self.apply_action(holonomy_render::menus::Action::ToggleRibbon)?
+            }
+            Hit::RulerLeftMargin => {
+                self.ruler_drag = Some(RulerDrag::LeftMargin);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerRightMargin => {
+                self.ruler_drag = Some(RulerDrag::RightMargin);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerFirstLineIndent => {
+                self.ruler_drag = Some(RulerDrag::FirstLineIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerLeftIndent => {
+                self.ruler_drag = Some(RulerDrag::LeftIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::RulerRightIndent => {
+                self.ruler_drag = Some(RulerDrag::RightIndent);
+                self.state.ruler_drag_x = Some(x);
+                self.invalidate(self.chrome.full_damage());
+            }
+            Hit::NavTab(tab) => {
+                self.state.nav_tab = tab.min(1);
+                self.invalidate(self.chrome.layout.sidebar);
+            }
+            Hit::NavSearch => self.apply_action(holonomy_render::menus::Action::Find)?,
+            Hit::NavClose => self.set_sidebar(false),
+            Hit::Nav(i) => {
+                let line = if self.state.nav_tab == 1 {
+                    (i as u32).checked_mul(self.chrome.layout.page_rows())
+                } else {
+                    self.state.navigation.get(i).map(|(line, _)| *line)
+                };
+                if let Some(line) = line {
+                    self.scroll_to(line)?;
+                }
+            }
+            Hit::Outline(line_idx) => {
+                self.scroll_to(line_idx)?;
+            }
+            Hit::MenuItem { open, row } => {
+                let Some(item) = open.items(&self.state).get(row).copied() else {
+                    return Ok(());
+                };
+                if open == widgets::Open::RibbonTabs {
+                    // Popup row indices equal tab indices; use the same path as
+                    // a visible tab, including File's document-library action.
+                    self.invalidate_popup_change(self.state.open);
+                    self.state.open = None;
+                    return self.press(Hit::RibbonTab(row), x, y, bytes);
+                }
+                let action = item.action;
+                // WordCraft keeps a collapsed group's palette open while its controls
+                // are used. Ordinary menus and the global overflow still close on choice.
+                if matches!(open, widgets::Open::RibbonGroup(_)) {
+                    let before = self.state.open;
+                    if let Some(action) = action {
+                        self.apply_action(action)?;
+                    }
+                    self.state.open = Some(open);
+                    self.invalidate_popup_change(before);
+                    return Ok(());
+                }
+                // **The popup closes before the action runs, and that order is load-bearing.** An
+                // action that changes what the popup would contain -- choosing a zoom level leaves
+                // the zoom control as the thing the user is holding -- would otherwise fight with the
+                // rows still on screen. Close, damage, act: three lines, in that order.
+                //
+                // **And the damage is the popup's, not the panel's.** See `invalidate_popup_change`.
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                if let Some(action) = action {
+                    self.apply_action(action)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            Hit::Menu(index) => {
+                // **A toggle, not "open".** Clicking the heading of the menu that is already down
+                // closes it, which is the one behaviour a menu has that is not obvious from having
+                // looked at a screenshot of it.
+                let before = self.state.open;
+                let open = widgets::Open::Menu(index);
+                self.state.open = (self.state.open != Some(open)).then_some(open);
+                self.invalidate_popup_change(before);
+            }
+            Hit::Tool(tool) => {
+                // Toolbar toggles must use the same selection-aware path as menu
+                // actions; directly arming here silently ignored selected text.
+                if let Some(slot) = holonomy_render::chrome::StyleFlags::slot_for(tool) {
+                    let action = match slot {
+                        holonomy_render::chrome::StyleFlagsSlot::Bold => {
+                            holonomy_render::menus::Action::ToggleBold
+                        }
+                        holonomy_render::chrome::StyleFlagsSlot::Italic => {
+                            holonomy_render::menus::Action::ToggleItalic
+                        }
+                        holonomy_render::chrome::StyleFlagsSlot::Underline => {
+                            holonomy_render::menus::Action::ToggleUnderline
+                        }
+                        holonomy_render::chrome::StyleFlagsSlot::Strikethrough => {
+                            holonomy_render::menus::Action::ToggleStrike
+                        }
+                    };
+                    self.apply_action(action)?;
+                    return Ok(());
+                }
+                // **A dropdown toggles, exactly as a menu does, and it is the same line of code for
+                // the same reason: the user needs a way to close it with the gesture that opened it.**
+                // **`Overflow` opens nothing when nothing is hidden**, and that is a decision made
+                // here rather than in `has_dropdown` because emptiness is a runtime fact: the tools
+                // that did not fit depend on the panel width, which is not a `const`.
+                //
+                // **And it is counted as `pointer_chrome`, not `pointer_inert`.** The button pressed;
+                // the button found there was nothing to show. **`pointer_inert` means a widget with no
+                // action behind it**, and there is one -- it just has nothing to do at this width.
+                // The ribbon has its own overflow *actions*, not the compact
+                // toolbar's hidden `Tool`s. Handle it before `has_dropdown()`:
+                // Overflow matches that predicate too, and otherwise opens the
+                // compact menu, which is empty in a managed document.
+                if tool == widgets::Tool::Overflow && self.state.ribbon {
+                    if self.state.ribbon_overflow.is_empty() {
+                        self.stats.pointer_chrome += 1;
+                        return Ok(());
+                    }
+                    let before = self.state.open;
+                    let open = widgets::Open::RibbonOverflow;
+                    self.state.open = (self.state.open != Some(open)).then_some(open);
+                    self.invalidate_popup_change(before);
+                    return Ok(());
+                }
+                if tool.has_dropdown()
+                    && !(tool == widgets::Tool::Overflow && self.state.overflow_tools.is_empty())
+                {
+                    // **No `pointer_chrome` here, and that is the gate `pointer.rs::
+                    // every_tool_that_has_a_command_is_routed_through_it` enforcing.** Part 44 added
+                    // one, on the reasoning that opening a popup *is* a chrome-state change -- which
+                    // is true and is not why it was wrong. **That gate counts a press as exactly one
+                    // of five things and never two** (fired, inert, toggled, opened, chrome), and a
+                    // dropdown press is `opened`; counting it twice makes a button that works look
+                    // like two buttons working.
+                    //
+                    // **Part 21 hit the same thing** -- it counted a zoom choice as `fired` -- and
+                    // part 23 measured that a zoom change produces no `Command` at all. **Both times
+                    // the fix was to name the outcome, not to relax the sum.**
+                    let before = self.state.open;
+                    let open = widgets::Open::Tool(tool);
+                    self.state.open = (self.state.open != Some(open)).then_some(open);
+                    self.invalidate_popup_change(before);
+                    return Ok(());
+                }
+                if tool == widgets::Tool::Overflow {
+                    self.stats.pointer_chrome += 1;
+                    return Ok(());
+                }
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                match tool {
+                    Tool::Print => {
+                        self.apply_action(holonomy_render::menus::Action::Export)?;
+                    }
+                    Tool::Collapse => {
+                        self.set_sidebar(!self.state.sidebar_open);
+                    }
+                    // **Part 44: the font-size pair is the zoom pair.** `SizeUp` and `SizeDown` are
+                    // the two atlas sizes the project can afford, reached from the toolbar rather than
+                    // from the zoom dropdown.
+                    //
+                    // **A nearest neighbour and not a step, because the list has two entries.** With
+                    // one size, SizeUp *is* 125 %; with two, SizeUp from 125 % stays at 125 % and
+                    // SizeDown from 100 % stays at 100 %. **Both ends are therefore no-ops at their
+                    // ends**, which is what a pair of buttons on a two-position control should be,
+                    // and neither is counted as inert -- **they pressed and something happened, which
+                    // was "there is nothing further".**
+                    //
+                    // **`zoom_step` and not an index arithmetic here**, because the percentage and
+                    // the rank are different things and the mapping lives in one place.
+                    Tool::SizeUp => {
+                        let next = self.zoom_step(1);
+                        self.set_zoom(next)?;
+                        self.stats.pointer_chrome += 1;
+                    }
+                    Tool::SizeDown => {
+                        let next = self.zoom_step(-1);
+                        self.set_zoom(next)?;
+                        self.stats.pointer_chrome += 1;
+                    }
+                    _ => {
+                        if let Some(cmd) = tool_command(tool) {
+                            self.run_clicked(cmd)?;
+                        } else {
+                            self.stats.pointer_inert += 1;
+                        }
+                    }
+                }
+            }
+            Hit::Title(btn) => {
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                if btn == widgets::TitleButton::Share {
+                    self.apply_action(holonomy_render::menus::Action::Export)?;
+                } else if let Some(cmd) = title_command(btn) {
+                    self.run_clicked(cmd)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            Hit::Doc(index) => {
+                // **Switching is a state change, not a command, and as of part 45 it is a real
+                // switch.** There is still no `Command::OpenDocument` — a document is not opened from
+                // a row, it is already in the session's list and the row names it — and
+                // [`switch_document`](Self::switch_document) is what adopts the named one, through the
+                // same [`adopt_document`](Self::adopt_document) every other path uses.
+                //
+                // **Row 0 is the document already painted**, so clicking it is not an error and does
+                // nothing, which is the same promise the row made when the list held one entry.
+                //
+                // **Nothing is counted.** This is a state change, not a command, and the arm was
+                // uncounted before the list existed; a switch also takes the full repaint it needs
+                // inside `adopt_document`, so there is no partial damage to account for here.
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                if index == 0 || index > self.parked.len() {
+                    return Ok(());
+                }
+                self.switch_document(index);
+            }
+            widgets::Hit::DocMenu(index) => {
+                if self.managed_documents {
+                    self.document_request = Some(DocumentRequest::DocumentMenu(index));
+                }
+                self.stats.pointer_chrome += 1;
+            }
+            Hit::NewDoc => {
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                // **The same request `File > New` makes, through the same arm**, so a document opened
+                // from the rail and one opened from the menu are the same document — and the one that
+                // was open is parked rather than dropped, which is what keeps the rail's rows honest
+                // about what is open.
+                self.apply_action(holonomy_render::menus::Action::New)?;
+            }
+            Hit::SidebarBack => {
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                self.set_sidebar(false);
+            }
+            Hit::Page => {
+                self.invalidate_popup_change(self.state.open);
+                self.state.open = None;
+                // **`self.mods.shift()`, which this method has never read.** Part 28's finding: the
+                // session already held a `ModifierState` and updated it on every key event, and
+                // nothing looked at it for a pointer. Shift-click was therefore *available* the
+                // whole time — the capability existed and was unused, which is the other kind of
+                // thing this project goes looking for.
+                // **The session's own click count, and not a hard-coded 1.** `press` is where a
+                // click on the page is turned into a caret, a word or a line, and the only thing
+                // that knows how many presses have happened is `self.clicks` -- which the `handle_pointer`
+                // arm above has already updated for this press. **Shift wins**, though: an
+                // extend-drag that happens to be the second click of a pair is still an
+                // extend-drag, because the user is dragging.
+                let clicks = if self.mods.shift() {
+                    1
+                } else {
+                    self.clicks.map_or(1, |c| c.count)
+                };
+                self.click_page(bytes, x, y, self.mods.shift(), clicks)?;
+            }
+            Hit::None => {
+                // **The dismissal, and the only thing a press on nothing does.** `hover_at` has
+                // already turned "the pointer is not over the popup" into `Hit::None`, so reaching
+                // here with a menu open *is* the dismissal.
+                //
+                // **CORRECTION, part 39: this was `self.damage = self.chrome.full_damage()`.** Every
+                // other way a popup can close damages the popup and its opener, and this one damaged a
+                // **whole window** — measured at 20.8 ms and 3,201,150 pixels for a click that was only
+                // ever going to erase a 200 x 300 panel. **"Click away to close the menu" is the most
+                // common thing a person does with a menu**, so this was the single largest contributor
+                // to the report that the buttons lag.
+                if self.state.open.is_some() {
+                    let before = self.state.open;
+                    self.state.open = None;
+                    self.invalidate_popup_change(before);
+                }
+            }
+            Hit::Dismiss => {}
+        }
+        let _ = bytes;
+        Ok(())
+    }
+
+    /// **Place the caret from a click on the page, or extend the selection if shift is held.** Part 28.
+    ///
+    /// ## CORRECTION — this doc used to say there is no selection
+    ///
+    /// It read:
+    ///
+    /// > A click places the caret and does not clear the selection, because there is no selection yet.
+    /// > When one lands, the same line becomes the rule; a gate will be written then and not now,
+    /// > because a gate written for a feature that does not exist tests nothing.
+    ///
+    /// **That was the right call at the time and it is now the thing being corrected.** The reasoning
+    /// was honest — it named the absence rather than papering over it — and the promise was kept: no
+    /// gate was written for a feature that did not exist. **The rule it promised is the one above.**
+    ///
+    /// ## Why the page is damaged and not the caret's two cells
+    ///
+    /// **Because a selection is not two cells.** A click with no shift moves the caret, and
+    /// `caret_to`'s two-cell damage is exactly right — which is why that note is still here. **A click
+    /// with shift, or a drag, changes a rectangle somewhere on the page**, and damaging only the caret
+    /// would leave the old highlight drawn until something else happened to repaint over it. So the
+    /// page is the damage unit for anything that moves the selection.
+    ///
+    /// ## Why `extend` is a parameter and not read here
+    ///
+    /// **Because the press and the drag need the same function with different arguments**, and the
+    /// press already knows: it branches on `self.mods.shift()`. Reading it again inside would be the
+    /// same fact read in two places, and the two would agree only until one of them changed.
+    fn click_page(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        x: i32,
+        y: i32,
+        extend: bool,
+        clicks: u32,
+    ) -> Result<(), SessionError> {
+        // **`caret_at_drag`, and the difference is the whole of this feature.** A *click* outside
+        // the page sheet is not a click on the page and plants no caret; a *drag* outside it means
+        // "keep going", and answering `None` there stops the selection while the pointer keeps
+        // moving. `click_page` serves both, so it asks for the clamped answer and the click path's
+        // strictness comes from [`Session::press`] having already resolved a page hit -- a press
+        // that did not land on the sheet never reaches this function.
+        let Some((line, grid_column)) = self.chrome.layout.caret_at_drag(&self.state, x, y) else {
+            return Ok(());
+        };
+        // **The column by the pen, and not the grid column.** Part 33.
+        //
+        // **`Layout::caret_at` divides `x - text.x` by `cell_w`**, and that was the right inverse of
+        // the old `column * cell_w` — but the caret is now placed by the pen, so the grid column is no
+        // longer the inverse of anything and **a click and the drawn caret disagree by up to a cell**.
+        // `a_click_and_the_drawn_cell_agree_in_both_directions` is the gate that says so, and it caught
+        // this on the first run of part 33: **249 against 250**.
+        //
+        // **`grid_column` is still read, and still used as the fallback**, for the case where the line's
+        // bytes cannot be read: a click that cannot be resolved by the pen is a click on a line that is
+        // not resident, and the grid column is one cell out rather than the click being dropped.
+        let column = self
+            .column_at_pen(line, x - self.chrome.layout.text.x as i32, bytes)
+            .unwrap_or(grid_column);
+        let at = self.offset_of(line, column, bytes)? as u32;
+
+        // ## The three things a click can select, and where they branch
+        //
+        // **Double-click selects the word, triple-click selects the line, and both branch here
+        // rather than in `press`.** That is the point of the `clicks` parameter: `press` does not
+        // know what a click is for, and `click_page` is the one function that has already done the
+        // hit test, resolved the column by the pen and computed a byte offset. **Any of the three
+        // could be derived from `at`, which is why they are one `match` and not three paths that
+        // each re-derive it.**
+        if !extend && clicks >= 2 {
+            // **`saturating_sub(1)` and not a match on 2 and 3 separately.** A word is a range; a line
+            // is a range; the difference is which range, and `>= 3` is the only question the caller
+            // asked by raising the count past two. **A fourth click is a line again, and that is the
+            // documented behaviour** -- see `Click::next`, which stops counting at three.
+            let range = if clicks == 2 {
+                self.word_around(at, bytes)?
+            } else {
+                self.line_around(line)
+            };
+            match range {
+                Some((from, to)) => self.select_at(from, to)?,
+                // **No range means the same thing a single click does, and not nothing.** A
+                // double-click on a line the fault could not read in full is a click; dropping it
+                // would leave the caret where the last click left it, which is the one outcome a
+                // user cannot explain from what they saw.
+                None => self.select_at(at, at)?,
+            }
+            return Ok(());
+        }
+
+        if extend {
+            self.extend_to(at)?;
+        } else {
+            // **`select(at, at)` and not `caret_to(at)`.** Both end up with the caret in the same
+            // place, and only one of them *says* that a plain click drops a selection. `select` plants
+            // an anchor at the click and then finds the anchor and the caret equal, which
+            // `SelectionRange::between` reports as "no selection" — so the rule is a consequence of
+            // the model rather than a line of code that has to be kept in step with it.
+            self.select_at(at, at)?;
+        }
+        Ok(())
+    }
+
+    /// **The glyph column whose cell contains `dx` pixels into the text column.** Part 33.
+    ///
+    /// # Why this exists, and what was wrong before
+    ///
+    /// **The click was resolved by `dx / cell_w`**, which is the exact inverse of a caret placed by
+    /// `column * cell_w` and **the wrong inverse of a caret placed by the pen.** Placing the caret on
+    /// the pen while hit-testing on the grid is the worst of the two: correct for a monospaced face
+    /// and wrong for every letter, in a direction the letters choose. **Measured, `dx` 10 landed the
+    /// caret at pen 249 where the drawing puts the boundary at 250.**
+    ///
+    /// # What it does
+    ///
+    /// **Walks the line's glyphs, accumulating each one's real advance, and returns the index of the
+    /// glyph whose half-open cell contains `dx`.** The boundary rule is **the midpoint**, so a click in
+    /// the left half of a glyph puts the caret before it and a click in the right half puts it after —
+    /// which is what every editor does and what a division cannot do, because a division has no way to
+    /// know where a glyph's centre is.
+    ///
+    /// # The cost, and the fallback
+    ///
+    /// **One pass over one line, in 64-byte chunks through a stack buffer**, the same shape as
+    /// [`refresh_caret_pen`](Self::refresh_caret_pen) and for the same reasons. **`None` when the line
+    /// cannot be read in full**, and the caller falls back to the grid column: a click on a line that
+    /// is not resident is better served by one cell out than by no click.
+    fn column_at_pen(
+        &mut self,
+        line: u32,
+        dx: i32,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Option<u32> {
+        let start = self.lines.line_begin(line as usize) as u32;
+        let end = self.lines.line_end(line as usize) as u32;
+        let align = if self.managed_documents {
+            let flags = self.editor.style_at(start).style_flags;
+            if (flags & holonomy_text::STYLE_ALIGN_MASK) != 0 {
+                let len = (end.saturating_sub(start)) as usize;
+                let mut small_buf = [0u8; 256];
+                if len <= small_buf.len() {
+                    if self
+                        .editor
+                        .read_into_faulting(source, start as usize, &mut small_buf[..len])
+                        .is_ok()
+                    {
+                        self.line_align_offset(start, &small_buf[..len])
+                    } else {
+                        0
+                    }
+                } else {
+                    let mut line_buf = vec![0u8; len];
+                    if self
+                        .editor
+                        .read_into_faulting(source, start as usize, &mut line_buf)
+                        .is_ok()
+                    {
+                        self.line_align_offset(start, &line_buf)
+                    } else {
+                        0
+                    }
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let dx = u32::try_from(dx - align).unwrap_or(0);
+        // **A click left of the text column is column 0**, which is what the grid arm answered and is
+        // still right: there is no glyph before the first one.
+        if dx == 0 || end <= start {
+            return Some(0);
+        }
+        // **The slice, not `runs_in`, for the same reason as `refresh_caret_pen`.** A drag resolves a
+        // column per pointer event and this is called once per event; the edit path's zero-allocation
+        // gate would catch it eventually, and the paint path has no reason to allocate either.
+        let span_count = self.editor.spans().spans().len();
+        let mut si = self
+            .editor
+            .spans()
+            .spans()
+            .iter()
+            .position(|s| s.end_byte > start)
+            .unwrap_or(span_count);
+        let mut run_end = self
+            .editor
+            .spans()
+            .spans()
+            .get(si)
+            .map_or(end, |s| s.end_byte);
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut pen = 0u32;
+        let mut column = 0u32;
+        let mut at = start;
+        while at < end {
+            let n = CHUNK.min((end - at) as usize);
+            let got = self
+                .editor
+                .read_into_faulting(source, at as usize, &mut buf[..n])
+                .ok()?;
+            if got < n {
+                return None;
+            }
+            let mut from = 0usize;
+            while from < n {
+                while (at + from as u32) >= run_end && si < span_count {
+                    si += 1;
+                    run_end = self
+                        .editor
+                        .spans()
+                        .spans()
+                        .get(si)
+                        .map_or(end, |s| s.end_byte);
+                }
+                // **The run's face and its size, from the same span and in one lookup.** A click
+                // inside a heading has to resolve its column in the size the heading is *drawn* at,
+                // or the hit test and the caret disagree past the heading's first word -- which is
+                // part 33's defect on the one axis part 33 did not have.
+                let (style, size) = self
+                    .editor
+                    .spans()
+                    .spans()
+                    .get(si)
+                    .filter(|_| (at + from as u32) < run_end)
+                    .map_or((self.body_style(), 0), |sp| {
+                        (self.span_style(sp), self.run_size_index(sp.style_flags))
+                    });
+                // **One scalar at a time, because the boundary is per glyph.** A chunk-wide advance
+                // would give the click the whole chunk's midpoint, which is not a column.
+                let len = scalar_len(&buf[from..n]).min(n - from);
+                let adv = pen_of(&self.painter, &buf[from..from + len], style, size);
+                // **The glyph owns `[pen, pen + adv)`, and the midpoint rule splits it at
+                // `pen + adv / 2`.** `>=` on the right edge is what puts a click past the last glyph on
+                // the last column rather than one past it.
+                if dx < pen.saturating_add(adv / 2) {
+                    return Some(column);
+                }
+                pen = pen.saturating_add(adv);
+                column += 1;
+                from += len;
+            }
+            at += n as u32;
+        }
+        Some(column)
+    }
+
+    /// Select `[anchor, focus)`, collapsing anything already selected. Part 28.
+    ///
+    /// **The session twin of [`Editor::select`](holonomy_text::Editor::select), and it exists because
+    /// `caret_to` is where the state and the damage are reconciled** — the same reason a `Session` has
+    /// `caret_to` at all rather than calling the editor from four places.
+    pub fn select_at(&mut self, anchor: u32, focus: u32) -> Result<(), SessionError> {
+        self.editor.select(anchor, focus)?;
+        if self.managed_documents && self.editor.table_at(focus).is_none() {
+            self.active_cell = None;
+        }
+        self.after_selection_moves();
+        Ok(())
+    }
+
+    /// Move the caret's far end of the selection, keeping its anchor. Part 28.
+    pub fn extend_to(&mut self, focus: u32) -> Result<(), SessionError> {
+        self.editor.extend_to(focus)?;
+        self.after_selection_moves();
+        Ok(())
+    }
+
+    /// **Reconcile the state and the damage after anything that moves the caret or the selection.**
+    ///
+    /// **The selection's own line is not tracked, and the page is damaged instead.** A selection can
+    /// be forty rows tall and the state has no field for that — the highlight is computed per line by
+    /// the emitter, from two byte offsets. **Damage would need the same arithmetic in reverse** (which
+    /// rows the *previous* selection covered), and doing it approximately is worse than doing it
+    /// simply: the page is repainted on every scroll anyway, and one extra page rect costs a rectangle
+    /// of work rather than a scan.
+    ///
+    /// # CORRECTION, part 39: the page, and not the panel
+    ///
+    /// **This used to end `self.damage = self.chrome.full_damage()`** — and the sentence above, which
+    /// was already in this function, says *page*. **So the function's own reasoning and its code
+    /// disagreed, and the code was the one that ran.**
+    ///
+    /// **Measured, in the live window at 20 ppem:** one `Shift+Left` damaged **1,600,000 px — 100 % of
+    /// the frame**. Shift-arrow is a *gesture*: a person selecting a paragraph holds shift down and
+    /// presses the key sixty times, and a pointer drag calls this once per motion event. **A full
+    /// repaint per event is the "the buttons lag" report, reached by a different route than the hover
+    /// that was fixed alongside it.**
+    ///
+    /// **What is damaged now, and why each part is there:**
+    ///
+    /// | rect | why |
+    /// |---|---|
+    /// | the **page** | the old highlight and the new one are both in it, and it is where every row of text lives |
+    /// | the **scrollbar** | `scroll_line_into_view` above may have scrolled, and the thumb is outside the page |
+    /// | the **status bar** | it prints `Ln N, Col M`, and `caret_line` moved — a selection that does not change the line still changes the column |
+    ///
+    /// **The union is the bounding box of the three, which for a 1,280x800 panel is 1,092x680 — 73 % of
+    /// the frame rather than 100 %.** That is not a small number, and it is not meant to be: **the page
+    /// genuinely repaints.** The chrome above it — title, menu bar, toolbar, ruler, sidebar, status bar's
+    /// neighbours — is 27 % of the window that did not change and is no longer touched.
+    ///
+    /// **And the page's scroll is covered by the page rect**, so a shift-arrow that scrolls the view
+    /// does not need a second case: the text that moved is the text in the page.
+    fn after_selection_moves(&mut self) {
+        self.sync_selection();
+        self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        let _ = self.refresh_caret_column(None);
+        // **And the pen, for the reason in `reconcile_caret`.** A drag moves the caret every pointer
+        // event and a gate reads the state after one; the pen has to be current there too.
+        let _ = self.refresh_caret_pen(None);
+        // **Scroll too, because a shift-arrow to a line off the page needs it as much as a plain one.**
+        self.scroll_line_into_view(self.state.caret_line);
+        let l = self.chrome.layout;
+        self.damage = if self.state.paged {
+            l.canvas.union(&l.status)
+        } else {
+            l.page.union(&l.scrollbar).union(&l.status)
+        };
+    }
+
+    /// Recompute [`ChromeState::caret_column`] as a count of UTF-8 scalars, and return it if complete.
+    ///
+    /// # This is the inverse of [`offset_of`](Self::offset_of), and it exists because of it
+    ///
+    /// `offset_of` was fixed in part 20: a column is characters, so a click in column 1 of a line
+    /// starting with a two-byte `é` lands after the `é` and not between its bytes. **The other half
+    /// of that fix was never made.** `caret_to` computed the column as `caret - line_start` — a *byte*
+    /// count — so the same `éa` reported column 2 for a caret at byte 2, and `Caret::locate` drew the
+    /// caret at `text.x + 2 * cell_w`, **one cell right of where the click had just put it.**
+    ///
+    /// That is not only a click bug: every keystroke goes through the same `caret_to`, so typing `é`
+    /// has always moved the drawn caret one cell too far. `tests/pointer.rs` recorded the finding
+    /// rather than asserting `== 1` (which would fail) or `== 2` (which would enshrine it).
+    ///
+    /// # Why scalars, and what that does and does not claim
+    ///
+    /// **`Painter::text` advances `cell_w` per UTF-8 scalar** — `TextRun`'s `k` indexes scalars — so
+    /// the caret cell has to be the scalar index to land under the right glyph. **A combining mark is
+    /// a second scalar at the same place**, and a CJK ideograph is two cells wide, and **this counter
+    /// gets both wrong.** That is recorded rather than fixed: the fix is a display-width table, and
+    /// adding one to make a counter correct in a case this build cannot produce would be the kind of
+    /// untested machinery this project has declined four times.
+    ///
+    /// # Why one function with two capabilities
+    ///
+    /// **Because there are two callers with two different needs, and two implementations would be two
+    /// things to keep in step.** `caret_to` has no source — see its note — and reads resident text.
+    /// `paint_with` has one, reads whatever it likes, and runs immediately before `chrome.tree`, so the
+    /// column the renderer reads is the authoritative one. Same function, same arithmetic, two
+    /// capabilities — the split `Editor` already draws between `read_into` and `read_into_faulting`.
+    ///
+    /// # The cost, and the fast path
+    ///
+    /// **O(line length), not O(document)** — bounded by the line the caret is on, read in 64-byte
+    /// chunks through a **stack** buffer so `tests/session_no_alloc.rs` stays green. **A caret at the
+    /// start of its line returns 0 without reading anything**, which is the common case for
+    /// `DocumentStart`, `Home`, and typing at the beginning of a line, and it is why the scan count in
+    /// `SessionStats` exists rather than the count being merely asserted here.
+    ///
+    /// # The failure is a fallback and not an error
+    ///
+    /// **`None` when the range could not be read in full**, which on a resident rope means an absent
+    /// leaf. The state keeps the byte count, and the paint path tries again with a source. **This is
+    /// the one window in which `caret_column()` reports a byte count**, and it is a window in which
+    /// the caret's line is not painted — the paint path fetches it — so no pixel is placed from it.
+    fn refresh_caret_column(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Option<u32> {
+        let caret = self.editor.caret() as usize;
+        let start = self.line_start(caret);
+        let span = caret.checked_sub(start)?;
+        if span == 0 {
+            // **The fast path, and the reason it is a fast path rather than a special case.** Zero
+            // bytes to count, so there is nothing to read and nothing to get wrong.
+            self.state.caret_column = 0;
+            return Some(0);
+        }
+        self.stats.caret_column_scans += 1;
+        /// Bytes per rope call. The same chunk `offset_of` uses, for the same reason: a column scan
+        /// must not be one rope walk per character.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut scalars = 0u32;
+        let mut at = start;
+        while at < caret {
+            let n = CHUNK.min(caret - at);
+            // **One loop, two readers.** The difference is the `match` and nothing else, which is the
+            // whole argument for not writing the walk twice.
+            let got = match source.as_deref_mut() {
+                Some(src) => self
+                    .editor
+                    // **No cast: `at` is already a `usize`**, and the `as usize` sat on a line
+                    // where the one genuinely typed offset was four lines above -- which is how a
+                    // reader stops trusting both.
+                    .read_into_faulting(src, at, &mut buf[..n])
+                    .ok()?,
+                // **No `as usize`: `at` is already one.** See the sibling arm above, which is the
+                // faulting read.
+                None => self.editor.read_into(at, &mut buf[..n]).ok()?,
+            };
+            // **A short read means the rest is not there**, and counting what arrived would be a
+            // number that is wrong by an unknown amount -- worse than the byte count it replaces,
+            // because the byte count at least has a stated meaning.
+            if got < n {
+                return None;
+            }
+            // **A UTF-8 scalar starts at any byte that is not a continuation byte**, which is the
+            // whole test: `0b10xxxxxx` continues a scalar started earlier, everything else starts one.
+            // This is the same rule `offset_of` walks the other way, and it needs no table and no
+            // decode -- a scalar's *length* is only needed to skip it, and counting does not skip.
+            scalars += buf[..n].iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32;
+            at += n;
+        }
+        self.state.caret_column = scalars;
+        Some(scalars)
+    }
+
+    /// **Where the caret's pen reaches on its own line, in pixels from the text column's left edge.**
+    /// Part 33.
+    ///
+    /// # Why this exists, and why it is not `refresh_caret_column`
+    ///
+    /// **`refresh_caret_column` counts scalars, and scalars are not a distance.** It answers "which
+    /// glyph", which is what a click needs to convert a column into an offset; it does not answer "how
+    /// far", because the document is proportional and `'a'` is 9 px where `'W'` is 16. **The caret was
+    /// being placed by multiplying a glyph index by the chrome's monospace cell**, which is part 30's
+    /// standing decision and the largest remaining item on the backlog.
+    ///
+    /// **So the two questions are two functions.** One counts glyphs and is called by the keystroke
+    /// path that has no source; this one measures distance and is called only from `paint_with`,
+    /// which has a source and draws. **Merging them would put a second concern into a function whose
+    /// invariants are documented and load-bearing** — the stack buffer, the 64-byte chunk, the
+    /// faulting read, the short-read fallback — for no saving, since the paint path reads the line
+    /// anyway.
+    ///
+    /// # The cost, and why it is a second pass
+    ///
+    /// **O(line length), read in 64-byte chunks through a stack buffer**, exactly as
+    /// [`refresh_caret_column`](Self::refresh_caret_column) does, so `tests/session_no_alloc.rs`
+    /// stays green. **It is a second pass over one line, and that is a deliberate trade**: the two
+    /// walks ask different questions of the same bytes, the column's is needed by the click path and
+    /// the pen's by nothing else, and a single fused walk would have to answer both from the same
+    /// read to save one pass over at most 80-odd bytes. **A caret at the start of its line returns
+    /// `Some(0)` without reading anything**, which is `Home`, `DocumentStart` and every keystroke at
+    /// the beginning of a line.
+    ///
+    /// # Why the styled runs are queried and not assumed Regular
+    ///
+    /// **Because a bold glyph advances by the bold face's metric**, and part 31 established that the
+    /// emitter places a run using that face's advances. **A pen that assumed Regular would put the
+    /// caret back on the grid for exactly the runs where the grid was wrong**, which is the worst of
+    /// both: correct for an unstyled document and wrong for a styled one.
+    fn refresh_caret_pen(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Option<u32> {
+        let caret = self.editor.caret();
+        let start = self.line_start(caret as usize) as u32;
+        let span = caret.checked_sub(start)?;
+        if span == 0 {
+            self.state.caret_pen_x = Some(0);
+            return Some(0);
+        }
+        // **`SpanMap::spans()` and not `runs_in`, and that is forced.** `runs_in` returns a `Vec`, and
+        // `refresh_caret_pen` is called from `reconcile_caret` — **which is the edit path**, where
+        // `tests/session_no_alloc.rs` asserts that nothing allocates. The first version called
+        // `runs_in` and `typing_through_a_session_allocates_nothing` failed on the first run.
+        //
+        // **The slice is the same information and costs nothing to walk.** An unstyled document's map
+        // is one span over the whole text, and the walk below degenerates to a straight sum of Regular
+        // advances without a special case.
+        //
+        // **The index, not the slice.** The walk reads the line through `&mut self.editor` and cannot
+        // hold a borrow of it, so the slice is re-indexed per scalar and each span is taken as an owned
+        // `(end_byte, atlas_style)` pair. **A bounds check per scalar on a slice that is already in
+        // cache is cheaper than the `Vec` that holding it would have needed**, and the alternative --
+        // `SpanMap::style_at` by value -- is O(spans) *per glyph*, which is quadratic on a styled
+        // document and O(n) on an unstyled one.
+        let span_count = self.editor.spans().spans().len();
+        let mut si = self
+            .editor
+            .spans()
+            .spans()
+            .iter()
+            .position(|s| s.end_byte > start)
+            .unwrap_or(span_count);
+        /// Bytes per rope call, and the same chunk `refresh_caret_column` uses.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        let mut pen = 0u32;
+        let mut at = start;
+        // **Which span the walk is inside, advanced as the walk passes span boundaries.** The spans
+        // are ascending and gap-free, so one cursor answers "what face is this byte in" without a
+        // search, and `SpanMap`'s own invariant is what makes that true.
+        let mut run_end = self
+            .editor
+            .spans()
+            .spans()
+            .get(si)
+            .map_or(caret, |s| s.end_byte);
+        while at < caret {
+            let n = CHUNK.min((caret - at) as usize);
+            let got = match source.as_deref_mut() {
+                Some(src) => self
+                    .editor
+                    .read_into_faulting(src, at as usize, &mut buf[..n])
+                    .ok()?,
+                None => self.editor.read_into(at as usize, &mut buf[..n]).ok()?,
+            };
+            // **A short read means the rest is not there**, and a pen summed over a prefix of a line
+            // is a number that is wrong by an unknown amount. Same fallback as the column scan.
+            if got < n {
+                return None;
+            }
+            let mut from = 0usize;
+            while from < n {
+                while (at + from as u32) >= run_end && si < span_count {
+                    si += 1;
+                    run_end = self
+                        .editor
+                        .spans()
+                        .spans()
+                        .get(si)
+                        .map_or(caret, |s| s.end_byte);
+                }
+                // **The run's face and its size together**, because the caret is the one caller that
+                // must agree with the pixels to the pixel: a heading drawn at 125 % with a caret
+                // measured at 100 % puts the caret inside the heading's second word by its end.
+                let (style, size) = self
+                    .editor
+                    .spans()
+                    .spans()
+                    .get(si)
+                    .filter(|_| (at + from as u32) < run_end)
+                    .map_or((self.body_style(), 0), |sp| {
+                        (self.span_style(sp), self.run_size_index(sp.style_flags))
+                    });
+                // **To the end of this run, or to the end of the chunk, whichever comes first.**
+                let to = n.min((run_end - at) as usize).max(from + 1);
+                pen = pen.saturating_add(pen_of(&self.painter, &buf[from..to], style, size));
+                from = to;
+            }
+            at += n as u32;
+        }
+        let mut line_buf = [0u8; LINE_SCRATCH_BYTES];
+        let line_len = (self
+            .lines
+            .line_end(self.line_index(start as usize) as usize)
+            - start as usize)
+            .min(LINE_SCRATCH_BYTES);
+        let align = if self.managed_documents && line_len > 0 {
+            let got = match source.as_deref_mut() {
+                Some(src) => self
+                    .editor
+                    .read_into_faulting(src, start as usize, &mut line_buf[..line_len])
+                    .ok(),
+                None => self
+                    .editor
+                    .read_into(start as usize, &mut line_buf[..line_len])
+                    .ok(),
+            };
+            if got == Some(line_len) {
+                self.line_align_offset(start, &line_buf[..line_len])
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let pen = (pen as i32 + align).max(0) as u32;
+        self.state.caret_pen_x = Some(pen);
+        Some(pen)
+    }
+
+    /// Add `r` to the pending damage.
+    ///
+    /// **`self.damage` is a [`DamageRect`], not a tracker**, so "add" is a union rather than an
+    /// accumulation. A tracker would carry a list and answer "was this ever damaged", and nothing
+    /// here asks that question -- the paint wants a bounding box and nothing else. An empty rect is
+    /// skipped because [`DamageRect::union`] treats `EMPTY` as the identity but a caller that unions
+    /// forty hover rects should not pay for the forty.
+    #[inline]
+    fn invalidate(&mut self, r: DamageRect) {
+        if !r.is_empty() {
+            self.damage = self.damage.union(&r);
+        }
+    }
+
+    /// **Ask for the status bar to be repainted, and only the status bar.** Part 39.
+    ///
+    /// **Called from the three places that change what it prints**: [`reconcile_caret`] (Ln/Col),
+    /// [`publish_counts`] (words and bytes) and the commit (the dirty marker clearing). **It is not
+    /// called from a hover, a menu press or a scroll, and that is the whole point** — the field exists
+    /// because "the status bar changes on a keystroke" and "the status bar changes on everything" are
+    /// different claims and only the first one is true.
+    ///
+    /// **The whole band, not the words.** The band is 22 px and the words are 5, and a rect that
+    /// tracked the words would have to be re-measured from the string that changed — which is the
+    /// painter's job, not the session's.
+    fn invalidate_status_bar(&mut self) {
+        self.status_damage = self.chrome.layout.status;
+    }
+
+    /// The byte offset of `(line, column)`, clamped into the line.
+    ///
+    /// # Why this walks characters and not bytes
+    ///
+    /// **Because `column` is a column and an offset is a byte count, and the two are the same only on
+    /// ASCII.** The first version walked `column` *bytes*, so a click in column 1 of a line starting
+    /// with a two-byte `é` landed between the two bytes of that character -- and `caret_to`, which
+    /// rounds down to a codepoint boundary, then put the caret *before* it. The gate
+    /// `clicking_a_column_puts_the_caret_after_that_character` is a line of `éa` for exactly this
+    /// reason, and it caught it on the first run: caret 0, expected 2.
+    ///
+    /// **The walk is over UTF-8 scalar values, not grapheme clusters.** A combining sequence is two
+    /// scalars and one glyph, so a click in the middle of one puts the caret between its parts -- which
+    /// is what every editor without a full text-shaping layout does, and saying so is better than
+    /// implying a cluster-aware implementation.
+    ///
+    /// **Clamped to the line's end rather than the document's**, because a click past the last
+    /// character of a short line is a click at the end of that line and not a click on the next one.
+    /// That is why clicking the white space right of a short paragraph does not move the caret down.
+    fn offset_of(
+        &mut self,
+        line: u32,
+        column: u32,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<usize, SessionError> {
+        /// Bytes read per rope call. A click on column 80 must not be 80 rope walks, and this is the
+        /// same chunk the document scan uses.
+        const CHUNK: usize = 64;
+        let mut buf = [0u8; CHUNK];
+        // **`lines.line_begin(line)`, not `Session::line_start(at)`.** Those two are one argument and
+        // two different questions: `line_begin` takes a *line index* and gives a byte offset,
+        // `line_start` takes a *byte offset* and gives the offset of the line containing it. Passing a
+        // line index to `line_start` silently returns the start of line 0 for every line below the
+        // first, so every click on row 1 landed on row 0. **`a_click_on_the_page_puts_the_caret_under
+        // _the_pointer` found it on the first run**, and the gate's fixture is a three-line document
+        // specifically because a one-line document cannot tell the two apart.
+        let start = self.lines.line_begin(line as usize);
+        let end = self.lines.line_end(line as usize);
+        let mut at = start;
+        let mut left = column;
+        while left > 0 {
+            // **A whole chunk, not `left` bytes.** The first version asked for exactly `left` bytes,
+            // so a click in column 1 of a line starting with a two-byte `é` read *one* byte, saw
+            // `0xC3`, decided the character was two wide, and advanced one byte anyway because only
+            // one was in hand -- landing the caret between the two bytes of one character.
+            // `caret_to` then rounded down and put it before the `é`. **You cannot tell how wide a
+            // UTF-8 character is without reading all of it.**
+            let room = end.min(self.editor.text_len()).saturating_sub(at);
+            let n = room.min(CHUNK);
+            if n == 0 {
+                break;
+            }
+            // **A read that fails is a click that cannot be placed, not the end of the session.**
+            //
+            // This used to be `?`, which propagated a `SessionError` out of `click_page` and out of
+            // the session loop, so **one unreadable chunk ended the editor** -- the user clicked on
+            // a line whose bytes could not be fetched and the program exited.
+            //
+            // Every other read in the same click path degrades instead: `word_around` answers
+            // `Ok(None)` and `column_at_pen` answers `None`, and both say so in their own docs
+            // ("a double-click on a non-resident line places a caret rather than a word"). This one
+            // was the odd one out.
+            //
+            // **So a failed read places the caret at the line's start** -- which is a position, it
+            // is inside the document, and the user is still in the editor.
+            let Ok(got) = self.editor.read_into_faulting(source, at, &mut buf[..n]) else {
+                return Ok(at);
+            };
+            if got == 0 {
+                break;
+            }
+            let mut i = 0;
+            while i < got && left > 0 {
+                let b = buf[i];
+                // **The newline ends the line, so `column` stops here.** Not "skip it and carry on" --
+                // a click past the end of a line's text is a click at its end.
+                if b == b'\n' {
+                    return Ok(at + i);
+                }
+                // Advance one whole scalar. A continuation byte is 10xxxxxx; the width is the
+                // leading byte's, and a malformed sequence is one byte so the loop cannot stall.
+                let w = match b {
+                    0x00..=0x7F => 1,
+                    0xC0..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF7 => 4,
+                    _ => 1,
+                };
+                i += w.min(got - i).max(1);
+                left -= 1;
+            }
+            at += i;
+        }
+        Ok(at)
+    }
+
+    /// The armed style flags, for a gate that wants the model's own view rather than the chrome's.
+    ///
+    /// **`pending_style()` and [`armed_style`](Self::armed_style) are the same reader.** The public one
+    /// exists because a gate must not have to ask the chrome what it believes is armed: **a test that reads
+    /// both sides of a "these must agree" claim is the only kind that can check it.** Part 25's
+    /// `the_model_and_the_chrome_agree_after_every_transition` is that test.
+    pub fn pending_style(&self) -> Option<u16> {
+        self.pending_style
+    }
+
+    /// **Smart Compose: the pending grey prediction, or None.** The compose engine sets this;
+    /// the renderer paints it inline after the caret in grey; Tab or Right arrow accepts it.
+    pub fn pending_compose(&self) -> Option<&str> {
+        self.pending_compose.as_deref()
+    }
+
+    /// **Smart Compose: set the pending prediction.** Called by the compose engine (a stub for
+    /// now; a real implementation would query a language model). Clears on any non-accept keystroke.
+    pub fn set_compose(&mut self, text: String) {
+        self.pending_compose = Some(text);
+    }
+
+    /// Arm or disarm a style toggle at the caret, in the model and in the chrome at once.
+    ///
+    /// **One function for both halves, and that is the whole reason this part exists in this shape.**
+    /// `pending_style` is a `u16` in the session and `ChromeState::styles` is a pair of bools in the render
+    /// crate, which knows nothing about `u16` flags. **Two copies of one value, written in two places, is a
+    /// value that will disagree** — and the disagreement would show as a Bold button that lights up and types
+    /// ordinary text, which is a state no gate in this project would think to look for.
+    ///
+    /// **So `armed_style` is the only reader of `pending_style` and `set_armed_style` the only writer, and
+    /// they are adjacent.** `apply_action` and the toolbar's press both go through the setter.
+    fn set_armed_style(&mut self, bold: bool, italic: bool, underline: bool, strikethrough: bool) {
+        self.state.styles.bold = bold;
+        self.state.styles.italic = italic;
+        self.state.styles.underline = underline;
+        self.state.styles.strikethrough = strikethrough;
+        // **`Some(flags)` and never `None`, and that is the deliberate part.** Un-pressing Bold when nothing
+        // else is armed writes `Some(0)` rather than `None`, because `None` means "inherit from the
+        // character before the caret" and inheriting bold after the user turned bold off is the bug this
+        // option type exists to prevent. **`None` is for a session nobody has toggled anything in.**
+        // Inline toggles must not discard an armed paragraph's header bit.
+        let mut f = self.pending_style.unwrap_or(0)
+            & !(STYLE_BOLD | STYLE_ITALIC | STYLE_UNDERLINE | STYLE_STRIKE);
+        if bold {
+            f |= STYLE_BOLD;
+        }
+        if italic {
+            f |= STYLE_ITALIC;
+        }
+        if underline {
+            f |= STYLE_UNDERLINE;
+        }
+        if strikethrough {
+            f |= STYLE_STRIKE;
+        }
+        self.pending_style = Some(f);
+    }
+
+    /// The armed flags, read from the model rather than from the chrome.
+    ///
+    /// **`&self` and the session, not a `pub` accessor on the chrome**, so a gate cannot ask the chrome what
+    /// it thinks is armed and conclude the two agree.
+    ///
+    /// **A tuple of four, in the order `set_armed_style` takes them**, and that adjacency is the whole
+    /// contract: a caller reading this and a caller writing that must not be able to swap two of the
+    /// four without the compiler noticing. A named struct would be safer still and would be two hundred
+    /// lines of `..Default::default()` at three call sites; the adjacency and this sentence are the
+    /// trade, and it is worth stating that it *is* one.
+    fn armed_style(&self) -> (bool, bool, bool, bool) {
+        // **Through `unwrap_or(0)`, so "the user said nothing" and "the user said plain" both read as
+        // nothing armed** — which is right for the bools and wrong for the model, and the difference is
+        // the whole reason the model is an `Option`.
+        let f = self.pending_style.unwrap_or(0);
+        (
+            f & STYLE_BOLD != 0,
+            f & STYLE_ITALIC != 0,
+            f & STYLE_UNDERLINE != 0,
+            f & STYLE_STRIKE != 0,
+        )
+    }
+
+    /// Act on an [`Action`](holonomy_render::menus::Action) a popup row carried.
+    ///
+    /// # Why the session, and not the renderer
+    ///
+    /// **Because `Action` has no meaning of its own.** `Action::Undo` is the sentence "this row says
+    /// Undo"; turning it into an edit is the session's job, and `holonomy-render` does not know a
+    /// `Command` exists. **Part 20 did this by comparing the row's label**, so renaming a menu entry
+    /// changed the program's behaviour; now it is a `match` on an enum, and adding a variant is a
+    /// compile error here rather than a silent no-op.
+    ///
+    /// **Three of the arms change chrome state rather than the document** -- zoom, style, font -- and
+    /// routing them through here too is the point: there is exactly one function that says what every
+    /// action in the product means, and a dropdown value is an action like any other.
+    ///
+    /// ## Public as of part 28
+    ///
+    /// **For the same reason [`Session::apply`] is public**: a driver -- or a gate -- needs to act on
+    /// a menu row without inventing a pointer event that happens to land on the right row.
+    /// `tests/selection.rs` needs it for the gate that says a selected range can be bolded, and the
+    /// alternative was to reach into the chrome, work out the Bold button's rectangle and press it --
+    /// **which would have tested the hit test as well as the styling, and failed for reasons that
+    /// have nothing to do with what it claims.** A gate should fail for one reason.
+    /// Rebuild the desktop heading outline. Bounded, and never run by the sealed UI.
+    pub fn refresh_navigation(&mut self) {
+        if !self.managed_documents {
+            return;
+        }
+        let Ok(text) = self.editor.text() else { return };
+        let mut out: Vec<(u32, String)> = Vec::new();
+        let mut start = 0usize;
+        for (i, b) in text
+            .iter()
+            .enumerate()
+            .chain(std::iter::once((text.len(), &b'\n')))
+        {
+            if *b == b'\n' {
+                let flags = self.editor.style_at(start as u32).style_flags;
+                if flags & STYLE_HEADER != 0 && out.len() < 256 {
+                    let title: String = String::from_utf8_lossy(&text[start..i])
+                        .chars()
+                        .take(80)
+                        .collect();
+                    if !title.is_empty() {
+                        // Navigation scrolls visual rows, which differ from raw
+                        // newline counts once the desktop measure wraps paragraphs.
+                        out.push((self.lines.line_of(start), title));
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        self.state.navigation = out;
+    }
+
+    /// Text prefixes are the list representation: they survive plain-text export and
+    /// every existing payload without a format migration. Enter continues the prefix.
+    fn toggle_list(&mut self, numbered: bool) -> Result<(), SessionError> {
+        self.check_editable()?;
+        let (from, to) = self.paragraph_range();
+        let mut text = self.editor.text()?;
+        let segment = String::from_utf8_lossy(&text[from as usize..to as usize]).into_owned();
+        let mut out = String::new();
+        let mut changed = false;
+        use zeroize::Zeroize;
+        for line in segment.split_inclusive('\n') {
+            let (body, term) = line
+                .strip_suffix('\n')
+                .map(|s| (s, "\n"))
+                .unwrap_or((line, ""));
+            let trimmed = body.trim_start();
+            let indent = &body[..body.len() - trimmed.len()];
+            let bullet = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "));
+            let number = trimmed
+                .find(". ")
+                .filter(|p| *p > 0 && trimmed[..*p].bytes().all(|b| b.is_ascii_digit()))
+                .map(|p| &trimmed[p + 2..]);
+            let prefix = if numbered { "1. " } else { "- " };
+            let already = if numbered {
+                number.is_some()
+            } else {
+                bullet.is_some()
+            };
+            let content = bullet.or(number).unwrap_or(trimmed);
+            if already {
+                out.push_str(indent);
+                out.push_str(content);
+                changed = true;
+            } else {
+                out.push_str(indent);
+                out.push_str(prefix);
+                out.push_str(content);
+                changed = true;
+            }
+            out.push_str(term);
+        }
+        if numbered {
+            renumber_list(&mut out);
+        }
+        if changed {
+            self.select_range(from, to)?;
+            self.delete_selected()?;
+            self.insert(out.as_bytes(), None)?;
+        }
+        text.zeroize();
+        Ok(())
+    }
+
+    fn set_alignment(
+        &mut self,
+        action: holonomy_render::menus::Action,
+    ) -> Result<(), SessionError> {
+        self.check_editable()?;
+        if !self.managed_documents {
+            self.set_notice(Some(
+                "Alignment is available in the desktop document editor.".into(),
+            ));
+            return Ok(());
+        }
+        use holonomy_render::menus::Action;
+        let bit = match action {
+            Action::AlignCenter => holonomy_text::STYLE_ALIGN_CENTER,
+            Action::AlignRight => holonomy_text::STYLE_ALIGN_RIGHT,
+            _ => 0,
+        };
+        let (from, to) = self.paragraph_range();
+        if from < to {
+            self.editor.format_range(from, to, |s| {
+                (
+                    (s.style_flags & !holonomy_text::STYLE_ALIGN_MASK) | bit,
+                    s.color_rgb,
+                )
+            })?;
+            self.after_edit(0)?;
+            self.invalidate(self.chrome.full_damage());
+        } else {
+            let f = self.pending_style.unwrap_or(0);
+            self.pending_style = Some((f & !holonomy_text::STYLE_ALIGN_MASK) | bit);
+        }
+        Ok(())
+    }
+
+    /// Find next substring, wrapping once. Case-insensitive search is ASCII-only:
+    /// Unicode case folding can change byte lengths and must never select the wrong range.
+    pub fn find_text(
+        &mut self,
+        query: &str,
+        forward: bool,
+        case_sensitive: bool,
+    ) -> Result<Option<(u32, u32)>, SessionError> {
+        if query.is_empty() {
+            return Ok(None);
+        }
+        let text = self.editor.text()?;
+        let (hay, q) = if case_sensitive {
+            (text.clone(), query.as_bytes().to_vec())
+        } else {
+            if !query.is_ascii() {
+                return Err(SessionError::Sink(std::io::Error::other(
+                    "Case-insensitive search supports ASCII; enable Match case for Unicode.",
+                )));
+            }
+            (
+                text.to_ascii_lowercase(),
+                query.as_bytes().to_ascii_lowercase(),
+            )
+        };
+        let caret = self
+            .editor
+            .selection()
+            .map(|s| if forward { s.end } else { s.start })
+            .unwrap_or(self.editor.caret()) as usize;
+        let find_in =
+            |slice: &[u8]| -> Option<usize> { slice.windows(q.len()).position(|w| w == q) };
+        let at = if forward {
+            find_in(&hay[caret.min(hay.len())..])
+                .map(|i| caret + i)
+                .or_else(|| find_in(&hay))
+        } else {
+            hay[..caret.min(hay.len())]
+                .windows(q.len())
+                .rposition(|w| w == q)
+                .or_else(|| hay.windows(q.len()).rposition(|w| w == q))
+        };
+        let Some(at) = at else { return Ok(None) };
+        self.select_range(at as u32, (at + q.len()) as u32)?;
+        Ok(Some((at as u32, (at + q.len()) as u32)))
+    }
+
+    pub fn replace_selection(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> Result<bool, SessionError> {
+        self.check_editable()?;
+        let Some(sel) = self.editor.selection() else {
+            return Ok(false);
+        };
+        let text = self.editor.text()?;
+        let selected = &text[sel.start as usize..sel.end as usize];
+        let ok = if case_sensitive {
+            selected == query.as_bytes()
+        } else {
+            selected.to_ascii_lowercase() == query.as_bytes().to_ascii_lowercase()
+        };
+        if !ok {
+            return Ok(false);
+        }
+        self.delete_selected()?;
+        self.insert(replacement.as_bytes(), None)?;
+        Ok(true)
+    }
+
+    /// Replace all non-overlapping matches from the end backwards, so earlier byte
+    /// offsets remain valid. Each replacement is an ordinary bounded editor edit.
+    pub fn replace_all(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> Result<usize, SessionError> {
+        self.check_editable()?;
+        if query.is_empty() {
+            return Ok(0);
+        }
+        let text = self.editor.text()?;
+        let (hay, q) = if case_sensitive {
+            (text.clone(), query.as_bytes().to_vec())
+        } else {
+            if !query.is_ascii() {
+                return Err(SessionError::Sink(std::io::Error::other(
+                    "Case-insensitive replace supports ASCII; enable Match case for Unicode.",
+                )));
+            }
+            (
+                text.to_ascii_lowercase(),
+                query.as_bytes().to_ascii_lowercase(),
+            )
+        };
+        let mut matches = Vec::new();
+        let mut at = 0;
+        while at + q.len() <= hay.len() && matches.len() < 10000 {
+            if hay[at..at + q.len()] == q[..] {
+                matches.push(at as u32);
+                at += q.len();
+            } else {
+                at += 1;
+            }
+        }
+        let count = matches.len();
+        for start in matches.into_iter().rev() {
+            self.select_range(start, start + q.len() as u32)?;
+            self.replace_selection(query, replacement, case_sensitive)?;
+        }
+        Ok(count)
+    }
+
+    pub fn apply_action(
+        &mut self,
+        action: holonomy_render::menus::Action,
+    ) -> Result<(), SessionError> {
+        use holonomy_render::menus::Action;
+        use widgets::Tool;
+        if self.managed_documents {
+            let request = match action {
+                Action::Home => Some(DocumentRequest::Home),
+                Action::New => Some(DocumentRequest::New),
+                Action::NewSample => Some(DocumentRequest::NewSample),
+                Action::Close => Some(DocumentRequest::Close),
+                Action::Rename => Some(DocumentRequest::Rename),
+                Action::Delete => Some(DocumentRequest::Delete),
+                Action::Lock => Some(DocumentRequest::Lock),
+                Action::Open => Some(DocumentRequest::OpenContainer),
+                Action::Import => Some(DocumentRequest::ImportText),
+                _ => None,
+            };
+            if let Some(request) = request {
+                self.document_request = Some(request);
+                self.state.open = None;
+                self.invalidate(self.chrome.full_damage());
+                return Ok(());
+            }
+        }
+        match action {
+            Action::Find | Action::Replace => {
+                if self.managed_documents {
+                    self.document_request = Some(if action == Action::Find {
+                        DocumentRequest::Find
+                    } else {
+                        DocumentRequest::Replace
+                    });
+                } else {
+                    self.set_notice(Some(
+                        "Find is available in the desktop document editor.".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            Action::ToggleTheme => {
+                self.state.dark = !self.state.dark;
+                self.invalidate(self.chrome.full_damage());
+                return Ok(());
+            }
+            Action::ToggleAutosave => {
+                self.state.autosave = !self.state.autosave;
+                self.set_notice(Some(
+                    if self.state.autosave {
+                        "AutoSave on"
+                    } else {
+                        "AutoSave off"
+                    }
+                    .into(),
+                ));
+                return Ok(());
+            }
+            Action::ToggleRibbon => {
+                self.state.ribbon_collapsed = !self.state.ribbon_collapsed;
+                // **The same derivation as `resize` and `apply_type_scale`.** This was a fourth copy
+                // of the `112`, so collapsing and re-expanding the ribbon at 125 % brought back a
+                // band sized for 16 ppem -- the collapsed state was right and the state you came
+                // back to was 20 % too short.
+                let m = self
+                    .chrome
+                    .metrics
+                    .with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
+                self.chrome = Chrome::new(m);
+                self.reflow_for_measure();
+                self.refresh_overflow();
+                self.invalidate(self.chrome.full_damage());
+                return Ok(());
+            }
+            Action::ToggleNavigation => {
+                self.set_sidebar(!self.state.sidebar_open);
+                self.refresh_navigation();
+                return Ok(());
+            }
+            Action::ToggleBullets => {
+                self.toggle_list(false)?;
+                return Ok(());
+            }
+            Action::ToggleNumbering => {
+                self.toggle_list(true)?;
+                return Ok(());
+            }
+            Action::AlignLeft | Action::AlignCenter | Action::AlignRight => {
+                self.set_alignment(action)?;
+                return Ok(());
+            }
+            Action::Indent => {
+                self.apply(Command::Tab)?;
+                return Ok(());
+            }
+            Action::Outdent => {
+                self.apply(Command::ShiftTab)?;
+                return Ok(());
+            }
+            Action::InsertPageBreak => {
+                self.check_editable()?;
+                let line = self.line_index(self.editor.caret() as usize) as u32;
+                let rows = self.chrome.layout.page_rows();
+                let n = rows - (line % rows);
+                self.insert(&vec![b'\n'; n as usize], None)?;
+                return Ok(());
+            }
+            Action::WordCount => {
+                self.set_notice(Some(format!(
+                    "{} words · {} lines",
+                    self.state.words,
+                    self.counts.lines()
+                )));
+                return Ok(());
+            }
+            Action::KeyboardShortcuts => {
+                self.set_notice(Some("Ctrl+B bold · Ctrl+I italic · Ctrl+U underline · Ctrl+S save · Ctrl+Q quit · Ctrl+A select all · Ctrl+C/X/V clipboard · Ctrl+T table · Ctrl+M equation · Ctrl+I image".into()));
+                return Ok(());
+            }
+            Action::Export => {
+                // **A request, like the save, and for the same structural reason**: the sinks are in
+                // `SessionContext` and are not reachable from `&mut self`. `run_with_io` holds both.
+                self.export_requested = true;
+                // **`pointer_chrome`, because nothing on screen changed.** An export writes files and
+                // moves no pixel — and counting it as a command would claim the document changed, which
+                // is the same mistake part 23 corrected for `SetZoom`.
+                self.stats.pointer_chrome += 1;
+            }
+            Action::SetZoom(pct) => {
+                self.set_zoom(pct)?;
+                // **`pointer_chrome`, not `pointer_commands`.** Part 21 put it here, and this is the
+                // correction: no `Command` was produced and nothing about the document changed. The
+                // zoom label moves, and `tests/zoom.rs` measures that as the only pixel it moves.
+                self.stats.pointer_chrome += 1;
+            }
+            // **Part 44: the mode switcher, and `Viewing` is the whole of it.**
+            Action::SetMode(i) => {
+                let before = self.state.mode_index;
+                if let Some(mode) = holonomy_render::menus::MODES
+                    .get(usize::from(i))
+                    .map(|&(_, m)| m)
+                {
+                    self.state.mode_index = i;
+                    self.mode = mode;
+                    self.stats.pointer_chrome += 1;
+                    // **Only the toolbar repaints.** The mode changes no document byte and moves no
+                    // page pixel; the caret may stop being drawn (it does in viewing mode, because a
+                    // blinking caret in a read-only view is an invitation to type), and that is one
+                    // cell. **`full_damage()` here would be 1.28 million pixels to move a caret.**
+                    let r = widgets::hit_rect(
+                        &self.chrome.layout,
+                        &self.state,
+                        widgets::Hit::Tool(widgets::Tool::Mode),
+                    );
+                    match r {
+                        Some(r) => self.invalidate(r),
+                        None => self.damage = self.chrome.full_damage(),
+                    }
+                    debug_assert_ne!(
+                        before,
+                        self.state.mode_index,
+                        "a row that is already ticked should not be clickable, and if this fires the \
+                         popup is offering the current mode as a choice"
+                    );
+                } else {
+                    // **An out-of-range index is a refusal, and `pointer_inert` is where it shows.**
+                    // **`mode_name` clamps for display but this does not**: the state carries what
+                    // the user chose, and a state carrying a number nothing can act on is the
+                    // defect `an_out_of_range_mode_index_falls_back` exists to keep visible.
+                    self.stats.pointer_inert += 1;
+                }
+            }
+            // **Part 44: the overflow menu's rows, which run a toolbar tool.**
+            Action::SelectTool(tool) => {
+                // **Through `press`, not through a second copy of what `press` does.** `press` is the
+                // one function that turns a `Hit` into an action, and re-implementing it here would
+                // be the "two copies of one thing" that `run_clicked`'s own note warns about --
+                // **and it would miss the armed-toggle branch and the dropdown branch, both of which
+                // are things a row in an overflow menu can be.**
+                //
+                // **`Hit::None` and not the tool's rect**, because the tool has no rect -- it is
+                // precisely the tool that did *not* fit, and `place_toolbar` gave it a zero-width
+                // one. `press` takes the hit and a position; the position is only read by
+                // `Hit::Page`, which this is not.
+                let l = self.chrome.layout;
+                let pos = (l.toolbar.x as i32, l.toolbar.y as i32);
+                self.press(
+                    widgets::Hit::Tool(tool),
+                    pos.0,
+                    pos.1,
+                    &mut crate::store::NoSource,
+                )?;
+                self.stats.pointer_commands += 1;
+            }
+            // **Three inline toggles and one function.** Bold, italic and underline differ only in which
+            // bit they flip and which button they invalidate, so they are one arm with one parameter
+            // rather than three near-identical arms — which is how the third one gets forgotten when the
+            // fourth arrives. `Tool::Underline` was exactly that forgotten case until the document model
+            // grew `STYLE_UNDERLINE`.
+            Action::ToggleBold | Action::ToggleItalic | Action::ToggleUnderline => {
+                let (flag, tool) = match action {
+                    Action::ToggleItalic => (STYLE_ITALIC, Some(Tool::Italic)),
+                    Action::ToggleUnderline => (STYLE_UNDERLINE, Some(Tool::Underline)),
+                    _ => (STYLE_BOLD, Some(Tool::Bold)),
+                };
+                self.toggle_inline_style(flag, tool)?;
+            }
+            // **The three decorations that are not buttons, and each one is the same gesture.**
+            //
+            // **Superscript and subscript are one another's opposite and both are a *position*;** a
+            // selection that is already superscript becomes plain when superscript is pressed again,
+            // and a selection that is subscript becomes superscript rather than both. That is what
+            // `toggle_decoration` does for superscript/subscript specifically, because a run cannot be
+            // both raised and lowered and a bitset that said so would draw at neither.
+            // **`None`, because the toolbar has no strikethrough button**, so there is no button
+            // whose armed state could be drawn and nothing to invalidate. Passing `Underline` here
+            // would light up a button for a flag it does not own.
+            Action::ToggleStrike => {
+                self.toggle_inline_style(STYLE_STRIKE, Some(widgets::Tool::Strikethrough))?
+            }
+            Action::ToggleSuperscript => self.toggle_decoration(STYLE_SUPERSCRIPT)?,
+            Action::ToggleSubscript => self.toggle_decoration(STYLE_SUBSCRIPT)?,
+            Action::ClearFormatting => {
+                self.check_editable()?;
+                // **The selection, or the paragraph the caret is in.** An empty selection is a place,
+                // not a range, and "clear the formatting here" means the paragraph — which is what
+                // every word processor does and what `SetStyle` already does one line below.
+                let (from, to) = self.paragraph_range();
+                // **Clear formatting clears the *face* as well**, which is what "clear" means: every
+                // per-run attribute goes back to the paragraph's. `format_range` cannot do it -- its
+                // transform has no third answer -- so this is the face-aware form with all three
+                // cleared, and it is the one caller that wants `FACE_BODY` rather than inheritance.
+                let cleared = from < to
+                    && self
+                        .editor
+                        .face_format_range(from, to, |_| (0, 0, FACE_BODY))?;
+                // **The armed flags go with it, whether or not there was a range to clear.** Leaving
+                // `pending_style` armed after clearing would make the next character bold in a
+                // paragraph the user just asked to have no formatting at all -- and a caret in an
+                // *empty* paragraph is exactly where that happens, because there `from == to` and
+                // nothing was cleared, so the armed state is the only thing the action can act on.
+                //
+                // **`None` for both pending values, which is what "write nothing special" is.**
+                // `Some(0)` is a *style of zero* and `Some(0)` for a colour is `0x000000`, so arming
+                // those would give the next paragraph an opaque-black span that no palette row can
+                // produce. `None` is what the field's own type says the default is, and it is what
+                // the insert path tests for.
+                self.pending_style = None;
+                self.pending_colour = None;
+                // **And the armed face**, which is the third `Option` and the one a version of this
+                // written before fonts were per-run would not have known to reset.
+                self.pending_face = None;
+                self.state.styles = holonomy_render::chrome::StyleFlags::default();
+                // **The last `COLOURS` row, which is the automatic one.** `COLOURS` ends with
+                // `("Default", 0)`, so this is the dropdown row that agrees with the pixels: a
+                // selected swatch that says Default beside text that draws in the document's ink.
+                self.state.colour_index = holonomy_render::menus::COLOURS.len() - 1;
+                self.state.style_index = 0;
+                if cleared {
+                    self.after_edit(0)?;
+                    self.damage = self.chrome.full_damage();
+                }
+                self.stats.pointer_chrome += 1;
+            }
+            Action::SetColour(i) => {
+                self.check_editable()?;
+                let idx =
+                    usize::from(i).min(holonomy_render::menus::COLOURS.len().saturating_sub(1));
+                let rgb = holonomy_render::menus::COLOURS[idx].1;
+                self.state.colour_index = idx;
+                self.pending_colour = Some(rgb);
+                if self.update_selection_style(None, Some(rgb))? {
+                    self.damage = self.chrome.full_damage();
+                } else {
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::TextColour)));
+                }
+                self.stats.pointer_chrome += 1;
+            }
+            Action::SetStyle(i) => {
+                self.check_editable()?;
+                let idx =
+                    usize::from(i).min(holonomy_render::menus::STYLES.len().saturating_sub(1));
+                // **A paragraph style is where a *document-wide* typography decision belongs.** The font
+                // box sets one run's family (a character format); this menu sets a paragraph's role, and
+                // the role's face is part of it. Google Docs' named styles carry a `TextStyle` -- font,
+                // size, weight, colour -- and `Normal text` is one of them, which is why *"make the whole
+                // document JetBrains Mono"* is `Select All` then this menu, and not the font box.
+                //
+                // **`Normal` carries the body face and the other five clear it**, so applying a heading
+                // to a run that had been set to mono by hand returns it to the body face: a heading's
+                // typography is the heading style's, and the style is the bigger statement. The narrow
+                // alternative -- a style that leaves a hand-set face alone -- reads as *"I set a heading
+                // and half of it stayed monospaced"*, which is a bug a user would report.
+                //
+                // **Colour stays zero for the styles that never had one.** It was already the case;
+                // writing `0` next to each is what says it was a decision rather than an omission.
+                let (flags, colour) = match idx {
+                    1 => (STYLE_HEADER | STYLE_BOLD, 0x001A_5C75),
+                    2 => (STYLE_ITALIC, 0),
+                    3 => (STYLE_HEADER | STYLE_BOLD, 0),
+                    4 => (STYLE_HEADER | STYLE_ITALIC, 0x0059_5959),
+                    5 => (STYLE_BOLD, 0x001A_5C75),
+                    _ => (0, 0),
+                };
+                let (from, to) = self.paragraph_range();
+                if from < to {
+                    if self
+                        .editor
+                        .face_format_range(from as u32, to as u32, |_| (flags, colour, FACE_BODY))?
+                    {
+                        self.after_edit(0)?;
+                        self.damage = self.chrome.full_damage();
+                    } else {
+                        self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
+                    }
+                } else {
+                    // A zero-width span cannot represent an empty paragraph. Arm the next
+                    // text instead, using the same mechanism as the inline controls.
+                    self.pending_style = Some(flags);
+                    self.pending_colour = Some(colour);
+                    // **The style's face is armed with it**, for the same reason its colour is: a
+                    // heading typed into an empty paragraph must be monospaced-or-not according to the
+                    // style, not according to whatever the last font press left armed.
+                    self.pending_face = Some(FACE_BODY);
+                    self.state.styles.bold = flags & STYLE_BOLD != 0;
+                    self.state.styles.italic = flags & STYLE_ITALIC != 0;
+                    self.invalidate_hit(Some(widgets::Hit::Tool(Tool::Style)));
+                }
+                self.state.style_index = idx;
+                self.stats.pointer_chrome += 1;
+            }
+            Action::SetFont(i) => {
+                self.check_editable()?;
+                let idx = usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
+                // **The face this index names, in the model's own terms.** A `usize` from the menu is a
+                // *row*; the document stores a *face*, and the two are related by the one match below
+                // rather than by a cast -- `MONO_FONT_INDEX` is 1 and `FACE_MONO` is 1 today, and the
+                // day a family is inserted above Mono those two numbers part company.
+                let face = if idx == holonomy_render::menus::MONO_FONT_INDEX {
+                    FACE_MONO
+                } else {
+                    FACE_BODY
+                };
+                // # The correction: a font is a *character format*, and this arm used to be a document
+                // # setting
+                //
+                // **`state.font_index` was read by `doc_style` for every unpainted run in the document**,
+                // so choosing JetBrains Mono in the dropdown turned the whole document monospaced --
+                // headings, body, every paragraph, whether or not anything was selected. That is not how
+                // a word processor works and it is the defect this arm is now: Google Docs' font box and
+                // Word's Font box both apply the family to **the selection**, and at a bare caret to the
+                // text typed next. **The document-wide default is a paragraph style** (`Normal text`),
+                // reached through the Styles menu, not through the font box.
+                //
+                // **So the arm now does three things and no more**: it restyles the selected (or
+                // caret's) range, it arms the next character typed with the same face, and it moves the
+                // dropdown's label. The document is not touched outside that range, which is the
+                // difference between "I set my heading to JetBrains Mono" and "I lost my whole
+                // document's typography".
+                let scope = self.face_scope();
+                let mut changed = false;
+                if scope.0 < scope.1 {
+                    // **One transaction for the whole range**, through the face-aware form: a font
+                    // change must be one undo step, and it must restore the *previous* face rather than
+                    // the default one. See `Editor::face_format_range`.
+                    changed = self.editor.face_format_range(scope.0, scope.1, |span| {
+                        (span.style_flags, span.color_rgb, face)
+                    })?;
+                }
+                // **The next character, whether or not text was restyled.** Setting the font at a bare
+                // caret has to affect what you type -- that is the half of the rule the document-wide
+                // version was accidentally getting right, and dropping it entirely would make the
+                // control do nothing at all in an empty document.
+                self.pending_face = Some(face);
+                // **The label shows the face the caret is in, which is the face that was just set.**
+                // Reading it back from the document rather than assigning `idx` is what makes the box
+                // honest when the press was a no-op: pressing `Inter` at a caret already in Inter
+                // leaves the box saying `Inter` because the text says so, not because the click did.
+                let caret_at = match self.editor.selection() {
+                    Some(sel) => sel.start,
+                    None => self.editor.caret(),
+                };
+                self.state.font_index = self.face_index_at(caret_at);
+                self.state.font_mixed = self.mixed_face();
+                // **A mixed selection shows no single face.** The box reads
+                // [`mixed_face`](Self::mixed_face) as well as the index, so a range holding two families
+                // reads blank -- Google Docs' rule, and the reason it matters is that *showing* one face
+                // over a mixed range is how a user comes to believe the whole paragraph is already in it.
+                self.damage = self.chrome.full_damage();
+                if changed {
+                    self.after_edit(0)?;
+                }
+                self.stats.pointer_chrome += 1;
+            }
+            // **`File > New`: open a fresh, empty document and keep the one that was open.**
+            //
+            // Through [`adopt_new`](Self::adopt_new), which parks the document being replaced and
+            // adopts the blank through [`adopt_document`](Self::adopt_document) — the editor, the
+            // geometry, the manifest and the counts move together, and the full repaint is taken inside
+            // it. **No file is touched**: the sealed path has no `openat` to name one, and the
+            // in-memory buffer is simply replaced. The undo history goes with the document, which is
+            // what `New` means.
+            //
+            // **Part 45 changed what happens to the document being replaced.** It was dropped; it is
+            // now parked, because the sidebar has a row for it and `Close` and the row itself are what
+            // make it reachable again.
+            Action::Home => {
+                self.stats.pointer_inert += 1;
+            }
+            Action::NewSample => {
+                self.create_sample_document(0)?;
+                self.stats.pointer_chrome += 1;
+            }
+            Action::New => {
+                self.adopt_new(Editor::new(), "untitled".to_string());
+                self.stats.pointer_chrome += 1;
+            }
+            // **`File > Close`: the painted document leaves the list.**
+            //
+            // **Not an `openat`, so it is legal under the seal — and it never leaves the session with
+            // nothing to paint.** [`close_active`](Self::close_active) switches to the most recently
+            // parked document, or opens a blank when there is none, so a window cannot end up with no
+            // document at all.
+            Action::Close => {
+                self.close_active();
+                self.stats.pointer_chrome += 1;
+            }
+            // **`File > Open` and `File > Import`: ask the driver for a path.**
+            //
+            // **Neither opens anything here, and the reason is the same for both.** The session can
+            // ask for a path to be opened but cannot supply one: the sealed jail has no `openat` on a
+            // user path, and the developer window has no file dialog. **Under the seal the row is
+            // refused by name** — the `openat` would be `SIGSYS` and exit 137, which is a menu row that
+            // kills the process — and counted as inert, which is what a gate reads.
+            //
+            // **Outside the seal the row is a request, not an opening.** The driver is the one place
+            // that can turn it into a path; it calls [`take_open_request`](Self::take_open_request) and
+            // then [`open_path`](Self::open_path) or [`import_path`](Self::import_path).
+            Action::Open | Action::Import => {
+                if self.state.sealed {
+                    self.stats.pointer_inert += 1;
+                } else {
+                    self.open_request = Some(action);
+                    self.stats.pointer_chrome += 1;
+                }
+            }
+            other => {
+                if let Some(cmd) = action_command(other) {
+                    self.run_clicked(cmd)?;
+                } else {
+                    self.stats.pointer_inert += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the zoom, and repaint.
+    ///
+    /// # CORRECTION, part 23: this does not zoom
+    ///
+    /// **The doc this replaced said `25..=400` because "§2.9.3's image-cache thresholds were measured
+    /// against" it. That was false.** No code reads `zoom_percent` except the toolbar's label and the
+    /// dropdown's tick — there is no image-cache coupling, and the claim was a plausible-sounding
+    /// sentence attached to a number that meant nothing.
+    ///
+    /// **So: this sets a label.** It is kept, and `crates/holonomy/tests/zoom.rs` measures exactly how
+    /// little it does — *every pixel that changes when the zoom changes lies inside the zoom button's
+    /// own rect*, and the page is pixel-identical at 50% and at 200%.
+    ///
+    /// **Public as of part 23, and that is the second thing the bite check found.** It was private, so
+    /// the three product paths that set the zoom from `--zoom` assigned `state.zoom_percent` directly
+    /// and **bypassed this function entirely** — which meant a gate could not reach the one place a
+    /// zoom would live, and `tests/zoom.rs` set the field directly too. **A gate that assigns the field
+    /// tests the field, not the feature**, and it stayed green when `set_zoom` was given a real cell
+    /// scale. The three `--zoom` sites now call this, so there is one writer, and it is the one the
+    /// gates exercise.
+    ///
+    /// **The clamp stays, and is still worth having**, for the reason a clamp is worth having at all:
+    /// the number is drawn, it comes from `--zoom` on a command line, and a value outside the range the
+    /// chrome can lay out would make the label wider than the button that holds it. The gate
+    /// `the_zoom_label_fits_its_button_at_both_ends_of_the_clamp` is what that is worth.
+    ///
+    /// **What real zoom needs, stated because the next person will otherwise assume this is a small
+    /// omission:** the glyphs are rasterised at one size. Scaling `cell_w` and `cell_h` alone would
+    /// space the text out without enlarging it. **A zoom needs the atlas rebuilt at the new ppem**, and
+    /// then a decision about how many sizes stay resident, which is an atlas-budget question and not a
+    /// chrome one. That is a phase, not a patch.
+    pub fn set_zoom(&mut self, percent: u32) -> Result<(), SessionError> {
+        let Some(index) = self.zoom_size_index(percent) else {
+            // **Refused, and not clamped.** A zoom control that silently snapped 200 % to 125 % is
+            // a control that lies about what it did, and `state.zoom_percent` would then be the one
+            // place in the file holding a number the pixels disagree with. **The caller asked for a
+            // size this atlas does not have and the answer is that it does not have it.**
+            return Err(SessionError::ZoomUnavailable { percent });
+        };
+        self.state.zoom_percent = percent;
+        self.painter.set_size_index(index);
+        // **The chrome's type metrics follow the painter's size.** Part 32 built
+        // `with_cell_width`/`with_type_scale`/`with_line_pitch` from the painter's own measurements
+        // at construction -- **and only at construction**, so a zoom that changed the painter alone
+        // would leave the measure at 16 ppem's advance while the glyphs were 20 ppem's. **The ruler,
+        // the caret and the selection would then be placing cells in a grid the text is not in.**
+        self.apply_type_scale();
+        self.reflow_for_measure();
+        self.scroll_line_into_view(self.state.caret_line);
+        // **Everything.** Every band, every pixel: the page's width in cells changes with the cell
+        // width, so the page moves as well as the type.
+        self.damage = self.chrome.full_damage();
+        Ok(())
+    }
+
+    /// **The atlas size index a zoom percentage names, or `None` if there is none.**
+    ///
+    /// ## The table, and why it is percent-to-*index* and not percent-to-ppem
+    ///
+    /// **Because the base ppem is a boot argument (`--ppem`) and the chrome does not know it.** The
+    /// two zoom levels are *index 0* and *index 1* of whatever the atlas was built with, and the
+    /// sizes behind them are 16 and 20 because that is what `main` asks for. **Writing the table as
+    /// percentages and resolving to an index is what makes `--ppem 24` work without touching this
+    /// function** -- it would then be 24 and 30.
+    ///
+    /// ## Two levels, and the third is refused
+    ///
+    /// **`AtlasBuilder::new` refuses a third size** -- each costs 14,080 bytes of metric table against
+    /// a 512 KiB ceiling the PRD sets, and `[16, 20]` already uses 378,850 of 458,752. So `ZOOMS` has
+    /// two rows and this has two arms, **and a percentage outside the table is an error rather than a
+    /// nearest-neighbour.**
+    fn zoom_size_index(&self, percent: u32) -> Option<u8> {
+        let rank = holonomy_render::menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == percent)?;
+        // **One size in the atlas means one zoom level.** A session built against `[16]` has nothing
+        // to switch to, and saying so is better than switching to the size it already had.
+        let sizes = self.painter.atlas().map_or(0, |a| a.sizes().len());
+        let index = u8::try_from(rank).ok()?;
+        (usize::from(index) < sizes).then_some(index)
+    }
+
+    /// **The atlas face document text draws and measures with, honouring the font dropdown.**
+    ///
+    /// `raw` is [`atlas_style`](holonomy_text::TextIntervalSpan::atlas_style)'s answer — 0 regular,
+    /// 1 bold, 2 italic, 3 code — or `0` for unstyled text. With Inter selected this is the
+    /// identity. With JetBrains Mono selected (`menus::MONO_FONT_INDEX`), face 0 becomes the
+    /// Monospace face; bold and italic keep Inter's faces, because no mono bold or italic is
+    /// packed, and code spans are Monospace already.
+    ///
+    /// **Every document paint *and* measurement site answers "which face" here.** The caret
+    /// column, the click-to-column midpoint rule, the selection highlight ([`pen_at`]) and the
+    /// emitted runs all route through this function or take its answer as a parameter — which is
+    /// what keeps the pen and the pixels in the same face when the dropdown changes. A paint that
+    /// switched and a measurement that did not would put the caret in Inter's columns over
+    /// Mono's glyphs, the exact class of disagreement part 31 and part 33 existed to end.
+    fn doc_style(&self, raw: u8) -> holonomy_render::Style {
+        // **The run's own face, not the toolbar's.** `raw` is this run's `atlas_style()` -- 0 regular,
+        // 1 bold, 2 italic, 3 code -- which answers *"what is this run's weight and slant"* and says
+        // nothing about *"which family"*. The family is a **character format on the run**
+        // ([`FACE_BODY`], [`FACE_MONO`]) and it comes from the span, which is why every caller passes
+        // the span and not an index off the toolbar.
+        //
+        // **The old signature took the same `u8` and read `self.state.font_index` against it**, so a
+        // change of the font dropdown changed the face of *every* run in the document that was not bold
+        // or italic -- the whole document repainted from one control, which is the defect this pass is
+        // about. Google Docs and Word both apply a font to the **selection**, and at a bare caret to the
+        // text typed next; the document-wide default is a *paragraph style*, which is a different
+        // control on a different menu.
+        holonomy_render::Style(raw)
+    }
+
+    /// **`doc_style`, for a run**: the family comes from the span's face and the weight from its bits.
+    ///
+    /// **One function, and the reason is the same one part 31 established for the pen:** the emitter,
+    /// the caret column and the click-to-column rule must all agree about which face a byte is drawn
+    /// in, and the way they agreed before was by all reading a field on the session. A per-run face is
+    /// read from the run, and there is one place that turns it into a `Style`.
+    ///
+    /// [`FACE_MONO`] overrides the body face but **not** bold or italic: no mono bold or italic is
+    /// packed, so `JetBrains Mono` + Bold draws bold Inter, which is what Wordcraft does with a family
+    /// that has one weight and what the atlas can honestly offer.
+    fn span_style(&self, span: &holonomy_text::TextIntervalSpan) -> holonomy_render::Style {
+        let raw = span.atlas_style();
+        match span.font_face {
+            FACE_MONO if raw == 0 => holonomy_render::Style::MONOSPACE,
+            _ => self.doc_style(raw),
+        }
+    }
+
+    /// **The face a run is set in, as the toolbar's font index**, so the dropdown shows the truth.
+    ///
+    /// **Google Docs shows the *current* font for the caret's position**, and shows an empty box when the
+    /// selection has more than one. This returns the index of the face at the caret, which is that rule
+    /// for the single-face case; the multi-face case is [`mixed_face`](Self::mixed_face).
+    fn face_index_at(&self, offset: u32) -> usize {
+        match self.editor.style_at(offset).font_face {
+            FACE_MONO => holonomy_render::menus::MONO_FONT_INDEX,
+            _ => 0,
+        }
+    }
+
+    /// **Whether the selection spans more than one face**, which is what makes the font box blank.
+    ///
+    /// A run-level format has no single value over a mixed range, and *showing* one is how a user comes
+    /// to believe the whole paragraph is already in that face -- and then presses it and gets an
+    /// unexpected no-op. The range is the selection, or the word the caret is in.
+    fn mixed_face(&mut self) -> bool {
+        let (from, to) = self.face_scope();
+        if from >= to {
+            return false;
+        }
+        let first = self.editor.style_at(from).font_face;
+        let mut at = from;
+        while at < to {
+            let sp = self.editor.style_at(at);
+            if sp.font_face != first {
+                return true;
+            }
+            at = sp.end_byte.min(to);
+            if at == sp.start_byte {
+                break;
+            }
+        }
+        false
+    }
+
+    /// **The byte range a font change applies to.**
+    ///
+    /// **The selection if there is one, and the word the caret is in otherwise** -- Word's rule, and
+    /// Google Docs' *"without a selection, the font applies to the text you type next"*. Between the two
+    /// the choice is: an empty selection is a *place*, and the two things a user means by *"set the font
+    /// here"* at a place are *"this word"* and *"what I type next"*. Both happen: the word is restyled
+    /// and the next character is armed with the same face ([`Session::pending_face`]).
+    fn face_scope(&mut self) -> (u32, u32) {
+        if let Some(sel) = self.editor.selection() {
+            return (sel.start, sel.end);
+        }
+        let caret = self.editor.caret();
+        // **`word_around` and not a second word-boundary routine**, which is the rule this file already
+        // arrived at for `paragraph_range`: a copy of a range calculation is wrong in a way nobody
+        // notices until a font lands on the word next door. It takes a byte source because a
+        // double-click on a non-resident line must not fault the document in; a local `NoSource` makes
+        // it best-effort, and `None` falls back to the caret, which arms the next character and styles
+        // nothing -- the same answer Google Docs gives for a click in the middle of nowhere.
+        match self.word_around(caret, &mut crate::store::NoSource) {
+            Ok(Some((from, to))) if from < to => (from, to),
+            _ => (caret, caret),
+        }
+    }
+
+    /// **The atlas size index a run of document text draws at.**
+    ///
+    /// # The heading, and why this is an index rather than a ppem
+    ///
+    /// **A document's headings have had a style bit since Phase 6 and have never been drawn bigger.**
+    /// `STYLE_HEADER` is load-bearing for the *line metrics* — a header line is taller, which is why
+    /// `LineMetrics::from_font` is called with a size chosen by the flag — and `doc_style` collapsed it
+    /// onto the body face, so a heading rendered at the body size in bold teal. **The exports have
+    /// always emitted `<h1>` and a 1.35x PDF size**, so the screen and the file disagreed about the same
+    /// paragraph.
+    ///
+    /// **The atlas can back exactly two sizes** (`MAX_SIZES`; `[16, 20]` fits in 378,850 of the 458,752
+    /// byte budget and a third does not). So the heading is **index 1**, which is 125 % of the body —
+    /// the zoom pair and the heading share the one spare size, and that is the honest consequence of a
+    /// 512 KiB atlas. **Nothing else gets a size**: a heading is the only document style whose *whole
+    /// point* is that it is bigger.
+    ///
+    /// **Clamped to what the atlas holds**, so a one-size atlas draws headings at the body size rather
+    /// than asking for an index that was never rasterised. `bool as u8` cannot be written in a way that
+    /// is clearer than the conditional, and the conditional is what says *which* two values are possible.
+    fn run_size_index(&self, flags: u16) -> u8 {
+        if flags & STYLE_HEADER == 0 {
+            return 0;
+        }
+        match self.painter.atlas() {
+            Some(atlas) if atlas.sizes().len() > 1 => 1,
+            _ => 0,
+        }
+    }
+
+    /// **How far a run's baseline moves, in pixels, for its super- or subscript bit.**
+    ///
+    /// **A third of the line's ascent**, which is the fraction every word processor uses and the one
+    /// that reads as "raised" rather than "on the line above". **`i8`, and the sign is the direction on
+    /// screen**: positive is up, because `DocRun::baseline_shift` is added to the ascent.
+    ///
+    /// **Superscript wins over subscript when both bits are set**, because a run cannot be both and the
+    /// two being set is a corrupt payload rather than a request. The session's own toggles clear the
+    /// opposite bit, so this arm is only reachable from a hand-built span.
+    fn baseline_shift(&self, flags: u16) -> i8 {
+        // **The painter's own fraction, at the run's own size.** `Painter::shift_of` is
+        // `cell_height_at(size) / 3` and is clamped to `i8::MAX`, so this is a *call* rather than a
+        // division and the two numbers cannot drift. The size matters: a heading's line is 20 px and its
+        // third is 6, against the body's 18 and 6 -- but a zoomed session's cell is different again, and
+        // a shift computed from the *painter's* size while the run draws at another is the class of
+        // disagreement part 31 removed from the x axis.
+        let third = self.painter.shift_of(
+            flags & (STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT) != 0,
+            self.run_size_index(flags),
+        ) as i8;
+        if flags & STYLE_SUPERSCRIPT != 0 {
+            third
+        } else if flags & STYLE_SUBSCRIPT != 0 {
+            // **`0 - third` and not `saturating_neg()`**, which is an `i8` inherent method this
+            // toolchain's `i8` does have — and subtracting is what the expression means. `third` is
+            // non-negative by construction (it is a `u32` division result cast down), so the
+            // subtraction cannot overflow and does not need the saturating form.
+            0 - third
+        } else {
+            0
+        }
+    }
+
+    /// **The two rule decorations a run draws**, as `DocRun`'s bitset.
+    ///
+    /// A translation and not the span's own bits, because the two vocabularies are different on
+    /// purpose: `STYLE_*` is what the *document* holds and `DocRun::DECORATION_*` is what the
+    /// *painter* draws. Keeping them separate is what lets the document model grow a decoration the
+    /// painter has no idea about without the painter drawing something wrong.
+    const fn decorations(flags: u16) -> u8 {
+        let mut out = 0u8;
+        if flags & STYLE_UNDERLINE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_UNDERLINE;
+        }
+        if flags & STYLE_STRIKE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_STRIKE;
+        }
+        if flags & STYLE_SUGGESTION_DELETE != 0 {
+            out |= holonomy_render::DocRun::DECORATION_STRIKE;
+        }
+        if flags & STYLE_SUGGESTION_INSERT != 0 {
+            out |= holonomy_render::DocRun::DECORATION_SUGGESTION_INSERT;
+        }
+        if flags & STYLE_SPELLING != 0 {
+            out |= holonomy_render::DocRun::DECORATION_SPELLING;
+        }
+        out
+    }
+
+    /// [`span_style`](Self::span_style) for text with no span of its own: the body face itself.
+    ///
+    /// **`FACE_BODY` and not the toolbar's row**, which is the whole correction: the fallback for a byte
+    /// outside any span is the *document's* default face, and there is no longer a control that can make
+    /// it anything else.
+    fn body_style(&self) -> holonomy_render::Style {
+        self.doc_style(0)
+    }
+
+    /// **The face the toolbar's font box shows: the caret's face, or `None` for a mixed range.**
+    ///
+    /// `None` is Google Docs' blank box: a range that holds two families has no single value, and
+    /// printing one of them is how a user comes to believe the whole paragraph is already in it.
+    pub fn current_face_name(&mut self) -> Option<&'static str> {
+        if self.mixed_face() {
+            return None;
+        }
+        let at = match self.editor.selection() {
+            Some(sel) => sel.start,
+            None => self.editor.caret(),
+        };
+        // **`pending_face` wins at a bare caret**, because it is the face the *next* character will be
+        // and the document therefore has no opinion yet -- the same precedence `armed_style` gives the
+        // armed bits over the inherited ones.
+        if self.editor.selection().is_none() {
+            if let Some(face) = self.pending_face {
+                return holonomy_render::menus::FONTS
+                    .get(usize::from(face))
+                    .copied();
+            }
+        }
+        holonomy_render::menus::FONTS
+            .get(self.face_index_at(at))
+            .copied()
+    }
+
+    /// **Re-derive the chrome's type metrics from the painter's current size.** Part 43.
+    ///
+    /// **A private function rather than three lines inline in `set_zoom`,** because the same three
+    /// lines run in `Session::new` and a second copy of "the cell comes from the face" is a second
+    /// thing to keep in step with part 32's derivation.
+    fn apply_type_scale(&mut self) {
+        // **`line_pitch_at(painter.size())`, not `line_pitch()`.** CORRECTION, part 43: the global one
+        // is the tallest face *over every size in the atlas*, so with `[16, 20]` it answers 20 ppem's
+        // pitch whatever is being drawn -- and a session at 100 % would space 16 ppem glyphs on 20 ppem
+        // leading, which reads as double-spaced text at 100 % and as a zoom that changed nothing.
+        let Some(atlas) = self.painter.atlas() else {
+            return;
+        };
+        let Some(size) = self.painter.size() else {
+            return;
+        };
+        let pitch = atlas.line_pitch_at(size);
+        if pitch == 0 {
+            return;
+        }
+        // Preserve the current viewport and sidebar, but derive type dimensions from the
+        // original unscaled design. Re-scaling the already-scaled bands caused zoom drift.
+        let current = self.chrome.metrics;
+        let base = self.type_metrics;
+        let metrics = ChromeMetrics {
+            title_h: base.title_h,
+            menu_h: base.menu_h,
+            tab_h: base.tab_h,
+            toolbar_h: base.toolbar_h,
+            ruler_h: base.ruler_h,
+            status_h: base.status_h,
+            button: base.button,
+            anchor_width: base.anchor_width,
+            ..current
+        }
+        .with_cell_width(self.painter.cell_width())
+        .with_type_scale(u32::from(pitch))
+        .with_line_pitch(u32::from(pitch));
+        // **The ribbon's bands are derived from the type, not written over it.** See
+        // `ChromeMetrics::with_ribbon_bands`: these were five literals applied *after*
+        // `with_type_scale`, so at 125 % -- the shipping default -- the ribbon was 20 % too short
+        // for the type it held.
+        let metrics = metrics.with_ribbon_bands(self.state.ribbon, self.state.ribbon_collapsed);
+        // **`Chrome::new(metrics)`, not `chrome.metrics = metrics`.** CORRECTION, and the gate caught
+        // it: `Chrome` is a `metrics` **and a computed `layout`**, and writing the metrics field left
+        // the layout at 16 ppem's bands. **The first version of this zoom did exactly that and
+        // `the_page_and_its_layout_do_depend_on_the_zoom` failed with two `Layout`s printing
+        // identically** -- `cell_w: 10, cell_h: 30` on both -- while `chrome.metrics.cell_w` read 12.
+        //
+        // **The same two lines `resize` uses**, which is the point of naming them: a zoom changes the
+        // geometry exactly as a window resize does, and the only difference is why.
+        self.chrome = Chrome::new(metrics);
+        // **Part 44: same reason as `resize`.** A zoom changes `cell_w`, which changes every button's
+        // width, so it changes which tools fit -- and an overflow menu that was right at 100 % is
+        // wrong at 125 %.
+        self.refresh_overflow();
+    }
+
+    /// Apply a command a click produced, and count it.
+    ///
+    /// **`self.apply` rather than a dispatch through the keymap**, because a click already *is* the
+    /// dispatch: there is no chord to fold and no modifier state to read, and routing a button press
+    /// back through the keymap would mean inventing a fake chord for it.
+    fn run_clicked(&mut self, command: holonomy_input::Command) -> Result<(), SessionError> {
+        self.stats.commands += 1;
+        self.stats.pointer_commands += 1;
+        self.apply(command)?;
+        Ok(())
+    }
+
+    /// One pass of the loop's frame work: repaint what the last edit damaged, then blink.
+    ///
+    /// **Two things can ask for a paint, and conflating them is a real bug.** An edit accumulates
+    /// damage in [`Session::damage`]; a blink flip asks for one cell. The first version of this did
+    /// only the second, so a keystroke recorded its damaged line and *nothing ever repainted it* --
+    /// the editor accepted the text and the screen stayed blank until a blink happened to fire. The
+    /// loop has to drain the accumulated damage first, because the blink's damage is a strict subset
+    /// of the region that is already stale.
+    ///
+    /// Public because the window's driver does not have an [`InputSource`]: it reads X11 events and
+    /// therefore calls [`Session::handle_event`] and this in turn. The Phase 8 loop is unchanged --
+    /// `run` is exactly these two calls.
+    pub fn tick(&mut self) -> Result<(), SessionError> {
+        self.tick_with(&mut crate::store::NoSource)
+    }
+
+    /// [`tick`](Self::tick) against a byte source. See [`run_with`](Self::run_with) for why the byte
+    /// source is a separate parameter rather than part of the session.
+    pub fn tick_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        if !self.damage.is_empty() {
+            // `paint` clears `damage` itself, so this does not need to.
+            self.paint_with(Some(self.damage), bytes)?;
+        }
+        if self.home.is_some() {
+            return Ok(());
+        }
+        let caret = self.caret_cell();
+        // `advance` reports only a transition *to visible*; see `Blink` for why the other
+        // direction is free.
+        if let Some(damage) = self.blink.advance(caret) {
+            self.state.caret_visible = self.blink.visible();
+            self.paint_with(Some(damage), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The caret's cell, if it is on screen.
+    fn caret_cell(&self) -> Option<DamageRect> {
+        Caret::locate(&self.chrome.layout, &self.chrome.metrics, &self.state).map(|c| c.cell)
+    }
+
+    /// Fold one event into the modifier state and dispatch it. Returns `Some` on a global hotkey.
+    ///
+    /// Public for the same reason as [`Session::tick`]: a driver with its own event source calls this
+    /// directly, one event at a time.
+    pub fn handle_event(
+        &mut self,
+        event: holonomy_input::InputEvent,
+    ) -> Result<Option<Exit>, SessionError> {
+        self.handle_event_with(&mut crate::store::NoSource, event)
+    }
+
+    /// [`handle_event`](Self::handle_event) against a byte source. **The windowed path's call.**
+    ///
+    /// The X11 driver has no [`InputSource`], so it calls this one event at a time -- which is why the
+    /// byte source has to reach this function and not only [`run_with`](Self::run_with). A driver that
+    /// forgot it would compile, run, and draw a blank page; see
+    /// [`NoSource`](crate::store::NoSource) for why the alternative was worse.
+    pub fn handle_event_with(
+        &mut self,
+        bytes: &mut dyn holonomy_text::LeafSource,
+        event: holonomy_input::InputEvent,
+    ) -> Result<Option<Exit>, SessionError> {
+        let Some(command) = self.dispatch(event) else {
+            return Ok(None);
+        };
+        self.stats.commands += 1;
+        if let Command::Hotkey(Hotkey::Quit) = command {
+            return Ok(Some(Exit::Quit));
+        }
+        // **A refused edit is not a session failure.** Part 44: `Viewing` mode makes every mutator
+        // answer `SessionError::ReadOnly`, and `run_with` and `windowed.rs` both `?` this — **so a
+        // keystroke in a read-only session would have ended the session with an error.** That is a
+        // policy decision arriving as a crash.
+        //
+        // **Swallowed here, and only here.** `Session::apply` still returns the error, so a caller
+        // that *wants* to know a key did nothing can ask; **the event path is where "the key was
+        // handled" is the right answer**, and `SessionStats::edits_readonly_refused` is where the
+        // count lives.
+        if let Err(e) = self.apply_with(command, Some(&mut *bytes)) {
+            match e {
+                SessionError::ReadOnly => {
+                    self.set_notice(Some("Viewing mode: editing is disabled".into()))
+                }
+                SessionError::Editor(EditorError::Undo(
+                    e @ holonomy_text::UndoError::ActionTooLarge { .. },
+                )) => {
+                    self.set_notice(Some(format!("Edit refused: {e}")));
+                }
+                other => return Err(other),
+            }
+        }
+        self.tick_with(bytes)?;
+        // **The commit is drained here and not inside `apply`.**
+        //
+        // `apply` is the dispatcher and is `pub`, and 40-odd gates call it with no byte source. A commit
+        // needs `&mut dyn LeafSource` *and* `&mut self.editor` at the same time, and the container is
+        // not reachable from `&mut self` at all. Here both exist — and **this is the only function both
+        // product drivers share**, `run_with` for the sealed evdev loop and `windowed.rs` for the live
+        // X11 window, so draining here rather than in either loop is what makes `Ctrl+S` work in both.
+        //
+        // `mem::take` before the work, so a commit that fails leaves the document dirty and the next
+        // `Ctrl+S` a fresh attempt rather than a retry of one that has already failed.
+        if self.save_requested && !self.managed_documents {
+            self.save_requested = false;
+            self.commit_to(bytes);
+        }
+        Ok(None)
+    }
+
+    /// Fold `event` into the modifier state and map it to a command, if it is one.
+    ///
+    /// Split out of [`Session::handle_event`] so that the *edit* path and the *paint* path can be
+    /// driven apart, which is what `tests/session_no_alloc.rs` needs: Phase 11's zero-allocation
+    /// claim is about the model change, and the paint's remaining allocations are Phase 12's work.
+    /// Measured together they are one number that is neither claim.
+    pub fn dispatch(&mut self, event: holonomy_input::InputEvent) -> Option<Command> {
+        // The modifier state is folded *before* dispatch, because `Ctrl+Q` is "ctrl goes down" then
+        // "Q goes down", and the second is only `Ctrl+Q` once the first has landed.
+        self.keymap.dispatch_into(event, &mut self.mods)
+    }
+
+    /// Apply one command, damaging what it touched, **with no source and so no faulting.**
+    ///
+    /// ## Why this is a shim and not the implementation
+    ///
+    /// **Forty-odd gates call `apply` and none of them has a container.** Part 42 added
+    /// [`apply_with`](Self::apply_with), which faults the caret's leaf before a mutator runs, and
+    /// the only two callers that *can* fault are `handle_event_with` and `Session::press` -- both of
+    /// which are already handed a `&mut dyn LeafSource`.
+    ///
+    /// **So this keeps the old signature and passes `None`, and an edit past the resident window
+    /// still refuses on this path.** That is honest rather than convenient: a gate with no source
+    /// cannot have its bytes faulted from anywhere, and the behaviour it observes is the behaviour
+    /// of a session that has no store. `a_keystroke_past_the_resident_window_edits_when_there_is_a_source`
+    /// is the gate that says the difference.
+    pub fn apply(&mut self, command: Command) -> Result<(), SessionError> {
+        self.apply_with(command, None)
+    }
+
+    /// Apply one command, **faulting the caret's leaf in first if a source is available.** Part 42.
+    ///
+    /// ## The `Option` and not a `&mut dyn`
+    ///
+    /// **Because a `&mut dyn` parameter would have to be moved into each mutating arm**, and the arms
+    /// are in one `match`. `Option<&mut dyn LeafSource>` is taken and `take()`n, which is one line per
+    /// arm and reads as "this arm may use the source".
+    ///
+    /// ## What faults, and what does not
+    ///
+    /// **The caret's leaf, and nothing else.** An insert moves the gap in one leaf; a delete moves it
+    /// in one leaf. **`Editor::insert_at` and `delete_at` each call `set_cursor` first**, which is
+    /// where the absent leaf is found, so faulting the caret is exactly the set of leaves a
+    /// single-keystroke edit can need. **A selection spanning two leaves is not covered** and
+    /// `a_selection_spanning_two_leaves_still_refuses` says so.
+    pub fn apply_with(
+        &mut self,
+        command: Command,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        let mut source = source;
+        // **Smart Compose dismissal.** Any keystroke other than Tab (accept) or Right (accept)
+        // dismisses the pending grey prediction without inserting it. This is what makes the
+        // prediction feel like a suggestion rather than a commitment: keep typing and it goes away.
+        if self.pending_compose.is_some() {
+            let accepts = matches!(command, Command::Tab | Command::Right);
+            if !accepts {
+                self.pending_compose = None;
+            }
+        }
+        match command {
+            Command::Insert(c) => {
+                // A stack buffer, not a `Vec`. Phase 11: this was `encode_utf8(&mut buf).as_bytes()
+                // .to_vec()`, which allocated and freed a four-byte heap block on **every
+                // keystroke** -- the last allocation on the edit path, and the one the
+                // `tests/session_no_alloc.rs` gate found after the document copies were gone.
+                //
+                // `encode_utf8` writes into `buf` and borrows it, so the encoded bytes live as long as
+                // this arm; `insert` takes `&[u8]` and does not retain them. Four bytes is the most a
+                // `char` can encode to, so the buffer cannot be too small.
+                let mut buf = [0u8; 4];
+                let bytes = c.encode_utf8(&mut buf);
+                self.insert(bytes.as_bytes(), source.take())?;
+            }
+            // Enter is a newline in ordinary text and a line break *inside* a cell in a table, and
+            // the difference is the whole of what makes a table usable: a newline that ended the row
+            // would add a document line, and a cell is not a line.
+            Command::Newline => {
+                if self.active_cell.is_some() {
+                    self.newline_in_cell()?;
+                } else {
+                    self.insert(b"\n", source.take())?;
+                }
+            }
+            // Tab is a literal tab outside a table and cell navigation inside one. Outside, it is four
+            // spaces rather than `\t`: a tab character in the document moves the *caret* to the next
+            // tab stop while contributing nothing to any column count, so a status bar reporting
+            // "Col 9" for four spaces would be describing a tab stop rather than a column.
+            Command::Tab => {
+                // **Smart Compose: accept the grey prediction with Tab.** If a compose suggestion is
+                // pending, insert it and clear the pending state. Otherwise, Tab inserts four spaces
+                // (or navigates a table cell).
+                if let Some(text) = self.pending_compose.take() {
+                    self.insert(text.as_bytes(), source.take())?;
+                } else if self.active_cell.is_some() {
+                    self.nav(holonomy_text::tab)?;
+                } else {
+                    self.insert(b"    ", source.take())?;
+                }
+            }
+            // Shift+Tab outside a table removes one level of the indentation Tab added, which is what
+            // makes the two a pair rather than two unrelated keys.
+            Command::ShiftTab => {
+                if self.active_cell.is_some() {
+                    self.nav(holonomy_text::shift_tab)?;
+                } else {
+                    self.outdent()?;
+                }
+            }
+            Command::InsertTable { rows, cols } => self.insert_table(rows, cols)?,
+            Command::Backspace => self.backspace(source.take())?,
+            Command::DeleteForward => self.delete_forward(source.take())?,
+            // Inside a table the four arrows are cell navigation, not caret movement: "down" means
+            // the cell below, which for a one-line cell is a jump of a whole row rather than a line.
+            // The rules report `Nav::Nowhere` when there is no such cell, and that is swallowed -- a
+            // movement that cannot happen is not a document failure.
+            Command::Left if self.active_cell.is_some() => self.nav(holonomy_text::left)?,
+            Command::Right if self.active_cell.is_some() => self.nav(holonomy_text::right)?,
+            Command::Up if self.active_cell.is_some() => self.nav(holonomy_text::up)?,
+            Command::Down if self.active_cell.is_some() => self.nav(holonomy_text::down)?,
+            Command::Left => self.move_caret(-1)?,
+            Command::Right => {
+                // **Smart Compose: accept the grey prediction with Right arrow too.** Matches Google
+                // Docs, where Tab or right arrow commits the inline suggestion. The dismissal logic
+                // in `apply_with` already skipped Right, so `pending_compose` is still `Some` here.
+                if let Some(text) = self.pending_compose.take() {
+                    self.insert(text.as_bytes(), source.take())?;
+                } else {
+                    self.move_caret(1)?;
+                }
+            }
+            Command::Up => self.move_line(-1)?,
+            Command::Down => self.move_line(1)?,
+            // **Home and End are line bounds.** They were `caret_to(0)` and `caret_to(text_len)` -- the
+            // *document* bounds -- for the whole of the file's life, and `SelectHome`/`SelectEnd`
+            // agreed with them on purpose so that a Shift+Home would not land somewhere else.
+            //
+            // `Home` was already right by accident, because `caret_to(0)` and "the start of the
+            // caret's line" coincide **on line 0**, which is where every gate that ever pressed it
+            // put the caret. `End` had no such accident.
+            Command::Home => {
+                let at = self.line_start(self.editor.caret() as usize) as u32;
+                self.caret_to(at as usize)?;
+            }
+            Command::End => {
+                let at = self.line_end_offset(self.editor.caret() as usize) as u32;
+                self.caret_to(at as usize)?;
+            }
+            // --- Selection. Part 28.
+            //
+            // **Each one is the plain command with `extend` set, and none of them is a new kind of
+            // movement.** That is the claim to hold: shift-arrow does what arrow does and then grows
+            // the range, and the six arms above this line are the proof that they stay in step —
+            // `SelectUp` is `move_line(-1, true)`, not a second implementation of "up one line".
+            Command::SelectLeft => self.extend_caret(-1)?,
+            Command::SelectRight => self.extend_caret(1)?,
+            Command::SelectUp => self.move_by_line(-1, true)?,
+            Command::SelectDown => self.move_by_line(1, true)?,
+            // **`0` and `text_len()`, matching `Command::Home` and `Command::End` above — and not
+            // the line's own start and end.**
+            //
+            // **That is deliberate, and it is agreeing with a defect.** `Command::Home`'s doc says
+            // *"Move to the start of the line"* and its arm is `self.caret_to(0)`, which is the start
+            // of the *document*; `End` likewise goes to the end of the document. **So Shift+Home
+            // going somewhere different from Home would be the second wrong thing**, and the honest fix
+            // is to change both in one part with their own gate. Recorded in PROJECT.md, not fixed
+            // here, because it is a behaviour change with no bearing on selection.
+            // **And the shift variants now agree with them because both sides moved.** They were left
+            // "agreeing with the defect rather than compounding it" -- a decision part 28 recorded
+            // as *"left for a part of its own."* This is that part, and it is the only reason the fix
+            // is two lines rather than four: a Shift+Home that went somewhere different from Home
+            // would be the second wrong thing.
+            Command::SelectHome => {
+                let at = self.line_start(self.editor.caret() as usize) as u32;
+                self.extend_to(at)?;
+            }
+            Command::SelectEnd => {
+                let at = self.line_end_offset(self.editor.caret() as usize) as u32;
+                self.extend_to(at)?;
+            }
+            // **PageUp and PageDown now move.** They decoded from the keymap and landed in a bare
+            // `{}` for the whole of the file's life -- a key that decodes and then vanishes is the
+            // hardest kind of nothing to notice, because the keymap test passes, the command exists,
+            // and the window ignores you.
+            Command::PageUp => self.page_by_lines(-1)?,
+            Command::PageDown => self.page_by_lines(1)?,
+            // **Escape dismisses the open popup, and otherwise does nothing.** It is a keyboard
+            // user's only route to the same thing a click outside the menu does, and the grab means
+            // every subsequent click is swallowed by the popup it should have dismissed.
+            //
+            // **It does not clear the selection.** A selection is not a transient mode and Escape is
+            // not its conventional dismissal key in every editor; making it do both would be a
+            // behaviour change that no menu item announces. One meaning per key is the rule this
+            // file keeps.
+            Command::Escape => {
+                if self.state.open.is_some() {
+                    self.state.open = None;
+                    self.state.hover = None;
+                    self.damage = self.chrome.full_damage();
+                }
+            }
+            Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => {}
+            Command::Hotkey(Hotkey::Bold) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleBold)?
+            }
+            Command::Hotkey(Hotkey::Italic) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleItalic)?
+            }
+            // **The four decorations and the clear, each through `apply_action`.**
+            //
+            // **Through the action rather than straight to the bit**, because the action is what the
+            // menu row and the toolbar button reach and *that is the point*: one implementation, three
+            // ways in. A shortcut that called `editor.format_range` directly would be a fifth path, and
+            // the two would diverge the first time one of them learned about armed state.
+            Command::Hotkey(Hotkey::Underline) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleUnderline)?
+            }
+            Command::Hotkey(Hotkey::Strike) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleStrike)?
+            }
+            Command::Hotkey(Hotkey::Superscript) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleSuperscript)?
+            }
+            Command::Hotkey(Hotkey::Subscript) => {
+                self.apply_action(holonomy_render::menus::Action::ToggleSubscript)?
+            }
+            Command::Hotkey(Hotkey::ClearFormatting) => {
+                self.apply_action(holonomy_render::menus::Action::ClearFormatting)?
+            }
+            Command::Hotkey(Hotkey::Find) => {
+                self.apply_action(holonomy_render::menus::Action::Find)?
+            }
+            Command::Hotkey(Hotkey::Replace) => {
+                self.apply_action(holonomy_render::menus::Action::Replace)?
+            }
+            Command::Hotkey(Hotkey::Undo) => self.undo()?,
+            Command::Hotkey(Hotkey::Redo) => self.redo()?,
+            Command::Hotkey(Hotkey::Save) => {
+                // Ctrl+S is a *request*. Performing it needs the container and the editor mutably at
+                // once, and the container is not reachable from `&mut self` — so this records the
+                // request and `run_with`, which holds both, does the work. See `save_requested`.
+                self.stats.saves += 1;
+                self.save_requested = true;
+            }
+            Command::Hotkey(Hotkey::InsertMath) => {
+                if self.managed_documents && self.active_cell.is_some() {
+                    self.set_notice(Some("Move outside the table to insert an equation.".into()));
+                } else {
+                    self.insert_math()?;
+                }
+            }
+            Command::Hotkey(Hotkey::InsertImage) => {
+                if self.active_cell.is_some() {
+                    self.set_notice(Some("Move outside the table to insert an image.".into()));
+                } else {
+                    self.check_editable()?;
+                    if self.managed_documents {
+                        // Desktop input is chosen and validated outside the sealed session.
+                        self.document_request = Some(DocumentRequest::InsertImage);
+                    } else {
+                        self.insert_image()?;
+                    }
+                }
+            }
+            Command::Hotkey(Hotkey::InsertTable) => {
+                if self.managed_documents {
+                    if self.active_cell.is_some() {
+                        self.set_notice(Some(
+                            "Move outside the table to insert another table.".into(),
+                        ));
+                    } else {
+                        self.check_editable()?;
+                        self.document_request = Some(DocumentRequest::InsertTable);
+                    }
+                } else {
+                    self.insert_table(3, 3)?;
+                }
+            }
+            // **The clipboard.** `Copy` and `Cut` differ only in whether the selection is also
+            // deleted, which is why they are one `Editor` method each rather than a flag here: the
+            // question "does this also remove it" is about the document, not about the keystroke.
+            //
+            // **A copy with no selection is not an error and not an edit.** `copy_selection` returns
+            // `Ok(false)`, counted as a no-op, and the selection is untouched — which is what makes
+            // `Ctrl+C` harmless to press with nothing selected, as every editor treats it.
+            Command::Hotkey(Hotkey::Copy) => {
+                if self.editor.copy_selection()? {
+                    self.stats.copies += 1;
+                    self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+                } else {
+                    self.stats.clipboard_noops += 1;
+                }
+            }
+            Command::Hotkey(Hotkey::Cut) => {
+                // **The bytes are taken before the delete**, because after it the selection is
+                // gone and there is nothing to ask. They are borrowed from the yank buffer, which
+                // is where `cut_selection` put them -- **not copied**, because a `to_vec` here
+                // would be an allocation on the edit path and `tests/session_no_alloc.rs` asserts
+                // there are none.
+                let cut_at = self.editor.selection().map(|s| s.start);
+                let cut_len = self.editor.selection().map(|s| s.end - s.start);
+                if self.editor.cut_selection()? {
+                    if let (Some(at), Some(len)) = (cut_at, cut_len) {
+                        let bytes = self.editor.yanked();
+                        let n = (len as usize).min(bytes.len());
+                        self.counts
+                            .after_delete(&self.editor, at as usize, &bytes[..n]);
+                    }
+                    self.after_edit(0)?;
+                    self.stats.cuts += 1;
+                    self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+                } else {
+                    self.stats.clipboard_noops += 1;
+                }
+            }
+            Command::Hotkey(Hotkey::Paste) => {
+                if self.managed_documents {
+                    self.paste_request = true;
+                    return Ok(());
+                }
+                let at = self.editor.caret() as usize;
+                let n = self.editor.paste()?;
+                if n > 0 {
+                    // **An edit, and it goes through `after_edit`** so it is in the undo stack, the
+                    // geometry syncs and the line is damaged. A paste that skipped any of those would
+                    // leave the status bar reporting the pre-paste word count.
+                    //
+                    // **And the counts are folded here, not left to `after_edit`.** `publish_counts`
+                    // *publishes* what `TextCounts` holds and does not recompute it, so a mutation
+                    // that does not fold leaves the status bar wrong while the document is right.
+                    // This is the same omission part 11 found in `insert_math` and the three table
+                    // helpers, and it is recorded in `recount_words_and_lines`'s doc comment.
+                    let inserted = self.editor.yanked();
+                    self.counts.after_insert(&self.editor, at, &inserted[..n]);
+                    self.after_edit(n as u32)?;
+                    self.stats.pastes += 1;
+                } else {
+                    self.stats.clipboard_noops += 1;
+                }
+            }
+            Command::Hotkey(Hotkey::DocumentStart) => self.caret_to(0)?,
+            Command::Hotkey(Hotkey::SelectAll) => {
+                let end = self.editor.text_len() as usize;
+                self.select_at(0, end as u32)?;
+            }
+            Command::Hotkey(Hotkey::DocumentEnd) => self.caret_to(self.editor.text_len())?,
+            _ => {
+                self.stats.unhandled += 1;
+            }
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------- edits
+
+    /// **Fault the caret's leaf before inserting, when a source is available.** Part 42.
+    ///
+    /// **First, before `delete_selected`.** The two edits are sequential and independent -- a
+    /// selection replace does not move the caret past either leaf -- so the order does not matter for
+    /// correctness. **It matters for what a failure looks like**: faulting first means the leaf is
+    /// present before anything has been touched, so a source that cannot produce the bytes leaves the
+    /// document exactly as it was, with the selection still selected.
+    fn fault_for_edit(
+        &mut self,
+        source: &mut Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        self.check_editable()?;
+        if let Some(src) = source.as_deref_mut() {
+            self.editor.fault_at_caret(src)?;
+        }
+        Ok(())
+    }
+
+    /// **The read-only check, on its own, for a mutator that has no source.**
+    ///
+    /// # Why this is a second function rather than a flag
+    ///
+    /// `fault_for_edit` does two things: it refuses the edit in viewing mode, and it faults the
+    /// caret's leaf so the editor's leaves are there before anything is touched. **The second half
+    /// needs a source, and four mutators do not have one** — they are reached from the toolbar,
+    /// which is not a keystroke path.
+    ///
+    /// **And they were editing the document in viewing mode.** `insert_math`, `insert_image_bytes`,
+    /// `insert_table` and `style_selection` called `self.editor.insert_at(...)` and friends
+    /// directly, never reaching `fault_for_edit`, so the policy the toolbar's own Mode switcher
+    /// advertises — *"a viewing mode where typing is silently dropped"* — was not enforced on
+    /// them: **Ctrl+M in viewing mode wrote four bytes into the document**, and
+    /// `stats.edits_readonly_refused` stayed at zero, so the counter that exists to make refusals
+    /// visible did not see it.
+    ///
+    /// The check is the same one, in the same place, and it is now reachable without a source.
+    fn check_editable(&mut self) -> Result<(), SessionError> {
+        // **The read-only check, and it is here rather than in twenty match arms.** Part 44: every
+        // mutator in this file reaches this function -- `insert`, `backspace`, `delete_forward`, and
+        // therefore every `Command` that edits -- so **one check here refuses typing, backspace,
+        // delete-forward and every range-styling action in one place.**
+        //
+        // **And it is here, *before* the fault, for the reason the ordering is what it is**: a
+        // read-only session that faulted a 4 KiB leaf in before refusing would have paid for a page
+        // load to produce an error.
+        //
+        // **The refusal is counted as chrome, not as inert.** `pointer_inert` means "a widget with no
+        // action behind it"; viewing mode is a mode with a policy, and a user who types in it has
+        // pressed a key that does something -- it just does not do that. **`edits_readonly_refused`
+        // is the counter**, and it is a new one rather than a reuse so that "the keyboard is dead in
+        // viewing mode" and "the keyboard is dead" are different numbers.
+        //
+        // **Suggesting mode is not read-only**: edits are accepted but recorded as suggestions
+        // (green insertions, strikethrough deletions) rather than committed directly. Only
+        // `Viewing` refuses.
+        if self.mode == holonomy_render::menus::ViewMode::Viewing {
+            self.stats.edits_readonly_refused += 1;
+            return Err(SessionError::ReadOnly);
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        bytes: &[u8],
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        // **The source is reborrowed, not moved.** `fault_for_edit` takes it by value, and the
+        // manifest's re-measure needs it afterwards: on a container-backed document the resident-only
+        // reader cannot fault, and **a save evicts every leaf** -- so without the source the
+        // manifest froze after the first Ctrl+S and the formula was never drawn again.
+        self.fault_for_edit(&mut source)?;
+        // **A selected range is replaced, not typed into.** Part 28.
+        //
+        // **This is the first thing typing does with a selection and the only reason a selection is
+        // more than a highlight.** The delete goes through [`delete_selection`](Editor::delete_selection)
+        // — one undo record carrying every deleted byte — and then the insert lands at the range's
+        // start, which `delete_at` has already parked the caret on.
+        //
+        // **Two undo records, and that is the honest cost.** A selection followed by one keystroke is
+        // *one* thing the user did, and a user pressing Ctrl+Z once would expect the whole paragraph
+        // back rather than the paragraph with one letter still deleted. **A single record would mean a
+        // composite action in `UndoStack`, which is a new kind of thing in that file for a case this
+        // part cannot test.** Recorded, not pretended away — and `undo_restores_a_typed_over_selection`
+        // asserts the behaviour that *is* delivered: two undos, not one.
+        //
+        // **Skipped for an empty `bytes`,** because `Command::Insert` is only called with a non-empty
+        // character, and a zero-length insert with a delete in front of it would be a selection
+        // deleted by nothing.
+        if !bytes.is_empty() {
+            self.delete_selected()?;
+        }
+        let at = self.editor.caret() as usize;
+        let end_of_heading = bytes == b"\n"
+            && at > self.line_start(at)
+            && at == self.line_end_offset(at)
+            && self.editor.style_at((at - 1) as u32).style_flags & STYLE_HEADER != 0;
+        // `GrowIntoInsert` so typing at the end of a bold word keeps it bold, which is what a word
+        // processor does and what `SpanPolicy`'s own docs argue for.
+        let list_prefix = if bytes == b"\n" && self.active_cell.is_none() && self.managed_documents
+        {
+            let start = self.line_start(at);
+            let end = self.line_end_offset(at);
+            // **`get`, not an index, because the offsets are *cached* geometry and the bytes are not.**
+            // `line_end_offset` answers from `DocLines`, which knows where the line is; this needs
+            // where the text is. A line tree that is one edit behind the rope -- which is exactly what
+            // a page-break insertion can leave behind, since a page break is a run of newlines that
+            // grows the document under the tree -- makes `end` past the end, and the slice *panicked*.
+            // An empty prefix is the honest answer for a line the cache cannot place: it continues no
+            // list, which leaves the newline a newline.
+            let line = match self.editor.text() {
+                Ok(text) => {
+                    String::from_utf8_lossy(text.get(start..end).unwrap_or_default()).into_owned()
+                }
+                Err(_) => String::new(),
+            };
+            let t = line.trim_start();
+            let indent = &line[..line.len() - t.len()];
+            if t == "-" || t == "*" || t.chars().all(|c| c.is_ascii_digit()) && t.ends_with('.') {
+                Some((start, end, String::new()))
+            } else if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+                let _ = rest;
+                Some((start, end, format!("{indent}- ")))
+            } else if let Some(p) = t
+                .find(". ")
+                .filter(|p| *p > 0 && t[..*p].bytes().all(|b| b.is_ascii_digit()))
+            {
+                let n: u32 = t[..p].parse().unwrap_or(0);
+                Some((start, end, format!("{indent}{}. ", n.saturating_add(1))))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((start, end, prefix)) = list_prefix {
+            if prefix.is_empty() {
+                self.editor.delete_at(start as u32, (end - start) as u32)?;
+                self.counts = crate::counts::TextCounts::scan(&self.editor);
+                self.after_edit(0)?;
+                return Ok(());
+            }
+            let bytes = format!("\n{prefix}");
+            self.editor.insert_at(
+                self.editor.caret(),
+                bytes.as_bytes(),
+                SpanPolicy::GrowIntoInsert,
+            )?;
+            self.counts.after_insert(&self.editor, at, bytes.as_bytes());
+            return self.after_edit(bytes.len() as u32);
+        }
+        self.editor
+            .insert_at(self.editor.caret(), bytes, SpanPolicy::GrowIntoInsert)?;
+        self.counts.after_insert(&self.editor, at, bytes);
+        // Both properties can be armed independently. Applying them in separate
+        // style_range calls would let the second call erase the first one.
+        if !bytes.is_empty()
+            && (self.pending_style.is_some()
+                || self.pending_colour.is_some()
+                || self.pending_face.is_some()
+                || self.mode == holonomy_render::menus::ViewMode::Suggesting)
+        {
+            let inherited = self.editor.style_at(at as u32);
+            let mut flags = self.pending_style.unwrap_or(inherited.style_flags);
+            // **In Suggesting mode, every inserted byte is a suggestion insertion:**
+            // drawn green and held pending accept or reject.
+            if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+                flags |= STYLE_SUGGESTION_INSERT;
+            }
+            // **`style_range_faced`, and the inherited face when nothing is armed.** A `style_range` here
+            // would write the *default* face over every typed character, so a character typed into the
+            // middle of a monospaced run would silently come out in Inter -- the run split in two by a
+            // single keystroke, which is the visible half of the same defect as the document-wide font.
+            self.editor.style_range_faced(
+                at as u32,
+                (at + bytes.len()) as u32,
+                flags,
+                self.pending_colour.unwrap_or(inherited.color_rgb),
+                self.pending_face.unwrap_or(inherited.font_face),
+            )?;
+        }
+        if end_of_heading {
+            self.pending_style = Some(0);
+            self.pending_colour = Some(0);
+            self.state.styles.bold = false;
+            self.state.styles.italic = false;
+            self.state.style_index = 0;
+        }
+        self.after_edit(bytes.len() as u32)
+    }
+
+    /// Run `f` with the table the caret is in, or report that there is none.
+    ///
+    /// A closure rather than a returned `ResolvedTable` because that borrows the document bytes, and
+    /// the bytes come from [`Editor::text`], which hands over an owned `Vec`. Returning the resolved
+    /// table would mean returning a borrow of a local -- so the text has to stay inside this frame,
+    /// and the only way to do that with the borrow checker is to scope it with a closure.
+    ///
+    /// Every table operation goes through here, and each re-derives the table from the editor rather
+    /// than caching one, because a byte typed into a previous cell moves every cell boundary after it.
+    /// A cached `ResolvedTable` would be stale after a single keystroke, which is the whole editing
+    /// session.
+    ///
+    /// **Cost, stated rather than hidden:** `Editor::text` copies the whole document, so this
+    /// allocates once per table keystroke. That is a real departure from the "no heap allocation while
+    /// editing" invariant and it is not yet fixed; `Editor::read_into` reads a byte range into a
+    /// caller-supplied buffer without allocating, and the fix is to hold the table's bytes in a
+    /// session-owned scratch buffer sized to the widest table. It is not done here because a wrong
+    /// buffer size is worse than a measurable allocation.
+    fn with_table<R>(
+        &mut self,
+        f: impl FnOnce(TableSpan, &ResolvedTable<'_>) -> Result<R, SessionError>,
+    ) -> Result<R, SessionError> {
+        // The span is handed to the closure as well as the resolved table because a caller that has
+        // just moved the caret needs the *old* span's `start_byte` to find the table again afterwards,
+        // and re-deriving it from the new caret is exactly what `table_at` would refuse to do.
+        let caret = self.editor.caret();
+        let span = self
+            .editor
+            .table_at(caret)
+            .ok_or(SessionError::NotInTable { offset: caret })?;
+        let need = (span.end_byte - span.start_byte) as usize;
+        if self.table_scratch.len() < need {
+            // Only ever grows, and only when a table is bigger than any seen before. An allocation
+            // *per keystroke* was what the first version did, by copying the whole document with
+            // `Editor::text` -- which is a departure from the "no heap allocation while editing"
+            // invariant, and the reason this exists.
+            self.table_scratch.resize(need, 0);
+        }
+        let got = self
+            .editor
+            .read_into(span.start_byte as usize, &mut self.table_scratch)?;
+        if got < need {
+            return Err(SessionError::Table(
+                holonomy_text::TableError::InvertedRange {
+                    start: span.start_byte,
+                    end: span.start_byte + got as u32,
+                },
+            ));
+        }
+        let resolved = ResolvedTable::new(span, &self.table_scratch[..got])?;
+        f(span, &resolved)
+    }
+
+    /// Put the caret into `(row, col)` at `offset_in_cell` of `span`, and start table-editing.
+    ///
+    /// # Why `span` is a parameter and not looked up from the caret
+    ///
+    /// The first version resolved the table with [`Session::with_table`], which finds it *from the
+    /// caret*. That is the right rule for every keystroke inside a table and the wrong one for the
+    /// keystroke that creates it: `Editor::insert_at` leaves the caret one past the inserted bytes,
+    /// which is the newline after the table's last row -- outside the table, so the lookup failed with
+    /// `NotInTable` for the very operation that had just made one. It is also the wrong rule after an
+    /// append, where the caret is about to be somewhere new.
+    ///
+    /// So the caller passes the span it already has. There is no window in which the table has to be
+    /// found by guessing where it is.
+    fn enter_cell(
+        &mut self,
+        span: TableSpan,
+        row: u16,
+        col: u16,
+        offset_in_cell: u32,
+    ) -> Result<(), SessionError> {
+        let text = self.editor.text()?;
+        let t = ResolvedTable::new(span, &text)?;
+        let cell = t.cell_at(span.cell_index(row, col))?;
+        let offset = offset_in_cell.min(cell.len());
+        self.active_cell = Some(TableCursor {
+            row,
+            col,
+            offset_in_cell: offset,
+        });
+        self.caret_to((cell.start_byte + offset) as usize)
+    }
+
+    /// The table containing `offset`, or an error saying there is none.
+    fn span_of(&self, offset: u32) -> Result<TableSpan, SessionError> {
+        self.editor
+            .table_at(offset)
+            .ok_or(SessionError::NotInTable { offset })
+    }
+
+    /// Run one navigation rule and act on its answer.
+    ///
+    /// The rule is a function rather than an enum so that "which rule" is a type error rather than a
+    /// match arm somebody forgets. Each returns `Result<Nav, TableError>` because the rules have to
+    /// read the neighbouring cell to know where "the previous cell's end" is.
+    fn nav(
+        &mut self,
+        rule: fn(&ResolvedTable<'_>, TableCursor) -> Result<Nav, holonomy_text::TableError>,
+    ) -> Result<(), SessionError> {
+        let Some(cur) = self.active_cell else {
+            return Ok(());
+        };
+        let start = self.editor.caret();
+        let (span, dest, append_row) = self.with_table(|span, t| match rule(t, cur)? {
+            Nav::Nowhere => Ok((span, None, false)),
+            Nav::NewlineInCell => Ok((span, None, false)),
+            Nav::Move {
+                row,
+                col,
+                offset_in_cell,
+                append_row,
+            } => Ok((span, Some((row, col, offset_in_cell)), append_row)),
+        })?;
+        let _ = start;
+        let Some((row, col, offset_in_cell)) = dest else {
+            self.stats.table_nav_nowhere += 1;
+            return Ok(());
+        };
+        let span = if append_row {
+            // An append is an **edit**: new bytes, an undo action, a new row of cells. The navigation
+            // rule only said it wanted one; this is where the separators go in. The rule asked to land
+            // in row `row`, which is `span.rows` -- the row the append creates -- so the two are
+            // asserted against each other rather than assumed to agree.
+            let new_row = self.editor.append_table_row(span)?;
+            self.tables_shape_dirty = true;
+            // Rescan, for the reason `insert_table` does: the appended row's separators are not
+            // returned to the caller and `TextCounts` needs them.
+            self.counts = TextCounts::scan(&self.editor);
+            debug_assert_eq!(
+                new_row, row,
+                "the rule asked to land in the row the append created, and the append made row \
+                 {new_row}; if these disagree the navigation rule and the edit have drifted apart"
+            );
+            // The grown span, not the one the rule was handed: `row` is one past the old `rows`, so
+            // resolving it against the old span is `OutOfRange`. That was the second version's bug --
+            // the first passed the old span through and reported `OutOfRange { row: 3, rows: 3 }` for
+            // the keystroke that had just created row 3.
+            self.span_of(span.start_byte)?
+        } else {
+            span
+        };
+        self.stats.table_navs += 1;
+        self.enter_cell(span, row, col, offset_in_cell)
+    }
+
+    /// A newline inside the caret's cell, which makes that cell's row taller.
+    ///
+    /// The row height is derived from the cell's own line count rather than assumed to be one, so a
+    /// cell holding three lines is three lines tall and the borders below it move down. That is the
+    /// "recompute row height in the Fenwick geometry" of the directive: the Fenwick mapper maps byte
+    /// offsets to line indices, and a cell's height is the number of `\n` bytes in it.
+    ///
+    /// **No source parameter, and that is a gap rather than a decision.** `newline_in_cell` is
+    /// reached from `apply_with`'s `Command::Newline` arm and could take the source the same way
+    /// `insert` does. **It does not, so Enter inside a table cell still refuses past the resident
+    /// window** while typing in ordinary text does not. `a_enter_in_a_cell_past_the_window_still_refuses`
+    /// is the gate that pins that, and closing it is a two-line change once someone wants a table
+    /// large enough to notice.
+    fn newline_in_cell(&mut self) -> Result<(), SessionError> {
+        let Some(cur) = self.active_cell else {
+            return self.insert(b"\n", None);
+        };
+        let cell_start = self.with_table(|_span, t| {
+            Ok(t.cell_at(t.span.cell_index(cur.row, cur.col))?.start_byte)
+        })?;
+        self.insert(b"\n", None)?;
+        // The insertion is inside the table, so the span grew; re-read it and re-enter the cell one
+        // byte past the newline that was just inserted.
+        // The insertion is inside the table, so the table grew; the span is re-read at the cell's old
+        // start, which is the check that would catch a `TableMap` that stopped tracking the edit.
+        self.stats.table_newlines += 1;
+        self.enter_cell(
+            self.span_of(cell_start)?,
+            cur.row,
+            cur.col,
+            cur.offset_in_cell + 1,
+        )
+    }
+
+    /// Remove one level of indentation, for Shift+Tab outside a table.
+    fn outdent(&mut self) -> Result<(), SessionError> {
+        const INDENT: &[u8] = b"    ";
+        let at = self.editor.caret();
+        if at < INDENT.len() as u32 {
+            return Ok(());
+        }
+        // Phase 11 item 4: four bytes into a stack array rather than a whole-document `editor.text()`, so
+        // this path allocates nothing and is O(4).
+        let start = at as usize - INDENT.len();
+        let mut indent = [0u8; 4];
+        let n = self.editor.read_into(start, &mut indent).unwrap_or(0);
+        if &indent[..n] != INDENT {
+            // Nothing to remove. Not an error: Shift+Tab on a line that was never indented is a
+            // keystroke with no effect, exactly as it is in any editor.
+            self.stats.table_nav_nowhere += 1;
+            return Ok(());
+        }
+        self.editor.delete_at(start as u32, INDENT.len() as u32)?;
+        self.counts.after_delete(&self.editor, start, INDENT);
+        self.after_edit(INDENT.len() as u32)
+    }
+
+    /// **Delete the selection, tell the counters about it, and report what went.** Part 28.
+    ///
+    /// ## Why this exists rather than three lines at each call site
+    ///
+    /// **`TextCounts::after_delete` needs the deleted bytes**, because FR-1.2 zeroes them and after the
+    /// delete there is nothing left to count word starts from. Three call sites — Backspace, Delete,
+    /// and typing over a selection — each needed the same capture-then-delete-then-report sequence,
+    /// and **the capture is the part with a decision in it**, so three copies is three chances to make
+    /// it differently.
+    ///
+    /// ## The decision: scratch when it fits, heap when it does not
+    ///
+    /// **Exactly the split [`Editor::anchors_in_range`](holonomy_text::Editor) already documents:**
+    ///
+    /// > A range longer than the scratch is not a keystroke — it is a multi-kilobyte selection — so it
+    /// > takes one heap buffer, which is the honest cost and is documented rather than pretended away.
+    ///
+    /// **A selection can be a whole document**, so a fixed buffer would either panic or silently
+    /// truncate the bytes and mis-count every word after the truncation point. One `Vec` on the
+    /// selection path is the right cost, and the keystroke path — no selection, `sel.len() == 1` —
+    /// **never allocates**, which is what `tests/session_no_alloc.rs` gates.
+    fn delete_selected(&mut self) -> Result<Option<u32>, SessionError> {
+        let Some(sel) = self.editor.selection() else {
+            return Ok(None);
+        };
+        let start = sel.start as usize;
+        let len = sel.len();
+        // **`LINE_SCRATCH_BYTES` is this file's scratch and the selection can be longer than it.** The
+        // branch is on the selection's own length, so a one-character selection — which is what the
+        // no-alloc gate exercises — takes the stack-free path and a whole-document selection takes one
+        // buffer that is freed when this returns.
+        let big = len as usize > LINE_SCRATCH_BYTES;
+        let mut heap: Vec<u8> = Vec::new();
+        let n = if !big {
+            // **`read_into` into the scratch, and then truncate it**: the scratch is a `Vec<u8>` whose
+            // *capacity* is the invariant and whose *length* is meaningless between uses, exactly as
+            // `line_scratch` is. `set_len` on uninitialised capacity would hand `after_delete` bytes
+            // that were never written, so the read is what makes the first `n` bytes real.
+            // **The read is the value, not a binding that is returned on the next line.** `got` was
+            // assigned and then returned immediately, which is two statements saying one thing and
+            // gives a reader a line to misread as "and then something happens to `got`".
+            self.editor
+                .read_into(start, &mut self.line_scratch[..len as usize])
+                .unwrap_or(0)
+        } else {
+            heap = vec![0u8; len as usize];
+            self.editor.read_into(start, &mut heap).unwrap_or(0)
+        };
+        let removed: &[u8] = if big {
+            &heap[..n]
+        } else {
+            &self.line_scratch[..n]
+        };
+        // **In Suggesting mode, deleting a selection is not a removal:** every selected byte gets
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The selection is cleared and
+        // the caret lands at `start`; the text remains visible, pending accept or reject.
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
+            self.editor
+                .format_range(start as u32, (start as u32 + len) as u32, |span| {
+                    (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+                })?;
+            self.counts.after_delete(&self.editor, start, removed);
+            self.after_edit(len as u32)?;
+            return Ok(Some(len));
+        }
+        self.editor.delete_selection()?;
+        self.counts.after_delete(&self.editor, start, removed);
+        self.after_edit(len)?;
+        Ok(Some(len))
+    }
+
+    fn backspace(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        // **The source is reborrowed, not moved** — see `insert`: the manifest's re-measure needs it
+        // afterwards, because the resident-only reader cannot fault and a save evicts every leaf.
+        self.fault_for_edit(&mut source)?;
+        // **A selection is deleted whole, before the "is there a byte before the caret" question.**
+        // Part 28. The check below is about *one character*; with a selection the answer is the range,
+        // and asking it first would mean Backspace with a selection anchored at byte 0 doing nothing at
+        // all because the caret happens to be at 0.
+        if self.delete_selected()?.is_some() {
+            return Ok(());
+        }
+        if self.editor.caret() == 0 {
+            return Ok(());
+        }
+        // The bytes about to be deleted, captured first: FR-1.2 zeroes them, so afterwards there is
+        // nothing for `TextCounts` to count.
+        //
+        // **CORRECTION: this read one byte and deleted one byte, and both were wrong together.** The
+        // editor's Backspace now deletes a whole character (see `Editor::backspace`), so the byte count
+        // has to be derived the same way — otherwise `after_delete` is told about the first byte of a
+        // three-byte character and the word count drifts by one every time a non-ASCII character is
+        // removed.
+        //
+        // **The range comes from the editor**, not from arithmetic here: `backspace_range` is the one
+        // definition of "which bytes does this keystroke remove", and a second copy of a UTF-8
+        // boundary walk is exactly the kind of two-answer-one-question this file's comments are
+        // otherwise careful about.
+        let Some((start, end)) = self.editor.backspace_range() else {
+            return Ok(());
+        };
+        // **In Suggesting mode, a deletion is not a removal:** the bytes stay, marked with
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The caret still moves to
+        // `start`, exactly as if they had been deleted — which is what makes "type, then backspace"
+        // read as "undo this insertion" rather than "strike through the previous character".
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            // A **stack** array, copied out before the style change.
+            let mut buf = [0u8; 4];
+            let want = (end - start).min(buf.len());
+            let n = self.editor.read_into(start, &mut buf[..want]).unwrap_or(0);
+            // **`format_range`, not `style_range`:** `style_range` would overwrite the run's colour
+            // with 0 (black); `format_range` reads each span and only flips the flag, keeping colour
+            // and face intact — which is what "strike through the previous character" means.
+            self.editor.format_range(start as u32, end as u32, |span| {
+                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+            })?;
+            self.editor.caret_to(start)?;
+            self.counts.after_delete(&self.editor, start, &buf[..n]);
+            return self.after_edit(1);
+        }
+        // A **stack** array, copied out before the delete. Holding a borrow of `self.editor` across
+        // the delete is E0502, and the borrow has to end there because `TextCounts` must be told the
+        // bytes *after* the document has changed. Four bytes is the most one character can encode.
+        let mut buf = [0u8; 4];
+        let want = (end - start).min(buf.len());
+        let n = self.editor.read_into(start, &mut buf[..want]).unwrap_or(0);
+        self.editor.backspace()?;
+        self.counts.after_delete(&self.editor, start, &buf[..n]);
+        self.after_edit(1)
+    }
+
+    fn delete_forward(
+        &mut self,
+        mut source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        // **The source is reborrowed, not moved** — see `insert`.
+        self.fault_for_edit(&mut source)?;
+        // **The same rule as `backspace`, and the same reason.** A Delete with a selection deletes
+        // the selection, which is what every editor does and is the only behaviour that makes
+        // "select, then press Delete" work without holding a different key.
+        if self.delete_selected()?.is_some() {
+            return Ok(());
+        }
+        if self.editor.caret() as usize >= self.editor.text_len() {
+            return Ok(());
+        }
+        let at = self.editor.caret() as usize;
+        // **One byte was read, and a character was deleted.** `Editor::delete_forward` walks to the
+        // end of the character (`editor.rs`), so a `é` read as its first byte counts as one byte in
+        // `TextCounts` and as two bytes in the document — the same drift the Backspace note above
+        // describes, in the other direction. **The length comes from the same walk**, so the count and
+        // the delete cannot disagree.
+        let mut len = 1usize;
+        while at + len < self.editor.text_len() {
+            let mut one = [0u8; 1];
+            if self.editor.read_into(at + len, &mut one).unwrap_or(0) == 0 {
+                break;
+            }
+            if one[0] & 0xC0 != 0x80 {
+                break;
+            }
+            len += 1;
+        }
+        // **In Suggesting mode, a forward deletion is not a removal:** the bytes stay, marked with
+        // `STYLE_SUGGESTION_DELETE` so the painter strikes them through. The caret stays put.
+        if self.mode == holonomy_render::menus::ViewMode::Suggesting {
+            let mut buf = [0u8; 4];
+            let want = len.min(buf.len());
+            let n = self.editor.read_into(at, &mut buf[..want]).unwrap_or(0);
+            // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
+            self.editor
+                .format_range(at as u32, (at + len) as u32, |span| {
+                    (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+                })?;
+            self.counts.after_delete(&self.editor, at, &buf[..n]);
+            return self.after_edit(1);
+        }
+        let mut buf = [0u8; 4];
+        let want = len.min(buf.len());
+        let n = self.editor.read_into(at, &mut buf[..want]).unwrap_or(0);
+        self.editor.delete_forward()?;
+        self.counts.after_delete(&self.editor, at, &buf[..n]);
+        self.after_edit(1)
+    }
+
+    pub fn undo(&mut self) -> Result<(), SessionError> {
+        self.check_editable()?;
+        // `NothingToUndo` is a *keymap* condition, not a document failure: pressing undo with
+        // nothing to undo should be swallowed, not reported. Same for redo.
+        //
+        // **Phase 11 item 4: undo and redo rescan rather than deltifying.** `Editor::undo` returns an
+        // `EditOutcome` with an offset and a length but not the bytes, and the bytes are what the seam
+        // arithmetic needs -- the run is either being put back or taken away, and which one is a
+        // question only the undo stack can answer. So this is the one edit path that pays `O(document)`.
+        //
+        // That is a deliberate trade, not an oversight: undo is not the keystroke the 0.50 ms budget is
+        // about, it happens perhaps once per ten keystrokes, and a rescan cannot be wrong. The
+        // alternative -- threading the bytes out of `UndoStack` -- would put an undo-format detail into
+        // the counting path, where a format change becomes a counting bug.
+        match self.editor.undo() {
+            Ok(outcome) => {
+                self.recount_counts();
+                if self.state.paged {
+                    self.lines
+                        .rebuild(&self.editor, holonomy_geometry::LineMetrics::default());
+                }
+                self.after_edit(0)?;
+                if outcome.kind == holonomy_text::ActionKind::Format {
+                    self.damage = self.chrome.full_damage();
+                }
+                Ok(())
+            }
+            Err(EditorError::NothingToUndo) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn redo(&mut self) -> Result<(), SessionError> {
+        self.check_editable()?;
+        match self.editor.redo() {
+            Ok(outcome) => {
+                self.recount_counts();
+                if self.state.paged {
+                    self.lines
+                        .rebuild(&self.editor, holonomy_geometry::LineMetrics::default());
+                }
+                self.after_edit(0)?;
+                if outcome.kind == holonomy_text::ActionKind::Format {
+                    self.damage = self.chrome.full_damage();
+                }
+                Ok(())
+            }
+            Err(EditorError::NothingToRedo) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Move the caret by whole codepoints.
+    fn move_caret(&mut self, delta: i64) -> Result<(), SessionError> {
+        let at = self.editor.caret() as i64;
+        let want = at + delta;
+        if !(0..=self.editor.text_len() as i64).contains(&want) {
+            // At an end. A movement that cannot happen is not a document failure.
+            return Ok(());
+        }
+        self.caret_to(want as usize)
+    }
+
+    /// Move the caret by lines, using the page's own row count to decide scrolling.
+    ///
+    /// ## CORRECTION, part 28 — this moved nothing
+    ///
+    /// It was four assignments to chrome state and no movement of `editor.caret()`:
+    ///
+    /// ```text
+    /// let line = (self.state.caret_line as i64 + delta).max(0) as u32;
+    /// self.state.scroll_line = scroll.min(line);
+    /// self.state.caret_line = line;
+    /// self.damage = self.chrome.full_damage();
+    /// ```
+    ///
+    /// **So `Up` and `Down` drew the caret on a line it did not occupy, and typing after either one
+    /// inserted at the old offset.** `tests/caret_line_moves.rs` is the reproduction.
+    ///
+    /// ## Why it went unnoticed
+    ///
+    /// **Because every gate that used Up or Down asserted on `state.caret_line`** — the field the bug
+    /// wrote and the document did not have. **The fixture and the defect were the same number**, which
+    /// is part 22's lesson restated: *"a fixture whose two quantities coincide cannot tell a correct
+    /// answer from a wrong one."*
+    ///
+    /// ## Why the column is not preserved
+    ///
+    /// **Preserving it needs the target line's length, which needs its bytes, and this path has no
+    /// source.** `apply` takes no `&mut dyn LeafSource` — 43 gate sites depend on that — so clamping a
+    /// column to a line that may not be resident would be a guess. **Down lands at the start of the
+    /// line, which is correct and is not what every editor does.** Real editors keep the column; that
+    /// is recorded as not done rather than done badly.
+    fn move_line(&mut self, delta: i64) -> Result<(), SessionError> {
+        self.move_by_line(delta, false)
+    }
+
+    /// `Up`/`Down`, or the shift variants. Part 28.
+    ///
+    /// **One function and a flag, where the keymap has six variants.** The flag is a parameter here
+    /// rather than a variant because there is exactly one caller of each and they are three lines
+    /// apart; `Command`'s own docs argue for variants at the *dispatch* boundary, where a caller has to
+    /// destructure them, and not for duplicating a body.
+    fn move_by_line(&mut self, delta: i64, extend: bool) -> Result<(), SessionError> {
+        let line = self.line_index(self.editor.caret() as usize);
+        // **From the document, not from `state.caret_line`.** The state is a view of this; reading the
+        // view to decide where to move the thing it is a view of is the inversion that let the old
+        // version drift. `saturating_sub(1)` because `total_lines` is a count and at least one line
+        // always exists, so `last` cannot underflow.
+        let last = self.state.total_lines.saturating_sub(1);
+        let want = (line as i64 + delta).clamp(0, i64::from(last)) as u32;
+        if want == line {
+            // **A movement that cannot happen still collapses a plain selection.** Down on the last
+            // line is a caret move like any other, and the model says caret moves collapse — leaving
+            // it would make it the one arrow key that keeps a selection.
+            if !extend {
+                let at = self.editor.caret() as usize;
+                self.caret_to(at)?;
+            }
+            return Ok(());
+        }
+        let at = self.lines.line_begin(want as usize) as u32;
+        if extend {
+            self.extend_to(at)?;
+        } else {
+            self.caret_to(at as usize)?;
+        }
+        Ok(())
+    }
+
+    /// **Extend the selection's far end by one character.** Part 28.
+    ///
+    /// **Separate from [`move_caret`](Self::move_caret) rather than a flag on it**, because the two
+    /// differ in what happens at a document end: a plain move stops, and an extend stops too, but a
+    /// plain move also *drops the selection* on the way — and `Editor::park` is what does that, so a
+    /// shared body would have to clear the selection it is about to extend.
+    fn extend_caret(&mut self, delta: i64) -> Result<(), SessionError> {
+        let at = self.editor.caret() as i64;
+        let want = at + delta;
+        if !(0..=self.editor.text_len() as i64).contains(&want) {
+            return Ok(());
+        }
+        self.extend_to(want as u32)
+    }
+
+    /// **Scroll the page so `line` is on it, if it is not already.** Part 28.
+    ///
+    /// **Extracted from `move_line`, and given to `caret_to` as well.** The old code had this
+    /// arithmetic in one place and only one caller reached it, so **Right past the bottom of the
+    /// window scrolled nothing** — the caret walked off the page and typing there scrolled only
+    /// because `after_edit` happens to scroll. **That is the same defect as the one above**: a caret
+    /// move that updates one thing and not the other.
+    ///
+    /// **`rows == 0` returns rather than subtracting**, because `rows - 1` would be the underflow the
+    /// project's `for_size` docs describe, and a window with no text rows is reachable by dragging.
+    fn scroll_line_into_view(&mut self, line: u32) {
+        let layout = self.chrome.layout;
+        let rows = layout.rows;
+        if rows == 0 && !self.state.paged {
+            return;
+        }
+        let first = self.state.scroll_line;
+        let last = first.saturating_add(rows);
+        let scroll = if self.state.paged {
+            let position = |from: u32| {
+                let extra = self
+                    .state
+                    .line_heights
+                    .extras
+                    .iter()
+                    .filter(|&&(row, _)| {
+                        let absolute = first.saturating_add(row);
+                        absolute >= from && absolute < line
+                    })
+                    .fold(0u32, |sum, &(_, height)| {
+                        sum.saturating_add(height.saturating_sub(self.state.line_heights.pitch))
+                    });
+                layout.paged_row_y(from, line) + i64::from(extra)
+            };
+            if line < first {
+                line
+            } else if position(first) + i64::from(layout.cell_h) > i64::from(layout.canvas.bottom())
+            {
+                // Find the smallest scroll that brings the caret into the canvas. The row-to-y
+                // mapping is monotonic even across page gaps, so this is logarithmic.
+                let (mut lo, mut hi) = (first, line);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if position(mid) + i64::from(layout.cell_h) <= i64::from(layout.canvas.bottom())
+                    {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
+                    }
+                }
+                lo
+            } else {
+                first
+            }
+        } else if line < first {
+            line
+        } else if line >= last {
+            line.saturating_sub(rows - 1)
+        } else {
+            first
+        };
+        self.state.scroll_line = scroll;
+        if self.state.paged && scroll != first {
+            // A caret move can change every visible row, not just the two caret cells.
+            let moved_view = self.chrome.layout.canvas.union(&self.chrome.layout.status);
+            self.damage = self.damage.union(&moved_view);
+        }
+    }
+
+    /// Change one formatting property without destroying the other properties in
+    /// a mixed selection. Snapshot the runs first because styling splits the map.
+    fn update_selection_style(
+        &mut self,
+        flag: Option<(u16, bool)>,
+        colour: Option<u32>,
+    ) -> Result<bool, SessionError> {
+        let Some(sel) = self.editor.selection() else {
+            return Ok(false);
+        };
+        let changed = self.editor.format_range(sel.start, sel.end, |span| {
+            let mut flags = span.style_flags;
+            if let Some((bit, enabled)) = flag {
+                if enabled {
+                    flags |= bit;
+                } else {
+                    flags &= !bit;
+                }
+            }
+            (flags, colour.unwrap_or(span.color_rgb))
+        })?;
+        if changed {
+            self.after_edit(0)?;
+        }
+        Ok(true)
+    }
+
+    /// **Toggle one inline flag: over the selection if there is one, armed at the caret if not.**
+    ///
+    /// # Why this is one function and not three arms
+    ///
+    /// **Because the three arms were three copies of one behaviour**, and the fourth copy is where the
+    /// bug lives: `Action::ToggleBold` and `Action::ToggleItalic` were written out separately, the
+    /// Underline button drew from part 19 onward, and *neither* of them could reach it — so pressing
+    /// Underline armed nothing, restyled nothing and counted as `pointer_inert`. Folding the three onto
+    /// one path is what makes `slot_for`'s three slots and this function's one implementation the same
+    /// set of three.
+    ///
+    /// # The two halves, and why `toggle` is the flag's *inverse* over the selection
+    ///
+    /// A selection is restyled according to what is at its **start**, which is the rule every word
+    /// processor uses: "select a bold word and press Bold" un-bolds it. A bare caret cannot be
+    /// restyled — there is no text — so the flag is armed for the next character instead, through
+    /// [`set_armed_style`](Self::set_armed_style), which is the one writer of both copies.
+    fn toggle_inline_style(
+        &mut self,
+        flag: u16,
+        tool: Option<widgets::Tool>,
+    ) -> Result<(), SessionError> {
+        self.check_editable()?;
+        let (bold, italic, underline, strikethrough) = self.armed_style();
+        if let Some(sel) = self.editor.selection() {
+            // **A selection is restyled according to what is at its start**, which is the rule every
+            // word processor uses: "select a bold word and press Bold" un-bolds it.
+            let on = self.editor.style_at(sel.start).style_flags & flag == 0;
+            self.update_selection_style(Some((flag, on)), None)?;
+            // **The armed flags follow the selection's new state**, so a Bold press with a selection
+            // and then a click at a bare caret types what the selection now is. Without this the
+            // button's highlight and the armed state disagreed the moment a selection was styled.
+            //
+            // **The four `if`s**, because every flag maps to its slot: a `STYLE_STRIKE` press with a
+            // selection restyles the text and changes no slot except strikethrough.
+            self.set_armed_style(
+                if flag == STYLE_BOLD { on } else { bold },
+                if flag == STYLE_ITALIC { on } else { italic },
+                if flag == STYLE_UNDERLINE {
+                    on
+                } else {
+                    underline
+                },
+                if flag == STYLE_STRIKE {
+                    on
+                } else {
+                    strikethrough
+                },
+            );
+            self.damage = self.chrome.full_damage();
+        } else {
+            // **The bit flipped in the model, and then both copies rewritten from it.** A bare caret
+            // has no text to restyle, so the flag is armed for the next character -- and doing the
+            // flip on `pending_style` rather than on a bool is what lets every flag arm its button.
+            // `STYLE_STRIKE` now has a toolbar button and a bool in `StyleFlags`, so it arms too.
+            //
+            // **The `set_armed_style` call is still the only writer of the chrome's copy**, and it is
+            // an identity here: it masks out the four bits it owns and puts back the same four,
+            // every other bit -- super, sub, header -- riding through the mask.
+            let f = self.pending_style.unwrap_or(0) ^ flag;
+            self.pending_style = Some(f);
+            self.set_armed_style(
+                f & STYLE_BOLD != 0,
+                f & STYLE_ITALIC != 0,
+                f & STYLE_UNDERLINE != 0,
+                f & STYLE_STRIKE != 0,
+            );
+            // **`None` for a flag with no button**, which is a no-op rather than a repaint: there is
+            // nothing on screen that draws "strike is armed", so there is nothing to invalidate.
+            self.invalidate_hit(tool.map(widgets::Hit::Tool));
+        }
+        self.stats.pointer_chrome += 1;
+        Ok(())
+    }
+
+    /// **How far above and below its line box this line's runs draw, in pixels.**
+    ///
+    /// # Why the emitter needs this and the painter cannot supply it
+    ///
+    /// A baseline shift moves *ink* out of the line box, and the box is what the emitter damages: one
+    /// `cell_h` per line, unioned into the frame's damage. `Painter::doc_text` grows its own cull box by
+    /// the shift, which is the right answer to "may I skip this run" — but it is not the answer to "which
+    /// rows must this line repaint", because **a row outside the line's rect is never asked about at all**.
+    /// The painter only ever sees the damage it is given.
+    ///
+    /// So the extent is computed here, from the same flags the runs were emitted from, and returns
+    /// `(up, down)` — one nonzero and the other zero on every line, since a run cannot be raised and
+    /// lowered at once and this takes the larger of the two if a corrupt payload says otherwise.
+    ///
+    /// **Both come from [`baseline_shift`](Self::baseline_shift)**, so there is no second answer to how
+    /// far a shift moves: the number that widens the damage is the number the painter offsets the glyphs
+    /// by.
+    fn line_shift(
+        &self,
+        page_runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
+        doc_at: u32,
+        len: u32,
+    ) -> (u32, u32) {
+        let mut up = 0u32;
+        let mut down = 0u32;
+        for (span, lo, hi) in page_runs {
+            // **Only the runs that touch this line.** `page_runs` is the whole page, and a superscript on
+            // line 3 must not widen line 1's damage — the cost is a taller repaint for every line of a
+            // document that has one, which on a scrolled page is the whole page.
+            if *hi <= doc_at || *lo >= doc_at + len {
+                continue;
+            }
+            let shift = self.baseline_shift(span.style_flags);
+            if shift > 0 {
+                up = up.max(u32::from(shift.unsigned_abs()));
+            } else if shift < 0 {
+                down = down.max(u32::from(shift.unsigned_abs()));
+            }
+        }
+        (up, down)
+    }
+
+    /// **Toggle superscript or subscript over the selection, or arm it at the caret.**
+    ///
+    /// # The two are mutually exclusive, and the bitset has to be made to say so
+    ///
+    /// `STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT` is a value the format can hold and a value nothing can
+    /// draw: a run cannot be both raised and lowered. So pressing one clears the other, which is what
+    /// pressing `Ctrl+.` on a subscripted word has to mean. **The toggle is decided from the
+    /// selection's start**, exactly as [`toggle_inline_style`](Self::toggle_inline_style) decides its
+    /// own, so "press it twice" is "on, then off" rather than "on, then on again".
+    fn toggle_decoration(&mut self, flag: u16) -> Result<(), SessionError> {
+        self.check_editable()?;
+        let other = if flag == STYLE_SUPERSCRIPT {
+            STYLE_SUBSCRIPT
+        } else {
+            STYLE_SUPERSCRIPT
+        };
+        match self.editor.selection() {
+            Some(sel) => {
+                let enabled = self.editor.style_at(sel.start).style_flags & flag == 0;
+                let changed = self.editor.format_range(sel.start, sel.end, |span| {
+                    let mut flags = span.style_flags & !other;
+                    if enabled {
+                        flags |= flag
+                    } else {
+                        flags &= !flag;
+                    }
+                    (flags, span.color_rgb)
+                })?;
+                if changed {
+                    self.after_edit(0)?;
+                    self.damage = self.chrome.full_damage();
+                }
+            }
+            None => {
+                // **Armed at the caret, and the opposite bit cleared.** `pending_style` is the model's
+                // own copy of "what the next character is", so a superscript armed after a subscript
+                // has to *replace* it rather than join it.
+                let f = (self.pending_style.unwrap_or(0) & !other) ^ flag;
+                self.pending_style = Some(f);
+                self.state.styles = holonomy_render::chrome::StyleFlags {
+                    bold: f & STYLE_BOLD != 0,
+                    italic: f & STYLE_ITALIC != 0,
+                    underline: f & STYLE_UNDERLINE != 0,
+                    strikethrough: f & STYLE_STRIKE != 0,
+                };
+            }
+        }
+        self.stats.pointer_chrome += 1;
+        Ok(())
+    }
+
+    /// **The byte range a paragraph-level command acts on: the selection, or the caret's line.**
+    ///
+    /// `SetStyle` and `ClearFormatting` both need it and it was written out inside `SetStyle`, which is
+    /// the one place a copy of a range calculation can be wrong without anybody noticing — the symptom
+    /// is a heading applied to the *previous* paragraph, which reads as an off-by-one in the editor.
+    fn paragraph_range(&self) -> (u32, u32) {
+        match self.editor.selection() {
+            // **`end - 1`, because a selection that ends at the *start* of a line did not select it.**
+            //
+            // Drag from the middle of paragraph 1 to the start of paragraph 2 and the selection's `end`
+            // is the first byte of paragraph 2. Asking `line_end_offset(end)` would answer with paragraph
+            // 2's last byte, so clearing the formatting would clear a paragraph the user did not touch
+            // -- and it would do it one line *below* the one they were looking at, which is the hardest
+            // kind of off-by-one to see in a diff. `end - 1` is the last byte they did select, which is
+            // paragraph 1's newline, and `line_end_offset` turns that into paragraph 1's end.
+            //
+            // **The subtraction cannot underflow, and a backwards selection cannot reach it.**
+            // `Editor::selection` answers `SelectionRange::between`, whose constructor both normalises
+            // (`start <= end` whichever way the drag went) and refuses a degenerate range, so this arm
+            // is only ever entered with `0 <= start < end`. **The guard is in the constructor rather
+            // than here on purpose**: every consumer of a selection — the highlight, the typed-over
+            // range, the styled range — would otherwise need the same swap, and this function is one of
+            // them. `end - 1` is therefore at least `start`, and at least 0.
+            //
+            // **`saturating_sub(1)` rather than `- 1`, which is defence against a hand-built range and
+            // not a second normalisation.** A range with `end == 0` cannot come out of
+            // `SelectionRange::between`; if one ever does, subtracting would panic in a debug build on
+            // the keystroke path, and the saturating form answers `line_end_offset(0)` — one line's
+            // formatting cleared in the wrong place, which is a visible bug rather than a crash.
+            Some(sel) => (
+                self.line_start(sel.start as usize) as u32,
+                self.line_end_offset(sel.end.saturating_sub(1) as usize) as u32,
+            ),
+            None => {
+                let caret = self.editor.caret() as usize;
+                (
+                    self.line_start(caret) as u32,
+                    self.line_end_offset(caret) as u32,
+                )
+            }
+        }
+    }
+
+    /// **Re-read everything about the caret that is derived from where it is.** Part 28.
+    ///
+    /// ## The tail of [`caret_to`](Self::caret_to), without the move
+    ///
+    /// A caret that has *moved* needs the state rebuilt. **A caret some other code has already
+    /// moved -- an edit, say -- needs exactly the same rebuild, and must not be moved again**,
+    /// because moving is what collapses a selection.
+    ///
+    /// **This exists because `after_edit` called `caret_to(self.editor.caret())`,** which was correct
+    /// for as long as moving the caret had no side effect beyond moving it. It now does. See
+    /// [`after_edit`](Self::after_edit) for the whole correction.
+    ///
+    /// **No scroll here, and the absence is the point.** `Session::new` calls this to make the chrome
+    /// agree with an editor whose caret is already at the end of the document, and a new session must
+    /// show the *top*. Every caller that moves the caret scrolls afterwards, explicitly, because
+    /// "where is the caret" and "where should the page be" are different questions and only the second
+    /// one has an exception.
+    ///
+    /// **`caret_to` is this function plus `editor.caret_to`, in that order** -- move, then rebuild --
+    /// and the two halves are the same in both callers, which is the point of taking them apart.
+    fn reconcile_caret(&mut self) -> Result<(), SessionError> {
+        let _ = self.refresh_caret_column(None);
+        // **The pen here as well as in `paint_with`, and that is the point of part 33.** The column
+        // is refreshed on every caret move so that the state a gate reads after `caret_to` is the
+        // state the frame would be drawn from -- part 22's argument. **The pen is a second field of
+        // exactly that kind, so it is refreshed in exactly the same places**; leaving it to the paint
+        // path alone made `Caret::locate` answer from a stale pen, which is the shape of part 22's
+        // defect wearing a new hat: two fields, one refreshed and one not.
+        let _ = self.refresh_caret_pen(None);
+        self.sync_selection();
+        self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        // **The status bar prints this line, so it is part of what moving the caret changed.** Part 39:
+        // without this the bar reads `Ln 1, Col 1` for the life of the document, which is what the live
+        // window showed after 122 typed characters.
+        self.invalidate_status_bar();
+        let cell = self.caret_cell();
+        if let Some(rect) = cell {
+            self.damage = self.damage.union(&rect);
+        }
+        Ok(())
+    }
+
+    /// **Copy the editor's selection into the state the chrome paints.** Part 28.
+    ///
+    /// ## Why a one-line sync and not a stored selection
+    ///
+    /// **Because `ChromeState.selection` is a *view* and `Editor` owns the fact**, and the two must not
+    /// be allowed to disagree. Part 22 is the precedent: `ChromeState::caret_line` was built once by
+    /// `Session::new` and then left alone for twelve phases, and the reason nothing noticed is the
+    /// kind of thing that hides bugs — both halves of the arithmetic it fed were zero.
+    ///
+    /// **This is called from `caret_to` and from `paint_with`, and those are the only two places the
+    /// caret moves or the frame is built.** Anything else that moved the caret and forgot this would
+    /// be a third site, and the way to make that impossible is to have no way to move the caret that
+    /// does not go through `Session::caret_to` — which is true today and is the property worth
+    /// preserving.
+    ///
+    /// ## Why it is `Option<SelectionRange>` and the editor's own value
+    ///
+    /// **Because the chrome cannot author a selection**, and re-deriving the range here from an anchor
+    /// and a focus would be authoring one. The editor's `SelectionRange` already normalises the
+    /// direction and refuses a degenerate range, so `state.selection` is right or `None` and there is
+    /// no third case to handle.
+    fn sync_selection(&mut self) {
+        self.state.selection = self.editor.selection();
+    }
+
+    /// **Read `offset..offset + out.len()` out of the document, faulting absent leaves in.** Part 42.
+    ///
+    /// ## Why this exists
+    ///
+    /// **[`text`](Self::text) is the resident-only reader and it cannot be widened.** `read_into` is
+    /// `&self` because the paint path calls it from `&self` contexts, and the whole design — argued
+    /// at length in `Editor::read_into_faulting`'s own docs — is that a `&self` reader must not pay
+    /// a page-locked 4 KiB load behind a `RefCell`. **So on a document larger than the resident
+    /// budget, `text()` answers `LeafAbsent` and a caller that needs the bytes has to ask for the
+    /// other method.**
+    ///
+    /// **It had no other method.** The capability existed on `Editor` and the session did not carry
+    /// it, so a caller holding a `Session` — which is every driver and every gate — could not read a
+    /// sparse document at all without reaching through `editor_mut`, which returns `&mut Editor` and
+    /// would let a caller bypass the session's whole invariant.
+    ///
+    /// ## A pass-through, and that is the point
+    ///
+    /// **One line, no logic, and the session's `&mut self` is what makes it possible** where
+    /// `Editor::read_into_faulting` needed `&mut Editor`. Every faulting read elsewhere in this file
+    /// goes through this, so there is one capability rather than several private ones.
+    pub fn read_into_faulting(
+        &mut self,
+        source: &mut dyn holonomy_text::LeafSource,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, SessionError> {
+        Ok(self.editor.read_into_faulting(source, offset, out)?)
+    }
+
+    /// Put the caret at `at`, clamped back to a codepoint boundary.
+    ///
+    /// **Public as of Phase 11**, for the same reason `tick` and `apply` are: a driver -- or a gate --
+    /// that positions the caret needs to move it without inventing an edit to move it with. The latency
+    /// gate in `tests/session_latency.rs` places the caret at three offsets and measures the keystroke
+    /// that follows, and doing that through `Command::Insert` would have measured an insertion at a
+    /// guessed offset rather than at the one being tested.
+    pub fn caret_to(&mut self, at: usize) -> Result<(), SessionError> {
+        self.caret_to_with(at, None)
+    }
+
+    /// Put the caret at `at`, **faulting the leaf it lands in when a source is available.** Part 42.
+    ///
+    /// ## Why this exists, and why it is not just part of the mutator fix
+    ///
+    /// **Part 42's first version made typing work past the resident window and left this broken, and
+    /// the gate caught it on the first run** with `LeafAbsent { leaf: 79 }` from the *caret
+    /// placement*, before the keystroke that was supposed to be under test ever ran.
+    ///
+    /// **It is the same defect one step earlier and it is the step a user takes first.** You cannot
+    /// type where the caret cannot go, and every route to a distant offset goes through here:
+    /// `Session::click_page` resolves a byte and then places the caret, `extend_to` anchors a
+    /// selection, the arrow keys walk there one key at a time. **Fixing only the mutator means a
+    /// user can reach the end of a document with the caret but cannot type there** — which is a
+    /// stranger failure than not being able to get there at all.
+    ///
+    /// ## `caret_to` is unchanged and passes `None`
+    ///
+    /// **Forty-three gate sites call it and the reason it is `pub` is documented above.** The same
+    /// argument as `apply`: a caller with no source cannot fault, and a refusal is the honest answer
+    /// rather than a clamp. `caret_to` keeps its signature and its behaviour; this is the variant.
+    pub fn caret_to_faulting(
+        &mut self,
+        at: usize,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        self.caret_to_with(at, Some(source))
+    }
+
+    fn caret_to_with(
+        &mut self,
+        at: usize,
+        source: Option<&mut dyn holonomy_text::LeafSource>,
+    ) -> Result<(), SessionError> {
+        // **Fault before the move, not after.** `Editor::caret_to` asks the rope to `set_cursor`,
+        // which locates a leaf and refuses if it is absent; faulting first is what makes the move
+        // legal. **Faulting afterwards would be too late to matter** — the move is the thing that
+        // failed.
+        if let Some(src) = source {
+            self.editor.fault_at(src, at)?;
+        }
+        self.caret_to_body(at)
+    }
+
+    fn caret_to_body(&mut self, at: usize) -> Result<(), SessionError> {
+        // The caret's old cell, before anything moves. Read from the *state* rather than by locating
+        // it, because the state is what `Caret::locate` will use and re-deriving it after the move
+        // would give the new position, which is the one thing that is not yet stale.
+        let old_cell = self.caret_cell();
+        self.editor.caret_to(at)?;
+        // The caret's *column* within its line, for the status bar and for `Caret::locate`'s cell.
+        //
+        // **This is a scalar count and not a byte offset, as of part 22**, and the call carries no
+        // source because the keystroke path cannot take one: `Session::apply` is public *so that* a
+        // driver with its own event source can drive it, and a `&mut dyn LeafSource` parameter would
+        // undo that — 43 gate sites and the documented reason for the method's visibility.
+        //
+        // **`None`, so this is a resident read.** On a document that is entirely in memory — every
+        // gate, and every document shorter than the resident budget — that is a memcpy and the count
+        // is exact. On a container-backed document whose caret line is not resident it cannot be, and
+        // `refresh_caret_column` falls back to the byte count. `paint_with` recomputes it with a
+        // faulting source before the chrome's tree, so the value the *renderer* uses is exact
+        // whenever the line is painted — which is whenever the caret can be drawn at all. See
+        // `refresh_caret_column` for why there is one function and two capabilities rather than two
+        // implementations.
+        let _ = self.refresh_caret_column(None);
+        // **The pen here as well as in `paint_with`, and that is the point of part 33.** The column
+        // is refreshed on every caret move so that the state a gate reads after `caret_to` is the
+        // state the frame would be drawn from -- part 22's argument. **The pen is a second field of
+        // exactly that kind, so it is refreshed in exactly the same places**; leaving it to the paint
+        // path alone made `Caret::locate` answer from a stale pen, which is the shape of part 22's
+        // defect wearing a new hat: two fields, one refreshed and one not.
+        let _ = self.refresh_caret_pen(None);
+        self.sync_selection();
+        self.state.caret_line = self.line_index(self.editor.caret() as usize);
+        // **And the page follows the caret.** Part 28: `scroll_line_into_view` used to live inside
+        // `move_line`, whose only other effect was to *not* move the caret -- so Right past the bottom
+        // of the window scrolled nothing, and only typing scrolled, because `after_edit` happens to.
+        self.scroll_line_into_view(self.state.caret_line);
+        // **A caret move is a repaint, and this used not to be one.**
+        //
+        // `caret_to` set no damage, and `tick` only paints when damage is non-empty, so pressing an
+        // arrow key moved the caret in the model and left the pixels alone. The old cell stayed drawn
+        // and the new one did not appear until the *blink* happened to toggle, at
+        // `Blink::DEFAULT_PERIOD`. Every scripted gate missed it because the gates assert on
+        // `Caret::locate`'s arithmetic and never on a frame after a bare movement.
+        //
+        // Phase 9B found it in a live window, and in the worst possible way to find it: this is the
+        // repaint that switches a formula from compiled to raw. Leaving a formula with Right changed
+        // every number in `SessionStats` except the ones the frame was drawn from, so the window kept
+        // showing the raw source while the log said the caret was outside.
+        //
+        // Both cells are damaged, old and new: moving within a line leaves a trail otherwise, which is
+        // the same reasoning as `after_edit`'s comment about the old caret's line.
+        let new_cell = self.caret_cell();
+        let moved = union_opt(old_cell, new_cell);
+        if let Some(rect) = moved {
+            self.damage = self.damage.union(&rect);
+        }
+        Ok(())
+    }
+
+    /// The byte offset of the start of the line containing `at`. **O(log n).**
+    ///
+    /// **Phase 11.** Three implementations have stood here, and the history is the reason for the
+    /// comment. First `self.editor.text()` — which allocates a `Vec` the size of the whole document and
+    /// copies it byte-for-byte, so a function whose comment claimed "O(line length)" was in fact
+    /// `O(document)` and allocating, twice per keystroke via [`Session::caret_to`]. Then a chunked
+    /// backward scan through `read_into`, which removed the allocation and left the scan. Now two
+    /// Fenwick trees, which remove the scan.
+    ///
+    /// `Editor` deliberately does not own line geometry, so the session holds it. See the layering note
+    /// in `holonomy-input`: a `Command::Up` means "move up" and nothing about how many bytes that is.
+    fn line_start(&self, at: usize) -> usize {
+        self.lines.line_start(at)
+    }
+
+    /// The 0-based line index containing `at`. **O(log n).**
+    ///
+    /// Same three implementations as [`Session::line_start`], for the same reasons. The scan this
+    /// replaced cost `O(bytes before the caret)` — at 3.5 MiB, ~900 `read_into` calls, which is
+    /// microseconds and therefore most of the 0.50 ms keystroke budget spent on answering a question a
+    /// tree answers in sixteen comparisons.
+    fn line_index(&self, at: usize) -> u32 {
+        self.lines.line_of(at)
+    }
+
+    /// **Where `End` belongs: after the last character of the line containing `at`.**
+    ///
+    /// # The newline is why this is not `line_end`
+    ///
+    /// [`DocLines::line_end`] **includes the terminator** — its own docs say so deliberately, because
+    /// geometry says where a line is and the text says what is in it. So `line_end` of `"abc\n"` is 4,
+    /// and a caret at 4 is on the *next* line. `End` must therefore subtract the terminator, but only
+    /// when there is one: the last line of a document has no `\n`, and `line_end - 1` there would put
+    /// the caret one character short — **which is the kind of bug that is invisible on every document
+    /// except the one with no trailing newline**, i.e. a document being typed.
+    ///
+    /// **One byte is read to find out.** The geometry stores lengths, not terminators, and asking it
+    /// "does this line end in a newline" is the question its docs say it has no business answering.
+    /// A failed read falls back to `line_end` — the no-terminator answer — which is the conservative
+    /// direction: a caret one byte further right is recoverable, and a caret on the wrong line is not.
+    fn line_end_offset(&self, at: usize) -> usize {
+        let line = self.line_index(at) as usize;
+        let end = self.lines.line_end(line);
+        if end == 0 || end > self.editor.text_len() {
+            return end;
+        }
+        let mut last = [0u8; 1];
+        match self.editor.read_into(end - 1, &mut last) {
+            Ok(1) if last[0] == b'\n' => end - 1,
+            // Not a newline, or the byte is not resident: no terminator, so the line ends at `end`.
+            _ => end,
+        }
+    }
+
+    /// **`PageUp` / `PageDown`: move the caret and the scroll by one screenful.**
+    ///
+    /// # A screenful, and why it is `rows - 1`
+    ///
+    /// Moving by exactly `rows` would put the line the caret started on at the row just off the top,
+    /// so consecutive presses would skip one line each time — **the classic off-by-one that makes
+    /// PageDown feel like it is losing lines.** `rows - 1` leaves the first row as shared context, so
+    /// pressing `PageDown` six times on a 31-row page shows every line and no gaps.
+    ///
+    /// **At least one row, whatever the panel is.** A window one row tall would otherwise divide by
+    /// zero, and `.max(1)` makes PageDown on it a no-op rather than a panic — which is the honest
+    /// answer for a panel with no room to page through.
+    ///
+    /// **The caret moves too.** Scrolling without moving the caret leaves the two disagreeing, and
+    /// `scroll_line_into_view` — which every caret move goes through — would immediately undo the
+    /// scroll on the next keystroke. A `PageDown` that scrolls back on the next character is not a
+    /// page-down.
+    fn page_by_lines(&mut self, direction: i64) -> Result<(), SessionError> {
+        let rows = self.chrome.layout.rows.max(1) as i64;
+        let step = if self.state.paged {
+            i64::from(
+                (self.chrome.layout.canvas.height / self.chrome.layout.cell_h.max(1))
+                    .saturating_sub(2)
+                    .max(1),
+            )
+        } else {
+            (rows - 1).max(1)
+        };
+        let line = self.line_index(self.editor.caret() as usize);
+        let last = self.state.total_lines.saturating_sub(1);
+        let want = (line as i64 + direction * step).clamp(0, i64::from(last)) as u32;
+        let at = self.lines.line_begin(want as usize) as u32;
+        self.caret_to(at as usize)?;
+        self.scroll_line_into_view(want);
+        Ok(())
+    }
+
+    /// Record an edit's consequences: counts, status bar, and the damaged line.
+    ///
+    /// **The counts are *not* refreshed here.** They are folded forward by the caller --
+    /// `Session::insert`, `backspace`, `delete_forward` and `outdent` each call `TextCounts` with the
+    /// bytes they moved, and `undo`/`redo` rescan. This function therefore does the two things that are
+    /// position-independent: move the caret, and reconcile the line geometry.
+    ///
+    /// ## CORRECTION, part 28 -- `caret_to` here was a refresh written as a move
+    ///
+    /// It read:
+    ///
+    /// ```text
+    /// self.caret_to(self.editor.caret() as usize)?;
+    /// ```
+    ///
+    /// **Which is a caret move to where the caret already is**, and that is a refresh wearing a
+    /// movement's clothes. The moment [`Editor::park`] made every real caret move collapse the
+    /// selection, **every edit collapsed it too** -- including the ones that had no business touching
+    /// it. `style_selection` bolded the selected range and then lost the selection, so a second Bold
+    /// press could not un-bold: it armed bold for the next keystroke instead.
+    ///
+    /// **The caret is already where it should be when this runs** -- `insert`, `backspace` and
+    /// `delete_selection` have all parked it. What is wanted is the *tail* of `caret_to`: re-read the
+    /// column, re-read the line, scroll, damage. That is [`reconcile_caret`](Self::reconcile_caret),
+    /// and saying so is cheaper than a flag on `caret_to` that exactly one caller would pass.
+    fn after_edit(&mut self, inserted: u32) -> Result<(), SessionError> {
+        self.stats.edits += 1;
+        if self.managed_documents {
+            self.refresh_navigation();
+        }
+        // **The caret's line before this edit, captured before `reconcile_caret` overwrites it.**
+        // `state.caret_line` is a *view* of where the caret is, and it is kept current by
+        // `reconcile_caret` — which every caret move and every edit goes through — so at the top of
+        // this function it is exactly where the caret was when the edit began. That is the second
+        // half of the damage below, and it is only recoverable here, because every caller has
+        // already mutated the document by the time it gets here and the line number is gone.
+        let old_line = self.state.caret_line;
+        // **The document now differs from what is on disk**, and that is the only thing this flag means.
+        //
+        // `ChromeState::dirty` has existed since Phase 8 and had **no writer anywhere in the workspace**
+        // — the status bar's unsaved marker was drawn from a field nothing ever set, so it showed
+        // "saved" for the life of every session including one mid-edit. This is that writer.
+        //
+        // Set on *every* edit including undo and redo, because undoing back to the saved state should
+        // clear the marker rather than leave it lit; the flag is cleared by a successful commit, not
+        // recomputed, which is the honest direction to be wrong in.
+        if !self.state.dirty && self.state.ribbon {
+            self.invalidate(self.chrome.layout.title);
+        }
+        self.state.dirty = true;
+        // **The line geometry must agree with the document before anything reads it, and the caller
+        // has already changed the document.** `line_index` used to count newlines, so it was correct
+        // whatever the geometry said; now it is a tree lookup, and a tree that a previous edit left
+        // stale answers with the *previous* document's line numbers.
+        //
+        // **This used to sit *after* `reconcile_caret`, which is the bug rather than an
+        // optimisation.** The comment above it said the geometry must agree before anything reads it
+        // and that `caret_to` had "already used it above" — the two halves of that sentence were
+        // true and the order it implied was inverted. `reconcile_caret` is where `caret_line` is
+        // *set* (`self.state.caret_line = self.line_index(...)`), so the very function that read the
+        // tree was the one allowed to run against a stale one. Measured: in `"alpha bravo ... golf"`
+        // with the caret at 44 after typing, the fresh tree says line 0 (offset 44 is the newline's
+        // own slot) and the stale one said line 1. So the status bar read `Ln 2` while the caret was
+        // on line 1, `caret_cell` placed the caret a row too low, and `line_box` damaged the wrong
+        // row — three symptoms of one ordering mistake, all of them "off by one line, one edit late".
+        //
+        // Nothing here reads the tree before this point, so moving it to the top of the function
+        // changes no caller: `sync_lines` needs only `counts.lines()` (the caller folded it before
+        // calling) and `editor.caret()` (the edit has parked it).
+        self.sync_lines();
+        self.state.total_lines = self.lines.len() as u32;
+        self.reconcile_caret()?;
+        // **Scroll after reconciling, not inside it.** `Session::new` also reconciles and must not
+        // scroll; an edit moves the caret like a keystroke does and must. See `reconcile_caret`.
+        self.scroll_line_into_view(self.state.caret_line);
+        // **And the section manifest**, for the same reason and at the same point: `DocLines` answers line
+        // questions and `Manifest` answers *"does this document contain a formula, table or image?"*,
+        // which is the question four emitters ask before deciding whether to read the whole document.
+        // Synced here rather than lazily because a manifest that is stale about `span_total` would make
+        // `publish_line_heights` skip a formula that exists, and the symptom would be a formula that
+        // silently stops rendering.
+        //
+        // **The source comes along, because the manifest has to read the document.**
+        //
+        // The manifest's re-measure reads three sections of the document, and the resident-only
+        // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for any
+        // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
+        // the read failed, the section kept its stale weight, and the manifest froze: the formula
+        // was never drawn and the lines below it were never displaced.
+        //
+        // **But the source is not used *here*.** A section is sixty-four kibibytes -- sixteen
+        // leaves -- and faulting them on the keystroke path would be a page-locked 4 KiB load per
+        // leaf per character, which does not fit in the 0.50 ms keystroke budget. So the keystroke
+        // path reads what is resident and marks the manifest stale if a section is not; **the paint
+        // path refreshes it**, where a fetch is already the price.
+        self.sync_manifest(&mut None);
+        // And the status bar's totals, from the deltas the caller folded. O(1): this is a three-field
+        // copy out of `TextCounts`, not a recount. See `publish_counts` for why the two maintained
+        // quantities are published at their own points rather than together.
+        self.publish_counts();
+        // FR-3.4: an edit invalidates one line's box. The damaged region is the caret's line, and
+        // the *old* caret's line if the edit moved it -- both, or a line that got longer would keep
+        // a tail of stale pixels.
+        //
+        // **Both, and the second one used to be missing.** The comment above described the invariant
+        // and the code beneath it damaged `self.state.caret_line` alone -- the line the caret ended up
+        // on, which after `reconcile_caret` is the *new* one. So any edit that moves the caret across a
+        // line boundary repainted only where the caret landed and left the line it left behind
+        // untouched. Press Enter at the end of a long line and that line's tail stays on screen for as
+        // long as nothing else dirties it; Backspace at the start of a line joins it to the previous one
+        // and the previous one's box keeps the pixels that used to be the start of the deleted line.
+        // Nothing else damages these boxes -- `reconcile_caret` unions only the *new* caret cell, which
+        // is inside the new line -- so this was not covered elsewhere either.
+        //
+        // `old_line` can be past the end of the document after an edit that removed lines (Backspace
+        // joining two, or an undo that undid a newline), and `line_box` answers `None` for a line that
+        // is not on screen. Both cases fall back to a full repaint, which is the correct direction: an
+        // unnecessary repaint costs a frame, and a missing one leaves visible garbage.
+        let line = self.state.caret_line;
+        let mut damage = self
+            .line_box(line)
+            .unwrap_or_else(|| self.chrome.full_damage());
+        if old_line != line {
+            damage = damage.union(
+                &self
+                    .line_box(old_line)
+                    .unwrap_or_else(|| self.chrome.full_damage()),
+            );
+        }
+        // **Assigned, not unioned into `self.damage`.** `reconcile_caret` above unions the caret cell
+        // into the pending damage, and that rect is inside the new line's box, so it is already covered
+        // — but the assignment is now load-bearing in the other direction too: `self.damage` may hold
+        // geometry from *before* this edit, and a line that moved needs its old box repainted regardless
+        // of where the caret is. Anything else that damaged the frame before `after_edit` would be
+        // dropped, so the union above is what has to stand on its own.
+        self.damage = if self.state.paged {
+            self.chrome.layout.canvas.union(&self.chrome.layout.status)
+        } else {
+            damage
+        };
+        let _ = inserted;
+        Ok(())
+    }
+
+    /// The text row box for line `line`, if it is on screen.
+    fn line_box(&self, line: u32) -> Option<DamageRect> {
+        let m = &self.chrome.metrics;
+        let text = self.chrome.layout.text;
+        let row = line.checked_sub(self.state.scroll_line)?;
+        if !self.state.paged && row >= self.chrome.layout.rows {
+            return None;
+        }
+        let y = if self.state.paged {
+            self.chrome.layout.row_y(&self.state, line)?
+        } else {
+            text.y + row * m.cell_h
+        };
+        Some(DamageRect::new(text.x, y, text.width, m.cell_h))
+    }
+
+    /// Bring the line geometry back into agreement with the document. Phase 11.
+    ///
+    /// Delegates to [`DocLines::sync`], which decides between a one-point update and a rebuild by
+    /// comparing the document's newline count with the geometry's line count. **It is called from
+    /// `after_edit` only** — every mutation in the session goes through there, including undo, redo,
+    /// table rows and formulas, which is why the sync is driven by a comparison rather than by being
+    /// told what each caller did.
+    ///
+    /// One thing this deliberately does *not* do: recompute the heights tree. `LineGeometry`'s heights
+    /// are uniform per line today because a line's height is `cell_h` for ordinary text, and the
+    /// variable-height blocks (tables, formulas, images) are handled by `LineHeights::from` on the
+    /// paint path. Wiring real per-line heights is Phase 12's, with `Painter::text`.
+    ///
+    /// **Public as of Phase 11**, for the reason `tick` and `apply` are: the latency diagnostic in
+    /// `tests/session_latency.rs` times this step on its own, and a diagnostic that cannot name the
+    /// thing it is measuring has to be deleted rather than maintained.
+    pub fn sync_lines(&mut self) {
+        // **The line count comes from `TextCounts`, not from a scan.** This function used to read the
+        // whole document to count newlines, which put a 3.1 MiB read back on the keystroke path inside
+        // the one function whose purpose is to remove `O(document)` work -- measured at 3,906 µs.
+        // `TextCounts` already maintains the newline count as a delta, so it is asked instead.
+        let expected = self.counts.lines() as usize;
+        let caret = self.editor.caret() as usize;
+        let metrics = holonomy_geometry::LineMetrics::default();
+        match self.lines.sync(&self.editor, expected, caret, metrics) {
+            Sync::OneLine => self.stats.line_updates += 1,
+            Sync::Rebuilt => self.stats.line_rebuilds += 1,
+            Sync::Unchanged => {}
+        }
+    }
+
+    /// The current word and line totals, from a full rescan. Phase 11 item 4.
+    ///
+    /// The repair path, and the one place `after_edit` no longer calls. See
+    /// [`Session::recount_words_and_lines`] for why it stays.
+    pub fn recount_counts(&mut self) {
+        self.recount_words_and_lines();
+    }
+
+    /// Bring the section manifest back into agreement with the document. Phase 13.
+    ///
+    /// # Three sections per keystroke, and where the 6 MiB went
+    ///
+    /// [`Manifest::sync`] takes the [`Editor`] rather than the document's bytes **so that it can read three
+    /// sections instead of the whole document**. That is the whole reason it is not `fn sync(&[u8])`: a
+    /// slice-based version is correct and costs 6 MiB per keystroke, which is precisely the number Phase 11
+    /// spent a phase removing. Three sections is 196 KiB — a 32x reduction — and `read_into` allocates
+    /// nothing, so there is no `Vec` growth either.
+    ///
+    /// **The rebuild branch is the only whole-document read on the keystroke path**, and it happens when a
+    /// line appears or vanishes, because fixed-size sections shift. Same trade as `DocLines::sync`, in a
+    /// second currency, and one keystroke in forty.
+    pub fn sync_manifest(&mut self, source: &mut Option<&mut dyn holonomy_text::LeafSource>) {
+        // **No cast: `Editor::caret` already answers a `u32`.**
+        let caret = self.editor.caret();
+        let mut scratch = std::mem::take(&mut self.manifest_scratch);
+        // **The editor is borrowed mutably, because the manifest may have to fault.**
+        //
+        // The manifest's re-measure reads three sections of the document, and the resident-only
+        // reader cannot fault: on a container-backed document it fails with `LeafAbsent` for every
+        // leaf the window does not hold. **A save evicts every leaf**, so after the first Ctrl+S
+        // the read failed, the section kept its stale weight, and the manifest froze — the formula
+        // was never drawn and the lines below it were never displaced.
+        //
+        // **The source is the caller's choice, and the keystroke path says no.** A section is 64 KiB
+        // — sixteen leaves — and a fetch per leaf per character does not fit in a 0.50 ms
+        // keystroke. So the keystroke path reads what is resident and, if a section is not
+        // resident, marks the manifest stale; the paint path refreshes it, where a fetch is
+        // already the price.
+        let out = self
+            .manifest
+            .sync(&mut self.editor, caret, source, &mut scratch);
+        self.manifest_scratch = scratch;
+        match out {
+            crate::manifest::Sync::OneSection => self.stats.section_updates += 1,
+            crate::manifest::Sync::Rebuilt => self.stats.section_rebuilds += 1,
+            crate::manifest::Sync::Unchanged => {}
+        }
+    }
+
+    /// Copy the maintained totals into the state the status bar draws from.
+    ///
+    /// **O(1)**, and the reason the status bar keeps working while the recount stopped running on the
+    /// keystroke path. `ChromeState::words` and `total_lines` are what `Chrome::tree` reads; the
+    /// maintained `TextCounts` is what is correct. Publishing is the one-way bridge between them, and it
+    /// is a three-field copy rather than a recount.
+    ///
+    /// Kept separate from `sync_lines` so the two *independent* maintained quantities are published at
+    /// their own points: if either is wrong the other does not mask it.
+    fn publish_counts(&mut self) {
+        self.state.bytes = self.editor.text_len() as u32;
+        self.state.words = self.counts.words;
+        self.state.total_lines = self.lines.len() as u32;
+        // **Document outline: rebuild after every edit so the left slider stays current.**
+        // Scan every line's first byte for header styling; heading paragraphs carry the flag on
+        // every byte, so checking the line start is sufficient. O(lines) per edit, which is far
+        // cheaper than the O(document) word count this already does.
+        self.state.outline.clear();
+        let mut scratch = Vec::new();
+        for line_idx in 0..self.lines.len() {
+            let begin = self.lines.line_begin(line_idx);
+            let end = self.lines.line_end(line_idx);
+            if begin >= end {
+                continue;
+            }
+            let span = self.editor.style_at(begin as u32);
+            let is_header = span.style_flags & STYLE_HEADER != 0;
+            // Heading 2 carries STYLE_BOLD with the heading blue but no STYLE_HEADER flag.
+            let is_heading2 = span.style_flags & STYLE_BOLD != 0 && span.color_rgb == 0x001A_5C75;
+            if !is_header && !is_heading2 {
+                continue;
+            }
+            let line_len = end.saturating_sub(begin);
+            // Strip a trailing newline.
+            let text_len = if line_len > 0 && self.editor.text_len() > begin {
+                let last = begin + line_len - 1;
+                if last < self.editor.text_len() as usize {
+                    let mut byte = [0u8; 1];
+                    if self.editor.read_into(last, &mut byte).is_ok() && byte[0] == b'\n' {
+                        line_len - 1
+                    } else {
+                        line_len
+                    }
+                } else {
+                    line_len
+                }
+            } else {
+                line_len
+            };
+            if text_len == 0 {
+                continue;
+            }
+            scratch.resize(text_len, 0);
+            if self.editor.read_into(begin, &mut scratch).is_err() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&scratch).trim_end().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let level = if is_heading2 {
+                2u8
+            } else if span.style_flags & STYLE_ITALIC != 0 {
+                // Title (STYLE_HEADER | STYLE_BOLD, no colour) vs Subtitle (STYLE_HEADER | STYLE_ITALIC)
+                // Both are header-level; Subtitle is deeper.
+                2u8
+            } else {
+                1u8
+            };
+            self.state.outline.push((text, line_idx as u32, level));
+        }
+        // **The outline changed, so the sidebar needs a repaint.** The sidebar is painted into
+        // root.before in chrome::tree, and without this damage its new heading entries would not
+        // appear until some other edit damaged that region.
+        self.invalidate(self.chrome.layout.sidebar);
+        // **Part 39: the numbers these three fields hold are drawn in the status bar**, so publishing
+        // them is half of changing what it shows -- and the other half is asking for the repaint. A
+        // word count that is correct in the state and stale on the screen is the defect this line fixes.
+        self.invalidate_status_bar();
+    }
+
+    /// Recount the words and bytes the status bar shows.
+    ///
+    /// **Phase 11 item 4, and this is the method item 4 exists to remove from the keystroke path.** It is
+    /// `O(document)`: a byte at a time over the whole text. Measured at 12.9 ms of a 3.1 MiB document's
+    /// keystroke, which is 26x the entire 0.50 ms budget spent on numbers that only appear in a status
+    /// bar.
+    ///
+    /// Kept as the **repair path**, not the update path: [`Session::counts`] maintains the totals as
+    /// deltas and calls this only to rebuild from scratch -- at construction, and from `undo`/`redo` and
+    /// the editor-level inserts (`insert_table`, `insert_image`, `append_table_row`) that do not hand back
+    /// the bytes they wrote. It is also what `counts.rs`'s own tests compare against, which is what makes
+    /// it worth keeping at all.
+    pub fn recount_words_and_lines(&mut self) {
+        self.counts = TextCounts::scan(&self.editor);
+        self.publish_counts();
+    }
+
+    // ---------------------------------------------------------------- paint
+
+    /// Repaint `damage` and present, **with no byte source** -- a session over an in-memory editor.
+    ///
+    /// **Every gate in this workspace uses this**, because a resident document's `read_into` always
+    /// succeeds and there is nothing to fault. The product path uses [`paint_with`](Self::paint_with).
+    /// The two are the same function: this one passes a [`NoSource`](crate::store::NoSource), which
+    /// refuses, which is a no-op on a document whose bytes are already held.
+    pub fn paint(&mut self, damage: Option<DamageRect>) -> Result<(), SessionError> {
+        self.paint_with(damage, &mut crate::store::NoSource)
+    }
+
+    /// Repaint `damage` and present, fetching bytes from `source` when a leaf is not resident.
+    ///
+    /// # This is part 16's whole change, and it is one argument
+    ///
+    /// The emitters used to read through `&self` and `break` on an absent leaf: `page_used` stopped
+    /// growing, `PageText::document` answered `None` past that point, and each answer was counted in
+    /// `runs_missing`. **A page of correct text with a blank tail past the resident window**, which is
+    /// what a container-backed document showed on every page but the first.
+    ///
+    /// `&mut dyn LeafSource` is a parameter rather than a field because a `SectionStore` borrows the
+    /// container and a store owned by the session would be a self-referential struct. **The product
+    /// builds one at the call site** (`main.rs`) and holds the container beside the session -- two
+    /// disjoint fields, so the borrow is legal and no lifetime surgery is needed.
+    ///
+    /// **Faulting a paint is correct and not a side effect**: the rope's record translates a window's
+    /// saved bytes into current ones, and *fetching* a leaf changes nothing about the document. See
+    /// `Rope::fault_leaf`.
+    pub fn paint_with(
+        &mut self,
+        damage: Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) -> Result<(), SessionError> {
+        // The caret goes *under* the page's text in paint order, so the caret's rect is erased by
+        // repainting the page and then redrawn -- which is why the damage includes it whenever it
+        // moves.
+        // The line-height model is rebuilt from the tables *before* the chrome's tree, because the
+        // chrome's tree and `Caret::locate` both read it: a table that pushed the lines below it down
+        // but was published afterwards would move the text and leave the caret behind.
+        if self.home.is_none() {
+            self.publish_line_heights(source);
+            // **The caret's column is recomputed here, with a faulting source, immediately before the
+            // chrome's tree — and that position in this function is the whole argument for it.**
+            //
+            // `Caret::locate` runs inside `chrome.tree` and reads `state.caret_column` to place the
+            // caret's cell, so **whatever this call leaves is what gets drawn.** The `None` read in
+            // `caret_to` is best-effort because the keystroke path cannot take a source; this one is not,
+            // and it runs on the frame that draws, so a caret on a line that was not resident when it
+            // moved is still drawn under the right glyph.
+            //
+            // **A read error here does not fail the paint.** `None` leaves the previous value, which is
+            // the byte count — a status bar number, not a reason to lose a frame over.
+            let _ = self.refresh_caret_column(Some(&mut *source));
+            // **The pen, in the same place and immediately after, because `chrome.tree` below reads it.**
+            //
+            // **`Caret::locate` runs inside `chrome.tree`**, so whatever this leaves is what gets drawn —
+            // the same argument `refresh_caret_column` is called there for, and the reason neither is
+            // hoisted out of this function. `None` leaves the previous value, and `Caret::locate` falls
+            // back to the grid, so a failed read costs a caret 10 px out rather than a frame.
+            let _ = self.refresh_caret_pen(Some(&mut *source));
+            // **The manifest, refreshed if the keystroke path could not measure it.**
+            //
+            // The manifest answers *"does this document contain a formula, table or image?"*, and four
+            // emitters ask it before deciding whether to read the whole document. **The keystroke path
+            // does not fault** -- a section is sixteen leaves and a fetch per leaf per character does
+            // not fit in a 0.50 ms keystroke -- so after a save (which evicts every leaf) it could not
+            // re-measure, and the manifest said nothing about it.
+            //
+            // **The paint path is where the refresh belongs**: it has a source, and a frame that draws
+            // a formula reads the whole document anyway, so one more section read is noise there.
+            // Without it, **the formula was never drawn again after the first save.**
+            if self.manifest.is_stale() {
+                self.sync_manifest(&mut Some(&mut *source));
+            }
+            self.sync_selection();
+        }
+        // **Smart Compose: sync the pending prediction to the chrome state** so the tree emitter
+        // can paint it inline after the caret. Done on every paint so a pending compose survives
+        // across frames until accepted or dismissed.
+        self.state.pending_compose = self.pending_compose.clone();
+        let mut tree = match &self.home {
+            Some(home) => holonomy_render::home::tree(&self.chrome.layout, home),
+            None => self.chrome.tree(&self.state),
+        };
+        // Tables are emitted *into* the chrome's tree rather than into a tree of their own, because
+        // they have to be painted in the page's coordinate space and clipped by the same damage the
+        // chrome uses. A table that lands outside the viewport contributes nothing and is not visited.
+        let mut damage = damage;
+        // **A copy of what the session asked for, before any emitter widens it.** See
+        // `last_damage`'s own comment for why the widened one is not the number to keep.
+        let requested = damage;
+        // **Each emitter is passed the source by reborrow**, so all four see the same store and none of
+        // them can hold it across the next one's call. `&mut *source` rather than `source`: the emitters
+        // take `&mut dyn LeafSource`, and moving the `&mut` would spend it.
+        if self.home.is_none() {
+            self.emit_tables(&mut tree, &mut damage, &mut *source);
+            self.emit_math(&mut tree, &mut damage, &mut *source);
+            self.emit_images(&mut tree, &mut damage, &mut *source);
+            // **Body text last among the emitters, so it draws over the others.** A table, a formula and an
+            // image are all anchored to a document line, and the body text of that line is what a reader
+            // expects to see *behind* them -- a table whose cells are empty still has the paragraph that
+            // introduced it around it. Emitting the body first would put the paragraph's glyphs on top of
+            // the table's borders.
+            self.emit_body_text(&mut tree, &mut damage, source);
+        }
+        // The raster source is borrowed *for this call* and not held: the cache is mutated by the next
+        // frame's decode and eviction, so a borrow that outlived the paint would be a self-referential
+        // `Session` -- the painter is a field and so is the cache it would have to point at.
+        // **The page buffer is the text source**, and it is a field borrow rather than a `&self` borrow,
+        // so `&mut self.frame` and `&self.images` are live at the same time. `PageText` is a one-field
+        // wrapper over a slice; see its docs for why the trait exists at all.
+        if let Some(dialog) = &self.dialog {
+            holonomy_render::dialog::push_tree(&mut tree, &self.chrome.layout, dialog);
+        }
+        let stats = {
+            let page = PageText(&self.line_scratch[..self.page_used]);
+            self.painter.paint_with(
+                &mut self.frame,
+                &tree,
+                damage,
+                Some(&self.images),
+                Some(&page),
+            )?
+        };
+        self.last_paint = stats;
+        // **Kept before the clear below, and from the copy rather than from `damage`.**
+        //
+        // **The emitters take `&mut damage` and widen it** -- `emit_body_text` unions the rectangle it
+        // emitted into the damage so that a caller who asks "what did the page contribute" has it --
+        // **and recording the widened value was a measurement that lied.** Measured, part 39: opening
+        // the File menu asked for `24,36 312x342` and `last_damage` reported `24,36 1468x342`, which
+        // reads as "the damage is four and a half times wider than it is" and would have sent the next
+        // person looking for a popup that is too wide.
+        //
+        // `requested` is what the *session* asked to be repainted, which is the number that says whether
+        // the damage is scoped. `PaintStats::pixels` is a separate question and is what it says.
+        self.last_damage = requested.unwrap_or(DamageRect::new(
+            0,
+            0,
+            self.frame.width(),
+            self.frame.height(),
+        ));
+        // **And the widened one, kept beside it.** See `last_painted_damage`: `damage` is the rect the
+        // emitters have finished with, which is the rect `paint_with` above was handed.
+        self.last_painted_damage = damage.unwrap_or(DamageRect::new(
+            0,
+            0,
+            self.frame.width(),
+            self.frame.height(),
+        ));
+        self.stats.frames += 1;
+        self.stats.pixels += stats.pixels;
+        // The damage goes to the backend as well as to the rasteriser. For the PPM backend that changes
+        // nothing -- `present_damage` defaults to the whole frame -- and for a backend on a socket it is
+        // the difference between 4 MiB per keystroke and 92 KiB.
+        self.scanout.present_damage(&self.frame, damage)?;
+        self.damage = DamageRect::EMPTY;
+        // **The status bar's own pass, and the reason it is a second pass.** Part 39.
+        //
+        // `status_damage` is not part of `damage` because a union with a rect at the bottom of the
+        // window is a bounding box that reaches the top of it -- on the keystroke path, which is the
+        // path NFR-1.1 budgets. **So it is painted here, clipped to itself, and presented as itself**:
+        // one 1,280x22 repaint instead of a 1,280x800 one.
+        //
+        // **The same tree, not a second one.** It is built once above and both passes walk it, so there
+        // is no second `chrome.tree` and no second emitter pass; the damage argument is what makes the
+        // second walk touch only the status bar.
+        //
+        // **Skipped when the main damage already covers it**, which is every full repaint: presenting
+        // the same pixels twice would be a second PutImage for nothing. The test is containment rather
+        // than intersection because a main rect that *overlaps* the status bar but does not cover it
+        // -- a repaint of the bottom of the page -- has still left the bar's words alone.
+        let status = self.status_damage;
+        self.status_damage = DamageRect::EMPTY;
+        let painted = damage.unwrap_or(DamageRect::new(
+            0,
+            0,
+            self.frame.width(),
+            self.frame.height(),
+        ));
+        let covered = painted.x <= status.x
+            && painted.right() >= status.right()
+            && painted.y <= status.y
+            && painted.bottom() >= status.bottom();
+        self.last_status = DamageRect::EMPTY;
+        if !status.is_empty() && !covered {
+            let page = PageText(&self.line_scratch[..self.page_used]);
+            let stats = self.painter.paint_with(
+                &mut self.frame,
+                &tree,
+                Some(status),
+                Some(&self.images),
+                Some(&page),
+            )?;
+            self.last_paint.merge(stats);
+            self.stats.pixels += stats.pixels;
+            self.scanout.present_damage(&self.frame, Some(status))?;
+            self.last_status = status;
+        }
+        Ok(())
+    }
+
+    /// **What the last paint repainted of the status bar, outside its own damage.**
+    ///
+    /// **`DamageRect::EMPTY` when the status bar was not a second region** — a hover, a menu press and a
+    /// scroll all leave it empty, and so does a full repaint, which carries the bar inside its own rect.
+    ///
+    /// **It is a second number rather than an addition to [`last_damage`](Self::last_damage) on
+    /// purpose.** `last_damage` is what a scoping claim is made about, and one bounding box reaching
+    /// from the toolbar to the status bar would be true of both and useless for either.
+    pub fn last_status_damage(&self) -> DamageRect {
+        self.last_status
+    }
+
+    /// Rebuild the chrome's line-height model from the tables, and park it in the state.
+    ///
+    /// Each table contributes `(anchor_line, its visual height in pixels)`; `LineHeights::from` turns
+    /// that into a sparse `(line, extra)` list by subtracting the line slots the table was already
+    /// using, so a table that happens to be exactly as tall as the rows it replaces contributes
+    /// nothing and every line below stays put.
+    ///
+    /// This is the debt Phase 9A recorded, paid. It is cheap: proportional to the number of tables,
+    /// not to the number of lines, and it does not allocate after the tables stop growing because the
+    /// `Vec` is reused across paints by `LineHeights::from`'s caller... which it currently is not --
+    /// `from` allocates a fresh `Vec` per paint. That is one allocation per paint, on a path that
+    /// paints per keystroke, and it is the next thing to fix. It is called out here rather than left to
+    /// be discovered, because the whole point of this function is to stop pretending the geometry is
+    /// free.
+    fn publish_line_heights(&mut self, source: &mut dyn holonomy_text::LeafSource) {
+        let pitch = self.chrome.metrics.cell_h.max(1);
+        let spans: Vec<TableSpan> = self.editor.tables().spans().to_vec();
+        let mut blocks: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
+        for span in &spans {
+            let grid = holonomy_render::table::TableGrid::new(
+                span,
+                0,
+                0,
+                self.chrome.metrics.cell_w,
+                self.chrome.metrics.cell_h,
+                self.chrome.metrics.cell_h,
+            );
+            let line = self.line_index(span.start_byte as usize);
+            blocks.push((line, grid.height_px()));
+        }
+        // Formulas join the tables in the *same* model, for the same reason: a fraction is 41 px tall
+        // where a line is 18, so the lines below it have to move or the formula draws over them.
+        // `LineHeights::from` merges two blocks that share a line by adding, so a table and a formula
+        // starting on one line displace by the sum rather than one overwriting the other.
+        blocks.extend(self.math_blocks_for(source));
+        // Images join the tables and the formulas in the *same* model, for the same reason: an image
+        // is taller than any line, so the lines below it have to move or it draws over them. The block
+        // height is the *raster's* height, not the source image's -- §2.9.3 makes those different, and
+        // using the source height would displace by a factor of three at 1920x1080.
+        blocks.extend(self.image_blocks(source));
+        // **Headings join them too, and they did not until this line.**
+        //
+        // A heading's glyphs are drawn at the atlas's *second* size -- that is `run_size_index`'s whole
+        // purpose, and `tests/decorations.rs` gates it. But the line box it was laid on is `cell_h` at
+        // the painter's own size, which is the body pitch: so a 20 px heading on an 18 px line has two
+        // pixels of its ink in the line above or below, and every line after it starts two pixels too
+        // high. **The old comment above is the bug, written down**: it says `STYLE_HEADER` is
+        // load-bearing for the line metrics, and nothing published them.
+        //
+        // The extra is the difference between the two pitches, and only when the atlas *has* a second
+        // size -- a one-size atlas clamps `run_size_index` to 0 and draws the heading at the body size,
+        // so it needs no extra and would otherwise reserve rows for ink that is not there.
+        blocks.extend(self.heading_blocks());
+        if self.state.paged {
+            // All paint and hit-test callers ask for viewport-relative rows. Discard blocks above
+            // the viewport and translate the rest, rather than displacing the wrong visible rows.
+            let first = self.state.scroll_line;
+            blocks = blocks
+                .into_iter()
+                .filter_map(|(line, h)| line.checked_sub(first).map(|row| (row, h)))
+                .collect();
+        }
+        self.state.line_heights = holonomy_render::LineHeights::from(pitch, &blocks);
+    }
+
+    /// **Every heading line and how much taller than the body pitch it is**, for
+    /// [`Session::publish_line_heights`].
+    ///
+    /// # Why a heading needs a block at all
+    ///
+    /// `LineHeights` is the model every consumer of line geometry reads: the body emitter lays each run
+    /// at `line_heights.y(line)`, the caret locates itself with the same function, and the damage rects
+    /// are `height(line)` tall. Its `pitch` is one number for the whole document, and it is
+    /// `ChromeMetrics::cell_h` -- the *body* pitch.
+    ///
+    /// A heading draws at `Painter::label_size(1)`, the atlas's second size, which is taller than the
+    /// body's. Without a block here the heading's own line box is too short for its own glyphs, and
+    /// because `y` is a prefix sum **every line below it starts that many pixels too high as well**. On
+    /// the shipped 16/20 ppem pair that is a couple of pixels per heading: small enough to read as sloppy
+    /// spacing rather than as a bug, which is exactly why it is worth a number and a gate.
+    ///
+    /// # Why the pitch difference and not the ascent difference
+    ///
+    /// A line box is `line_pitch_at(size)` tall and the baselines inside it are placed from each run's
+    /// own ascent -- that is what lets a heading and a body run share a line at all. So the extra the
+    /// *sum* needs is exactly the difference between the two pitches.
+    ///
+    /// **Nothing when the atlas has one size**, because `run_size_index` clamps to 0 and the heading
+    /// really is drawn at the body pitch; reserving rows there would reserve them for ink nothing draws.
+    ///
+    /// **Reported in document line numbers**, like `image_blocks` and `math_blocks_for`: the paged
+    /// translation is `publish_line_heights`'s job and it already does it for every block in the list.
+    fn heading_blocks(&self) -> Vec<(u32, u32)> {
+        let body = self.chrome.metrics.cell_h.max(1);
+        let Some(atlas) = self.painter.atlas() else {
+            return Vec::new();
+        };
+        // The second size, from the atlas the painter actually holds -- the same atlas
+        // `Painter::label_size(1)` resolves the run's glyphs against.
+        let Some(&heading) = atlas.sizes().get(1) else {
+            return Vec::new();
+        };
+        let taller = u32::from(atlas.line_pitch_at(heading))
+            .max(body)
+            .saturating_sub(body);
+        if taller == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<(u32, u32)> = self
+            .editor
+            .spans()
+            .runs_in(0, self.editor.text_len() as u32)
+            .into_iter()
+            .filter(|(span, _, _)| span.style_flags & STYLE_HEADER != 0)
+            .map(|(_, lo, _)| (self.line_index(lo as usize), taller))
+            .collect();
+        // **One block per line, not one per span.** Two heading spans on one line are still one taller
+        // line, and `LineHeights::from` merges duplicate lines by *adding* -- so an undeduplicated list
+        // would make a line with two heading runs two heading-heights tall. `runs_in` answers in
+        // ascending order, so the duplicates are adjacent.
+        out.dedup_by_key(|(line, _)| *line);
+        out
+    }
+
+    /// Every visible image's `(anchor_line, raster_height_px)`, for [`Session::publish_line_heights`].
+    ///
+    /// Shares `emit_images`' scan rather than repeating it, because the displacement and the draw have
+    /// to be derived from the same numbers: a line moved by one height and an image drawn at another is
+    /// a bug that looks like a layout choice.
+    ///
+    /// Returns nothing when the document has no images, which is the common case and costs one `is_empty`
+    /// rather than a scan.
+    fn image_blocks(&mut self, source: &mut dyn holonomy_text::LeafSource) -> Vec<(u32, u32)> {
+        if self.editor.assets().is_empty() {
+            return Vec::new();
+        }
+        // **And the manifest's span count, which covers anchors as well as formulas.** `scan_anchors` is
+        // the other byte cursor that forces a whole-document read, and it is looking for a marker the
+        // manifest already counted. Same trade as `math_blocks_for`: free, exact, wrong only if the
+        // manifest is stale.
+        if self.manifest.span_total() == 0 {
+            return Vec::new();
+        }
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
+            return Vec::new();
+        };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        let mut out = Vec::new();
+        for (ordinal, at) in holonomy_text::scan_anchors(text).into_iter().enumerate() {
+            let Ok(asset) = self.editor.assets().get(ordinal) else {
+                continue;
+            };
+            let (w, h) = self.raster_size(asset.width as u32, asset.height as u32);
+            let _ = w;
+            out.push((self.line_index(at as usize), h));
+        }
+        out
+    }
+
+    /// The page-column-width raster size for a source of `src_w` by `src_h`.
+    ///
+    /// §2.9.3: the cache holds **page-column-width** rasters, not native ones, because a ±1-page policy
+    /// with native decoding holds exactly one 1080p image and the second photo on facing pages breaches
+    /// the budget. So a source is downscaled to `image_column_width` wide and its height follows the
+    /// aspect ratio, rounded up so a raster is never one pixel short of the row it has to cover.
+    ///
+    /// A source already narrower than the column is **not** enlarged. Upscaling a 200 px GIF to 640 px
+    /// spends 921,600 bytes of an 8.0 MiB budget on 16x more pixels of the same information, and the
+    /// painter's 1:1 blit draws it at whatever size it is.
+    fn raster_size(&self, src_w: u32, src_h: u32) -> (u32, u32) {
+        let column = self.image_column_width.max(1);
+        if src_w <= column {
+            return (src_w.max(1), src_h.max(1));
+        }
+        // `u64` because `src_h * column` overflows `u32` for a 40000 px panorama, which a PNG's `u32`
+        // IHDR permits and this must not panic on.
+        let h = u64::from(src_h)
+            .saturating_mul(u64::from(column))
+            .saturating_add(u64::from(src_w) / 2)
+            / u64::from(src_w);
+        (column, h.max(1).min(u32::MAX as u64) as u32)
+    }
+
+    /// Draw every table whose first line is on screen, and widen `damage` to cover them.
+    ///
+    /// # Why the damage is the active cell and not the whole grid
+    ///
+    /// The directive's requirement is that typing in a cell invalidates only that cell's rectangle.
+    /// That holds because of the split between *content* and *shape*: a keystroke inside a cell
+    /// changes only that cell's glyphs, and the borders around it are in different rectangles that
+    /// did not move. So when `tables_shape_dirty` is false, the added damage is the active cell's
+    /// content rect. When it is true -- a table was inserted or a row appended -- every border line
+    /// below moved, and the added damage is the whole grid.
+    ///
+    /// # Why the viewport bounds it
+    ///
+    /// A table's `TableGrid` is built from integer arithmetic over the span and costs nothing to skip,
+    /// so a document with a hundred tables pays for the ones on screen. That is the same policy the
+    /// image cache will need in 9C, and it is here first because a table's geometry is cheap: the
+    /// expensive thing in 9C is a decoded raster.
+    ///
+    /// Block rows in the managed view displace later rows, but they are not yet repaginated
+    /// or split across sheets. Existing objects sharing one line can still overlap.
+    fn line_align_offset(&self, doc_at: u32, text: &[u8]) -> i32 {
+        if !self.managed_documents {
+            return 0;
+        }
+        let flags = self.editor.style_at(doc_at).style_flags;
+        let mask = flags & holonomy_text::STYLE_ALIGN_MASK;
+        if mask == 0 {
+            return 0;
+        }
+        let shown = strip_terminator(text);
+        let runs = self
+            .editor
+            .spans()
+            .runs_in(doc_at, doc_at + shown.len() as u32);
+        let width = pen_at(
+            &self.painter,
+            shown,
+            doc_at,
+            shown.len(),
+            &runs,
+            self.body_style(),
+            |f| self.run_size_index(f),
+        ) as i32;
+        let measure = self.chrome.layout.text.width as i32;
+        if mask & holonomy_text::STYLE_ALIGN_RIGHT != 0 {
+            (measure - width).max(0)
+        } else {
+            (measure - width).max(0) / 2
+        }
+    }
+
+    fn emit_body_text(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
+        self.stats.lines_drawn = 0;
+        self.stats.glyphs_drawn = 0;
+
+        let m = self.chrome.metrics;
+        // The **text column**, not the layout: every other emitter works in the text rect's coordinates,
+        // and mixing the two is how a run ends up on the page margin.
+        let l = self.chrome.layout.text;
+        let first = self.state.scroll_line;
+        let last = self.chrome.layout.visible_end(&self.state);
+        if first >= last {
+            return;
+        }
+        // The page's measure, in whole cells. The wrap point is by *cell count* rather than by measured
+        // pixels because the cell is what every other part of the renderer agrees on: `Caret::locate`
+        // puts the caret at `column * cell_w`, damage rects are `cell_h` tall, and the tables lay
+        // themselves out on cells.
+        let cells_per_row = self.chrome.layout.cells_per_row(m.cell_w);
+        let ink = holonomy_render::chrome::colour::INK;
+        // **The selection, read once.** Part 28.
+        //
+        // **Read from `state`, not from `self.editor`,** because this runs *after* `paint_with` synced
+        // it and the state is what the rest of the frame agrees with. Reading the editor here would be
+        // a second, independent source of truth for the same fact — the exact shape of part 22.
+        let selection = self.state.selection;
+
+        // --- Pass 1: read every visible line into one page-sized buffer.
+        //
+        // **The buffer holds the whole page, not one line, and that is the point.** A `DocRun` names a byte
+        // offset that the painter resolves at *paint* time, so the bytes it names have to still be there
+        // when the painter runs -- which is after every line has been emitted. A one-line buffer would be
+        // correct for one run and wrong for the other 42, and the failure would be silent: the painter
+        // would resolve each run against whichever line happened to be last.
+        //
+        // So the page is read once, contiguously, and every run's offset is into *this* buffer. It is
+        // [`LINE_SCRATCH_BYTES`] = 48 KiB, against 6 MiB for `doc_scratch` on a 6 MiB document.
+        let mut used = 0usize;
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        for line in first..last {
+            // **The index-shaped accessors, not `line_start`.** `line_start` takes a byte offset and
+            // answers "where does the line containing this byte begin"; a renderer has a line *index*
+            // and wants "where does line N begin". Phase 12's first version passed the index to
+            // `line_start`, which quietly answered with line 0's offset every time.
+            let start = self.lines.line_begin(line as usize);
+            let end = self.lines.line_end(line as usize);
+            let len = end.saturating_sub(start);
+            // The buffer's ceiling is the reason a line can be truncated: a document with one enormous
+            // line would otherwise try to read the whole thing. 48 KiB of text is far more than the page
+            // can show, so the cull below is what normally stops this, and this is the backstop.
+            //
+            // **`LINE_SCRATCH_BYTES` and not `self.line_scratch.len()`**, and this one comparison is the
+            // whole of part 35's defect. `line_scratch` was truncated to what the previous paint read, so
+            // `len()` was the *last page's* size, and a document one byte longer than the page before it
+            // **broke out of this loop on its first line and emitted nothing at all**. Measured: an
+            // empty session painted, then two characters typed, then painted again -- the second paint
+            // read 0 bytes of a 2-byte document.
+            //
+            // **And every keystroke makes the document longer than the last page read**, which is why
+            // the symptom was *"I type and nothing appears"* rather than *"text appears until the page
+            // fills"*: the caret moves (a different emitter) and the body goes quiet, permanently.
+            //
+            // `LINE_SCRATCH_BYTES` is the buffer's invariant, which `delete_selected`'s own comment
+            // already states: *"the scratch is a `Vec<u8>` whose capacity is the invariant and whose
+            // length is meaningless between uses, exactly as `line_scratch` is."* It was right there.
+            if used + len > LINE_SCRATCH_BYTES {
+                break;
+            }
+            // **Faulting, and that is the change.** `read_into` takes `&self` and cannot fetch, so a line
+            // past the resident window ended the loop -- one absent leaf truncated the page and every
+            // run after it counted as missing. `read_into_faulting` asks the record which saved bytes
+            // belong in this line and fetches them, so a page anywhere in the document draws.
+            //
+            // **`break` still, and is still right**: it is the line-scratch ceiling (48 KiB), a backstop
+            // for a document with one enormous line. A fetch failure here means the source could not
+            // produce the bytes at all, and there is nothing further down the page to draw.
+            if self
+                .editor
+                .read_into_faulting(source, start, &mut self.line_scratch[used..used + len])
+                .is_err()
+            {
+                break;
+            }
+            spans.push((used as u32, len as u32));
+            used += len;
+        }
+        // **No `truncate`, and it is the fix rather than a tidiness change.** `page_used` is how much of
+        // the buffer is live; the buffer itself stays `LINE_SCRATCH_BYTES` long so that the next paint,
+        // and `delete_selected`, both find a full-size scratch. `truncate` here was load-bearing for
+        // nothing -- every read below is bounded by `used` or by a run's own `(at, len)` -- and it cost
+        // every paint after the first.
+        //
+        // **The bite check says which half of the change carries the fix.** Guarding on
+        // `LINE_SCRATCH_BYTES` with this line still present leaves the gate green, because a truncated
+        // buffer compared against the constant passes the guard and then panics one line later on a
+        // range that is past the end. Restoring the `truncate` with the guard correct fails. **The
+        // `truncate` was the defect and the guard was the symptom of it.**
+        self.page_used = used;
+
+        // --- Pass 2: which lines another emitter already draws.
+        //
+        // **This is not an optimisation, it is the thing that makes the page readable.** A formula, a
+        // table and an image are all *inline in a line of prose*: `emit_math` draws the raw LaTeX or the
+        // compiled glyphs at that line's row, and `emit_tables` draws the grid there. If the body-text
+        // emitter also drew the line, the two would be painted on top of each other and the reader would
+        // see the document's own words and the formula's source superimposed.
+        //
+        // The failure is silent, and it is *how* the first version of Phase 12 broke two of Phase 9B's
+        // math gates: their ink-extent assertions suddenly read 9 px wider, because the extent was the
+        // union of the formula and the paragraph around it. Neither gate was wrong — the page was, and the
+        // gates were the only things that noticed.
+        //
+        // **Scanned from the page buffer, not from the document, and that is sound** because a formula
+        // span never crosses a line: `for_each_math_span`'s own docs say an unpaired `$$` "runs to the
+        // end of its line", so every span lies inside one line, and an image anchor is a fixed byte
+        // sequence. Tables are the exception — a table *is* several lines — and those come from the
+        // editor's own span map rather than from a scan, so they cost nothing to enumerate.
+        //
+        // The first version scanned `doc_scratch`, which meant this emitter read the whole document and
+        // undid the page buffer it had just built. That is the specific way the "1.000 bytes per
+        // document byte" claim was false for its own emitter, and it is why the scan is here rather than
+        // left as a call to `read_document`.
+        let mut claimed: Vec<u32> = Vec::new();
+        for span in self.editor.tables().spans() {
+            let a = self.line_index(span.start_byte as usize);
+            let b = self.line_index(span.end_byte.max(span.start_byte) as usize);
+            for line in a..=b {
+                claimed.push(line);
+            }
+        }
+        holonomy_text::for_each_math_span(&self.line_scratch[..used], |span| {
+            claimed.push(first + line_of_span(&spans, span.start as usize));
+        });
+        for at in holonomy_text::scan_anchors(&self.line_scratch[..used]) {
+            claimed.push(first + line_of_span(&spans, at as usize));
+        }
+        claimed.sort_unstable();
+        claimed.dedup();
+
+        // --- Pass 3: one run per line, positioned by the line model.
+        let mut extra: Option<DamageRect> = None;
+        let line_heights = self.state.line_heights.clone();
+        let mut lines = 0u32;
+        let mut glyphs = 0u32;
+        // --- Part 26: the page's styled runs, fetched once.
+        //
+        // **`spans` is the visible page's `(at, len)` pairs**, so its first and last entries bound the
+        // byte range the page covers, and one `runs_in` over that range answers every line's question.
+        // Before this the call sat inside the loop and a forty-line page paid for it forty times --
+        // forty allocations and forty walks of the span list.
+        //
+        // **`take_while(...).filter(...)` per line is the partition, and it is over the *page's* runs
+        // rather than the document's**, so it is a handful of comparisons per line with no allocation.
+        // `take_while` rather than `filter` because both lists ascend: once a run starts past this
+        // line, no later run can belong to it.
+        self.stats.span_queries += 1;
+        // **The page buffer's offsets and the document's offsets are two coordinate systems, and
+        // the runs live in the second one.**
+        //
+        // `spans` is the visible page's `(at, len)` pairs, and those `at`s are offsets into
+        // `line_scratch` — the page buffer, which starts at zero on every paint. The editor's
+        // span map, the selection and `pen_at` are all in *document* offsets, and the document
+        // offset of the page buffer's first byte is `line_begin(first)`.
+        //
+        // **So the query was made in the wrong coordinate system on every page but the first.**
+        // On page one the two agree; on page thirty the query asked for the document's bytes
+        // `[0, page_len)` — the *first* page's runs — and drew the visible line in the first
+        // page's styles. The selection had the same problem, and worse: `clip_to` compares the
+        // selection's document offsets against the page's, so on any page but the first it
+        // clipped to nothing and **the highlight was never drawn at all**.
+        let page_base = spans.first().map(|&(at, _)| at).unwrap_or(0);
+        let doc_base = self.lines.line_begin(first as usize) as u32;
+        let page_runs = match (spans.first(), spans.last()) {
+            // **The *last* line's end, and not the first line's start plus the last line's length.**
+            // That was the first version, and it asked for a range barely past the first line — so no
+            // styled run on any other line was found and four of part 24's gates went red at once with
+            // "no differing pixels at all". A range built from the wrong two fields of a list is worse
+            // than no hoist, because it looks correct.
+            (Some(&(lo, _)), Some(&(hi_at, hi_len))) => {
+                // **The document's range, which is the page's range translated.**
+                let doc_lo = doc_base;
+                let doc_hi = doc_base + (hi_at + hi_len - lo);
+                self.editor.spans().runs_in(doc_lo, doc_hi)
+            }
+            _ => Vec::new(),
+        };
+        for (row, &(at, len)) in spans.iter().enumerate() {
+            let line = first + row as u32;
+            let y = if self.state.paged {
+                let Some(y) = self.chrome.layout.row_y(&self.state, line) else {
+                    continue;
+                };
+                y
+            } else {
+                l.y + line_heights.y(line - first)
+            };
+            let rect = DamageRect::new(l.x, y, l.width, m.cell_h);
+            // **Culled by row range, after the read.** Two comparisons rather than a rectangle
+            // intersection: `DamageRect` has no `intersects`, and a general-purpose method used in exactly
+            // one place is a method that will be used in a second place with the wrong semantics.
+            if let Some(d) = damage {
+                if rect.y >= d.bottom() || d.y >= rect.bottom() {
+                    continue;
+                }
+            }
+            // **Skip a line another emitter owns.** `claimed` is sorted and deduplicated, so this is a
+            // binary search; the set is one entry per formula, table line or image on the page, which is
+            // a handful, and a linear scan per row would be O(rows x claims) rather than O(rows log n).
+            if claimed.binary_search(&line).is_ok() {
+                continue;
+            }
+            lines += 1;
+
+            let text = &self.line_scratch[at as usize..(at + len) as usize];
+            let shown = codepoints_upto(text, 0, cells_per_row);
+
+            // --- The selection highlight, behind the text. Part 28.
+            //
+            // **Pushed into `tree.before`, and that is what puts it behind the glyphs.** `SurfaceTree`
+            // paints `before`, then `node`, then `after`, so a rect pushed here is under every `DocRun`
+            // this loop emits — including the styled ones, which are pushed later. Drawn after, the
+            // highlight would be a blue box *over* the words it is supposed to be marking.
+            //
+            // **The geometry is `clip_to` plus a cell count, and the cell count is the same scalar
+            // count the caret uses.** `refresh_caret_column` counts scalars from a line start to a
+            // caret; this counts scalars from a line start to a selection edge. Both are "how many
+            // glyphs are between two offsets on this line", and **both answer from bytes the line
+            // already has in `line_scratch`** — so a selection on a 40-line page costs two scans of a
+            // buffer that was read anyway and **zero** rope reads.
+            //
+            // **Two scans and not one, because they are to different places.** `col_of(lo)` and
+            // `col_of(hi)` each walk from the line start. Walking once and remembering the distance
+            // between would need a mid-line restart anyway, and the second scan is over at most one
+            // line's bytes.
+            if let Some(sel) = selection {
+                // **The clip is in document offsets, and the line's document offset is what it
+                // is clipped against.**
+                //
+                // The selection is a range of the *document*; `at` is an offset into the *page
+                // buffer*. **On any page but the first the two are different numbers**, and
+                // `clip_to` compares them: `lo = max(2000, 0) = 2000`, `hi = min(2005, 10) =
+                // 10`, and `hi <= lo` means "no overlap" — **so the selection highlight was
+                // never drawn on any page but the first.**
+                let doc_at = doc_base + (at - page_base);
+                if let Some((lo, hi)) = sel.clip_to(doc_at, doc_at + len) {
+                    // **The line's offset in the document, which `pen_at` needs** because `runs` is
+                    // keyed on document offsets and `text` is a slice of the page buffer.
+                    let doc_start = self.lines.line_begin(line as usize) as u32;
+                    let lo = (lo - doc_at) as usize;
+                    let hi = (hi - doc_at) as usize;
+                    // **Two pens, not two column counts.** Part 33. `col0 * cell_w` was the grid and
+                    // the caret is now at the pen, so a highlight placed on the grid would start up to
+                    // a cell right of the caret at its left edge -- **the caret outside its own
+                    // highlight**, which is the defect the caret fix would otherwise have made worse
+                    // rather than better.
+                    // **`self.run_size_index` is handed in, because `pen_at` is a free function and
+                    // the size is a session decision.** It is the same answer `emit_body_text` gives
+                    // every run below, so the highlight and the glyphs cannot disagree about how wide a
+                    // heading's letters are.
+                    let size_of = |flags: u16| self.run_size_index(flags);
+                    let pen0 = pen_at(
+                        &self.painter,
+                        text,
+                        doc_start,
+                        lo,
+                        &page_runs,
+                        self.body_style(),
+                        size_of,
+                    );
+                    let pen1 = pen_at(
+                        &self.painter,
+                        text,
+                        doc_start,
+                        hi,
+                        &page_runs,
+                        self.body_style(),
+                        size_of,
+                    );
+                    // **`shown` is the measure, and the highlight stops there too.** A line longer
+                    // than the page is clipped by `codepoints_upto`, and a highlight running past the
+                    // edge of the text would be a blue band over the page margin — which is not a
+                    // cosmetic difference, it is a highlight on nothing.
+                    // **`shown` is still the measure, and the highlight still stops there.** A line
+                    // longer than the page is clipped by `codepoints_upto`, and a highlight running
+                    // past the edge of the text would be a blue band over the page margin -- which is
+                    // not a cosmetic difference, it is a highlight on nothing. **The clip is on bytes
+                    // rather than on columns**, because the pen has no column to clip: the last glyph
+                    // the page shows is the last one inside `shown`, and its advance is where the pen
+                    // is.
+                    let pen1 = pen1.min(pen_at(
+                        &self.painter,
+                        &text[..shown],
+                        doc_start,
+                        shown,
+                        &page_runs,
+                        self.body_style(),
+                        size_of,
+                    ));
+                    let align = self.line_align_offset(doc_at, text);
+                    if pen1 > pen0 {
+                        push_rect(
+                            tree,
+                            (l.x as i32 + pen0 as i32 + align) as u32,
+                            y,
+                            pen1 - pen0,
+                            m.cell_h,
+                            holonomy_render::chrome::colour::SELECTION,
+                        );
+                    }
+                }
+            }
+
+            // The terminator is not drawn. A `\n` has a glyph in most faces, so drawing it would put a
+            // visible mark at the end of every line.
+            let seg = strip_terminator(&text[..shown]);
+            if seg.is_empty() {
+                extra = union_opt(extra, Some(rect));
+                continue;
+            }
+            // Bytes, not cells: `SessionStats::glyphs_drawn`'s doc comment says why these two figures are
+            // not the same number.
+            glyphs += seg.len() as u32;
+            let shown_len = seg.len() as u32;
+
+            // --- Pass 3a: one run per *style*, not one per line. Part 24.
+            //
+            // **This used to emit one `DocRun` per line with `Style::REGULAR` hardcoded**, and
+            // `Editor::style_at` was called from nowhere in the product -- only from `holonomy-text`'s own
+            // tests. So `Session::toggle_bold` wrote style flags into the span map, the flags survived
+            // undo, and **nothing ever drew them**: a document with every character set bold painted
+            // pixel-for-pixel like the same document unstyled. `crates/holonomy/tests/style_render.rs`
+            // measured that before this change and asserts the opposite now.
+            //
+            // **`SpanMap::runs_in` is what a renderer walks, and its own doc says so** -- "for each
+            // visible line, the runs it must draw, each with a colour and an atlas style". It existed,
+            // it was correct, and nothing called it.
+            //
+            // **The runs come from one query for the whole page, hoisted out of this loop. Part 26.**
+            // The first version called `runs_in` per line, and that had two costs that a page of forty
+            // lines pays forty times:
+            //
+            // * **One heap allocation per line**, on the path whose invariant is zero — see
+            //   `tests/session_no_alloc.rs`, which asserts it for the *edit* path and is explicit that
+            //   the paint path was out of scope. Part 24 moved it from out of scope to forty-per-frame.
+            // * **A linear scan of the span list per line**, because `runs_in` walks from the start of
+            //   the list and breaks only past the end of the range. On a document scrolled deep into a
+            //   styled file, that is every span before the page, forty times over.
+            //
+            // **One query over the page's byte range is O(spans before the page) instead of
+            // O(lines x spans before the page), and allocates once.** The per-line partition below is
+            // over the *page's* runs -- a handful -- with an early break, so it is cheap and does not
+            // allocate.
+            //
+            // **`SessionStats::span_queries` counts the queries**, so "one per paint" is a measured
+            // claim and not a comment. `one_span_query_serves_the_whole_page` is the gate.
+            // **A peeking iterator and not a collected `Vec`.** Collecting would be one allocation per
+            // line again, which is the thing being removed; `peek` answers the "is this line
+            // unstyled?" question without materialising anything.
+            // **Skip, then take — and the order is the whole of it.** `SpanMap::style_range`
+            // rebuilds its list in ascending offset order, so a line's runs are a contiguous run of it.
+            // The first version used `take_while(|(_, _, hi)| *hi > at)` alone, which **stops at the
+            // first span that ends at or before this line** — and for the line after a styled one that
+            // is the first span in the list, so every line after the first styled run drew plain.
+            // **Four of part 24's gates went red at once, all reporting "no differing pixels at all",**
+            // which is the most informative failure in this project: the style was still in the map, it
+            // was simply never looked at.
+            // **The partition is in document offsets, because the runs are.**
+            //
+            // `page_runs` came from the editor's span map, which is keyed on document offsets, and
+            // this line's document offset is `doc_at`. **Comparing a document offset with a page
+            // offset is the bug this fixes**: on page one they coincide and everything is
+            // correct; on any other page the partition takes the wrong runs, so a styled line
+            // is drawn plain and a plain line is drawn in the style of whatever was at the same
+            // *page* offset in the document.
+            let doc_at = doc_base + (at - page_base);
+            let align = self
+                .line_align_offset(doc_at, &self.line_scratch[at as usize..(at + len) as usize]);
+            let mut runs = page_runs
+                .iter()
+                .skip_while(|(_, _, hi)| *hi <= doc_at)
+                .take_while(|(_, lo, _)| *lo < doc_at + shown_len)
+                .map(|(s, lo, hi)| (*s, *lo, *hi))
+                .peekable();
+            if runs.peek().is_none() {
+                // **The line's own flags even when it has no runs of its own.** A `STYLE_HEADER`
+                // paragraph is stored as a span, so it *does* have a run and lands in the loop below —
+                // but a document whose header span covers only part of the line has a plain tail, and
+                // a whole-line run that ignored the flags would draw that tail at the body size. The
+                // lookup is one binary search over the span list, and it is skipped entirely on a
+                // document with no spans at all.
+                let flags = self.editor.style_at(doc_at).style_flags;
+                tree.before
+                    .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
+                        l.x as i32 + align,
+                        y as i32,
+                        at,
+                        shown_len,
+                        self.body_style(),
+                        self.run_size_index(flags),
+                        ink,
+                        self.baseline_shift(flags),
+                        Self::decorations(flags),
+                    ))));
+                // **The same widened rect the styled path unions**, because this run can be shifted too:
+                // a whole line in superscript takes this branch — it has flags and no *runs* of its own
+                // -- and a plain `rect` would leave the raised rows undamaged. The two branches are the
+                // same decision about damage, so they compute it the same way.
+                let shift = self.line_shift(&page_runs, doc_at, shown_len);
+                extra = union_opt(extra, Some(shifted_rect(rect, shift)));
+                continue;
+            }
+
+            // --- Pass 3b: the styled runs, each positioned by how many cells precede it on this line.
+            //
+            // **The x advances by the cell count, not the byte count,** because the grid is cells: a bold
+            // run that started after two two-byte characters starts at cell 2, and starting it at byte 4
+            // would put it two cells right of the character before it. Part 22 made the caret count
+            // characters for the same reason and from the opposite direction.
+            // **A pen in pixels, and not a cell count.** Part 31. This used to be `cell_x`, advanced by
+            // `codepoint_count` and multiplied by `cell_w` at each call site -- the grid, while the
+            // painter advanced by the font's metrics, so the two disagreed at every run boundary.
+            //
+            // **The name is the argument.** `cell_x` reads like a count of cells and is used like one;
+            // `pen_x` reads like a distance and is, so the next reader cannot reintroduce the grid by
+            // accident. See `pen_of`.
+            let mut pen_x: u32 = 0;
+            let mut cursor = 0usize; // byte index into `seg`
+            for (span, lo, hi) in runs {
+                // **`span` drives every property of the run it produces** -- face, size, ink,
+                // baseline shift and the two rules -- and `runs` iterates an owned `Vec` (`page_runs`),
+                // so nothing here borrows the editor and the `&self` calls below are all readable.
+                // **Skip anything past the drawn prefix.** `runs_in` is asked for `[at, at + shown_len)`
+                // so this cannot happen today; it is a bound rather than a belief, because `seg` was
+                // truncated to the measure and a run clipped to a range the caller then shortened would
+                // otherwise index out of it.
+                //
+                // **The clip is in document offsets**, like the runs themselves.
+                let (lo, hi) = (
+                    lo.max(doc_at).min(doc_at + shown_len),
+                    hi.min(doc_at + shown_len),
+                );
+                if hi <= lo {
+                    continue;
+                }
+                let (lo, hi) = ((lo - doc_at) as usize, (hi - doc_at) as usize);
+                // **Advance over the plain text before this run**, one run's worth of `REGULAR`.
+                if lo > cursor {
+                    let gap = &seg[cursor..lo];
+                    push_doc_run(
+                        tree,
+                        (l.x as i32 + pen_x as i32 + align) as u32,
+                        y,
+                        at + cursor as u32,
+                        gap.len() as u32,
+                        self.body_style(),
+                        ink,
+                        // **The gap between two styled runs is body text**, so it takes the body size,
+                        // no shift and no rules. A gap that inherited the *previous* run's decoration
+                        // would underline the space between two underlined words — which is what an
+                        // underline across a whole phrase looks like and is not what this is.
+                        0,
+                        0,
+                        0,
+                    );
+                    pen_x += pen_of(&self.painter, gap, self.body_style(), 0);
+                    cursor = lo;
+                }
+                let run = &seg[cursor..hi];
+                if !run.is_empty() {
+                    // **`Style(span.atlas_style())`, and not a match on `span.style_flags`.** The span
+                    // already knows how to resolve flags to an atlas index -- `atlas_style` is the
+                    // function that collapses four flag combinations onto four faces -- and re-deciding
+                    // that here would be a second answer to a question with one right one.
+                    push_doc_run(
+                        tree,
+                        (l.x as i32 + pen_x as i32 + align) as u32,
+                        y,
+                        at + cursor as u32,
+                        run.len() as u32,
+                        self.span_style(&span),
+                        span_ink(&span, ink),
+                        // **The three new properties, from the same span the face came from.** The
+                        // size is the heading's, the shift is the super/subscript's, and the two
+                        // rules are the underline's and the strike's — so one span drives one run and
+                        // there is no second place for a decoration to be read from.
+                        self.run_size_index(span.style_flags),
+                        self.baseline_shift(span.style_flags),
+                        Self::decorations(span.style_flags),
+                    );
+                    // **The run's own face, not `REGULAR`.** A bold glyph advances differently from a
+                    // plain one, and measuring the gap with the wrong face is the same class of error as
+                    // the grid was -- a second place where the position and the painting disagree.
+                    pen_x += pen_of(
+                        &self.painter,
+                        run,
+                        self.span_style(&span),
+                        // **The same size the run was emitted at**, so the next run starts where this
+                        // one's glyphs ended -- see `Painter::advance_at`.
+                        self.run_size_index(span.style_flags),
+                    );
+                    cursor = hi;
+                }
+            }
+            // **Whatever is left is plain**, which is the tail after the last styled run. Without this a
+            // line ending in styled-then-plain text loses its tail, and the symptom is text that vanishes
+            // when you make the middle of a line bold.
+            if cursor < seg.len() {
+                let tail = &seg[cursor..];
+                push_doc_run(
+                    tree,
+                    (l.x as i32 + pen_x as i32 + align) as u32,
+                    y,
+                    at + cursor as u32,
+                    tail.len() as u32,
+                    self.body_style(),
+                    ink,
+                    0,
+                    0,
+                    0,
+                );
+            }
+            // **The line's damage is the line box, widened by any shift in it.**
+            //
+            // A super- or subscript draws outside `[y, y + cell_h)`: the emitter hands the painter a
+            // shifted baseline, so the *glyphs* of a raised run occupy rows above `y`. `rect` is one
+            // `cell_h` tall, and a damage rect that misses those rows is a repaint that leaves them
+            // holding what the previous frame drew -- the caret's old position, most visibly, inside the
+            // raised part of a superscript.
+            //
+            // **Both directions, from every run on the line and not from the last one emitted.** A line
+            // is damaged once, so the extent is a maximum over the runs that touch it -- see `line_shift`.
+            // It is a scan of the page's own run list per line, which is a handful of spans, and it
+            // answers `(0, 0)` for the overwhelming majority of lines; the alternative is a mutable
+            // accumulator threaded through forty-line loops for a number that is usually zero.
+            let shift = self.line_shift(&page_runs, doc_at, shown_len);
+            extra = union_opt(extra, Some(shifted_rect(rect, shift)));
+        }
+
+        self.stats.lines_drawn = lines;
+        self.stats.glyphs_drawn = glyphs;
+        widen(damage, extra);
+    }
+
+    fn emit_tables(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
+        let spans = self.editor.tables().spans().to_vec();
+        if spans.is_empty() {
+            self.stats.table_cells_drawn = 0;
+            self.stats.table_borders_drawn = 0;
+            return;
+        }
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
+            // A table whose bytes will not read cannot be drawn, and reporting it here would turn a
+            // rendering problem into a paint failure. The session's own table operations already
+            // surface the same error through `with_table`.
+            return;
+        };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        let m = self.chrome.metrics;
+        let l = self.chrome.layout;
+        let first = self.state.scroll_line;
+        let last = l.visible_end(&self.state);
+        let mut cells_drawn = 0u32;
+        let mut borders_drawn = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let active = self.active_cell;
+
+        for span in spans.iter().copied() {
+            let line = self.lines.line_of(span.start_byte as usize);
+            if line < first || line >= last {
+                continue;
+            }
+            let Ok(resolved) = ResolvedTable::new(span, text) else {
+                continue;
+            };
+            // From the model, not from `row_pitch`: this is the line the model has reserved for the
+            // table, so the table and the chrome agree on where that line is by construction.
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else {
+                    continue;
+                };
+                y
+            } else {
+                l.text.y + self.state.line_heights.y(line - first)
+            };
+            let grid = TableGrid::new(&span, l.text.x, top, m.cell_w, m.cell_h, m.cell_h);
+
+            // Draw continuous rules directly. Box glyphs depend on atlas advances and can
+            // leave gaps or wrap through adjacent cells at different zoom levels.
+            let left = grid.border_x_at(0).saturating_add(m.cell_w / 2);
+            let right = grid.border_x_at(span.cols).saturating_add(m.cell_w / 2);
+            let top_rule = grid.border_y_at(0).saturating_add(m.cell_h / 2);
+            let bottom = grid.border_y_at(span.rows).saturating_add(m.cell_h / 2);
+            for row in 0..=span.rows {
+                let y = grid.border_y_at(row).saturating_add(m.cell_h / 2);
+                tree.before
+                    .push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                        left as i32,
+                        y as i32,
+                        right.saturating_sub(left).saturating_add(1),
+                        1,
+                        holonomy_render::chrome::colour::INK,
+                    ))));
+                borders_drawn += 1;
+            }
+            for col in 0..=span.cols {
+                let x = grid.border_x_at(col).saturating_add(m.cell_w / 2);
+                tree.before
+                    .push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                        x as i32,
+                        top_rule as i32,
+                        1,
+                        bottom.saturating_sub(top_rule).saturating_add(1),
+                        holonomy_render::chrome::colour::INK,
+                    ))));
+                borders_drawn += 1;
+            }
+            extra = union_opt(
+                extra,
+                Some(DamageRect::new(
+                    left,
+                    top_rule,
+                    right.saturating_sub(left).saturating_add(1),
+                    bottom.saturating_sub(top_rule).saturating_add(1),
+                )),
+            );
+
+            // --- cell text, clipped to each cell's content rect.
+            for index in 0..span.cell_count() {
+                let Ok(cell) = resolved.cell_at(index) else {
+                    continue;
+                };
+                let Some((cx, cy, cw, ch)) = grid.cell_content_rect(cell.row, cell.col) else {
+                    continue;
+                };
+                let content = &text[cell.start_byte as usize..cell.end_byte as usize];
+                if !content.is_empty() {
+                    // PageText is filled by emit_body_text before painting. Reference the
+                    // actual UTF-8 bytes rather than a TextRun of ascending codepoints.
+                    let fits = (cw / m.cell_w.max(1)).min(u32::from(TextRun::MAX_LEN)) as usize;
+                    let first_line = content
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .unwrap_or(content.len());
+                    let shown = codepoints_upto(&content[..first_line], 0, fits);
+                    let page_start = self.lines.line_begin(first as usize);
+                    if let Some(offset) = (cell.start_byte as usize).checked_sub(page_start) {
+                        tree.before.push(SurfaceTree::leaf(Node::DocText(
+                            holonomy_render::DocRun::new(
+                                cx as i32,
+                                cy as i32,
+                                offset as u32,
+                                shown as u32,
+                                holonomy_render::Style::REGULAR,
+                                0,
+                                holonomy_render::chrome::colour::INK,
+                            ),
+                        )));
+                    }
+                }
+                cells_drawn += 1;
+                if active.is_some_and(|a| a.row == cell.row && a.col == cell.col) {
+                    extra = union_opt(extra, Some(DamageRect::new(cx, cy, cw, ch)));
+                }
+            }
+
+            // --- the caret, drawn inside the cell rather than by the chrome's line model, which has
+            // no idea a cell exists.
+            if let Some(a) = active.filter(|a| a.row < span.rows && a.col < span.cols) {
+                if let Some((cx, cy, cw, _)) = grid.cell_content_rect(a.row, a.col) {
+                    let cx = cx + a.offset_in_cell * m.cell_w;
+                    tree.before
+                        .push(SurfaceTree::leaf(Node::Rect(holonomy_render::Rect::new(
+                            cx as i32,
+                            cy as i32,
+                            m.cell_w.min(cw),
+                            m.cell_h,
+                            holonomy_render::chrome::colour::CARET,
+                        ))));
+                    extra = union_opt(extra, Some(DamageRect::new(cx, cy, m.cell_w, m.cell_h)));
+                }
+            }
+
+            if self.tables_shape_dirty {
+                extra = union_opt(
+                    extra,
+                    Some(DamageRect::new(
+                        grid.origin_x,
+                        grid.origin_y,
+                        grid.width_px(),
+                        grid.height_px(),
+                    )),
+                );
+            }
+        }
+        self.stats.table_cells_drawn = cells_drawn;
+        self.stats.table_borders_drawn = borders_drawn;
+        self.tables_shape_dirty = false;
+        widen(damage, extra);
+    }
+
+    /// Draw every image whose line is on screen, and widen `damage` to cover them.
+    ///
+    /// # The order of the four things this does
+    ///
+    /// 1. **Evict**, by the ±1-page window, *before* deciding what is on screen. Evicting first means
+    ///    the budget is already correct when a decode is attempted, so an image cannot be admitted by a
+    ///    cache that was over its limit.
+    /// 2. **Decode** what is visible and not resident. This is the expensive step and the one §2.9.3's
+    ///    arithmetic is about: 9 rasters at 640x360 inside 8.0 MiB, or *one* at native 1080p.
+    /// 3. **Emit** a `Node::Image` per visible anchor, whether or not its raster is resident. A node
+    ///    with no pixels is a counted miss in the painter rather than an absent node, so "the image did
+    ///    not draw" is a number in `PaintStats` and not an absence nobody can explain.
+    /// 4. **Widen `damage`**, through the same `widen` the tables and formulas use.
+    ///
+    /// # Why the node carries the address and not the pixels
+    ///
+    /// `Node` is `Copy` and `SurfaceTree`'s before/self/after ordering depends on that. A node holding
+    /// 921,600 bytes cannot be `Copy` and cannot be in a `Vec<Node>`, so it carries the 32-byte
+    /// `AssetId` and the painter resolves it through `&IcebergCache`. The cost is one `Option<&Entry>`
+    /// and a pointer chase per image per frame, which is nothing next to rasterising one.
+    ///
+    /// # Why the rect is the *raster's* size and not the source's
+    ///
+    /// The painter's blit is 1:1 by design -- there is no second scaler in `holonomy-display`, and a
+    /// nearest-neighbour stretch is a different picture rather than a worse one. So the rect has to be
+    /// the raster the cache holds, which is the page-column-width one. §2.9.3's downscaling is therefore
+    /// not an optimisation that paint can skip: it is what makes the blit a copy.
+    fn emit_images(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
+        self.stats.images_drawn = 0;
+        if self.editor.assets().is_empty() {
+            return;
+        }
+        // **And the manifest's span count, which counts anchors as well as formulas.** `scan_anchors` is
+        // the other byte cursor that forces a whole-document read. Free, exact, wrong only if the manifest
+        // is stale -- and it is synced on every edit before anything paints.
+        if self.manifest.span_total() == 0 {
+            return;
+        }
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
+            return;
+        };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        let l = self.chrome.layout;
+        let first = self.state.scroll_line;
+        let last = l.visible_end(&self.state);
+
+        // --- 1. eviction. The window is the visible page plus one either side.
+        let rows_per_page = if self.state.paged {
+            l.page_rows()
+        } else {
+            l.rows.max(1)
+        };
+        let first_page = first / rows_per_page;
+        let last_page = last.saturating_sub(1) / rows_per_page;
+        let evicted = self.images.set_window(
+            &(first_page.saturating_sub(1)..=last_page.saturating_add(1)).collect::<Vec<_>>(),
+        );
+        self.stats.images_evicted += evicted.count;
+        // `evicted.rasters` is dropped here, which releases the scrubbed memory. The *count* is kept
+        // because the scrub itself is asserted in `holonomy-image`'s gate, where the victims can still
+        // be read through a pointer captured before the eviction.
+
+        let mut drawn = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let line_heights = self.state.line_heights.clone();
+        let anchors = holonomy_text::scan_anchors(text);
+
+        for (ordinal, at) in anchors.into_iter().enumerate() {
+            let line = self.line_index(at as usize);
+            if line < first || line >= last {
+                continue;
+            }
+            let Ok(asset) = self.editor.assets().get(ordinal) else {
+                // An anchor with no asset: the text says there is an image here and the catalog does
+                // not agree. Counting it is the only honest response -- drawing a placeholder would be
+                // inventing content.
+                continue;
+            };
+            let id = asset.id;
+            let (rw, rh) = self.raster_size(asset.width as u32, asset.height as u32);
+
+            // --- 2. decode if absent. Only for what is on screen, which is the whole of the ±1 rule's
+            // point: a document may hold a thousand images and only the visible ones cost anything.
+            if !self.images.holds(id.as_bytes())
+                && self.decode_into_cache(ordinal, line / rows_per_page)
+            {
+                // Decoded. `rw`/`rh` are recomputed by the decoder's own header, and a header that
+                // disagreed with the catalog would already have been refused when the catalog was
+                // loaded.
+            }
+
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else {
+                    continue;
+                };
+                y
+            } else {
+                l.text.y + line_heights.y(line - first)
+            };
+            // The colour is never read: `Painter::image` blits the raster's own RGBA and ignores
+            // `Rect::colour`. The page background is passed because `Rect` requires one, and because
+            // it is the right answer for the `DamageRect` a caller derives from the rect.
+            let rect = Rect::new(
+                l.text.x as i32,
+                top as i32,
+                rw,
+                rh,
+                holonomy_render::chrome::colour::PAGE,
+            );
+            tree.before
+                .push(SurfaceTree::leaf(Node::Image { rect, asset_id: id }));
+            drawn += 1;
+            extra = union_opt(extra, Some(rect.bounds().unwrap_or(DamageRect::EMPTY)));
+        }
+        self.stats.images_drawn = drawn;
+        widen(damage, extra);
+    }
+
+    /// Decode asset `ordinal` and admit the page-column-width raster, reporting whether it worked.
+    ///
+    /// Three buffers, in this order, and each is the reason for the next:
+    ///
+    /// * `image_decode_scratch` at **native** size, because [`holonomy_image::decode`] produces the
+    ///   source's own pixels. `read_header` sizes it first, so a header claiming 32 megapixels is
+    ///   refused *before* anything is allocated from it.
+    /// * `image_resample_scratch` at the **raster** size, because [`holonomy_image::resample`] cannot
+    ///   write in place and the two sizes are different by construction at 1920x1080.
+    /// * the cache's `SecureBlock`, which is where the result lives and what the budget counts.
+    ///
+    /// A failure at any step returns `false` and leaves the cache untouched. It is not an error the
+    /// paint should propagate: one undecodable asset is a blank rectangle, and failing the whole frame
+    /// over it would turn a bad picture into an unusable editor.
+    fn decode_into_cache(&mut self, ordinal: usize, page: u32) -> bool {
+        let Ok(asset) = self.editor.assets().get(ordinal) else {
+            return false;
+        };
+        let png = asset.png.as_slice();
+        let Ok(header) = holonomy_image::read_header(png) else {
+            return false;
+        };
+        // `decoded_len` saturates through `u64`, so a header claiming 32 megapixels produces a length
+        // rather than a wrap. The `resize` below then either succeeds or the allocation fails, and a
+        // failed allocation is an abort rather than a silent 100 MB buffer -- which is the right
+        // response to a hostile header in a process with a 16 MiB RSS budget.
+        let native = holonomy_image::decoded_len(&header);
+        if self.image_decode_scratch.len() < native {
+            self.image_decode_scratch.resize(native, 0);
+        }
+        if holonomy_image::decode(png, &mut self.image_decode_scratch).is_err() {
+            return false;
+        }
+        let (rw, rh) = self.raster_size(header.width, header.height);
+        // `bytes_for` already saturates to `usize::MAX`, so there is no conversion left to make.
+        let want = holonomy_image::scale::bytes_for(rw, rh);
+        if self.image_resample_scratch.len() < want {
+            self.image_resample_scratch.resize(want, 0);
+        }
+        if holonomy_image::scale::resample_pixels(
+            header.width,
+            header.height,
+            &self.image_decode_scratch,
+            rw,
+            rh,
+            &mut self.image_resample_scratch,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let decoded = &self.image_resample_scratch[..want];
+        if self
+            .images
+            .insert(
+                *asset.id.as_bytes(),
+                page,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                rw,
+                rh,
+                u64::from(header.width) * u64::from(header.height),
+                decoded,
+            )
+            .is_ok()
+        {
+            self.stats.images_decoded += 1;
+            true
+        } else {
+            // A raster larger than the whole budget. §2.9.3's arithmetic says 9 fit; a 20th does not,
+            // and the refusal is the cache's `Budget` error rather than an overflow.
+            false
+        }
+    }
+
+    /// Bytes of decoded image resident right now. The number §2.9.4's budget row is about.
+    pub fn image_cache_bytes(&self) -> usize {
+        self.images.resident_bytes()
+    }
+
+    fn seek_scrollbar(&mut self, y: i32) {
+        let rail = self.chrome.layout.scrollbar;
+        let thumb = self.chrome.scroll_thumb(&self.state);
+        let span = rail.height.saturating_sub(thumb.height);
+        if span == 0 {
+            return;
+        }
+        let offset = self.scrollbar_drag.unwrap_or(0);
+        let position =
+            (i64::from(y) - i64::from(rail.y) - i64::from(offset)).clamp(0, i64::from(span)) as u64;
+        let last = u64::from(self.state.total_lines.saturating_sub(1));
+        let line = ((position * last + u64::from(span) / 2) / u64::from(span)) as u32;
+        let _ = self.scroll_to(line);
+    }
+
+    /// Scroll the page by `delta` lines, without moving the caret.
+    ///
+    /// Separate from [`Session::move_line`] because moving the caret is not the same as scrolling the
+    /// page, and a gate for the Iceberg window needs to do the second without the first: scrolling
+    /// *with* the caret keeps the caret on screen, so it can never actually leave the image.
+    ///
+    /// Saturating at zero rather than refusing, because scrolling up past the first line is a thing a
+    /// reader does, not an error.
+    ///
+    /// **And bounded at the other end, which it was not.** The wheel scrolls the page by `dy * 3`
+    /// lines per notch, and nothing stopped the total: on a short document, enough notches put
+    /// `scroll_line` past the last line, and the page emitter's `first >= last` guard then drew
+    /// **nothing at all** -- a blank page, with the only way out being a caret move.
+    ///
+    /// [`Session::scroll_to`] already clamped to the document (`line.min(total_lines - 1)`), so the
+    /// two scroll entry points disagreed about where the page may end. They agree now.
+    pub fn scroll_by(&mut self, delta: i64) -> u32 {
+        // **The sum is computed in `i64` and clamped in `u32`, not the other way round.** The old
+        // code did `as u32` on an unclamped `i64`, so a `scroll_line` past `u32::MAX` wrapped to a
+        // small number and the page jumped to the top.
+        let last = self.state.total_lines.saturating_sub(1);
+        let next = (self.state.scroll_line as i64)
+            .saturating_add(delta)
+            .clamp(0, i64::from(last)) as u32;
+        if next == self.state.scroll_line {
+            return self.state.scroll_line;
+        }
+        self.state.scroll_line = next;
+        // The whole page: a scroll moves every line, so there is no smaller honest rect.
+        self.damage = self.chrome.full_damage();
+        self.state.scroll_line
+    }
+
+    /// The first line on screen.
+    pub fn scroll_line(&self) -> u32 {
+        self.state.scroll_line
+    }
+
+    /// The document line image `ordinal` is anchored on.
+    ///
+    /// `ordinal` is the anchor's index among the document's anchors, which is also its index into the
+    /// catalog -- the pairing `AssetCatalog`'s ordering contract is about.
+    pub fn line_of_anchor(&self, ordinal: usize) -> u32 {
+        let Ok(text) = self.editor.text() else {
+            return 0;
+        };
+        holonomy_text::scan_anchors(&text)
+            .get(ordinal)
+            .map_or(0, |at| self.line_index(*at as usize))
+    }
+
+    /// The raster size `(width, height)` image `ordinal` is drawn at, in pixels.
+    ///
+    /// This is the **page-column-width** size, not the source image's, and the difference is §2.9.3's
+    /// whole decision. Exposed because a gate asserting "the resident raster is the column-width one"
+    /// needs the number the *layout* used, not the one the catalog recorded -- the two being equal is
+    /// the property, and a test that recomputed the expectation from the catalog would agree with a
+    /// broken layout.
+    pub fn chrome_rect_for_image(&self, ordinal: usize) -> (u32, u32) {
+        let Ok(asset) = self.editor.assets().get(ordinal) else {
+            return (0, 0);
+        };
+        self.raster_size(asset.width as u32, asset.height as u32)
+    }
+
+    /// The resident raster's pixels for image `ordinal`, if it is resident.
+    ///
+    /// Read-only, and for the same reason every other accessor here is: the budget and the scrub are
+    /// properties a gate must be able to observe, and a cache whose contents can be written from
+    /// outside could not be asserted about.
+    pub fn image_cache_pixels(&self, ordinal: usize) -> Option<&[u8]> {
+        let asset = self.editor.assets().get(ordinal).ok()?;
+        self.images
+            .get_by_id(asset.id.as_bytes())
+            .map(|e| e.pixels())
+    }
+
+    /// The resident raster's `(width, height)` for image `ordinal`.
+    pub fn image_cache_size(&self, ordinal: usize) -> Option<(u32, u32)> {
+        let asset = self.editor.assets().get(ordinal).ok()?;
+        self.images
+            .get_by_id(asset.id.as_bytes())
+            .map(|e| (e.width, e.height))
+    }
+
+    /// One pixel of the current frame, as `0x00RRGGBB`.
+    ///
+    /// `Frame::pixel` returns the frame's own `0xAARRGGBB`; this normalises it so a test compares
+    /// against the `chrome::colour` constants rather than re-deriving the alpha byte.
+    pub fn frame_pixel(&self, x: u32, y: u32) -> u32 {
+        self.frame.pixel(x, y) & 0x00FF_FFFF
+    }
+
+    /// The Iceberg cache's budget.
+    pub fn image_cache_budget(&self) -> usize {
+        self.images.budget()
+    }
+
+    /// Rasters resident right now.
+    pub fn image_cache_len(&self) -> usize {
+        self.images.len()
+    }
+
+    /// Draw every formula whose line is on screen, and widen `damage` to cover them.
+    ///
+    /// # The two modes, and why both are here
+    ///
+    /// A formula is drawn as one of two things:
+    ///
+    /// * **the caret is inside it** — the raw LaTeX, in the monospace face, exactly as typed. Editing
+    ///   a formula means editing its source, and a compiled layout cannot be edited: there is no
+    ///   position in `rac{-b}{2a}` that means "between the minus and the b", because the compiled
+    ///   form has no such character.
+    /// * **the caret is elsewhere** — the compiled layout: glyphs from the math face for the symbols,
+    ///   Inter Italic for the variables, and *procedural fills* for the fraction bars and radical
+    ///   overlies.
+    ///
+    /// The switch is on the caret alone, with no focus ring and no mode key, because the caret is
+    /// already the thing that says what the user is doing. A separate "edit formula" mode would need
+    /// its own state, its own exit, and its own way to be wrong.
+    ///
+    /// **A formula that does not parse draws as raw LaTeX even when the caret is elsewhere.** That is
+    /// `math.rs`'s rule and it is the right one: a half-typed `ra` is not an error to show the user
+    /// as a blank box, it is a formula being written. `math_parse_errors` counts it, because a
+    /// deliberate fallback and a formula that silently stopped compiling look identical on screen.
+    ///
+    /// # Why the bars are not glyphs
+    ///
+    /// `MathRun::Rule` becomes a [`holonomy_render::Rect`] and `MathRun::RadicalTick` becomes a small
+    /// stepped fill, both integer-aligned. A 1 px line drawn from a glyph outline is antialiased at
+    /// both ends and so does not meet the glyph beside it exactly; at 1x that seam is visible. This is
+    /// PROJECT.md §2.9.2 point 4 applied, and it is why the radical is a shape rather than U+221A.
+    fn emit_math(
+        &mut self,
+        tree: &mut SurfaceTree,
+        damage: &mut Option<DamageRect>,
+        source: &mut dyn holonomy_text::LeafSource,
+    ) {
+        self.stats.math_compiled = 0;
+        self.stats.math_raw = 0;
+        self.stats.math_rules = 0;
+        self.stats.math_parse_errors = 0;
+
+        // **The manifest answers "is there anything here to draw?" for free.** Phase 12's remaining work,
+        // and the reason this is the whole 6.00 MiB: `read_document` below is the only thing that grows
+        // `doc_scratch`, and it was called unconditionally because the span scanners are byte cursors. The
+        // manifest counted the same markers once at open. `tests/session_manifest.rs` holds this down.
+        if self.manifest.span_total() == 0 {
+            return;
+        }
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
+            return;
+        };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        let m = self.chrome.metrics;
+        let l = self.chrome.layout;
+        let mut mm = MathMetrics::new(m.cell_w, m.cell_h);
+        // Real per-glyph advances, so the layout's boxes match the ink it is about to draw.
+        //
+        // Without this the layout sits on the page's 8 px text grid while the fonts are proportional:
+        // measured at 16 ppem, JetBrains Mono advances 10 px and `\sum` 14, so every glyph overlapped
+        // its neighbour by 1-2 px and a superscript landed *inside* the summation sign. See
+        // `MathMetrics::advance` for the table and `crates/holonomy-assets/examples/adv.rs`, which
+        // prints it.
+        mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
+        let first = self.state.scroll_line;
+        let last = l.visible_end(&self.state);
+        let caret = self.editor.caret();
+        let ink = holonomy_render::chrome::colour::INK;
+        let line_heights = self.state.line_heights.clone();
+        // The closure below cannot touch `self`: it holds `&mut self.math_scratch`, and borrowing
+        // `self.line_index` as well is E0500. So every field it needs is copied out first and the
+        // counters come back out after. Copying a `ChromeMetrics` is four `u32`s and a `LineHeights`
+        // is a `Vec` that is *cloned* -- which is why this is worth a comment rather than a shrug: it
+        // is one allocation per paint, on the same path `publish_line_heights` already allocates on.
+        // The alternative -- an explicit `for` loop with the borrows scoped per iteration -- is what
+        // this should be, and `for_each_math_span`'s closure is the wrong tool for a body that mutates
+        // the session. Recorded rather than left for someone to rediscover at three more call sites.
+        let mut compiled = 0u32;
+        let mut raw_count = 0u32;
+        let mut rules = 0u32;
+        let mut parse_errors = 0u32;
+        let mut extra: Option<DamageRect> = None;
+        let scratch = &mut self.math_scratch;
+        let source = &mut self.math_source;
+        let line_of = |at: usize| self.lines.line_of(at);
+
+        holonomy_text::for_each_math_span(text, |span| {
+            let line = line_of(span.start as usize);
+            if line < first || line >= last {
+                return;
+            }
+            let inner = span.inner();
+            let top = if self.state.paged {
+                let Some(y) = l.row_y(&self.state, line) else {
+                    return;
+                };
+                y
+            } else {
+                l.text.y + line_heights.y(line - first)
+            };
+
+            // --- caret inside: the raw LaTeX, in the monospace face.
+            if span.contains(caret) {
+                let raw = &text[inner.clone()];
+                let shown: String = raw
+                    .iter()
+                    .take(MAX_MATH_SOURCE)
+                    .map(|&b| b as char)
+                    .collect();
+                if !shown.is_empty() {
+                    // The source is drawn at the text column's left edge, which is where the formula
+                    // *starts* -- not where the caret is. A formula that grew to 200 bytes would
+                    // otherwise reflow the rest of the line every keystroke.
+                    push_math_source(
+                        &mut tree.before,
+                        m.cell_w,
+                        l.text.x as i32,
+                        top as i32,
+                        &shown,
+                        ink,
+                    );
+                }
+                raw_count += 1;
+                let w = (shown.chars().count() as u32) * m.cell_w;
+                let h = mm.cell_h;
+                extra = union_opt(extra, Some(DamageRect::new(l.text.x, top, w, h)));
+                // The caret inside a formula is drawn by the chrome's own line model at the column,
+                // which for a formula that starts at the text column is the same place. Nothing extra
+                // to do: the chrome already draws it, and it lands on the source.
+                return;
+            }
+
+            // --- caret elsewhere: compile.
+            source.clear();
+            source.extend_from_slice(&text[inner]);
+            let Ok(node) = math::parse(source) else {
+                parse_errors += 1;
+                // Fall back to the raw source at the text column. Same geometry as the raw mode above,
+                // deliberately: a formula that stops compiling must not move.
+                let shown: String = source
+                    .iter()
+                    .take(MAX_MATH_SOURCE)
+                    .map(|&b| b as char)
+                    .collect();
+                if !shown.is_empty() {
+                    push_math_source(
+                        &mut tree.before,
+                        m.cell_w,
+                        l.text.x as i32,
+                        top as i32,
+                        &shown,
+                        ink,
+                    );
+                }
+                raw_count += 1;
+                let w = (shown.chars().count() as u32) * m.cell_w;
+                extra = union_opt(extra, Some(DamageRect::new(l.text.x, top, w, mm.cell_h)));
+                return;
+            };
+
+            // The box is `above` the text column's top by half its extra height, so a fraction is
+            // vertically centred on the line it sits in rather than hanging from its top edge. This is
+            // a *centre*, not a `LineHeights` offset: `publish_line_heights` handles the displacement
+            // of the lines below, and doing both here would double it.
+            let box_ = measure_only(&node, &mm);
+            let y = top + (m.cell_h.saturating_sub(box_.height)) / 2;
+            scratch.clear();
+            layout_boxed(&node, &mm, l.text.x, y, scratch);
+
+            for run in &scratch.runs {
+                match *run {
+                    MathRun::Glyph { x, y: gy, cp, .. } => {
+                        // The style is per glyph, not per formula: `\alpha` is in the math face, `x` is
+                        // Inter Italic. `is_math_symbol` is the whole decision.
+                        let style = if holonomy_assets::payload::is_math_symbol(cp) {
+                            holonomy_render::Style::MATH
+                        } else {
+                            holonomy_render::Style::ITALIC
+                        };
+                        tree.before.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+                            x as i32, gy as i32, cp, 1, style, 0, ink,
+                        ))));
+                    }
+                    MathRun::Rule { x: rx, y: ry, w, h } => {
+                        tree.before.push(SurfaceTree::leaf(Node::Rect(
+                            holonomy_render::Rect::new(rx as i32, ry as i32, w, h, ink),
+                        )));
+                        rules += 1;
+                    }
+                    MathRun::RadicalTick {
+                        x: rx,
+                        y: ry,
+                        w,
+                        tick_h,
+                    } => {
+                        // A vertical stub plus a diagonal, drawn as integer steps. See the module
+                        // header on `MathRun::RadicalTick`: a diagonal as 1 px squares aliases, and
+                        // this is the only place in the renderer that draws one.
+                        let stub_w = (m.cell_w / 3).max(1);
+                        tree.before.push(SurfaceTree::leaf(Node::Rect(
+                            holonomy_render::Rect::new(rx as i32, ry as i32, stub_w, tick_h, ink),
+                        )));
+                        // The diagonal: `tick_h` steps of one pixel each, marching right.
+                        let steps = tick_h.min(w);
+                        for step in 0..steps {
+                            tree.before.push(SurfaceTree::leaf(Node::Rect(
+                                holonomy_render::Rect::new(
+                                    (rx + stub_w + step) as i32,
+                                    (ry + tick_h - 1 - step) as i32,
+                                    1,
+                                    2,
+                                    ink,
+                                ),
+                            )));
+                        }
+                        rules += 1;
+                    }
+                }
+            }
+            compiled += 1;
+            extra = union_opt(
+                extra,
+                Some(DamageRect::new(l.text.x, y, box_.width, box_.height)),
+            );
+        });
+
+        self.stats.math_compiled = compiled;
+        self.stats.math_raw = raw_count;
+        self.stats.math_rules = rules;
+        self.stats.math_parse_errors = parse_errors;
+        widen(damage, extra);
+    }
+
+    /// Add every formula's height to the line-height model, so the lines below it move down.
+    ///
+    /// See the free function [`math_blocks`] for the model and why it is a free function. This method
+    /// exists only to build the `MathMetrics` -- which **must match `emit_math` exactly**, because if
+    /// the two disagree the displacement the line model applies is for one formula and the pixels are
+    /// another, and a wrong displacement is invisible in the counters: the formula still draws.
+    fn math_blocks_for(&mut self, source: &mut dyn holonomy_text::LeafSource) -> Vec<(u32, u32)> {
+        // **The 6 MiB read, removed.** Phase 12 named this as the blocker it could not fix: it called
+        // `read_document` unconditionally because `for_each_math_span` is a cursor over bytes and *"does
+        // this document contain any math"* could not be asked without reading them to find the `$$`.
+        // [`crate::manifest::Manifest`] answers it from structure — a `u32` per section, 12 bytes each,
+        // built at open — and the answer is **zero for a document with no formula in it**.
+        //
+        // So the check is free, exact, and wrong only if the manifest is stale, and the manifest is synced
+        // on every edit by [`Session::sync_manifest`] before anything paints. A stale manifest would make
+        // this skip a formula that exists; `tests/session_manifest.rs`'s
+        // `a_formula_appears_and_the_manifest_notices_within_one_keystroke` is what holds that down.
+        if self.manifest.span_total() == 0 {
+            return Vec::new();
+        }
+        let mut mm = MathMetrics::new(self.chrome.metrics.cell_w, self.chrome.metrics.cell_h);
+        mm.advance = advance_shim(self.painter.atlas(), self.painter.size_index());
+        let Ok(read) = read_document(&mut self.editor, &mut self.doc_scratch, source) else {
+            return Vec::new();
+        };
+        // **The bytes live in `doc_scratch`, and this borrows that field alone.**
+        // `read_document` returns a *length* rather than a slice precisely so this borrow and the
+        // `editor` borrows in the loops below stay disjoint -- a returned `&[u8]` tied to
+        // `&mut Editor` would fuse them, and every `self.editor` use inside would be a conflict.
+        let text = &self.doc_scratch[..read];
+        math_blocks(&self.lines, text, &mm)
+    }
+
+    // ---------------------------------------------------------------- export
+
+    /// Write the document to a pre-opened sink in `format`.
+    ///
+    /// The caller opened `sink.file` during boot. See the module docs for why.
+    pub fn export(&mut self, sink: &mut ExportSink, title: &str) -> Result<Report, SessionError> {
+        let report = holonomy_export::write(&self.editor, &mut sink.file, sink.format, title)?;
+        sink.file.flush()?;
+        self.stats.exports += 1;
+        Ok(report)
+    }
+
+    /// Toggle bold over the word under the caret, or apply it at the caret.
+    ///
+    /// Exposed because the gate needs a way to *style* something deterministically; a keystroke
+    /// binding for it would be a keymap change, and the keymap is already gated.
+    pub fn toggle_bold(&mut self, from: u32, to: u32) -> Result<(), SessionError> {
+        self.editor.style_range(from, to, STYLE_BOLD, 0)?;
+        self.after_edit(0)
+    }
+}
+
+/// Union two optional rectangles.
+///
+/// `DamageRect::union` takes two rectangles, and "no damage yet" is `None` rather than an empty
+/// rectangle, so the optionality has to be lifted out of the way at every step. A `None` on either
+/// side yields the other; two `None`s yield `None`.
+/// A per-codepoint advance function over the atlas, or `None` for the fixed-grid model.
+///
+/// The signature is `fn(u32) -> u32` rather than a closure because `MathMetrics` is `Copy` and
+/// `const`-constructible, and a closure capturing the atlas would make it neither. The cost of that
+/// choice is the table below: the atlas and the size index have to be reachable from a `fn`, which
+/// means they are stashed in statics.
+///
+/// # Why statics rather than a leak
+///
+/// The session holds `&'a Atlas` through its `Painter`, so it does *not* outlive the atlas, and a
+/// leaked `&'static` would be a second reference that could outlive it -- and then point at a
+/// dropped atlas. So the pointers are written once, when the atlas is built, and the advance function
+/// asserts that what it finds is what was published. A formula laid out after the session's painter
+/// was dropped would panic rather than read freed memory, which is the failure order that is safe.
+///
+/// This is a limitation of the `fn`-pointer design and it is the cost of the alternative: a
+/// `dyn Fn` field on `MathMetrics` would make the layout allocate-capable and stop being `Copy`, which
+/// costs every existing caller and buys nothing here.
+fn advance_shim(
+    atlas: Option<&holonomy_assets::atlas::Atlas>,
+    size_index: u8,
+) -> Option<fn(u32) -> u32> {
+    let atlas = atlas?;
+    if std::ptr::from_ref(atlas) as usize
+        != PUBLISHED_ATLAS.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return None;
+    }
+    // Compared in *pixels*, because that is what `publish_atlas` stored. See its comment: the two
+    // sizes are different quantities and mixing them silently disables the whole feature.
+    let px = atlas.sizes().get(size_index as usize).copied().unwrap_or(0);
+    if px as usize != PUBLISHED_SIZE.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    Some(advance_from_published)
+}
+
+/// The published atlas pointer. Written by [`publish_atlas`].
+static PUBLISHED_ATLAS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The published size, in **pixels**. Written by [`publish_atlas`].
+static PUBLISHED_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Publish the atlas and the pixel size the advance shim will read.
+///
+/// Called from [`Session::new`]. A single global because the shim is a plain `fn`; a process that
+/// built two atlases of different sizes would have the second session fall back to the fixed grid,
+/// which [`advance_shim`] detects rather than reading the wrong metrics.
+///
+/// **The size is translated from an index to pixels here, and that is not cosmetic.**
+/// `Painter::size_index` is an index into `Atlas::sizes`, while `Atlas::metric` takes a *pixel* size
+/// and looks the index up itself. Passing the index straight through made every lookup ask for 0 ppem,
+/// find no such size, and return `GlyphMetric::BLANK` -- whose advance is 0 -- so `adv` fell back to
+/// `cell_w` and the whole feature was inert while still looking correct in the counters. The advance
+/// is the one number whose absence changes no counter, which is why this needed a pixel-level
+/// regression test rather than a smoke test: see
+/// `a_formula_laid_out_on_real_advances_is_wider_than_the_fixed_grid_model`.
+fn publish_atlas(atlas: Option<&holonomy_assets::atlas::Atlas>, size_index: u8) {
+    PUBLISHED_ATLAS.store(
+        atlas.map_or(0, |a| std::ptr::from_ref(a) as usize),
+        std::sync::atomic::Ordering::Release,
+    );
+    let px = atlas
+        .and_then(|a| a.sizes().get(size_index as usize).copied())
+        .unwrap_or(0);
+    PUBLISHED_SIZE.store(px as usize, std::sync::atomic::Ordering::Release);
+}
+
+/// The advance function itself: read `GlyphMetric::advance_x` for `cp`, choosing the face per glyph.
+///
+/// The face choice is the same one `emit_math` makes for *drawing*, and it has to be the same one:
+/// measuring `lpha` in Inter, which has no Greek, would give a zero advance and reserve nothing.
+fn advance_from_published(cp: u32) -> u32 {
+    let ptr = PUBLISHED_ATLAS.load(std::sync::atomic::Ordering::Acquire)
+        as *const holonomy_assets::atlas::Atlas;
+    if ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: `ptr` was published from a `&'a Atlas` that some live `Session` owns. A `Session` that
+    // owned it has not been dropped while another `Session` is being painted in this process, because
+    // painting happens through a `&Session` borrow. The remaining hole is two sessions built over two
+    // different atlases, which `advance_shim` rejects by comparing the pointer before publishing a
+    // closure -- so only the *published* atlas is ever read here, and only while its owner lives.
+    let atlas = unsafe { &*ptr };
+    let size = PUBLISHED_SIZE.load(std::sync::atomic::Ordering::Acquire) as u16;
+    let style = if holonomy_assets::payload::is_math_symbol(cp) {
+        holonomy_assets::payload::Style::Math
+    } else {
+        holonomy_assets::payload::Style::Italic
+    };
+    atlas.metric(cp, style, size).advance_x.into()
+}
+
+/// The image `Ctrl+I` inserts: a 1920x1080 colour chart with a 64 px grid.
+///
+/// Deliberately **larger than the page column**, which is §2.9.3's claim made testable: because the
+/// Iceberg cache holds page-column-width rasters, every image in this product is a downscale, and a
+/// fixture at or below the column width would never run the scaler. Committed rather than generated
+/// because `include_bytes!` needs bytes at compile time, and a build script that emitted one would put a
+/// PNG *encoder* into the build -- more code than the fixture.
+pub const TEST_CHART_PNG: &[u8] = include_bytes!("../assets/test-chart.png");
+
+/// How many run slots [`Session::math_scratch`] is sized for.
+///
+/// The quadratic formula -- the gate's worked example -- lays out to 14 runs. 64 is the next power of
+/// two above that and covers `rac{a}{b} + \sqrt{c}` with room for a superscript and a subscript, so
+/// the common case never reallocates. A pathological formula with more than 64 runs grows the `Vec`
+/// once and then stops, which is the same behaviour every other growable buffer here has.
+const MATH_RUN_CAPACITY: usize = 64;
+
+/// The most source bytes of a formula drawn as raw LaTeX.
+///
+/// A `TextRun` is capped at [`TextRun::MAX_LEN`] codepoints, and a `u32` advance times an unbounded
+/// byte count would put the run's right edge past the page. Truncating is wrong in principle and right
+/// in practice: the user is looking at the formula they are editing, which is at the front.
+const MAX_MATH_SOURCE: usize = TextRun::MAX_LEN as usize;
+
+/// The chunk size for the document scans that replaced whole-document copies. Phase 11.
+///
+/// `Session::line_start`, `Session::line_index` and `Session::refresh_counts` used to call
+/// `Editor::text()`, which allocates a `Vec` the size of the document and copies it byte-for-byte --
+/// six times per keystroke. They now stream through `Editor::read_into` in chunks of this size, so
+/// they hold 4 KiB instead of the document and allocate nothing.
+///
+/// **4 KiB, not larger, and the reason is stack rather than throughput.** These are `&self` methods on
+/// the keystroke path and the buffer is a local `[u8; SCAN_CHUNK]`, so it must live on the stack: the
+/// alternative is a `Session` field, which then needs `&mut self` at every call site -- and
+/// `line_index` is called from inside `emit_tables` and `emit_math` while they hold borrows of other
+/// `Session` fields, so making it `&mut self` is a borrow-checker fight over five call sites rather
+/// than a one-line change. `SCAN_CHUNK = LEAF_CAPACITY` so one chunk is exactly one rope leaf and
+/// `read_into` walks the spine rather than re-splitting ranges.
+///
+/// The cost of the choice: a document scan is `document_bytes / 4096` calls into `read_into`. At 3.5
+/// MiB that is ~900 calls for the line count, which is microseconds. Phase 11's third item -- the
+/// Fenwick tree -- removes the scan itself rather than making it cheaper.
+pub const SCAN_CHUNK: usize = 4096;
+
+/// How many bytes one page's worth of document text can be. Phase 12.
+///
+/// **48 KiB, and `Layout::rows` is 23 rather than the 43 first written here.** At 1280x800 the text
+/// column is 23 rows of `cell_h`, so the true ceiling is 23 x 1,024 = 23,552 bytes and 48 KiB is twice
+/// that. The overshoot is deliberate: a `rows` figure that depends on the panel size would make this
+/// constant wrong for every panel but this one, and a buffer that is sized from a constant is one that
+/// cannot be resized by accident on the paint path.
+///
+/// **This is the number that replaces 6 MiB.** `doc_scratch` grows to the whole document because
+/// `emit_tables`, `emit_math` and `emit_images` all want random access across the text. Body text does
+/// not: it wants the 43 lines on screen. So it gets its own buffer, sized to the page.
+///
+/// A field rather than a local because a local array passed to `read_into` **escapes** and is promoted to
+/// the heap -- the reason `Session::table_scratch` exists -- which on a path that paints per keystroke
+/// would be one allocation per paint.
+pub const LINE_SCRATCH_BYTES: usize = 48 * 1024;
+
+/// `node`'s box, without emitting anything.
+///
+/// `math_layout::measure`, re-exported under a name that says what it is for at the call site. There is
+/// a `measure` and a `layout_boxed` in `holonomy_render`, and this function needs the box *twice* --
+/// once to centre the formula vertically before laying it out, and once for the damage rectangle --
+/// so it is the measure-only entry point rather than the one that returns a box as a by-product.
+#[inline]
+/// Every formula's `(anchor_line, height_px)`, for the line-height model.
+///
+/// A free function over its arguments rather than a `&self` method, for the reason
+/// [`read_document`] is: its caller holds `&mut Session::doc_scratch` across the call, so a `&self`
+/// method would borrow all of `Session` and conflict with it.
+///
+/// Same model as tables and the same arithmetic: the extra **is** the block's full height, because
+/// [`LineHeights::from`] is handed pixels and displaces every line from the anchor onward. A formula
+/// one line tall therefore contributes its `cell_h` and pushes the line below it down by a whole line
+/// -- which is wrong for an inline formula and right for a displayed one, and the distinction is
+/// Phase 9B's known limit rather than a bug to be argued about here. Recorded in `PROJECT.md` §9B
+/// rather than silently approximated.
+fn math_blocks(lines: &DocLines, text: &[u8], mm: &MathMetrics) -> Vec<(u32, u32)> {
+    let mut blocks = Vec::new();
+    holonomy_text::for_each_math_span(text, |span| {
+        let inner = span.inner();
+        // An unparseable formula has no box, so it contributes nothing and the raw text's own line
+        // height stands. That is the same answer the caret-inside mode gives.
+        let Ok(node) = math::parse(&text[inner]) else {
+            return;
+        };
+        let line = lines.line_of(span.start as usize);
+        blocks.push((line, measure_only(&node, mm).height));
+    });
+    blocks
+}
+
+/// Which visible line a page-buffer offset falls in, given the per-line `(offset, len)` spans.
+///
+/// **A binary search over `spans`, which is sorted by offset because it is built in line order.** An
+/// offset past the last line returns the last line, which is the answer a caller that clamps wants: a
+/// formula's closing `$$` on the line after the page has scrolled is attributed to the last visible line,
+/// which is the conservative direction for a "this line is claimed" test.
+///
+/// The fallback is a linear scan rather than a `partition_point`, because `spans` is a dozen entries and
+/// a branch-free binary search over something that small costs more to read than a loop.
+fn line_of_span(spans: &[(u32, u32)], offset: usize) -> u32 {
+    // **`enumerate` and not a hand-rolled counter.** The index *is* the row -- `spans` is the page's
+    // `(at, len)` pairs in order, so entry N is row N -- and a counter incremented at the bottom of a
+    // loop is a second copy of that fact to keep in step. **`enumerate` cannot drift**, which matters
+    // because the `saturating_sub(1)` below is the whole of "an offset before the page belongs to the
+    // last row of the previous page".
+    for (row, &(at, len)) in spans.iter().enumerate() {
+        let row = row as u32;
+        let start = at as usize;
+        if offset < start {
+            return row.saturating_sub(1);
+        }
+        if offset < start + len as usize {
+            return row;
+        }
+    }
+    spans.len().saturating_sub(1) as u32
+}
+
+/// Strip a line terminator from a byte slice: `\r\n`, `\n`, or `\r`.
+///
+/// **Both bytes, and CRLF is one terminator rather than two.** A document written on Windows ends its
+/// lines with `\r\n`, and a renderer that draws the `\r` puts a visible mark at the end of every line —
+/// because `\r` has a glyph in most faces, and it is not a blank one. The order matters: stripping `\n`
+/// first and then `\r` handles all three forms with one pass and no lookahead.
+fn strip_terminator(seg: &[u8]) -> &[u8] {
+    let seg = seg.strip_suffix(b"\n").unwrap_or(seg);
+    seg.strip_suffix(b"\r").unwrap_or(seg)
+}
+
+/// A [`TextSource`] over a contiguous run of document bytes. Phase 12.
+///
+/// # Why the session's source is a *page* and not the document
+///
+/// `Editor` cannot lend its text as a slice: its leaves are page-locked and a document is thousands of
+/// them, so there is no contiguous `&[u8]` for the whole rope. **A rope has no slice.** So
+/// [`Session::emit_body_text`] copies the visible page into `line_scratch` and hands *that* to the
+/// painter, and every `DocRun`'s offset is into the page buffer rather than into the document.
+///
+/// That is the same "structure without content" split Phase 13's section manifest is about: what the
+/// renderer needs is a *window*, and the window is contiguous. Phase 13's windowing makes the window
+/// larger without making the copy larger, because a section's text is read once and read wide.
+///
+/// # Why a wrapper and not a bare `&[u8]`
+///
+/// `TextSource` is a trait so `holonomy-display` does not depend on `holonomy-text`, which is the same
+/// division of labour `RasterSource` exists for. A three-line impl over a slice is the price of that, and
+/// it is the same price `RasterSource` costs.
+struct PageText<'a>(&'a [u8]);
+
+impl TextSource for PageText<'_> {
+    fn document(&self, offset: u32, len: u32) -> Option<&[u8]> {
+        let start = usize::try_from(offset).ok()?;
+        let len = usize::try_from(len).ok()?;
+        let end = start.checked_add(len)?;
+        self.0.get(start..end)
+    }
+}
+
+/// How many codepoints `bytes` holds, which is how many cells wide it is on the page.
+///
+/// **The same rule as [`codepoints_upto`](Self) applied to a whole slice**, because a byte that is not
+/// a continuation byte *is* a codepoint start. Part 24 needs it to advance the pen between the styled
+/// runs of one line: **the grid is cells, so the next run's x is the number of codepoints before it and
+/// not the number of bytes.** Using bytes there would put every run after the first multi-byte character
+/// one cell too far right, which is the same arithmetic the caret got wrong in part 22 and the opposite
+/// direction.
+///
+/// **`O(len)`, no decode and no allocation**, so calling it per run is a scan of the line rather than of
+/// the document: a line is at most `cells_per_row` codepoints wide, and the runs tile it.
+/// **The length in bytes of the UTF-8 scalar at the front of `bytes`, at least 1.** Part 33.
+///
+/// **A continuation byte at the front cannot start a scalar**, and a truncated tail cannot be decoded,
+/// so the answer is clamped to one byte rather than refused: the walk in
+/// [`Session::column_at_pen`] is over a chunk boundary it cannot see, and stopping there would put
+/// every later glyph of a 64-byte-boundary line one column short.
+///
+/// **This is not the same as `std::str::from_utf8`, deliberately.** That answers "is this whole slice
+/// valid UTF-8", which is the wrong question mid-chunk and costs a scan of the rest of the slice.
+fn scalar_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.chars().next().map_or(1, char::len_utf8),
+        Err(e) => {
+            let valid = e.valid_up_to();
+            if valid > 0 {
+                std::str::from_utf8(&bytes[..valid])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                    .map_or(1, char::len_utf8)
+            } else {
+                // **An invalid byte is one scalar's worth of movement**, matching `pen_of`, which
+                // charges one `.notdef` cell for it. Two functions disagreeing here would put the caret
+                // a column from the glyph it points at, on a document that is not valid UTF-8.
+                e.error_len().unwrap_or(1)
+            }
+        }
+    }
+}
+
+/// Push one body-text run at `x`, `y`, in `style`.
+///
+/// **A free function rather than a method** because it holds no session state and takes seven arguments
+/// that are all values — the same reason `strip_terminator` and `codepoints_upto` are free. **Part 24
+/// added it because the styled path emits four runs per line** (the plain gaps and the tail) and writing
+/// the `DocRun::new` call out four times is how four slightly different calls drift apart.
+#[allow(clippy::too_many_arguments)]
+fn push_doc_run(
+    tree: &mut SurfaceTree,
+    x: u32,
+    y: u32,
+    at: u32,
+    len: u32,
+    style: holonomy_render::Style,
+    ink: u32,
+    size: u8,
+    baseline_shift: i8,
+    decorations: u8,
+) {
+    if len == 0 {
+        return;
+    }
+    // **`DocRun::styled` and not `new`, and the three trailing arguments are why.** A run that carries a
+    // baseline shift or a decoration is a different node from one that carries neither, and `new` is the
+    // constructor for the common case -- every caller of it wants `(0, DECORATION_NONE)` and four of them
+    // pass exactly that in the gap and tail arms above.
+    //
+    // **The box this run occupies is `DocRun::bounds`'s answer, not `cell_h`.** A shifted run draws
+    // outside its line box, and `bounds` grows the box in the direction the shift moves the glyphs; the
+    // line's damage is widened separately by `Session::line_shift`, because a *line* is damaged once for
+    // every run on it and the union belongs at the line and not here.
+    tree.before
+        .push(SurfaceTree::leaf(Node::DocText(DocRun::styled(
+            x as i32,
+            y as i32,
+            at,
+            len,
+            style,
+            size,
+            ink,
+            baseline_shift,
+            decorations,
+        ))));
+}
+
+/// **The ink a span draws in: its own colour, or the document's.** Part 29.
+///
+/// ## Why `color_rgb` needed a helper rather than an expression at the call site
+///
+/// **Because `0` means two things and they must not collapse.** `TextIntervalSpan::color_rgb`'s own
+/// doc says *"Zero means the document's default colour, not opaque black"* — so `0` is not black, it
+/// is *unspecified*. Passing `span.color_rgb` straight through would paint every uncoloured span in
+/// `0x00000000`, and the alpha byte is what the blitter reads, so the page's text would disappear.
+///
+/// **The alpha byte is added here and nowhere else.** `DocRun::colour` is packed `0xAARRGGBB` and a
+/// span's is `0x00RRGGBB`, so `| 0xFF00_0000` is the one conversion and it belongs in one function.
+///
+/// ## Why this was not written in phase 4 or 6
+///
+/// **Because nothing called it.** `color_rgb` is a documented field, an argument to `style_range`, a
+/// term in `same_style` -- so it split runs and survived undo -- and **the renderer never read it.**
+/// Part 24 is the same story for `style_flags`, one field away in the same record, and this is the
+/// half that was still outstanding when part 28's selection made a range available to colour.
+///
+/// `crates/holonomy/tests/text_colour.rs` is the gate, and its first run reported **zero** differing
+/// pixels.
+fn span_ink(span: &holonomy_text::TextIntervalSpan, ink: u32) -> u32 {
+    if span.color_rgb == 0 {
+        ink
+    } else {
+        0xFF00_0000 | (span.color_rgb & 0x00FF_FFFF)
+    }
+}
+
+/// **How far the pen has moved after laying out `bytes`, in the document's own faces.** Part 31.
+///
+/// ## Why this exists
+///
+/// **`emit_body_text` positioned each run at `text.x + cell_x * cell_w`** — the 8 px grid — **while
+/// [`Painter::doc_text`] advanced by the font's own metrics.** So a line drawn as one run accumulated
+/// the font's advances and a line drawn as three snapped back to the grid at every boundary: **a run
+/// boundary was a discontinuity**, and bolding or colouring a word moved the text after it (part 29).
+///
+/// ## Why it goes through [`Painter::advance_of`] and not through the atlas
+///
+/// **Because that is where the rule lives, and the rule has two cases.** A space takes the face's
+/// advance; a `.notdef` takes the cell and is counted missing. Re-implementing that here is how the two
+/// sides drifted in the first place, and the failure is invisible — a document whose spaces are each a
+/// pixel short still looks like a document.
+///
+/// ## Why the chrome's grid is still used elsewhere, and that is part 30
+///
+/// **[`Caret::locate`] and the selection highlight are still on the grid**, and they are still wrong.
+/// Making them right is `part 30`'s decision and not this one, because it moves every x in the project
+/// and §2.9.3's 640 px page column with it. **This change makes the *document* internally consistent**
+/// — every run placed by the same rule the painter advances by — and leaves the caret question where
+/// `tests/grid_vs_glyphs.rs` holds it.
+///
+/// ## A free function, because it needs one field
+///
+/// **`&Painter` and not `&self`**, so the borrow is one argument rather than the whole session — which
+/// matters because the only two callers are inside `emit_body_text`, which holds `&mut self` for other
+/// reasons. **`Painter` is all it reads**, and saying so in the signature means a second caller cannot
+/// reach for `self` and quietly depend on something else.
+///
+/// ## `O(bytes)`, and no allocation
+///
+/// **A scan over bytes the caller already has.** `emit_body_text` passes the page's `line_scratch`, so
+/// this reads a buffer that was read anyway; `refresh_caret_column` would pass one line. **Decoding is
+/// `from_utf8().valid_up_to()`, the same walk `doc_text` does**, and an invalid byte counts as one
+/// `.notdef` — the same direction, for the same reason.
+fn pen_of(painter: &Painter<'_>, bytes: &[u8], style: holonomy_render::Style, size: u8) -> u32 {
+    let mut pen = 0u32;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        // **`painter.advance_of`, and that is the whole reason this function exists.**
+        //
+        // It is the one function that answers "how far does the pen move for this codepoint" for
+        // *both* the painter and every caller that has to place something between two glyphs — the
+        // caret, the selection's two edges, and a styled run's start. `Painter::advance_of`'s own
+        // comment records what happened when there were two answers: a run boundary placed on the grid
+        // while `doc_text` advanced by the face's metrics, so styling a word moved the text after it.
+        //
+        // **A space is the case where the two would still differ if this function decided for itself.**
+        // A space has no ink and an advance, and takes the *face's* advance; a `.notdef` has neither and
+        // takes the cell. Re-deciding that here — with `.max(1)`, say — would put the caret a pixel off
+        // after every space, which is the most common character in the document.
+        let (cp, used) = match std::str::from_utf8(&bytes[at..]) {
+            Ok(s) => match s.chars().next() {
+                Some(c) => (u32::from(c), c.len_utf8()),
+                None => break,
+            },
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if valid > 0 {
+                    let s = std::str::from_utf8(&bytes[at..at + valid])
+                        .expect("valid_up_to is a char boundary by definition");
+                    match s.chars().next() {
+                        Some(c) => (u32::from(c), c.len_utf8()),
+                        None => break,
+                    }
+                } else {
+                    (0xFFFD, e.error_len().unwrap_or(1))
+                }
+            }
+        };
+        // **`advance_at` and `size`, not `advance_of`.** A heading is 125 % of the body and its
+        // glyphs are wider, so measuring it at the body size would place every run after a heading --
+        // and the caret -- left of where the glyphs actually are. The two sizes are one argument
+        // apart and the argument is the run's own `DocRun::size`, which is what `doc_text` advances by.
+        pen = pen.saturating_add(painter.advance_at(cp, style, size));
+        at += used;
+    }
+    pen
+}
+
+/// **The pen position `at` bytes into a line, using each styled run's own face.** Part 33.
+///
+/// ## Why this exists, and why it is not `pen_of`
+///
+/// **`pen_of` measures a whole run in one face.** A line with three runs needs three calls with three
+/// faces, and getting the boundaries right by hand at each call site is how the run positions and the
+/// caret came to disagree in the first place — so the boundary walk lives here once, and the caret,
+/// the selection highlight and the text itself all get their positions from the same arithmetic.
+///
+/// ## `at` is bytes into `text`; `line_start` is the line's offset in the document
+///
+/// **Both, and the distinction is load-bearing.** `runs` is keyed on document offsets because that is
+/// what `SpanMap` speaks, and `text` is a slice of the page buffer because that is what the emitter
+/// already has. Conflating them would put a highlight on the wrong line, and the two differ by
+/// everything above the page.
+///
+/// ## No allocation
+///
+/// **`runs` is the page's one query, already in hand** — this walks a handful of entries over at most
+/// one line's bytes. The paint path's allocation invariant is asserted by `tests/session_no_alloc.rs`
+/// for the edit path and is explicitly out of scope for paint, but a function on this path has no
+/// business allocating when a walk answers it.
+/// ## `body` is the unstyled face, passed in rather than assumed
+///
+/// This measured every unstyled stretch in `REGULAR`, which was correct while `REGULAR` was the
+/// only face a plain byte could draw in. The font dropdown ended that: `Session::doc_style`
+/// decides the body face now, and a free function cannot ask it — so the caller passes
+/// `Session::body_style()` and this applies the same rule `doc_style` does (a face-0 span is
+/// body text too; bold, italic and code keep their own faces). A highlight measured in Inter
+/// over a page painted in Mono would be part 33's defect reintroduced from the other side.
+#[allow(clippy::too_many_arguments)]
+fn pen_at(
+    painter: &Painter<'_>,
+    text: &[u8],
+    line_start: u32,
+    at: usize,
+    runs: &[(holonomy_text::TextIntervalSpan, u32, u32)],
+    body: holonomy_render::Style,
+    size_of: impl Fn(u16) -> u8,
+) -> u32 {
+    let at = at.min(text.len());
+    let mut pen = 0u32;
+    // **The cursor is a byte index into `text`, and every run boundary it lands on is converted from a
+    // document offset before use.** The `- line_start` is `saturating_sub` because a run can start
+    // before this line -- a styled run begun on the previous line and continuing here -- and a
+    // subtraction that wrapped would put the highlight a page to the left.
+    let mut cursor = 0usize;
+    for (span, lo, hi) in runs {
+        let lo = (*lo).saturating_sub(line_start) as usize;
+        let hi = (*hi).saturating_sub(line_start) as usize;
+        if lo >= at {
+            break;
+        }
+        if hi <= cursor {
+            continue;
+        }
+        if lo > cursor {
+            pen = pen.saturating_add(pen_of(painter, &text[cursor..lo], body, 0));
+        }
+        let end = hi.min(at);
+        // **The same mapping `Session::doc_style` applies**: a span whose flags collapse to face 0
+        // (a colour-only span) is body text and follows the dropdown; bold, italic and code carry
+        // their own faces.
+        let span_style = if span.atlas_style() == 0 {
+            body
+        } else {
+            holonomy_render::Style(span.atlas_style())
+        };
+        // **The span's own size, resolved by the caller's `size_of`.** A heading is the one style
+        // whose advance differs, and a caret measured at the body size inside a heading would sit a
+        // fifth of a line left of the glyph it points at by the end of the heading's first word.
+        let span_size = size_of(span.style_flags);
+        pen = pen.saturating_add(pen_of(painter, &text[lo..end], span_style, span_size));
+        cursor = end;
+        if cursor >= at {
+            return pen;
+        }
+    }
+    if cursor < at {
+        pen = pen.saturating_add(pen_of(painter, &text[cursor..at], body, 0));
+    }
+    pen
+}
+
+/// Push a filled rectangle into `tree`'s **back** layer. Part 28.
+///
+/// **A free function beside [`push_doc_run`](Self) rather than a method, and for the reason that one
+/// is a free function.** `SurfaceTree::leaf(Node::Rect(Rect::new(...)))` nests three ways and the `u32`
+/// to `i32` conversion is inside the innermost one; a helper is where the conversion gets asserted
+/// once instead of at every call site.
+///
+/// **Into `before`, so it paints under the text.** A selection highlight is the only surface in this
+/// file that must be behind the glyphs rather than in front of them, and it is exactly the kind of
+/// thing that gets pushed the wrong way once and is invisible until someone selects a word.
+fn push_rect(tree: &mut SurfaceTree, x: u32, y: u32, width: u32, height: u32, colour: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    tree.before.push(SurfaceTree::leaf(Node::Rect(Rect::new(
+        x as i32, y as i32, width, height, colour,
+    ))));
+}
+
+/// Bytes of the segment starting at `from` that hold at most `limit` codepoints.
+///
+/// **Never splits a multi-byte character**, which is the entire job. Counting non-continuation bytes
+/// finds the `limit`-th codepoint start; walking its continuation bytes finds where it ends. No decode,
+/// no allocation, `O(limit)`.
+///
+/// A byte that is not a continuation byte is a codepoint start by definition, so the count is right even
+/// for a malformed document — where the "codepoint" may not be a real one. That is the safe direction:
+/// the painter draws the bytes and counts what it cannot decode, and this only decides where to cut.
+fn codepoints_upto(bytes: &[u8], from: usize, limit: usize) -> usize {
+    if limit == 0 || from >= bytes.len() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] & 0xC0 != 0x80 {
+            if count == limit {
+                break;
+            }
+            count += 1;
+        }
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return bytes.len() - from;
+    }
+    // **CORRECTION, part 39: this returned `i + 1` and drew one cell more than the measure.**
+    //
+    // The loop above breaks with `count == limit` and `i` sitting on **the first byte of the
+    // (limit + 1)-th codepoint** -- which is a character boundary, because the byte that triggered the
+    // test is exactly the one that is not a continuation byte. So the end of what was asked for is `i`,
+    // and the `end = i + 1` tail added the one codepoint the limit excluded.
+    //
+    // **Measured, in a gate written to record a different limitation**: 300 characters typed at a 72-cell
+    // measure drew **73** glyphs. The last glyph sat one cell past the text column -- inside the page's
+    // 48 px padding, so nothing looked wrong and nothing was clipped -- while the ruler, the caret and
+    // the selection highlight all counted 72. **Three parts of the chrome disagreeing about where the
+    // line ends, none of them visibly.**
+    //
+    // **The continuation-byte scan that is not here any more was never needed in this branch.** Its only
+    // purpose would be to land on a character boundary, and `i` already is one: it is the byte that the
+    // `& 0xC0 != 0x80` test looked at.
+    i - from
+}
+
+/// Read the whole document into `out`, growing it if needed. Returns the bytes read.
+///
+/// Replaced five `Editor::text()` calls on the paint path -- `emit_tables`, `emit_math`, `emit_images`,
+/// `publish_line_heights`, `image_blocks` -- each of which allocated a `Vec` the size of the document
+/// and copied it. Five allocations of the whole document per keystroke is what
+/// `tests/session_no_alloc.rs` measured before this existed.
+///
+/// **A free function taking its two arguments separately, not a `&mut self` method, and that is the
+/// whole point.** `Editor::text()` returned an *owned* `Vec`, so callers held a borrow of nothing and
+/// could reach every other field freely. A method returning `&[u8]` out of a `Session` field borrows
+/// *all* of `self`, and every paint-path caller also needs `&self.chrome`, `&self.editor` and
+/// `&mut self.math_scratch` while the bytes are live -- so the first version of this was five borrow
+/// errors (E0502 and E0503) rather than five one-line changes. Taking `&Editor` and `&mut Vec<u8>` as
+/// arguments borrows two disjoint fields, which is exactly what the callers need.
+///
+/// **This is still a whole-document copy per paint, and Phase 11 does not pretend otherwise.** What
+/// this removes is the *allocation*. What removes the copy is a windowed read -- a paint only needs the
+/// bytes of the lines it is about to draw -- which is Phase 12's change to `Painter::text`'s contract.
+/// Until then the honest state is one copy per paint instead of five, none of them allocating after
+/// the first.
+///
+/// Grown only, never shrunk: a document that stops growing stops allocating.
+/// **Faulting**, as of part 16. It took `&Editor` and could not, so on a container-backed document every
+/// whole-document read past the resident window returned `SourceUnavailable` and the emitters that need
+/// one -- tables, math, images -- silently drew nothing.
+///
+/// **`&mut Editor` is the price of asking for the bytes**, and it is the right trade: the alternative was
+/// a table, a formula or an image that is in the container and not on the screen.
+fn read_document(
+    editor: &mut Editor,
+    out: &mut Vec<u8>,
+    source: &mut dyn holonomy_text::LeafSource,
+) -> Result<usize, holonomy_text::EditorError> {
+    let len = editor.text_len();
+    if out.len() < len {
+        // Rounded up to the next multiple of [`SCAN_CHUNK`], because `resize` to exactly `len` means
+        // the *next* keystroke -- which makes the document one byte longer -- reallocates again. That
+        // is one `realloc` per keystroke for as long as the document grows, which is precisely what
+        // the buffer exists to prevent. One extra allocation per 4,096 keystrokes instead.
+        let want = len.next_multiple_of(SCAN_CHUNK);
+        out.resize(want, 0);
+    }
+    editor.read_into_faulting(source, 0, out)
+}
+
+#[inline]
+fn measure_only(node: &MathNode, m: &MathMetrics) -> holonomy_render::math_layout::MathBox {
+    holonomy_render::math_layout::measure(node, m)
+}
+
+/// Widen `damage` by the rectangle an emitter had to draw, **without ever narrowing a full
+/// repaint**.
+///
+/// # The bug this replaces
+///
+/// Both emitters used to inline
+///
+/// ```text
+/// *damage = Some(match *damage { Some(d) => d.union(&rect), None => rect });
+/// ```
+///
+/// which reads as "union" and is not one. `None` in this position does not mean *nothing to
+/// repaint*: [`Painter::paint`] treats `None` as the whole frame, and `Session::paint(None)` is how
+/// a test asks for a full repaint. Turning that `None` into `Some(rect)` silently converted a full
+/// repaint into a repaint of one formula's box, and everything outside the box kept whatever pixels
+/// it already had -- black, on a first paint.
+///
+/// It was found by tracing the vertical-placement fix in Phase 9C: after `Session::paint(None)`, a
+/// caret drawn at the *old* cell (x 320, y 130) was still on screen four repaints later, because the
+/// page fill that erases it was clipped away along with everything outside the formula's rect at
+/// (320, 155). The caret's own lookup said (376, 155) and the frame said (320, 130) -- two answers to
+/// the same question, which is exactly the class of disagreement this file exists to prevent.
+///
+/// So the union is now only performed when there is a rect to union into. A full frame cannot be
+/// widened by a smaller rectangle, and that is the whole rule.
+fn widen(damage: &mut Option<DamageRect>, extra: Option<DamageRect>) {
+    if let (Some(d), Some(e)) = (*damage, extra) {
+        *damage = Some(d.union(&e));
+    }
+}
+
+/// **A line box grown by the furthest a shift in it draws out of the box.**
+///
+/// `shift` is `(up, down)` from [`Session::line_shift`], and exactly one of them is nonzero on a real
+/// line. **The growth is the whole of the fix for a repaint that leaves a superscript's raised third
+/// standing**, because the emitter's damage is this rectangle and the painter only ever sees it.
+///
+/// A free function rather than a method, because both emit paths — the whole-line run and the
+/// per-style runs — must grow the box the same way, and a method called twice is two chances to call it
+/// with one of the two.
+fn shifted_rect(rect: DamageRect, shift: (u32, u32)) -> DamageRect {
+    if shift == (0, 0) {
+        return rect;
+    }
+    DamageRect::new(
+        rect.x,
+        rect.y.saturating_sub(shift.0),
+        rect.width,
+        rect.height.saturating_add(shift.0).saturating_add(shift.1),
+    )
+}
+
+fn union_opt(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.union(&b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+/// Map an [`InputError`](holonomy_input::InputError) onto a [`SessionError`].
+fn session_io(e: holonomy_input::InputError) -> SessionError {
+    // `InputError`'s only I/O-shaped variant carries an errno, so it becomes an `io::Error` rather
+    // than a new variant that says the same thing twice.
+    match e {
+        holonomy_input::InputError::Read(e) => {
+            SessionError::Sink(std::io::Error::from_raw_os_error(e))
+        }
+        holonomy_input::InputError::Eof => SessionError::Sink(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the scripted input stream ended mid-record",
+        )),
+    }
+}
+
+// ---------------------------------------------------------------- what a click means
+//
+// **Three functions, one shape, and the shape is the point.** Each takes what was clicked and returns
+// the [`Command`] it means, or `None` for "this button is drawn, hoverable, pressable, and has nothing
+// behind it yet".
+//
+// # Why `None` and not a stub command
+//
+// **Because a stub command is a lie that survives.** `Command::Bold` that the session ignores would
+// make a click on Bold look like it did something -- it would bump `stats.commands`, take a paint, and
+// leave the document unchanged. `None` says the honest thing, and the caller counts it in
+// [`SessionStats::pointer_inert`] so the number is visible rather than inferred.
+//
+// # The mapping is by *meaning*, not by position
+//
+// `tool_command` matches on the [`Tool`] variant, so moving a button in `TOOLBAR` cannot change what
+// it does. A table indexed by list position would have that property inverted, and the first toolbar
+// edit would have silently swapped two buttons' behaviour.
+//
+// # What is not here, and why
+//
+// **`Zoom`, `Style` and `Font` are the three that would obviously be next** -- they are dropdowns in
+// the reference and they need a second popup each, which is the same `widgets::popup` machinery with
+// different contents. They are `None` because *they* are not built, not because the table is
+// incomplete, and a gate asserts the count so the two cannot be confused.
+
+/// What a toolbar button means, or `None` for a button with no action behind it.
+fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::widgets::Tool;
+    Some(match tool {
+        Tool::Undo => Command::Hotkey(Hotkey::Undo),
+        Tool::Redo => Command::Hotkey(Hotkey::Redo),
+        Tool::Image => Command::Hotkey(Hotkey::InsertImage),
+        Tool::Strikethrough => Command::Hotkey(Hotkey::Strike),
+        // `Tool::Collapse` is handled in `Session::press`, because it toggles a chrome flag
+        // rather than running a document command.
+        // **Listed as `None` here rather than omitted** so that this function's arms are exactly the
+        // `Tool` variants -- adding a tool makes this non-exhaustive and the compiler says so.
+        _ => return None,
+    })
+}
+
+/// What a title-bar button means, or `None`.
+///
+/// # This is now the *only* arm, and it matches the drawn set
+///
+/// **`place_title` draws `Cloud` and `Share` and nothing else** — see `TitleButton::has_action`, which
+/// is the filter it uses. So this function and that one have to agree or a drawn button is inert again:
+/// `Cloud` is here, `Share` is routed to `Action::Export` in `press` because it is an action rather than
+/// a `Command`, and **the two functions together are the whole of "what can this title bar do".**
+///
+/// **The `_ => return None` stays.** A future button that is drawn but not wired must count as
+/// `pointer_inert` rather than be swallowed, which is what that counter is for: a button that silently
+/// does nothing is the defect, and a button that is *counted* doing nothing is a measurement.
+fn title_command(btn: holonomy_render::widgets::TitleButton) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::widgets::TitleButton;
+    Some(match btn {
+        TitleButton::Cloud => Command::Hotkey(Hotkey::Save),
+        _ => return None,
+    })
+}
+
+/// What an [`Action`](holonomy_render::menus::Action) means, as a [`Command`].
+///
+/// # This replaces part 20's label comparison, and that replacement is the point
+///
+/// Part 20 wrote:
+///
+/// ```text
+/// Some(match (heading, item.label) { (_, "Undo") => …, ("Insert", "Table") => … })
+/// ```
+///
+/// and noted that renaming a menu entry silently makes it inert. **The fix is that there is no
+/// `item.label` here at all.** A row says `Action::Undo`; this function says what that means. The
+/// renderer passes the value through without interpreting it and this function interprets it without
+/// having seen the row — **neither half can get the other's detail wrong**, which is the property a
+/// `match` on a string does not have.
+///
+/// **Public so a gate can call it with an `Action` and no menu at all** — which is how
+/// `an_action_is_routed_without_a_menu_open_around_it` proves the decision does not depend on where
+/// the row came from. A private function could only be reached by clicking, and every click would
+/// carry a `label` with it, which is the coupling being removed.
+///
+/// **The `None`s are the honest remainder.** `Close` has no action in this build, and
+/// `SelectAll` selects the whole document. `SetZoom`, `SetStyle`
+/// and `SetFont` never reach here — `Session::apply_action` handles those first, because they change
+/// chrome state rather than issuing a document command.
+pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy_input::Command> {
+    use holonomy_input::{Command, Hotkey};
+    use holonomy_render::menus::Action;
+    Some(match action {
+        Action::Undo => Command::Hotkey(Hotkey::Undo),
+        Action::Redo => Command::Hotkey(Hotkey::Redo),
+        Action::SelectAll => Command::Hotkey(Hotkey::SelectAll),
+        Action::DocumentEnd => Command::Hotkey(Hotkey::DocumentEnd),
+        Action::DocumentStart => Command::Hotkey(Hotkey::DocumentStart),
+        Action::InsertTable => Command::Hotkey(Hotkey::InsertTable),
+        Action::InsertImage => Command::Hotkey(Hotkey::InsertImage),
+        Action::InsertMath => Command::Hotkey(Hotkey::InsertMath),
+        // **Same route as the key.** A menu row and a keystroke are two ways of asking for one thing,
+        // and giving them separate implementations is how they drift — which is the failure part 20
+        // fixed by replacing a label match with this function, so reaching the keymap's own `Save`
+        // rather than a private commit is the same decision applied once more.
+        Action::Save => Command::Hotkey(Hotkey::Save),
+        // **The same three routes the keymap uses**, for the same reason: a row and a keystroke are
+        // two ways of asking for one thing, and separate implementations are how they drift. The
+        // clipboard rows existed and drew for thirteen phases doing nothing; these are the arms that
+        // make them mean something.
+        Action::Cut => Command::Hotkey(Hotkey::Cut),
+        Action::Copy => Command::Hotkey(Hotkey::Copy),
+        Action::Paste => Command::Hotkey(Hotkey::Paste),
+        // **No `Command` for this one, and that is deliberate.** Export is not a document edit and not a
+        // keybinding — it writes files to descriptors this process was handed at boot and the jail has
+        // no way to acquire. `apply_action` handles it, the same shape as the chrome-state actions
+        // below. **There is no `Ctrl+E`**, because a binding that rewrites two files on disk belongs to
+        // a keystroke a user can decline, and this build does not have one.
+        Action::Export => return None,
+        // **No `Command` for this one either, and the same shape as `Export`.** Closing a document is
+        // not a keystroke the editor applies — it changes *which* document the session paints, and the
+        // only function allowed to do that is `Session::adopt_document`. **It was the one row with no
+        // action in this build** and is no longer: part 45 gave the session a document list, and `Close`
+        // now reaches `Session::close_active` from `apply_action`.
+        Action::Close | Action::Rename | Action::Delete | Action::Lock => return None,
+        // **No `Command` for this one either, and the same shape as `Export`.** A new document is
+        // not a keystroke the editor applies — it *replaces* the editor, and the only function
+        // allowed to do that is `Session::adopt_document`, which `apply_action` reaches directly.
+        // Routing it through a `Command` would hand the keymap a variant whose meaning is "discard
+        // the document", which no chord asks for in this build.
+        Action::Home | Action::New | Action::NewSample => return None,
+        // **And the same for the two rows that need a path.** `Open` and `Import` are not keystrokes
+        // at all: the session can ask for a path to be opened but cannot supply one, so the row is a
+        // request the *window driver* answers — `apply_action` stores it, the driver calls
+        // `Session::take_open_request` and then `Session::open_path`. **There is no chord**, because a
+        // binding that opens an arbitrary file is exactly what the sealed jail cannot do and what the
+        // developer window should not do silently.
+        Action::Open | Action::Import => return None,
+        Action::SetZoom(_)
+        | Action::SetStyle(_)
+        | Action::SetFont(_)
+        | Action::SetColour(_)
+        // **Part 44: same reasoning as the three above.** A mode is chrome state; selecting a tool
+        // from the overflow menu is routed through `Session::press`, which is a pointer gesture and
+        // not a `Command`. **Neither reaches `apply_command`.**
+        | Action::SetMode(_)
+        | Action::SelectTool(_) => {
+            return None
+        }
+        // **Arming a style is a chrome-state change, not a command** -- the same shape as the three
+        // above, and `Session::apply_action` handles it before this function is reached.
+        //
+        // **Seven variants, and they are all `apply_action`'s.** Bold, italic and underline; the
+        // strike toggle; the super/subscript pair; and clear-formatting. None of them is a keystroke
+        // the *editor* applies -- the keymap routes `Ctrl+B` to `Hotkey::Bold` and `Hotkey::Bold`
+        // reaches `apply_action(Action::ToggleBold)`, so routing these back to a `Command` would be a
+        // loop. `Hotkey::Underline` and the three decoration chords are in the same shape and land
+        // here for the same reason.
+        Action::ToggleBold
+        | Action::ToggleItalic
+        | Action::ToggleUnderline
+        | Action::ToggleStrike
+        | Action::ToggleSuperscript
+        | Action::ToggleSubscript
+        | Action::ClearFormatting => return None,
+        Action::WordCount | Action::KeyboardShortcuts => return None,
+        Action::Find | Action::Replace | Action::ToggleBullets | Action::ToggleNumbering
+        | Action::AlignLeft | Action::AlignCenter | Action::AlignRight | Action::Indent | Action::Outdent
+        | Action::ToggleRibbon | Action::ToggleTheme | Action::ToggleAutosave | Action::ToggleNavigation
+        | Action::InsertPageBreak => return None,
+    })
+}
+
+/// The rect of whatever opened `open`, for invalidating.
+///
+/// **A free function, not a method**, because it is geometry and not state — and because
+/// [`widgets::hit_rect`] already has the machinery. This is `Hit`'s rect for the opener, and writing
+/// it as a third spelling of "where is that widget" would be exactly the duplication part 19 was
+/// about.
+///
+/// **`ChromeState::default()` and not the session's own state, deliberately.** The opener's rect does
+/// not depend on any state — a menu heading is where the menu bar puts it — and taking `&self` here
+/// would borrow the session for a value that is a constant function of the layout.
+/// Emit `text` as chrome text at `(x, y)`, one `TextRun` per ascending piece.
+///
+/// # Why this exists, and what it replaced
+///
+/// **A `TextRun` carries a first codepoint and a length, which means *consecutive* codepoints** --
+/// and neither raw-formula path said so. Both of them wrote
+///
+/// ```text
+/// TextRun::new(x, y, shown.chars().next(), shown.chars().count(), ..)
+/// ```
+///
+/// **which draws `\frac{1}{2}` as `\`, then `a`, `c`, `r`, `f`, `{`, …** -- one codepoint per glyph,
+/// each the successor of the one before it. A formula being edited is the state a person looks at
+/// most closely, and it was rendered as a run of unrelated letters.
+///
+/// `holonomy_render::chrome::ascending_runs` is the same splitter the chrome's own labels use, and
+/// reusing it is the point: **there is one definition of "how a string becomes runs" in this
+/// project**, and a second spelling of it in the session is how the two drifted in the first place.
+fn push_math_source(
+    into: &mut Vec<SurfaceTree>,
+    cell_w: u32,
+    x: i32,
+    y: i32,
+    text: &str,
+    colour: u32,
+) {
+    let cell = cell_w as i32;
+    for run in holonomy_render::chrome::ascending_runs(text) {
+        if run.len == 0 {
+            continue;
+        }
+        into.push(SurfaceTree::leaf(Node::Text(TextRun::new(
+            x + (run.char_offset as i32) * cell,
+            y,
+            run.first,
+            run.len,
+            holonomy_render::Style::MONOSPACE,
+            0,
+            colour,
+        ))));
+    }
+}
+
+fn opener_rect(
+    l: &holonomy_render::chrome::Layout,
+    state: &holonomy_render::ChromeState,
+    open: widgets::Open,
+) -> DamageRect {
+    let h = match open {
+        widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
+        widgets::Open::RibbonTabs => widgets::Hit::RibbonMore,
+        widgets::Open::RibbonGroup(index) => widgets::Hit::RibbonGroup(index),
+        widgets::Open::Menu(i) => widgets::Hit::Menu(i),
+        widgets::Open::Tool(t) => {
+            widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t))
+        }
+    };
+    widgets::hit_rect(l, state, h)
+        .or_else(|| {
+            widgets::hit_rect(
+                l,
+                &holonomy_render::ChromeState::default(),
+                widgets::Hit::Tool(match open {
+                    widgets::Open::Tool(t) => t,
+                    _ => widgets::Tool::Overflow,
+                }),
+            )
+        })
+        .unwrap_or(DamageRect::new(0, 0, 0, 0))
+}
+
+/// **How many clicks in a row have landed in the same place, quickly.** Part 41.
+///
+/// ## Why this is a struct and not a `(u32, u64, i32, i32)`
+///
+/// **Because the pairing is the invariant, and a four-tuple is four independent numbers.** A tuple
+/// invites `count` being carried across a click that should have reset it, or the position being
+/// carried across a click that should have moved it; `Click` has no way to express either mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Click {
+    /// `1` for a single click, `2` for a double, `3` or more for a triple and beyond.
+    count: u32,
+    /// **The source's own millisecond clock.** Never compared against this process's `Instant`.
+    at_ms: u64,
+    /// Where the click was, in panel pixels.
+    x: i32,
+    /// Where the click was, in panel pixels.
+    y: i32,
+}
+
+impl Click {
+    /// **How long apart two clicks may be and still be one gesture.**
+    ///
+    /// **400 ms, and the number is the one every toolkit uses** -- GTK's `gtk-double-click-time` and
+    /// Qt's `QApplication::doubleClickInterval` both default to 400. **It is not measured here
+    /// because it cannot be**: this is a constant, and the honest thing about a constant is to write
+    /// it down and say where it came from. `crates/holonomy/tests/click_count.rs` is what says it is
+    /// applied at all.
+    const WINDOW_MS: u64 = 400;
+
+    /// **How far apart two clicks may be and still be one gesture.**
+    ///
+    /// **5 pixels, and this one is not a taste question.** A double-click is a *precision* gesture,
+    /// and a 5-pixel slop is smaller than the distance between two adjacent glyph centres in the
+    /// body face at 16 ppem. **A slop larger than a glyph would let a click on `word` and a click on
+    /// the space after it be one word-selection**, which is the same bug the click-position slop
+    /// exists to prevent.
+    const SLOP_PX: i32 = 5;
+
+    /// The count this press makes, given when and where it landed and what came before.
+    ///
+    /// ## The three ways it is not a continuation
+    ///
+    /// **Too slow, too far, or too many.** A fourth click is a single click again rather than a
+    /// quadruple, because the editor has nothing to do with four: `click_page` reads `2` as a word
+    /// and `>= 3` as a line, so `4` would be a line again -- and a user who clicks five times has
+    /// stopped clicking and started testing.
+    fn next(previous: Option<Self>, at_ms: u64, x: i32, y: i32) -> Self {
+        let continued = previous.is_some_and(|p| {
+            at_ms.wrapping_sub(p.at_ms) <= Self::WINDOW_MS
+                && (x - p.x).abs() <= Self::SLOP_PX
+                && (y - p.y).abs() <= Self::SLOP_PX
+        });
+        let count = match previous {
+            Some(p) if continued && p.count < 3 => p.count + 1,
+            _ => 1,
+        };
+        Self { count, at_ms, x, y }
+    }
+}
+
+/// **Which edge of the page the pointer is at, and how far in.** Part 41.
+///
+/// ## Why the depth is stored and not recomputed
+///
+/// **Because it changes as the pointer moves and an auto-scroll has to answer "how much" every tick.**
+/// Recomputing it from `(x, y)` at each tick would be four lines and would also be *the same four
+/// lines twice* -- once when arming and once when stepping. `EdgeScroll::at` is the one place the
+/// arithmetic lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EdgeScroll {
+    /// `-1` to scroll towards the top, `1` towards the bottom, `0` for neither.
+    ///
+    /// **`i32` and not `Direction`**, because there are exactly two and the arithmetic here is
+    /// `depth * DIRECTION` with no case to match on. A named enum would be one more type to
+    /// convert at every use.
+    direction: i32,
+    /// How far past the edge the pointer is, in pixels, **1 at the edge and `EDGE_DEPTH` at the
+    /// furthest.**
+    depth: u32,
+}
+
+impl EdgeScroll {
+    /// **How far past the edge a pointer has to be before the page scrolls at all.**
+    ///
+    /// **0, and that is a decision worth stating.** Every other auto-scroll in a toolkit has a small
+    /// dead zone at the edge so that a drag that ends *on* the last visible line does not start
+    /// moving the document under the pointer. **This one has none, because the pointer being inside
+    /// the page at all is already the test** -- `widgets::Hit::Page` -- and a pointer one pixel
+    /// below the last line is unambiguously past it. A dead zone here would mean a drag that reaches
+    /// the bottom stops working for the one pixel where the user is most likely to be looking.
+    const MAX_DEPTH: u32 = 24;
+
+    /// How fast the page scrolls at the edge, in lines per event, at [`Self::MAX_DEPTH`].
+    ///
+    /// **Three lines, which is a wheel notch.** The wheel scrolls `dy * 3`, so an auto-scroll that
+    /// moved a different amount would make "drag to the bottom" and "spin the wheel at the bottom"
+    /// feel like two different documents.
+    const LINES_AT_MAX_DEPTH: i32 = 3;
+
+    /// The scroll this pointer position calls for, or `None` when it is not at an edge.
+    ///
+    /// ## Why "not at an edge" is measured from the *canvas* and not the page
+    ///
+    /// **Because the canvas is what scrolls.** `Layout::canvas` is the scrollable region and `page`
+    /// is the sheet drawn inside it; a pointer below the sheet but inside the canvas is still at the
+    /// bottom of the document as far as the user is concerned, and refusing to scroll there would
+    /// make the bottom of a short document unselectable by dragging.
+    fn at(l: &holonomy_render::chrome::Layout, x: i32, y: i32) -> Option<Self> {
+        if x < l.canvas.x as i32 || x >= l.canvas.right() as i32 {
+            return None;
+        }
+        let past_top = (l.canvas.y as i32 - y).max(0);
+        let past_bottom = (y - l.canvas.bottom() as i32).max(0);
+        let (direction, past) = if past_top > 0 {
+            (-1, past_top)
+        } else if past_bottom > 0 {
+            (1, past_bottom)
+        } else {
+            return None;
+        };
+        let depth = u32::try_from(past).unwrap_or(u32::MAX).min(Self::MAX_DEPTH);
+        Some(Self { direction, depth })
+    }
+
+    /// How many lines this scroll moves, **sign included.**
+    ///
+    /// ## The arithmetic, and why it is a product rather than a table
+    ///
+    /// **`depth / MAX_DEPTH * LINES_AT_MAX_DEPTH`** means one pixel past the edge moves nothing and
+    /// 24 pixels moves three lines, with every value between proportional. **A `match` on depth
+    /// would be a table of 25 rows** and would have to be re-derived by hand every time
+    /// `MAX_DEPTH` changed; this is one division and one multiplication, and the gate
+    /// `an_auto_scroll_accelerates_with_depth` is what says the ends are right.
+    fn lines(self) -> i32 {
+        (self.depth * Self::LINES_AT_MAX_DEPTH as u32).div_ceil(Self::MAX_DEPTH) as i32
+            * self.direction
+    }
+}
+
+/// **One byte of a word, by the rule [`Session::word_around`] states.**
+///
+/// **A free function and not a method, and not a `char` method.** The whole point of that rule is
+/// that it is a *byte* rule, and reaching for `char::is_alphanumeric` here -- which is what a reader
+/// will expect -- would silently make it a character rule on a non-UTF-8 boundary and produce a
+/// different answer than the doc comment claims. **The name says "byte" for that reason.**
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn renumber_list(text: &mut String) {
+    let mut n = 1;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, term) = line
+            .strip_suffix('\n')
+            .map(|s| (s, "\n"))
+            .unwrap_or((line, ""));
+        let t = body.trim_start();
+        if let Some(p) = t
+            .find(". ")
+            .filter(|p| *p > 0 && t[..*p].bytes().all(|b| b.is_ascii_digit()))
+        {
+            out.push_str(&body[..body.len() - t.len()]);
+            out.push_str(&format!("{n}. {}", &t[p + 2..]));
+            n += 1;
+        } else {
+            out.push_str(body);
+        }
+        out.push_str(term);
+    }
+    *text = out;
+}

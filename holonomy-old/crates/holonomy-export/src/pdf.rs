@@ -1,0 +1,2218 @@
+//! PDF, via `pdf-writer`: Base-14 faces, real wrapping, `BT`/`Tf`/`Td`/`Tj`/`ET`.
+//!
+//! # Layout in integer arithmetic
+//!
+//! The brief requires integer geometry, and PDF makes that easy rather than awkward: text positions are
+//! in *points*, and font metrics are in 1/1000 em. So a line's width is
+//!
+//! ```text
+//!   points = 1000 * sum_of_widths * font_size / (1000 * 1000)
+//! ```
+//!
+//! and the whole comparison -- "does this run fit in the measure?" -- reduces to comparing the sum of
+//! 1/1000-em widths against `measure * 1000 / font_size`. No `f32` is involved in deciding where a
+//! line breaks. `f32` appears only where the PDF syntax demands it (page boxes, `Tf` sizes), because
+//! a PDF viewer reads those as reals and there is nothing to be gained by writing them as integers.
+//!
+//! # Where a run breaks, and why it is the run
+//!
+//! Wrapping is done at **run** boundaries -- where the span map changes style -- and never mid-run, not
+//! even mid-word. A document's runs are its *formatting* boundaries, and re-flowing text across a
+//! formatting boundary would mean splitting a `<b>` run in the PDF, which no reader rejoins. So a long
+//! bold run overflows the measure rather than being split.
+//!
+//! That is a real limitation and it is a deliberate choice: mid-run wrapping needs the same run broken
+//! across two `Tj` calls, which needs per-word measurement inside a run, which needs a word
+//! segmenter. PROJECT.md Phase 8 does not ask for a word segmenter, and guessing where words are
+//! inside a `code` run would be worse than not wrapping it. [`PdfStats::overflowing_lines`] counts the
+//! occurrences so the limitation is visible rather than silent.
+//!
+//! # Base-14, no embedding
+//!
+//! Every conforming reader carries the 14 standard fonts, so a Type1 font dictionary with a `/BaseFont`
+//! and an `/Encoding` is a complete font and the export is a few KB of operators. Embedding a subsetted
+//! TTF would mean shipping the subsetter and the glyph tables; see [`crate::fonts`] for why that is
+//! also what keeps the exporter inside the binary budget.
+//!
+//! # Pre-opened descriptors
+//!
+//! Nothing here opens anything. The exporter takes a `W: Write`, and the session passes a
+//! pre-opened fd -- see the crate docs for why that is not negotiable.
+
+use std::io::{self, Write};
+
+use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
+
+use crate::fonts::{advance, winansi, BaseFont};
+use holonomy_text::{
+    Editor, TextIntervalSpan, STYLE_BOLD, STYLE_CODE, STYLE_HEADER, STYLE_ITALIC, STYLE_STRIKE,
+    STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
+};
+
+/// The byte substituted for a character WinAnsi cannot encode.
+///
+/// `?` rather than a space: a space would silently change the meaning of a line, and `?` at least says
+/// something was lost. [`PdfStats::substituted`] counts them.
+pub const UNMAPPED: u8 = b'?';
+
+/// Points per inch, for converting the font sizes the editor uses into PDF's unit.
+pub const POINTS_PER_INCH: f32 = 72.0;
+
+/// Why a PDF export stopped early.
+#[derive(Debug)]
+pub enum PdfError {
+    /// A picture was placed during the layout walk and its asset was gone by the time the streams were
+    /// written.
+    MissingAsset {
+        /// The catalog index the walk recorded.
+        index: usize,
+    },
+    /// An image could not be decoded into RGB samples for an `/XObject`.
+    Asset(String),
+    /// The sink failed.
+    Io(io::Error),
+    /// The document refused to be read.
+    Editor(holonomy_text::EditorError),
+    /// `pdf-writer` refused to finish the file.
+    ///
+    /// Carries nothing: it is a broken-invariant report rather than a recoverable condition, and there
+    /// is no partial output to salvage.
+    Writer,
+}
+
+impl std::fmt::Display for PdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "writing PDF: {e}"),
+            Self::Editor(e) => write!(f, "reading the document for PDF: {e}"),
+            Self::Writer => write!(f, "the PDF writer refused to finish the file"),
+            Self::MissingAsset { index } => {
+                write!(f, "image {index} was placed and then its asset was gone")
+            }
+            Self::Asset(m) => write!(f, "image: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for PdfError {}
+
+impl From<io::Error> for PdfError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<holonomy_text::EditorError> for PdfError {
+    fn from(e: holonomy_text::EditorError) -> Self {
+        Self::Editor(e)
+    }
+}
+
+/// Page geometry, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageSize {
+    /// Width.
+    pub width: f32,
+    /// Height.
+    pub height: f32,
+}
+
+impl PageSize {
+    /// US Letter: 8.5 x 11 inches at 72 points per inch.
+    pub const LETTER: Self = Self {
+        width: 612.0,
+        height: 792.0,
+    };
+
+    /// ISO A4.
+    pub const A4: Self = Self {
+        width: 595.0,
+        height: 842.0,
+    };
+
+    /// The origin as a `Rect`, which is how `pdf-writer` wants a media box.
+    fn rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, self.width, self.height)
+    }
+}
+
+/// What the PDF should look like.
+#[derive(Debug, Clone)]
+pub struct PdfOptions {
+    /// `/Title` in the document information dictionary.
+    pub title: String,
+    /// Page size.
+    pub page: PageSize,
+    /// Body text size, in points.
+    pub font_size: f32,
+    /// Space between baselines, in points.
+    pub line_height: f32,
+    /// Margin on every side, in points.
+    pub margin: f32,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        Self {
+            title: "Holonomy".to_string(),
+            page: PageSize::LETTER,
+            font_size: 11.0,
+            line_height: 14.0,
+            margin: 54.0,
+        }
+    }
+}
+
+impl PdfOptions {
+    /// The usable text width, in points.
+    #[inline]
+    pub fn measure(&self) -> f32 {
+        self.page.width - 2.0 * self.margin
+    }
+
+    /// The measure in 1/1000-em units at [`font_size`](Self::font_size), which is the unit wrapping
+    /// compares in.
+    ///
+    /// `measure * 1000 / font_size`, rounded. Rounding once, up front, means the comparison itself is
+    /// exact integer work and the same limit applies to every line on every page.
+    #[inline]
+    pub fn measure_mils(&self) -> u32 {
+        (self.measure() * 1000.0 / self.font_size).round().max(1.0) as u32
+    }
+}
+
+/// What an export produced, and what it had to compromise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PdfStats {
+    /// Bytes written.
+    pub bytes: u64,
+    /// Pages emitted.
+    pub pages: u32,
+    /// Lines laid out.
+    pub lines: u32,
+    /// Characters that became `?` because WinAnsi has no code for them.
+    pub substituted: u32,
+    /// Lines that overflowed the measure rather than being broken mid-word.
+    ///
+    /// Non-zero means at least one word is wider than the measure. That is the only way a line can
+    /// overflow, because the exporter breaks between words -- see [`Layouter`], which explains why
+    /// breaking inside one is worse than overflowing it.
+    pub overflowing_lines: u32,
+    /// Images written as `/XObject`s.
+    pub images: u32,
+    /// Anchors with no asset in the catalog.
+    ///
+    /// Counted rather than ignored: on the PDF side a missing asset is a *line of vertical space with
+    /// nothing on it*, which is the kind of gap a reader does not explain and a reader of the HTML
+    /// output would have seen as `&#xfffc;`. The two formats disagree about how loud to be about it and
+    /// both are right, because they are different formats.
+    pub images_missing: u32,
+    /// Decoded RGB bytes handed to the `/Flate` compressor.
+    pub image_sample_bytes: u64,
+    /// **Segments with a rule under them**, one per segment that asked for it.
+    ///
+    /// # Why this is here and not only in the HTML exporter
+    ///
+    /// `HtmlStats` counts `underline_runs`, `strike_runs`, `superscript_runs` and `subscript_runs`, and
+    /// **the two exporters must agree about whether a decoration survived the trip.** A `<u>` is
+    /// visible in a text extraction of the HTML; a stroked `/Rect` path is *not* visible in a text
+    /// extraction of the PDF, so a PDF that dropped every underline reads identically to one that drew
+    /// them. Without a count, the only way to tell is to render the page and look — which is what
+    /// `tests/content.rs` does for the streams and what this field makes unnecessary for the claim
+    /// "the export kept it".
+    ///
+    /// **A count of segments and not of rules**, unlike the screen's `PaintStats::rules`: a segment with
+    /// both bits set is one segment and two rules, and neither number is more true than the other. This
+    /// one is per segment because a segment is what the layouter produces and what the HTML exporter
+    /// counts as a run.
+    pub underlined: u32,
+    /// Segments struck through.
+    pub struck: u32,
+    /// Segments with a non-zero `rise` — a superscript or a subscript, **not distinguished**, because
+    /// the two differ only in a sign and a count that split them would be two fields answering one
+    /// question. `RunStyle::of_span` is the one place the sign is decided.
+    pub risen: u32,
+}
+
+/// The faces the exporter draws with.
+///
+/// Four resources, one per combination of weight and slant, plus Courier for `code`. Declared as a
+/// `const` so the resource names and the widths cannot drift apart.
+struct Faces<'a> {
+    regular: Name<'a>,
+    bold: Name<'a>,
+    italic: Name<'a>,
+    bold_italic: Name<'a>,
+    code: Name<'a>,
+    code_bold: Name<'a>,
+}
+
+impl Faces<'_> {
+    const NAMES: Faces<'static> = Faces {
+        regular: Name(b"F1"),
+        bold: Name(b"F2"),
+        italic: Name(b"F3"),
+        bold_italic: Name(b"F4"),
+        code: Name(b"F5"),
+        code_bold: Name(b"F6"),
+    };
+
+    /// The face and its metric face for one span.
+    fn for_span(span: &TextIntervalSpan) -> (Name<'static>, BaseFont) {
+        if span.style_flags & STYLE_CODE != 0 {
+            if span.style_flags & STYLE_BOLD != 0 {
+                // Courier's four faces are metrically identical, so `code_bold` and `code` measure the
+                // same. Naming them separately anyway means a viewer that *does* have a bold Courier
+                // shows one, and `fonts.rs` documents why the metrics do not differ.
+                return (Faces::NAMES.code_bold, BaseFont::Courier);
+            }
+            return (Faces::NAMES.code, BaseFont::Courier);
+        }
+        match (
+            span.style_flags & STYLE_BOLD != 0,
+            span.style_flags & STYLE_ITALIC != 0,
+        ) {
+            (false, false) => (Faces::NAMES.regular, BaseFont::Helvetica),
+            (true, false) => (Faces::NAMES.bold, BaseFont::HelveticaBold),
+            (false, true) => (Faces::NAMES.italic, BaseFont::Helvetica),
+            (true, true) => (Faces::NAMES.bold_italic, BaseFont::HelveticaBold),
+        }
+    }
+
+    /// The `Name` for every face, in resource order.
+    fn all(&self) -> [Name<'_>; 6] {
+        [
+            self.regular,
+            self.bold,
+            self.italic,
+            self.bold_italic,
+            self.code,
+            self.code_bold,
+        ]
+    }
+
+    /// The `/BaseFont` for each resource, in the same order.
+    fn base_fonts(&self) -> [&'static [u8]; 6] {
+        [
+            b"Helvetica",
+            b"Helvetica-Bold",
+            b"Helvetica-Oblique",
+            b"Helvetica-BoldOblique",
+            BaseFont::Courier.pdf_name(),
+            BaseFont::Courier.pdf_name(),
+        ]
+    }
+}
+
+/// Write `editor` to `sink` as a PDF.
+pub fn export<W: Write>(
+    editor: &Editor,
+    sink: &mut W,
+    opts: &PdfOptions,
+) -> Result<PdfStats, PdfError> {
+    let mut stats = PdfStats::default();
+    let body = build(editor, opts, &mut stats)?;
+    sink.write_all(&body)?;
+    sink.flush()?;
+    stats.bytes = body.len() as u64;
+    Ok(stats)
+}
+
+/// Build the whole PDF in memory and return it.
+///
+/// `pdf-writer` works by building an in-memory object graph and serialising at the end, so "stream to
+/// the sink" means "build then write". That is a deliberate acceptance: the alternative is
+/// hand-writing the cross-reference table, which is the part of PDF every reader is strictest about.
+/// For a document-sized file this is one allocation of one document's worth of operators.
+pub fn build(
+    editor: &Editor,
+    opts: &PdfOptions,
+    stats: &mut PdfStats,
+) -> Result<Vec<u8>, PdfError> {
+    let mut pdf = Pdf::new();
+    // Object ids. Fixed rather than allocated, because the whole file is written in one pass and a
+    // bump allocator here would be a second thing to get wrong for no benefit.
+    let catalog_id = Ref::new(1);
+    let pages_id = Ref::new(2);
+    let info_id = Ref::new(3);
+    // Pages start at 10 so a future addition (an outline, an embedded font) can take 4..9 without
+    // renumbering.
+    const FIRST_PAGE: i32 = 10;
+    const FIRST_FONT: i32 = 100;
+    const FIRST_CONTENT: i32 = 200;
+    // Images are written once each and are referenced from whichever page they landed on, so they need
+    // ids that cannot collide with a page or a content stream. 1000 is comfortably past `FIRST_CONTENT`
+    // plus the largest page count the container allows (2048 chunks is not pages, but a page per line
+    // would still be far below 800).
+    const FIRST_IMAGE: i32 = 1000;
+
+    pdf.catalog(catalog_id).pages(pages_id);
+    pdf.document_info(info_id).title(TextStr(&opts.title));
+
+    let faces = Faces::NAMES;
+
+    // Lay the document out into pages of content operators first, so the page tree can be written with
+    // the real count instead of a placeholder.
+    let text_len = editor.text_len();
+    let runs = editor.spans().runs_in(0, text_len as u32);
+    let mut chunk = vec![0u8; crate::html::CHUNK_BYTES];
+
+    let mut pages: Vec<Content> = Vec::new();
+    let mut current = Content::new();
+    // The catalog, read once. §2.9.5 requires the exporters to take images from the payload rather than
+    // from the Iceberg cache, because a PDF must not depend on scroll position -- so this is a borrow of
+    // the document's own assets and nothing is decoded until an image is actually reached.
+    let catalog = editor.assets();
+    // Images are placed during the walk and written after it, because their object ids and the page
+    // tree's count are both unknown until the document has been laid out.
+    let mut images: Vec<PlacedImage> = Vec::new();
+    // How many anchors have gone past; the n-th serves catalog entry n. See `html.rs`'s note on why this
+    // is a counter and not a search: the walk is already in document order.
+    let mut anchor_ordinal = 0usize;
+    // The at-most-two bytes an anchor can be cut into by a slice edge, held between slices so the next
+    // one can complete it. Mirrors `html.rs`'s `carry`; see `split_on_anchors` for why dropping these
+    // instead cost both text bytes and every picture after the first cut anchor.
+    let mut carry: Vec<u8> = Vec::with_capacity(holonomy_text::ANCHOR_BYTES.len());
+    // `carry ++ slice`, rebuilt per slice. One allocation for the life of the export, and the same
+    // buffer serves both roles so what the scanner sees and what the layouter is fed cannot differ.
+    let mut joined: Vec<u8> =
+        Vec::with_capacity(crate::html::CHUNK_BYTES + holonomy_text::ANCHOR_BYTES.len());
+    let mut y = opts.page.height - opts.margin;
+    let mut lines_on_page = 0usize;
+    // The line being accumulated. It survives across runs, which is the whole point: the span map's
+    // runs are *formatting* boundaries and most of them sit in the middle of a line.
+    let mut layout = Layouter::new(opts);
+
+    // Walk runs and chunks in step, exactly as the HTML exporter does, so the two agree on where the
+    // document's formatting boundaries are.
+    let mut run_ix = 0usize;
+    let mut chunk_base = 0usize;
+
+    while chunk_base < text_len {
+        let n = editor.read_into(chunk_base, &mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        let chunk_end = chunk_base + n;
+
+        while run_ix < runs.len() {
+            let (span, start, end) = runs[run_ix];
+            let from = (start as usize).max(chunk_base);
+            let to = (end as usize).min(chunk_end);
+            if from >= to {
+                if (end as usize) <= chunk_end {
+                    run_ix += 1;
+                    continue;
+                }
+                break;
+            }
+
+            let slice = &chunk[from - chunk_base..to - chunk_base];
+            // **Everything the run's flags say, in one value.** Face, size, rise and the two rules --
+            // the four new bits were added to the model, the toolbar and the painter and *not* here,
+            // so an underlined word exported as plain text with the underline silently gone. `RunStyle`
+            // is the one place they are read now.
+            let style = RunStyle::of_span(&span, opts);
+
+            // **The carry goes in front of this slice**, which is the whole of `split_on_anchors`'s
+            // tail contract: an anchor split across the previous slice's end is completed here and
+            // nowhere else, so it is found exactly once and `anchor_ordinal` advances exactly once.
+            // Reusing one buffer for both roles keeps the pair from drifting -- the bytes read by
+            // `find_anchor` and the bytes fed to the layouter are the same allocation, by construction.
+            joined.clear();
+            joined.extend_from_slice(&carry);
+            joined.extend_from_slice(slice);
+            let pieces = split_on_anchors(&joined, &mut carry);
+
+            // Split the slice on anchors before it reaches the layouter. An anchor is a picture, not a
+            // word: it has no glyph, no advance, and it wants the whole measure and a height derived
+            // from its aspect ratio. Feeding it to the layouter as a 3-byte run would typeset U+FFFC's
+            // replacement glyph if the font had one and a blank otherwise, so the split happens here.
+            for (pi, piece) in pieces.iter().enumerate() {
+                if let Piece::Text(t) = piece {
+                    // **Where this piece ends decides whether the word in front of it is finished.**
+                    //
+                    // * **A picture follows** — the word is committed, because a picture is a hard
+                    //   block and the text in front of it has to be placed before it.
+                    // * **The run ends here** — the word is committed, because a style change is a
+                    //   formatting boundary.
+                    // * **Neither** — the piece ends at the 64 KiB chunk edge and the run continues
+                    //   into the next chunk. **The word stays open**, because a chunk boundary is
+                    //   not a formatting boundary: committing there broke the word in two, and the
+                    //   line could break inside it.
+                    let next_is_anchor = matches!(pieces.get(pi + 1), Some(Piece::Anchor));
+                    let run_ends_here = to >= end as usize;
+                    let boundary = next_is_anchor || run_ends_here;
+                    let mut pending: Vec<u8> = t.to_vec();
+                    for line in layout.feed(&pending, style, stats, boundary) {
+                        if lines_on_page == lines_per_page(opts) || y < opts.margin {
+                            pages.push(std::mem::replace(&mut current, Content::new()));
+                            y = opts.page.height - opts.margin;
+                            lines_on_page = 0;
+                        }
+                        write_line(
+                            &mut current,
+                            &line.segments,
+                            y,
+                            opts.margin,
+                            opts.font_size,
+                            stats,
+                        );
+                        y -= opts.line_height * line.scale;
+                        lines_on_page += 1;
+                        stats.lines += 1;
+                    }
+                    pending.clear();
+                    continue;
+                }
+                // An anchor. Break the page if the picture cannot fit where it is, then place it.
+                let Some(asset) = crate::asset::asset_at(catalog, anchor_ordinal) else {
+                    stats.images_missing += 1;
+                    // No asset: still a block of vertical space, or the text after it would run over
+                    // the gap the reader will leave where the picture should be.
+                    let h = opts.line_height;
+                    if y < opts.margin + h {
+                        pages.push(std::mem::replace(&mut current, Content::new()));
+                        y = opts.page.height - opts.margin;
+                        lines_on_page = 0;
+                    }
+                    y -= h;
+                    lines_on_page += 1;
+                    anchor_ordinal += 1;
+                    continue;
+                };
+                // The drawn width is the measure and the height follows the aspect ratio, so the
+                // picture is as large as the text column and never distorted. The `f64` arithmetic is
+                // the one float in the image path: PDF's coordinate system is in points, and the aspect
+                // ratio has to survive.
+                let width = opts.measure();
+                let height = if asset.width == 0 {
+                    opts.line_height
+                } else {
+                    (f64::from(opts.measure()) * f64::from(asset.height) / f64::from(asset.width))
+                        as f32
+                };
+                if y < opts.margin + height || lines_on_page == lines_per_page(opts) {
+                    pages.push(std::mem::replace(&mut current, Content::new()));
+                    y = opts.page.height - opts.margin;
+                    lines_on_page = 0;
+                }
+                let ix = images.len() as i32;
+                images.push(PlacedImage {
+                    page: pages.len(),
+                    // The picture's *top* is at the current baseline, so its bottom edge is that much
+                    // lower. PDF's y grows up, so subtracting is the right direction.
+                    y: y - height,
+                    width,
+                    height,
+                    id: Ref::new(FIRST_IMAGE + ix),
+                    name_bytes: {
+                        let mut n = Vec::with_capacity(8);
+                        n.extend_from_slice(b"Im");
+                        n.extend_from_slice(ix.to_string().as_bytes());
+                        n
+                    },
+                    index: anchor_ordinal,
+                });
+                stats.images += 1;
+                // Reserve the vertical space, plus a line's worth of leading so text below the picture
+                // is not flush against it.
+                y -= height + opts.line_height;
+                lines_on_page += 1;
+                anchor_ordinal += 1;
+            }
+            if lines_on_page == lines_per_page(opts) || y < opts.margin {
+                pages.push(std::mem::replace(&mut current, Content::new()));
+                y = opts.page.height - opts.margin;
+                lines_on_page = 0;
+            }
+
+            if (end as usize) <= chunk_end {
+                run_ix += 1;
+            } else {
+                break;
+            }
+        }
+        chunk_base = chunk_end;
+    }
+
+    // **Whatever is still held back is an anchor the document ended in the middle of.** It cannot
+    // happen through `insert_image` -- the anchor is inserted whole -- but a hand-edited or
+    // corrupt document can end on one or two bytes of U+FFFC. Those bytes are not valid UTF-8, so
+    // feeding them to the layouter would be meaningless rather than lossy; the honest reading is the
+    // one `html.rs` takes, a picture reference with no picture behind it, which reserves the space a
+    // picture would have and counts itself so a document that lost an asset says so here rather than
+    // looking like one that never had images. No ordinal is consumed: nothing placed an image, and
+    // the walk is over, so a counter nothing reads is worse than no counter.
+    if !carry.is_empty() {
+        let h = opts.line_height;
+        if y < opts.margin + h {
+            pages.push(std::mem::replace(&mut current, Content::new()));
+            y = opts.page.height - opts.margin;
+            lines_on_page = 0;
+        }
+        y -= h;
+        lines_on_page += 1;
+        stats.images_missing += 1;
+        carry.clear();
+    }
+
+    // A trailing run with no newline still produced a line, via `finish`.
+    for line in layout.finish(stats) {
+        if lines_on_page == lines_per_page(opts) || y < opts.margin {
+            pages.push(std::mem::replace(&mut current, Content::new()));
+            y = opts.page.height - opts.margin;
+            lines_on_page = 0;
+        }
+        write_line(
+            &mut current,
+            &line.segments,
+            y,
+            opts.margin,
+            opts.font_size,
+            stats,
+        );
+        y -= opts.line_height * line.scale;
+        lines_on_page += 1;
+        stats.lines += 1;
+    }
+    // A document with no text at all is still one blank page, not zero: a PDF with an empty page tree
+    // is rejected by some readers.
+    if lines_on_page > 0 {
+        pages.push(current);
+    }
+    if pages.is_empty() {
+        pages.push(Content::new());
+    }
+
+    stats.pages = pages.len() as u32;
+
+    // The page tree, now that the count is known.
+    let page_refs: Vec<Ref> = (0..pages.len())
+        .map(|i| Ref::new(FIRST_PAGE + i as i32))
+        .collect();
+    pdf.pages(pages_id)
+        .kids(page_refs.iter().copied())
+        .count(pages.len() as i32);
+
+    // Fonts, once each, referenced by every page.
+    for (i, base) in faces.base_fonts().iter().enumerate() {
+        let id = Ref::new(FIRST_FONT + i as i32);
+        // WinAnsi, not Standard: `fonts.rs` indexes the width tables by WinAnsi code, so the declared
+        // encoding and the metrics have to be the same one or wrapping lands where the reader does not
+        // break.
+        pdf.type1_font(id)
+            .base_font(Name(base))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+    }
+
+    // Decode and compress each image once, then write its XObject.
+    //
+    // `/DeviceRGB` with 8 bits per component and `/FlateDecode`, which is the only combination this
+    // crate can produce: there is no JPEG encoder and no `png` crate (§2.9.5), and the `/Flate`
+    // compressor is the one already linked for the decoder. A 1920x1080 photo is 6.2 MB of raw RGB
+    // before compression, so `/Flate` is not an optimisation here, it is the difference between an
+    // export that works and one that does not.
+    for img in &images {
+        let asset = catalog
+            .entries()
+            .get(img.index)
+            .ok_or(PdfError::MissingAsset { index: img.index })?;
+        let (w, h, rgb) =
+            crate::asset::decode_to_rgb(asset).map_err(|e| PdfError::Asset(e.to_string()))?;
+        stats.image_sample_bytes += rgb.len() as u64;
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6);
+        let mut x = pdf.image_xobject(img.id, &packed);
+        x.width(w as i32);
+        x.height(h as i32);
+        x.bits_per_component(8);
+        x.color_space_name(Name(b"DeviceRGB"));
+        x.filter(pdf_writer::Filter::FlateDecode);
+        x.finish();
+    }
+
+    // The `Do` operators, one per image, appended to the page it landed on -- before the page tree is
+    // written, so the content streams the loop below emits are the versions with the operators in them.
+    for img in &images {
+        let Some(content) = pages.get_mut(img.page) else {
+            // `PlacedImage::page` is recorded during the walk, before the walk's final page break, so it
+            // can name a page that was then pushed. Falling back to the last page would put the picture
+            // somewhere it is not referenced from; skipping it would lose it. Counting it is the honest
+            // answer, and the condition cannot happen today because the final break only happens once
+            // the walk is over.
+            stats.images_missing += 1;
+            continue;
+        };
+        // `q ... Q` so the picture's transform cannot leak into whatever the next line does.
+        content.save_state();
+        content.transform([img.width, 0.0, 0.0, img.height, opts.margin, img.y]);
+        content.x_object(Name(&img.name_bytes));
+        content.restore_state();
+    }
+
+    for (i, content) in pages.into_iter().enumerate() {
+        let page_id = Ref::new(FIRST_PAGE + i as i32);
+        let content_id = Ref::new(FIRST_CONTENT + i as i32);
+
+        let mut page = pdf.page(page_id);
+        page.media_box(opts.page.rect());
+        page.parent(pages_id);
+        page.contents(content_id);
+        {
+            // Scoped: `resources()` hands out a temporary, and holding `fonts` across the loop keeps
+            // that temporary alive, which is why this is a block rather than two statements.
+            let mut resources = page.resources();
+            let mut fonts = resources.fonts();
+            for (ix, name) in faces.all().iter().enumerate() {
+                fonts.pair(*name, Ref::new(FIRST_FONT + ix as i32));
+            }
+            fonts.finish();
+            // `/XObject` only when the page has an image. An empty `/XObject <<>>` is legal and some
+            // readers complain about it, and a page with no picture should not carry the key at all.
+            let on_this_page: Vec<&PlacedImage> =
+                images.iter().filter(|img| img.page == i).collect();
+            if !on_this_page.is_empty() {
+                let mut xobjects = resources.x_objects();
+                for img in on_this_page {
+                    xobjects.pair(Name(&img.name_bytes), img.id);
+                }
+                xobjects.finish();
+            }
+        }
+        page.finish();
+
+        pdf.stream(content_id, &content.finish());
+    }
+
+    Ok(pdf.finish())
+}
+
+/// A slice of a document's bytes, split at the anchors.
+///
+/// Yielded as text and anchors separately so the layout walk can typeset one and place the other. A
+/// `&[u8]` per piece rather than an owned `Vec`, so splitting a 64 KiB chunk allocates nothing.
+enum Piece<'a> {
+    /// Ordinary bytes, possibly empty.
+    Text(&'a [u8]),
+    /// An anchor, already consumed.
+    Anchor,
+}
+
+/// The pieces of `slice`, in order, with anchors as their own item.
+///
+/// # The tail problem, and what used to happen to it
+///
+/// `slice` is a run's bytes and the anchor is three, so an anchor can straddle the end: `read_into`
+/// and `runs_in` both cut on their own edges, and neither knows where an anchor is.
+///
+/// The previous version subtracted the partial lead from the trailing text and returned -- which meant
+/// **two** bugs from one line. The lead bytes were *dropped*, so the exported PDF lost one or two bytes
+/// of the author's text at every run boundary that happened to land there; and because the next slice
+/// then began mid-anchor with `0x80 0x99` where the scanner looks for `0xE2`, the anchor was never
+/// found at all. That second half is the worse one: `anchor_ordinal` is the *only* thing mapping an
+/// anchor to a catalog entry, so a single missed anchor shifts every picture after it onto its
+/// neighbour's bytes -- a document that exports successfully and pictures the wrong photographs in
+/// the wrong places.
+///
+/// So the partial lead is **held back into `carry`**, not consumed, exactly as `html.rs`'s
+/// `emit_with_anchors` does; `build` prepends `carry` to the next slice, the anchor is found once by
+/// the slice that completes it, and `anchor_ordinal` advances once with it. `carry` is at most two
+/// bytes, so prepending costs one `memcpy` per slice and nothing per document.
+fn split_on_anchors<'a>(slice: &'a [u8], carry: &mut Vec<u8>) -> Vec<Piece<'a>> {
+    let mut out = Vec::new();
+    let mut rest = slice;
+    loop {
+        let (found, partial) = crate::asset::find_anchor(rest);
+        let Some(found) = found else {
+            // Everything except a possible partial lead at the very end, which goes back in `carry`
+            // for the next slice to prepend rather than vanishing from the export.
+            let keep = rest.len().saturating_sub(partial);
+            out.push(Piece::Text(&rest[..keep]));
+            carry.clear();
+            carry.extend_from_slice(&rest[keep..]);
+            return out;
+        };
+        if found > 0 {
+            out.push(Piece::Text(&rest[..found]));
+        }
+        out.push(Piece::Anchor);
+        rest = &rest[found + holonomy_text::ANCHOR_BYTES.len()..];
+        if rest.is_empty() {
+            carry.clear();
+            return out;
+        }
+    }
+}
+
+/// One image to place, and the stream it needs.
+///
+/// Built during the layout walk and written after it, because `pdf-writer` wants an object id and the
+/// page tree wants a count, and neither is known until the document has been laid out. The image's
+/// position is recorded as **the page it landed on and the y it landed at**, both of which the walk
+/// knows and the writing pass does not.
+struct PlacedImage {
+    /// Which page, by index into the `pages` vector.
+    page: usize,
+    /// Bottom edge, in points from the page's origin. PDF's y grows upward.
+    y: f32,
+    /// Drawn width in points.
+    width: f32,
+    /// Drawn height in points.
+    height: f32,
+    /// The object id of the image XObject.
+    id: Ref,
+    /// The resource name it is referenced by, and the bytes it borrows.
+    ///
+    /// `pdf-writer`'s `Name` is a borrowed `&[u8]`, and a name like `/Im7` cannot be a `'static` byte
+    /// string because the index is computed at runtime. So the name's bytes are owned here and the
+    /// `Name` borrows from them -- which is why `PlacedImage` cannot be borrowed across the writing
+    /// loop while its own `Names` are alive. It holds no self-references: `name_bytes` is the storage
+    /// and `name` is rebuilt where it is needed.
+    name_bytes: Vec<u8>,
+    /// Which catalog entry it is, so the writing pass can find the bytes without a second walk.
+    index: usize,
+}
+
+/// How many lines fit between the margins.
+fn lines_per_page(opts: &PdfOptions) -> usize {
+    let usable = (opts.page.height - 2.0 * opts.margin) / opts.line_height;
+    (usable.floor() as usize).max(1)
+}
+
+/// How much bigger a header line is than body text.
+pub const HEADER_SCALE: f32 = 1.35;
+
+/// **How thick the underline and the strikethrough are, in points.**
+///
+/// Half a point, which is 1/144 inch: what a word processor draws under 11-pt type. A whole point is
+/// visible at 100 % reading size and reads as a border rather than as emphasis.
+pub const RULE_THICKNESS: f32 = 0.5;
+
+/// Spaces a tab expands to in the PDF export.
+///
+/// Four is the conventional choice for a proportional face at 10-12pt, where one em is roughly four
+/// spaces wide.
+pub const TAB_SPACES: usize = 4;
+
+/// One run of text on a laid-out line, with the face it is drawn in.
+#[derive(Debug, Clone, PartialEq)]
+struct Segment {
+    /// WinAnsi bytes.
+    text: Vec<u8>,
+    /// The face's resource name.
+    font: Name<'static>,
+    /// The face's point size -- headers are larger, so a line can mix sizes.
+    size: f32,
+    /// **The metric face, kept so a rule can be given the segment's width.**
+    ///
+    /// The layouter knows this when it measures and threw it away; `draw_rules` needs it again to turn
+    /// the bytes back into points, because the rule's extent is the text's and not the line's.
+    metric: BaseFont,
+    /// **The text rise, in points: positive is up and is a superscript.**
+    ///
+    /// PDF has had a text state for this the whole time -- `Ts` -- and every reader implements it,
+    /// which is why a raised run needs no second font, no second size and no drawn line. `0` is
+    /// ordinary text, so a segment that is not raised costs nothing.
+    rise: f32,
+    /// **This segment draws a rule under itself.**
+    ///
+    /// **A rule, not a link annotation and not a font.** PDF's only built-in underline is the
+    /// `/U` entry on a link annotation, which is a *link* and would make a plain underlined word
+    /// clickable-looking and, worse, would need one annotation object per run. A stroked line is what
+    /// every word processor emits and what the screen's own underline is, so the two agree.
+    underline: bool,
+    /// **This segment draws a rule through itself.**
+    strike: bool,
+}
+
+/// One finished line.
+#[derive(Debug, Clone, PartialEq)]
+struct Line {
+    segments: Vec<Segment>,
+    /// Line-height multiplier, so a line containing a header takes a header's height.
+    scale: f32,
+}
+
+/// Accumulates run fragments into lines, breaking at word boundaries.
+///
+/// # Why this exists
+///
+/// Two bugs, in order.
+///
+/// The first version called a per-run `split_lines` and treated each result as a finished line. The
+/// span map hands back a run per *formatting* boundary and formatting boundaries sit mid-sentence, so
+/// every styled word became its own line: a structurally valid PDF that read back as one short line
+/// per styled span.
+///
+/// The second version accumulated runs into a line correctly but broke the line per *character*. That
+/// reads back with a spurious line break inside every long word -- "foxtrot" arrives as "foxtro" plus
+/// a line holding "t" -- so the export's text no longer matches the document.
+///
+/// # The rule
+///
+/// Break **between** words, at a space, and never inside one. That means a word's width has to be known
+/// before the word can be placed, so a word is buffered until its end. Two things are held back while
+/// that happens:
+///
+/// * the word itself, as [`Pending`], and
+/// * the spaces before it, as a width.
+///
+/// Holding the spaces back is what keeps a broken line from ending in whitespace. The cost is that the
+/// spaces are committed only once the following word is known to fit -- which is exactly when the
+/// decision can be made, and the reason no trailing-space trimming pass is needed.
+///
+/// # A word wider than the measure
+///
+/// It goes on a line of its own and overflows, counted in
+/// [`PdfStats::overflowing_lines`]. Breaking inside a word to fit would be worse than overflowing it: a
+/// hyphen-less mid-word break in a PDF renders as two fragments with no indication they were one word.
+#[derive(Debug)]
+struct Layouter<'a> {
+    opts: &'a PdfOptions,
+    /// The line being built.
+    segments: Vec<Segment>,
+    /// Its width so far, in 1/1000 em.
+    width: u32,
+    /// Line-height multiplier, so a line containing a header takes a header's height.
+    scale: f32,
+    /// The word being buffered, if one is open.
+    pending: Option<Pending>,
+    /// Width of the spaces held back before [`Layouter::pending`].
+    held_spaces: u32,
+    /// **The run the held spaces came from: its face, its metric and its point size.**
+    ///
+    /// `None` when nothing is held. **A held space belongs to the run it was typed in, and that run is
+    /// gone by the time the spaces are written**: `commit` finishes the word, and only then does anything
+    /// look for one reads the *line's* last segment — which at a style boundary is the previous run. So `` `code `` followed by a space and then plain text measured the
+    /// space as a Helvetica space while the reader drew a Courier one, and a space between two heading
+    /// words was pushed at the body size. The run's rule then traced a length its own text does not have,
+    /// and the line the exporter broke was not the line the reader laid out.
+    ///
+    /// **One `Option` around all three** so the empty case is a single `None` and the three cannot be
+    /// half-set: a `face` with no `metric` is exactly the disagreement this field replaces.
+    held_run: Option<(Name<'static>, BaseFont, f32)>,
+    /// **The bytes of a character the last piece ended in the middle of.**
+    ///
+    /// **A piece is 64 KiB of the document, and a character can straddle the edge.** The
+    /// character used to be split: the lead byte was read as a one-byte character, `transcode`
+    /// could not decode it, and it became `?` — and the continuation bytes at the head of the
+    /// next piece each became a `?` as well. **One CJK character became three question marks,
+    /// silently, in the exported PDF.**
+    ///
+    /// So the incomplete character is held here and completed by the next piece. The bytes are
+    /// at most three, because a UTF-8 character is at most four bytes long.
+    utf8_carry: Vec<u8>,
+}
+
+/// **The formatting of one run, as the layouter needs it.**
+///
+/// A plane of its own rather than five more arguments on [`Layouter::feed`], because the five travel
+/// together: the face and the size are what the word is measured in, and the rise and the two rules are
+/// what it is *drawn* with, and a caller that passed four of the five would be a caller with a bug.
+/// [`RunStyle::of_plain`] is what a test that only cares about a face and a width passes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RunStyle {
+    /// The face's resource name.
+    font: Name<'static>,
+    /// The metric face, for widths.
+    metric: BaseFont,
+    /// Point size -- headers are larger, so a line can mix sizes.
+    size: f32,
+    /// A header, which also scales the line's leading.
+    big: bool,
+    /// Text rise in points; positive is up.
+    rise: f32,
+    /// A rule under the run.
+    underline: bool,
+    /// A rule through the run.
+    strike: bool,
+}
+
+impl RunStyle {
+    /// **A run of plain text: no rise, no rules, and `big` only if the caller says so.**
+    ///
+    /// The tests that only care about faces, sizes and wrapping use this, which is why they read as
+    /// one argument instead of six. `big` is a parameter rather than a constant because a header is
+    /// still "plain" in the sense that matters here -- it has no decoration -- and the leading test
+    /// depends on it.
+    ///
+    /// **`cfg(test)`, because `build` does not call it.** Every run the product lays out comes from
+    /// [`Self::of_span`], which reads the flags; this constructor exists for the unit tests below, and
+    /// a non-test build that compiled it would be a second way to make a `RunStyle` -- one that cannot
+    /// carry a decoration, which is the class of constructor this file's docs argue against having.
+    #[cfg(test)]
+    fn of_plain(font: Name<'static>, metric: BaseFont, size: f32, big: bool) -> Self {
+        Self {
+            font,
+            metric,
+            size,
+            big,
+            rise: 0.0,
+            underline: false,
+            strike: false,
+        }
+    }
+
+    /// **Everything the span says**, which is what the exporter hands `feed`.
+    ///
+    /// The rise is a third of the size and the sign follows the bit -- the same fraction the screen's
+    /// painter uses (`Session::baseline_shift`), because a document that reads one way on screen and
+    /// another in the file is the defect Phase 6's heading work was about.
+    ///
+    /// **The rise is expressed in points here and in pixels there, and that is not an inconsistency.**
+    /// The exporter's unit is the point and the painter's is the pixel; both are "a third of an em".
+    fn of_span(span: &TextIntervalSpan, opts: &PdfOptions) -> Self {
+        let (font, metric) = Faces::for_span(span);
+        let big = span.style_flags & STYLE_HEADER != 0;
+        let size = if big {
+            opts.font_size * HEADER_SCALE
+        } else {
+            opts.font_size
+        };
+        // **Superscript wins over subscript**, as on screen: a run cannot be both, and the session's
+        // toggles clear the opposite bit, so this only decides what a hand-built span does.
+        let rise = if span.style_flags & STYLE_SUPERSCRIPT != 0 {
+            size / 3.0
+        } else if span.style_flags & STYLE_SUBSCRIPT != 0 {
+            -(size / 3.0)
+        } else {
+            0.0
+        };
+        Self {
+            font,
+            metric,
+            size,
+            big,
+            rise,
+            underline: span.style_flags & STYLE_UNDERLINE != 0,
+            strike: span.style_flags & STYLE_STRIKE != 0,
+        }
+    }
+}
+
+/// A word being buffered, in one face.
+#[derive(Debug)]
+struct Pending {
+    text: Vec<u8>,
+    font: Name<'static>,
+    size: f32,
+    /// Its width in 1/1000 em, at its own size.
+    width: u32,
+    /// See [`Segment::metric`].
+    metric: BaseFont,
+    /// See [`Segment::rise`].
+    rise: f32,
+    /// See [`Segment::underline`].
+    underline: bool,
+    /// See [`Segment::strike`].
+    strike: bool,
+}
+
+impl<'a> Layouter<'a> {
+    fn new(opts: &'a PdfOptions) -> Self {
+        Self {
+            opts,
+            segments: Vec::new(),
+            width: 0,
+            scale: 1.0,
+            pending: None,
+            held_spaces: 0,
+            held_run: None,
+            utf8_carry: Vec::new(),
+        }
+    }
+
+    /// The measure in 1/1000 em at `size`, rounded once.
+    fn limit_mils(&self, size: f32) -> u32 {
+        (self.opts.measure_mils() as f32 * size / self.opts.font_size).round() as u32
+    }
+
+    /// Feed one run's bytes, returning every line that completes.
+    ///
+    /// # `boundary` says whether the piece ends a formatting run
+    ///
+    /// **A piece is not a run.** The document is walked in 64 KiB pieces, and a run that crosses
+    /// a piece boundary is fed twice — the same run, the same face, two calls. The word open at
+    /// the end of the first call is still open in the second, and it must not be committed at the
+    /// piece edge: **a chunk boundary is not a formatting boundary.**
+    ///
+    /// It used to be treated as one. The word was committed at the end of every piece, so a word
+    /// straddling the 64 KiB boundary was broken in two — and if the tail did not fit in the
+    /// remaining measure, **the line broke inside the word**, which is the exact defect this
+    /// layouter exists to prevent.
+    ///
+    /// `boundary` is true at the end of a run and before a picture (a picture is a hard block, so
+    /// the word in front of it has to be placed first), and false at a piece edge inside a run.
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        style: RunStyle,
+        stats: &mut PdfStats,
+        boundary: bool,
+    ) -> Vec<Line> {
+        let RunStyle {
+            font,
+            metric,
+            size,
+            big,
+            rise,
+            underline,
+            strike,
+        } = style;
+        let mut done = Vec::new();
+        let limit = self.limit_mils(size);
+
+        // **The carry goes in front of this piece**, and it is the whole of the fix for a
+        // character that straddles a piece boundary: the bytes are completed here and nowhere
+        // else, so the character is decoded exactly once.
+        let mut joined: Vec<u8> = Vec::new();
+        let input: &[u8] = if self.utf8_carry.is_empty() {
+            bytes
+        } else {
+            joined.reserve(self.utf8_carry.len() + bytes.len());
+            joined.extend_from_slice(&self.utf8_carry);
+            joined.extend_from_slice(bytes);
+            self.utf8_carry.clear();
+            &joined
+        };
+
+        let mut i = 0usize;
+        while i < input.len() {
+            match input[i] {
+                b'\n' => {
+                    if let Some(l) = self.commit(stats, limit) {
+                        done.push(l);
+                    }
+                    // A newline drops any spaces held back: trailing whitespace on a line is never
+                    // what the author meant, and leaving it in would need a trim pass later.
+                    self.held_spaces = 0;
+                    done.push(self.take());
+                    i += 1;
+                    continue;
+                }
+                b'\r' => {
+                    if let Some(l) = self.commit(stats, limit) {
+                        done.push(l);
+                    }
+                    self.held_spaces = 0;
+                    done.push(self.take());
+                    i += 1;
+                    if input.get(i) == Some(&b'\n') {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b' ' => {
+                    // A space ends the word that came before it.
+                    if let Some(l) = self.commit(stats, limit) {
+                        done.push(l);
+                    }
+                    // **The run's own face, recorded with the width.** See `held_run`: the run is over by
+                    // the time the space is written, so it has to be remembered here or inferred wrongly
+                    // from the line's last segment.
+                    self.hold(font, metric, size, advance(metric, b" "));
+                    i += 1;
+                    continue;
+                }
+                b'\t' => {
+                    // A tab is a layout instruction with no WinAnsi byte and no intrinsic width. Four
+                    // spaces is the conventional stand-in at 10-12pt, and it is not counted as a
+                    // substitution because nothing is lost the way `?` for CJK loses something.
+                    if let Some(l) = self.commit(stats, limit) {
+                        done.push(l);
+                    }
+                    self.hold(font, metric, size, advance(metric, &[b' '; TAB_SPACES]));
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+
+            let n = utf8_len(input[i]);
+            // **A character that runs past the end of this piece is carried, not decoded.**
+            //
+            // This used to slice the bytes up to the end of the piece and hand a half-character to
+            // `transcode`, which could not decode it and returned `?`. **One CJK character became
+            // three question marks** — the truncated one here, and the two continuation bytes at
+            // the head of the next piece, each read as a one-byte character.
+            if i + n > input.len() {
+                self.utf8_carry.extend_from_slice(&input[i..]);
+                break;
+            }
+            let slice = &input[i..i + n];
+            let w = advance(metric, slice);
+            let code = transcode(slice, stats);
+            match &mut self.pending {
+                Some(p) => {
+                    p.text.push(code[0]);
+                    p.width += w;
+                }
+                None => {
+                    self.pending = Some(Pending {
+                        text: vec![code[0]],
+                        font,
+                        size,
+                        width: w,
+                        metric,
+                        // **The word's decorations are the run's**, taken when the word opens. A word
+                        // cannot straddle two runs -- a run boundary commits it -- so there is no case
+                        // where a half-underlined word needs both.
+                        rise,
+                        underline,
+                        strike,
+                    })
+                }
+            }
+            if big {
+                self.scale = self.scale.max(HEADER_SCALE);
+            }
+            i += n;
+        }
+        // The word open at the end of a **run** is committed here, not left dangling: a run
+        // boundary is a formatting boundary, and there is no reason for text to end mid-word
+        // because a style changed.
+        //
+        // **Only at a run boundary.** At a piece edge inside a run the word stays open, because a
+        // 64 KiB chunk boundary is not a formatting boundary — and committing there split the
+        // word, and the line could break inside it.
+        if boundary {
+            if let Some(l) = self.commit(stats, limit) {
+                done.push(l);
+            }
+        }
+        done
+    }
+
+    /// Place the buffered word and the spaces held back for it.
+    ///
+    /// Returns the line that was finished, if the word did not fit and the line had to break first.
+    /// A break is only ever taken *before* a word, so the returned line always ends at a word boundary
+    /// and never in whitespace.
+    fn commit(&mut self, stats: &mut PdfStats, limit: u32) -> Option<Line> {
+        let Some(pending) = self.pending.take() else {
+            // No word open -- a run of only spaces. The held spaces still have to go somewhere, or a
+            // line break would discard them; for a run that is *only* spaces they are the whole run.
+            // **The face and metric are the held run's own**, recorded when the space was typed.
+            self.flush_spaces();
+            return None;
+        };
+        if !self.segments.is_empty() && self.width + pending.width > limit {
+            // The word goes on the next line, and the space that caused the break is **consumed**.
+            //
+            // Consuming it is the whole reason the spaces are held back rather than appended: they have
+            // not been written yet, so dropping them here cannot leave trailing whitespace on the
+            // finished line. Leaving them in -- which is what the first version did -- put the space
+            // *after* the moved word, so a document extracted back with two spaces at every break.
+            self.held_spaces = 0;
+            stats.overflowing_lines += 1;
+            let finished = self.take();
+            self.push_many(
+                &pending.text,
+                pending.font,
+                pending.metric,
+                pending.size,
+                pending.rise,
+                pending.underline,
+                pending.strike,
+            );
+            self.width = pending.width;
+            return Some(finished);
+        }
+        // **The spaces go out before this word, in the run they were typed in.** That is `held_run`'s
+        // and not `pending`'s: a space at a style boundary belongs to the run it was typed in, and taking
+        // the next word's face would draw it in a face whose glyphs it is not.
+        self.flush_spaces();
+        self.width += pending.width;
+        self.push_many(
+            &pending.text,
+            pending.font,
+            pending.metric,
+            pending.size,
+            pending.rise,
+            pending.underline,
+            pending.strike,
+        );
+        None
+    }
+
+    /// **Hold one or more spaces back, with the run they came from.**
+    ///
+    /// The width accumulates because a run of spaces is one held stretch; the face and metric are
+    /// overwritten because a second run's spaces cannot join the first's -- `commit` runs on every space,
+    /// so anything held when a new run's space arrives was already flushed into the line.
+    fn hold(&mut self, face: Name<'static>, metric: BaseFont, size: f32, width: u32) {
+        self.held_spaces += width;
+        self.held_run = Some((face, metric, size));
+    }
+
+    /// Append the held spaces, in the run that held them.
+    ///
+    /// **No arguments: the face and the metric come from `held_run`, where the run that held them was
+    /// recorded.** A parameter pair here would be a second answer to "whose space is this", and it was
+    /// exactly that: the face used to be looked up from the line's last segment, which is not the run the
+    /// space came from.
+    fn flush_spaces(&mut self) {
+        let Some((face, metric, size)) = self.held_run.take() else {
+            // **A count with no record would lose a space**, so the invariant is asserted where it can be
+            // checked cheaply in a debug build. `hold` sets both, and nothing else moves either, so this
+            // arm is only reachable from a future field added without the record.
+            debug_assert_eq!(self.held_spaces, 0, "a held width with no held run");
+            return;
+        };
+        if self.held_spaces == 0 {
+            return;
+        }
+        // **One space byte per space width in the run's own metric face**, which is the face the width
+        // is measured in and the face the reader will draw with.
+        //
+        // This used to say "in the *plain* font, then scaled into the segment's face" and pass
+        // `BaseFont::Helvetica` while the `face` argument named a different font -- two halves of one
+        // decision, disagreeing. **A mono space is twice a proportional one**, so a held width inside a
+        // `code` run measured at Helvetica's space produced twice the spaces the run wanted, and
+        // `draw_rules` then traced a rule twice the length of the text it was under.
+        let one = u32::from(metric.width(b' ')).max(1);
+        let n = (self.held_spaces.div_ceil(one)) as usize;
+        let spaces = vec![b' '; n];
+        let w = advance(metric, &spaces);
+        // **Plain and unraised**, because a held space stands between two words and belongs to
+        // neither: an underline across the gap between two underlined words would draw one rule where
+        // the author wrote two, and `advance_of`'s discipline is the same one -- the gap is body text.
+        //
+        // **And at the held run's own size**, which was the body size until this line. A held space
+        // between two heading words is a space in a heading, and drawing it at 11 pt when the words
+        // either side are at 14.85 leaves the reader to re-break a line the exporter already broke --
+        // the one thing this layouter exists to prevent.
+        self.push_many(&spaces, face, metric, size, 0.0, false, false);
+        self.width += w;
+        self.held_spaces = 0;
+    }
+
+    /// Append several bytes in one face, extending the last segment when it has not changed.
+    ///
+    /// Extending rather than starting a new segment matters for the PDF's size and for its readability:
+    /// a document with four alternating styles on one line emits four `Tf`s and four `Tj`s, not one
+    /// `Tj` per character.
+    #[allow(clippy::too_many_arguments)]
+    fn push_many(
+        &mut self,
+        bytes: &[u8],
+        font: Name<'static>,
+        metric: BaseFont,
+        size: f32,
+        rise: f32,
+        underline: bool,
+        strike: bool,
+    ) {
+        match self.segments.last_mut() {
+            // **Every property that reaches the content stream, not just the face.** A run that is
+            // the same face and size but a different rise or a different rule is a *different* `Tj`,
+            // because `Ts` is text state: merging them would put a superscript's rise on the word
+            // before it, which is a document that reads correctly and looks wrong.
+            Some(last)
+                if last.font.0 == font.0
+                    && last.size == size
+                    && last.rise == rise
+                    && last.underline == underline
+                    && last.strike == strike =>
+            {
+                last.text.extend_from_slice(bytes);
+            }
+            _ => self.segments.push(Segment {
+                text: bytes.to_vec(),
+                font,
+                metric,
+                size,
+                rise,
+                underline,
+                strike,
+            }),
+        }
+    }
+
+    /// Finish the current line, whatever it holds, and reset.
+    fn take(&mut self) -> Line {
+        let line = Line {
+            segments: std::mem::take(&mut self.segments),
+            scale: self.scale,
+        };
+        self.width = 0;
+        self.scale = 1.0;
+        line
+    }
+
+    /// The line in progress, if there is one.
+    ///
+    /// An empty line at the very end of a document that ended in a newline is *not* returned: a
+    /// trailing newline ends the last line rather than starting a new one.
+    ///
+    /// # A character the document ended in the middle of
+    ///
+    /// The carry is flushed as a substitution: **the bytes are half a character, and there is
+    /// no more document to complete them with.** `?` is the honest answer — the same answer
+    /// `transcode` gives for any character WinAnsi cannot hold.
+    fn finish(mut self, stats: &mut PdfStats) -> Vec<Line> {
+        if !self.utf8_carry.is_empty() {
+            stats.substituted += 1;
+            self.utf8_carry.clear();
+        }
+        let mut out = Vec::new();
+        // **The word still open at the end of the document is placed here.**
+        //
+        // It used to be placed by the unconditional commit at the end of every `feed`. That
+        // commit is now conditional on a real formatting boundary, so a word that was still open
+        // when the document ended — which is every document that does not end in a newline — would
+        // never have been written at all.
+        if self.pending.is_some() {
+            let size = self
+                .pending
+                .as_ref()
+                .map(|p| p.size)
+                .unwrap_or(self.opts.font_size);
+            let limit = self.limit_mils(size);
+            if let Some(l) = self.commit(stats, limit) {
+                out.push(l);
+            }
+        }
+        if self.segments.is_empty() && self.held_spaces == 0 {
+            out
+        } else {
+            out.push(Line {
+                segments: self.segments,
+                scale: self.scale,
+            });
+            out
+        }
+    }
+}
+
+/// The length in bytes of the UTF-8 character starting with `b`, or 1 if `b` cannot start one.
+#[inline]
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        // A continuation byte, or an invalid lead. One byte, so the walk cannot stall on it -- a run
+        // with a stray continuation byte would otherwise loop forever.
+        _ => 1,
+    }
+}
+
+/// Transcode one character's UTF-8 bytes to one WinAnsi byte, counting substitutions.
+///
+/// `None` from [`winansi`] and a truncated character both become [`UNMAPPED`]. For the second case
+/// that is the honest answer rather than a safe one: the bytes are half a character, and picking a
+/// plausible glyph would put the wrong thing on the page while looking fine.
+fn transcode(slice: &[u8], stats: &mut PdfStats) -> [u8; 1] {
+    match std::str::from_utf8(slice) {
+        Ok(s) => match s.chars().next().and_then(winansi) {
+            Some(b) => [b],
+            None => {
+                stats.substituted += 1;
+                [UNMAPPED]
+            }
+        },
+        Err(_) => {
+            stats.substituted += 1;
+            [UNMAPPED]
+        }
+    }
+}
+
+/// Write one line: `BT`, `Tf`, `Td`, `Tj`, `ET`.
+///
+/// # One `BT`/`ET` per line, and one `Tf` per segment
+///
+/// A single text object for the whole page would be smaller, and wrong in a way that matters: a reader
+/// that merges two lines' text matrices loses the line structure, so text extraction comes back as one
+/// run per page. And `Tf` has to be re-issued per segment because a line can mix faces -- a bold word
+/// inside a plain sentence -- and the font is part of the text state, not of the string.
+///
+/// `Td` is absolute here only because each line gets a fresh `BT`, which resets the line matrix. That
+/// is deliberate and it is why the exporter does not have to track accumulated line positions.
+fn write_line(
+    out: &mut Content,
+    segments: &[Segment],
+    y: f32,
+    x: f32,
+    body_size: f32,
+    stats: &mut PdfStats,
+) {
+    // **The decoration tally, from the segments this line was handed.** Counted here rather than in
+    // `draw_rules`, because `draw_rules` skips a zero-width segment — an empty stretch between two faces
+    // draws no rule — and a count that skipped it would disagree with the HTML exporter, which emits a
+    // `<u>` pair around a run that has no visible characters in it. **The two formats must agree about
+    // how many decorated runs the document has**, or the comparison in `export.rs` is comparing an
+    // implementation with itself.
+    for seg in segments {
+        if seg.underline {
+            stats.underlined += 1;
+        }
+        if seg.strike {
+            stats.struck += 1;
+        }
+        if seg.rise != 0.0 {
+            stats.risen += 1;
+        }
+    }
+    // A blank line emits `BT`, a `Td` and an *empty* `Tj`, and is not skipped. The line has to be
+    // positioned: a paragraph break in the document is a line's worth of vertical space, and dropping
+    // it makes consecutive paragraphs run together. An empty string operand is legal, and a reader that
+    // buckets by position sees a line with no text on it -- which is what a blank line is.
+    out.begin_text();
+    // `Td` **once per line**, before any `Tj`.
+    //
+    // `td_is_relative_to_the_line_start_not_the_point` is the test that matters here: inside one `BT`,
+    // `tx ty Td` translates the line matrix, so it *accumulates*. Emitting one per segment -- which the
+    // first version did, so each styled word got its own `Td` -- put the second segment at twice the x
+    // and twice the y, and the line came back from the reader as several lines at increasing heights.
+    // A reader reassembling by position then saw a document that grew a line per bold word.
+    //
+    // The position is then absolute, because `BT` reset the line matrix to the identity and nothing has
+    // moved it yet.
+    out.next_line(x, y);
+    // **How many segments actually showed bytes**, which is what decides the blank-line arm below. The
+    // *rules* are drawn from every segment, because an empty one still occupies a stretch of the line.
+    let mut drawn = 0usize;
+    for seg in segments {
+        if seg.text.is_empty() {
+            continue;
+        }
+        out.set_font(seg.font, seg.size);
+        // **`Ts` before every `Tj`, including the `0` that puts ordinary text back on the baseline.**
+        // Text state persists for as long as the text object does, so a rise set for a superscript
+        // would otherwise be inherited by the plain word after it -- a document whose first
+        // superscript raised the rest of the line. Setting it unconditionally is one more operator per
+        // segment and the only version that cannot leak.
+        out.set_rise(seg.rise);
+        out.show(Str(&seg.text));
+        drawn += 1;
+    }
+    if drawn == 0 {
+        // The blank-line case: one empty show, so the reader has a run to position.
+        //
+        // `body_size` is passed in rather than read off the segments, which for a blank line have none.
+        // Deriving it from them produced `/F1 0 Tf`, and a font size of zero is not a legal PDF
+        // operand.
+        out.set_font(Faces::NAMES.regular, body_size);
+        out.set_rise(0.0);
+        out.show(Str(b""));
+    }
+    out.end_text();
+    // **The rules after the text object, because they are geometry and not text.** A stroked path
+    // inside `BT`/`ET` is legal and would inherit the text matrix, and the pass needs every segment's
+    // width anyway -- so it runs once, here, where the whole line is known.
+    draw_rules(out, segments, y, x);
+}
+
+/// **The underline and the strikethrough for one line, as stroked segments.**
+///
+/// # Why the width is recomputed here
+///
+/// The layouter measures in 1/1000 em *at the segment's own size*, which is the unit wrapping compares
+/// in, and a rule's extent has to be in points. `advance * size / 1000` is that conversion, done once
+/// per segment and never for a segment that draws no rule -- which is the common case.
+///
+/// # The two heights, as fractions of the size
+///
+/// ```text
+///   baseline      y
+///   underline     y - 2          (PDF's y grows upward, so "under" is minus)
+///   strike        y + size * 0.28
+/// ```
+///
+/// **Both are relative to the baseline, so a raised run's rules rise with it.** `Ts` moves the text
+/// matrix and the rule is a path in *user* space at `y`, so the two must be reconciled here rather than
+/// left to agree by accident: a superscript's underline is drawn under the raised glyphs, two points
+/// above where the same rule would sit for body text on that line. Without this a run that was both
+/// raised and underlined had its rule under the *baseline* — through the air below the letters, and in
+/// the one style combination where the mistake is obvious to a reader.
+///
+/// **Two points under the baseline** clears the descenders of an 11-pt face. **It is not the screen's
+/// rule, and the two agreeing on a number is a coincidence rather than a shared constant.** The
+/// painter resolves an underline from the *atlas's ascent and descent*, because the atlas is what it has;
+/// this emitter resolves it from a point size, because a PDF's unit is a point and there is no atlas in
+/// the file. **0.28 em above the baseline** is where Helvetica's x-height midpoint sits -- the x-height is
+/// 523/1000, so its middle is 261, and 280 errs up rather than striking through the stems.
+///
+/// **`RULE_THICKNESS` is the one number that is shared**, and it has no counterpart on screen either:
+/// the painter's floor is `DocRun::RULE_THICKNESS` in *pixels*, and 0.5 pt is a *vector* line. Two units,
+/// two numbers, and both are in their own file with the reason beside them.
+///
+/// **One stroke for the whole line**, because a path can hold every segment's line at once: a fully
+/// underlined paragraph is one `S`, not one operator pair per word.
+fn draw_rules(out: &mut Content, segments: &[Segment], y: f32, x: f32) {
+    let mut pen = x;
+    let mut any = false;
+    // **No `save_state`/`restore_state`, because one path is stroked once.** The pen is a local, the
+    // colour and width are set immediately before the single `S`, and nothing outside this function
+    // reads the graphics state afterwards -- the next line starts from `BT` and its own `Td`.
+    // **The path is built first and stroked once**, so a line with no rule emits nothing at all -- not
+    // a `save_state`/`restore_state` pair around an empty path, which would be two operators on every
+    // line of every document that has no underlining in it.
+    //
+    // **A segment with no text still moves the pen.** An empty segment is how the layouter represents
+    // a stretch of nothing between two faces, and skipping its width would put the rule under the
+    // wrong word -- so the advance is taken for every segment and only the *rule* is conditional.
+    for seg in segments {
+        let seg_width = advance(seg.metric, &seg.text) as f32 * seg.size / 1000.0;
+        // **The line's baseline, moved by the segment's own rise.** Both offsets below are distances
+        // from the baseline, and a raised run's baseline is not the line's -- see this function's doc.
+        let baseline = y + seg.rise;
+        for (draw, at) in [(seg.underline, -2.0), (seg.strike, seg.size * 0.28)] {
+            if !draw || seg_width <= 0.0 {
+                continue;
+            }
+            out.move_to(pen, baseline + at);
+            out.line_to(pen + seg_width, baseline + at);
+            any = true;
+        }
+        pen += seg_width;
+    }
+    if !any {
+        return;
+    }
+    out.set_stroke_rgb(0.0, 0.0, 0.0);
+    // **Half a point, and not one.** A point is 1/72 inch; half of one is what a word processor draws
+    // under 11-pt type, and it is visible without reading as a border.
+    out.set_line_width(RULE_THICKNESS);
+    out.stroke();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_measure_converts_to_mils_exactly() {
+        let o = PdfOptions {
+            font_size: 10.0,
+            ..Default::default()
+        };
+        // Letter 612 wide, 54 margins -> 504 points. At 10pt, 504 * 1000 / 10 = 50400 mils.
+        assert_eq!(o.measure(), 504.0);
+        assert_eq!(o.measure_mils(), 50_400);
+    }
+
+    #[test]
+    fn the_limit_scales_with_font_size() {
+        let small = PdfOptions {
+            font_size: 10.0,
+            ..Default::default()
+        };
+        let large = PdfOptions {
+            font_size: 20.0,
+            ..Default::default()
+        };
+        // Twice the size, half the room per glyph.
+        assert_eq!(large.measure_mils() * 2, small.measure_mils());
+    }
+
+    #[test]
+    fn utf8_lengths_are_read_from_the_lead_byte() {
+        assert_eq!(utf8_len(b'a'), 1);
+        assert_eq!(utf8_len(0xC3), 2);
+        assert_eq!(utf8_len(0xE2), 3);
+        assert_eq!(utf8_len(0xF0), 4);
+        // A continuation byte, and 0xFF. Both must advance by 1 or the walk stalls.
+        assert_eq!(utf8_len(0x80), 1);
+        assert_eq!(utf8_len(0xFF), 1);
+    }
+
+    /// The WinAnsi text of each segment of a laid-out line, concatenated.
+    fn text_of(line: &Line) -> Vec<u8> {
+        line.segments.iter().flat_map(|s| s.text.clone()).collect()
+    }
+
+    fn feed_all(opts: &PdfOptions, bytes: &[u8], stats: &mut PdfStats) -> Vec<Line> {
+        let mut l = Layouter::new(opts);
+        let mut out = l.feed(
+            bytes,
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            stats,
+            true,
+        );
+        out.extend(l.finish(stats));
+        out
+    }
+
+    /// **A word split across two pieces is one word.**
+    ///
+    /// The document is read in 64 KiB pieces and a formatting run can cross one, so the same word
+    /// arrives in two calls. **A piece boundary is not a formatting boundary**, and the word used
+    /// to be committed at the end of every piece: it was broken in two, and if the tail did not
+    /// fit in the remaining measure the line broke *inside* the word.
+    ///
+    /// The `boundary` flag is what distinguishes the two. It is false here, twice.
+    #[test]
+    fn a_word_split_across_two_pieces_is_one_word() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"hel",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            false,
+        );
+        lines.extend(l.feed(
+            b"lo",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            false,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(lines.len(), 1, "one word, one line");
+        assert_eq!(text_of(&lines[0]), b"hello");
+    }
+
+    /// **And at a real boundary the word is still committed**, so the flag is not simply off.
+    #[test]
+    fn a_word_ends_at_a_boundary() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"one",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            true,
+        );
+        lines.extend(l.feed(
+            b" two",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            true,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(text_of(&lines[0]), b"one two");
+    }
+
+    /// **A character split across two pieces is one character.**
+    ///
+    /// The old code sliced the bytes to the end of the piece and handed a half-character to the
+    /// transcoder, which could not decode it and produced `?` — and the continuation bytes at the
+    /// head of the next piece each became a `?` too. **One character became three question
+    /// marks, silently.**
+    #[test]
+    fn a_character_split_across_two_pieces_is_one_character() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        // "é" is two bytes: 0xC3 0xA9. The piece ends between them.
+        let mut lines = l.feed(
+            b"a\xc3",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            false,
+        );
+        lines.extend(l.feed(
+            b"\xa9b",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            false,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(stats.substituted, 0, "nothing was substituted");
+        // **`é` is in WinAnsi**, so it is one byte — 0xE9 — and not the two UTF-8 bytes. One
+        // character in, one character out: the old code put three `?` here.
+        assert_eq!(text_of(&lines[0]), b"a\xE9b");
+    }
+
+    #[test]
+    fn a_newline_ends_a_line() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"ab\ncd", &mut stats);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(text_of(&lines[0]), b"ab");
+        assert_eq!(text_of(&lines[1]), b"cd");
+        assert_eq!(stats.overflowing_lines, 0);
+    }
+
+    #[test]
+    fn a_trailing_newline_yields_no_extra_line() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"ab\n", &mut stats);
+        assert_eq!(
+            lines.len(),
+            1,
+            "a trailing newline ends the line, it does not start one"
+        );
+        assert_eq!(text_of(&lines[0]), b"ab");
+    }
+
+    #[test]
+    fn a_bare_newline_yields_an_empty_line() {
+        // A blank line in the document is a line in the PDF. Only a *trailing* newline is dropped.
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"a\n\nb", &mut stats);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(text_of(&lines[1]), b"");
+    }
+
+    #[test]
+    fn crlf_is_one_break_and_a_lone_cr_is_too() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"a\r\nb\rc", &mut stats);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(text_of(&lines[1]), b"b");
+        assert_eq!(
+            stats.substituted, 0,
+            "a CR is a line ending, not a character to substitute"
+        );
+    }
+
+    #[test]
+    fn an_overlong_line_is_broken_at_the_measure_and_counted() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        // The default Letter measure at 11pt is ~45800 mils; 'W' is 944.
+        let lines = feed_all(&opts, b"WWWW", &mut stats);
+        // All four fit: 4 * 944 = 3776, far inside the measure.
+        assert_eq!(lines.len(), 1, "nothing should have wrapped");
+        assert_eq!(stats.overflowing_lines, 0);
+        assert_eq!(text_of(&lines[0]), b"WWWW");
+    }
+
+    #[test]
+    fn a_very_narrow_measure_breaks_the_line() {
+        let opts = PdfOptions {
+            page: PageSize {
+                width: 80.0,
+                height: 800.0,
+            },
+            margin: 10.0,
+            ..Default::default()
+        };
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"alpha bravo charlie", &mut stats);
+        assert!(lines.len() > 1, "a 60pt measure cannot hold that");
+        for line in &lines {
+            assert!(!text_of(line).is_empty(), "a break produced an empty line");
+        }
+        assert!(stats.overflowing_lines > 0);
+        // The invariant that actually holds after wrapping: **no word is split**, and no word is lost.
+        //
+        // Not "concatenating the lines gives the source", because a line break in a PDF consumes the
+        // space that caused it -- that is what word wrapping *is*. So the lines are joined with a space
+        // to put the break back.
+        let joined: String = lines
+            .iter()
+            .map(|l| String::from_utf8(text_of(l)).expect("ascii"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined, "alpha bravo charlie");
+
+        // And no line begins or ends with the space a naive wrapper would leave there.
+        for line in &lines {
+            let t = text_of(line);
+            assert_ne!(t.first(), Some(&b' '), "a line starts with a space");
+            assert_ne!(t.last(), Some(&b' '), "a line ends with a space");
+        }
+    }
+
+    #[test]
+    fn a_word_wider_than_the_measure_is_not_split() {
+        let opts = PdfOptions {
+            page: PageSize {
+                width: 60.0,
+                height: 800.0,
+            },
+            margin: 10.0,
+            ..Default::default()
+        };
+        let mut stats = PdfStats::default();
+        // A 40pt measure, and a word far wider than it.
+        let long = "supercalifragilistic";
+        let lines = feed_all(&opts, long.as_bytes(), &mut stats);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the word overflows rather than being cut in half"
+        );
+        assert_eq!(text_of(&lines[0]), long.as_bytes());
+        assert_eq!(
+            stats.overflowing_lines, 0,
+            "an unbroken word does not count as an overflowing *line*; it is counted when a break forces it"
+        );
+    }
+
+    #[test]
+    fn a_break_between_two_words_is_counted_once() {
+        let opts = PdfOptions {
+            page: PageSize {
+                width: 90.0,
+                height: 800.0,
+            },
+            margin: 10.0,
+            ..Default::default()
+        };
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, b"alpha bravo charlie delta echo", &mut stats);
+        assert!(lines.len() > 1);
+        assert_eq!(stats.overflowing_lines, lines.len() as u32 - 1);
+    }
+
+    #[test]
+    fn runs_concatenate_into_one_line_rather_than_one_line_each() {
+        // The bug the `Layouter` exists to fix: the span map hands back a run per *formatting*
+        // boundary, and those sit mid-sentence. Treating each run as a finished line gave the PDF one
+        // short line per styled word.
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = Vec::new();
+        for (text, face, metric) in [
+            (&b"Bold "[..], Faces::NAMES.bold, BaseFont::HelveticaBold),
+            (&b"words. "[..], Faces::NAMES.regular, BaseFont::Helvetica),
+            (&b"code"[..], Faces::NAMES.code, BaseFont::Courier),
+            (&b"()"[..], Faces::NAMES.code, BaseFont::Courier),
+        ] {
+            lines.extend(l.feed(
+                text,
+                RunStyle::of_plain(face, metric, opts.font_size, false),
+                &mut stats,
+                true,
+            ));
+        }
+        lines.extend(l.finish(&mut stats));
+
+        assert_eq!(lines.len(), 1, "four runs must produce one line, not four");
+        assert_eq!(text_of(&lines[0]), b"Bold words. code()");
+        // And the faces are the three distinct ones, in order.
+        let faces: Vec<&[u8]> = lines[0].segments.iter().map(|s| s.font.0).collect();
+        assert_eq!(
+            faces,
+            vec![b"F2", b"F1", b"F5"],
+            "expected bold, regular, code"
+        );
+    }
+
+    #[test]
+    fn consecutive_runs_in_the_same_face_merge_into_one_segment() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"ab",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            true,
+        );
+        lines.extend(l.feed(
+            b"cd",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            true,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(
+            lines[0].segments.len(),
+            1,
+            "same face, same size: one Tj is enough"
+        );
+        assert_eq!(text_of(&lines[0]), b"abcd");
+    }
+
+    #[test]
+    fn a_line_containing_a_header_takes_a_headers_height() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"Chapter",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size * HEADER_SCALE,
+                true,
+            ),
+            &mut stats,
+            true,
+        );
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(lines[0].scale, HEADER_SCALE);
+        assert_eq!(lines[0].segments[0].size, opts.font_size * HEADER_SCALE);
+
+        // A plain line does not.
+        let plain = feed_all(&opts, b"body", &mut stats);
+        assert_eq!(plain[0].scale, 1.0);
+    }
+
+    #[test]
+    fn a_line_mixes_sizes_and_both_are_kept() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let mut lines = l.feed(
+            b"Title",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size * HEADER_SCALE,
+                true,
+            ),
+            &mut stats,
+            true,
+        );
+        lines.extend(l.feed(
+            b" body",
+            RunStyle::of_plain(
+                Faces::NAMES.regular,
+                BaseFont::Helvetica,
+                opts.font_size,
+                false,
+            ),
+            &mut stats,
+            true,
+        ));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].segments.len(),
+            2,
+            "different sizes cannot share a Tf"
+        );
+        assert_eq!(text_of(&lines[0]), b"Title body");
+        assert_eq!(lines[0].scale, HEADER_SCALE);
+    }
+
+    #[test]
+    fn utf8_survives_the_walk() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let lines = feed_all(&opts, "caf\u{e9} \u{4e2d}\u{6587}".as_bytes(), &mut stats);
+        assert_eq!(lines.len(), 1);
+        // e-acute is WinAnsi 0xE9; the two CJK characters are not WinAnsi at all.
+        assert_eq!(text_of(&lines[0]), b"caf\xE9 ??");
+        assert_eq!(stats.substituted, 2);
+    }
+
+    #[test]
+    fn a_stray_continuation_byte_does_not_stall() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        // A lone 0x80 where a lead byte should be. `utf8_len` returns 1 for it precisely so the walk
+        // advances; if it returned 0 the whole exporter would hang here.
+        let lines = feed_all(&opts, b"a\x80b", &mut stats);
+        assert_eq!(text_of(&lines[0]), b"a?b");
+        assert_eq!(stats.substituted, 1);
+    }
+
+    #[test]
+    fn faces_follow_the_style_flags() {
+        let plain = TextIntervalSpan::plain(0, 1);
+        assert_eq!(
+            Faces::for_span(&plain),
+            (Faces::NAMES.regular, BaseFont::Helvetica)
+        );
+
+        let bold = TextIntervalSpan::styled(0, 1, STYLE_BOLD, 0);
+        assert_eq!(
+            Faces::for_span(&bold),
+            (Faces::NAMES.bold, BaseFont::HelveticaBold)
+        );
+
+        let ital = TextIntervalSpan::styled(0, 1, STYLE_ITALIC, 0);
+        assert_eq!(
+            Faces::for_span(&ital),
+            (Faces::NAMES.italic, BaseFont::Helvetica)
+        );
+
+        let both = TextIntervalSpan::styled(0, 1, STYLE_BOLD | STYLE_ITALIC, 0);
+        assert_eq!(
+            Faces::for_span(&both),
+            (Faces::NAMES.bold_italic, BaseFont::HelveticaBold)
+        );
+
+        let code = TextIntervalSpan::styled(0, 1, STYLE_CODE, 0);
+        assert_eq!(
+            Faces::for_span(&code),
+            (Faces::NAMES.code, BaseFont::Courier)
+        );
+        // Code wins over bold, and the face is Courier either way.
+        let code_bold = TextIntervalSpan::styled(0, 1, STYLE_CODE | STYLE_BOLD, 0);
+        assert_eq!(
+            Faces::for_span(&code_bold),
+            (Faces::NAMES.code_bold, BaseFont::Courier)
+        );
+
+        // A header is a size change, not a face change.
+        let header = TextIntervalSpan::styled(0, 1, STYLE_HEADER, 0);
+        assert_eq!(
+            Faces::for_span(&header),
+            (Faces::NAMES.regular, BaseFont::Helvetica)
+        );
+        // **And none of the decorations changes the face either.** An underline is a stroked line
+        // and a strike is a stroked line; a face here would be a *second* answer to "what does bold
+        // look like", and it is how an underlined run would silently become a bold one.
+        for bit in [
+            STYLE_UNDERLINE,
+            STYLE_STRIKE,
+            STYLE_SUPERSCRIPT,
+            STYLE_SUBSCRIPT,
+        ] {
+            let span = TextIntervalSpan::styled(0, 1, bit, 0);
+            assert_eq!(
+                Faces::for_span(&span),
+                (Faces::NAMES.regular, BaseFont::Helvetica),
+                "flag {bit:#x} must not pick a face"
+            );
+        }
+    }
+
+    /// **The four decorative bits reach the run style, and the two that move are opposite.**
+    ///
+    /// The defect this exists for: the bits were added to the model, the toolbar and the painter and
+    /// never to the exporter, so an underlined word exported as plain text with the underline gone and
+    /// nothing said so. This asserts each bit's own effect rather than that `of_span` was called.
+    #[test]
+    fn the_decorations_reach_the_run_style() {
+        let opts = PdfOptions::default();
+        let plain = RunStyle::of_span(&TextIntervalSpan::styled(0, 1, 0, 0), &opts);
+        assert_eq!(plain.rise, 0.0);
+        assert!(!plain.underline && !plain.strike);
+
+        let under = RunStyle::of_span(&TextIntervalSpan::styled(0, 1, STYLE_UNDERLINE, 0), &opts);
+        assert!(under.underline);
+        assert!(!under.strike, "an underline is not a strike");
+
+        let strike = RunStyle::of_span(&TextIntervalSpan::styled(0, 1, STYLE_STRIKE, 0), &opts);
+        assert!(strike.strike);
+        assert!(!strike.underline, "a strike is not an underline");
+
+        // **Up for super, down for sub, and the same magnitude.** A subscript that rose would be a
+        // superscript drawn at the wrong place, which is the sort of thing that looks like a font bug.
+        let sup = RunStyle::of_span(&TextIntervalSpan::styled(0, 1, STYLE_SUPERSCRIPT, 0), &opts);
+        let sub = RunStyle::of_span(&TextIntervalSpan::styled(0, 1, STYLE_SUBSCRIPT, 0), &opts);
+        assert!(sup.rise > 0.0, "a superscript rises");
+        assert!(sub.rise < 0.0, "a subscript sinks");
+        assert_eq!(sup.rise, -sub.rise);
+        // A third of the em, like the screen's painter.
+        assert_eq!(sup.rise, opts.font_size / 3.0);
+
+        // Both bits set: superscript wins, which is what the screen does with a corrupt span.
+        let both = RunStyle::of_span(
+            &TextIntervalSpan::styled(0, 1, STYLE_SUPERSCRIPT | STYLE_SUBSCRIPT, 0),
+            &opts,
+        );
+        assert_eq!(both.rise, sup.rise);
+    }
+
+    /// **A rise or a rule is a `Tj` boundary even when the face is the same.**
+    ///
+    /// `Ts` is text state and persists for the life of the text object, so merging a superscript into
+    /// the plain word before it would raise that word as well -- a line that reads correctly and looks
+    /// wrong. `push_many` compares every property for exactly this reason.
+    #[test]
+    fn a_decoration_change_splits_the_segment() {
+        let opts = PdfOptions::default();
+        let mut stats = PdfStats::default();
+        let mut l = Layouter::new(&opts);
+        let plain = RunStyle::of_plain(
+            Faces::NAMES.regular,
+            BaseFont::Helvetica,
+            opts.font_size,
+            false,
+        );
+        let raised = RunStyle {
+            rise: opts.font_size / 3.0,
+            ..plain
+        };
+        // A changed style is a run boundary, not a 64 KiB chunk boundary within the same run.
+        // The producer commits the word there even when the two runs split a word in half.
+        let mut lines = l.feed(b"E=mc", plain, &mut stats, true);
+        lines.extend(l.feed(b"2", raised, &mut stats, true));
+        lines.extend(l.finish(&mut stats));
+        assert_eq!(lines.len(), 1, "one line, three words or not");
+        assert_eq!(text_of(&lines[0]), b"E=mc2");
+        assert_eq!(
+            lines[0].segments.len(),
+            2,
+            "the raised run cannot share a Tf with the plain one"
+        );
+        assert_eq!(lines[0].segments[0].rise, 0.0);
+        assert!(lines[0].segments[1].rise > 0.0);
+    }
+
+    #[test]
+    fn lines_per_page_counts_the_usable_height() {
+        let mut o = PdfOptions::default();
+        // Letter 792 tall, 54 margins, 14pt lines: (792 - 108) / 14 = 48.857 -> 48.
+        assert_eq!(lines_per_page(&o), 48);
+        o.margin = 300.0;
+        // (792 - 600) / 14 = 13.71 -> 13. Still a page, just a narrow one.
+        assert_eq!(lines_per_page(&o), 13);
+    }
+
+    #[test]
+    fn lines_per_page_is_at_least_one_even_when_it_cannot_be() {
+        // A margin that leaves no room at all: the negative floor becomes 0 as a `usize`, and the
+        // `max(1)` is what keeps the page from being zero lines tall. Without it the layout loop would
+        // flush a page before every line and produce one page per line.
+        let o = PdfOptions {
+            margin: 500.0,
+            ..Default::default()
+        };
+        assert_eq!(lines_per_page(&o), 1);
+        let tiny = PdfOptions {
+            page: PageSize {
+                width: 10.0,
+                height: 10.0,
+            },
+            margin: 5.0,
+            ..Default::default()
+        };
+        assert_eq!(lines_per_page(&tiny), 1);
+    }
+}

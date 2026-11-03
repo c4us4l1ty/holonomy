@@ -1,0 +1,24 @@
+# Streaming HTML and pdf-writer PDF export.
+#
+# `pdf-writer` is 80 KB of dependency and writes into a `Vec<u8>` the caller hands to a pre-opened
+# descriptor. H2's Typst pipeline is recorded as a deliberate deviation: it would need `fork`/`exec`,
+# which the jail forbids. The dependency on holonomy-jail is the single allocation chokepoint -- see
+# crates/holonomy-jail/src/lib.rs for why every crate has it.
+[package]
+name = "holonomy-export"
+description = "Streaming HTML and pdf-writer PDF export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+holonomy-jail = { path = "../holonomy-jail" }
+holonomy-text = { path = "../holonomy-text" }
+# PDF has no notion of "a PNG", so an /XObject needs decoded pixels and this is the only decoder the
+# product has (PROJECT.md 2.9.5: one decoder, no `png` crate). The same crate supplies the /Flate
+# compressor for the image samples, so no second compression dependency is introduced.
+holonomy-image = { path = "../holonomy-image" }
+miniz_oxide = "0.9"
+pdf-writer = "0.15"

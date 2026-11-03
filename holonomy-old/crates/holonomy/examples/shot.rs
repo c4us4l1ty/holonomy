@@ -1,0 +1,171 @@
+//! Render the current chrome to a PPM. A development aid, not a product path.
+use holonomy::session::Session;
+use holonomy_display::paint::Painter;
+use holonomy_display::HeadlessScanout;
+use holonomy_render::chrome::ChromeMetrics;
+use holonomy_text::{Editor, SpanPolicy};
+
+fn main() {
+    let out = std::env::args()
+        .nth(1)
+        .expect("usage: shot <out.ppm> [extra]");
+    // **The first argument that is not a flag**, and not simply `nth(2)`.
+    //
+    // **`nth(2)` was right when the only other arguments were flags, and part 27 added `--size`** --
+    // so `shot out.ppm --size=1280x800` put the literal text `--size=1280x800` at the top of the
+    // document. The picture showed the selection working perfectly *and a line of gibberish above
+    // it*, and a reader would have had no way to tell which was the fixture and which was the bug.
+    //
+    // **It is a fixture defect rather than a rendering one, and it was invisible until a second flag
+    // existed** -- the same shape as part 22's `caret_line` and part 28's `move_line`: two ways to say
+    // one thing, and nobody checking whether they agreed.
+    let extra = std::env::args()
+        .skip(2) // output path is not document text
+        .find(|a| !a.starts_with("--"))
+        .unwrap_or_default();
+    // `--desktop` takes the real managed-document path at the product's 16/20
+    // ppem zoom pair. The unflagged historical compact-chrome fixture is kept.
+    let desktop = std::env::args().any(|a| a == "--desktop");
+    let ppem = std::env::args()
+        .find_map(|a| {
+            a.strip_prefix("--ppem=")
+                .and_then(|v| v.parse::<u16>().ok())
+        })
+        .unwrap_or(if desktop { 16 } else { 24 });
+    let sizes = if desktop && ppem == 16 {
+        vec![16, 20]
+    } else {
+        vec![ppem]
+    };
+    let atlas: &'static holonomy_assets::atlas::Atlas = Box::leak(Box::new(
+        holonomy_assets::build_atlas(&sizes).expect("atlas").0,
+    ));
+    // `--size=WxH`, so a screenshot can show a panel other than the design width. Part 27 made the
+    // measure follow the panel above 1,280 px, and a picture of only the design width would not show it.
+    let mut m = ChromeMetrics::DESKTOP;
+    if let Some(arg) = std::env::args().find(|a| a.starts_with("--size=")) {
+        if let Some((w, h)) = arg.trim_start_matches("--size=").split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                m = m.clamp_to(w, h);
+            }
+        }
+    }
+    let mut ed = Editor::new();
+    let mut i = 1;
+    while !desktop && ed.text_len() < 900 {
+        let line = format!("The quick brown fox jumps over the lazy dog, line {i}.\n");
+        ed.insert_at(
+            ed.text_len() as u32,
+            line.as_bytes(),
+            SpanPolicy::GrowIntoInsert,
+        )
+        .expect("room");
+        i += 1;
+    }
+    if !desktop && !extra.is_empty() {
+        ed.insert_at(0, extra.as_bytes(), SpanPolicy::GrowIntoInsert)
+            .ok();
+    }
+    let mut s = Session::new(
+        ed,
+        Painter::new(atlas, 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    );
+    if desktop {
+        s.set_managed_documents(true);
+        if std::env::args().any(|a| a == "--sample") {
+            s.create_sample_document(1).expect("studio handbook");
+        } else {
+            s.create_document(1, "Untitled".into());
+        }
+        if !extra.is_empty() {
+            s.insert_text(&extra).expect("document text");
+        }
+        let zoom = std::env::args()
+            .find_map(|a| {
+                a.strip_prefix("--zoom=")
+                    .and_then(|v| v.parse::<u32>().ok())
+            })
+            .unwrap_or(if m.width >= 1800 { 125 } else { 100 });
+        s.set_zoom(zoom)
+            .expect("desktop zoom available in this atlas");
+    } else {
+        // Preserve the original compact-chrome fixture for sealed UI probes.
+        s.state.docs = vec![
+            "Journal".into(),
+            "Notes on the container".into(),
+            "Field report".into(),
+            "Meeting minutes".into(),
+        ];
+        s.state.active_doc = 3;
+        s.state.sidebar_open = true;
+    }
+    // `--popup=MENU` opens a menu bar popup and `--dropdown=TOOL` opens a toolbar dropdown, so a
+    // screenshot can show the two overlay states the reference captures.
+    for arg in std::env::args().skip(1) {
+        if let Some(v) = arg.strip_prefix("--popup=") {
+            if let Ok(i) = v.parse::<usize>() {
+                s.state.open = Some(holonomy_render::widgets::Open::Menu(i));
+            }
+        }
+        // `--select=START..END` selects a byte range, so a screenshot can show the highlight. Part 28
+        // added the selection and every other flag here drives a piece of chrome state; this drives a
+        // piece of *document* state, which is why it is the one that goes through the editor rather
+        // than assigning to `s.state`.
+        if let Some(v) = arg.strip_prefix("--select=") {
+            if let Some((a, b)) = v.split_once("..") {
+                if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    s.select_at(a, b).expect("select");
+                }
+            }
+        }
+        if let Some(v) = arg.strip_prefix("--dropdown=") {
+            for p in holonomy_render::widgets::place_toolbar(&s.chrome_layout(), 8) {
+                if p.tool.name() == v {
+                    s.state.open = Some(holonomy_render::widgets::Open::Tool(p.tool));
+                    break;
+                }
+            }
+        }
+    }
+    // `--hover=NAME` and `--press=NAME` put the pointer on a toolbar tool, so a screenshot can show
+    // the two state surfaces. **The name is resolved through `place_toolbar`** -- the same list the
+    // hit test reads -- so the screenshot cannot show a widget the pointer could not reach.
+    for arg in std::env::args().skip(1) {
+        let Some((flag, want)) = arg.split_once('=') else {
+            continue;
+        };
+        if !matches!(flag, "--hover" | "--press") {
+            continue;
+        }
+        let layout = s.chrome_layout();
+        let Some(tool) = holonomy_render::widgets::place_toolbar(&layout, 8)
+            .into_iter()
+            .find(|p| p.tool.name() == want)
+            .map(|p| p.tool)
+        else {
+            eprintln!("no tool named {want:?}; try one of:");
+            for p in holonomy_render::widgets::place_toolbar(&layout, 8) {
+                eprintln!("  {}", p.tool.name());
+            }
+            continue;
+        };
+        let hit = holonomy_render::widgets::Hit::Tool(tool);
+        s.state.hover = Some(hit);
+        if flag == "--press" {
+            s.state.pressed = Some(hit);
+        }
+    }
+    s.repaint_all().expect("paint");
+    let f = s.frame();
+    let (w, h) = (f.width(), f.height());
+    let mut ppm = Vec::with_capacity((w * h * 3) as usize + 32);
+    ppm.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
+    for px in f.pixels() {
+        let [r, g, b] = [(px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF];
+        ppm.extend_from_slice(&[r as u8, g as u8, b as u8]);
+    }
+    std::fs::write(&out, &ppm).expect("write");
+    println!("{out}: {w}x{h}");
+}

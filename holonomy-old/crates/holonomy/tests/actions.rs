@@ -1,0 +1,821 @@
+//! **What a row means: `Action`, and the three dropdowns.** 11 tests.
+//!
+//! # The coupling this file exists to remove
+//!
+//! Part 20 routed a menu choice by **comparing the item's label**:
+//!
+//! ```text
+//! Some(match (heading, item.label) { (_, "Undo") => …, ("Insert", "Table") => … })
+//! ```
+//!
+//! and its own comment said what was wrong with it: *renaming "Undo" to "Revert" silently makes it
+//! inert.* **A display string was load-bearing.** Both halves still compiled, both still typechecked,
+//! and a typo in a word a user reads would have changed what the program does.
+//!
+//! Part 21 replaces it with `menus::Action` — a value the renderer passes through and the session
+//! interprets — and the two tests that matter are
+//! [`an_action_is_routed_without_a_menu_open_around_it`] and
+//! [`renaming_a_label_does_not_change_what_a_row_does`].
+//!
+//! | what it proves | test |
+//! | --- | --- |
+//! | the routing depends on the action, not the row | [`an_action_is_routed_without_a_menu_open_around_it`] |
+//! | **and the label is not load-bearing** | [`renaming_a_label_does_not_change_what_a_row_does`] |
+//! | every action is either routed or accounted for | [`every_action_is_routed_or_accounted_for`] |
+//! | and every one has a name for a log | [`every_action_has_a_name`] |
+//! | the real menus carry real actions | [`every_wired_menu_item_carries_an_action`] |
+//! | a dropdown opens, ticks the current value, and applies | [`a_dropdown_ticks_the_current_value_and_applies_a_new_one`] |
+//! | and two dropdowns cannot be open at once | [`only_one_popup_is_open_at_a_time`] |
+//! | the toolbar labels are borrowed, not allocated | [`the_toolbar_labels_are_borrows_not_allocations`] |
+//! | and the two dropdown lists agree | [`the_two_dropdown_lists_agree`] |
+//! | **a row carrying an action reaches it** | [`the_file_menu_rows_reach_their_actions`] |
+
+use holonomy::session::action_command;
+use holonomy::store::NoSource;
+use holonomy::Session;
+use holonomy_display::paint::Painter;
+use holonomy_display::HeadlessScanout;
+use holonomy_input::pointer::encode_record;
+use holonomy_input::{RecordDecoder, BTN_LEFT, EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y};
+use holonomy_render::chrome::{ChromeMetrics, ChromeState};
+use holonomy_render::menus::{self, Action};
+use holonomy_render::widgets::{self, Open};
+use holonomy_text::{Editor, SpanPolicy};
+
+fn atlas() -> &'static holonomy_assets::atlas::Atlas {
+    static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
+        std::sync::OnceLock::new();
+    ATLAS.get_or_init(|| {
+        // **Two sizes, not one.** Part 43: `Session::zoom_size_index` refuses any percentage whose
+        // rank is not a size the atlas holds, so a one-size atlas cannot reach 125 % at all -- and
+        // `a_dropdown_ticks_the_current_value_and_applies_a_new_one` applies 125 % through a real
+        // click, which is the point of it. **This is the same fixture `main` builds**, so a gate
+        // that drives the dropdown here is driving what the product offers.
+        let (a, _) = holonomy_assets::build_atlas(&[16, 20]).expect("build the atlas");
+        Box::leak(Box::new(a))
+    })
+}
+
+fn session() -> Session<'static> {
+    let m = ChromeMetrics::DESKTOP;
+    let mut ed = Editor::new();
+    ed.insert_at(0, b"alpha\nbravo\n", SpanPolicy::GrowIntoInsert)
+        .expect("room");
+    Session::new(
+        ed,
+        Painter::new(atlas(), 0),
+        Box::new(HeadlessScanout::new(m.width, m.height)),
+        m,
+    )
+}
+
+/// Click at an absolute panel point, through real evdev records.
+fn click(s: &mut Session<'static>, x: i32, y: i32) {
+    let mut d = RecordDecoder::new();
+    for ev in [
+        encode_record(EV_REL, REL_X, x),
+        encode_record(EV_REL, REL_Y, y),
+        encode_record(EV_KEY, BTN_LEFT, 1),
+        encode_record(EV_KEY, BTN_LEFT, 0),
+        encode_record(EV_SYN, 0, 0),
+    ] {
+        d.push(&ev);
+    }
+    while let Some(e) = d.next_event() {
+        s.handle_pointer(&mut NoSource, e)
+            .expect("pointer handling");
+    }
+}
+
+/// Click a widget by name: the rect is taken first and the session borrowed afterwards.
+///
+/// **Two statements rather than `click_rect(&mut s, tool_rect(&s, name))`,** because that is a
+/// borrow conflict and the fix would have been a clone of the layout on every call. Taking the rect
+/// into a local is free and reads the same.
+fn click_tool(s: &mut Session<'static>, name: &str) {
+    let r = tool_rect(s, name);
+    click_rect(s, r);
+}
+
+fn click_rect(s: &mut Session<'static>, r: holonomy_render::DamageRect) {
+    click(s, (r.x + r.width / 2) as i32, (r.y + r.height / 2) as i32);
+}
+
+fn tool_rect(s: &Session<'_>, name: &str) -> holonomy_render::DamageRect {
+    widgets::place_toolbar(&s.chrome_layout(), 8)
+        .into_iter()
+        .find(|p| p.tool.name() == name)
+        .unwrap_or_else(|| panic!("no tool named {name}"))
+        .rect
+}
+
+/// **An action is routed with no menu open and no row anywhere near it.**
+///
+/// **This is the whole of the part-21 claim in one call.** Part 20's routing could only be reached
+/// by clicking a row, and every row carries a `label` — so "does the label decide?" had no answer that
+/// did not involve a label. Calling [`action_command`] with an `Action` and nothing else makes the
+/// question answerable: **the routing is a function of the action and of nothing else.**
+#[test]
+fn an_action_is_routed_without_a_menu_open_around_it() {
+    use holonomy_input::{Command, Hotkey};
+    assert_eq!(
+        action_command(Action::Undo),
+        Some(Command::Hotkey(Hotkey::Undo))
+    );
+    assert_eq!(
+        action_command(Action::Redo),
+        Some(Command::Hotkey(Hotkey::Redo))
+    );
+    assert_eq!(
+        action_command(Action::InsertTable),
+        Some(Command::Hotkey(Hotkey::InsertTable))
+    );
+    assert_eq!(
+        action_command(Action::DocumentStart),
+        Some(Command::Hotkey(Hotkey::DocumentStart))
+    );
+}
+
+/// **Renaming a label does not change what a row does.**
+///
+/// **Stated as the absence of a `label` in the routing path, because that is the actual property.**
+/// There is no way to write this as "rename the label and check" — the labels are `&'static str` in a
+/// `const`, so a test cannot mutate one. What *can* be asserted, and is the thing that would break if
+/// the coupling came back, is that **no function between a row and its effect takes an `Item`**: the
+/// routing takes an `Action`, and `Action` has no `label` field at all.
+#[test]
+fn renaming_a_label_does_not_change_what_a_row_does() {
+    // `Action` has no label. That is the whole mechanism, and it is checked by construction rather
+    // than by a negative compile-fail test.
+    let a = Action::Undo;
+    assert_eq!(a.name(), "undo");
+    // The same action reached from two different rows -- one in Edit, one constructed by hand with a
+    // different label -- routes identically, because the routing never sees either label.
+    let from_edit = menus::item_at(1, 0).expect("Edit's first row");
+    let hand_made = menus::Item {
+        label: "Revert",
+        ..*from_edit
+    };
+    assert_eq!(from_edit.action, Some(Action::Undo));
+    assert_eq!(hand_made.action, Some(Action::Undo));
+    assert_ne!(
+        from_edit.label, hand_made.label,
+        "the fixture is not testing itself"
+    );
+    // And both route the same way, because `action_command` takes the `Action`.
+    assert_eq!(
+        action_command(from_edit.action.unwrap()),
+        action_command(hand_made.action.unwrap())
+    );
+}
+
+/// **Every action is either routed to a command or handled by the session, and the split is 19 + 12.**
+///
+/// **`Action` has 31 variants and the two lists name all of them between them.** That is not how the
+/// lists are *checked* — `action_command` and `apply_action` are both exhaustive matches, so a variant in
+/// neither is caught by the linker rather than by this test — but it is what the two lists mean, and the
+/// first version of this doc said the lists "must add up" without ever asserting a total. **They did add
+/// up: 19 + 12 = 31.** The arithmetic is written here so the next row that lands in either list has a
+/// number to move, and so that a variant which is quietly in neither is a discrepancy somebody can see.
+///
+/// **What the lists are for is the reason each variant is where it is.** A routed one becomes a `Command`
+/// the editor applies. A handled one changes chrome state, replaces the document, or asks for a path —
+/// none of which a `Command` can express, because `Command` is the vocabulary of *edits* and these are
+/// not edits.
+#[test]
+fn every_action_is_routed_or_accounted_for() {
+    // The chrome-state actions never reach `action_command`, and saying so here is what keeps the two
+    // lists honest: a fourth one added to `apply_action` and not to this list fails.
+    //
+    // `Export` is here rather than in the `routed` list because it is **not chrome state and not a
+    // document edit either** — it writes files to descriptors this process was handed at boot. It is
+    // grouped with the others for the same reason they are: `apply_action` is the function that handles
+    // a thing rather than issuing a command.
+    let handled_by_session = [
+        Action::SetZoom(100),
+        Action::SetStyle(0),
+        Action::SetFont(0),
+        Action::Export,
+        // **`New` is handled, not routed, for the same structural reason as `Export`**: it does
+        // not edit the document, it replaces it, and `adopt_document` is reachable only from the
+        // session.
+        Action::New,
+        Action::NewSample,
+        // **Part 45: three more, and `Close` is the one that used to be the single unwired row.**
+        // `Close` changes which document is painted, and `Open`/`Import` ask for a path. None of the
+        // three is a keystroke the editor applies — they change what the session is painting — so
+        // none of them is a command, and all three reach their effect from `apply_action`.
+        Action::Close,
+        Action::Rename,
+        Action::Delete,
+        Action::Lock,
+        Action::Open,
+        Action::Import,
+        Action::WordCount,
+        Action::KeyboardShortcuts,
+        // **The seven style actions, which `action_command` deliberately refuses to route.** They were
+        // already here in effect -- `ToggleBold` and `ToggleItalic` are in the list above with a
+        // different reason -- and the five that made `Format` a real menu joined them on the same
+        // terms: a style is applied *to the document through the session*, because that is where the
+        // armed state, the selection and the damage are. Routing `ToggleStrike` to a bare
+        // `Command::Format` would be a second path to the same edit and the two would diverge the
+        // first time one of them learned about `pending_style`.
+        Action::ToggleUnderline,
+        Action::ToggleStrike,
+        Action::ToggleSuperscript,
+        Action::ToggleSubscript,
+        Action::ClearFormatting,
+    ];
+    for a in handled_by_session {
+        assert_eq!(
+            action_command(a),
+            None,
+            "{} is handled by apply_action, not routed to a command",
+            a.name()
+        );
+    }
+    // Everything else either routes or is explicitly not wired. **The count is written down**, so a
+    // new action that routes changes it on purpose and one that does not is visible in the diff.
+    let routed = [
+        Action::Undo,
+        Action::Redo,
+        Action::SelectAll,
+        Action::DocumentStart,
+        Action::DocumentEnd,
+        Action::InsertTable,
+        Action::InsertImage,
+        Action::InsertMath,
+        // **Routed by the commit, and `File > Save` is the row that reaches it.** This was `None` here
+        // and the variant was carried by no row at all, so it was reachable only from the keymap.
+        Action::Save,
+        // **The clipboard.** Three rows that had drawn since Phase 8 and done nothing, beside a
+        // keymap whose own test asserted `Ctrl+C` was *swallowed*. Both halves were correct about
+        // what they measured and neither was a specification of what the product should do.
+        Action::Cut,
+        Action::Copy,
+        Action::Paste,
+    ];
+    for a in routed {
+        assert!(action_command(a).is_some(), "{} should route", a.name());
+    }
+    // **No unwired row is left to be mistaken for an oversight.** `Close`, `Open` and `Import` were
+    // the rows with no meaning before part 45 — `Close` had no document list to close from, and the
+    // two that need a path had nowhere to get one. **All three are handled by `apply_action` now**
+    // and are listed in `handled_by_session` above, which is what keeps the two lists honest: a
+    // fourth one added to `apply_action` and not to that list fails.
+}
+
+/// **Every action has a name, and no two share one.**
+///
+/// **`Action::name` is what a status bar and a gate's failure message use, so an action without one is
+/// an action that cannot be reported.** It is a `match` with no `_`, so adding a variant breaks the
+/// build; this asserts the *names* are distinct, which is the part a `match` cannot see.
+#[test]
+fn every_action_has_a_name() {
+    let all = [
+        Action::Undo,
+        Action::Redo,
+        Action::SelectAll,
+        Action::DocumentStart,
+        Action::DocumentEnd,
+        Action::New,
+        Action::NewSample,
+        Action::Save,
+        Action::InsertTable,
+        Action::InsertImage,
+        Action::InsertMath,
+        Action::Close,
+        Action::Rename,
+        Action::Delete,
+        Action::Lock,
+        Action::Export,
+        Action::SetZoom(100),
+        Action::SetStyle(0),
+        Action::SetFont(0),
+        Action::SetColour(0),
+        Action::ToggleBold,
+        Action::ToggleItalic,
+        // **The five that made `Format` a menu worth opening.** Each is in this list for the reason
+        // the gate's own doc gives -- a `match` with no `_` sees a new variant, and only this sees a
+        // *duplicate name*, which is the part a compile error cannot catch.
+        Action::ToggleUnderline,
+        Action::ToggleStrike,
+        Action::ToggleSuperscript,
+        Action::ToggleSubscript,
+        Action::ClearFormatting,
+        Action::WordCount,
+        Action::KeyboardShortcuts,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for a in all {
+        assert!(!a.name().is_empty(), "{a:?} has no name");
+        assert!(
+            seen.insert(a.name()),
+            "{} is used by two actions; a log line naming it would be ambiguous",
+            a.name()
+        );
+    }
+    // **The payload does not change the name.** `SetZoom(125)` and `SetZoom(200)` are the same action
+    // at different values, and a status bar that said "set-zoom" for both is right; a *gate* that
+    // wanted to name the value is what `Debug` is for.
+    assert_eq!(Action::SetZoom(125).name(), Action::SetZoom(200).name());
+}
+
+/// **Every menu item that means something says so, and the ones that do not are the expected ones.**
+#[test]
+fn every_wired_menu_item_carries_an_action() {
+    let mut with_action = 0;
+    let mut without = Vec::new();
+    for (i, menu) in menus::MENUS.iter().enumerate() {
+        for it in *menu {
+            match it.action {
+                Some(_) => with_action += 1,
+                None => without.push(format!(
+                    "{} > {}",
+                    holonomy_render::chrome::MENUS
+                        .get(i)
+                        .copied()
+                        .unwrap_or("?"),
+                    it.label
+                )),
+            }
+        }
+    }
+    assert_eq!(
+        with_action, 34,
+        "the wired rows after the menu cleanup: lifecycle rows, the four View rows, Word count and \
+         Keyboard shortcuts, and the five text-formatting rows that made `Format` a real menu -- \
+         Underline, Strikethrough, Superscript, Subscript and Clear formatting. Adding one changes \
+         this number."
+    );
+    // **The list is printed rather than asserted empty**, because a row that is *deliberately* inert —
+    // a submenu header, a reference-only command — is a legitimate state and hiding it would be worse
+    // than showing it. **There are none of those left**, and the assertion below is `(0, 33)`.
+    //
+    // **And 33 was arrived at from 28, not from 27**, which is the arithmetic worth writing down. The
+    // assertion read `(0, 27)` on a `menus.rs` whose seven arrays summed to **28** rows: the number was
+    // one short and nothing noticed, because the gate counts what `MENUS` holds and only *this* line
+    // named a total. The five formatting rows added here therefore make it 28 + 5, and the first version
+    // of this edit wrote 31 -- it moved the stale number by the same five and kept the same error.
+    //
+    // **It was 40 of 57, and 47 of 55 before the save gained a row.**
+    //
+    // **This gate has now been through six edits and they are not all the same shape**, which is worth
+    // stating plainly — because three of them moved the same number for opposite reasons:
+    //
+    // * **Part 25 added two wired rows** (Bold and Italic in Format) rather than converting two
+    //   unwired ones, so the unwired count did not move and the *total* went 54 -> 56. **The first
+    //   draft of that edit subtracted from both and was wrong.**
+    // * **Part 33 removed a row outright.** An unwired one, so the unwired count moved down by one
+    //   *and* the total did. **48/56 -> 47/55.**
+    // * **Wiring the save moved one unwired row into the wired set without adding a row**, because
+    //   `action_command` routed `Action::Save` to `None` — the variant existed but no row carried it.
+    //   **47/55 -> 46/55, the unwired count alone.**
+    // * **`File > Save` was then added as a row**, because a variant no row carries is a capability no
+    //   pointer-only user can reach. **46/55 -> 47/56: the total alone.**
+    // * **Export was wired on the row that was already there.** `plain("Export")` became
+    //   `act("Export", Action::Export)`, so the backend that has existed since Phase 8 — and was
+    //   reachable only from a command-line flag — is now reachable from the menu. **47/56 -> 46/56, the
+    //   unwired count alone again**, and for the opposite reason from the save.
+    //
+    // **Those last two are the point.** Both changed the total by zero, one moved the unwired count up
+    // and the other moved it down, and an edit that shows up as `47 -> 46` in a diff is a different
+    // event from one that shows as `47 -> 46` because a row was added. Asserting the *pair* is what
+    // keeps them distinguishable.
+    //
+    // * **`File > New` was wired on the row that was already there.** `plain("New")` became
+    //   `act("New", Action::New)` — the same shape as Export: the unwired count alone moved,
+    //   **43/56 -> 42/56**, because `Session::adopt_document` had existed as the one supported way
+    //   to put a document into a session and no row could reach it.
+    // * **`File > Open` and `File > Import` were wired on the rows that were already there**,
+    //   `plain("Open")` and `sub("Import", …)` becoming `act("Open", Action::Open)` and
+    //   `act("Import", Action::Import)`. **The same shape as New and Export, twice over**: the rows
+    //   existed, the variants existed, and neither could be reached. `Import` is worth naming because
+    //   it was a `sub(…)` header — a row whose chevron opened a submenu that has no renderer, so it
+    //   drew as a header and did nothing. **42/56 -> 40/56, the unwired count alone**, and the total
+    //   did not move.
+    // * **`Insert > Equation` is a *new* row, and that is the shape that matters.** `act` was used,
+    //   not `plain`, and the row was added rather than converted: `Action::InsertMath` was the third
+    //   of the three `Action` variants that appeared only in their own `name()` arm, routed from the
+    //   keyboard as `Ctrl-M` and reachable by no menu and no popup. `DocumentStart` and `DocumentEnd`
+    //   are the other two and they are *not* being given rows — see the note at the row in
+    //   `menus.rs`. **40/56 -> 40/57: the total alone**, and the unwired count does not move, because
+    //   a wired row was added rather than an unwired row being wired. **That is the distinguishing
+    //   pair again, from the third direction** — the save and export edits moved the unwired count and
+    //   left the total; this one moves the total and leaves the unwired count.
+    //
+    // **A gate that prints the list is what made these safe to get right.** The list is printed because
+    // "everything is wired" is not true here and pretending otherwise would be the worse answer: what
+    // matters is that the count is stable and the rows are named. Got: {without:?}
+    // **`(0, 26)`, and the zero is the news.**
+    //
+    // It read `(2, 24)` and the two were **`View > Mode` and `View > Zoom`** — `sub(..)` headers, whose
+    // chevron promised a submenu the client cannot draw in any case: `state.open` names a menu heading
+    // or a toolbar tool, and there is no `Open::Submenu` at all. **Every menu row now means
+    // something**, which is a stronger claim than this gate has ever been able to make, and the total
+    // went up by two because the four rows that replaced them are four rows.
+    assert_eq!(
+        (without.len(), without.len() + with_action),
+        (0, 34),
+        "**0 unwired of 34 menu items** in the eight headings after out-of-scope cloud/add-on rows \
+         were removed. Any row that reappears here is a row that draws and does nothing. Got: \
+         {without:?}"
+    );
+}
+
+/// **A dropdown ticks the current value, and choosing another applies it.**
+///
+/// **The tick is the feature the reference's screenshot shows and part 20 did not have.** It is
+/// `Item::checked`, set by `menus::dropdown_items` comparing the row's value against the state — which
+/// means **the tick cannot be on the wrong row**, because the same comparison that draws it is the one
+/// that will be acted on.
+#[test]
+fn a_dropdown_ticks_the_current_value_and_applies_a_new_one() {
+    let mut s = session();
+    let zoom = tool_rect(&s, "zoom");
+    click_rect(&mut s, zoom);
+    assert_eq!(
+        s.state.open,
+        Some(Open::Tool(widgets::Tool::Zoom)),
+        "clicking Zoom opens its dropdown"
+    );
+
+    let l = s.chrome_layout();
+    let pop = widgets::popup(&l, &s.state, s.state.open).expect("the zoom dropdown has rows");
+    let items = Open::Tool(widgets::Tool::Zoom).items(&s.state);
+
+    // **Exactly one row is ticked, and it is the current value.**
+    let ticked: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.checked)
+        .map(|(i, _)| i)
+        .collect();
+    // **The indices are found by looking the percentage up in `ZOOMS`, and not written down.**
+    //
+    // Part 43 cut the zoom dropdown from five rows to two -- `AtlasBuilder::new` refuses a third size,
+    // so the dropdown now has the rows the atlas can back -- and this gate's `vec![2]` and `target = 4`
+    // were two hard-coded positions in a five-row list. **A gate that names an index in a list it does
+    // not control is a gate that fails when the list is corrected**, which is what happened.
+    let row_of = |percent: u32| {
+        menus::ZOOMS
+            .iter()
+            .position(|&(_, z)| z == percent)
+            .expect("the zoom list has that percentage")
+    };
+    let hundred = row_of(100);
+    let target = row_of(125);
+    assert_ne!(hundred, target, "100 % and 125 % are two different rows");
+    assert_eq!(
+        ticked,
+        vec![hundred],
+        "**exactly one row is ticked and it is 100 %** -- row {hundred} of {}",
+        menus::ZOOMS.len()
+    );
+    assert_eq!(items[hundred].label, "100%");
+    assert_eq!(s.state.zoom_percent, 100);
+
+    // And choosing another applies it, and closes the dropdown.
+    assert_eq!(items[target].label, "125%");
+    assert!(!items[target].checked, "not ticked before it is chosen");
+    click_rect(&mut s, pop.rows[target]);
+    // **125 %, read from `ZOOMS` and not written down** for the same reason `target` is: the
+    // percentage came from a row whose position this gate does not control.
+    assert_eq!(
+        s.state.zoom_percent,
+        menus::ZOOMS[target].1,
+        "the state moved to the percentage the row names"
+    );
+    assert_eq!(s.state.open, None, "and the dropdown closed");
+    // **`pointer_chrome`, not `pointer_commands` — corrected in part 23.**
+    //
+    // Part 21 asserted `pointer_commands`, because it read as "the press did something". It did not do
+    // a *command*, and `pointer_commands` says *presses that produced a `Command` the session applied* —
+    // `Action::SetZoom` is handled in `apply_action` before `action_command` is reached, and no
+    // `Command` exists. Part 23 then measured what a zoom change actually moves and found it to be the
+    // label and nothing else, which made the wrong count worse rather than merely loose: the counter was
+    // reporting a document edit that does not happen.
+    assert!(
+        s.stats.pointer_chrome > 0,
+        "counted as a chrome-state change, which is what it is"
+    );
+    assert_eq!(
+        s.stats.pointer_commands, 0,
+        "**and not as a command**, because no `Command` was produced and no document byte changed"
+    );
+    assert_eq!(
+        s.stats.pointer_inert, 0,
+        "and not as inert either, because the label did change — a fourth outcome, which is why \
+         `pointer_chrome` exists"
+    );
+
+    // **Re-opening ticks the new value, because the tick is computed from the state and not stored.**
+    click_tool(&mut s, "zoom");
+    let items = Open::Tool(widgets::Tool::Zoom).items(&s.state);
+    // **`assert!` and not `assert_eq!(_, true)`.** The row's tick is the claim; comparing it against
+    // the literal `true` would report a mismatch between two booleans rather than saying what is
+    // wrong.
+    assert!(items[target].checked);
+    // **And still exactly one row, which is now the chosen one.**
+    //
+    // The tick *moved* rather than accumulating: `dropdown_items` computes `checked` by comparing each
+    // row's value against the state, so there is nowhere for a second tick to come from — which is
+    // the property the first half of this gate establishes and the second half has to re-establish,
+    // because a dropdown that re-opened with both the old and the new value ticked would look exactly
+    // like one that works until you open it a second time.
+    let ticked: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.checked)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        ticked,
+        vec![target],
+        "the tick moved to the chosen row and did not stay where it was: {:?}",
+        items.iter().map(|i| i.checked).collect::<Vec<_>>()
+    );
+    assert!(
+        !items[hundred].checked,
+        "and the row it left is no longer ticked — 100% is not still the current value. \
+         **Row {hundred}, found by looking 100 up in `ZOOMS`:** the index used to be a literal 2 \
+         in a five-row list, and part 43 cut the list to two."
+    );
+}
+
+/// **Only one popup is open at a time, and that is what the type is for.**
+///
+/// **This is the argument for `Open` being an enum rather than two `Option`s.** With
+/// `open_menu: Option<usize>` and a second `open_tool: Option<Tool>`, both could be `Some` — two
+/// overlays drawn on top of each other, and a hit test with no rule about which one the pointer meant.
+/// **The compiler rules that out; this asserts the behaviour as well, because the enum can still be
+/// set to the wrong arm by a caller.**
+#[test]
+fn only_one_popup_is_open_at_a_time() {
+    let mut s = session();
+    // Open a menu.
+    let l = s.chrome_layout();
+    let (_, boxes) = holonomy_render::chrome::menu_boxes(&l);
+    click_rect(&mut s, boxes[1]);
+    assert!(matches!(s.state.open, Some(Open::Menu(_))));
+
+    // Now click the zoom dropdown's opener. **The grab means the menu is dismissed first**, and the
+    // press is *not* also delivered to the zoom control -- the same rule as the toolbar, and the
+    // reason `hover_at` returns the opener rather than passing through.
+    click_tool(&mut s, "zoom");
+    assert_eq!(
+        s.state.open, None,
+        "one press dismissed the menu and did not also open the dropdown"
+    );
+
+    // And now open the dropdown, and try to open a menu through it.
+    click_tool(&mut s, "zoom");
+    assert!(matches!(s.state.open, Some(Open::Tool(_))));
+    {
+        let r = boxes[1];
+        click_rect(&mut s, r);
+    }
+    assert_eq!(s.state.open, None, "and the same in the other direction");
+}
+
+/// **The toolbar's labels are borrowed out of a `const`, not allocated per paint.**
+///
+/// **This is the measurement, and it is a claim about three `format!`s that are no longer there.**
+/// Part 19 stored `style_name: String` and `font_name: String` on the state and called `format!` for
+/// Zoom and for `"Inter 11"` — **three heap allocations on every paint of every frame**, on the path
+/// with a latency budget. Part 21 replaced them with two `usize` indices into `menus::STYLES` and
+/// `menus::FONTS`.
+///
+/// Only `font_label` still formats, because `"Inter 11"` is two values with a space between them; the
+/// other two are borrows, and this asserts the type rather than the behaviour.
+#[test]
+fn the_toolbar_labels_are_borrows_not_allocations() {
+    let st = ChromeState::default();
+    let a: &'static str = st.style_name();
+    let b: &'static str = st.font_name();
+    assert_eq!(a, "Normal");
+    assert_eq!(b, "Inter");
+    // **`&'static str` is only possible because the lists are `const`** — an owned `Vec<String>` of
+    // names would have to be returned as a borrow of the state and could not be `'static`.
+    assert_eq!(menus::STYLES.len(), 6);
+    // **Two, and both loaded.** The list used to be five names of which four had no face in the
+    // atlas; the dropdown is now exactly the families `Session::doc_style` can actually draw.
+    assert_eq!(menus::FONTS.len(), 2);
+    // An index past the end falls back rather than panicking: a state loaded from a file written by a
+    // build with more styles should not take the session down.
+    // **Both indices in one initializer, because the two assertions are one property.** A state
+    // whose style index is out of range *and* whose font index is out of range is what a file written
+    // by a build with more styles and more fonts looks like, and the fallback has to hold for each
+    // field independently -- so both are set at once and each is checked on its own.
+    let oob = ChromeState {
+        style_index: 999,
+        font_index: 999,
+        ..ChromeState::default()
+    };
+    assert_eq!(oob.style_name(), "Normal");
+    assert_eq!(oob.font_name(), "Inter");
+    // **And one at a time, so the first assertion is not carrying the second.** Setting both and
+    // checking both passes if `style_name` ignores its index entirely and reads `font_index`; the
+    // second pass below is what rules that out.
+    let style_only = ChromeState {
+        style_index: 999,
+        ..ChromeState::default()
+    };
+    assert_eq!(
+        style_only.style_name(),
+        "Normal",
+        "a bad style index alone still falls back"
+    );
+    let font_only = ChromeState {
+        font_index: 999,
+        ..ChromeState::default()
+    };
+    assert_eq!(
+        font_only.font_name(),
+        "Inter",
+        "and a bad font index alone does too"
+    );
+}
+
+/// **The two lists that say which tools have dropdowns agree.**
+///
+/// `Tool::has_dropdown` is the cheap answer a caller asks; `menus::dropdown_items` is the authority
+/// that produces the rows. **Two lists is two lists**, and this is what stops a tool being drawn with
+/// a chevron that opens nothing — which is the affordance the reference gets right and that a `None`
+/// would silently undo.
+#[test]
+fn the_two_dropdown_lists_agree() {
+    for p in widgets::TOOLBAR {
+        let rows = menus::dropdown_items(*p, &ChromeState::default());
+
+        // # `Overflow` is the exception, and it is named rather than relaxed
+        //
+        // **Part 44 made `Overflow` a menu button and this gate went red**, with *"has_dropdown says
+        // true, dropdown_items returned 0 rows"*. **The gate is right and the code needs the
+        // exception**, because `Overflow`'s rows are the tools that did not fit and there are none on
+        // a panel wide enough to hold all twenty.
+        //
+        // **The alternative was to take `Overflow` out of `has_dropdown`** and have the press path ask
+        // only "is the list empty". **That is worse**, because `has_dropdown` is what draws the
+        // chevron: a button whose chevron means "this opens a menu" and whose `has_dropdown` says
+        // false would have an affordance and a predicate disagreeing about the same fact, **and the
+        // chevron is what a user reads.**
+        //
+        // **So the exception is one tool, stated here, rather than a blanket relaxation** -- which
+        // would have stopped this gate holding for the other nineteen, and the four static tables are
+        // the ones where "a chevron that opens nothing" is the defect this gate exists to catch.
+        if *p == widgets::Tool::Overflow {
+            assert!(
+                rows.is_empty(),
+                "**a default state hides nothing, so `Overflow` has no rows** -- got {}",
+                rows.len()
+            );
+            assert!(
+                p.has_dropdown(),
+                "**and it is still a menu button**: `has_dropdown` is the capability, and the empty                  menu is a runtime fact about the window. The chevron is drawn only when there is                  something to show -- `an_overflow_button_with_nothing_hidden_draws_no_chevron`."
+            );
+            continue;
+        }
+
+        assert_eq!(
+            rows.is_empty(),
+            !p.has_dropdown(),
+            "{}: has_dropdown says {}, dropdown_items returned {} rows",
+            p.name(),
+            p.has_dropdown(),
+            rows.len()
+        );
+    }
+    // And the three that have rows really do have rows, with a tick on exactly one.
+    for name in ["zoom", "style", "font"] {
+        let tool = tool_by_name(name);
+        let rows = menus::dropdown_items(tool, &ChromeState::default());
+        assert!(!rows.is_empty(), "{name} has no rows");
+        assert_eq!(
+            rows.iter().filter(|r| r.checked).count(),
+            1,
+            "{name} ticks exactly one row"
+        );
+        assert!(
+            rows.iter().all(|r| r.action.is_some()),
+            "{name} rows all carry an action, or choosing one does nothing"
+        );
+    }
+}
+
+/// Look a tool up by name, panicking with a useful message.
+fn tool_by_name(name: &str) -> widgets::Tool {
+    widgets::TOOLBAR
+        .iter()
+        .copied()
+        .find(|t| t.name() == name)
+        .unwrap_or_else(|| panic!("the toolbar has no tool named {name}"))
+}
+
+// ---------------------------------------------------------------- Save and Export reach something
+
+/// A scratch sink, opened the way the boot opens one.
+///
+/// **A real `File`, not a buffer.** The jail has no `openat` on a user path, so an export sink is a
+/// descriptor the process was handed before sealing — and a test that used an in-memory writer would be
+/// testing a different thing from the one the product writes.
+fn sink(format: holonomy_export::Format, path: &std::path::Path) -> holonomy::ExportSink {
+    holonomy::ExportSink {
+        format,
+        file: std::fs::File::create(path).expect("open the sink"),
+        path: path.display().to_string(),
+    }
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let d = std::env::current_exe()
+        .expect("test exe")
+        .ancestors()
+        .nth(3)
+        .expect("layout")
+        .join("holonomy-export-tests")
+        .join("actions");
+    std::fs::create_dir_all(&d).expect("scratch");
+    d.join(name)
+}
+
+/// **The two File rows that used to open a menu and close it again.**
+///
+/// `every_wired_menu_item_carries_an_action` counts rows by asking whether `Item::action` is `Some`,
+/// which is a statement about the **table**. This is a statement about the **product**: a row can carry
+/// an action, be counted as wired, and still reach nothing — which is exactly what **Save** and
+/// **Export** both did for their whole lives.
+///
+/// `Save` had no row at all and routed to `None`; `Export` had a row with no action and a backend that
+/// has existed since Phase 8. **Both are counted as wired by the other gate now**, and neither of them
+/// would have been caught by it.
+#[test]
+fn the_file_menu_rows_reach_their_actions() {
+    let file = menus::MENUS[0];
+    let row = |label: &str| {
+        file.iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("File has no {label} row"))
+            .action
+    };
+
+    // The two rows, named, and what each one reaches.
+    assert_eq!(
+        row("Save"),
+        Some(Action::Save),
+        "File > Save carries the action -- it did not have a row until the commit was wired"
+    );
+    assert!(
+        action_command(row("Save").expect("carries")).is_some(),
+        "**and the save routes to a command**, which is the half the count gate cannot see"
+    );
+    assert_eq!(
+        row("Export"),
+        Some(Action::Export),
+        "File > Export carries the action -- it was `plain(\"Export\")` beside a working backend"
+    );
+
+    // **And through the session, with the bytes on disk.** `apply_action` is what actually runs when
+    // the row is clicked, and it sets a request rather than exporting inline, because the sinks live
+    // in `SessionContext` where `&mut self` cannot reach them.
+    let html = scratch("export-from-menu.html");
+    let mut s = session();
+    let mut sinks = [sink(holonomy_export::Format::Html, &html)];
+    let before = s.stats.exports;
+
+    s.apply_action(Action::Export).expect("the row's action");
+    assert!(
+        s.export_requested(),
+        "**the row set a request**, so `run_with_io` performs it against the boot-opened sinks"
+    );
+    assert_eq!(
+        s.export_all(&mut sinks),
+        1,
+        "and the request performs: one sink, one export"
+    );
+    assert_eq!(s.stats.exports, before + 1, "counted as an export");
+
+    let wrote = std::fs::read_to_string(&html).expect("read the exported file");
+    assert!(
+        wrote.contains("alpha") && wrote.contains("bravo"),
+        "**and the file holds the session's document** -- this row wrote nothing at all before, and \
+         counted as wired while doing it. Got {} bytes",
+        wrote.len()
+    );
+    let _ = std::fs::remove_file(&html);
+}
+
+/// **No sinks is a no-op, not a failure.** It is what every gate in this file drives, and a menu row
+/// that returns an error when there is nowhere to write would make the default configuration look
+/// broken.
+#[test]
+fn exporting_with_no_sinks_writes_nothing_and_is_not_an_error() {
+    let mut s = session();
+    s.apply_action(Action::Export).expect("the row's action");
+    assert_eq!(s.export_all(&mut []), 0, "nothing to write to");
+    assert_eq!(s.stats.exports, 0, "and nothing was exported");
+    assert_eq!(
+        s.stats.export_failures, 0,
+        "and nothing failed: there was nowhere to fail"
+    );
+}

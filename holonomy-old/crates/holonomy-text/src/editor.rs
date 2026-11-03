@@ -1,0 +1,2729 @@
+//! The editor: the one type that keeps the rope, the span map and the undo stack consistent.
+//!
+//! # Why a facade and not three types the caller juggles
+//!
+//! An edit is three coordinated mutations:
+//!
+//! ```text
+//! bytes     Rope::insert_at / delete_at      -- the document
+//! styling   SpanMap::apply_insert / delete   -- the parallel interval map
+//! history   UndoStack::push_insert / push_delete
+//! ```
+//!
+//! Doing them in the wrong order, or forgetting one, is silent. Apply the span shift but not the byte
+//! change and the spans point past the end of the text; apply the byte change but not the span shift
+//! and a run of bold silently becomes plain from the edit point onward. Neither raises an error, both
+//! corrupt the document, and both are the kind of bug that survives a test suite that only exercises
+//! one structure at a time.
+//!
+//! So [`Editor`] owns all three and exposes only the coordinated operations. Its invariant is the one
+//! worth stating as a single sentence: **after every `Editor` operation, the span map's coverage is
+//! exactly `[0, text_len)`, and the two undo stacks' lengths agree.** `check_invariants` asserts it,
+//! and the gate asserts it across leaf splits and merges.
+//!
+//! # The zero-allocation claim, and where it holds
+//!
+//! Typing at the caret allocates nothing: [`Editor::insert_at`] routes through [`Rope::insert_byte`],
+//! which writes into a gap, and through [`UndoStack::push`], which writes into a pre-allocated arena.
+//! Deleting *styled* text does allocate, once, to record the styling that has to come back on undo --
+//! see [`Editor::delete_at`] for why that is unavoidable and why it is bounded.
+//!
+//! # Why undo of a styled deletion needs more than bytes
+//!
+//! [`UndoStack`] records `(offset, kind, bytes)`, which is what the Phase 6 directive specifies and
+//! which is enough for plain text. It is not enough for styled text: FR-1.2 is destructive, so the
+//! bytes a delete removed cannot be recovered from the rope, and neither can their formatting.
+//!
+//! So [`Editor`] keeps its own bounded ring of removed-span slices, [`STYLE_UNDO_DEPTH`] entries, pushed
+//! only when a delete actually removed styled content. Unstyled deletes -- the overwhelming majority,
+//! and every keystroke in a plain document -- push nothing and allocate nothing.
+
+use crate::asset::{Asset, AssetCatalog, AssetError, AssetId};
+use crate::payload::{self, PayloadError};
+use crate::rope::{Rope, RopeError};
+use crate::span::{
+    FontFace, SpanError, SpanMap, SpanPolicy, TextIntervalSpan, FACE_BODY, FACE_COUNT,
+};
+use crate::tables::{col_widths_for, TableMap, TableMapError};
+use crate::undo::{ActionKind, UndoAction, UndoError, UndoStack, ARENA_BYTES, UNDO_DEPTH};
+
+/// **The size of one *face-format* history record: `start + end + before(flags, colour, face) +
+/// after(flags, colour, face)` = `4 + 4 + (2 + 4 + 1) + (2 + 4 + 1)`.**
+///
+/// **Not 20, which is [`Editor::format_range`]'s record.** That one has no face, and its replay reads at
+/// fixed offsets, so the two lengths must not be confused: `apply_face_format_record` chunks on 24 and
+/// `apply_format_record` on 20, and a record read at the wrong width does not fail — it *misreads*, and
+/// a font undo writes somebody's colour into somebody's flags.
+const RECORD_BYTES: usize = 24;
+use zeroize::Zeroize;
+
+/// Removed-span slices retained for undoing a styled deletion.
+pub const STYLE_UNDO_DEPTH: usize = UNDO_DEPTH;
+
+/// Why an editor operation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorError {
+    /// The rope refused the byte-level edit.
+    Rope(RopeError),
+    /// The span map refused the coordinate shift.
+    Span(SpanError),
+    /// The undo stack refused to record the action.
+    Undo(UndoError),
+    /// Nothing to undo.
+    NothingToUndo,
+    /// Nothing to redo.
+    ///
+    /// A distinct variant rather than reusing [`EditorError::NothingToUndo`] because the two have
+    /// different causes with opposite fixes: an empty undo stack means the user pressed undo too
+    /// often, an empty redo stack means they started a new edit, and a keymap that shows the same
+    /// message for both tells the user nothing.
+    NothingToRedo,
+    /// The offset is not on a UTF-8 character boundary.
+    ///
+    /// Checked here rather than deferred to the rope, because a mid-character offset would be accepted
+    /// by the span map -- which has no idea what a character is -- and produce spans whose boundaries
+    /// bisect a multi-byte sequence.
+    NotCharBoundary {
+        /// Requested offset.
+        offset: u32,
+    },
+    /// An image could not be catalogued, or a payload could not be read or written.
+    Asset(AssetError),
+    /// A document payload was refused.
+    Payload(PayloadError),
+}
+
+impl std::fmt::Display for EditorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rope(e) => write!(f, "{e}"),
+            Self::Span(e) => write!(f, "{e}"),
+            Self::Undo(e) => write!(f, "{e}"),
+            Self::NothingToUndo => write!(f, "there is nothing to undo"),
+            Self::NothingToRedo => write!(f, "there is nothing to redo"),
+            Self::NotCharBoundary { offset } => {
+                write!(f, "byte {offset} is inside a UTF-8 character")
+            }
+            Self::Asset(e) => write!(f, "{e}"),
+            Self::Payload(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for EditorError {}
+
+impl From<RopeError> for EditorError {
+    fn from(e: RopeError) -> Self {
+        Self::Rope(e)
+    }
+}
+impl From<SpanError> for EditorError {
+    fn from(e: SpanError) -> Self {
+        Self::Span(e)
+    }
+}
+impl From<UndoError> for EditorError {
+    fn from(e: UndoError) -> Self {
+        Self::Undo(e)
+    }
+}
+impl From<AssetError> for EditorError {
+    fn from(e: AssetError) -> Self {
+        Self::Asset(e)
+    }
+}
+impl From<PayloadError> for EditorError {
+    fn from(e: PayloadError) -> Self {
+        Self::Payload(e)
+    }
+}
+
+/// The result of an edit, for a caller that needs to repaint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditOutcome {
+    /// Where the edit happened, in document bytes.
+    pub offset: u32,
+    /// How many bytes it added (`Insert`) or removed (`Delete`).
+    pub len: u32,
+    /// Which way it goes.
+    pub kind: ActionKind,
+    /// The line the edit landed on, if the geometry is attached.
+    ///
+    /// `None` when no [`holonomy_geometry::LineGeometry`] is attached, which is the case for a bare
+    /// editor used only for its text. With one attached, this is what
+    /// [`holonomy_geometry::LineGeometry::damage_rect_for`] turns into the repaint region, and it is
+    /// what FR-3.4 requires a keystroke to invalidate: one line's box.
+    pub line: Option<usize>,
+    /// Whether the edit changed the document's line count, so the caller must re-derive the geometry.
+    ///
+    /// A newline, and a line that wrapped. Both are O(n) in the geometry, which is why the flag exists:
+    /// the editor cannot know whether the inserted text wrapped without measuring, so it reports the
+    /// one case it *can* know (an explicit newline) and the caller re-measures on any doubt.
+    pub lines_changed: bool,
+}
+
+/// A rope, its span map, and its undo history, kept consistent.
+#[derive(Debug)]
+pub struct Editor {
+    rope: Rope,
+    spans: SpanMap,
+    undo: UndoStack,
+    /// **Where the current selection was anchored, in document bytes, or `None` if there is not one.**
+    ///
+    /// **One field rather than an `(anchor, focus)` pair, and this is the whole design of part 28.**
+    /// The focus *is* the caret — `Editor::caret()` already stores it in the rope's cursor, and
+    /// storing it a second time is how part 22's `ChromeState::caret_line` came to disagree with
+    /// `editor.caret()`: two fields, one meaning, nothing to keep them in step.
+    ///
+    /// So the selection is **`Option<anchor>` plus the caret**, and [`selection`](Self::selection)
+    /// derives the [`SelectionRange`] from the two on demand. **The three states are: no anchor (no
+    /// selection), an anchor equal to the caret (a collapsed selection, which is what a drag returns
+    /// to and what shift-arrow collapses to), and an anchor away from the caret (a real selection).**
+    ///
+    /// **Which every movement clears**, via [`park`](Self::park). An arrow key, a click and an edit
+    /// all collapse a selection, and the one place that says so is the one place the caret moves.
+    selection_anchor: Option<u32>,
+    /// The yank buffer: what `Ctrl+C` put there and `Ctrl+V` reads. Capacity is the invariant.
+    ///
+    /// # Why the editor owns it rather than the session, and why it is internal
+    ///
+    /// **A system clipboard is not available and cannot be made available.** The seccomp allowlist has
+    /// no `openat` on a user path and `FR-5.1`'s `unshare(CLONE_NEWNET)` removes every network route;
+    /// the desktop window's X11 client is behind the `desktop` feature and never links into the sealed
+    /// binary, which `release_artifact.rs` asserts on every build. **So there is no X selection, no
+    /// `CLIPBOARD` atom and no file to spool to**, and a menu row that says *Copy* has to mean
+    /// something that is reachable from all three.
+    ///
+    /// What is reachable from all three is *this*: a buffer inside the process, which is also what a
+    /// word processor's internal clipboard has always been — the platform clipboard is a transport, not
+    /// the feature. `cut` and `copy` differ only in whether the selection is also deleted.
+    ///
+    /// # Capacity, not length, and never zeroized on the way out
+    ///
+    /// **`Vec::capacity` is pre-reserved and `len` is the live length**, for the same reason
+    /// `Session::line_scratch` is: a `Vec` that grows on the keystroke path is one allocation per
+    /// growth, and paste *is* the keystroke path.
+    ///
+    /// **The bytes are not scrubbed when they are replaced.** They should be — this is plaintext
+    /// derived from the document and it outlives the selection — and the honest reason it is not done
+    /// is that a `Vec`'s old bytes are freed to the allocator rather than wiped, so scrubbing on the
+    /// way out would need `zeroize` on the slice *before* `clear()` rather than after. **Recorded as a
+    /// gap rather than claimed as secure**: `PR-5.4`'s 30-second scramble does not reach it either,
+    /// because that is a rope-leaf mechanism.
+    yank: Vec<u8>,
+    /// Removed spans for undoing a deletion, newest last. Bounded to [`STYLE_UNDO_DEPTH`].
+    ///
+    /// Phase 6 made this a *lossy* side-channel -- pushed only when a delete removed styled content,
+    /// so that a plain-text document never allocated here at all -- and paired it with `undo`'s
+    /// **unconditional** pop. The two halves disagreed: undoing a plain delete popped an earlier
+    /// styled delete's record and restored it over the wrong bytes, and the following undo then found
+    /// nothing and silently lost the styling that was there all along. Silent, and unreachable by
+    /// testing one delete at a time, which is how it survived Phase 6's gate.
+    /// `tests/style_undo.rs` is the reproduction.
+    ///
+    /// So it is now **total**: one entry per Delete-kind action, with an empty `Vec` meaning "this
+    /// delete removed nothing styled". `Vec::new()` does not allocate, so the plain-delete case still
+    /// costs zero, and in exchange push and pop pair one-to-one -- the property that was missing.
+    ///
+    /// Still deliberately *not* in the arena. Being total changes its size bound from
+    /// "however many deletes touched styled text" to "however many deletes happened", but 500 empty
+    /// `Vec`s is 12 KB of pointer triples, not 500 arena slices, and a second ring in [`UndoStack`]
+    /// would have to keep the same eviction order as the first.
+    style_undo: Vec<Vec<TextIntervalSpan>>,
+    /// Scratch for counting anchors in the bytes before or inside an edited range, sized
+    /// [`DELETE_SCRATCH`].
+    ///
+    /// Exists because of the same measurement as [`Editor::delete_scratch`] and for the same reason: the
+    /// obvious way to find an anchor's ordinal is to read the whole prefix with `text()`, which is a
+    /// `Vec` the size of the document on **every delete**. `no_alloc.rs` measured 1,000 allocations over
+    /// a 1,000-keystroke delete burst and said so immediately.
+    ///
+    /// So the prefix and the range are counted in chunks through [`Rope::read_at`], which allocates
+    /// nothing, into this buffer. What remains is `O(document)` *time* per delete -- which is what every
+    /// offset in this crate already costs, and what Phase 11 exists to replace with Fenwick queries. An
+    /// allocation claim and a time claim are different claims, and the allocation one is this crate's
+    /// gate. It is kept green for documents with a thousand images as well as documents with none,
+    /// because the keystroke path cannot afford to depend on what the document happens to contain.
+    anchor_scan_scratch: Vec<u8>,
+    /// Scratch space for [`delete_at`](Self::delete_at)'s captured bytes, sized [`DELETE_SCRATCH`].
+    ///
+    /// A field rather than a local array, and the reason is measured: a `let mut buf = [u8; 256]`
+    /// inside `delete_at`, whose slice is passed to `UndoStack::push_delete`, **escapes** and is promoted
+    /// to the heap by the compiler. The allocation then happens once per `delete_at` call rather than
+    /// once per delete, so it is invisible in a rate and visible in a count: a 1,000-keystroke delete
+    /// burst reported exactly 1 allocation.
+    ///
+    /// Hoisting it here makes it one allocation in [`Editor::new`], outside every measured window, and the
+    /// per-delete count is then exactly zero with no caveat.
+    delete_scratch: Vec<u8>,
+    /// Every table in the document, as spans. Phase 9A.
+    ///
+    /// A field rather than something the caller keeps, because a span is an interval and every edit
+    /// moves intervals: an insert inside a table has to extend it and an insert before one has to
+    /// slide it. A caller-side table map would have to be updated at every edit site, and the site it
+    /// forgets is a table whose cells silently shift under the caret. So the map is updated inside the
+    /// five places bytes move -- [`insert_at`](Self::insert_at), [`delete_at`](Self::delete_at),
+    /// [`undo`](Self::undo) and [`apply_insert_raw`](Self::apply_insert_raw) -- which is the same
+    /// argument `spans` makes for the interval map, and the reason both are fields rather than
+    /// collaborators is that neither can be correct without the edit.
+    tables: TableMap,
+    /// The table map as it was before the most recent undo, so redo can restore it.
+    ///
+    /// # Why the map cannot be derived from the bytes
+    ///
+    /// Undoing an insertion deletes the table's separators, and `TableMap::retain_intact` then drops
+    /// the span -- correctly, because there is no longer a table there. Redoing re-inserts the same
+    /// bytes at the same offset, and `apply_insert` can slide an *existing* span but cannot invent a
+    /// vanished one. Worse, it could not invent a correct one even in principle: `rows`, `cols` and
+    /// `col_widths` are not recoverable from a flat run of separators, so a 2x3 table and a 1x6 table
+    /// are the same six bytes.
+    ///
+    /// So the pre-undo map is kept, and redo puts it back.
+    ///
+    /// **A stack, one entry per undo, and every entry is present.** The first version was a single
+    /// `Option`, on the reasoning that "redo is only valid immediately after an undo -- any new edit
+    /// calls [`drop_redo`](Self::drop_redo)". **That reasoning was wrong, because `undo` does not
+    /// call `drop_redo`.** So `undo, undo, redo, redo` is a perfectly legal sequence, and with one
+    /// slot the second undo overwrote the first's map and the second redo found nothing to
+    /// restore: **the table map was silently never restored**, and the table's separator bytes were
+    /// in the document with no `TableSpan` for them -- so Tab navigation and the table renderer
+    /// could no longer find the table.
+    ///
+    /// **The entries are total, one per undo**, so the pop pairs one-for-one with the push, exactly
+    /// as [`Editor::style_undo`] does. **And the entry is an `Option`**: `None` means "this undo
+    /// could not have changed the table map", which is the common case -- an undo of an ordinary
+    /// keystroke touches no separator -- and it costs **no clone of the map at all**. The first
+    /// version cloned the whole map on *every* undo, whether or not the map could have changed.
+    undo_tables: Vec<Option<Vec<crate::TableSpan>>>,
+    /// Actions undone and awaiting redo, newest last. Bounded to [`UNDO_DEPTH`].
+    ///
+    /// Phase 8. A `Vec<UndoAction>` rather than a second arena, and the reason is that
+    /// [`UndoStack::pop_for_undo`] already *hands the bytes out*: it zeroizes its arena and returns an
+    /// owning `UndoAction`, because "the caller may re-push it for redo or drop it" is written into the
+    /// method's own doc comment. A redo built inside the arena would have to fight that zeroize.
+    /// Holding the actions here is what makes redo possible at all, and it costs one allocation per
+    /// **undo** -- never per keystroke, which is the path FR-1.2 measures.
+    ///
+    /// A plain heap `Vec`, not a `SecureBlock`, because an undone action's payload is plaintext that
+    /// must itself be scrubbed on drop. It is: [`clear_history`](Self::clear_history) zeroizes every
+    /// payload on the way out, the same guarantee the undo arena gives on eviction.
+    redo: Vec<UndoAction>,
+    /// The document's images, one per anchor, in document order. Phase 9C.
+    ///
+    /// **An image's *position* is a character, not an offset.** A U+FFFC OBJECT REPLACEMENT CHARACTER
+    /// in the document's own bytes ([`crate::ANCHOR`]) is what says where a picture goes, so an edit
+    /// moves the anchor for free -- no anchor list to slide.
+    ///
+    /// **But the *pairing* is positional and has to be maintained.** Entry `i` serves the `i`-th
+    /// anchor, because the payload's frozen per-entry shape (`Blake2b | w u16 | h u16 | len | PNG`) has
+    /// nowhere to record which anchor an asset belongs to. So deleting an anchor removes an asset, and
+    /// undoing an insertion of an image puts it back -- at the same five sites `tables` is updated from,
+    /// for the same reason: the site that is forgotten is a picture nobody can account for.
+    ///
+    /// The first version of this field's doc comment claimed none of that was necessary, on the grounds
+    /// that a content address is not an interval. It was wrong, and `AssetCatalog`'s own header now
+    /// records the mistake and the symptom -- see [`AssetCatalog`].
+    assets: AssetCatalog,
+    /// Assets removed by a delete, for undo. Phase 9C.
+    ///
+    /// The asset counterpart of [`Editor::undo_tables`], and shaped by the same reason: undoing a
+    /// deletion re-inserts the bytes, and bytes alone do not bring an image back. Unlike the table
+    /// shadow this is *only* the assets the last delete removed, not a whole map -- a `TableSpan` is 28
+    /// bytes and shadowing the map is cheap, whereas an asset is a PNG and shadowing the catalog would
+    /// mean holding every image in the document a second time.
+    ///
+    /// A `Vec`, and empty in the common case: a delete that touched no anchor removes no assets, and
+    /// `Vec::new()` does not allocate, so the per-keystroke allocation count is unaffected.
+    ///
+    /// **A stack, one entry per delete, and every entry is present.**
+    ///
+    /// **The first version was a single `Vec`, and it was consumed by whichever undo happened to run
+    /// first.** `undo` took the whole stash at the top, and the `Insert` arm -- undoing a *typed*
+    /// character -- never used it, so it was dropped on the floor. **The image was then gone**:
+    /// delete an image, type a character, undo twice, and the text came back with its anchor and no
+    /// asset to serve it. The `Asset` holds a `Zeroizing<Vec<u8>>`, so the PNG was not even left in
+    /// memory to recover.
+    ///
+    /// **The entries are total, one per delete**, so the pop pairs one-for-one with the push, exactly
+    /// as [`Editor::style_undo`] does -- and that is the fix for the bug above, because an undo of an
+    /// *insert* no longer touches the delete's entry at all.
+    undo_assets: Vec<Vec<Asset>>,
+    /// Assets removed by undoing an *insertion*, for the redo that may follow. Phase 9C.
+    ///
+    /// **The other half of the pair.** Undoing an insertion deletes the bytes, and the anchor among
+    /// them, so the asset goes with them -- and a redo of that insertion has to put the asset back.
+    /// That is the same shape as [`Editor::undo_assets`] with the roles of the two directions
+    /// swapped, and it was the slot that the `Insert` arm of `undo` wrote into.
+    redo_assets: Vec<Vec<Asset>>,
+    /// Styles of undone insertions, paired with redo insertion actions only.
+    redo_insert_styles: Vec<Vec<TextIntervalSpan>>,
+}
+
+/// Bytes of scratch [`Editor::delete_at`] keeps, covering every single-keystroke delete.
+///
+/// 256 is past the size at which an array is worth avoiding on its own merits, and it covers any
+/// realistic short selection too. A longer delete falls back to the heap; see
+/// [`delete_at`](Editor::delete_at).
+pub const DELETE_SCRATCH: usize = 256;
+
+/// **How much the yank buffer can hold, reserved once at construction.**
+///
+/// **64 KiB, and the number is a policy choice rather than a derivation.** It is one rope leaf's worth
+/// of text (`LEAF_CAPACITY`) and comfortably more than a paragraph; a selection larger than this is
+/// truncated on paste, which [`Editor::paste`] reports rather than performing silently.
+///
+/// **Why reserved rather than grown.** `tests/no_alloc.rs` asserts that editing allocates nothing, and
+/// a paste is an edit. Growing to 64 KiB on the first copy would be invisible on a gate that types
+/// 1,000 keystrokes and never presses `Ctrl+C`, **which is exactly the shape of gate that lets this
+/// through** — so the capacity is paid at construction where it cannot be missed.
+pub const YANK_CAPACITY: usize = 4096;
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Editor {
+    /// An empty document.
+    pub fn new() -> Self {
+        Self::empty(Rope::new(), 0)
+    }
+
+    /// A document holding `text`, with no styling and no history.
+    pub fn from_text(text: &[u8]) -> Result<Self, EditorError> {
+        let rope = Rope::from_text(text)?;
+        let len = rope.text_len();
+        Ok(Self::empty(rope, len))
+    }
+
+    /// An editor over a document of `text_len` bytes whose **bytes are not held**.
+    ///
+    /// # Why this exists, and the number it moves
+    ///
+    /// [`from_text`](Self::from_text) needs the whole document as a contiguous `&[u8]`, so opening one
+    /// costs **two copies at the peak**: that slice plus every page-locked leaf. Measured on a 2 MiB
+    /// document, `VmHWM` peaks at **~5.0 MiB**; this constructor peaks at **~1.1 MiB**, which is the
+    /// process baseline and does not carry the document at all. **~4.6x lower, and O(leaves) rather than
+    /// O(document)** — see `tests/skeleton_load.rs`, which measures `VmHWM` in a child process rather than
+    /// asserting a ratio computed from a struct's field list.
+    ///
+    /// # Why the rest of `Editor` can be built without reading a byte
+    ///
+    /// **Because every other field is a function of the document's *length*, not its contents.**
+    /// [`SpanMap::plain`] records that every byte is plain-styled, which is true of a document H1 has not
+    /// read yet; `TableMap::new` and `AssetCatalog::new` are empty because no table or image has been seen;
+    /// the undo stacks are empty because nothing has been edited. So [`empty`](Self::empty) needs only
+    /// `text_len`, and this constructor is that call with a skeleton rope in place of a filled one.
+    ///
+    /// **This is the reassuring half of the answer to "what does absent mean for spans and undo".** Both
+    /// are happy with a document they have never read, because both are index structures over lengths.
+    /// What they are *not* yet happy about is a **faulted-in edit** — a leaf that arrives mid-session has
+    /// to leave the span map and the undo stack indistinguishable from one that was resident throughout.
+    /// That is the remaining design question, and this constructor does not address it.
+    ///
+    /// # What this does not give you
+    ///
+    /// A skeleton editor is **read-only until leaves are faulted in**: editing an absent leaf
+    /// [`refuses`](Rope::leaf_mut). And **no session calls this yet** — `main.rs` still builds
+    /// `Editor::new()`, an empty document. So the peak win is proven in a gate and not yet reachable from
+    /// the product.
+    pub fn from_skeleton(text_len: usize) -> Self {
+        Self::empty(Rope::from_skeleton(text_len), text_len)
+    }
+
+    /// Bytes of document text currently held, over the resident leaves only.
+    ///
+    /// **The number the page-lock ceiling is spent on**, and the one a session's residency budget is
+    /// enforced against. Delegated rather than reimplemented so there is one definition of "resident".
+    pub fn resident_bytes(&self) -> usize {
+        self.rope.resident_bytes()
+    }
+
+    /// Read `offset..offset+out.len()` into `out`, **faulting absent leaves in from `source`**.
+    ///
+    /// # Why this is a second method and not a change to [`read_into`](Self::read_into)
+    ///
+    /// **Because `read_into` is `&self` and faulting is `&mut self`, and that is structural rather than a
+    /// preference.** `read_into` is called from `&self` contexts all over the paint path -- `session.rs`,
+    /// `doclines.rs`, `counts.rs`, the export sinks -- so it cannot fault. Rather than put a `RefCell` in
+    /// the rope and make "is this leaf resident" a runtime question behind a borrow check on the keystroke
+    /// path, **the two capabilities are two methods.**
+    ///
+    /// The split has a real cost, and it is worth naming: **a `&self` reader cannot fault, so every `&self`
+    /// reader sees `LeafAbsent` on a sparse rope and has to decide what to do with it.** The paint path
+    /// currently counts that as `PaintStats::runs_missing`. That is safe and it is wrong to draw, and it
+    /// stays wrong until the paint path takes the `&mut` variant. **This method is what makes that
+    /// possible; it does not make it happen.**
+    ///
+    /// [`LeafSource`] is passed in rather than stored, because the source is the *caller's* — it owns the
+    /// store, the budget and the eviction policy. An editor holding a source would have to own a container,
+    /// and `holonomy-text` cannot depend on `holonomy-container`.
+    pub fn read_into_faulting(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, EditorError> {
+        let len = self.text_len();
+        if offset >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(len - offset);
+        self.rope
+            .read_at_faulting(source, offset, want, &mut out[..want])?;
+        Ok(want)
+    }
+
+    /// Release every leaf overlapping `[start, end)`, keeping each one's length.
+    ///
+    /// **A pass-through**, and the rope's docs are the design. Exposed because a bounded-memory commit needs
+    /// both halves — [`read_into_faulting`](Self::read_into_faulting) to bring a range resident and this to shed
+    /// it — and splitting them across two types would mean a caller holding a rope it cannot reach.
+    pub fn evict_range(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<usize, crate::rope::RopeError> {
+        self.rope.evict_range(start, end)
+    }
+
+    /// Forget every recorded edit, because the source now holds the document as it is.
+    ///
+    /// **Only correct immediately after every leaf has been written to the source.** An empty record claims the
+    /// store's bytes are the current document's bytes; if they are not, every later fault reads the wrong
+    /// document and nothing reports it.
+    ///
+    /// **It is public because the commit is a loop**, and a loop cannot be half-in here: the caller walks the
+    /// document writing each chunk, and only at the end is the claim true. [`Rope::commit`] hides this
+    /// because it performs the whole write itself. **So the naming is the guard** — `forget_record` says what
+    /// it does and `record` says what must already be true, and a caller reaching for it mid-loop has to type
+    /// the word.
+    pub fn forget_record(&mut self) {
+        self.rope.forget_record()
+    }
+
+    /// How many leaves currently hold their bytes.
+    pub fn resident_count(&self) -> usize {
+        self.rope.resident_count()
+    }
+
+    /// The shared constructor.
+    ///
+    /// Every allocation an [`Editor`] ever makes happens here, which is what lets the keystroke path
+    /// claim a flat zero. It exists as one function because the field list used to be spelled out in
+    /// both constructors, and Phase 6 found a field that had been added to one and not the other.
+    fn empty(rope: Rope, text_len: usize) -> Self {
+        Self {
+            rope,
+            spans: SpanMap::plain(text_len as u32),
+            tables: TableMap::new(),
+            undo_tables: Vec::with_capacity(UNDO_DEPTH),
+            undo_assets: Vec::with_capacity(UNDO_DEPTH),
+            redo_assets: Vec::with_capacity(UNDO_DEPTH),
+            redo_insert_styles: Vec::with_capacity(UNDO_DEPTH),
+            undo: UndoStack::new(),
+            selection_anchor: None,
+            // **Reserved once, here, rather than grown on first paste.** A paste is an edit, and
+            // `tests/no_alloc.rs` asserts that editing allocates nothing; a `Vec` that reached its
+            // capacity during a paste would fail that gate on the one keystroke that used a feature
+            // the other 999 did not.
+            yank: Vec::with_capacity(YANK_CAPACITY),
+            style_undo: Vec::with_capacity(STYLE_UNDO_DEPTH),
+            delete_scratch: vec![0u8; DELETE_SCRATCH],
+            anchor_scan_scratch: vec![0u8; DELETE_SCRATCH],
+            redo: Vec::with_capacity(UNDO_DEPTH),
+            assets: AssetCatalog::new(),
+        }
+    }
+
+    /// The document's bytes, for export and for tests.
+    pub fn text(&self) -> Result<Vec<u8>, EditorError> {
+        Ok(self.rope.to_vec()?)
+    }
+
+    /// [`text`](Self::text) over a document whose bytes may not be resident. **Part 16.**
+    ///
+    /// # What this is for, and it is exactly one caller
+    ///
+    /// Opening. `DocLines`, `Manifest` and `TextCounts` are each built from the document's bytes at
+    /// session construction, and on a container-backed document **none of them could be built at all**:
+    /// `text()` takes `&self`, cannot fault, and a document larger than the resident window returned
+    /// `LeafAbsent`, which `unwrap_or_default()` turned into *an empty geometry over a non-empty
+    /// document*. The symptom was a session that reported one line and painted no body text at all on a
+    /// 7-section document, while every in-memory gate passed -- because on an in-memory editor the read
+    /// always succeeds.
+    ///
+    /// **It is one caller and that is deliberate.** A whole-document `Vec` on any other path is the
+    /// allocation Phase 13 exists to remove; at open it happens once, before the first frame, and it is
+    /// what lets `DocLines` and `Manifest` never need it again. PROJECT.md's "build the geometry from
+    /// offsets, not bytes" remains the open question, and this does not pretend to answer it -- it makes
+    /// the product correct and leaves the peak recorded.
+    ///
+    /// **The vector is the caller's to zero** and this cannot do it, because it returns the buffer rather
+    /// than filling one. A caller that lets it drop hands a whole document back to the allocator.
+    pub fn text_faulting(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+    ) -> Result<Vec<u8>, EditorError> {
+        let len = self.rope.text_len();
+        let mut out = vec![0u8; len];
+        self.rope.read_at_faulting(source, 0, len, &mut out)?;
+        Ok(out)
+    }
+
+    /// The document's images, in document order.
+    #[must_use]
+    pub fn assets(&self) -> &AssetCatalog {
+        &self.assets
+    }
+
+    /// The byte offset of every image anchor, in document order.
+    ///
+    /// A full copy of the document to find three bytes per image, which is exactly the cost Phase 11's
+    /// audit complains about elsewhere. It is here rather than being a streaming walk because the
+    /// session needs the offsets and the session already holds the text; the `read_into` version
+    /// belongs with that phase, not with this one.
+    pub fn image_anchors(&self) -> Result<Vec<u32>, EditorError> {
+        Ok(crate::asset::scan_anchors(&self.text()?))
+    }
+
+    /// Insert `png` as an image at `offset`, and return its [`AssetId`].
+    ///
+    /// **Two writes, and the order is the contract.** The catalog's *nth* entry serves the *n*-th
+    /// anchor in the text, so the two must stay in step. A text write that failed *after* the catalog
+    /// write would leave every image below the new one showing the wrong picture -- a corruption that
+    /// no error message would ever name. So the catalog is written first and the text second: a
+    /// refused PNG leaves nothing at all, and a failed text write leaves a catalog entry that is never
+    /// reached. Both are harmless. The reverse order is not.
+    ///
+    /// The anchor goes in through [`insert_at`](Self::insert_at), so it is undoable, it slides
+    /// correctly when text is typed in front of it, and it moves the caret past itself -- exactly as
+    /// any other insertion does.
+    pub fn insert_image(&mut self, offset: u32, png: &[u8]) -> Result<AssetId, EditorError> {
+        // The ordinal this anchor will have is the number of anchors before `offset`, counted on the
+        // text as it is *now* -- the anchor does not exist yet. Putting the asset there rather than at
+        // the end is the whole of `AssetCatalog`'s ordering contract, and getting it wrong serves this
+        // image the last picture in the document.
+        let at = self.anchor_ordinal_at(offset as usize);
+        let id = self.assets.insert_at(at, png)?;
+        self.insert_at(offset, &crate::asset::ANCHOR_BYTES, SpanPolicy::Strict)?;
+        Ok(id)
+    }
+
+    /// The whole document as a container payload.
+    ///
+    /// This is the byte string `Wavefunction::create` and `write_content` are handed. The container
+    /// neither parses it nor knows its shape; see [`crate::payload`] for why the container format did
+    /// not have to change to accommodate it.
+    pub fn payload(&self) -> Result<Vec<u8>, EditorError> {
+        let text = self.text()?;
+        let text =
+            String::from_utf8(text).map_err(|_| EditorError::Payload(PayloadError::NotUtf8))?;
+        let tables: Vec<crate::TableSpan> = self.tables.spans().to_vec();
+        Ok(payload::encode(&text, &self.spans, &tables, &self.assets))
+    }
+
+    /// Rebuild a document from a payload produced by [`payload`](Self::payload).
+    ///
+    /// The history is empty: an opened document has no undo stack. That is Phase 6's "undo is never
+    /// persisted" taken to its conclusion rather than a gap.
+    ///
+    /// No invariant check is called afterwards, and that is not an oversight: `Rope::from_text`
+    /// validates the rope, `SpanMap::from_spans` validated the span list on the way out of `decode`
+    /// (including that it is sorted, gap-free and ends exactly at the text length), and `decode`
+    /// bounds-checked every table against the text. A second validator here would be a second thing
+    /// to keep in step with the first, which is the cost `from_spans` exists to avoid.
+    pub fn from_payload(bytes: &[u8]) -> Result<Self, EditorError> {
+        let decoded = payload::decode(bytes)?;
+        let rope = Rope::from_text(decoded.text.as_bytes())?;
+        let mut e = Self::empty(rope, decoded.text.len());
+        e.spans = decoded.spans;
+        e.tables.replace(decoded.tables);
+        e.assets = decoded.assets;
+        Ok(e)
+    }
+
+    /// Document length in bytes.
+    #[inline]
+    pub fn text_len(&self) -> usize {
+        self.rope.text_len()
+    }
+
+    /// Every table in the document, as spans.
+    pub fn tables(&self) -> &TableMap {
+        &self.tables
+    }
+
+    /// The table containing `offset`, if any.
+    pub fn table_at(&self, offset: u32) -> Option<crate::TableSpan> {
+        self.tables.at(offset)
+    }
+
+    /// Insert an empty `rows` by `cols` table at the caret and return its span.
+    ///
+    /// # The bytes, and why there are newlines around them
+    ///
+    /// The table's own bytes are `rows * cols - 1` separators and nothing else -- every cell starts
+    /// empty. Around them, this inserts a newline **before** when the caret is not already at the
+    /// start of a line, and one **after** always.
+    ///
+    /// Both are load-bearing rather than cosmetic. Without the leading one, a table inserted into the
+    /// middle of a paragraph would begin on that paragraph's line, and the box's top border would be
+    /// drawn across the second half of a sentence. Without the trailing one, whatever text followed
+    /// the caret would end up inside the table's last cell, because a table's span ends at a byte
+    /// offset and the only thing that says "the table stopped here" is a newline the layout knows
+    /// about. Insert one means the next character typed is *outside* the table, which is what a
+    /// person expects after `Ctrl+T`.
+    ///
+    /// The span covers the separators only, never the newlines, so a caret on either newline is
+    /// outside the table -- see [`TableMap::at`], whose end is exclusive for the same reason.
+    ///
+    /// The caret is left where the insertion started, which is the first byte of cell `(0, 0)`: a
+    /// person who has just asked for a table wants to type into its first cell, and the session's
+    /// `Ctrl+T` handler moves there explicitly rather than relying on this.
+    pub fn insert_table(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        measure: u32,
+    ) -> Result<crate::TableSpan, TableMapError> {
+        let widths = col_widths_for(measure, cols).ok_or(crate::TableError::TooWide {
+            content: 0,
+            needed: u32::MAX,
+            measure,
+        })?;
+        let shape = crate::TableSpan::with_widths(rows, cols, widths, 0, 0)?;
+
+        let at = self.caret();
+        let text = self.text()?;
+        // A leading newline only when there is a line to end. At offset 0 there is nothing before,
+        // and a leading newline would leave the table one line down with a blank line above it.
+        let leading = if at > 0 && text.get(at as usize - 1) != Some(&b'\n') {
+            1u32
+        } else {
+            0
+        };
+
+        let mut bytes = Vec::with_capacity(shape.separator_count() as usize + 2);
+        if leading > 0 {
+            bytes.push(b'\n');
+        }
+        let table_start = at + leading;
+        bytes.extend(std::iter::repeat_n(
+            crate::table::CELL_SEPARATOR,
+            shape.separator_count() as usize,
+        ));
+        let table_end = table_start + shape.separator_count();
+        bytes.push(b'\n');
+
+        // The insert happens *first*, so that `insert_at`'s own `apply_insert` moves the tables that
+        // are already here, and this table's span is registered against bytes that exist.
+        self.insert_at(at, &bytes, SpanPolicy::GrowIntoInsert)?;
+
+        let span = crate::TableSpan {
+            start_byte: table_start,
+            end_byte: table_end,
+            ..shape
+        };
+        self.tables.insert(span)?;
+        Ok(span)
+    }
+
+    /// Append a row to `span`'s table, and return the new row's index.
+    ///
+    /// `cols - 1` new separators, at the end of the table, because the boundary between the old last
+    /// cell and the new first cell already has one. Called by Tab at the bottom-right cell, and only
+    /// there: it is an **edit**, with bytes and an undo action, which is why it is not inside the
+    /// navigation rule.
+    pub fn append_table_row(&mut self, span: crate::TableSpan) -> Result<u16, TableMapError> {
+        let add = crate::tables::appended_row_bytes(span.cols);
+        if add.is_empty() {
+            return Err(crate::TableError::ZeroExtent.into());
+        }
+        let rows = span.rows;
+        // **Saturating, and refused before the edit.** `rows + 1` on a 65,535-row table was an
+        // overflow -- and the release profile runs `overflow-checks = true`, so it was an abort,
+        // *after* the row's bytes had already been inserted. A table cannot have 65,536 rows: the
+        // row index is a `u16`.
+        let Some(grown_rows) = rows.checked_add(1) else {
+            return Err(crate::TableError::ZeroExtent.into());
+        };
+        self.insert_at(span.end_byte, &add, SpanPolicy::GrowIntoInsert)?;
+        let grown = crate::TableSpan {
+            rows: grown_rows,
+            end_byte: span.end_byte + add.len() as u32,
+            ..span
+        };
+        // Replace rather than insert: `apply_insert` above already extended this span, and inserting a
+        // second copy of it would make the map think there are two tables where there is one.
+        if let Some(at) = self
+            .tables
+            .spans()
+            .iter()
+            .position(|s| s.start_byte == span.start_byte)
+        {
+            let mut spans = self.tables.take();
+            spans[at] = grown;
+            self.tables.replace(spans);
+        } else {
+            self.tables.insert(grown)?;
+        }
+        Ok(rows)
+    }
+
+    /// The span map.
+    #[inline]
+    pub fn spans(&self) -> &SpanMap {
+        &self.spans
+    }
+
+    /// The undo stack, for depth and diagnostics.
+    ///
+    /// Named `undo_stack` rather than `undo` so it does not collide with
+    /// [`undo`](Self::undo), the operation. An earlier version had both called `undo` and the compiler
+    /// rejected the duplicate.
+    #[inline]
+    pub fn undo_stack(&self) -> &UndoStack {
+        &self.undo
+    }
+
+    /// Number of leaves, so a test can assert a split happened.
+    #[inline]
+    pub fn leaf_count(&self) -> usize {
+        self.rope.leaf_count()
+    }
+
+    /// Insert `bytes` at `offset`, recording the action for undo.
+    ///
+    /// The order is bytes, then spans, then history, and it matters:
+    ///
+    /// 1. The rope, because a refused byte edit must leave the span map untouched. Reversing the order
+    ///    means a failed span shift after a successful byte edit, which no caller can detect.
+    /// 2. The spans, which must see the *new* length to stay gap-free.
+    /// 3. The history, last, because it should only record an edit that actually happened.
+    ///
+    /// `policy` decides what styling the inserted bytes take; see [`SpanPolicy`].
+    pub fn insert_at(
+        &mut self,
+        offset: u32,
+        bytes: &[u8],
+        policy: SpanPolicy,
+    ) -> Result<EditOutcome, EditorError> {
+        let offset = offset as usize;
+        if !self.is_char_boundary(offset) {
+            return Err(EditorError::NotCharBoundary {
+                offset: offset as u32,
+            });
+        }
+        // **The arena's size limit is a precondition, checked before anything is mutated.**
+        //
+        // `push_insert` refuses a payload larger than [`ARENA_BYTES`] (64 KiB) by design -- see
+        // [`UndoError::ActionTooLarge`] -- and this function used to ask it *after* the rope, the
+        // span map and the table map had already been changed. **A paste of 70,000 bytes
+        // therefore mutated the document and then failed loudly**: the bytes were in the rope, the
+        // spans had shifted, and the caller was told the edit had not happened.
+        //
+        // That is worse than a wrong error, because the editor and the history now disagree:
+        // the edit is in the document but not in the undo stack, so `Ctrl+Z` undoes the *previous*
+        // action -- and because undo is strictly last-in-first-out, that older action's absolute
+        // offset is now stale by 70,000 bytes. The next undo deletes or restores the wrong bytes.
+        // The redo branch survives the "failed" edit too, so a later `redo()` splices old bytes at
+        // a stale offset.
+        //
+        // `delete_at` has had this check since part 11 found the same bug on the delete path, and
+        // its comment names this failure mode. The insert path is the same bug in the other
+        // direction, and it is checked here for the same reason: **the refusal costs nothing but
+        // the keystroke, and it leaves the document and the history exactly as they were.**
+        if bytes.len() > ARENA_BYTES {
+            return Err(EditorError::Undo(UndoError::ActionTooLarge {
+                len: bytes.len(),
+                capacity: ARENA_BYTES,
+            }));
+        }
+        self.rope.insert_at(offset, bytes)?;
+        self.spans
+            .apply_insert_with(offset as u32, bytes.len() as u32, policy)?;
+        self.tables.apply_insert(offset as u32, bytes.len() as u32);
+        self.undo.push_insert(offset as u32, bytes)?;
+        // Last, because a refused edit must leave the history exactly as it found it -- including the
+        // redo branch, which is history.
+        self.drop_redo();
+
+        Ok(EditOutcome {
+            offset: offset as u32,
+            len: bytes.len() as u32,
+            kind: ActionKind::Insert,
+            line: None,
+            lines_changed: bytes.contains(&b'\n'),
+        })
+    }
+
+    /// Insert one byte at the caret.
+    pub fn insert_char(
+        &mut self,
+        byte: u8,
+        policy: SpanPolicy,
+    ) -> Result<EditOutcome, EditorError> {
+        let offset = self.rope.cursor() as u32;
+        self.insert_at(offset, &[byte], policy)
+    }
+
+    /// Delete `len` bytes at `offset`, recording the action for undo.
+    ///
+    /// # Why this can allocate and the others cannot
+    ///
+    /// Undoing the deletion needs the removed bytes (they are scrubbed from the rope by FR-1.2) *and*
+    /// their styling. The bytes go into [`UndoStack`]'s pre-allocated arena. The styling has nowhere to
+    /// go, so it goes in [`Editor::style_undo`], which is a `Vec` and therefore allocates -- but only
+    /// when the deleted region was actually styled.
+    ///
+    /// The alternative is to make [`UndoStack`]'s arena also hold span records, which would make typing
+    /// allocation-free and deleting allocation-free at the cost of a second ring format inside the undo
+    /// stack. That is the better design and it is not what is here; the trade is deliberate and this is
+    /// where it is recorded.
+    pub fn delete_at(&mut self, offset: u32, len: u32) -> Result<EditOutcome, EditorError> {
+        let offset_u = offset as usize;
+        let end = offset_u + len as usize;
+        if end > self.text_len() {
+            return Err(EditorError::Rope(RopeError::OutOfBounds {
+                offset: end,
+                text_len: self.text_len(),
+            }));
+        }
+        if !self.is_char_boundary(offset_u) || !self.is_char_boundary(end) {
+            return Err(EditorError::NotCharBoundary { offset });
+        }
+        // **The arena's size limit is a precondition, checked before anything is mutated.**
+        //
+        // `push_delete` refuses a payload larger than [`ARENA_BYTES`] (64 KiB) by design -- see
+        // [`UndoError::ActionTooLarge`] -- but this function used to ask it *after* the span map, the
+        // table map and the asset catalog had already been shifted. A select-all delete in a document
+        // over 64 KiB therefore mutated all three and then failed loudly, leaving the bytes still in
+        // the rope with every style, table and image detached: a corrupt document behind an error
+        // dialog. Checked here, the refusal costs nothing but the keystroke and leaves the document
+        // and the history exactly as they were.
+        if len as usize > ARENA_BYTES {
+            return Err(EditorError::Undo(UndoError::ActionTooLarge {
+                len: len as usize,
+                capacity: ARENA_BYTES,
+            }));
+        }
+
+        // Capture the bytes before the rope scrubs them, into the editor's pre-allocated scratch buffer.
+        //
+        // Backspace is a keystroke and FR-1.2 measures keystrokes, so this must not allocate. Three
+        // attempts, in order of what each measured:
+        //
+        // * `vec![0u8; len]` per delete: one allocation per keystroke. A 1,000-keystroke delete burst
+        //   reported 2,000 allocations -- one here, one in the styling capture below.
+        // * A local `[u8; 256]`: **one** allocation, because the slice escapes and the compiler promotes
+        //   the array to the heap. 1,000 deletes reported 1 allocation, which reads as a per-call cost
+        //   rather than the per-delete one it looked like.
+        // * [`Editor::delete_scratch`]: one allocation in `new()`, outside every measured window, and the
+        //   per-delete count is then exactly zero with no caveat.
+        //
+        // A delete longer than [`DELETE_SCRATCH`] -- a multi-kilobyte selection -- falls back to the heap.
+        // That is the honest cost for that operation and it is documented rather than hidden.
+        let removed_spans = self.spans.apply_delete(offset, len)?;
+        self.tables.apply_delete(offset, len);
+        // Read before the bytes go, because both halves of this are byte positions and the delete
+        // renumbers them: `first` is how many anchors precede the range, and `count` is how many are
+        // inside it. Neither needs the document -- the first is a chunked prefix scan into
+        // `anchor_scan_scratch`, the second a count over the bytes already in `delete_scratch`.
+        let first = self.anchor_ordinal_at(offset_u);
+        let anchor_count = self.anchors_in_range(offset_u, len);
+        // **Pushed, not assigned.** The stash is a stack with one entry per delete, so the undo of
+        // this delete pops *this* entry -- and an undo of something else never touches it.
+        // (The first version assigned to a single slot, and an undo of an *insertion* overwrote it:
+        // **the image was then gone**, with its anchor in the text and no asset to serve it.)
+        if self.undo_assets.len() == UNDO_DEPTH {
+            self.undo_assets.remove(0);
+        }
+        self.undo_assets
+            .push(self.assets.remove_n(first, anchor_count));
+        // A table whose separators have all been deleted has no cells, and `cell_count()` subtracts
+        // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a later
+        // keystroke walking into a zero-cell table; see `TableMap::retain_intact`.
+        self.tables.retain_intact();
+
+        // Read the bytes out of the scratch buffer and hand them to the undo stack, in one scope.
+        //
+        // The scope is what makes the borrow checker satisfiable: `removed` borrows
+        // `delete_scratch`, so it must be dead before `delete_range_in_rope` takes `&mut self`. Reading
+        // and recording together is also the correct order -- the bytes are captured before the rope
+        // scrubs them, and an action is recorded only once the edit it describes is under way.
+        let crossed_line = {
+            // Destructure so `rope`, `undo` and `delete_scratch` are disjoint fields. Reaching them as
+            // `self.rope` and `self.delete_scratch` is an immutable and a mutable borrow of one `self` in
+            // a single call, which the compiler rejects.
+            let Self {
+                rope,
+                undo,
+                delete_scratch,
+                ..
+            } = self;
+            let mut heap_buf: Vec<u8> = Vec::new();
+            let removed: &[u8] = if len as usize <= DELETE_SCRATCH {
+                rope.read_at(offset_u, len as usize, &mut delete_scratch[..len as usize])?;
+                &delete_scratch[..len as usize]
+            } else {
+                heap_buf.resize(len as usize, 0);
+                rope.read_at(offset_u, len as usize, &mut heap_buf)?;
+                &heap_buf
+            };
+            undo.push_delete(offset, removed)?;
+            // The one other fact the caller needs from these bytes, captured while they are still live.
+            removed.contains(&b'\n')
+        };
+
+        // **Through `park`, and not `rope.set_cursor`.** Part 28: an edit collapses the selection,
+        // and this is the one funnel that says so for every edit in the file.
+        self.park(offset_u + len as usize)?;
+        self.delete_range_in_rope(offset_u, len as usize)?;
+
+        // Record the styling the delete removed, **always**, so that `undo`'s pop pairs one-to-one
+        // with this push.
+        //
+        // Phase 6 gated this on `!styled.is_empty()`, which was a real optimisation (a plain-text
+        // document allocated nothing here at all) and a real bug: `undo` popped unconditionally, so
+        // a plain delete's undo stole the previous styled delete's record. `Vec::new()` does not
+        // allocate, so making the entry total costs a `Vec` header and nothing else.
+        //
+        // The `is_empty` branch is still worth spelling out rather than left implicit: an
+        // unconditional `collect()` over a `filter_map` takes its capacity from the iterator's upper
+        // size hint *even when it yields nothing*, which is the second allocation per delete that
+        // `no_alloc.rs` measures. The filter, then the `is_empty` check, is what makes that zero.
+        // **A run whose only attribute is its face is still styled**, and it has to be in the record:
+        // a paragraph in JetBrains Mono with no bold and no colour is the *common* case, and the filter
+        // below used to test flags and colour alone -- so deleting it and undoing lost the face, because
+        // the record was empty and the restore took the `GrowIntoInsert` guess or the plain default.
+        let styled: Vec<TextIntervalSpan> = if removed_spans
+            .iter()
+            .all(|s| s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY)
+        {
+            Vec::new()
+        } else {
+            removed_spans
+                .iter()
+                .copied()
+                .filter(|s| s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY)
+                .collect()
+        };
+        if self.style_undo.len() == STYLE_UNDO_DEPTH {
+            self.style_undo.remove(0);
+        }
+        self.style_undo.push(styled);
+        // A fresh delete invalidates the redo branch too, for the reason in `drop_redo`.
+        self.drop_redo();
+
+        Ok(EditOutcome {
+            offset,
+            len,
+            kind: ActionKind::Delete,
+            line: None,
+            lines_changed: crossed_line,
+        })
+    }
+
+    /// The byte range [`backspace`](Self::backspace) deletes: the character before the caret.
+    ///
+    /// # Why this is a method and not arithmetic at each call site
+    ///
+    /// **"How long is the character before the caret" is asked twice** — once by the editor to delete
+    /// it, and once by `Session::backspace` to tell `TextCounts` which bytes went away. **Two copies of
+    /// a UTF-8 boundary walk is two answers waiting to differ**, and the failure mode is a word count
+    /// that drifts by one per non-ASCII deletion, which is invisible for months.
+    ///
+    /// `None` at offset 0: there is no character before the start of the document.
+    pub fn backspace_range(&self) -> Option<(usize, usize)> {
+        let cursor = self.rope.cursor();
+        if cursor == 0 {
+            return None;
+        }
+        let mut start = cursor - 1;
+        // A UTF-8 continuation byte is `0b10xx_xxxx`, and `is_char_boundary` is defined as the
+        // *absence* of one at that index — so stepping back while the index is not a boundary walks
+        // over exactly the continuation bytes of the character the caret sits after. At most three.
+        while start > 0 && !self.is_char_boundary(start) {
+            start -= 1;
+        }
+        Some((start, cursor))
+    }
+
+    /// Delete the character before the caret.
+    ///
+    /// # CORRECTION: this deleted one *byte*, and one byte is not one character
+    ///
+    /// It was `self.delete_at((cursor - 1) as u32, 1)` with a docstring that said "the byte before the
+    /// caret". **`delete_at` is right to refuse an offset that is not a char boundary**
+    /// ([`EditorError::NotCharBoundary`]), so pressing Backspace after any non-ASCII character — `é`,
+    /// an em dash, a curly quote — returned an error instead of deleting. In the window that error
+    /// travelled out of the session and **ended the process**, so a document could not be typed into
+    /// at all once one such character was in it.
+    ///
+    /// **The fix is the mirror of [`delete_forward`](Self::delete_forward), which has always walked
+    /// boundaries.** The range comes from [`backspace_range`](Self::backspace_range), so the session's
+    /// byte count and this delete cannot disagree. **No allocation and no decoding**: this is the
+    /// keystroke path, and `tests/no_alloc.rs` measures it.
+    pub fn backspace(&mut self) -> Result<EditOutcome, EditorError> {
+        let Some((start, end)) = self.backspace_range() else {
+            return Err(EditorError::Rope(RopeError::OutOfBounds {
+                offset: 0,
+                text_len: 0,
+            }));
+        };
+        // `delete_at` reads the bytes from the rope, so the caret must be *after* the target.
+        self.delete_at(start as u32, (end - start) as u32)
+    }
+
+    /// Delete `len` bytes by caret-relative delete, so the rope's merge path runs.
+    ///
+    /// Separate from [`delete_at`](Self::delete_at) because deleting at an arbitrary offset and
+    /// deleting before the caret take different paths through the rope: the latter is the keystroke
+    /// path, and it is the one that merges leaves.
+    ///
+    /// # Why the cursor is set once, at the far end
+    ///
+    /// `Rope::delete_byte` deletes the byte *before* the cursor and leaves the cursor on it, so one
+    /// `set_cursor(offset + 1)` per byte is the obvious way to walk forward. **It cannot delete a
+    /// multi-byte character.** After a 3-byte U+FFFC lands at `offset`, the second iteration sets the
+    /// cursor to `offset + 1`, which is the middle of that character, and `set_cursor` refuses:
+    ///
+    /// ```text
+    /// thread 'undo' panicked: undo: Rope(NotCharBoundary { offset: 2, text_len: 4 })
+    /// ```
+    ///
+    /// Every byte offset this crate's own tests touched was ASCII, so nothing noticed. Setting the
+    /// cursor once to `offset + len` and then deleting walks *backwards* through the run, and every
+    /// intermediate position is set by `delete_byte` itself rather than by us -- so there is no moment
+    /// at which a cursor can land mid-character. `offset + len` is a boundary because the run was
+    /// inserted as whole characters at a boundary, which is the only thing that puts it in a payload.
+    fn delete_range_in_rope(&mut self, offset: usize, len: usize) -> Result<(), EditorError> {
+        self.rope.set_cursor(offset + len)?;
+        for _ in 0..len {
+            self.rope.delete_byte()?;
+        }
+        Ok(())
+    }
+
+    /// Whether `offset` is on a UTF-8 character boundary.
+    fn is_char_boundary(&self, offset: usize) -> bool {
+        if offset == 0 || offset == self.text_len() {
+            return true;
+        }
+        if offset > self.text_len() {
+            return false;
+        }
+        // The byte **at** `offset`, not the one before it. A boundary is the *absence* of a continuation
+        // byte at that index: in `héllo`, offset 2 holds `0xA9`, continuing the character that began at
+        // 1, so 2 is not a boundary.
+        //
+        // Reading `offset - 1` is the same off-by-one the leaf's `is_char_boundary` had, reintroduced
+        // here. It calls offset 2 a boundary -- byte 1 is `0xC3`, not a continuation -- and lets a
+        // split land inside `é`.
+        let mut one = [0u8; 1];
+        self.rope.read_at(offset, 1, &mut one).is_ok() && (one[0] & 0xC0) != 0x80
+    }
+
+    /// Style `[start, end)`.
+    pub fn style_range(
+        &mut self,
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+    ) -> Result<(), EditorError> {
+        Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
+    }
+
+    /// **Style `[start, end)` and set its face**, without a history record.
+    ///
+    /// The counterpart of [`style_range`](Self::style_range) for the insert path, which has already
+    /// recorded the *insert* and must not push a second action for the styling that came with it. The
+    /// four-argument form leaves the face alone; this one sets it, and the two exist side by side so a
+    /// caller cannot be ambiguous about which it meant.
+    pub fn style_range_faced(
+        &mut self,
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+        font_face: FontFace,
+    ) -> Result<(), EditorError> {
+        Ok(self
+            .spans
+            .style_range_faced(start, end, style_flags, color_rgb, font_face)?)
+    }
+
+    /// Apply a formatting command as one bounded undoable transaction.
+    ///
+    /// Each existing run is transformed independently, preserving mixed formatting.
+    /// History stores only offsets and style attributes, never document text. The
+    /// operation is refused before mutation if the history record will not fit.
+    pub fn format_range<F>(
+        &mut self,
+        start: u32,
+        end: u32,
+        transform: F,
+    ) -> Result<bool, EditorError>
+    where
+        F: Fn(TextIntervalSpan) -> (u16, u32),
+    {
+        if start > end {
+            return Err(SpanError::InvertedRange { start, end }.into());
+        }
+        if end > self.spans.text_len() {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(start),
+                end: u64::from(end),
+                text_len: self.spans.text_len(),
+            }
+            .into());
+        }
+        if start == end {
+            return Ok(false);
+        }
+        let mut runs = self.spans.runs_in(start, end);
+        if runs.is_empty() {
+            runs.push((TextIntervalSpan::plain(start, end), start, end));
+        }
+        const BYTES: usize = 20;
+        let needed = runs.len().saturating_mul(BYTES);
+        if needed > ARENA_BYTES {
+            return Err(UndoError::ActionTooLarge {
+                len: needed,
+                capacity: ARENA_BYTES,
+            }
+            .into());
+        }
+        let mut record = Vec::with_capacity(needed);
+        let mut changed = false;
+        for (old, lo, hi) in runs {
+            let (flags, colour) = transform(old);
+            changed |= flags != old.style_flags || colour != old.color_rgb;
+            record.extend_from_slice(&lo.to_le_bytes());
+            record.extend_from_slice(&hi.to_le_bytes());
+            record.extend_from_slice(&old.style_flags.to_le_bytes());
+            record.extend_from_slice(&old.color_rgb.to_le_bytes());
+            record.extend_from_slice(&flags.to_le_bytes());
+            record.extend_from_slice(&colour.to_le_bytes());
+        }
+        if !changed {
+            return Ok(false);
+        }
+        self.undo.push(start, ActionKind::Format, &record)?;
+        self.drop_redo();
+        self.apply_format_record(&record, true)?;
+        record.zeroize();
+        Ok(true)
+    }
+
+    /// **Apply a *character format* -- bits, colour and face -- as one undoable transaction.**
+    ///
+    /// # Why this exists next to [`format_range`](Self::format_range)
+    ///
+    /// **A font is not a bit and a `u16` cannot carry it**, so the transform that sets one needs a third
+    /// answer. Widening `format_range`'s closure to a triple would touch all thirteen of its callers, ten
+    /// of which have no opinion about a face -- and the two that do are the two that *apply a character
+    /// format to a selection*, which is exactly what this function is. So the triple lives here and the
+    /// pair stays where it is.
+    ///
+    /// # The history record, and the 20 bytes
+    ///
+    /// **Before and after are `start, end, flags, colour, face`** -- 21 bytes, which is why
+    /// [`RECORD_BYTES`] moved from 20 to 24. **The face has to be in the record or undo is wrong in the
+    /// direction nobody notices until a save**: `apply_format_record` replays one call per run, so a
+    /// font change whose *before* face was not recorded would undo to the body face and quietly repaint
+    /// the paragraph in the default, one undo after every font change.
+    ///
+    /// **Refused before mutation if the record will not fit**, like `format_range`: an undo that cannot
+    /// be recorded is an edit that must not happen.
+    pub fn face_format_range<F>(
+        &mut self,
+        start: u32,
+        end: u32,
+        transform: F,
+    ) -> Result<bool, EditorError>
+    where
+        F: Fn(TextIntervalSpan) -> (u16, u32, FontFace),
+    {
+        if start > end {
+            return Err(SpanError::InvertedRange { start, end }.into());
+        }
+        if end > self.spans.text_len() {
+            return Err(SpanError::RangeOutOfBounds {
+                start: u64::from(start),
+                end: u64::from(end),
+                text_len: self.spans.text_len(),
+            }
+            .into());
+        }
+        if start == end {
+            return Ok(false);
+        }
+        let mut runs = self.spans.runs_in(start, end);
+        if runs.is_empty() {
+            runs.push((TextIntervalSpan::plain(start, end), start, end));
+        }
+        let needed = runs.len().saturating_mul(RECORD_BYTES);
+        if needed > ARENA_BYTES {
+            return Err(UndoError::ActionTooLarge {
+                len: needed,
+                capacity: ARENA_BYTES,
+            }
+            .into());
+        }
+        let mut record = Vec::with_capacity(needed);
+        let mut changed = false;
+        for (old, lo, hi) in runs {
+            let (flags, colour, face) = transform(old);
+            // **An out-of-range face keeps the run's own**, so a corrupt request styles nothing rather
+            // than making the document unopenable. See `FACE_COUNT`.
+            let face = if face < FACE_COUNT {
+                face
+            } else {
+                old.font_face
+            };
+            changed |= flags != old.style_flags || colour != old.color_rgb || face != old.font_face;
+            record.extend_from_slice(&lo.to_le_bytes());
+            record.extend_from_slice(&hi.to_le_bytes());
+            // **One run, laid out to `RECORD_BYTES` = 24, field by field:**
+            //
+            // | offset | width | field |
+            // |---|---|---|
+            // | 0  | 4 | start |
+            // | 4  | 4 | end |
+            // | 8  | 2 | before flags |
+            // | 10 | 4 | before colour |
+            // | 14 | 1 | before face |
+            // | 15 | 1 | pad |
+            // | 16 | 2 | after flags |
+            // | 18 | 4 | after colour |
+            // | 22 | 1 | after face |
+            // | 23 | 1 | pad |
+            //
+            // Both pads are alignment and nothing else, and **both are load-bearing**: the reader is
+            // `chunks_exact(RECORD_BYTES)`, so a run of 22 or 23 bytes makes that iterator yield *zero*
+            // chunks. The record was then pushed, the edit was marked changed, and the new style was
+            // never applied — every face change in this crate silently did nothing. A length that does
+            // not divide is a no-op, and the `debug_assert` below is the only thing that says so out
+            // loud.
+            record.extend_from_slice(&old.style_flags.to_le_bytes());
+            record.extend_from_slice(&old.color_rgb.to_le_bytes());
+            record.push(old.font_face);
+            record.push(0);
+            record.extend_from_slice(&flags.to_le_bytes());
+            record.extend_from_slice(&colour.to_le_bytes());
+            record.push(face);
+            // The last pad, offset 23. Without it the run is 23 bytes and the whole log vanishes into
+            // `chunks_exact`'s remainder.
+            record.push(0);
+            debug_assert_eq!(
+                record.len() % RECORD_BYTES,
+                0,
+                "every change is exactly {} bytes, or the reader walks past it",
+                RECORD_BYTES
+            );
+        }
+        if !changed {
+            return Ok(false);
+        }
+        // **Recorded as a face format, not as a plain one.** `undo` and `redo` dispatch on the action kind
+        // and hand a `Format` record to `apply_format_record`, which reads 20-byte runs -- so a 24-byte
+        // face log replayed through it decodes to nothing but garbage (a flags word read out of a
+        // colour, a `u32` read three bytes into a face, and a `chunks_exact(20)` that then yields one
+        // truncated run per 24 bytes). The face edit would then undo to the *wrong* style instead of to
+        // the previous one, which is worse than not undoing at all.
+        //
+        // The kind is what tells the two layouts apart, and it is why `ActionKind::FaceFormat` exists
+        // rather than the face riding in the padding of a plain format record.
+        self.undo.push(start, ActionKind::FaceFormat, &record)?;
+        self.drop_redo();
+        self.apply_face_format_record(&record, true)?;
+        record.zeroize();
+        Ok(true)
+    }
+
+    /// Replay before or after attributes from an internal, fixed-width history record.
+    fn apply_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
+        for run in record.chunks_exact(20) {
+            let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
+            let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
+            let (flags, colour) = if after {
+                (u16_at(14), u32_at(16))
+            } else {
+                (u16_at(8), u32_at(10))
+            };
+            self.spans
+                .style_range(u32_at(0), u32_at(4), flags, colour)?;
+        }
+        Ok(())
+    }
+
+    /// Replay before or after attributes, face included, from a face-format record.
+    ///
+    /// **A separate replay from [`apply_format_record`](Self::apply_format_record), and the two cannot be
+    /// one function.** Their records are different lengths -- 20 and 24 -- and `chunks_exact(20)` over a
+    /// 24-byte record does not fail, it *misreads*: every field after the first chunk lands on the wrong
+    /// byte, so a font undo would have written somebody's colour into somebody's flags. Two record kinds,
+    /// two readers, and the `RECORD_BYTES` constant is what keeps them in step.
+    fn apply_face_format_record(&mut self, record: &[u8], after: bool) -> Result<(), EditorError> {
+        for run in record.chunks_exact(RECORD_BYTES) {
+            let u32_at = |i| u32::from_le_bytes([run[i], run[i + 1], run[i + 2], run[i + 3]]);
+            let u16_at = |i| u16::from_le_bytes([run[i], run[i + 1]]);
+            // before: start@0 end@4 flags@8 colour@10 face@14 pad@15
+            // after:  flags@16 colour@18 face@22
+            let (flags, colour, face) = if after {
+                (u16_at(16), u32_at(18), run[22])
+            } else {
+                (u16_at(8), u32_at(10), run[14])
+            };
+            self.spans
+                .style_range_faced(u32_at(0), u32_at(4), flags, colour, face)?;
+        }
+        Ok(())
+    }
+
+    /// The style in effect at `offset`.
+    #[inline]
+    pub fn style_at(&self, offset: u32) -> TextIntervalSpan {
+        self.spans.style_at(offset)
+    }
+
+    /// Undo the most recent action.
+    ///
+    /// Both directions restore bytes *and* styling, which is the whole point of routing edits through
+    /// this type.
+    pub fn undo(&mut self) -> Result<EditOutcome, EditorError> {
+        // **The table map is stashed after the action is known, not before.**
+        //
+        // The first version stashed it before the pop -- on the reasoning that "after the undo the
+        // spans it is about to delete are already gone" -- and that was true, but it cost a **clone
+        // of the whole table map on every undo**, whether or not the undo could have changed the map.
+        //
+        // The action's bytes say whether it could: **a table is a run of cell separators in the
+        // document's bytes**, so an action with no separator among its bytes cannot have moved the
+        // table map at all. And `None` means exactly that -- "the map did not change, leave it
+        // alone" -- which is the common case and costs nothing.
+        let action = self
+            .undo
+            .pop_for_undo()
+            .map_err(|_| EditorError::NothingToUndo)?;
+        // **Pushed, one entry per undo, so the pop in `redo` pairs one-for-one.**
+        //
+        // The first version was a single `Option` and the second undo overwrote the first's map:
+        // `undo, undo, redo, redo` is legal -- `undo` does *not* call `drop_redo` -- and the second
+        // redo found nothing to restore, so the table map was silently never put back.
+        let table_shadow = if !matches!(action.kind, ActionKind::Format | ActionKind::FaceFormat)
+            && action.bytes.contains(&crate::table::CELL_SEPARATOR)
+        {
+            Some(self.tables.spans().to_vec())
+        } else {
+            None
+        };
+        if self.undo_tables.len() == UNDO_DEPTH {
+            self.undo_tables.remove(0);
+        }
+        self.undo_tables.push(table_shadow);
+        let outcome = match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, false)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                }
+            }
+            ActionKind::Format => {
+                self.apply_format_record(&action.bytes, false)?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::Format,
+                    line: None,
+                    lines_changed: false,
+                }
+            }
+            ActionKind::Insert => {
+                // Capture inserted styles before deleting the text, for redo.
+                if self.redo_insert_styles.len() == UNDO_DEPTH {
+                    self.redo_insert_styles.remove(0);
+                }
+                self.redo_insert_styles.push(
+                    self.spans
+                        .runs_in(action.offset, action.offset + action.bytes.len() as u32)
+                        .into_iter()
+                        // **`faced`, not `styled`.** A `styled` span has `FACE_BODY` for its face, so a
+                        // redo restored the flags and the colour and put every character back in the body
+                        // face -- an edit to a monospaced word undone and redone came back in Inter, which
+                        // is the same defect as the document-wide font arriving by a different route.
+                        .map(|(s, lo, hi)| {
+                            TextIntervalSpan::faced(lo, hi, s.style_flags, s.color_rgb, s.font_face)
+                        })
+                        .collect(),
+                );
+                // The action inserted these bytes, so undoing removes them.
+                self.spans
+                    .apply_delete(action.offset, action.bytes.len() as u32)?;
+                self.tables
+                    .apply_delete(action.offset, action.bytes.len() as u32);
+                self.tables.retain_intact();
+                // The asset that was inserted with those bytes goes too, or the anchor-to-asset pairing
+                // shifts by one and every image below this point shows the wrong picture. **Kept** rather
+                // than dropped, because `redo` replays these same bytes and has to put the asset back
+                // -- and the stash is the only record of it that exists.
+                //
+                // **Pushed onto the *redo* side, and not onto the undo side.** The assets removed here
+                // are the ones a redo of this insertion has to put back. The undo side's entry belongs
+                // to a *delete* deeper in the stack, and taking it here is what lost the image: undo an
+                // insertion and the pending delete's stashed assets were dropped on the floor.
+                let first = self.anchor_ordinal_at(action.offset as usize);
+                if self.redo_assets.len() == UNDO_DEPTH {
+                    self.redo_assets.remove(0);
+                }
+                self.redo_assets.push(
+                    self.assets
+                        .remove_n(first, AssetCatalog::count_in(&action.bytes)),
+                );
+                self.park(action.offset as usize + action.bytes.len())?;
+                self.delete_range_in_rope(action.offset as usize, action.bytes.len())?;
+                EditOutcome {
+                    offset: action.offset,
+                    len: action.bytes.len() as u32,
+                    kind: ActionKind::Delete,
+                    line: None,
+                    lines_changed: action.bytes.contains(&b'\n'),
+                }
+            }
+            ActionKind::Delete => {
+                // The action deleted these bytes, so undoing re-inserts them, and the styling comes
+                // back from the style record. The table map needs no restore on this arm: the
+                // `apply_insert` below extends whatever span these bytes landed in, and a table that
+                // survived the delete is still a span. Only redo's `Insert` arm needs the stash,
+                // because undoing an insertion deletes a table outright.
+                let removed = self.style_undo.pop();
+                let start = action.offset;
+                let end = action.offset + action.bytes.len() as u32;
+                self.park(action.offset as usize)?;
+                self.rope.insert_at(action.offset as usize, &action.bytes)?;
+                // `GrowIntoInsert` so the restored bytes take the preceding run's style as a starting
+                // point, then the recorded spans overwrite it exactly.
+                self.spans.apply_insert_with(
+                    start,
+                    action.bytes.len() as u32,
+                    SpanPolicy::GrowIntoInsert,
+                )?;
+                self.tables.apply_insert(start, action.bytes.len() as u32);
+                // The bytes are back, so the assets for the anchors among them go back too. `restore_at`
+                // replaces rather than appends, so the assets of *later* anchors stay where they are.
+                //
+                // **Popped, and only here.** The stash is a stack with one entry per delete, and this
+                // arm is the undo of a delete -- so it pops *this* delete's entry. The first version
+                // took the whole stash at the top of `undo`, which meant the undo of an *insertion*
+                // consumed the pending delete's assets and dropped them.
+                let stash_assets = self.undo_assets.pop().unwrap_or_default();
+                if !stash_assets.is_empty() {
+                    let (first, after) =
+                        AssetCatalog::anchors_in(&self.text()?, start, action.bytes.len() as u32);
+                    let want = after.saturating_sub(first);
+                    let leftover = self.assets.restore_at(first, stash_assets, want);
+                    if !leftover.is_empty() {
+                        // **The surplus is appended, not dropped.** The stashed assets are one per
+                        // anchor in the deleted range and `want` is the number of anchors among the
+                        // restored bytes, so the two agree and this is empty. **If they do not, the
+                        // positional pairing is already broken** -- and an image that is dropped is
+                        // an image nobody can account for, which is the failure this whole mechanism
+                        // exists to prevent. So the surplus goes to the end of the catalog: the
+                        // picture survives, and the pairing is the thing that is already wrong.
+                        let at = self.assets.len();
+                        let n = leftover.len();
+                        self.assets.restore_at(at, leftover, n);
+                    }
+                }
+                match removed {
+                    Some(spans) if !spans.is_empty() => {
+                        // **The gaps between the recorded runs are restyled plain, explicitly.**
+                        //
+                        // The record holds only the *styled* sub-spans -- the plain ones are not
+                        // stored, because storing them would double the record's size for no
+                        // information. But the restore has to be exact, and the `GrowIntoInsert`
+                        // above has already given the whole region the *preceding* run's style.
+                        //
+                        // **So a mixed region came back wrong**: bold(0..5), plain(5..10),
+                        // bold(10..15), delete(5..10), undo -- the plain half came back bold, because
+                        // the record said "bold at 10..15" and said nothing about 5..10, and the
+                        // guess filled it.
+                        //
+                        // The record is sorted and non-overlapping, so the gaps between its runs
+                        // are exactly the parts that were plain, and they are restored as plain.
+                        let mut cursor = start;
+                        for s in spans {
+                            // **A restored gap is plain in *every* attribute, face included.** A
+                            // `style_range(.., 0, 0)` clears the flags and the colour and leaves the
+                            // face alone, so the gap kept the `GrowIntoInsert` guess -- with the face
+                            // left behind, a deleted-and-undone plain run came back monospaced.
+                            if s.start_byte > cursor {
+                                self.spans.style_range_faced(
+                                    cursor,
+                                    s.start_byte,
+                                    0,
+                                    0,
+                                    FACE_BODY,
+                                )?;
+                            }
+                            // **`style_range_faced`, so the face comes back with the rest of the run.**
+                            self.spans.style_range_faced(
+                                s.start_byte,
+                                s.end_byte,
+                                s.style_flags,
+                                s.color_rgb,
+                                s.font_face,
+                            )?;
+                            cursor = s.end_byte;
+                        }
+                        if cursor < end {
+                            self.spans.style_range_faced(cursor, end, 0, 0, FACE_BODY)?;
+                        }
+                    }
+                    _ => {
+                        // An empty record -- and *only* an empty record, now that `style_undo` is total
+                        // -- means these bytes carried no styling of their own. So they must come back
+                        // plain, not with the `GrowIntoInsert` guess above.
+                        //
+                        // Before Phase 8 this arm could not tell "was plain" from "the record went
+                        // missing", so it took the guess, and undoing a plain delete that sat next to a
+                        // bold run restored the text bold. Restoring a delete should restore what was
+                        // deleted; `GrowIntoInsert` is the right default for the *caret* and the wrong
+                        // one for *history*, and this is where the two come apart.
+                        self.spans.style_range_faced(start, end, 0, 0, FACE_BODY)?;
+                    }
+                }
+                EditOutcome {
+                    offset: action.offset,
+                    len: action.bytes.len() as u32,
+                    kind: ActionKind::Insert,
+                    line: None,
+                    lines_changed: action.bytes.contains(&b'\n'),
+                }
+            }
+        };
+        // Park it for redo, *after* the inverse has been applied -- the action describes the original
+        // edit, so its bytes are still needed to replay it forward.
+        //
+        // Bounded exactly as `style_undo` is. The eviction matters more here than there: dropping an
+        // evicted redo action discards its payload, so it is zeroized rather than freed with plaintext
+        // still in it. An evicted redo is a redo that can no longer happen, which is the same guarantee
+        // `UndoStack`'s own arena gives on overflow.
+        if self.redo.len() == UNDO_DEPTH {
+            let mut evicted = self.redo.remove(0);
+            evicted.bytes.zeroize();
+        }
+        self.redo.push(action);
+        Ok(outcome)
+    }
+
+    /// Number of actions that can be undone.
+    #[inline]
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Whether anything can be undone.
+    #[inline]
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Discard the history, zeroizing both rings.
+    pub fn clear_history(&mut self) {
+        self.undo.clear();
+        self.style_undo.clear();
+        // **And the stashes that go with it.** The asset stacks hold PNGs and the table stack holds
+        // maps; they are history too, and a `clear_history` that left them would let an undo of a
+        // later delete restore an asset from a discarded history.
+        self.undo_assets.clear();
+        self.redo_assets.clear();
+        self.redo_insert_styles.clear();
+        self.undo_tables.clear();
+        // The redo payloads are plaintext that outlived their undo, so they get scrubbed rather than
+        // dropped. `UndoAction` holds a `Vec<u8>`, and this is the only path that discards one.
+        for action in &mut self.redo {
+            action.bytes.zeroize();
+        }
+        self.redo.clear();
+    }
+
+    // ---------------------------------------------------------------- caret, Phase 8
+
+    /// Copy a range of the document into `out`, returning how many bytes were copied.
+    ///
+    /// Phase 8, for the exporters. [`text`](Self::text) is the honest whole-document API and allocates
+    /// a `Vec` the size of the document; a writer that streams wants a bounded buffer instead, and
+    /// inside the jail memory is the scarce resource.
+    ///
+    /// Short reads at the end are normal and reported as a short count rather than an error, so a
+    /// caller loops on `offset += n` until `n == 0`. A range that starts past the end copies nothing
+    /// and returns 0.
+    ///
+    /// `out` is the caller's, so this allocates nothing. The caret is not moved.
+    pub fn read_into(&self, offset: usize, out: &mut [u8]) -> Result<usize, EditorError> {
+        let len = self.text_len();
+        if offset >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(len - offset);
+        self.rope.read_at(offset, want, &mut out[..want])?;
+        Ok(want)
+    }
+
+    /// Where the caret is, in document bytes. Always on a UTF-8 character boundary.
+    #[inline]
+    pub fn caret(&self) -> u32 {
+        self.rope.cursor() as u32
+    }
+
+    /// Move the caret to `offset`, snapped into the document and onto a character boundary.
+    ///
+    /// Returns where it landed, which is not necessarily `offset`: an offset past the end clamps to
+    /// the end, and one that falls inside a multi-byte character snaps *backwards* to that
+    /// How many anchors are inside the byte range `offset..offset + len`, without allocating.
+    ///
+    /// Reads through [`Editor::anchor_scan_scratch`], the same buffer [`anchor_ordinal_at`](Self)
+    /// uses -- so a delete does one pass over the prefix and one over the range, both into memory
+    /// allocated once in `Editor::empty`. That is the whole point of `no_alloc.rs` staying green: a
+    /// document with a thousand images must delete a character as cheaply as one with none, because
+    /// the keystroke path cannot afford to depend on how much the document happens to contain.
+    ///
+    /// A range longer than the scratch is not a keystroke -- it is a multi-kilobyte selection -- so it
+    /// takes one heap buffer, which is the honest cost and is documented rather than pretended away.
+    fn anchors_in_range(&mut self, offset: usize, len: u32) -> usize {
+        let len = len as usize;
+        if len == 0 {
+            return 0;
+        }
+        if len > self.anchor_scan_scratch.len() {
+            let mut heap = vec![0u8; len];
+            let Ok(()) = self.rope.read_at(offset, len, &mut heap) else {
+                return 0;
+            };
+            return AssetCatalog::count_in(&heap);
+        }
+        let Ok(()) = self
+            .rope
+            .read_at(offset, len, &mut self.anchor_scan_scratch[..len])
+        else {
+            return 0;
+        };
+        AssetCatalog::count_in(&self.anchor_scan_scratch[..len])
+    }
+
+    /// How many anchors there are before byte `offset`, without copying the prefix.
+    ///
+    /// The ordinal an image inserted at `offset` will take, and the ordinal a delete starting at
+    /// `offset` begins removing from. Reads the prefix in [`DELETE_SCRATCH`]-sized chunks through
+    /// [`Rope::read_at`] -- see [`Editor::anchor_scan_scratch`] for why this is not `text()`.
+    ///
+    /// `&mut self` rather than `&self` because it writes the scratch, and a scratch that had to be
+    /// taken with `mem::take` to satisfy the borrow checker would be a heap allocation -- the very thing
+    /// the scratch exists to avoid.
+    fn anchor_ordinal_at(&mut self, offset: usize) -> usize {
+        let mut n = 0usize;
+        let mut at = 0usize;
+        let end = offset.min(self.text_len());
+        let chunk = self.anchor_scan_scratch.len();
+        while at < end {
+            let take = chunk.min(end - at);
+            if self
+                .rope
+                .read_at(at, take, &mut self.anchor_scan_scratch[..take])
+                .is_err()
+            {
+                // A failed read means the rope disagrees with `text_len`, which is an invariant
+                // violation rather than an edit case. Counting what was read and stopping is the
+                // conservative direction: it can under-count an ordinal, and an under-count surfaces as a
+                // refused insert or an over-eager removal -- both recoverable -- where an over-count
+                // would silently show the wrong picture.
+                return n;
+            }
+            n += AssetCatalog::count_in(&self.anchor_scan_scratch[..take]);
+            at += take;
+        }
+        n
+    }
+
+    /// character's start.
+    ///
+    /// Snapping backwards rather than forwards is the choice worth stating. Forward would put the
+    /// caret after a character the caller meant to address; backwards puts it before, which is the
+    /// only reading where the character at `offset` is still reachable with a Right. Both are
+    /// defensible and only one is reversible.
+    pub fn caret_to(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.park(offset)
+    }
+
+    /// **Make the leaf holding `offset` resident, so an edit at `offset` can be applied.** Part 42.
+    ///
+    /// # Why this exists, and what was broken
+    ///
+    /// **Every mutating path refused to touch an absent leaf.** `Rope::leaf_mut` answers
+    /// `LeafAbsent` for a leaf the rope does not hold, and that refusal is deliberate and correct:
+    /// the alternative is a leaf whose gap has moved without its bytes being present, which is not a
+    /// wrong answer but no answer at all. **And because nothing called [`Rope::fault_leaf_containing`]
+    /// first, the refusal reached the user** -- a keystroke past the resident window did nothing at
+    /// all, silently, with no error the user could see and no keystroke the user could see either.
+    ///
+    /// **Reads faulted and writes did not**, which is the asymmetry. `read_into_faulting` has been
+    /// here since part 14 and the paint path uses it; the edit path had no equivalent.
+    ///
+    /// # Why `fault_leaf_containing` and not a `locate` plus a `fault_leaf`
+    ///
+    /// **Because `locate` answers `(leaf, within)` and every caller wants to say "the bytes at this
+    /// offset".** A caller that dropped the `within` half would fault the right leaf and then get a
+    /// confusing error out of `set_cursor`. The rope's own method exists for exactly this and it is
+    /// the one called.
+    ///
+    /// # What it costs when the leaf is already resident
+    ///
+    /// **One `is_resident` check, which is an array index.** This is on the keystroke path, where
+    /// NFR-1.1 budgets 0.50 ms for the whole turn, and it is worth saying that the common case is a
+    /// leaf that was just read -- `a_keystroke_faults_nothing_when_the_leaf_is_already_resident`
+    /// is the gate that holds it.
+    pub fn fault_at(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+        offset: usize,
+    ) -> Result<(), EditorError> {
+        self.rope.fault_leaf_containing(source, offset)?;
+        Ok(())
+    }
+
+    /// **The caret's leaf, resident.** The mutator's precondition, and the one method a caller that
+    /// is about to edit needs.
+    ///
+    /// **`fault_at(self.caret() as usize)` spelled out rather than delegated**, so that a reader of
+    /// this function does not have to know `caret()` is a `u32` that has been `usize` for four
+    /// phases.
+    pub fn fault_at_caret(
+        &mut self,
+        source: &mut dyn crate::rope::LeafSource,
+    ) -> Result<(), EditorError> {
+        let at = self.caret() as usize;
+        self.fault_at(source, at)
+    }
+
+    // ---------------------------------------------------------------- selection, part 28
+
+    /// **The selection, or `None`.**
+    ///
+    /// **Derived from the anchor and the caret every call, and not stored**, for the reason
+    /// [`selection_anchor`](Self) gives: the caret already lives in the rope's cursor, and a second copy
+    /// of it is a second thing that can disagree with the first. `Some((10, 10))` cannot be returned
+    /// — [`SelectionRange::between`] refuses a degenerate range — so a collapsed selection is `None`
+    /// and callers never see one.
+    pub fn selection(&self) -> Option<crate::SelectionRange> {
+        crate::SelectionRange::between(self.selection_anchor?, self.caret())
+    }
+
+    /// Whether anything is selected. Cheaper than [`selection`](Self).is_some() to read and it is what
+    /// the paint path asks every frame.
+    #[inline]
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some_and(|a| a != self.caret())
+    }
+
+    /// **Select from `anchor` to `focus`, collapsing anything already selected.**
+    ///
+    /// ## Why this and not only `extend_to`
+    ///
+    /// **A plain click is a selection of zero bytes that happens not to exist.** Clicking without
+    /// dragging should leave no selection, and *clicking with shift* should grow or shrink the one
+    /// already there — two different operations on the anchor, and one function cannot do both.
+    /// `select` replaces the anchor; `extend_to` keeps it and moves only the caret.
+    ///
+    /// ## Why the anchor is snapped
+    ///
+    /// **Because `focus` is snapped and an unsnapped anchor would put the selection's edge inside a
+    /// multi-byte character.** [`move_only`](Self::move_only) snaps `focus` backwards; doing the same
+    /// to `anchor` costs one call to the same function, and the alternative is a selection that starts
+    /// mid-character and that `delete_at` would then be asked to remove.
+    pub fn select(&mut self, anchor: u32, focus: u32) -> Result<u32, EditorError> {
+        let anchor = self.snap(anchor as usize) as u32;
+        let landed = self.move_only(focus as usize)?;
+        // **An anchor equal to the caret is no selection at all**, so this is the collapse: a click
+        // that did not move sets the anchor and then takes it away, in one line, with no separate
+        // "clear on click" rule for every caller to remember.
+        self.selection_anchor = crate::SelectionRange::between(anchor, landed).map(|_| anchor);
+        Ok(landed)
+    }
+
+    /// **Move the caret to `focus`, keeping whatever anchor is there** — or planting one at the caret
+    /// if there is none, which is what shift-arrow on an unselected document has to do.
+    ///
+    /// ## Why planting an anchor is not `select(caret, focus)`
+    ///
+    /// **Because the two are different keystrokes.** Shift-Right with no selection extends from where
+    /// the caret is. Shift-Right with a selection grows it. A second shift-arrow that reversed the
+    /// selection would be a different command with a different key, and this build does not have it.
+    pub fn extend_to(&mut self, focus: u32) -> Result<u32, EditorError> {
+        let anchor = self.selection_anchor.unwrap_or_else(|| self.caret());
+        let landed = self.move_only(focus as usize)?;
+        self.selection_anchor = crate::SelectionRange::between(anchor, landed).map(|_| anchor);
+        Ok(landed)
+    }
+
+    /// Move the caret without touching the anchor. **Private because leaving it public is the bug.**
+    ///
+    /// Every public caret mover goes through [`park`](Self::park), which clears the selection; this is
+    /// the two exceptions — `select` and `extend_to` — that mean to keep it. Exposing it would put
+    /// three callers to the rule instead of one, and a fourth would get it wrong.
+    fn move_only(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.rope.set_cursor(self.snap(offset))?;
+        Ok(self.rope.cursor() as u32)
+    }
+
+    /// **The single place the caret moves without an anchor, and therefore the single place a
+    /// selection is collapsed.**
+    ///
+    /// `caret_to`, `caret_left`, `caret_right`, `insert_at`, `delete_at`, `undo` and `redo` all end
+    /// here, which is why "an arrow key drops the selection" is a fact about the code rather than a
+    /// rule six callers have to remember. **Part 28's first version had no such funnel** and each of
+    /// those call sites cleared its own anchor, which is the shape that produced part 22's
+    /// `ChromeState`/`Editor` disagreement.
+    fn park(&mut self, offset: usize) -> Result<u32, EditorError> {
+        self.selection_anchor = None;
+        self.move_only(offset)
+    }
+
+    /// Snap `offset` into the document and onto a character boundary, backwards.
+    fn snap(&self, offset: usize) -> usize {
+        let target = offset.min(self.text_len());
+        let mut snapped = target;
+        while snapped > 0 && !self.is_char_boundary(snapped) {
+            snapped -= 1;
+        }
+        snapped
+    }
+
+    /// **Delete the selection and report what went, or `None` if there was nothing selected.**
+    ///
+    /// ## Why `delete_at` rather than a loop of `delete_forward`
+    ///
+    /// **Because deleting a selection is one undo record.** A drag across a paragraph followed by
+    /// Backspace is *one* thing the user did, and undo must bring back the whole paragraph in one
+    /// step — which means one `ActionKind::Delete` carrying all the bytes, and that is
+    /// [`delete_at`](Self::delete_at)'s argument, not `delete_forward`'s.
+    ///
+    /// ## Why the caller must handle `None`
+    ///
+    /// **Because "nothing was selected" is a different answer from "the selection was empty",** and
+    /// collapsing them would make Backspace with no selection a silent no-op instead of deleting a
+    /// character. The caller checks `selection()` first and falls through to its own behaviour.
+    pub fn delete_selection(&mut self) -> Result<Option<EditOutcome>, EditorError> {
+        let Some(sel) = self.selection() else {
+            return Ok(None);
+        };
+        Ok(Some(self.delete_at(sel.start, sel.len())?))
+    }
+
+    // ---------------------------------------------------------------- clipboard
+
+    /// **Copy the selection into the yank buffer. `false` when there is nothing selected.**
+    ///
+    /// **A copy does not collapse the selection**, which is the whole difference from a cut and the
+    /// only reason the two are separate functions. Every editor without an exception to this, and an
+    /// exception here would be "copy then the selection vanished", which is indistinguishable from a
+    /// broken Copy.
+    ///
+    /// ## Why the read is into a scratch buffer rather than a fresh `Vec`
+    ///
+    /// `Editor::read_into` fills a caller's buffer, and this is a caller. `to_vec` would be one
+    /// allocation per copy and `no_alloc.rs` counts them; this reuses [`Editor::delete_scratch`], which
+    /// already exists for the same reason in [`delete_at`](Self::delete_at).
+    pub fn copy_selection(&mut self) -> Result<bool, EditorError> {
+        let Some(sel) = self.selection() else {
+            return Ok(false);
+        };
+        self.copy_range(sel.start, sel.len())?;
+        Ok(true)
+    }
+
+    /// **Cut: copy the selection, then delete it.**
+    ///
+    /// **Two operations, and the caller undoes them as one.** `copy_selection` does not touch the undo
+    /// stack and `delete_at` pushes one entry, so a cut is a single undo — which is what makes *Edit >
+    /// Undo* restore a cut rather than half of it.
+    pub fn cut_selection(&mut self) -> Result<bool, EditorError> {
+        if !self.copy_selection()? {
+            return Ok(false);
+        }
+        self.delete_selection()?;
+        Ok(true)
+    }
+
+    /// **Paste the yank buffer at the caret, returning how many bytes went in.**
+    ///
+    /// ## The length limit, and why there is one
+    ///
+    /// The yank buffer is fixed-capacity: [`Editor::copy_range`] clamps a copied range to that
+    /// capacity, and `paste` inserts what was actually captured. This method does not reallocate the
+    /// yank buffer and does not silently truncate it further; if the document insert itself is
+    /// refused, the error is returned and the yank buffer is restored intact.
+    pub fn paste(&mut self) -> Result<usize, EditorError> {
+        let at = self.caret();
+        if self.yank.is_empty() {
+            return Ok(0);
+        }
+        // **Take and put back, which is what lets `&[u8]` and `&mut self` coexist.** `insert_at`
+        // takes `&mut self`, and borrowing `&self.yank` out of the same `&mut self` is a
+        // simultaneous immutable and mutable borrow that no ordering fixes. `mem::take` leaves a
+        // `Vec::new()` behind -- **which allocates nothing** -- and the original is restored on the
+        // way out, so the reserved capacity survives and `no_alloc.rs` still sees zero.
+        //
+        // The result is put back *before* the `?`, so a failed paste still leaves the buffer intact
+        // rather than emptying it: a paste that failed and a paste that cleared the clipboard are
+        // different states and only one of them is what the user did.
+        let yank = core::mem::take(&mut self.yank);
+        let inserted = self.insert_at(at, &yank, SpanPolicy::GrowIntoInsert);
+        self.yank = yank;
+        inserted?;
+        Ok(self.yank.len())
+    }
+
+    /// **What the yank buffer holds**, for a caller that wants to show it or count it.
+    pub fn yanked(&self) -> &[u8] {
+        &self.yank
+    }
+
+    /// Scrub and empty the yank buffer without releasing its reserved capacity.
+    pub fn clear_yank(&mut self) {
+        for b in self.yank.iter_mut() {
+            // SAFETY: `b` is a valid aligned mutable reference into `self.yank`.
+            unsafe {
+                core::ptr::write_volatile(b, 0);
+            }
+        }
+        self.yank.clear();
+    }
+
+    /// Copy `[at, at+len)` into the yank buffer.
+    ///
+    /// **One read, and the buffer is truncated to what that read produced.** The first version read
+    /// twice — once into a resized buffer and once to check how much had landed — which is two reads
+    /// of a caller-supplied buffer and a `resize` whose zeroes could survive into a paste. `read_into`
+    /// returns the count, so the count *is* the answer and a second read is a second chance to get it
+    /// wrong.
+    fn copy_range(&mut self, at: u32, len: u32) -> Result<(), EditorError> {
+        let at = at as usize;
+        let take = (len as usize).min(self.yank.capacity());
+        // **The same take-and-restore as `paste`**, for the same reason: `read_into` is `&self` and
+        // takes `&mut [u8]`, so handing it `&mut self.yank` from a `&mut self` method is the same
+        // borrow conflict. It is the reason this is not `self.read_into(at, &mut self.yank)`, which
+        // is what the first version wrote.
+        let mut yank = core::mem::take(&mut self.yank);
+        yank.clear();
+        if take == 0 {
+            self.yank = yank;
+            return Ok(());
+        }
+        yank.resize(take, 0);
+        let got = self.read_into(at, &mut yank);
+        self.yank = yank;
+        // **Truncate to the read, so a short read cannot leave NUL padding** that a paste would then
+        // insert into the document as zeroes.
+        self.yank.truncate(got?);
+        Ok(())
+    }
+
+    /// Move the caret left one character.
+    ///
+    /// Errors at offset 0 rather than clamping, because "left at the start" is a command the keymap
+    /// should swallow rather than a document operation that failed.
+    pub fn caret_left(&mut self) -> Result<u32, EditorError> {
+        let cursor = self.rope.cursor();
+        if cursor == 0 {
+            return Err(EditorError::NothingToUndo);
+        }
+        let mut target = cursor - 1;
+        while target > 0 && !self.is_char_boundary(target) {
+            target -= 1;
+        }
+        // **`park`, so an arrow key drops the selection.** See `Editor::park`.
+        self.park(target)
+    }
+
+    /// Move the caret right one character.
+    pub fn caret_right(&mut self) -> Result<u32, EditorError> {
+        let cursor = self.rope.cursor();
+        let end = self.text_len();
+        if cursor >= end {
+            return Err(EditorError::NothingToUndo);
+        }
+        let mut target = cursor + 1;
+        while target < end && !self.is_char_boundary(target) {
+            target += 1;
+        }
+        // **`park`, so an arrow key drops the selection.** See `Editor::park`.
+        self.park(target)
+    }
+
+    /// Delete the character *after* the caret. The Delete key, as opposed to
+    /// [`backspace`](Self::backspace).
+    ///
+    /// Deletes a whole codepoint, not a byte. Deleting a byte of a multi-byte character would leave
+    /// the document invalid UTF-8, and the rope's own `is_char_boundary` would then refuse every
+    /// subsequent edit at that point -- one Delete key turning into a document that cannot be edited
+    /// at all.
+    pub fn delete_forward(&mut self) -> Result<EditOutcome, EditorError> {
+        let cursor = self.rope.cursor() as u32;
+        if !self.is_char_boundary(cursor as usize) {
+            return Err(EditorError::NotCharBoundary { offset: cursor });
+        }
+        let mut len = 1usize;
+        while cursor as usize + len < self.text_len()
+            && !self.is_char_boundary(cursor as usize + len)
+        {
+            len += 1;
+        }
+        if cursor as usize + len > self.text_len() {
+            return Err(EditorError::Rope(RopeError::OutOfBounds {
+                offset: cursor as usize + len,
+                text_len: self.text_len(),
+            }));
+        }
+        self.delete_at(cursor, len as u32)
+    }
+
+    // ---------------------------------------------------------------- redo, Phase 8
+
+    /// Number of actions that can be redone.
+    #[inline]
+    pub fn redo_depth(&self) -> usize {
+        self.redo.len()
+    }
+
+    #[inline]
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Re-apply the most recently undone action.
+    ///
+    /// # Why this cannot reuse `insert_at` / `delete_at`
+    ///
+    /// Those push to the undo stack, because for a fresh edit that is what they must do. A redo is
+    /// not a fresh edit: it is the *same* edit being replayed, so recording it again would make the
+    /// two histories disagree -- undo would then be able to undo a redo, and the depths reported by
+    /// [`undo_depth`](Self::undo_depth) and [`redo_depth`](Self::redo_depth) would not sum to the
+    /// number of edits made. So a redo applies the bytes and the span shift directly, and puts the
+    /// action back on the undo stack exactly once, itself.
+    ///
+    /// The `Delete` arm additionally captures the styling of the region it removes, mirroring what
+    /// [`delete_at`](Self::delete_at) does for a fresh delete, so that an undo of this redo can put
+    /// the styling back.
+    pub fn redo(&mut self) -> Result<EditOutcome, EditorError> {
+        // **Pop before taking the stashes.** Taking them first and then finding the redo stack empty
+        // -- which is what a second Ctrl+Y does, and [`Session::redo`](https://docs.rs) swallows
+        // `NothingToRedo` -- drained the table spans and, worse, the assets a *future* undo of the
+        // delete being redone has to put back. `restore_at` returns the remainder, and dropping it
+        // detaches the image from its anchor: the next `undo` finds an empty stash, skips the restore,
+        // and the anchor serves nothing. Popping first makes a refused redo touch nothing at all.
+        let mut action = self.redo.pop().ok_or(EditorError::NothingToRedo)?;
+        // Restored after the bytes go back in, so the spans are the ones the re-inserted bytes belong
+        // to rather than a guess about where they should be.
+        //
+        // **Popped, one entry per redo.** The first version was a single `Option` and the second undo
+        // overwrote the first's map, so `undo, undo, redo, redo` restored the table map on the first
+        // redo and not on the second: **the table's bytes were in the document with no `TableSpan` for
+        // them**, and Tab navigation and the table renderer could no longer find the table.
+        let restore = self.undo_tables.pop().flatten();
+        // **Popped from the *redo* side.** The assets a redo of an *insertion* has to put back were
+        // stashed by the undo of that insertion.
+        let restore_assets = if action.kind == ActionKind::Insert {
+            self.redo_assets.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let restore_styles = if action.kind == ActionKind::Insert {
+            self.redo_insert_styles.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // The replay in its own helper, so that *every* path out of it -- including a refusal that
+        // returns early -- reaches the zeroize below. `action.bytes` is a plain `Vec`, not
+        // `Zeroizing`, and these are the deleted plaintext: dropping them to the heap on an error
+        // return is exactly what FR-1.2 forbids, and the old `?`-inside-the-match let it happen.
+        let replayed = self.replay_redo(&action, restore, restore_assets, restore_styles);
+        let outcome = match replayed {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Refused mid-replay: scrub the plaintext rather than dropping it to the heap.
+                action.bytes.zeroize();
+                return Err(e);
+            }
+        };
+
+        // Back on the undo stack, so undo and redo can alternate indefinitely. `push` may evict the
+        // oldest entries to make room, which is the same trade a fresh edit makes and the reason redo
+        // is not guaranteed forever: it is bounded exactly as deeply as undo is.
+        let pushed = self
+            .undo
+            .push(action.offset, action.kind, &action.bytes)
+            .map_err(EditorError::Undo);
+        // The arena owns a copy now, so scrub ours rather than dropping plaintext to the heap. Order
+        // matters: this is after the push for exactly that reason -- and it runs on the push's own
+        // error path too, so a refused push cannot leak the payload either.
+        action.bytes.zeroize();
+        pushed?;
+        Ok(outcome)
+    }
+
+    /// Apply one redone action's bytes and map updates, with no history record of its own.
+    ///
+    /// Split out of [`redo`](Self::redo) for one reason: the caller has to zeroize `action.bytes` on
+    /// the way out no matter what happens here, and that is only expressible if the replay reports a
+    /// `Result` the caller can inspect *before* the payload is dropped. Keeping it inline with `?`
+    /// inside the match arms was the shape that leaked plaintext on every error return.
+    ///
+    /// Each arm mirrors its fresh-edit counterpart -- [`insert_at`](Self::insert_at)'s rope-and-span
+    /// half for `Insert`, and [`delete_at`](Self::delete_at)'s full map-update sequence for `Delete`
+    /// -- minus the history push, which is the caller's job because a redo is the *same* edit
+    /// replayed, not a new one.
+    fn replay_redo(
+        &mut self,
+        action: &UndoAction,
+        restore: Option<Vec<crate::TableSpan>>,
+        restore_assets: Vec<crate::asset::Asset>,
+        restore_styles: Vec<TextIntervalSpan>,
+    ) -> Result<EditOutcome, EditorError> {
+        let offset = action.offset as usize;
+        let len = action.bytes.len();
+        let lines_changed = action.bytes.contains(&b'\n');
+        match action.kind {
+            ActionKind::FaceFormat => {
+                self.apply_face_format_record(&action.bytes, true)?;
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::FaceFormat,
+                    line: None,
+                    lines_changed: false,
+                })
+            }
+            ActionKind::Format => {
+                self.apply_format_record(&action.bytes, true)?;
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: 0,
+                    kind: ActionKind::Format,
+                    line: None,
+                    lines_changed: false,
+                })
+            }
+            ActionKind::Insert => {
+                self.apply_insert_raw(offset, &action.bytes, SpanPolicy::Strict)?;
+                for span in restore_styles {
+                    self.spans.style_range_faced(
+                        span.start_byte,
+                        span.end_byte,
+                        span.style_flags,
+                        span.color_rgb,
+                        span.font_face,
+                    )?;
+                }
+                // The bytes of a table are back; the shape that goes with them is what `undo` stashed.
+                if let Some(spans) = restore {
+                    self.tables.replace(spans);
+                }
+                if !restore_assets.is_empty() {
+                    let (first, after) = AssetCatalog::anchors_in(
+                        &self.text()?,
+                        action.offset,
+                        action.bytes.len() as u32,
+                    );
+                    let want = after.saturating_sub(first);
+                    let leftover = self.assets.restore_at(first, restore_assets, want);
+                    if !leftover.is_empty() {
+                        // The surplus is appended rather than dropped: an image nobody can account
+                        // for is the failure this whole mechanism exists to prevent.
+                        let at = self.assets.len();
+                        let n = leftover.len();
+                        self.assets.restore_at(at, leftover, n);
+                    }
+                }
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: len as u32,
+                    kind: ActionKind::Insert,
+                    line: None,
+                    lines_changed,
+                })
+            }
+            ActionKind::Delete => {
+                // Mirror `delete_at`'s map updates, in the same order. Redoing a delete removes the
+                // bytes again, and the span map, the table map and the asset catalog all have to see
+                // it. The old arm captured only the styling (`capture_spans`, which is `&self` and
+                // therefore read-only) and then deleted out of the rope, leaving every map still
+                // describing bytes that no longer exist -- `check_invariants`, which asserts the spans
+                // cover the rope exactly, fails on the next keystroke, and the anchor count drifts by
+                // one per redone image, so a later undo restores assets to the wrong anchors.
+                let removed_spans = self.spans.apply_delete(action.offset, len as u32)?;
+                self.tables.apply_delete(action.offset, len as u32);
+                let first = self.anchor_ordinal_at(offset);
+                let anchor_count = self.anchors_in_range(offset, len as u32);
+                // **Pushed onto the undo side.** A redone delete removes the assets, and the undo of
+                // *that* has to put them back -- so this is an undo-side entry, exactly as a fresh
+                // delete's is.
+                if self.undo_assets.len() == UNDO_DEPTH {
+                    self.undo_assets.remove(0);
+                }
+                self.undo_assets
+                    .push(self.assets.remove_n(first, anchor_count));
+                // A table whose separators have all gone has no cells, and `cell_count()` subtracts
+                // one from `rows * cols`, which underflows `u32`. Dropping it here is what stops a
+                // later keystroke walking into a zero-cell table; same reason as in `delete_at`.
+                self.tables.retain_intact();
+                self.delete_range_in_rope(offset, len)?;
+                // The styling this redo removed, pushed **total** so `undo`'s pop pairs one-for-one
+                // with it, exactly as `delete_at` does. `Vec::new()` allocates nothing, so an unstyled
+                // region costs only a header.
+                // Same predicate as `delete_at`'s, face included, and for the same reason: a redone
+                // delete of a monospaced run has to record the face or its undo restores Inter.
+                let styled: Vec<TextIntervalSpan> = if removed_spans
+                    .iter()
+                    .all(|s| s.style_flags == 0 && s.color_rgb == 0 && s.font_face == FACE_BODY)
+                {
+                    Vec::new()
+                } else {
+                    removed_spans
+                        .iter()
+                        .copied()
+                        .filter(|s| {
+                            s.style_flags != 0 || s.color_rgb != 0 || s.font_face != FACE_BODY
+                        })
+                        .collect()
+                };
+                if self.style_undo.len() == STYLE_UNDO_DEPTH {
+                    self.style_undo.remove(0);
+                }
+                self.style_undo.push(styled);
+                Ok(EditOutcome {
+                    offset: action.offset,
+                    len: len as u32,
+                    kind: ActionKind::Delete,
+                    line: None,
+                    lines_changed,
+                })
+            }
+        }
+    }
+
+    /// Apply a byte insertion to the rope and the span map, with no history record.
+    ///
+    /// The shared half of [`insert_at`](Self::insert_at) and [`redo`](Self::redo): the two differ
+    /// only in whether the action is recorded.
+    fn apply_insert_raw(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+        policy: SpanPolicy,
+    ) -> Result<(), EditorError> {
+        self.rope.insert_at(offset, bytes)?;
+        self.spans
+            .apply_insert_with(offset as u32, bytes.len() as u32, policy)?;
+        self.tables.apply_insert(offset as u32, bytes.len() as u32);
+        Ok(())
+    }
+
+    /// Discard the redo history, scrubbing the payloads on the way out.
+    ///
+    /// Called by every *fresh* edit. The branch that keeps the undone bytes replayable would otherwise
+    /// be one that every word processor takes: undo, type something, redo would splice the replayed
+    /// text at a caret that has since moved, which is not an edit anyone asked for.
+    ///
+    /// Not called by [`redo`](Self::redo), which is the whole point -- redo pushes *onto* the undo
+    /// stack and must leave this vector alone. The two are kept distinct precisely so `redo` can
+    /// bypass it; a single `record()` helper that both used would have been the bug.
+    fn drop_redo(&mut self) {
+        for action in &mut self.redo {
+            action.bytes.zeroize();
+        }
+        self.redo.clear();
+        // **The stashes that the redos were going to consume go with them.** A redo of an
+        // *insertion* restores the assets stashed by the undo of that insertion, and a redo of a
+        // *delete* restores the table map stashed by the undo of that delete. **With the redo
+        // branch gone, those stashes have no consumer** -- and leaving them would let a later
+        // undo pair with a stale entry.
+        self.redo_assets.clear();
+        self.redo_insert_styles.clear();
+        self.undo_tables.clear();
+    }
+
+    /// Assert the editor's cross-structure invariants. Test-only.
+    #[cfg(test)]
+    pub(crate) fn check_invariants(&self) {
+        self.rope.check_invariants();
+        self.spans.check_invariants();
+        assert_eq!(
+            self.spans.text_len() as usize,
+            self.rope.text_len(),
+            "the span map covers {} bytes but the rope holds {}",
+            self.spans.text_len(),
+            self.rope.text_len()
+        );
+        // Span lengths must tile the document exactly.
+        let sum: u32 = self.spans.spans().iter().map(TextIntervalSpan::len).sum();
+        assert_eq!(
+            sum,
+            self.spans.text_len(),
+            "the spans do not tile the document"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::{STYLE_BOLD, STYLE_CODE};
+
+    const RED: u32 = 0x00FF_0000;
+
+    fn editor(text: &str) -> Editor {
+        Editor::from_text(text.as_bytes()).expect("load")
+    }
+
+    #[test]
+    fn an_empty_editor_is_consistent() {
+        let e = Editor::new();
+        e.check_invariants();
+        assert_eq!(e.text_len(), 0);
+        assert_eq!(e.leaf_count(), 1);
+        assert!(!e.can_undo());
+        assert!(e.undo_stack().is_empty());
+    }
+
+    #[test]
+    fn insert_and_delete_round_trip_through_all_three_structures() {
+        let mut e = editor("hello");
+        e.check_invariants();
+        e.insert_at(5, b" world", SpanPolicy::Strict)
+            .expect("insert");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"hello world");
+        assert_eq!(e.spans().text_len(), 11);
+
+        e.delete_at(5, 6).expect("delete");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"hello");
+        assert_eq!(e.spans().text_len(), 5);
+    }
+
+    /// FR-1.2's allocation claim, at the editor level: typing changes nothing but the gap.
+    #[test]
+    fn typing_keeps_the_span_map_a_single_plain_run() {
+        let mut e = Editor::new();
+        for b in b"the quick brown fox" {
+            e.insert_char(*b, SpanPolicy::Strict).expect("room");
+        }
+        e.check_invariants();
+        assert_eq!(e.spans().len(), 1, "no styling, so no run boundaries");
+        assert_eq!(e.spans().spans()[0].len(), 19);
+        assert_eq!(e.text_len(), 19);
+    }
+
+    /// Styling, then editing around the styled region, must keep the spans consistent.
+    #[test]
+    fn edits_around_a_styled_region_keep_the_spans_tiling_the_text() {
+        let mut e = editor("the quick brown fox");
+        e.style_range(4, 9, STYLE_BOLD, RED).expect("style");
+        e.check_invariants();
+
+        e.insert_at(0, b">> ", SpanPolicy::Strict)
+            .expect("insert before");
+        e.check_invariants();
+        assert!(
+            e.style_at(4).style_flags & STYLE_BOLD == 0,
+            "the run moved right"
+        );
+        assert!(
+            e.style_at(7).style_flags & STYLE_BOLD != 0,
+            "and kept its style"
+        );
+
+        // At the *end*, which is 22 bytes: ">> " plus the 19-byte phrase. Offset 20 lands inside "fox"
+        // -- an earlier version used 20 and produced "...fo!x", which the test then read as a bug in
+        // the editor rather than an arithmetic slip in itself.
+        let end = e.text_len() as u32;
+        e.insert_at(end, b"!", SpanPolicy::Strict)
+            .expect("insert after");
+        e.check_invariants();
+
+        e.delete_at(0, 3).expect("delete the prefix");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"the quick brown fox!");
+        assert!(
+            e.style_at(4).style_flags & STYLE_BOLD != 0,
+            "back where it was"
+        );
+    }
+
+    /// The gate's span-consistency requirement, across a leaf split.
+    #[test]
+    fn spans_stay_consistent_across_a_leaf_split() {
+        // More than one leaf's worth, so the load splits.
+        let long: String = "abcdefghij".repeat(600);
+        let mut e = Editor::from_text(long.as_bytes()).expect("load");
+        e.check_invariants();
+        assert!(
+            e.leaf_count() > 1,
+            "{} bytes must span several leaves, got {}",
+            e.text_len(),
+            e.leaf_count()
+        );
+
+        // Style a range that straddles a leaf boundary.
+        let mid = (e.text_len() / 2) as u32;
+        e.style_range(mid - 10, mid + 10, STYLE_CODE, RED)
+            .expect("style across the seam");
+        e.check_invariants();
+
+        // Now type enough to force further splits, and check after each.
+        for i in 0..(crate::leaf::LEAF_CAPACITY as u32) {
+            e.insert_char(b'x', SpanPolicy::Strict).expect("room");
+            e.check_invariants();
+            assert!(
+                e.style_at(mid).style_flags & STYLE_CODE != 0 || i == 0,
+                "the styled run lost its style at byte {mid} after {i} inserts"
+            );
+        }
+    }
+
+    /// Spans must survive a *merge*, which is the direction that destroys text if it is wrong.
+    #[test]
+    fn spans_stay_consistent_across_a_leaf_merge() {
+        let mut e = Editor::from_text(&vec![b'a'; crate::leaf::LEAF_CAPACITY * 3]).expect("load");
+        e.check_invariants();
+        assert!(e.leaf_count() >= 3);
+
+        // Style a run *inside the bytes that will survive*. Deleting from the front until 64 bytes
+        // remain removes everything before offset 12,224, so a run styled at 4,091 -- where an earlier
+        // version put it, to straddle a leaf boundary -- is itself deleted, and then asserting it
+        // "survived the merges" asserts the wrong thing entirely.
+        //
+        // The leaves this run sits in are still exercised: offset 30 is in the last leaf, and the
+        // deletes that bring the document down to 64 bytes merge every leaf above it, repeatedly.
+        e.style_range(30, 40, STYLE_BOLD, RED).expect("style");
+        e.check_invariants();
+        assert!(
+            e.style_at(35).style_flags & STYLE_BOLD != 0,
+            "styled before the deletes"
+        );
+
+        // Delete from the **end** down to 64 bytes, merging leaves repeatedly on the way.
+        //
+        // Two earlier versions got this wrong in ways worth recording:
+        //
+        // * Deleting from offset 0 removes the head, and the styled run at 30..40 is in the head -- so
+        //   asserting it "survived" asserts that deleted bytes came back. It reported one span left
+        //   where three were expected, which was the correct answer to a wrong question.
+        // * The loop also required `leaf_count() > 1`, and exited as soon as the leaves had merged,
+        //   leaving 2,688 bytes and reporting "left: 2688, right: 64". Merging stops when two leaves'
+        //   combined length exceeds `crate::leaf::LEAF_CAPACITY - GAP_MINIMUM`, so one leaf can hold several
+        //   thousand bytes; the two conditions are not the same.
+        while e.text_len() > 64 {
+            let last = (e.text_len() - 1) as u32;
+            e.delete_at(last, 1).expect("delete from the end");
+            e.check_invariants();
+        }
+        assert!(e.leaf_count() < 3, "leaves merged: {}", e.leaf_count());
+        // The surviving text is still styled where it was, and only where it was.
+        assert_eq!(e.text_len(), 64);
+        assert_eq!(e.spans().len(), 3, "plain 0..30, bold 30..40, plain 40..64");
+        assert!(
+            e.style_at(35).style_flags & STYLE_BOLD != 0,
+            "the styled run did not survive the merges"
+        );
+        assert!(
+            e.style_at(45).style_flags & STYLE_BOLD == 0,
+            "and did not spread to its neighbours"
+        );
+    }
+
+    #[test]
+    fn undo_restores_bytes_and_styling() {
+        let mut e = editor("hello world");
+        e.style_range(0, 5, STYLE_BOLD, RED).expect("style");
+
+        e.delete_at(0, 6).expect("delete 'hello '");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"world");
+        assert_eq!(e.spans().len(), 1);
+
+        let outcome = e.undo().expect("undo");
+        assert_eq!(outcome.kind, ActionKind::Insert);
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"hello world", "the bytes came back");
+        // And the styling, which is the part a byte-only undo loses.
+        assert!(
+            e.style_at(0).style_flags & STYLE_BOLD != 0,
+            "the bold run must come back with the bytes"
+        );
+        assert_eq!(e.spans().len(), 2, "bold 0..5, plain 5..11");
+    }
+
+    #[test]
+    fn undo_of_an_insert_removes_exactly_those_bytes() {
+        let mut e = editor("hello");
+        e.insert_at(5, b"!!!", SpanPolicy::Strict).expect("insert");
+        assert_eq!(e.text().unwrap(), b"hello!!!");
+        e.undo().expect("undo");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"hello");
+        assert_eq!(e.spans().text_len(), 5);
+    }
+
+    /// Five hundred undo operations, the requirement's number.
+    #[test]
+    fn five_hundred_undo_operations() {
+        let text: Vec<u8> = (0..600u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut e = Editor::from_text(&text).expect("load");
+        e.check_invariants();
+
+        // 600 edits on top of the load; the stack holds the newest 500.
+        for _ in 0..600u32 {
+            e.insert_at(e.text_len() as u32, b".", SpanPolicy::Strict)
+                .expect("append");
+        }
+        e.check_invariants();
+        assert_eq!(e.undo_depth(), 500, "bounded at 500");
+        assert_eq!(e.text_len(), 600 + 600);
+
+        for _ in 0..500 {
+            e.undo().expect("undo");
+            e.check_invariants();
+        }
+        assert_eq!(e.text_len(), 600 + 100, "600 appended, 500 undone");
+        assert_eq!(e.text().unwrap(), {
+            let mut want = text;
+            want.extend(std::iter::repeat_n(b'.', 100));
+            want
+        });
+    }
+
+    #[test]
+    fn undo_with_nothing_recorded_is_an_error_not_a_panic() {
+        let mut e = Editor::new();
+        assert_eq!(e.undo(), Err(EditorError::NothingToUndo));
+        assert!(!e.can_undo());
+    }
+
+    #[test]
+    fn a_mid_character_offset_is_refused() {
+        let mut e = Editor::from_text("héllo".as_bytes()).expect("load");
+        // `é` is bytes 1 and 2.
+        let err = e
+            .insert_at(2, b"x", SpanPolicy::Strict)
+            .expect_err("inside é");
+        assert!(
+            matches!(err, EditorError::NotCharBoundary { offset: 2 }),
+            "got {err:?}"
+        );
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), "héllo".as_bytes(), "and nothing changed");
+    }
+
+    #[test]
+    fn a_delete_past_the_end_is_refused_without_touching_anything() {
+        let mut e = editor("hello");
+        let before = e.text().unwrap();
+        assert!(e.delete_at(3, 100).is_err());
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), before);
+        assert_eq!(e.undo_depth(), 0, "a refused edit must not be recorded");
+    }
+
+    #[test]
+    fn backspace_deletes_the_byte_before_the_caret() {
+        let mut e = editor("abc");
+        e.backspace().expect("backspace");
+        e.check_invariants();
+        assert_eq!(e.text().unwrap(), b"ab");
+        e.backspace().expect("backspace");
+        assert_eq!(e.text().unwrap(), b"a");
+        e.backspace().expect("backspace");
+        assert_eq!(e.text().unwrap(), b"");
+        assert!(e.backspace().is_err(), "nothing left to delete");
+        e.check_invariants();
+    }
+
+    /// The long randomised sequence, which is the only thing that composes the three structures.
+    #[test]
+    fn invariants_hold_under_a_random_edit_sequence() {
+        let mut state = 0xDEAD_BEEF_CAFE_1234u64;
+        let mut next = move |n: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % u64::from(n.max(1))) as u32
+        };
+        let mut e = Editor::new();
+        let mut text: Vec<u8> = Vec::new();
+        // The model needs an undo stack too. An earlier version kept only `text` and called
+        // `e.undo()` on one branch of the match, so the model never unwound: it diverged at step 2 with
+        // the editor holding `[97]` and the model holding `[97, 98, 99, 100, 101, 102]`. The failure was
+        // in the model, not the editor.
+        //
+        // Each entry is the *inverse* of the edit, so undoing is a splice with no case analysis.
+        let mut model_undo: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+
+        for step in 0..3_000u32 {
+            match next(4) {
+                0 | 1 => {
+                    let len = 1 + next(6);
+                    let at = next((text.len() + 1) as u32) as usize;
+                    let bytes: Vec<u8> = (0..len)
+                        .map(|i| b'a' + ((at as u8).wrapping_add(i as u8)) % 26)
+                        .collect();
+                    e.insert_at(at as u32, &bytes, SpanPolicy::Strict)
+                        .unwrap_or_else(|err| panic!("insert at {at} at step {step}: {err}"));
+                    text.splice(at..at, bytes.iter().copied());
+                    model_undo.push((at, bytes, true));
+                }
+                2 => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let at = next(text.len() as u32) as usize;
+                    let len = 1 + next(4) as usize;
+                    let len = len.min(text.len() - at);
+                    e.delete_at(at as u32, len as u32)
+                        .unwrap_or_else(|err| panic!("delete {at}+{len} at step {step}: {err}"));
+                    let removed: Vec<u8> = text.drain(at..at + len).collect();
+                    model_undo.push((at, removed, false));
+                }
+                _ => {
+                    if e.can_undo() {
+                        e.undo()
+                            .unwrap_or_else(|err| panic!("undo at step {step}: {err}"));
+                        if let Some((at, bytes, was_insert)) = model_undo.pop() {
+                            if was_insert {
+                                text.drain(at..at + bytes.len());
+                            } else {
+                                text.splice(at..at, bytes);
+                            }
+                        }
+                    }
+                }
+            }
+            e.check_invariants();
+            assert_eq!(
+                e.text().unwrap(),
+                text,
+                "the editor's text diverged from the model at step {step}"
+            );
+        }
+    }
+}

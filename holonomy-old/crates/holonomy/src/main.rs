@@ -1,0 +1,787 @@
+//! The Holonomy binary: the boot sequence and the session.
+//!
+//! # The boot order is load-bearing
+//!
+//! ```text
+//!   seal core dumps -> raise RLIMIT_MEMLOCK -> install tripwires
+//!     -> open every descriptor            <- the last point a file can be named
+//!     -> mlockall(MCL_CURRENT|MCL_FUTURE) -> isolate the network
+//!     -> drop privileges (no_new_privs)   -> install the seccomp filter
+//! ```
+//!
+//! Each arrow is a distinct Rust type, so the order is a compile error to get wrong: there is no
+//! method on `Opened` that skips `lock_all_pages`, and no way to reach `Sealed` except through
+//! `PrivilegesDropped::seal`.
+//!
+//! # Every descriptor is opened at stage 4, and nothing opens a path after
+//!
+//! The filter contains no `openat` -- see `holonomy_jail::seccomp::table::ALLOWLIST` -- and it is
+//! installed at stage 8. So stage 4 is the last moment a *path* can become a descriptor, and the
+//! [`open_descriptors`] closure is where the container and both export files are opened. Reaching
+//! for a path afterwards is not a slow failure, it is `SIGSYS` and exit 137, which reads like a
+//! crash rather than like a design rule.
+//!
+//! That is also why the session is handed `File`s and not paths: [`session::Session`] has no way to
+//! open anything, so there is nothing for it to get wrong.
+//!
+//! # `--headless` skips the chain, and says so
+//!
+//! The jail cannot be entered from a `#[test]`: `unshare(CLONE_NEWUSER)` returns `EINVAL` in any
+//! multi-threaded process and libtest always spawns one. So the integration gate drives
+//! [`session::Session`] directly, headless, and this file's chain is covered by `holonomy-jail`'s own
+//! 60 tests plus the census in `examples/census_session.rs`. `--headless` is therefore not a
+//! convenience flag: it is the mode that says "run the loop without the jail", and it is the only
+//! mode that is honest about what it has not sealed.
+
+use std::fs::File;
+use std::io::Write as _;
+use std::path::Path;
+use std::process::ExitCode;
+
+use holonomy::args::{Args, ParseError};
+use holonomy::session::{ExportSink, Session};
+use holonomy_container::io::DirectFile;
+use holonomy_display::paint::Painter;
+use holonomy_display::HeadlessScanout;
+use holonomy_export::Format;
+use holonomy_jail::{Action, AltStack, Enter, ALT_STACK_BYTES};
+use holonomy_render::chrome::ChromeMetrics;
+use holonomy_secure::SecureBlock;
+use holonomy_text::Editor;
+
+/// Everything stage 4 built or opened, threaded through the boot and handed to the session.
+///
+/// **The session lives in here, not in `main`.** It borrows the atlas, so it cannot be constructed
+/// inside `run_session` without either leaking a borrow past the closure or rebuilding the atlas
+/// after `seccomp` -- and the second is a `mmap` the filter does not permit. Carrying it as the boot
+/// context means it is *built* before the jail and *run* inside it, which is exactly the discipline:
+/// nothing in the session allocates, and nothing in it opens anything.
+///
+/// A first version built the session inside `run_session` and dropped it there, so the sealed path
+/// never actually ran a session. It compiled, and it would have shipped a binary that sealed itself
+/// and exited.
+struct SessionContext {
+    /// The editor and its loop.
+    session: Session<'static>,
+    /// The container, opened `O_DIRECT | O_SYNC`.
+    #[allow(dead_code)]
+    container: Option<DirectFile>,
+    /// The export sinks, opened `O_WRONLY | O_CREAT | O_TRUNC`.
+    sinks: Vec<ExportSink>,
+    /// A PPM dump target, if asked for.
+    screenshot: Option<File>,
+    /// The container, once the descriptor has been adopted into a [`Wavefunction`].
+    ///
+    /// **Kept beside the session rather than inside it.** `SectionStore` borrows the container, so a store
+    /// owned by the session would be self-referential; holding the `Wavefunction` here and letting the
+    /// session borrow it on demand avoids that without a self-referential-struct dependency. It is `None`
+    /// until the passphrase is read.
+    container_file: Option<holonomy_container::Wavefunction>,
+    /// **The input source, opened at boot.**
+    ///
+    /// **This field exists because the sealed path cannot open anything.**
+    ///
+    /// After `seccomp` the filter has no `openat`, so a path cannot become a descriptor — and a
+    /// session that reaches for one is `SIGSYS` and exit 137, which reads like a crash rather than
+    /// like a design rule. **The keyboard and the script were both being opened *after* the
+    /// filter**, inside the session driver, so the sealed product could not start its input loop
+    /// at all: the first `openat` killed the process.
+    ///
+    /// **So both are opened here, at stage 4**, which is the only place a path may become a
+    /// descriptor. The script is *read* at boot — its bytes are in memory before the filter goes
+    /// on — and the keyboard is *opened* at boot, with the descriptor handed to the session
+    /// rather than reopened.
+    input: BootInput,
+}
+
+/// **Where the session's input comes from, opened before the seal.**
+///
+/// **Two variants because the sealed path can have either, and the seal forbids choosing
+/// between them afterwards.** The script is a file read at boot; the keyboard is a device opened
+/// at boot.
+enum BootInput {
+    /// A scripted stream: the fixture's bytes, read at boot.
+    Script(holonomy_input::ScriptedInputSource),
+    /// The keyboard, opened at boot.
+    Evdev(holonomy_input::EvdevSource),
+}
+
+impl BootInput {
+    /// The source as the trait object the session takes.
+    fn as_source(&mut self) -> &mut dyn holonomy_input::InputSource {
+        match self {
+            Self::Script(s) => s,
+            Self::Evdev(e) => e,
+        }
+    }
+}
+
+impl SessionContext {
+    /// **Every descriptor this process opened at boot, for the teardown plan.**
+    ///
+    /// # Why this is not optional
+    ///
+    /// The plan used to be empty, which meant `teardown_and_exit` did its `registry::scrub_all()` and
+    /// nothing else. **After `seccomp` there is no `openat`, so a descriptor not closed here is not
+    /// closed at all** — the kernel closes it when the process dies, but the *data* in it is whatever
+    /// the page cache has not yet written. A commit that landed in the last few hundred milliseconds
+    /// before `Ctrl+Q` was therefore a commit that was not on the platter.
+    ///
+    /// `fsync` is the half that matters and it is allowlisted (`seccomp/table.rs:73`), so it is
+    /// available after sealing — which is the only reason this is possible at all.
+    ///
+    /// **The container is named once, whichever of the two fields holds it.** The descriptor is
+    /// *moved* from `container` into `container_file` by `Wavefunction::adopt`, so a context that got
+    /// as far as opening a document has it in the second field and one that did not has it in the
+    /// first. Returning both would `close` the same fd twice, and a double close in a shutdown path
+    /// closes whatever the number now refers to.
+    fn boot_descriptors(&self) -> Vec<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        let mut fds = Vec::new();
+        if let Some(file) = &self.container_file {
+            fds.push(file.raw_fd());
+        } else if let Some(file) = &self.container {
+            fds.push(file.as_raw_fd());
+        }
+        for sink in &self.sinks {
+            fds.push(sink.file.as_raw_fd());
+        }
+        if let Some(f) = &self.screenshot {
+            fds.push(f.as_raw_fd());
+        }
+        fds
+    }
+}
+
+/// The atlas, built once. Leaked so the session's lifetime is not tied to a local.
+static ATLAS: std::sync::OnceLock<holonomy::atlas_plan::Plan> = std::sync::OnceLock::new();
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(Fail::Usage(e)) => {
+            eprintln!("holonomy: {e}\n\n{}", Args::USAGE);
+            ExitCode::from(2)
+        }
+        Err(Fail::Boot(e)) => {
+            eprintln!("holonomy: the boot sequence refused: {e}");
+            ExitCode::from(3)
+        }
+        Err(Fail::Session(e)) => {
+            eprintln!("holonomy: {e}");
+            ExitCode::from(4)
+        }
+        Err(Fail::Window { source }) => {
+            eprintln!("holonomy: the window failed: {source}");
+            ExitCode::from(5)
+        }
+    }
+}
+
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage(e) => write!(f, "{e}"),
+            Self::Boot(e) => write!(f, "{e}"),
+            Self::Session(e) => write!(f, "{e}"),
+            Self::Window { source } => write!(f, "{source}"),
+        }
+    }
+}
+
+/// The keyboard. Opened at boot, before the filter, or not at all.
+const EVDEV_NODE: &str = "/dev/input/event0";
+
+/// Lift an `io::Error` into a [`Fail`].
+///
+/// A one-liner rather than four call sites of `map_err(|e| Fail::Session(e.into()))`, and the reason
+/// it is a *function* rather than a `From` impl is that `Fail` is a `main`-local type: an orphan rule
+/// would otherwise force it into the library, where it does not belong.
+fn io(e: std::io::Error) -> Fail {
+    Fail::Session(e.into())
+}
+
+/// Why `main` stopped.
+#[derive(Debug)]
+enum Fail {
+    /// The command line was wrong.
+    Usage(ParseError),
+    /// The boot chain refused.
+    Boot(holonomy_jail::JailError),
+    /// The session failed.
+    Session(holonomy::session::SessionError),
+    /// The developer window failed. Boxed and feature-independent, because `WindowedError` exists only
+    /// when the `desktop` feature does, and this variant has to exist either way so the `match` in
+    /// `main` is the same code in both builds.
+    // Nothing constructs it without the feature, which is the one thing the linter is right about.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Window {
+        /// The window's own error, whatever its type.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+/// The passphrase, from the environment.
+///
+/// Not from the command line: an argument is in `/proc/*/cmdline`, readable by every process on the
+/// machine. Absent is an error rather than an empty passphrase, because an empty passphrase that
+/// silently derives a working key is the worst possible failure for an encrypted container.
+fn passphrase() -> Result<String, Fail> {
+    std::env::var("HOLONOMY_PASSPHRASE").map_err(|_| {
+        Fail::Session(holonomy::session::SessionError::Sink(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "$HOLONOMY_PASSPHRASE is unset; an empty passphrase is not a default",
+        )))
+    })
+}
+
+fn run() -> Result<(), Fail> {
+    let args = match Args::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(ParseError::Help) => {
+            println!("{}", Args::USAGE);
+            return Ok(());
+        }
+        Err(e) => return Err(Fail::Usage(e)),
+    };
+
+    if args.dry_run {
+        print_plan(&args);
+        return Ok(());
+    }
+
+    // Headless is the gate's mode and the only one this file can honestly run in a test binary, so it
+    // is the default when no hardware is present rather than an error.
+    let headless = args.headless || cfg!(not(feature = "hardware"));
+
+    // The atlas is the largest allocation the session makes, and it is made *before* the jail so
+    // that nothing after `seccomp` has to touch the allocator.
+    //
+    // **The pair or not, carried alongside the atlas**, because `--zoom` has to be checked against
+    // what was actually rasterised rather than against what was asked for. Borrowed out of the
+    // `OnceLock` rather than moved: the atlas is leaked deliberately and the tuple is not.
+    let built = ATLAS.get_or_init(|| holonomy::atlas_plan::build(args.ppem));
+    let atlas = &built.atlas;
+    let has_zoom_size = built.has_zoom_size;
+    // ## The one line that makes a refusal actionable
+    //
+    // **Printed once, at boot, and only when the pair was refused.** A zoom control that is on the
+    // toolbar and does nothing is the defect this project keeps refusing to ship; the difference
+    // here is that it is no longer *silent*, and one stderr line is not noise when it is the reason
+    // a visible control is inert.
+    if let Some(why) = built.zoom_refusal(args.ppem) {
+        eprintln!("holonomy: {why}");
+    }
+    let metrics = ChromeMetrics {
+        width: args.width,
+        height: args.height,
+        ..ChromeMetrics::DESKTOP
+    };
+
+    // The developer window. Ahead of `headless` because `--window` is a request for a window, and a
+    // request that silently produced a PPM dump would be worse than useless.
+    #[cfg(feature = "desktop")]
+    if args.window {
+        let exit = holonomy::windowed::run(atlas, &args, metrics).map_err(|e| Fail::Window {
+            source: Box::new(e),
+        })?;
+        eprintln!("holonomy: {exit:?}");
+        return Ok(());
+    }
+    #[cfg(not(feature = "desktop"))]
+    if args.window {
+        eprintln!(
+            "holonomy: --window needs the desktop feature, which this binary was not built with.\n\
+             Build it with: cargo run --release --features desktop"
+        );
+        return Err(Fail::Usage(holonomy::args::ParseError::Unknown {
+            flag: "window".into(),
+        }));
+    }
+
+    if headless {
+        let mut sinks = open_sinks(&args).map_err(io)?;
+        let mut screenshot = open_screenshot(&args).map_err(io)?;
+        let mut s = Session::new(
+            Editor::new(),
+            Painter::new(atlas, 0),
+            Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
+            metrics,
+        );
+        // **A zoom this atlas cannot do is a refusal, not a clamp.** `--zoom 200` on a two-size
+        // atlas is a command-line error and saying so beats drawing 125 % under a "200%" label.
+        //
+        // **And the refusal has to name the real reason when the pair was dropped at boot** --
+        // `--zoom 125` on a one-size atlas says "not in the atlas's sizes", which is true and tells
+        // the user nothing about *why* their size list has one entry. **The line is worth two
+        // extra characters of the budget**: a refusal the user can act on and a refusal they cannot
+        // are different tools, and this one names the flag that would fix it.
+        let zoom = if !has_zoom_size && args.zoom != 100 {
+            eprintln!(
+                "holonomy: --zoom {} needs a second atlas size, and --ppem {} could not hold one; \
+                 continuing at 100 %",
+                args.zoom, args.ppem
+            );
+            100
+        } else {
+            args.zoom
+        };
+        s.set_zoom(zoom).unwrap_or_else(|e| {
+            eprintln!("holonomy: {e}");
+            eprintln!("holonomy: continuing at 100 %");
+        });
+        s.state.sealed = false;
+        // **No container here**, so no store and no fetching: this is the pre-open path, an empty editor
+        // on a headless frame. `NoSource` refuses every fetch, which is exactly right -- there is nothing
+        // to fetch and every byte is already in the rope.
+        let mut bytes = holonomy::store::NoSource;
+        s.repaint_all_with(&mut bytes).map_err(Fail::Session)?;
+        // **The headless path is not sealed**, so the input is opened here rather than at boot.
+        let mut input = open_input(&args).map_err(io)?;
+        drive(
+            &mut s,
+            &mut sinks,
+            screenshot.as_mut(),
+            &mut bytes,
+            input.as_source(),
+        )?;
+        return Ok(());
+    }
+
+    // --- The boot chain. Everything that names a path happens inside stage 4.
+    //
+    // The alternate signal stack must be a *registered* `SecureBlock`, not a `Vec<u8]`: the whole
+    // point of the tripwire is that the signal frame the kernel pushes onto it is scrubbed by the
+    // handler that is about to write to it, and an unregistered stack's bytes survive the process.
+    // So the block is allocated here and **kept alive across the whole chain** -- dropping it early
+    // would leave `sigaltstack` pointing at unmapped memory, which is a segfault on the first
+    // fault rather than a clean report.
+    let alt_block =
+        SecureBlock::allocate(ALT_STACK_BYTES).expect("allocate the alternate signal stack");
+    let alt = AltStack::install(alt_block.as_ptr() as usize, ALT_STACK_BYTES)
+        .expect("install the alternate signal stack");
+
+    let chain = Enter
+        .seal_core_dumps()
+        .raise_memlock()
+        .install_tripwires(alt)
+        .map_err(Fail::Boot)?;
+    let opened = chain
+        .open_descriptors(|| {
+            Ok(SessionContext {
+                session: Session::new(
+                    Editor::new(),
+                    Painter::new(atlas, 0),
+                    Box::new(HeadlessScanout::new(metrics.width, metrics.height)),
+                    metrics,
+                ),
+                // `Option` because the descriptor is **consumed** by `Wavefunction::adopt` below, and
+                // that can only happen after sealing -- the passphrase does not exist before then. Stage 4
+                // is still the only place a path becomes a descriptor; this only hands the one it opened
+                // to the container rather than opening a second.
+                container: Some(
+                    DirectFile::create_or_open(
+                        args.container
+                            .as_deref()
+                            .unwrap_or_else(|| Path::new("untitled.wavefunction")),
+                    )
+                    .expect("open the container"),
+                ),
+                sinks: open_sinks(&args).expect("open the export sinks"),
+                screenshot: open_screenshot(&args).expect("open the screenshot"),
+                container_file: None,
+                // **The input, opened here, because here is the only place a path may become a
+                // descriptor.** The seal has no `openat`, so opening the keyboard afterwards is
+                // `SIGSYS` and exit 137.
+                input: open_input(&args).expect("open the input"),
+            })
+        })
+        .map_err(Fail::Boot)?;
+
+    let mut sealed = opened
+        .lock_all_pages()
+        .isolate_network()
+        .drop_privileges()
+        .map_err(Fail::Boot)?
+        .seal(Action::KillProcess)
+        .map_err(Fail::Boot)?;
+
+    let report = sealed.report();
+    eprintln!(
+        "holonomy: sealed. mlockall={} (errno {}), no_new_privs={}, ASLR={:?}",
+        report.all_pages_locked, report.mlock_errno, report.no_new_privs, report.aslr
+    );
+
+    // The `RLIMIT_MEMLOCK` ceiling is printed, and it is printed *because it is the number that
+    // decides whether the format's maximum document can open at all* -- and because on this host it
+    // cannot be raised from inside the process.
+    //
+    // `raise_memlock_to_hard_limit` is a no-op where soft already equals hard, which is what the
+    // rlimits module's own doc says happens here: soft == hard == 8.00 MiB. Going above that needs
+    // `CAP_SYS_RESOURCE` (to raise the hard limit) and the process has none -- `CapEff` reads as 0 --
+    // so `setrlimit` fails with `EPERM` and even `ulimit -l unlimited` is refused by the shell. **The
+    // ceiling is therefore a property of the host, not something the boot can negotiate**, and the
+    // maximum document needs `8,321,040 * 4096/3840 = 8.88 MiB` of page-locked leaves.
+    //
+    // Without this line that is invisible until a leaf allocation fails deep inside the rope, where
+    // it surfaces as `SecureBlockError::MlockFailed` and reads like a bug rather than like a host
+    // limit. `mlockall` is deliberately *not* retired to work around it: that is a real reduction in
+    // coverage for plain heap buffers, and it is recorded in PROJECT.md's Phase 13 rather than done
+    // here.
+    let ceiling = report.limits.memlock_soft_after.unwrap_or(0);
+    eprintln!(
+        "holonomy: RLIMIT_MEMLOCK soft={} ({:.2} MiB) hard={} -- raise it on the host \
+         (LimitMEMLOCK=) to open documents above {:.2} MiB of page-locked text",
+        ceiling,
+        ceiling as f64 / (1024.0 * 1024.0),
+        report
+            .limits
+            .memlock_hard
+            .map_or_else(|| "unknown".to_string(), |h| h.to_string()),
+        (8_321_040.0f64 * 4096.0 / 3840.0) / (1024.0 * 1024.0),
+    );
+
+    // The passphrase is read *after* sealing, which is why it has to come from the environment: there
+    // is no `open` and no `getenv` guarantee post-filter, and the value must already be in the
+    // process's own memory to be scrubbed on the way out.
+    let phrase = passphrase()?;
+
+    sealed.run_session(|sealed| {
+        // **FR-5 / PRD §9.2: the teardown plan, built here rather than left empty.**
+        //
+        // `teardown_and_exit(-1)` used to be called with a plan containing nothing, so the shutdown
+        // did its `registry::scrub_all()` and stopped. **Every mechanism PRD §9.2 lists already
+        // existed and was gated** — ring noise, `DRM_IOCTL_MODE_DESTROY_DUMB`, `fsync`, `close` — and
+        // none of it was reachable from the product, which is the failure mode
+        // `crates/holonomy-jail/tests/census.rs` proves against on every other subsystem.
+        //
+        // **Sync before close, per descriptor, and the order is the point.** `close` does not flush;
+        // it drops the reference and the kernel writes back whenever it likes. A commit that landed
+        // 200 ms before `Ctrl+Q` and a container that was never `fsync`ed is a document that was not
+        // on the platter when the lights went out.
+        //
+        // **The ring buffer needs no explicit step any more, and that is a consequence rather than an
+        // omission.** FR-4.8 moved the three 64 KiB slots from `alloc_zeroed` to `SecureBlock`, which
+        // registers them with the jail's scrub registry — so `scrub_all()`, which has always run at
+        // teardown, now covers them. PRD §9.2 asks for the ring to be overwritten with noise; zeroing
+        // is the stronger of the two for cold-boot purposes and the file's own indistinguishability
+        // is a property of what is *written*, never of what was in the buffer.
+        //
+        // **The descriptor list is taken first and the plan built second**, because `context_mut` and
+        // `teardown` are two `&mut` into the same `Sealed` and only one of them is live at a time.
+        let boot_fds = sealed.context().boot_descriptors();
+        for fd in &boot_fds {
+            let _ = sealed.teardown().sync(*fd);
+        }
+        for fd in &boot_fds {
+            let _ = sealed.teardown().close(*fd);
+        }
+
+        let ctx = sealed.context_mut();
+        ctx.session.state.sealed = true;
+        ctx.session.set_zoom(args.zoom).unwrap_or_else(|e| {
+            eprintln!("holonomy: {e}");
+            eprintln!("holonomy: continuing at 100 %");
+        });
+
+        // **The passphrase is used now.** It was read above and dropped on the floor (`let _ = &phrase`),
+        // which is why this product had never opened a document: there was no path from a descriptor to
+        // plaintext, because opening one needs the KDF and the KDF needs the passphrase, and the
+        // passphrase only exists after sealing.
+        //
+        // `vdf_iterations` is **derived**: `TARGET_VDF_MS` worth of squarings at this host's measured
+        // per-squaring cost, via `vdf_iterations_for` (PROJECT.md 2.4). It used to be
+        // `TEST_VDF_ITERATIONS` = 8, which is the test constant and 11,730x weaker than the derived
+        // value -- so the container's KDF was running 8 serial squarings where the design calls for 93,843.
+        //
+        // **A build-time constant, deliberately.** The VDF's property is that its cost is fixed in
+        // advance, so a caller who could vary it could be handed a cheap challenge. Calibrating at
+        // runtime would make `T` depend on the machine presenting it.
+        //
+        // **The residual gap, recorded rather than glossed:** the count is not recorded *in the container*,
+        // so opening needs it out of band, and a container written by a build calibrated on a
+        // substantially different host will not open with this one. 2,664 ns is within ~8% of this host's
+        // re-measurement, so the mismatch is currently small -- but the format change that records `T`
+        // beside the salt is what makes this robust, and it is not done.
+        // **A missing descriptor is a bug, not a user error**, so it is reported and the session carries
+        // on with an empty editor rather than aborting the boot -- an empty editor is what it had before.
+        let Some(fd) = ctx.container.take() else {
+            // **No descriptor means no `Wavefunction` either** -- `container_file` is only filled by the
+            // adopt below -- so this path has nothing to fetch from and `NoSource` is the honest source.
+            // Not a fallback for a store that could not be built: it is the same state.
+            eprintln!("holonomy: the container descriptor was already taken; starting empty");
+            let mut bytes = holonomy::store::NoSource;
+            ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
+            drive(
+                &mut ctx.session,
+                &mut ctx.sinks,
+                ctx.screenshot.as_mut(),
+                &mut bytes,
+                ctx.input.as_source(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("holonomy: {e}");
+            });
+            return;
+        };
+        match holonomy::store::open_document(
+            fd,
+            &phrase,
+            holonomy_crypto::envelope::VDF_ITERATIONS,
+            holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+        ) {
+            Ok(opened) => {
+                eprintln!(
+                    "holonomy: opened {} bytes, {} resident across {} leaves ({} sections resident)",
+                    opened.editor.text_len(),
+                    opened.editor.resident_bytes(),
+                    opened.editor.resident_count(),
+                    holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+                );
+                ctx.container_file = Some(opened.container);
+
+                // **The document goes in through `adopt_document`, not by assigning the field.** The
+                // session was built before the passphrase existed, so its `DocLines`, `Manifest` and
+                // `TextCounts` describe an *empty* document; assigning `editor` left all three stale and
+                // the product painted one empty line over a real document. `adopt_document` rebuilds all
+                // three and forces a full repaint, because the frame holds the previous document's
+                // pixels. See `Session::adopt_document`'s docs for the whole of it.
+                let mut opened_store = holonomy::store::SectionStore::new(
+                    ctx.container_file.as_mut().expect("just assigned"),
+                    holonomy::store::DEFAULT_RESIDENT_SECTIONS,
+                );
+                // **Reported, not fatal.** An empty editor is what the product had before any of this,
+                // and a session that starts with nothing beats one that refuses to start. The store is
+                // dropped first because it borrows `container_file`, and clearing the field is what
+                // makes `store` below come out `None` -- which is how the paint path learns there is
+                // nothing to fetch from.
+                let adopted = ctx.session.adopt_document(opened.editor, &mut opened_store);
+                drop(opened_store);
+                if let Err(e) = adopted {
+                    eprintln!(
+                        "holonomy: could not read the document ({e:?}); starting with an empty one"
+                    );
+                    ctx.container_file = None;
+                }                // **Rebuilt, because the store borrows the container that just arrived.** The store
+                // `open_document` used is gone with that call; this one is the session's. Building it
+                // here rather than before the open is the whole of the ordering -- a store over the old
+                // container would read the wrong bytes and the symptom would be a correct-looking
+                // document that is one revision old.
+
+            }
+            // **A wrong passphrase is a normal outcome, not a crash**, and it is reported rather than
+            // silently leaving an empty document on screen -- which is what "the product opens nothing"
+            // looks like from the outside.
+            Err(e) => eprintln!(
+                "holonomy: could not open the document ({e:?}); starting with an empty one"
+            ),
+        }
+
+        // The first paint is a *full* repaint, because nothing has been painted yet and a
+        // damage-limited pass would leave the framebuffer black.
+        //
+        // **Through the store when there is one.** This is the line that makes a container-backed document
+        // draw past its first window: `repaint_all_with` faults, and every visible line is fetched. With
+        // `repaint_all` it would read `&self`, hit an absent leaf, and truncate the page -- which is what
+        // `tests/session_open_document.rs`'s `text_past_the_first_window_is_drawn_not_counted` is the gate
+        // for.
+        // **One place that knows whether there is a store.** Everything below needs a
+        // `&mut dyn LeafSource`, and deciding that separately at each site is how one of them ends up
+        // passing `NoSource` to a document that is on disk.
+        //
+        // **Built after the open, and that ordering is load-bearing.** The store borrows the container,
+        // so it cannot be constructed before `container_file` is assigned -- and constructing it over the
+        // *old* container would read the wrong bytes, with the symptom being a correct-looking document
+        // that is one revision old.
+        //
+        // **It borrows `container_file` beside the session rather than living inside it.** That is what
+        // `SessionContext`'s own doc comment says the field is for, and part 16 is the first code that
+        // needs it: before, nothing on the paint path asked for bytes at all. The borrow is legal because
+        // `session` and `container_file` are disjoint fields -- no self-referential struct, no `unsafe`.
+        let mut store = ctx.container_file.as_mut().map(|wf| {
+            holonomy::store::SectionStore::new(wf, holonomy::store::DEFAULT_RESIDENT_SECTIONS)
+        });
+        match store.as_mut() {
+            Some(store) => {
+                ctx.session.repaint_all_with(store).expect("the first paint");
+                drive(
+                    &mut ctx.session,
+                    &mut ctx.sinks,
+                    ctx.screenshot.as_mut(),
+                    store,
+                    ctx.input.as_source(),
+                )
+            }
+            None => {
+                let mut bytes = holonomy::store::NoSource;
+                ctx.session.repaint_all_with(&mut bytes).expect("the first paint");
+                drive(
+                    &mut ctx.session,
+                    &mut ctx.sinks,
+                    ctx.screenshot.as_mut(),
+                    &mut bytes,
+                    ctx.input.as_source(),
+                )
+            }
+        }
+        .unwrap_or_else(|e| {
+            eprintln!("holonomy: {e}");
+        });
+    });
+
+    sealed.teardown_and_exit(-1);
+}
+
+/// **Open the session's input, at boot.**
+///
+/// # Why this exists at all
+///
+/// **The sealed path cannot open anything.** The seccomp filter has no `openat`, so a path
+/// cannot become a descriptor after the seal: reaching for one is `SIGSYS` and exit 137.
+///
+/// **The keyboard and the script were both being opened after the seal**, inside the session
+/// driver, so the sealed product's first act was to kill itself with a signal the shell reports
+/// as "Killed" and nothing else. The session never started.
+///
+/// So the input is opened here — before the filter — and handed in:
+///
+/// * **the script** is *read* at boot. Its bytes are in memory before the seal, and the sealed
+///   session decodes them from there.
+/// * **the keyboard** is *opened* at boot, and the descriptor is the one the session uses.
+///
+/// # Why the failure is at boot rather than at the session
+///
+/// A host with no `/dev/input/event0` cannot run the sealed product, and it should say so in a
+/// sentence rather than dying on a signal. **The boot fails with the path named**, which is the
+/// difference between "the keyboard is missing" and "Killed".
+fn open_input(args: &Args) -> std::io::Result<BootInput> {
+    match &args.script {
+        Some(path) => {
+            let script = std::fs::read(path)?;
+            Ok(BootInput::Script(holonomy_input::ScriptedInputSource::new(
+                &script,
+            )))
+        }
+        None => Ok(BootInput::Evdev(
+            holonomy_input::EvdevSource::open(std::path::Path::new(EVDEV_NODE))
+                .map_err(|e| std::io::Error::other(e.to_string()))?,
+        )),
+    }
+}
+
+/// Run the session to completion and write the sinks.
+fn drive(
+    s: &mut Session<'_>,
+    sinks: &mut [ExportSink],
+    screenshot: Option<&mut File>,
+    bytes: &mut dyn holonomy_text::LeafSource,
+    input: &mut dyn holonomy_input::InputSource,
+) -> Result<(), Fail> {
+    // **The input is handed in, not opened here.** The sealed path has no `openat`, so opening
+    // the keyboard or reading the script at this point is `SIGSYS` and exit 137.
+    let exit = s.run_with_io(bytes, input, sinks).map_err(Fail::Session)?;
+    eprintln!(
+        "holonomy: {exit:?} after {} commands, {} edits, {} frames",
+        s.stats.commands, s.stats.edits, s.stats.frames
+    );
+
+    // **Commit unsaved work before anything else reads the document.** This is the save a user relies
+    // on without pressing a key, and it is the one that was missing: `Ctrl+S` existed as a counter and
+    // a commit existed as a gated function, and nothing joined them, so every keystroke since the last
+    // explicit save was discarded on exit. A document that exits dirty is the whole failure mode of a
+    // sealed editor with no undo history on disk.
+    //
+    // **Before the repaint and before the exports**, for a reason that is about honesty rather than
+    // order: an export of a document that is not on disk is still a valid export, but a *silent* one is
+    // not. If the commit fails the message above says so, and the exports that follow describe the text
+    // that is actually in memory.
+    if s.state.dirty {
+        let written = s.commit_to(bytes);
+        eprintln!(
+            "holonomy: wrote {} bytes to the container on exit ({})",
+            written,
+            if written > 0 {
+                "committed"
+            } else {
+                "nothing to commit"
+            }
+        );
+    }
+
+    s.repaint_all_with(bytes).map_err(Fail::Session)?;
+
+    for sink in sinks.iter_mut() {
+        let report = s.export(sink, "holonomy").map_err(Fail::Session)?;
+        eprintln!(
+            "holonomy: wrote {} bytes of {} to {}",
+            report.bytes,
+            Format::extension(sink.format),
+            sink.path
+        );
+    }
+
+    if let Some(f) = screenshot {
+        let n = s.dump_ppm_to_file(f).map_err(Fail::Session)?;
+        f.flush().map_err(io)?;
+        eprintln!("holonomy: wrote a {n}-byte PPM");
+    }
+    Ok(())
+}
+
+/// Open every export sink. **Before** the jail, always.
+fn open_sinks(args: &Args) -> std::io::Result<Vec<ExportSink>> {
+    args.exports
+        .iter()
+        .map(|t| {
+            Ok(ExportSink {
+                format: t.format,
+                file: File::create(&t.path)?,
+                path: t.path.display().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Open the PPM target, if there is one.
+fn open_screenshot(args: &Args) -> std::io::Result<Option<File>> {
+    args.screenshot.as_deref().map(File::create).transpose()
+}
+
+/// Print the boot plan and exit, having opened nothing.
+///
+/// Useful because the plan is the thing worth reviewing: if `--dry-run` and a real run disagree,
+/// the bug is in the plan.
+fn print_plan(args: &Args) {
+    println!("holonomy --dry-run");
+    println!("  container : {:?}", args.container.as_deref());
+    println!("  panel     : {}x{}", args.width, args.height);
+    println!("  zoom      : {}%", args.zoom);
+    println!("  exports   :");
+    for t in &args.exports {
+        println!(
+            "    {} -> {}",
+            Format::extension(t.format),
+            t.path.display()
+        );
+    }
+    println!("  screenshot: {:?}", args.screenshot.as_deref());
+    println!("  script    : {:?}", args.script.as_deref());
+    println!();
+    println!("boot order:");
+    println!("  1. seal core dumps          (RLIMIT_CORE=0, PR_SET_DUMPABLE=0)");
+    println!("  2. raise RLIMIT_MEMLOCK     soft -> hard");
+    println!("  3. install tripwires        SIGSEGV, SIGBUS, SIGSYS, SIGILL, SIGFPE");
+    println!("  4. open every descriptor    <<< the last point a path can be named");
+    println!("  5. mlockall                 MCL_CURRENT | MCL_FUTURE");
+    println!("  6. isolate the network      CLONE_NEWUSER | CLONE_NEWNET");
+    println!("  7. drop privileges          PR_SET_NO_NEW_PRIVS");
+    // Read from the table rather than hardcoded. Phase 7's census named 50 entries, and a banner
+    // that says 50 while the table grows to 52 is a banner that is quietly wrong about the machine's
+    // own security posture -- which is the one number here that must never drift.
+    println!(
+        "  8. install seccomp          {} entries",
+        holonomy_jail::seccomp::table::ALLOWLIST.len()
+    );
+    println!();
+    println!("after stage 8: no open, no mmap, no brk. everything is already resident.");
+}

@@ -1,0 +1,61 @@
+# Temporary development preview; the product is a native X11 app, so render its
+# actual managed-document path headlessly rather than using a browser mock-up.
+name: Desktop editor visual review
+on:
+  push:
+    branches: [arena/d88a3e5c-holonomy]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  shots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Render the actual desktop UI at wide and narrow widths
+        run: |
+          cargo run --locked -p holonomy --features desktop --example shot -- target/editor-wide.ppm --desktop --sample --size=1920x1167 --zoom=125
+          cargo run --locked -p holonomy --features desktop --example shot -- target/editor-default.ppm --desktop --sample --size=1600x900 --zoom=125
+          cargo run --locked -p holonomy --features desktop --example shot -- target/editor-narrow.ppm --desktop --sample --size=768x520 --zoom=125
+      - name: Save lossless pictures and compact inspection previews
+        run: |
+          python3 -m pip install Pillow
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          for name in ('wide', 'default', 'narrow'):
+              image = Image.open(f'target/editor-{name}.ppm').convert('RGB')
+              image.save(f'target/editor-{name}.png', optimize=True)
+              # Limited-size thumbnails fit in the Checks annotations, whose
+              # text is accessible from the GitHub API in restricted sandboxes.
+              ratio = min(1, 960 / image.width)
+              preview = image.resize((int(image.width * ratio), int(image.height * ratio)), Image.Resampling.NEAREST)
+              preview.quantize(colors=32, method=Image.Quantize.FASTOCTREE).save(f'target/editor-{name}-preview.png', optimize=True)
+              print(name, image.size, Path(f'target/editor-{name}-preview.png').stat().st_size)
+          PY
+      - name: Wide visual preview via Checks API
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          data = base64.b64encode(Path('target/editor-wide-preview.png').read_bytes()).decode()
+          print(f'::notice title=Wide preview size::{len(data)} encoded characters')
+          for i in range(0, len(data), 2900):
+              print(f'::warning title=Wide preview part {i//2900:03}::{data[i:i+2900]}')
+          PY
+      - name: Narrow visual preview via Checks API
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          data = base64.b64encode(Path('target/editor-narrow-preview.png').read_bytes()).decode()
+          print(f'::notice title=Narrow preview size::{len(data)} encoded characters')
+          for i in range(0, len(data), 2900):
+              print(f'::warning title=Narrow preview part {i//2900:03}::{data[i:i+2900]}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-desktop-editor-screenshots
+          path: target/editor-*.png

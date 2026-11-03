@@ -1,0 +1,427 @@
+//! `XTEST`: synthesising keystrokes into a real server, for a gate that needs a real keyboard.
+//!
+//! # Why this is a test-only extension
+//!
+//! The honest way to test "does a keypress turn into the right character" is to press a key. On a
+//! build machine nobody is at the keyboard, so the alternative is to assert that our *own* keymap is
+//! self-consistent -- which is the assumption under test, not a check of it.
+//!
+//! `XTEST` closes that gap: it makes the server synthesise a genuine `KeyPress`/`KeyRelease` pair with
+//! a chosen keycode, through the same path a real keyboard uses, and the client cannot tell the
+//! difference. So `tests/live.rs` injects a keycode, waits for the event, and asserts the session's
+//! own state machine produced the right `Command`. The only thing that is not exercised is a human's
+//! finger.
+//!
+//! # And it is how the keycode offset is *proved* rather than assumed
+//!
+//! `holonomy_input::Keymap` maps Linux input codes, and X11 sends X keycodes. The claim is that X
+//! keycode = Linux code + 8. This module does not assume it: [`XTest::keycode_for_keysym`] asks the
+//! server which keycode carries a given keysym, and the live test asserts `keycode - 8` equals the
+//! `KEY_*` constant for the same key. If a server ever used a different mapping, that test fails by
+//! name.
+//!
+//! Nothing in the shipped window path uses this module; it exists so the gate can type.
+
+use crate::conn::{Conn, ConnError};
+use crate::proto::{Event, Rdr, Req};
+
+/// XTEST request minor opcodes.
+///
+/// They start at zero, which is worth writing down: `XTestFakeInput` is minor 2, not 4, and a request
+/// with the wrong minor opcode is answered with `BadLength` -- which is what this crate's first
+/// `XTestGetVersion` got, having numbered them from two.
+pub mod minor {
+    /// `XTestQueryVersion`.
+    pub const GET_VERSION: u8 = 0;
+    /// `XTestCompareCursor`.
+    pub const COMPARE_CURSOR: u8 = 1;
+    /// `XTestFakeInput`.
+    pub const FAKE_INPUT: u8 = 2;
+    /// `XTestGrabControl`.
+    pub const GRAB_CONTROL: u8 = 3;
+}
+
+/// Event types for `XTestFakeInput`.
+pub mod fake {
+    /// KeyPress.
+    pub const KEY_PRESS: u8 = 2;
+    /// KeyRelease.
+    pub const KEY_RELEASE: u8 = 3;
+    /// ButtonPress. **Detail is the button number, 1 for left.**
+    pub const BUTTON_PRESS: u8 = 4;
+    /// ButtonRelease.
+    pub const BUTTON_RELEASE: u8 = 5;
+    /// MotionNotify. **Moves the pointer to the `x`, `y` in the same request.**
+    pub const MOTION: u8 = 6;
+}
+
+/// An open `XTEST` extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XTest {
+    major: u8,
+}
+
+impl XTest {
+    /// Open the extension, or `None` if the server does not have it.
+    ///
+    /// A server without `XTEST` is not an error for the *window* -- only for the gate that types into
+    /// it -- so this returns `None` rather than failing, and `tests/live.rs` reports which it found.
+    pub fn open(conn: &mut Conn) -> Result<Option<Self>, ConnError> {
+        let Some((present, major, _first_event, _first_error)) = conn.query_extension("XTEST")?
+        else {
+            return Ok(None);
+        };
+        if !present {
+            return Ok(None);
+        }
+        let xtest = Self { major };
+        // Ask for the version anyway: it is the shortest extension request there is, and if it fails
+        // the gate will find out now rather than three assertions later.
+        conn.request(Req::new(xtest.major).minor(minor::GET_VERSION).pad(3))?;
+        conn.sync()?;
+        Ok(Some(xtest))
+    }
+
+    /// The extension's major opcode.
+    pub fn major(&self) -> u8 {
+        self.major
+    }
+
+    /// `XTestGrabControl`: while permitted, no other client may grab the server, so synthesised
+    /// events cannot be lost to a stray `GrabServer` from an unrelated program.
+    ///
+    /// This is what `xdotool` does before typing, and it is what made the difference here: without it
+    /// this host delivered the synthesised `KeyPress` and silently dropped the matching `KeyRelease`.
+    pub fn grab_control(&self, conn: &mut Conn, permit: bool) -> Result<(), ConnError> {
+        conn.request(
+            Req::new(self.major)
+                .minor(minor::GRAB_CONTROL)
+                .u8(u8::from(permit))
+                .pad(3),
+        )?;
+        conn.sync()
+    }
+
+    /// Inject a key press or release for `keycode` into whatever window has the focus.
+    ///
+    /// `root` is passed as the window id rather than 0. XTEST's `root` field is the window the event
+    /// is delivered through, and 0 means "the root the pointer is currently on" -- which, for a
+    /// window that has just been mapped under the user's cursor, is the desktop rather than the
+    /// window. Key events follow the focus, so a focus that has not landed yet loses them.
+    pub fn fake_key(&self, conn: &mut Conn, keycode: u8, press: bool) -> Result<(), ConnError> {
+        self.fake_key_in(conn, 0, keycode, press)
+    }
+
+    /// [`XTest::fake_key`], naming the window the event should go to.
+    pub fn fake_key_in(
+        &self,
+        conn: &mut Conn,
+        window: u32,
+        keycode: u8,
+        press: bool,
+    ) -> Result<(), ConnError> {
+        conn.request(
+            Req::new(self.major)
+                .minor(minor::FAKE_INPUT)
+                .u8(if press {
+                    fake::KEY_PRESS
+                } else {
+                    fake::KEY_RELEASE
+                })
+                .u8(keycode)
+                .u16(0)
+                .u32(0) // delay
+                .u32(window)
+                .pad(8)
+                .i16(0)
+                .i16(0)
+                .pad(7)
+                .u8(0), // device id: 0 is the core keyboard
+        )?;
+        conn.sync()
+    }
+
+    /// Inject a press and a release, and sync once.
+    pub fn tap(&self, conn: &mut Conn, keycode: u8) -> Result<(), ConnError> {
+        self.fake_key(conn, keycode, true)?;
+        self.fake_key(conn, keycode, false)
+    }
+
+    /// [`XTest::tap`], naming the window the events should go to.
+    pub fn tap_in(&self, conn: &mut Conn, window: u32, keycode: u8) -> Result<(), ConnError> {
+        self.fake_key_in(conn, window, keycode, true)?;
+        self.fake_key_in(conn, window, keycode, false)
+    }
+
+    /// **Move the pointer to a screen position.**
+    ///
+    /// # Why this is here, and why the coordinates are absolute
+    ///
+    /// [`XTest::fake_key_in`] names a window, and a pointer event has no such field that the server
+    /// routes by: **`MotionNotify` is delivered to whatever window is under `(x, y)`**, and `x`/`y`
+    /// are in **root coordinates**. A driver that passes window-relative coordinates moves the pointer
+    /// to the wrong place and reports "the click did nothing", which is indistinguishable from a hit
+    /// test that is broken — so the gate that drives a window has to add the window's own position to
+    /// whatever it wants to point at. See `Window::geometry`, which reports the position relative to
+    /// the parent, and this window's parent is the root.
+    ///
+    /// # Why it syncs
+    ///
+    /// **Because a move followed by a click has to be ordered, and XTEST does not deliver
+    /// synchronously.** `tap_in` syncs for the same reason: the queue outlives the request that filled
+    /// it, and a click injected before the move is a click at the *old* position.
+    pub fn move_pointer(
+        &self,
+        conn: &mut Conn,
+        root: u32,
+        x: i16,
+        y: i16,
+    ) -> Result<(), ConnError> {
+        self.fake_pointer(conn, fake::MOTION, root, x, y, 0)
+    }
+
+    /// Click at a screen position: press and release, one sync.
+    pub fn click_at(
+        &self,
+        conn: &mut Conn,
+        root: u32,
+        x: i16,
+        y: i16,
+        button: u8,
+    ) -> Result<(), ConnError> {
+        self.fake_pointer(conn, fake::BUTTON_PRESS, root, x, y, button)?;
+        self.fake_pointer(conn, fake::BUTTON_RELEASE, root, x, y, button)
+    }
+
+    /// One `XTestFakeInput` for a pointer event, sync'd.
+    ///
+    /// **The 36-byte layout is the same one `fake_key_in` sends**, because the server has one request
+    /// for both: type in byte 4, keycode/button in byte 5, and the two signed coordinates at bytes 24
+    /// and 26. `detail` is the button number for a press or a release and ignored for a motion.
+    pub fn fake_pointer(
+        &self,
+        conn: &mut Conn,
+        kind: u8,
+        root: u32,
+        x: i16,
+        y: i16,
+        detail: u8,
+    ) -> Result<(), ConnError> {
+        conn.request(
+            Req::new(self.major)
+                .minor(minor::FAKE_INPUT)
+                .u8(kind)
+                .u8(detail)
+                .u16(0)
+                .u32(0) // delay
+                .u32(root)
+                .pad(8)
+                .i16(x)
+                .i16(y)
+                .pad(7)
+                .u8(0), // device id: 0 is the core pointer
+        )?;
+        conn.sync()
+    }
+
+    /// The X keycode that produces `keysym` unshifted, from the server's own keyboard mapping.
+    ///
+    /// `keysym` is an X keysym: `0x61` is `a`, `0xFFE1` is `Shift_L`. This asks the server rather
+    /// than assuming a table, because the whole point is that the mapping is not ours to assume.
+    pub fn keycode_for_keysym(conn: &mut Conn, keysym: u32) -> Result<Option<u8>, ConnError> {
+        let mapping = conn.keyboard_mapping()?;
+        let first = conn.setup().min_keycode;
+        for (i, syms) in mapping.iter().enumerate() {
+            if syms.first().is_some_and(|s| *s == keysym) {
+                return Ok(Some(first + i as u8));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The keycode that produces `keysym`, and whether **shift** has to be held to get it.
+    ///
+    /// [`XTest::keycode_for_keysym`] only matches a keycode's *first* keysym, which is right for a
+    /// letter and wrong for anything you have to hold shift for: `}` (U+007D) sits in the second
+    /// column of the bracket key, so the first-only lookup returns `None` and a caller that types LaTeX
+    /// silently drops every closing brace. A 9B live run typed `\frac{1}{2}` and got `\frac12`
+    /// recorded, which parses as an error and made the session log "1 parse error" for a formula that
+    /// was typed correctly.
+    ///
+    /// So this walks every column of the mapping and reports which one matched:
+    ///
+    /// * column 0 -- the key produces it unshifted
+    /// * column 1 -- the key produces it with shift
+    ///
+    /// Anything past column 1 is mode-switched (`AltGraph`) rather than shifted, and is reported as
+    /// unshifted rather than guessed at, because XTEST cannot set a mode alone and typing the wrong
+    /// thing silently is worse than reporting that it could not be typed.
+    ///
+    /// A caller that wants a `char` should prefer this over two lookups: asking for `c` and then for
+    /// `c.to_lowercase()` gets the keycode but still has to work out the shift flag itself, which is
+    /// the part that goes wrong.
+    pub fn keycode_for_keysym_shifted(
+        conn: &mut Conn,
+        keysym: u32,
+    ) -> Result<Option<(u8, bool)>, ConnError> {
+        let mapping = conn.keyboard_mapping()?;
+        let first = conn.setup().min_keycode;
+        for (i, syms) in mapping.iter().enumerate() {
+            if syms.first().is_some_and(|s| *s == keysym) {
+                return Ok(Some((first + i as u8, false)));
+            }
+            if syms.get(1).is_some_and(|s| *s == keysym) {
+                return Ok(Some((first + i as u8, true)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Wait for the next key event, up to `timeout`.
+    ///
+    /// Skips everything else -- `Expose`, `ConfigureNotify`, the `ClientMessage` the server sends when
+    /// the focus moves -- because a gate that asks "what key did the server just report" should not
+    /// have to know what else was in the queue.
+    pub fn wait_for_key(
+        &self,
+        conn: &mut Conn,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Event>, ConnError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            match conn.next_event(Some(left))? {
+                Some(ev @ (Event::KeyPress { .. } | Event::KeyRelease { .. })) => {
+                    return Ok(Some(ev))
+                }
+                Some(_) => {}
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+/// Read the version out of an `XTestGetVersion` reply: `(client_major, client_minor)`.
+/// `XTESTGetVersion`'s `(major, minor)`, from its reply.
+///
+/// **`Rdr` panics past the end, so the length is checked here.** A short reply has no version in it,
+/// and `(0, 0)` is what a build without `XTEST` -- or a server that refused the request -- should
+/// look like to a caller deciding whether to use it. Returning zeros rather than unwrapping a slice
+/// makes a refusal and an absence indistinguishable, which is the honest answer: neither one is a
+/// version this client can use.
+pub fn version(reply: &[u8]) -> (u32, u32) {
+    if reply.len() < 20 {
+        return (0, 0);
+    }
+    let mut r = Rdr::new(reply);
+    r.skip(12);
+    (r.u32(), r.u32())
+}
+
+/// `XTEST`'s `FakeInput` request is 36 bytes, and getting that wrong is a `BadLength` that the server
+/// answers by *silently discarding the keystroke* -- the gate would then time out and blame the
+/// client. So the layout is asserted here rather than discovered there.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A short reply is `(0, 0)`, not a panic.**
+    ///
+    /// `Rdr` panics when a field falls past the end of its buffer, and `version` read twenty bytes
+    /// out of whatever it was handed. A caller deciding whether `XTEST` is usable gets that reply
+    /// from the connection layer, which hands over *exactly* the size the protocol says the packet
+    /// is -- so the lengths agree for every real server.
+    ///
+    /// **But the check is here anyway**, because a build without `XTEST` answers
+    /// `QueryExtension` with a short reply, and the two cases have to look the same to the caller:
+    /// neither one is a version this client can use. Returning zeros says exactly that, and
+    /// unwrapping a slice out of a 19-byte buffer would say something else.
+    #[test]
+    fn a_short_reply_is_a_version_nobody_can_use_rather_than_a_panic() {
+        // A reply the protocol says is 20 bytes and a reply that is 19 bytes long.
+        let mut full = vec![0u8; 20];
+        full[12..16].copy_from_slice(&2u32.to_le_bytes());
+        full[16..20].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(
+            version(&full),
+            (2, 3),
+            "the two u32s are at offsets 12 and 16"
+        );
+
+        for short in [0usize, 1, 8, 19] {
+            assert_eq!(
+                version(&vec![0u8; short]),
+                (0, 0),
+                "a {short}-byte reply has no version in it"
+            );
+        }
+    }
+
+    /// The 36-byte layout: 4 header + type, detail, 2 pad, delay, root, 8 pad, x, y, 7 pad, device.
+    #[test]
+    fn fake_input_is_nine_words() {
+        let bytes = Req::new(0x7E)
+            .minor(minor::FAKE_INPUT)
+            .u8(fake::KEY_PRESS)
+            .u8(38)
+            .u16(0)
+            .u32(0)
+            .u32(0)
+            .pad(8)
+            .i16(0)
+            .i16(0)
+            .pad(7)
+            .u8(0)
+            .finish(1);
+        // 4 header + 1 type + 1 detail + 2 pad + 4 delay + 4 root + 8 pad + 2 x + 2 y + 7 pad
+        // + 1 device = 36 bytes = 9 words.
+        assert_eq!(bytes.len(), 36, "4 header + 32 fields");
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 9, "nine words");
+    }
+
+    /// `GetVersion` is the two-word request, which is the smallest thing an extension can have.
+    ///
+    /// Its minor opcode is 0, not 2: `XTestFakeInput` is 2. Sending 2 with a `GetVersion` body is a
+    /// `BadLength`.
+    ///
+    /// Note what is *not* here: a length field. `Req` writes one in the request header, and writing
+    /// a second one -- which the first version of this builder did -- makes every request two bytes
+    /// long, which the server answers with `BadLength` while discarding the keystroke the gate was
+    /// waiting for.
+    #[test]
+    fn get_version_is_two_words() {
+        let bytes = Req::new(0x7E).minor(minor::GET_VERSION).pad(3).finish(1);
+        assert_eq!(bytes.len(), 8, "4 header + minor + 3 pad");
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 2, "two words");
+    }
+
+    /// The reply's version pair sits past the 12-byte common prefix.
+    #[test]
+    fn the_version_reply_is_read_past_the_prefix() {
+        let mut reply = vec![0u8; 12];
+        reply.extend_from_slice(&2u32.to_le_bytes());
+        reply.extend_from_slice(&3u32.to_le_bytes());
+        assert_eq!(version(&reply), (2, 3));
+    }
+
+    /// Both event types are sent, and they are different numbers, because a client that sends
+    /// `KEY_PRESS` twice produces a modifier that never clears.
+    /// The minor opcodes are 0, 1, 2, 3 -- a client that numbers them from 2 gets `BadLength`.
+    #[test]
+    fn the_minor_opcodes_start_at_zero() {
+        assert_eq!(minor::GET_VERSION, 0);
+        assert_eq!(minor::COMPARE_CURSOR, 1);
+        assert_eq!(minor::FAKE_INPUT, 2);
+        assert_eq!(minor::GRAB_CONTROL, 3);
+    }
+
+    #[test]
+    fn press_and_release_are_different_events() {
+        assert_ne!(fake::KEY_PRESS, fake::KEY_RELEASE);
+        assert_eq!(fake::KEY_PRESS, 2);
+        assert_eq!(fake::KEY_RELEASE, 3);
+    }
+}

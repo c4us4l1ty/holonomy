@@ -1,0 +1,777 @@
+//! **The menu bar's contents: the eight headings' items.** Added in Phase 14 part 19.
+//!
+//! # Why the items are data and not a tree of nodes
+//!
+//! A menu is three things that have to agree: what it looks like, what it is hit-tested against, and
+//! what it does when chosen. **Only the first two belong here.** The third is a command, and a command
+//! belongs to the session — so this file describes *items* and the session says what each one means.
+//!
+//! **The consequence is that a menu item cannot be a `Node`.** A `Node` knows how to draw itself and
+//! nothing else; if the items were nodes, choosing one would require the renderer to decide what it
+//! means, and the renderer is the wrong crate for that by a wide margin.
+//!
+//! **So [`items_for`] returns labels, icons and accelerators, and the chrome's `paint_popup` draws
+//! them and the session reads the same function to route a click.** One function, two consumers — the
+//! same arrangement as [`crate::widgets`], and for the same reason.
+//!
+//! | what it proves | test |
+//! | --- | --- |
+//! | every heading has items | [`every_heading_has_items`] |
+//! | an out-of-range heading does not panic | [`an_out_of_range_heading_is_an_empty_menu`] |
+//! | and every item is renderable | [`every_item_is_renderable`] |
+
+use crate::icons::IconId;
+
+/// **What a menu item *is*, as distinct from what it *does*.** Part 21.
+///
+/// # Why this exists, and what it replaced
+///
+/// Part 20 routed a menu choice by **comparing the item's label**:
+///
+/// ```text
+/// Some(match (heading, item.label) { (_, "Undo") => …, (_, "Redo") => …, … })
+/// ```
+///
+/// and said so — *renaming "Undo" to "Revert" silently makes it inert*. That is the worst kind of
+/// coupling: **a typo in a display string changes a program's behaviour**, and nothing reports it,
+/// because both halves still compile and both still typecheck.
+///
+/// So an item now carries an [`Action`], a value with no interpretation attached. The renderer draws
+/// it and passes it through; **the session decides what `Action::Undo` means.** Neither crate depends
+/// on the other's vocabulary — `holonomy-render` does not know a `Command` exists — and the session
+/// gets a `match` on an enum, so **adding an action is a compile error in every place that has to
+/// handle it** rather than a silent no-op.
+///
+/// # Why it lives here rather than in `holonomy-input`
+///
+/// Because it is a *UI vocabulary*, not an input one. `holonomy-input` knows chords and commands and
+/// nothing about what a menu is; `holonomy-render` knows what a menu item is and nothing about what a
+/// keystroke does. An `Action` is the sentence between them — "this row says Undo" — and it belongs
+/// with the rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// Undo the last edit.
+    Undo,
+    /// Redo the last undone edit.
+    Redo,
+    /// Select the whole document.
+    SelectAll,
+    /// Jump to the first line.
+    DocumentStart,
+    /// Jump to the last line.
+    DocumentEnd,
+    /// **Start a new, empty document and make it the one this session paints.**
+    ///
+    /// **A variant and not a `Command`, for the same reason [`Action::Export`] is one:** the row does
+    /// not edit the document, it *replaces* it, and the only function allowed to do that is
+    /// `Session::adopt_document` — which lives one crate over and is reached directly from
+    /// `Session::apply_action`. Routing it through the keymap would hand the chord table a meaning
+    /// (\"discard the document\") that no chord asks for in this build.
+    ///
+    /// **Added in the font/new-document pass, and it was the one variant the enum was missing.** The row
+    /// had been `plain(\"New\")` for its whole life — drawn, and doing nothing — while
+    /// `Session::adopt_document` sat one crate over as the supported way to put a document into a
+    /// session. Wiring the row is one arm in `apply_action`; this variant is what makes the row compile.
+    /// **The tree did not build without it**, because `act(\"New\", Action::New)` and the `name()` arm
+    /// below both name a variant that did not exist.
+    New,
+    /// Create a new editable copy of the built-in studio handbook.
+    NewSample,
+    /// Return to the desktop document library.
+    Home,
+    /// **Open a container from a path and make it the document this session paints.** Part 45.
+    ///
+    /// **The developer window only, and the reason is the seal.** The jail's seccomp filter has no
+    /// `openat` on a user path, so reaching for one after the seal is `SIGSYS` and exit 137 — a menu
+    /// row that kills the process is worse than a row that does nothing, so `Session::apply_action`
+    /// refuses it by name when `ChromeState::sealed` is set and counts it as inert instead.
+    ///
+    /// **A path has to come from somewhere, and there is no file dialog.** The sealed product has
+    /// neither the dialog nor the `openat`; the developer window has the `openat` and no dialog. So
+    /// the row asks the session to *request* an open, and the window driver — the one place that can
+    /// read a path — supplies it. See `Session::take_open_request`.
+    Open,
+    /// **Open a container from a path and add it to the document list, leaving the open document
+    /// where it is.** Part 45.
+    ///
+    /// **`Open` and `Import` differ in one thing: which document is active afterwards.** Both need a
+    /// path from the driver, both are refused under the seal, and both are one `Session` call apart
+    /// from `Open` — which is why they are two variants rather than a payload, and why the request
+    /// carries the action rather than a boolean.
+    Import,
+    /// Commit the in-memory rings to the container.
+    Save,
+    /// Insert a table at the caret.
+    InsertTable,
+    /// Insert an image at the caret.
+    InsertImage,
+    /// Insert a formula at the caret.
+    InsertMath,
+    /// Close the document.
+    Close,
+    Rename,
+    Delete,
+    Lock,
+    /// **Write the document to every sink opened at boot.**
+    ///
+    /// **To the sinks, and not to a path the user names.** The jail's measured seccomp allowlist has no
+    /// `openat` on a user path, so there is no file dialog; `--export-html out.html` at boot is what
+    /// chooses a destination, and this says *now* rather than *at exit*.
+    Export,
+    /// **Set the zoom to a percentage the row names.**
+    ///
+    /// **A payload on an otherwise empty enum**, because "zoom to 125%" and "zoom to 150%" are the
+    /// same action at different values and listing six variants would make every `match` on `Action`
+    /// six arms longer for no gain.
+    SetZoom(u32),
+    /// **Choose a paragraph style by index**, into [`STYLES`].
+    SetStyle(u8),
+    /// **Colour the text by index into [`COLOURS`].** Part 29.
+    ///
+    /// **An index and not a `u32` colour**, for the same reason [`Action::SetZoom`] carries a
+    /// percentage rather than a pixel value: *"`zoom to 125%` and `zoom to 150%` are the same action at
+    /// different values and listing six variants would make every `match` on `Action` six arms longer
+    /// for no gain."* **And an index into a `const` list rather than a `String` name**, which is
+    /// part 21's correction to `ChromeState::style_name`.
+    SetColour(u8),
+    /// **Choose a font by index**, into [`FONTS`].
+    SetFont(u8),
+    /// **Cut: copy the selection, then delete it.**
+    Cut,
+    /// **Copy the selection into the editor's yank buffer.**
+    Copy,
+    /// **Paste the yank buffer at the caret.**
+    Paste,
+    /// **Arm or disarm bold for the next character typed.**
+    ToggleBold,
+    /// **Arm or disarm italic for the next character typed.**
+    ToggleItalic,
+    /// **Toggle underline over the selection, or arm it at the caret.** `Ctrl+U`.
+    ///
+    /// **The four decoration actions below are one family and the shape is the same for all five**:
+    /// a selection is restyled in place, a bare caret arms the flag, and the toolbar button and the
+    /// menu row reach the same action. `Session::toggle_decoration` is the one implementation.
+    ToggleUnderline,
+    /// **Toggle strikethrough.** `Alt+Shift+5` — the reference's chord, and the one Google Docs uses.
+    ToggleStrike,
+    /// **Toggle superscript.** `Ctrl+.`
+    ToggleSuperscript,
+    /// **Toggle subscript.** `Ctrl+,`
+    ToggleSubscript,
+    /// **Return the selected range, or the caret's paragraph, to the document's default formatting.**
+    /// `Ctrl+\`.
+    ///
+    /// **One action and not a dozen toggles off**, because "clear" is a *state* the user asks for and
+    /// not a sequence of flips: pressing it must work whatever is currently on, and doing it as seven
+    /// calls would be seven undo entries for one gesture.
+    ClearFormatting,
+    /// **Switch to the mode at this index in [`MODES`].** Part 44.
+    SetMode(u8),
+    /// Show the current word/line count in the status notice.
+    WordCount,
+    /// Show the local keyboard shortcut summary.
+    KeyboardShortcuts,
+    /// **Run the toolbar tool named by this row.** Part 44.
+    ///
+    /// **A `Tool` in an `Action`, and the dependency runs the right way.** `holonomy-render` owns
+    /// `Tool` and `Action` and the renderer neither knows nor needs to know what a mode does or what
+    /// `Tool::Bold` toggles -- it draws the row and passes the value through, and the session is
+    /// where `Tool::Bold` becomes a flag. **Without this the overflow menu would need a parallel
+    /// `Action` per tool**, which is a table that has to be kept in step with `TOOLBAR` and is wrong
+    /// the moment a tool is added.
+    SelectTool(crate::widgets::Tool),
+    Find,
+    Replace,
+    ToggleBullets,
+    ToggleNumbering,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    Indent,
+    Outdent,
+    ToggleRibbon,
+    ToggleTheme,
+    ToggleAutosave,
+    ToggleNavigation,
+    InsertPageBreak,
+}
+
+impl Action {
+    /// A short name for a status bar and for a gate's failure message.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Action::Find => "find",
+            Action::Replace => "replace",
+            Action::ToggleBullets => "bullets",
+            Action::ToggleNumbering => "numbering",
+            Action::AlignLeft => "align-left",
+            Action::AlignCenter => "align-center",
+            Action::AlignRight => "align-right",
+            Action::Indent => "indent",
+            Action::Outdent => "outdent",
+            Action::ToggleRibbon => "toggle-ribbon",
+            Action::ToggleTheme => "toggle-theme",
+            Action::ToggleAutosave => "toggle-autosave",
+            Action::ToggleNavigation => "toggle-navigation",
+            Action::InsertPageBreak => "insert-page-break",
+            Action::Undo => "undo",
+            Action::Redo => "redo",
+            Action::SelectAll => "select-all",
+            Action::DocumentStart => "document-start",
+            Action::DocumentEnd => "document-end",
+            Action::New => "new-document",
+            Action::NewSample => "new-sample",
+            Action::Home => "document-home",
+            Action::Open => "open",
+            Action::Import => "import",
+            Action::Save => "save",
+            Action::InsertTable => "insert-table",
+            Action::InsertImage => "insert-image",
+            Action::InsertMath => "insert-math",
+            Action::Close => "close",
+            Action::Rename => "rename",
+            Action::Delete => "delete",
+            Action::Lock => "lock",
+            Action::Export => "export",
+            Action::Cut => "cut",
+            Action::Copy => "copy",
+            Action::Paste => "paste",
+            Action::SetZoom(_) => "set-zoom",
+            Action::SetStyle(_) => "set-style",
+            Action::SetFont(_) => "set-font",
+            Action::SetColour(_) => "set-colour",
+            Action::ToggleBold => "toggle-bold",
+            Action::ToggleItalic => "toggle-italic",
+            Action::ToggleUnderline => "toggle-underline",
+            Action::ToggleStrike => "toggle-strike",
+            Action::ToggleSuperscript => "toggle-superscript",
+            Action::ToggleSubscript => "toggle-subscript",
+            Action::ClearFormatting => "clear-formatting",
+            Action::SetMode(_) => "set-mode",
+            // **One name for both tools, and not `format!("select-tool-{}", ..)`.** `name` is a
+            // `const fn` answering `&'static str`, so it cannot format. **The tool's own name is
+            // already on the row** -- `Item::label` is `tool.name()` -- so a gate that wants to know
+            // which row it is holding already has it, and a slug that repeated it would be a second
+            // spelling to keep in step.
+            Action::WordCount => "word-count",
+            Action::KeyboardShortcuts => "keyboard-shortcuts",
+            Action::SelectTool(_) => "select-tool",
+        }
+    }
+}
+
+/// One menu item.
+///
+/// **`accelerator` is a rendered string, not a keybinding.** A real one would be a `Vec<Key>` parsed
+/// from the same table the keymap uses; this one is the text the reference shows, and it is `None`
+/// where the reference shows nothing. **Keeping it a string is honest about that** — a fake keybinding
+/// that looked real would be the kind of thing that survives into a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Item {
+    /// The item's text.
+    pub label: &'static str,
+    /// Its leading icon, if the reference draws one.
+    pub icon: Option<IconId>,
+    /// The right-hand accelerator text.
+    pub accelerator: Option<&'static str>,
+    /// Whether it opens a submenu.
+    pub submenu: bool,
+    /// **What it is.**
+    ///
+    /// **Every row in [`MENUS`] now carries one, so `None` is a state no shipped row is in** — this was
+    /// `None` for most of them for most of the project's life, and the field stays an `Option` because
+    /// *"this row is deliberately inert"* is still a legitimate thing for a future row to be. What is
+    /// not legitimate is a row that is inert by *accident*, which is why `tests/actions.rs` asserts the
+    /// unwired count rather than trusting this comment.
+    pub action: Option<Action>,
+    /// Whether this row shows a tick.
+    ///
+    /// **A flag on the item rather than a set of chosen indices in the popup**, because a tick is a
+    /// property of the *row* — a row that is not chosen cannot be drawn with a tick, and a second
+    /// parallel list of indices would be a second thing to keep in step with the rows.
+    pub checked: bool,
+}
+
+/// Build an item with no icon, no accelerator and no action.
+#[allow(dead_code)]
+const fn plain(label: &'static str) -> Item {
+    Item {
+        label,
+        icon: None,
+        accelerator: None,
+        submenu: false,
+        action: None,
+        checked: false,
+    }
+}
+
+/// Build an item with an action and nothing else.
+///
+/// **The one constructor most new menu items will use**, because part 21 is the point: a row that
+/// means something says so in the row, not in a `match` on its own name somewhere else.
+const fn act(label: &'static str, action: Action) -> Item {
+    Item {
+        label,
+        icon: None,
+        accelerator: None,
+        submenu: false,
+        action: Some(action),
+        checked: false,
+    }
+}
+
+/// Build an item with an action *and* a tick, for a chosen value in a dropdown.
+///
+/// **`checked` defaults to false**, because a row is *chosen* by the session comparing it to the
+/// current value, not by the item declaring itself chosen. **A dropdown that marks the current value
+/// is a dropdown whose current value lives in one place**, and `Tool::items` is that place.
+const fn chosen(label: &'static str, action: Action, checked: bool) -> Item {
+    Item {
+        label,
+        icon: None,
+        accelerator: None,
+        submenu: false,
+        action: Some(action),
+        checked,
+    }
+}
+
+/// Build an item with an icon.
+///
+/// **Unused as of part 19, and kept deliberately.** Every item that has a picture in the reference
+/// *also* opens a submenu, so it is built by [`sub`] instead. The constructor exists because the
+/// "icon but no chevron" item is a real thing -- a toolbar action inside a menu -- and when one is
+/// added it should be added by removing this `#[allow]`, not by hand-writing the struct literal a
+/// third time. **A dead constructor with a reason beats a struct literal at each new site.**
+#[allow(dead_code)]
+const fn icon(label: &'static str, icon: IconId) -> Item {
+    Item {
+        label,
+        icon: Some(icon),
+        accelerator: None,
+        submenu: false,
+        action: None,
+        checked: false,
+    }
+}
+
+/// Build an item with a right-pointing chevron, i.e. one that opens a submenu.
+///
+/// **`submenu` is set rather than left false**, because a chevron with no submenu is the reference's
+/// single most confusing affordance and there is no way to tell from the picture alone.
+const fn sub(label: &'static str, icon: IconId) -> Item {
+    Item {
+        label,
+        icon: Some(icon),
+        accelerator: None,
+        submenu: true,
+        action: None,
+        checked: false,
+    }
+}
+
+/// Build an item with an accelerator.
+#[allow(dead_code)]
+const fn accel(label: &'static str, acc: &'static str) -> Item {
+    Item {
+        label,
+        icon: None,
+        accelerator: Some(acc),
+        submenu: false,
+        action: None,
+        checked: false,
+    }
+}
+
+/// Every heading's items, indexed the same way as [`MENUS`](crate::chrome::MENUS).
+///
+/// **The lengths are asserted against `MENUS` by the gate.** Two `const` arrays that must agree is a
+/// place a rename can silently break, and the failure would be `index out of bounds` at paint time
+/// rather than a compile error — which is why [`items_for`] takes a `usize` and returns an empty slice
+/// rather than indexing.
+// Menu cleanup: rows that named cloud/add-on/voice/translation features are removed rather than
+// drawn as inert affordances. The sealed product has no network, add-on runtime, or spell service.
+const FILE: &[Item] = &[
+    act("Documents", Action::Home),
+    act("New", Action::New),
+    act("New sample", Action::NewSample),
+    act("Open", Action::Open),
+    act("Import", Action::Import),
+    Item {
+        accelerator: Some("Ctrl+S"),
+        ..act("Save", Action::Save)
+    },
+    act("Export", Action::Export),
+    act("Close", Action::Close),
+    act("Rename", Action::Rename),
+    act("Delete…", Action::Delete),
+    act("Lock", Action::Lock),
+];
+
+const EDIT: &[Item] = &[
+    Item {
+        accelerator: Some("Ctrl+Z"),
+        ..act("Undo", Action::Undo)
+    },
+    Item {
+        accelerator: Some("Ctrl+Y"),
+        ..act("Redo", Action::Redo)
+    },
+    Item {
+        accelerator: Some("Ctrl+X"),
+        ..act("Cut", Action::Cut)
+    },
+    Item {
+        accelerator: Some("Ctrl+C"),
+        ..act("Copy", Action::Copy)
+    },
+    Item {
+        accelerator: Some("Ctrl+V"),
+        ..act("Paste", Action::Paste)
+    },
+    act("Select all", Action::SelectAll),
+];
+
+/// **VIEW, and it was two dead submenus.**
+///
+/// It read `[sub("Mode", ..), sub("Zoom", ..)]` — two rows with a right-hand chevron, `submenu: true`,
+/// and `action: None`. **Nothing in the program can open a submenu**: there is one popup, `state.open`
+/// is an `Option<Open>`, and `Open` names a menu heading or a toolbar tool. So both rows were inert,
+/// and worse than inert: **the chevron says "there is more behind this", which is a promise the client
+/// cannot keep.** Clicking them closed the menu and did nothing.
+///
+/// **Replaced by rows that do what they say**, one per thing a View menu is for in this program —
+/// there is no other zoom or mode surface, and the accelerators are the ones the rest of the chrome
+/// already uses (`Ctrl+0` and `Ctrl+1` are not claimed elsewhere).
+///
+/// **Only the zoom levels that exist.** `ZOOMS` has two entries and the pair of rows below is one per
+/// entry rather than a hand-written 100/125: a level added to `ZOOMS` is a level the menu can reach,
+/// and a level removed from it cannot be offered here.
+///
+/// **A `const` builder rather than a loop**, because `VIEW` is a `&'static [Item]` and a computed list
+/// would have to be a `const fn` walk anyway. The two zoom rows are written against `ZOOMS`'s two
+/// entries, so a level added to that list is a level this menu can reach.
+///
+/// **No accelerators, and that is deliberate.** The keymap binds `Ctrl+0` and `Ctrl+1` to nothing, and
+/// `Ctrl+M` is Insert Math (`keymap.rs`, the `KEY_M` arm). An accelerator is a label that claims a key
+/// works; **printing one for an unbound key is the same lie the chevrons were telling**, and it is a
+/// worse one because the user will try it and conclude the program is broken rather than the menu.
+/// Every accelerator in this file is checked against `keymap.rs` for the same reason.
+const VIEW: &[Item] = &[
+    chosen("Zoom 100%", Action::SetZoom(ZOOMS[0].1), false),
+    chosen("Zoom 125%", Action::SetZoom(ZOOMS[1].1), false),
+    act("Editing mode", Action::SetMode(0)),
+    act("Viewing mode", Action::SetMode(1)),
+];
+
+const INSERT: &[Item] = &[
+    Item {
+        action: Some(Action::InsertImage),
+        ..sub("Image", IconId::Image)
+    },
+    Item {
+        action: Some(Action::InsertTable),
+        ..sub("Table", IconId::Table)
+    },
+    act("Equation", Action::InsertMath),
+];
+
+/// **FORMAT, and as of the typography pass it is the reference's Text menu.**
+///
+/// | row | chord | what it does |
+/// |---|---|---|
+/// | Bold | `Ctrl+B` | `STYLE_BOLD` |
+/// | Italic | `Ctrl+I` | `STYLE_ITALIC` |
+/// | Underline | `Ctrl+U` | `STYLE_UNDERLINE`, drawn as a rule by the painter |
+/// | Strikethrough | `Alt+Shift+5` | `STYLE_STRIKE` |
+/// | Superscript | `Ctrl+.` | `STYLE_SUPERSCRIPT`, a raised baseline |
+/// | Subscript | `Ctrl+,` | `STYLE_SUBSCRIPT`, a lowered one |
+/// | Clear formatting | `Ctrl+\` | every bit back to zero |
+///
+/// **`Ctrl+I` for italic**, matching Google Docs. The accelerator column says what the program
+/// actually binds rather than what the reference does.
+///
+/// **Every chord here is bound in `keymap.rs`**, which is the rule this file has always followed: an
+/// accelerator printed beside a row that does nothing is the kind of lie a menu is best at. The four
+/// new ones are `Alt+Shift+5`, `Ctrl+.`, `Ctrl+,` and `Ctrl+\` — none of which collided with anything,
+/// and all of which are the chords WordCraft and Google Docs both use.
+const FORMAT: &[Item] = &[
+    Item {
+        accelerator: Some("Ctrl+B"),
+        ..act("Bold", Action::ToggleBold)
+    },
+    Item {
+        accelerator: Some("Ctrl+I"),
+        ..act("Italic", Action::ToggleItalic)
+    },
+    Item {
+        accelerator: Some("Ctrl+U"),
+        ..act("Underline", Action::ToggleUnderline)
+    },
+    Item {
+        accelerator: Some("Alt+Shift+5"),
+        ..act("Strikethrough", Action::ToggleStrike)
+    },
+    Item {
+        accelerator: Some("Ctrl+."),
+        ..act("Superscript", Action::ToggleSuperscript)
+    },
+    Item {
+        accelerator: Some("Ctrl+,"),
+        ..act("Subscript", Action::ToggleSubscript)
+    },
+    Item {
+        accelerator: Some("Ctrl+\\"),
+        ..act("Clear formatting", Action::ClearFormatting)
+    },
+];
+
+const TOOLS: &[Item] = &[Item {
+    accelerator: Some("Ctrl+Shift+G"),
+    ..act("Word count", Action::WordCount)
+}];
+
+const TABLE: &[Item] = &[act("Insert table", Action::InsertTable)];
+
+const HELP: &[Item] = &[act("Keyboard shortcuts", Action::KeyboardShortcuts)];
+
+/// Every menu, in [`MENUS`](crate::chrome::MENUS) order.
+pub const MENUS: &[&[Item]] = &[FILE, EDIT, VIEW, INSERT, FORMAT, TOOLS, TABLE, HELP];
+
+/// The items for heading `index`, or an empty slice.
+///
+/// **A slice rather than a `Result` or a panic**, because a heading index out of range is a paint-time
+/// mistake in a caller, not a condition a user can reach: `open_menu` is set from `hit`, which only
+/// ever returns an index that came from `menu_boxes`. **Returning empty makes the mistake a blank
+/// popup rather than a crash on the paint path**, which is the right way round: a crash inside a paint
+/// takes the session with it.
+#[must_use]
+pub fn items_for(index: usize) -> &'static [Item] {
+    MENUS.get(index).copied().unwrap_or(&[])
+}
+
+/// The paragraph styles the style dropdown offers, in the order it shows them.
+///
+/// **`&'static [&'static str]` rather than a `Vec`, so `ChromeState::style_name` is a borrow rather
+/// than an allocation.** Part 19 stored `style_name: String` and formatted a `String` for the toolbar
+/// on *every paint*; an index into this list is a `u8` in the state and a borrow at the point of use.
+/// See `ChromeState::style_name`.
+pub const STYLES: &[&str] = &[
+    "Normal",
+    "Heading 1",
+    "Quote",
+    "Title",
+    "Subtitle",
+    "Heading 2",
+];
+
+/// The fonts the font dropdown offers, in the order it shows them.
+///
+/// **Every entry is a family the atlas actually packs, and choosing one changes the page.** This
+/// list used to carry five names of which four were never loaded — the dropdown was scenery, and
+/// `Action::SetFont` recorded an index that moved nothing. A control that looks like Google Docs'
+/// font menu and does nothing is worse than a shorter menu that works, so the list is now exactly
+/// the two body-capable families in the payload: Inter (regular, bold and italic faces) and
+/// JetBrains Mono (regular). The session's `doc_style` is where the index becomes a face, and its
+/// `SetFont` arm repaints the page when the face changes.
+///
+/// **Growing this list is an atlas question, not a list question.** A new family means a new face
+/// in the payload (`tools/build_font_payload.py`), a new row in the metric tables, and binary-size
+/// budget — which is why the four decorative names were removed rather than wired.
+pub const FONTS: &[&str] = &["Inter", "JetBrains Mono"];
+
+/// The row of [`FONTS`] that selects JetBrains Mono, the one alternative body face.
+///
+/// **A named constant because two places must agree on it**: `dropdown_items` builds the row from
+/// the list's order, and the session's `doc_style` maps the chosen index to the Monospace atlas
+/// face. A bare `1` in the session would be a second spelling of this list's order, wrong the day
+/// a family is inserted above it.
+pub const MONO_FONT_INDEX: usize = 1;
+
+/// The zoom levels the zoom dropdown offers: **a label and a value together**.
+///
+/// **The pair is the point.** The first version had `ZOOMS: &[u16]` and formatted `"{}%"` at the
+/// point of use — which meant the *row's text* was computed while the *row's meaning* came from a
+/// different array, and the two could be out of step. Here one entry carries both, so "125" and
+/// "125%" cannot disagree, and there is no formatting on the paint path at all.
+///
+/// **`&'static str` labels rather than a `String`,** which is why `Item::label` can stay
+/// `&'static str` and every menu can stay a `const`. A zoom dropdown with a fixed list has fixed
+/// labels; a dropdown whose labels were computed would need an owned `Item`, and that is a much
+/// larger change for no gain.
+///
+/// **CORRECTION, part 23: `u32` and not the `u16` part 21 chose.** Part 21's note argued that `u16` is
+/// "the smallest honest width for a percentage with a thousands' digit" — which is true, and beside
+/// the point. **`ChromeState::zoom_percent` is a `u32` and `--zoom` is a `u32`**, so `u16` was the third
+/// spelling of one concept, and it cost a real conversion: part 23 made `set_zoom` public so the
+/// `--zoom` sites could reach it, and the compiler rejected `set_zoom(args.zoom)` because the types
+/// disagreed. **A width chosen for economy and then paid for at every boundary is not a saving.**
+///
+/// # CORRECTION, part 43: five rows became two, and the reason is an atlas ceiling
+///
+/// **The list was 50 / 75 / 100 / 125 / 150 and every one of them did nothing to the pixels.**
+/// `Painter` already had a `size_index` and an `atlas_size()` that reads `atlas.sizes()[index]` --
+/// **the machinery was built and unused** -- and the thing missing was a second size in the atlas.
+///
+/// **There is room for exactly two.** `AtlasBuilder::new` refuses a third:
+///
+/// ```text
+/// 3 sizes requested, but the atlas geometry is budgeted for at most 2: each extra size adds
+/// 14,080 bytes of metric table, which would push the atlas-plus-table pair over the 512 KiB ceiling
+/// ```
+///
+/// **and that ceiling is the PRD's, not this crate's.** Measured: `[16]` uses 236,690 of 458,752;
+/// `[16, 20]` uses 378,850; a third does not fit. **So the honest dropdown has the rows the atlas
+/// can back**, and 125 % is the second one -- 20 ppem against 16 is exactly 125 %.
+///
+/// **Two rows where the reference has five is a visible deviation and it is the right one.** Five
+/// rows of which three change nothing is the reference's lie reproduced; two rows that both change
+/// the pixels is a control that works. `a_zoom_row_that_is_not_in_the_table_is_refused` is the gate
+/// that says what happens to a percentage outside the table.
+pub const ZOOMS: &[(&str, u32)] = &[("100%", 100), ("125%", 125)];
+
+/// **The text colours the toolbar offers, and the values [`SpanMap::style_range`] takes.**
+///
+/// ## Why a `const` list and not a table in the renderer
+///
+/// **Part 21's reason, unchanged.** The chrome needs the index to tick the current choice and the
+/// label to draw it; the session needs the index to apply it and the value to write into the span.
+/// **One list, two readers, and an index that cannot disagree with a name** — which is what part 21
+/// got wrong when `ChromeState` carried a `style_name: String`.
+///
+/// ## Why six
+///
+/// **Six is what a swatch grid fits in one column without scrolling, and one is not enough to be a
+/// choice.** The full palette of a word processor is a grid of dozens; this is a dropdown, so it is a
+/// list, and a list of dozens is a scrollbar -- which this popup does not have. **Six is a number
+/// chosen for the popup, and `COLOURS` is where to change it.**
+///
+/// ## Why `0x00RRGGBB` and not `0xAARRGGBB`
+///
+/// **Because that is what the span field is.** `TextIntervalSpan::color_rgb`'s doc says so, and the
+/// `|` of an alpha byte happens in exactly one function -- `Session::span_ink` -- rather than being
+/// something each reader has to remember.
+pub const COLOURS: &[(&str, u32)] = &[
+    ("Crimson", 0x00D1_2B45),
+    // **`0x008C_C8C0` and not `0x00B0_4A8A`, which this said "Teal" for two days.** `0xB0_4A_8A` has
+    // *red* as its largest channel: it is a mauve. **A colour whose name is wrong is a colour nobody
+    // can find**, and the palette is the only place the user sees these values, so it is worth being
+    // right. The gate's own hue test found it -- it counted zero teal pixels next to a palette entry
+    // named teal, and the second entry's value was the reason.
+    ("Teal", 0x008C_C8C0),
+    ("Forest", 0x00B0_4A3C),
+    // **`AA_RR_GG_BB` in groups of two, like every other colour in the project.** These three were
+    // written `00C0 | 7A | 1E`, which is the same number and a different shape.
+    ("Amber", 0x00_C0_7A_1E),
+    ("Violet", 0x00_75_4A_C0),
+    ("Slate", 0x00_5A_5A_66),
+    ("Default", 0),
+];
+
+/// The item at `(menu, row)`, if there is one.
+///
+/// **The hit-test entry point**, and the counterpart of `items_for`: the popup's rows are numbered from
+/// the same list the popup was drawn from, so a row that was drawn is a row that can be hit.
+#[must_use]
+pub fn item_at(menu: usize, row: usize) -> Option<&'static Item> {
+    items_for(menu).get(row)
+}
+
+/// The dropdown a labelled toolbar control opens, or `None` for one that opens nothing.
+///
+/// **A `Vec`, because the rows depend on `state`.** The zoom dropdown ticks the current level and the
+/// style dropdown ticks the current style, so its rows are a function of what is current — which
+/// makes them data, not constants. **One allocation per paint, and only while a dropdown is open**,
+/// which is the same trade `widgets::popup`'s rows already make and for the same reason: a closed
+/// dropdown draws nothing.
+///
+/// **No label is ever formatted.** Every row's text is a `&'static str`, so the only thing this
+/// allocates is the `Vec` itself — one, for the rows — and part 19's three-per-paint `String`s are
+/// gone with the `style_name` and `font_name` fields this made possible to delete.
+pub fn dropdown_items(tool: crate::widgets::Tool, state: &crate::chrome::ChromeState) -> Vec<Item> {
+    use crate::widgets::Tool;
+    match tool {
+        Tool::Zoom => ZOOMS
+            .iter()
+            .map(|&(label, z)| chosen(label, Action::SetZoom(z), z == state.zoom_percent))
+            .collect(),
+        Tool::Style => STYLES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| chosen(name, Action::SetStyle(i as u8), i == state.style_index))
+            .collect(),
+        Tool::Font => FONTS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| chosen(name, Action::SetFont(i as u8), i == state.font_index))
+            .collect(),
+        // **Part 29.** The fourth dropdown, and the first one whose rows carry a value the *document*
+        // holds rather than a value the *chrome* holds -- which is the difference between a tick that
+        // means "this is the current font" and one that means "this is the colour you last chose".
+        Tool::TextColour => COLOURS
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| chosen(name, Action::SetColour(i as u8), i == state.colour_index))
+            .collect(),
+        // **Part 44: `Mode` is a real dropdown, and both of its rows are real.** `MODES` is one row
+        // per mode the session can actually be in; see `ViewMode`.
+        Tool::Mode => MODES
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| {
+                chosen(
+                    label,
+                    Action::SetMode(i as u8),
+                    i == usize::from(state.mode_index),
+                )
+            })
+            .collect(),
+        // **Part 44: `Overflow` lists the tools that did not fit.** The rows carry the tool's *name*
+        // and `Action::SelectTool` is what runs one -- a different shape from `Action::SetZoom`, which
+        // is a statement about the chrome's own state.
+        Tool::Overflow => state
+            .overflow_tools
+            .iter()
+            .map(|&tool| Item {
+                label: tool.name(),
+                icon: tool.icon(),
+                accelerator: None,
+                submenu: false,
+                action: Some(Action::SelectTool(tool)),
+                checked: false,
+            })
+            .collect(),
+        // **Every other tool opens nothing**, and `None` rather than an empty `Vec` so the caller can
+        // tell "no dropdown" from "a dropdown with no rows" — which is the difference between a
+        // button that does nothing and a button that is broken.
+        _ => Vec::new(),
+    }
+}
+
+/// The modes the mode switcher offers, and what each one means.
+///
+/// **Three, and all are real.** `Editing` is the ordinary mode; `Viewing` is read-only — every mutator
+/// is refused and the caret still moves; `Suggesting` lets the user type and delete but records each
+/// change as a suggestion (green insertions, strikethrough deletions) rather than committing it
+/// directly. The renderer only needs names and ticks; the session decides what each mode does.
+pub const MODES: &[(&str, ViewMode)] = &[
+    ("Editing", ViewMode::Editing),
+    ("Suggesting", ViewMode::Suggesting),
+    ("Viewing", ViewMode::Viewing),
+];
+
+/// What a mode is, as far as the renderer is concerned.
+///
+/// **A copy of the session's vocabulary and not the session's type**, for the same reason `Action`
+/// is: `holonomy-render` must not depend on `holonomy`, and the renderer only needs to put a name
+/// and a tick on a row. **The session is the only thing that decides what a mode *does*.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Type, delete, format — changes commit directly to the document.
+    Editing,
+    /// Type and delete, but every change is recorded as a suggestion: green insertions,
+    /// strikethrough deletions, with margin accept/reject cards.
+    Suggesting,
+    /// Move the caret, select, scroll. **Refuse every edit.**
+    Viewing,
+}

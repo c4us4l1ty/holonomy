@@ -1,0 +1,1542 @@
+//! The connection: the socket, the handshake, the request queue, and the event stream.
+//!
+//! # One socket, two directions, and why reads are non-blocking
+//!
+//! The window's socket carries requests out and events in, and the two must not deadlock. If a read
+//! blocked while the server was busy writing events, the client would stop consuming them and the
+//! server's 256-deep event queue would fill, at which point the *server* blocks and stops answering
+//! the requests we are waiting on. So after the handshake the socket is non-blocking and reads go
+//! through [`libc::poll`] with a deadline, and every wait has a bound.
+//!
+//! # Errors are events, not failures
+//!
+//! An X11 error names one bad request; the connection stays usable. Treating the first one as fatal
+//! would turn a wrong argument into a destroyed window, so they are collected and the caller decides.
+//! [`Conn::take_error`] pops the oldest. Nothing here panics on a protocol error.
+//!
+//! # The request ceiling is enforced, not assumed
+//!
+//! Without `BIG-REQUESTS` a request may be at most `maximum-request-length` words (262,140 bytes on
+//! every server that does not advertise the extension). [`Conn::request`] refuses an over-long request
+//! instead of letting the server truncate it -- a truncated request is a *desynchronised* stream, the
+//! worst failure this crate has, so it is checked where it can be seen.
+//!
+//! [`crate::window::Window::put_image`] is the caller that matters: it splits a frame along scanlines
+//! to stay under the ceiling, which is why a 1280x800 frame can be pushed without `BIG-REQUESTS`.
+
+use std::collections::VecDeque;
+use std::fmt;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixStream};
+use std::time::{Duration, Instant};
+
+use crate::auth::{self, AuthError};
+use crate::proto::{self, op, Event, ProtocolError, Rdr, Req, MAX_REQUEST_BYTES};
+
+/// How long the connection waits for the setup reply before giving up.
+///
+/// The server answers a setup request from its accept path, so a correct one replies in under a
+/// millisecond. Five seconds is not a latency budget; it is the point at which the display is not
+/// there at all and a hang is worse than an error.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the client waits for the server's post-setup greeting before deciding there was none.
+const GREETING_WINDOW: Duration = Duration::from_millis(60);
+
+/// How many bytes of the greeting are kept for diagnostics.
+const GREETING_KEEP: usize = 8;
+
+/// The first byte of the post-setup greeting, and the length of the whole thing.
+const GREETING_BYTE: u8 = 0xFF;
+const GREETING_LEN: usize = 8;
+
+/// Where a reply's own fields start: 1 for the reply marker, 1 for the second byte, 2 for the sequence
+/// number, 4 for the extra-data length.
+///
+/// **Every reply parser in this crate starts here.** Reading one of these layouts from offset 0 gives
+/// answers that look plausible: `QueryExtension`'s `present` reads the reply marker (always 1, so every
+/// extension looks present) and its `major-opcode` reads the `unused` byte (always 0, so no extension
+/// can be used). Measured: `query_extension("XTEST")` reported `present = true, major = 0`, and the
+/// `first-event` it reported was the low byte of the sequence number.
+const REPLY_FIELDS: usize = 8;
+
+/// The most extra data a reply may carry, in bytes.
+///
+/// **A budget on the server's own word, because that word is the server's.** A reply's length field is
+/// a CARD32 in four-byte units, so it reaches sixteen gigabytes, and `read_packet` would size its
+/// buffer to it before reading a byte of it -- an allocator abort on an argument the caller handed
+/// over.
+///
+/// **Sized against the calls this crate makes.** The largest reply is `GetImage` of a rectangle the
+/// crate read back, which [`crate::window`](crate::window)'s own
+/// [`window::IMAGE_BUDGET_BYTES`](crate::window) bounds at 64 MiB for the same reason, plus
+/// `GetKeyboardMapping`, whose keysym table is under 8 KiB on this host. 64 MiB covers both and is
+/// two hundred and sixty thousand times below what the field alone would ask for. Anything above it
+/// is a server this client cannot talk to, and saying so is cheaper than an abort.
+const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Whether to log every request and every packet to stderr, set with `HOLONOMY_X11_TRACE=1`.
+///
+/// This exists because a protocol client that is wrong is wrong *quietly*: a mistimed sequence number
+/// or a field in the wrong byte produces a server that answers with something else, and the only way
+/// to tell "the server is slow" from "my request was malformed" is to see both sides. Every bug in
+/// this crate's first live run was found by reading this trace, and none of them would have been
+/// visible from the API alone.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("HOLONOMY_X11_TRACE").as_deref() == Ok("1"))
+}
+
+/// A request as hex, for the trace.
+///
+/// Not an API. A hand-written protocol client's errors are almost always a field in the wrong byte,
+/// and "the server said `BadValue`" does not say which field -- the hex does. This is the third bug in
+/// this crate that only the hex made visible: a value mask written into the `pad2` after it, a value
+/// list with a fourth value and no fourth mask bit, and a request whose length was one word short.
+#[cfg_attr(not(test), allow(dead_code))]
+fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i % 16 == 0 && i != 0 {
+            out.push('\n');
+            out.push_str("       ");
+        }
+        out.push_str(&format!("{b:02x} "));
+    }
+    out.trim_end().to_string()
+}
+
+/// A pixmap format the server supports, from the handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Format {
+    /// Bits of colour per pixel.
+    pub depth: u8,
+    /// Bits per pixel in memory.
+    pub bits_per_pixel: u8,
+    /// Scanline padding, in bits.
+    pub scanline_pad: u8,
+}
+
+/// What the server said about itself in the handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    /// The server's `vendor` string. Xwayland reports `The X.Org Foundation`.
+    pub vendor: String,
+    /// Protocol release number.
+    pub release: u32,
+    /// The first resource id this client may use.
+    pub resource_id_base: u32,
+    /// A mask over the client's resource id range.
+    pub resource_id_mask: u32,
+    /// The longest request, in 4-byte words.
+    pub max_request_words: u32,
+    /// The root window of the first screen.
+    pub root: u32,
+    /// The root's depth.
+    pub root_depth: u8,
+    /// The root's visual.
+    pub root_visual: u32,
+    /// The root's `white-pixel`, which on a compositor's root window is usually 0.
+    pub white_pixel: u32,
+    /// The root's `black-pixel`.
+    pub black_pixel: u32,
+    /// The root window's width in pixels.
+    pub root_width: u16,
+    /// The root window's height in pixels.
+    pub root_height: u16,
+    /// The lowest keycode the keyboard mapping covers.
+    pub min_keycode: u8,
+    /// The highest keycode the keyboard mapping covers.
+    pub max_keycode: u8,
+    /// `LSBFirst` (0) or `MSBFirst` (1). Everything this crate writes is little-endian, so a server
+    /// reporting `MSBFirst` is a server this client cannot talk to and [`Conn::connect`] refuses it.
+    pub image_byte_order: u8,
+    /// The pixmap formats the server supports.
+    pub formats: Vec<Format>,
+}
+
+impl Setup {
+    /// The format for `depth` at `bpp` bits per pixel, if the server has one.
+    pub fn format(&self, depth: u8, bpp: u8) -> Option<Format> {
+        self.formats
+            .iter()
+            .copied()
+            .find(|f| f.depth == depth && f.bits_per_pixel == bpp)
+    }
+}
+
+/// Why a connection could not be made, or could not be kept.
+#[derive(Debug)]
+pub enum ConnError {
+    /// The socket could not be opened at either the filesystem or the abstract path.
+    Socket {
+        /// The display that was asked for.
+        display: u32,
+        /// The filesystem path tried.
+        path: String,
+        /// The `errno` from the last attempt.
+        errno: i32,
+    },
+    /// No usable cookie.
+    Auth(AuthError),
+    /// The server refused the connection outright.
+    Refused {
+        /// The reason string, without its trailing NUL.
+        reason: String,
+    },
+    /// The handshake said something this client cannot use.
+    Unsupported(String),
+    /// A request was longer than the server accepts.
+    TooLarge {
+        /// The request's byte length.
+        request: usize,
+        /// The server's ceiling.
+        limit: usize,
+    },
+    /// The server rejected the request this reply was meant for.
+    Protocol(ProtocolError),
+    /// A read or write failed.
+    Io(std::io::Error),
+    /// A wait ran out with no data.
+    TimedOut {
+        /// What was being waited for.
+        what: &'static str,
+    },
+}
+
+impl fmt::Display for ConnError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket {
+                display,
+                path,
+                errno,
+            } => write!(
+                f,
+                "cannot reach display :{display}: neither {path} nor its abstract socket exists \
+                 (errno {errno}) -- is XWAYLAND running and is DISPLAY set?"
+            ),
+            Self::Auth(e) => write!(f, "{e}"),
+            Self::Refused { reason } => {
+                write!(f, "the X server refused the connection: {reason}")
+            }
+            Self::Unsupported(s) => write!(f, "unsupported X server: {s}"),
+            Self::TooLarge { request, limit } => write!(
+                f,
+                "a {request}-byte request exceeds the server's {limit}-byte limit"
+            ),
+            Self::Protocol(e) => write!(f, "{e}"),
+            Self::Io(e) => write!(f, "the X connection failed: {e}"),
+            Self::TimedOut { what } => write!(f, "timed out waiting for {what}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnError {}
+
+impl From<std::io::Error> for ConnError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<AuthError> for ConnError {
+    fn from(e: AuthError) -> Self {
+        Self::Auth(e)
+    }
+}
+
+/// One packet off the wire.
+#[derive(Debug)]
+enum Packet {
+    /// A reply, already-stripped of its 32-byte header's type field but keeping the extra data.
+    Reply {
+        /// The low 16 bits of the request's sequence number.
+        sequence: u16,
+        /// Everything after the 8-byte header: 24 bytes of reply body plus the extra.
+        body: Vec<u8>,
+    },
+    /// A protocol error, which is not fatal.
+    Error(ProtocolError),
+    /// An event.
+    Event(Event),
+}
+
+/// A live connection to an X server.
+#[derive(Debug)]
+pub struct Conn {
+    stream: UnixStream,
+    setup: Setup,
+    /// Sequence number of the next request.
+    seq: u16,
+    /// The next resource id to hand out.
+    next_id: u32,
+    /// Requests queued but not yet written.
+    out: Vec<u8>,
+    /// Bytes read from the socket and not yet consumed.
+    rbuf: Vec<u8>,
+    /// How much of `rbuf` has been consumed.
+    rstart: usize,
+    events: VecDeque<Event>,
+    errors: VecDeque<ProtocolError>,
+    /// The display this connection is to, for `describe`-style messages.
+    display: u32,
+    /// Bytes the server sent after the setup reply that no request asked for. See
+    /// [`Conn::drain_greeting`].
+    greeting: Option<(usize, [u8; GREETING_KEEP])>,
+    /// How many post-setup greetings have been discarded, including the one at connect.
+    greetings: u32,
+    /// **Requests sent, counted in [`Conn::request`] — every path through this crate.**
+    ///
+    /// **Added 2026-10-12 to make one property falsifiable.** `Desktop::resize` used to answer a
+    /// `ConfigureNotify` from the window manager by sending a `ConfigureWindow` back, and the user
+    /// saw a window that grew while its content stayed put and the new area went black. **Nothing
+    /// observable at the window named the request that caused it**: the symptom is a loop between two
+    /// peers, and the two other instruments — `GetGeometry` and the frame's own size — both agree with
+    /// the *client's* view and disagree with the *window's*.
+    ///
+    /// **So the counter is at the lowest level, where any reintroduction of the request must show
+    /// up.** A gate that counts a higher-level call would count whatever that call site still is,
+    /// which is exactly what happened when the gate was first written: it incremented a field in
+    /// `Desktop` that the fix had removed the only writer of, and passed vacuously.
+    requests: u64,
+    /// Bytes still owed for the packet at the front of the read buffer.
+    ///
+    /// A short read is normal -- a socket delivers what it delivers -- and it must not be mistaken for
+    /// "nothing to read", or the event loop spins. Measured: a packet that never completed made every
+    /// `next_event` return immediately, and the developer window looped as fast as it could, painting a
+    /// caret blink on every pass: 420,000 requests in twenty seconds.
+    pending: usize,
+}
+
+impl Conn {
+    /// Connect to `display` (`$DISPLAY` if `None`) and read the handshake.
+    ///
+    /// Both socket spellings are tried, in this order: `/tmp/.X11-unix/X<n>`, then the abstract
+    /// namespace socket of the same name. The second is not a fallback for exotic setups -- it is what
+    /// this host needs. Measured here: `/tmp/.X11-unix/X0` does not exist in this mount namespace at
+    /// all (`ls` returns ENOENT) while `ss` shows `@/tmp/.X11-unix/X0` listening, and libX11 opens the
+    /// display anyway because it tries the abstract socket too. A client that only tries the
+    /// filesystem path fails on this machine, which is the whole reason both are here.
+    pub fn connect(display: Option<&str>) -> Result<Self, ConnError> {
+        let spec = display
+            .map(str::to_string)
+            .or_else(|| std::env::var("DISPLAY").ok())
+            .unwrap_or_else(|| ":0".to_string());
+        let number = crate::display_number(&spec).ok_or_else(|| {
+            ConnError::Unsupported(format!(
+                "DISPLAY={spec:?} names a host, and this client speaks only a local unix socket"
+            ))
+        })?;
+
+        let path = format!("/tmp/.X11-unix/X{number}");
+        let mut stream = Self::open_socket(number, &path)?;
+        stream
+            .set_read_timeout(Some(SETUP_TIMEOUT))
+            .map_err(ConnError::Io)?;
+        stream
+            .set_write_timeout(Some(SETUP_TIMEOUT))
+            .map_err(ConnError::Io)?;
+
+        let cookie = match auth::default_path() {
+            Some(p) => auth::cookie_for(&p, number)?,
+            None => {
+                return Err(ConnError::Auth(AuthError::Unreadable {
+                    path: "$HOME/.Xauthority".into(),
+                    errno: libc::ENOENT,
+                }))
+            }
+        };
+
+        // The handshake request is written by hand rather than through `Req`, because its 12-byte
+        // fixed part is not a sequence of protocol fields -- the two lengths in it are *byte* counts
+        // that are padded independently, which is the mistake the first probe made.
+        let mut body = Vec::with_capacity(32 + cookie.len());
+        body.extend_from_slice(&[0x6C, 0]); // little-endian, unused
+        body.extend_from_slice(&11u16.to_le_bytes()); // protocol major
+        body.extend_from_slice(&0u16.to_le_bytes()); // protocol minor
+        body.extend_from_slice(&(auth::MIT_MAGIC_COOKIE_1.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(cookie.len() as u16).to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes()); // unused
+        body.extend_from_slice(auth::MIT_MAGIC_COOKIE_1.as_bytes());
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        body.extend_from_slice(&cookie);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        stream.write_all(&body).map_err(ConnError::Io)?;
+
+        let mut head = [0u8; 8];
+        read_exact(&mut stream, &mut head)?;
+        let mut r = Rdr::new(&head);
+        let status = r.u8();
+        let _unused = r.u8();
+        let _major = r.u16();
+        let _minor = r.u16();
+        // The additional-data length is a CARD16, not a CARD32. Reading it as a u32 runs off the end
+        // of the 8-byte header -- which is what `Rdr` is for: it panicked here rather than letting a
+        // 65,540-byte length through.
+        let extra_words = u32::from(r.u16());
+        if status == 0 {
+            // A refusal carries the reason length in the *second* byte and the reason itself counted
+            // in words, which is a different packing from the success reply two fields away.
+            let reason_len = head[1] as usize;
+            let reason_words = u16::from_le_bytes([head[6], head[7]]) as usize;
+            let mut reason = vec![0u8; reason_words * 4];
+            read_exact(&mut stream, &mut reason)?;
+            let reason = String::from_utf8_lossy(&reason[..reason_len.min(reason.len())])
+                .trim_end_matches('\0')
+                .to_string();
+            return Err(ConnError::Refused { reason });
+        }
+        if status != 1 {
+            return Err(ConnError::Unsupported(format!(
+                "setup reply status {status}"
+            )));
+        }
+
+        // **The additional data is at least the eight bytes of the header**, so the length is
+        // checked before it is used.
+        //
+        // `extra_words` is the server's own field and it is in 4-byte units: the eight bytes of
+        // the setup header are part of it. **Nothing guarantees it is at least two**, and the old
+        // `extra_words as usize * 4 - 8` underflowed on a server that answered `00 00` -- and the
+        // release profile runs `overflow-checks = true` under `panic = "abort"`, so an
+        // impersonating server on the socket killed the process.
+        let extra_bytes = (extra_words as usize).saturating_mul(4);
+        if extra_bytes < 8 {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply claims {extra_words} words of additional data, which is less than \
+                 the eight-byte header it is part of"
+            )));
+        }
+        let mut rest = vec![0u8; extra_bytes - 8];
+        read_exact(&mut stream, &mut rest)?;
+        let setup = Self::parse_setup(&rest)?;
+
+        // From here on, nothing may block indefinitely.
+        stream.set_nonblocking(true).map_err(ConnError::Io)?;
+        let mut conn = Self {
+            stream,
+            setup,
+            seq: 0,
+            next_id: 0,
+            out: Vec::with_capacity(4096),
+            rbuf: Vec::with_capacity(4096),
+            rstart: 0,
+            events: VecDeque::with_capacity(64),
+            errors: VecDeque::with_capacity(8),
+            display: number,
+            greeting: None,
+            greetings: 0,
+            requests: 0,
+            pending: 0,
+        };
+        conn.next_id = conn.setup.resource_id_base.wrapping_add(1);
+        // X.Org increments a client's sequence number *before* using it, so the first request a
+        // client sends is sequence 1 and not 0. Measured here: sending NoOperation as 0 and
+        // GetInputFocus as 1 produces replies carrying sequences 1 and 2 -- a client whose counter
+        // starts at 0 matches neither and then hangs waiting for a reply that already went past.
+        conn.seq = conn.seq.wrapping_add(1);
+        // The greeting. See `Conn::drain_greeting`.
+        let greeting = conn.drain_greeting(GREETING_WINDOW)?;
+        conn.greetings = 1;
+        conn.greeting = Some(greeting);
+        Ok(conn)
+    }
+
+    /// Parse the setup reply's additional data.
+    ///
+    /// The layout is: release, id-base, id-mask, motion-buffer-size (16 bytes), the vendor and its
+    /// pad, the maximum request length, the screen and format counts, six bytes of image format,
+    /// the pixmap formats (8 bytes each), then the first `SCREEN`.
+    /// Parse the setup reply's additional data.
+    ///
+    /// # The order is the X.Org implementation's, not the specification's listing
+    ///
+    /// The X11 protocol specification lists the additional data as release, id-base, id-mask,
+    /// motion-buffer-size, *vendor length, vendor*, pad, maximum-request-length, screen and format
+    /// counts, the six image-format bytes, the keycode range, four unused bytes, then the formats.
+    ///
+    /// `dix/dispatch.c`'s `SendConnectionSetup` does not do that. It writes the fourteen fixed bytes
+    /// and *then* the vendor string, and every server in the field is built from that code -- Xorg,
+    /// Xwayland, Xnest, Xdummy. Measured on this host, dumping the reply byte for byte
+    /// (`cargo run -p holonomy-x11 --example dump_setup`):
+    ///
+    /// ```text
+    /// 0000  75 39 bd 00 00 00 c0 00 ff ff 1f 00 00 01 00 00   release, id-base, id-mask, motion
+    /// 0010  14 00 ff ff 01 07 00 00 20 20 08 ff 00 00 00 00   vendor-len 20, then the 14 fixed bytes:
+    ///                                                        max-request 0xffff, 1 screen, 7 formats,
+    ///                                                        LSBFirst, LSBFirst, unit 32, pad 32,
+    ///                                                        min-keycode 8, max-keycode 255
+    /// 0020  54 68 65 20 58 2e 4f 72 67 20 46 6f 75 6e ...   "The X.Org Foundation", 20 bytes
+    /// 0034  01 01 20 00 00 00 00 00 | 04 08 20 00 00 00 00 00   the FORMATs: depth 1/bpp 1, 4/8, ...
+    /// 005c  18 20 20 00 00 00 00 00                            depth 24, 32 bpp, pad 32
+    /// 0064  20 20 20 00 00 00 00 00                            depth 32, 32 bpp
+    /// 006c  ed 04 00 00 22 00 00 00 ...                        SCREEN: root 0x4ed, colormap 0x22
+    /// ```
+    ///
+    /// Two things in that dump are the check: the root window lands at 0x6c, which is exactly
+    /// 0x34 + 7 * 8 -- the end of the seven format records and no other offset -- and every one of
+    /// the fourteen fixed bytes has a sane value. A parser written to the specification's order reads
+    /// the vendor's first fourteen bytes as the fixed fields and produces a maximum-request-length of
+    /// 0xffff from `MIT-MAGIC-C` and a min-keycode of 1, which is how this crate's first version
+    /// failed: `Rdr` panicked reading past the end of the packet.
+    fn parse_setup(body: &[u8]) -> Result<Setup, ConnError> {
+        // **The setup's minimum length is checked before a single field is read.**
+        //
+        // `Rdr::take` panics when a field falls past the end, by design -- its own doc says so -- and
+        // that design is right for parse_setup: every length the parser needs here comes from *the same
+        // buffer it is parsing*. `vendor_len` and `nformats` are the server's own words, so a server
+        // that answers with a truncated setup, or that inflates one of those counts past what the
+        // buffer holds, would otherwise walk past the end and panic in the loop.
+        //
+        // The walk below is a fixed-size header of 32 bytes, then `vendor_len` rounded up to a
+        // multiple of four, then 8 bytes per pixmap format, then at least the 40 fixed bytes of one
+        // SCREEN. Checking the sum up front means the parser's every `bytes` and `skip` is already
+        // inside the buffer, which is the invariant `Rdr`'s panic assumes.
+        //
+        // The screen itself is not walked -- this client reads one screen's *fixed* fields and then
+        // stops, so only `formats` and the vendor string are bounded. A server with more than one
+        // screen has its extra screens in the tail, and nothing below reads them.
+        if body.len() < 32 + 40 {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply carries {} bytes, below the 72 the protocol's first screen requires",
+                body.len()
+            )));
+        }
+        let mut probe = Rdr::new(body);
+        probe.u32();
+        probe.u32();
+        probe.u32();
+        probe.u32();
+        let vendor_len = u32::from(probe.u16()) as usize;
+        let _max_request_words = u32::from(probe.u16());
+        let _screens = probe.u8();
+        let nformats = u32::from(probe.u8()) as usize;
+        let vendor_padded = vendor_len
+            .checked_add(3)
+            .map(|v| (v & !3) + 3)
+            .ok_or_else(|| {
+                ConnError::Unsupported("the setup's vendor length is out of range".into())
+            })?;
+        let body_needed = vendor_padded
+            .checked_add(nformats.checked_mul(8).ok_or_else(|| {
+                ConnError::Unsupported("the setup's format count is out of range".into())
+            })?)
+            .and_then(|v| v.checked_add(72))
+            .ok_or_else(|| {
+                ConnError::Unsupported("the setup's declared extents do not fit".into())
+            })?;
+        if body.len() < body_needed {
+            return Err(ConnError::Unsupported(format!(
+                "the setup reply declares {nformats} formats and a {vendor_len}-byte vendor string, \
+                 which needs {body_needed} bytes, but carries {}",
+                body.len()
+            )));
+        }
+        let mut r = Rdr::new(body);
+        let release = r.u32();
+        let resource_id_base = r.u32();
+        let resource_id_mask = r.u32();
+        let _motion_buffer = r.u32();
+        let vendor_len = r.u16() as usize;
+        let max_request_words = u32::from(r.u16());
+        let _screens = r.u8();
+        let nformats = r.u8() as usize;
+        let image_byte_order = r.u8();
+        r.skip(3); // bit order, scanline unit, scanline pad -- unused by this client
+        let min_keycode = r.u8();
+        let max_keycode = r.u8();
+        r.skip(4);
+        let vendor = String::from_utf8_lossy(r.bytes(vendor_len)).into_owned();
+        r.skip((4 - vendor_len % 4) % 4);
+        let mut formats = Vec::with_capacity(nformats);
+        for _ in 0..nformats {
+            // 8 bytes: depth, bits-per-pixel, scanline-pad, 5 unused.
+            formats.push(Format {
+                depth: r.u8(),
+                bits_per_pixel: r.u8(),
+                scanline_pad: r.u8(),
+            });
+            r.skip(5);
+        }
+        let root = r.u32();
+        let _colormap = r.u32();
+        let white_pixel = r.u32();
+        let black_pixel = r.u32();
+        let _input_masks = r.u32();
+        let width = r.u16();
+        let height = r.u16();
+        let _mm_width = r.u16();
+        let _mm_height = r.u16();
+        let _min_maps = r.u16();
+        let _max_maps = r.u16();
+        let root_visual = r.u32();
+        let _backing_stores = r.u8();
+        let _save_unders = r.u8();
+        let root_depth = r.u8();
+        let _ndepths = r.u8();
+
+        if image_byte_order != 0 {
+            // Everything this crate writes is little-endian, because the request encoding is
+            // little-endian by definition. A big-endian server would need every field swapped, and
+            // silently sending the wrong byte order produces `BadLength` for every request.
+            return Err(ConnError::Unsupported(format!(
+                "image-byte-order {image_byte_order} (MSBFirst); this client is little-endian only"
+            )));
+        }
+        if max_request_words == 0 {
+            return Err(ConnError::Unsupported(
+                "the server reported a maximum-request-length of zero".into(),
+            ));
+        }
+        if width == 0 || height == 0 {
+            return Err(ConnError::Unsupported(format!(
+                "the server reported a {width}x{height} root window"
+            )));
+        }
+
+        Ok(Setup {
+            vendor,
+            release,
+            resource_id_base,
+            resource_id_mask,
+            max_request_words,
+            root,
+            root_depth,
+            root_visual,
+            white_pixel,
+            black_pixel,
+            min_keycode,
+            max_keycode,
+            image_byte_order,
+            formats,
+            root_width: width,
+            root_height: height,
+        })
+    }
+
+    fn open_socket(display: u32, path: &str) -> Result<UnixStream, ConnError> {
+        match UnixStream::connect(path) {
+            Ok(s) => Ok(s),
+            Err(first) => {
+                // An abstract socket has no filesystem entry at all, so `SocketAddr` is the only way to
+                // name one. The name is the path *without* a leading NUL -- `from_abstract_name` adds
+                // the NUL itself, and passing one in produces a socket at `\0\0/tmp/...`, which does
+                // not exist and fails with the same ENOENT as the missing filesystem path. That is
+                // exactly the failure the first version of this had, and it is why the error message
+                // names both spellings.
+                if let Ok(addr) = SocketAddr::from_abstract_name(path.as_bytes()) {
+                    if let Ok(s) = UnixStream::connect_addr(&addr) {
+                        return Ok(s);
+                    }
+                }
+                Err(ConnError::Socket {
+                    display,
+                    path: path.to_string(),
+                    errno: first.raw_os_error().unwrap_or(libc::EIO),
+                })
+            }
+        }
+    }
+
+    /// Read and discard whatever the server sends before the first request is answered.
+    ///
+    /// # This host sends eight bytes nobody asked for
+    ///
+    /// Measured here, on Xwayland behind GNOME: the setup reply declares 10,284 bytes of additional
+    /// data, and a walk through the formats, the screen and its seven depths and 420 visuals accounts
+    /// for exactly 10,284 of them -- and then the server sends eight more, `ff 00 00 00 00 00 00 00`,
+    /// once per connection, before any request has been sent. Run
+    /// `cargo run -p holonomy-x11 --example dump_setup` to print the declared length, the walk, and
+    /// the eight bytes.
+    ///
+    /// Nothing in the core protocol sends an unsolicited packet there, and eight bytes is not a packet
+    /// length: core replies and errors are 32 bytes and events are 24, 28 or 32. A client that reads
+    /// only the declared length leaves those eight bytes in the socket, and then every reply it parses
+    /// begins eight bytes into a packet. That is what this crate's first live run did, and it
+    /// presented as a hang rather than as garbage -- which is why the live gate has a test for
+    /// something this boring.
+    ///
+    /// So they are drained, deliberately and visibly: [`Conn::greeting`] reports how many bytes were
+    /// discarded and what they were. A server that sends none is the normal case elsewhere.
+    fn drain_greeting(
+        &mut self,
+        window: Duration,
+    ) -> Result<(usize, [u8; GREETING_KEEP]), ConnError> {
+        let deadline = Instant::now() + window;
+        let mut seen = 0usize;
+        let mut first = [0u8; GREETING_KEEP];
+        let mut chunk = [0u8; 64];
+        loop {
+            if Instant::now() >= deadline || seen >= 256 {
+                break;
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(ConnError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the X server closed the connection right after the handshake",
+                    )))
+                }
+                Ok(n) => {
+                    for (i, b) in chunk[..n].iter().enumerate() {
+                        if i < GREETING_KEEP {
+                            first[i] = *b;
+                        }
+                    }
+                    seen += n;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.wait(false, deadline.saturating_duration_since(Instant::now()))?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(ConnError::Io(e)),
+            }
+        }
+        Ok((seen, first))
+    }
+
+    /// How many post-setup greetings this connection has discarded.
+    ///
+    /// One at connect is normal. Two means the server sent the eight bytes later than the connect-time
+    /// window allowed, which it does; the count is here so that is visible rather than inferred.
+    pub fn greetings(&self) -> u32 {
+        self.greetings
+    }
+
+    /// How many bytes the server sent before any request was answered, and the first few of them.
+    ///
+    /// See [`Conn::drain_greeting`]. On this host it is 8, and a server that sends 0 is not broken.
+    pub fn greeting(&self) -> Option<(usize, [u8; GREETING_KEEP])> {
+        self.greeting
+    }
+
+    /// The socket, for a caller that needs the descriptor. Used by `examples/dump_reply.rs`.
+    pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.stream.as_raw_fd()
+    }
+
+    /// What the server said about itself.
+    pub fn setup(&self) -> &Setup {
+        &self.setup
+    }
+
+    /// The display number this connection is to.
+    pub fn display(&self) -> u32 {
+        self.display
+    }
+
+    /// The longest request this server accepts, in bytes.
+    /// **How many requests have been sent on this connection.**
+    ///
+    /// **The instrument for "this client asked the server for nothing it was not asked for"**, which
+    /// is otherwise only observable as a disagreement between two peers that neither can resolve. See
+    /// the field's docs for the defect it caught.
+    pub fn requests_sent(&self) -> u64 {
+        self.requests
+    }
+
+    pub fn request_limit(&self) -> usize {
+        (self.setup.max_request_words as usize)
+            .saturating_mul(4)
+            .min(MAX_REQUEST_BYTES)
+    }
+
+    /// A fresh resource id from this client's range.
+    pub fn alloc_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1) & self.setup.resource_id_mask;
+        id | self.setup.resource_id_base
+    }
+
+    /// Queue a request. Not written until [`Conn::flush`] or a syncing call.
+    pub fn request(&mut self, req: Req) -> Result<u16, ConnError> {
+        // **Counted before the request can fail**, because a request that was *attempted* is what a
+        // feedback loop is made of — and a failed `ConfigureWindow` in particular is still a round
+        // trip to the peer.
+        self.requests += 1;
+        let bytes = req.finish(self.seq);
+        if bytes.len() > self.request_limit() {
+            return Err(ConnError::TooLarge {
+                request: bytes.len(),
+                limit: self.request_limit(),
+            });
+        }
+        if tracing() {
+            let hex = hex_of(&bytes);
+            eprintln!(
+                "x11 -> opcode {} sequence {} ({} bytes)",
+                bytes[0],
+                self.seq,
+                bytes.len()
+            );
+            eprintln!("       {hex}");
+        }
+        self.out.extend_from_slice(&bytes);
+        let used = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        Ok(used)
+    }
+
+    /// Write everything queued, in full, or fail.
+    ///
+    /// # This must not return early, and the first version did
+    ///
+    /// The socket is non-blocking and a `PutImage` chunk is 262,116 bytes, which is larger than the
+    /// default `SO_SNDBUF` for an `AF_UNIX` socket on this host (measured: the write blocks after
+    /// roughly 208 KB). So `write` returns `EAGAIN` partway through a request.
+    ///
+    /// The first version stashed the unwritten tail and returned `Ok(())`, on the theory that a later
+    /// `flush` would pick it up. It does not arrive: the *next* thing to be written is a four-byte
+    /// `GetInputFocus`, and the server is still waiting for the rest of the `PutImage` before it looks
+    /// at anything. So the sync waited out its five-second timeout with a reply that was never going to
+    /// come, and the symptom -- a timeout on a request the server had not received -- pointed at the
+    /// wrong thing entirely.
+    ///
+    /// So this loop is the whole contract: every queued byte is written before it returns, or it is an
+    /// error. Anything unwritten stays queued for a later attempt.
+    pub fn flush(&mut self) -> Result<(), ConnError> {
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + SETUP_TIMEOUT;
+        let mut written = 0usize;
+        while written < self.out.len() {
+            match self.stream.write(&self.out[written..]) {
+                Ok(0) => {
+                    return Err(ConnError::Io(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "the X socket accepted no bytes",
+                    )))
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        // Keep what has not gone out; the caller may retry or fail.
+                        self.out.drain(..written);
+                        return Err(ConnError::TimedOut {
+                            what: "the X socket to accept a request",
+                        });
+                    }
+                    self.wait(true, deadline.saturating_duration_since(Instant::now()))?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    self.out.drain(..written);
+                    return Err(ConnError::Io(e));
+                }
+            }
+        }
+        self.out.clear();
+        Ok(())
+    }
+
+    /// Send `GetInputFocus` and read until its reply, queueing every event and error on the way.
+    ///
+    /// This is the only way this crate knows a request landed. X11 has no other synchronisation: a
+    /// request with no reply is reported by an error *if and only if* it failed, and a request that
+    /// succeeded leaves no trace. So anything that must not be silently dropped ends with a sync.
+    ///
+    /// # Why `GetInputFocus` and not `NoOperation`
+    ///
+    /// `NoOperation` is the obvious choice -- it is the shortest request there is, and its own byte 1
+    /// is genuinely `unused`, so it is one of the few requests where the sequence number belongs there.
+    /// It also sends **no reply**. That is in the specification, and this crate's `sync` used it for
+    /// two days' worth of debugging on the strength of a comment that said its reply was "guaranteed".
+    /// The result was a sync that waited out its timeout after every successful request, with nothing
+    /// in the socket, which is indistinguishable from a server that had stopped answering.
+    ///
+    /// `GetInputFocus` is four bytes, has no arguments, and always replies -- the same four bytes that
+    /// arrive in the trace as `opcode 43`.
+    pub fn sync(&mut self) -> Result<(), ConnError> {
+        let seq = self.request(Req::new(op::GET_INPUT_FOCUS))?;
+        self.flush()?;
+        let deadline = Instant::now() + SETUP_TIMEOUT;
+        loop {
+            match self.read_packet(Some(deadline))? {
+                Some(Packet::Reply { sequence, .. }) if sequence == seq => {
+                    // A reply is not a barrier for errors; see `drain_ready`.
+                    self.drain_ready();
+                    return Ok(());
+                }
+                Some(Packet::Error(e)) if e.sequence == seq => return Err(ConnError::Protocol(e)),
+                Some(Packet::Reply { .. }) | None => {}
+                Some(other) => self.queue(other),
+            }
+            if Instant::now() >= deadline {
+                return Err(ConnError::TimedOut {
+                    what: "a GetInputFocus reply",
+                });
+            }
+        }
+    }
+
+    /// Take everything already in the buffer, without waiting.
+    ///
+    /// # A reply is not a barrier for errors
+    ///
+    /// X11 reports a failed request by sending an error *as well as* the replies to the requests that
+    /// followed it, and the server makes no promise about which arrives first. Measured here: a
+    /// `SendEvent` whose length field was one word too long was answered with `BadLength`, but the reply
+    /// to the `GetInputFocus` after it arrived first, so the sync that followed the `SendEvent` saw its
+    /// own reply, found no error waiting, and returned. The error turned up three requests later --
+    /// during a full-screen frame push -- and *that* is what the window reported as the reason it failed.
+    ///
+    /// So after matching a reply this takes whatever is already readable. It cannot promise that an
+    /// error still in flight will be seen here, which is why every request that must not be lost ends
+    /// with a sync rather than trusting this alone.
+    fn drain_ready(&mut self) {
+        while let Ok(Some(packet)) = self.read_packet(None) {
+            self.queue(packet);
+        }
+    }
+
+    fn queue(&mut self, packet: Packet) {
+        match packet {
+            Packet::Event(e) => {
+                if self.events.len() < 4096 {
+                    self.events.push_back(e);
+                }
+            }
+            Packet::Error(e) => {
+                if self.errors.len() < 64 {
+                    self.errors.push_back(e);
+                }
+            }
+            // A reply nobody asked for. Dropped, because there is nothing to match it to and holding
+            // it would only hide the next real reply.
+            Packet::Reply { .. } => {}
+        }
+    }
+
+    /// Pop the oldest queued event, waiting up to `timeout` for one if the queue is empty.
+    pub fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>, ConnError> {
+        if let Some(e) = self.events.pop_front() {
+            return Ok(Some(e));
+        }
+        let deadline = timeout.map(|t| Instant::now() + t);
+        loop {
+            match self.read_packet(deadline)? {
+                Some(Packet::Event(e)) => return Ok(Some(e)),
+                Some(other) => self.queue(other),
+                None => {
+                    // Nothing arrived and either there is no deadline or it has not passed.
+                    return match deadline {
+                        Some(d) if Instant::now() < d => Ok(None),
+                        Some(_) => Ok(None),
+                        None => Ok(None),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Fold the run of motion events at the **front** of the queue into the last of them.
+    ///
+    /// # Why the *front*, and why this does not read the socket
+    ///
+    /// A drag produces one `MotionNotify` per pixel, and every one of them but the last is superseded
+    /// before it can be drawn — a mouse at 1,000 Hz against a 60 Hz frame is sixteen positions per
+    /// frame, of which fifteen were dispatched and repainted for nothing. **The observable symptom was
+    /// a selection highlight that trailed the cursor**, and a click that landed a frame or two late
+    /// because the queue in front of it was full of positions already out of date.
+    ///
+    /// **It only folds a *leading* run.** Everything else in the queue keeps its position, so a
+    /// `ButtonPress` that arrived between two motions is still seen before the motion that followed
+    /// it. Folding the whole queue would be less code and would reorder input, which is how a click
+    /// ends up selecting the wrong thing.
+    ///
+    /// **It does not read.** A read here would consume an event that is not a motion event and have
+    /// nowhere to put it — `queue` is private and this is the same object — so the driver calls this
+    /// once it already knows it is in a motion run, and whatever it returns is the newest position the
+    /// server has already sent.
+    ///
+    /// Returns `None` when the queue does not start with a motion event, which leaves the queue
+    /// untouched.
+    pub fn take_motion_run(&mut self) -> Option<Event> {
+        let mut last = None;
+        loop {
+            while self
+                .events
+                .front()
+                .is_some_and(|e| matches!(e, Event::MotionNotify { .. }))
+            {
+                last = self.events.pop_front();
+            }
+            // **And one non-blocking read**, because the queue is usually *empty* when a drag is
+            // running: the server's motion events are in the socket, not in this deque, and folding
+            // only what is already parsed would fold nothing during the one moment it matters.
+            // `read_packet_now` is the call that cannot wait — see its note on why
+            // `read_packet(Some(Instant::now()))` is *not* that call.
+            //
+            // **A non-motion packet is put back, not dropped.** Pushing to the front of this object's
+            // own deque preserves order, so a `ButtonPress` that arrives behind the motion run is the
+            // next thing the driver sees — **which is what stops a click being swallowed by a drag.**
+            match self.read_packet_now() {
+                Ok(Some(Packet::Event(e))) => {
+                    if matches!(e, Event::MotionNotify { .. }) {
+                        last = Some(e);
+                        continue;
+                    }
+                    // Not motion: it goes back at the front, in order, and the fold is over.
+                    self.events.push_front(e);
+                    break;
+                }
+                Ok(Some(other)) => {
+                    self.queue(other);
+                    break;
+                }
+                // A partial packet, the deadline, or a read error. **An error is not swallowed here** —
+                // the next `next_event` will report it, and reporting it twice would turn one broken
+                // socket into two messages.
+                Ok(None) | Err(_) => break,
+            }
+        }
+        last
+    }
+
+    /// Take the oldest protocol error, if the server reported one.
+    pub fn take_error(&mut self) -> Option<ProtocolError> {
+        self.errors.pop_front()
+    }
+
+    /// How many events are queued without a read.
+    pub fn queued_events(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Close the connection.
+    pub fn close(self) {}
+
+    /// Read one packet if the socket already has one, and return `Ok(None)` otherwise.
+    ///
+    /// # Why this is not `read_packet(Some(Instant::now()))`
+    ///
+    /// **That call reads nothing, always.** `ensure` checks its deadline *before* it touches the socket
+    /// (`if Instant::now() >= d { return Ok(false) }`) and `Instant::now()` is its own deadline, so the
+    /// guard fires on the first pass and a "non-blocking" call written that way is a no-op that looks
+    /// like a drained socket. **The deadline form is right for every other caller** — it is what stops
+    /// a read loop spinning once its deadline has passed — so the fix is a second entry point rather
+    /// than a change to `ensure`'s rule.
+    ///
+    /// **It does not read unless there is something to read.** `poll` with a zero timeout is the
+    /// question "is the socket readable"; asking it first means the `read` below can never block,
+    /// because it is only issued when the kernel has already said there are bytes.
+    fn read_packet_now(&mut self) -> Result<Option<Packet>, ConnError> {
+        self.compact();
+        // Anything already buffered is answered without touching the socket, and the greeting and the
+        // partial-packet states are `read_packet`'s business — this defers to it whenever there is a
+        // byte in hand, with a deadline far enough away that it will not refuse.
+        if self.rbuf.len() > self.rstart {
+            // **A deadline of *now*, and that is deliberate here.** `read_packet` completes a packet from
+            // bytes already in the buffer without consulting the deadline (the `ensure` guard only fires
+            // when it has to touch the socket), so this answers immediately for a whole packet and
+            // answers `None` rather than waiting for a half-delivered one. **The fold is an optimisation
+            // and must never cost a frame**: a partial packet is left for `next_event`, which is the
+            // call that is allowed to wait.
+            return self.read_packet(Some(Instant::now()));
+        }
+        let mut pfd = libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd`, initialised, and a count of one.
+        let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(ConnError::Io(e));
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        // Readable, so the first `read` cannot block — there are bytes, and `ensure` reads them without
+        // consulting the deadline. **The deadline is now, so a *partial* packet is left for
+        // `next_event`** rather than making a pointer optimisation the reason a frame waits on the
+        // server. That is the same rule as the buffered arm above.
+        self.read_packet(Some(Instant::now()))
+    }
+
+    /// Read one packet, waiting until `deadline`.
+    ///
+    /// `None` means: return immediately if nothing is buffered. The read buffer is compacted only
+    /// when it has been fully consumed, so the amortised cost of the event loop is one `memmove` per
+    /// buffer's worth of events rather than one per event.
+    fn read_packet(&mut self, deadline: Option<Instant>) -> Result<Option<Packet>, ConnError> {
+        self.compact();
+        let first = self.ensure(1, deadline)?;
+        if !first {
+            return Ok(None);
+        }
+        if self.pending > 0 && !self.ensure(self.pending, deadline)? {
+            // arrived. Wait for the rest on the *next* call rather than treating this as "nothing to
+            // read", which is the difference between waiting and spinning. Measured: with `pending`
+            // ignored, every `next_event` returned immediately on a half-delivered event and the window
+            // looped as fast as it could -- 420,000 requests in twenty seconds, painting a caret blink on
+            // every pass.
+            //
+            // There is no stall counter and no resynchronisation, and there does not need to be: the
+            // packet size is constant, so a reader that got it right cannot fall out of step. The
+            // recovery machinery existed only to paper over a wrong size, and is gone with it.
+            return Ok(None);
+        }
+
+        // The greeting, wherever it turns up.
+        //
+        // [`Conn::drain_greeting`] catches the one that follows the handshake, but it is a *window*, not
+        // a barrier: measured, the same eight bytes can arrive after the client has been busy creating a
+        // window and interning atoms, which is what the developer window does. The first version of this
+        // reader had no idea what to do with them -- `0xff` is not a core event code and not a plausible
+        // extension code, so it asked for 32 bytes, never got them, and the window reported a failure on
+        // its first keystroke. It is eight bytes of nothing and is recognised by that.
+        if self.rbuf[self.rstart] == GREETING_BYTE {
+            if !self.ensure(GREETING_LEN, deadline)? {
+                return Ok(None);
+            }
+            self.rstart += GREETING_LEN;
+            self.pending = 0;
+            self.greetings += 1;
+            if tracing() {
+                eprintln!(
+                    "x11    discarded a {GREETING_LEN}-byte greeting (number {})",
+                    self.greetings
+                );
+            }
+            return Ok(None);
+        }
+
+        let code = self.rbuf[self.rstart] & !proto::event::SEND_EVENT_FLAG;
+        // One size for an error, a reply and every event alike. See [`proto::EVENT_BYTES`]: the
+        // per-code table this replaced was true of the specification's field lists and false of the
+        // wire, and it desynchronised the stream on the first keystroke.
+        let want = proto::EVENT_BYTES;
+        self.pending = want;
+        if !self.ensure(want, deadline)? {
+            // A short read, not a protocol failure: some bytes of a packet arrived and the rest did
+            // not, before the deadline. The right answer is "nothing yet", so the loop comes back.
+            //
+            // The first version of this returned an error, and the developer window died on it: a few
+            // bytes of an event arrived, the 125 ms the loop will wait elapsed, and the whole session
+            // exited with "the X server sent 32 of a packet's bytes and then stopped". The server had
+            // not stopped; the packet was late. A client that treats a short read as a broken
+            // connection is a client that quits under load.
+            return Ok(None);
+        }
+        let packet = self.rbuf[self.rstart..self.rstart + want].to_vec();
+        self.rstart += want;
+        self.pending = 0;
+        if tracing() {
+            let first = packet[0];
+            let what = match first {
+                0 => "error",
+                1 => "reply",
+                other => holonomy_x11_event_name(other).unwrap_or("unknown"),
+            };
+            let head: Vec<String> = packet.iter().take(6).map(|b| format!("{b:02x}")).collect();
+            eprintln!(
+                "x11 <- {what} {} bytes [{}]{}",
+                want,
+                head.join(" "),
+                if first == 1 || first == 0 {
+                    format!(" sequence {}", u16::from_le_bytes([packet[2], packet[3]]))
+                } else {
+                    String::new()
+                }
+            );
+        }
+        Ok(Some(match code {
+            0 => {
+                let mut r = Rdr::new(&packet);
+                let _ = r.u8();
+                let code = r.u8();
+                let sequence = r.u16();
+                let value = r.u32();
+                let minor = r.u16();
+                let major = r.u8();
+                Packet::Error(ProtocolError {
+                    code,
+                    major,
+                    minor,
+                    sequence,
+                    value,
+                })
+            }
+            1 => {
+                let mut r = Rdr::new(&packet);
+                let _ = r.u8();
+                let _kind = r.u8();
+                let sequence = r.u16();
+                let extra = r.u32() as usize * 4;
+                // **The extra length is bounded, because it is the server's own word.**
+                //
+                // The length field is a CARD32 in four-byte units, so it reaches sixteen gigabytes,
+                // and the reader sized its buffer to it *before* reading a byte of it -- a call to
+                // `Vec::extend_from_slice` against the allocator, which aborts on an argument the
+                // caller handed over. A reply above [`MAX_REPLY_BYTES`] is a server this client
+                // cannot talk to, and saying so is cheaper than the abort.
+                if extra > MAX_REPLY_BYTES {
+                    return Err(ConnError::Unsupported(format!(
+                        "the reply to sequence {sequence} claims {} bytes of extra data, above the \
+                         {} this client will buffer",
+                        extra, MAX_REPLY_BYTES
+                    )));
+                }
+                // **Give the header back.** The reader advanced `rstart` past this packet's 32 bytes
+                // *before* it knew how long the reply was, so `rstart` is rewound to the packet's
+                // first byte and the whole packet -- header and extra alike -- is what is waited for
+                // from there. `ensure` measures from `rstart`, so the two have to agree.
+                //
+                // **The buffer still holds the header**: `compact` only drains what has been
+                // consumed, and this call consumed none of it, so rewinding is arithmetic rather
+                // than a re-read.
+                //
+                // **And `pending` is the whole packet's length.** The version of this arm that left
+                // it cleared returned `Ok(None)` on a short read with `pending == 0`, so the next
+                // call read the reply's own extra data as a *packet type* -- a desynchronised
+                // stream, which this crate's own header calls the worst failure it has.
+                self.rstart -= want;
+                self.pending = want + extra;
+                if !self.ensure(self.pending, deadline)? {
+                    // Also not a failure: the rest is in flight and the next call picks it up, with
+                    // `rstart` back at the packet's start and `pending` naming all of it.
+                    return Ok(None);
+                }
+                self.rstart += want + extra;
+                self.pending = 0;
+                // The whole packet, header and extra data. The first version took
+                // `rbuf[rstart - want - extra .. rstart - extra]`, which is the 32-byte header with the
+                // extra data cut off -- so `GetKeyboardMapping` decoded an empty keysym table and
+                // `GetImage` an empty picture, and both looked like the server having said nothing.
+                let body = self.rbuf[self.rstart - want - extra..self.rstart].to_vec();
+                Packet::Reply { sequence, body }
+            }
+            _ => Packet::Event(
+                Event::decode(&self.rbuf[self.rstart - want..self.rstart])
+                    .inspect(|ev| {
+                        // **The raw packet, on demand, and it settled a question three readings of the
+                        // source could not.** Part 34: the window's pointer was reporting
+                        // `event_x: -27541` in a 1024x700 window, and the candidates were "the parser
+                        // reads the wrong field" and "the server is reporting root-relative
+                        // coordinates". **A hex dump answers it in one line and both of them are
+                        // theories until then.**
+                        //
+                        // **`HOLONOMY_X11_TRACE_PACKETS=1`, and it is off by default** because a
+                        // pointer produces a packet per motion event and a hex dump per packet turns a
+                        // readable log into a wall.
+                        if std::env::var_os("HOLONOMY_X11_TRACE_PACKETS").is_some() {
+                            let b = &self.rbuf[self.rstart - want..self.rstart];
+                            let hex: Vec<String> = b
+                                .chunks(4)
+                                .map(|c| {
+                                    format!("{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+                                })
+                                .collect();
+                            eprintln!("x11 pkt {ev:?}\n     {}", hex.join(" "));
+                        }
+                    })
+                    .expect("an event code"),
+            ),
+        }))
+    }
+
+    fn compact(&mut self) {
+        if self.rstart > 0 && self.rstart == self.rbuf.len() {
+            self.rbuf.clear();
+            self.rstart = 0;
+        } else if self.rstart > 4096 {
+            self.rbuf.drain(..self.rstart);
+            self.rstart = 0;
+        }
+    }
+
+    /// Make sure `want` bytes are buffered. Returns false if the deadline passed first.
+    fn ensure(&mut self, want: usize, deadline: Option<Instant>) -> Result<bool, ConnError> {
+        let mut chunk = [0u8; 4096];
+        while self.rbuf.len() - self.rstart < want {
+            // The deadline is checked *before* every read attempt, not only inside `wait`. A `wait`
+            // that is handed a zero timeout returns immediately, so a loop that only checks the
+            // deadline there spins forever once it has passed -- which is exactly what happened: two
+            // live tests hung instead of reporting that the server had sent nothing.
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return Ok(false);
+                }
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(ConnError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the X server closed the connection",
+                    )))
+                }
+                Ok(n) => {
+                    if tracing() {
+                        eprintln!(
+                            "x11    read {n} bytes, {} buffered, {want} wanted",
+                            self.rbuf.len() - self.rstart
+                        );
+                    }
+                    self.rbuf.extend_from_slice(&chunk[..n])
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if tracing() {
+                        eprintln!(
+                            "x11    would block: {} buffered, {want} wanted",
+                            self.rbuf.len() - self.rstart
+                        );
+                    }
+                    let Some(deadline) = deadline else {
+                        return Ok(false);
+                    };
+                    self.wait(false, deadline.saturating_duration_since(Instant::now()))?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(ConnError::Io(e)),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Wait for the socket to become readable or writable.
+    fn wait(&self, writable: bool, timeout: Duration) -> Result<(), ConnError> {
+        if timeout.is_zero() {
+            return Ok(());
+        }
+        let mut pfd = libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: if writable {
+                libc::POLLOUT
+            } else {
+                libc::POLLIN
+            },
+            revents: 0,
+        };
+        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                return Err(ConnError::Io(e));
+            }
+        }
+        Ok(())
+    }
+
+    /// `QueryExtension`, returning `(present, major-opcode, first-event, first-error)`.
+    pub fn query_extension(&mut self, name: &str) -> Result<Option<(bool, u8, u8, u8)>, ConnError> {
+        // byte 1 is `unused`, then the name's length as a CARD8, then **three** unused bytes, then the
+        // name. The specification lists two unused bytes there, which puts the name at offset 7 -- and
+        // this server answers `BadLength` for that. Measured, by sending the same name in 3-, 4- and
+        // 5-word requests (`cargo run -p holonomy-x11 --example dump_lengths`): 3 words is refused,
+        // 4 and 5 are accepted, so the name starts at offset 8 and the fixed part after the header is
+        // four bytes rather than three.
+        // byte 1 is `unused`, then the name's length as a CARD8, then **three** unused bytes, then the
+        // name. The specification lists two unused bytes there, which puts the name at offset 7 -- and
+        // this server answers `BadLength` for that. Measured, by sending the same name in 3-, 4- and
+        // 5-word requests (`cargo run -p holonomy-x11 --example dump_lengths`): 3 words is refused,
+        // 4 and 5 are accepted, so the name starts at offset 8 and the fixed part after the header is
+        // four bytes rather than three.
+        //
+        // **And the length is checked, not truncated.** It is a CARD8 on the wire, and a `str` longer
+        // than 255 bytes would have written a wrapped count with the whole payload appended after it --
+        // a request whose header and body disagree in length, which is a desynchronised stream. Every
+        // extension this crate queries is `XTEST`-sized, so this is unreachable from the product; it is
+        // asserted here for the same reason the request ceiling is: **a bound that is only sometimes
+        // checked is the kind that gets skipped by the one caller who needed it.**
+        let len = u8::try_from(name.len()).map_err(|_| {
+            ConnError::Unsupported(format!(
+            "the extension name {name} is {} bytes and the protocol's own field for it is a CARD8",
+            name.len()
+        ))
+        })?;
+        let seq = self.request(
+            Req::new(op::QUERY_EXTENSION)
+                .second_byte(0)
+                .u8(len)
+                .pad(3)
+                .bytes(name.as_bytes()),
+        )?;
+        self.flush()?;
+        let body = self.reply(seq)?;
+        let mut r = Rdr::new(&body);
+        r.skip(REPLY_FIELDS);
+        let present = r.u8() != 0;
+        let major = r.u8();
+        let first_event = r.u8();
+        let first_error = r.u8();
+        Ok(Some((present, major, first_event, first_error)))
+    }
+
+    /// `GetKeyboardMapping`: one `Vec` of keysyms per keycode, indexed from `min_keycode`.
+    pub fn keyboard_mapping(&mut self) -> Result<Vec<Vec<u32>>, ConnError> {
+        let first = self.setup.min_keycode;
+        let count = self
+            .setup
+            .max_keycode
+            .saturating_sub(self.setup.min_keycode)
+            .saturating_add(1);
+        let seq = self.request(
+            Req::new(op::GET_KEYBOARD_MAPPING)
+                .second_byte(0) // unused
+                .u8(first)
+                .u8(count)
+                .u16(0),
+        )?;
+        self.flush()?;
+        let body = self.reply(seq)?;
+        let per = body[1] as usize;
+        if per == 0 {
+            return Ok(Vec::new());
+        }
+        // **The reply is walked by how much of it arrived, not by how much was asked for.**
+        //
+        // `Rdr` panics when a field falls past the end of its buffer, and the old code handed it
+        // exactly the answer's shape: `[keycodes_min, keycodes_max]` came from the *setup*, and
+        // 32 + count * per * 4 is what the reply should hold if the server honoured the request.
+        //
+        // **A server that answers short breaks that agreement.** The protocol says the reply's length
+        // is what it is, so a `GetKeyboardMapping` that carries fewer keysyms than the request asked
+        // for leaves the parser reading past the buffer -- and the release profile runs
+        // `overflow-checks = true` under `panic = "abort"`, so one short answer killed the process
+        // rather than producing a partial table.
+        //
+        // **So the count is clamped to what the reply holds.** The allocation is bounded by the same
+        // number, which also keeps a short reply from reserving the *asked-for* capacity, and a reply
+        // with room for more than the request asked for is still read to the request's count -- that
+        // is the server's business, not something to walk into.
+        let payload = body.len().saturating_sub(32);
+        let readable = payload / (per * 4);
+        let wanted = count as usize;
+        // **The reply's own length wins when it is the shorter answer.** A reply with room for more
+        // keysyms than the request asked for is read to the request's count instead -- that is not
+        // something to walk into, and asking for what was asked for is what the setup said.
+        let keys = readable.min(wanted);
+        let mut r = Rdr::new(&body[32..]);
+        let mut out = Vec::with_capacity(keys);
+        for _ in 0..keys {
+            let mut syms = Vec::with_capacity(per);
+            for _ in 0..per {
+                syms.push(r.u32());
+            }
+            out.push(syms);
+        }
+        Ok(out)
+    }
+
+    /// `SetInputFocus` to `window`, reverting to the pointer if the window goes away.
+    ///
+    /// The error is claimed here rather than left in the queue. `SetInputFocus` on a window that is not
+    /// yet viewable is a `BadMatch` -- measured, every time, when the focus is taken immediately after
+    /// `MapWindow` -- and a caller that treats that as "best effort" still has to *consume* it, because
+    /// the next request to ask for a queued error gets this one. That is how a failed focus became the
+    /// reason a window refused to present its first frame.
+    pub fn set_input_focus(&mut self, window: u32) -> Result<(), ConnError> {
+        self.request(
+            Req::new(op::SET_INPUT_FOCUS)
+                .second_byte(proto::focus::POINTER_ROOT) // revert-to lives in byte 1
+                .u32(window)
+                .u32(0), // CurrentTime
+        )?;
+        self.sync()?;
+        if let Some(e) = self.take_error() {
+            return Err(ConnError::Protocol(e));
+        }
+        Ok(())
+    }
+
+    /// Send `GetInputFocus`, for a caller that wants to know who has the keyboard.
+    pub fn input_focus(&mut self) -> Result<u32, ConnError> {
+        let seq = self.request(Req::new(op::GET_INPUT_FOCUS))?;
+        self.flush()?;
+        let body = self.reply(seq)?;
+        let mut r = Rdr::new(&body);
+        // GetInputFocus: reply marker, revert-to, sequence, length, then the focus window.
+        r.skip(1);
+        let _revert_to = r.u8();
+        r.skip(6);
+        Ok(r.u32())
+    }
+
+    /// Read until the reply to `seq` arrives, queueing events on the way.
+    ///
+    /// **An error naming `seq` is returned, not queued.** X11 reports a failed request by sending an
+    /// error instead of a reply, so a caller that waited for the reply would wait out the whole
+    /// timeout with the reason sitting in a queue it never looks at -- which is what the first version
+    /// of this did, and the effect was a `Window::create` that "timed out" for five seconds with the
+    /// `BadValue` that caused it already in hand and unread. Errors for *other* requests are queued,
+    /// because they belong to someone else.
+    pub fn reply(&mut self, seq: u16) -> Result<Vec<u8>, ConnError> {
+        let deadline = Instant::now() + SETUP_TIMEOUT;
+        loop {
+            match self.read_packet(Some(deadline))? {
+                Some(Packet::Reply { sequence, body }) if sequence == seq => {
+                    // A reply is not a barrier for errors; see `drain_ready`.
+                    self.drain_ready();
+                    return Ok(body);
+                }
+                // An error that arrives while a reply is outstanding belongs to it. Matching the
+                // error's own sequence number cannot be done: X.Org fills that field from the failing
+                // request's *second byte*, which for most requests is a field rather than a sequence
+                // number -- so an error for `GetKeyboardMapping` arrives saying sequence 0, which is
+                // that request's `unused` byte. Measured here: four errors in a row all reading
+                // "sequence 0" for requests that carried no sequence number at all.
+                //
+                // So: this crate never has two requests in flight -- `request` then `flush` then
+                // `reply` -- and any error seen while waiting belongs to the reply being waited for.
+                Some(Packet::Error(e)) => return Err(ConnError::Protocol(e)),
+                Some(other) => self.queue(other),
+                None if Instant::now() >= deadline => {
+                    return Err(ConnError::TimedOut { what: "a reply" })
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+/// A readable name for a core event code, for the trace.
+fn holonomy_x11_event_name(code: u8) -> Option<&'static str> {
+    Some(match code {
+        proto::event::KEY_PRESS => "KeyPress",
+        proto::event::KEY_RELEASE => "KeyRelease",
+        proto::event::BUTTON_PRESS => "ButtonPress",
+        proto::event::BUTTON_RELEASE => "ButtonRelease",
+        proto::event::EXPOSE => "Expose",
+        proto::event::MAP_NOTIFY => "MapNotify",
+        proto::event::CONFIGURE_NOTIFY => "ConfigureNotify",
+        proto::event::PROPERTY_NOTIFY => "PropertyNotify",
+        proto::event::CLIENT_MESSAGE => "ClientMessage",
+        proto::event::SELECTION_CLEAR => "SelectionClear",
+        proto::event::SELECTION_REQUEST => "SelectionRequest",
+        proto::event::SELECTION_NOTIFY => "SelectionNotify",
+        6 => "MotionNotify",
+        _ => return None,
+    })
+}
+
+fn read_exact(stream: &mut UnixStream, buf: &mut [u8]) -> Result<(), ConnError> {
+    let mut at = 0;
+    while at < buf.len() {
+        match stream.read(&mut buf[at..]) {
+            Ok(0) => {
+                return Err(ConnError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the X server closed the connection during the handshake",
+                )))
+            }
+            Ok(n) => at += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(ConnError::Io(e)),
+        }
+    }
+    Ok(())
+}

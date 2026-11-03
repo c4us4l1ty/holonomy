@@ -1,0 +1,25 @@
+# Page-locked, guard-bounded memory with provable scrubbing.
+#
+# Phase 1. The dependency on holonomy-jail is the single allocation chokepoint -- see
+# crates/holonomy-jail/src/lib.rs for why every crate has it.
+[package]
+name = "holonomy-secure"
+description = "Page-locked, guard-bounded memory with provable scrubbing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Every crate depends on the jail, including this one. `SecureBlock` deliberately does
+# *not* use the global allocator for its payload -- the payload is an mmap, and that is
+# the whole point -- but the dependency keeps the edge present from the first commit.
+holonomy-jail = { path = "../holonomy-jail" }
+libc = "0.2"
+# Volatile writes, so the scrub on drop cannot be optimised into nothing.
+zeroize = "1.9"
+[dev-dependencies]
+# The allocation-failure regression test calls `getrlimit` and `mlock` directly, to exhaust
+# `RLIMIT_MEMLOCK` and reach the code path that used to double-unmap.
+libc = "0.2"

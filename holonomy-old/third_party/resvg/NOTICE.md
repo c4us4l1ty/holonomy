@@ -1,0 +1,15 @@
+# SVG conversion dependencies
+
+`resvg` / `usvg` v0.45.1 are used under their MIT OR Apache-2.0 licenses;
+their MIT text is retained in `LICENSE-MIT`. `tiny-skia` v0.11.4 is **BSD-3-Clause**;
+its separate copyright and license are retained in `LICENSE-TINY-SKIA-BSD-3`.
+The unsealed desktop import uses `resvg` to rasterise a restricted static SVG
+subset before handing PNG bytes to Holonomy's existing document/image pipeline.
+The renderer's *build script* also uses these libraries to turn four checked-in,
+MIT-licensed WordCraft icon SVGs into fixed bit masks. This does **not** put
+an XML/SVG parser in the sealed default runtime.
+
+The desktop-only PNG encoder is the `png` crate (MIT OR Apache-2.0); the
+sealed product retains Holonomy's original bounded `holonomy-image` decoder.
+The full dependency and license list for a release should be produced from
+the committed `Cargo.lock` before distribution.
