@@ -1186,7 +1186,10 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                    widgets::Tool::Mode
+                        | widgets::Tool::Collapse
+                        | widgets::Tool::Overflow
+                        | widgets::Tool::Share
                 ) && (p.rect.width == 0 || p.rect.height == 0)
             })
             .map(|p| p.tool)
@@ -1974,7 +1977,10 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
+                    widgets::Tool::Mode
+                        | widgets::Tool::Collapse
+                        | widgets::Tool::Overflow
+                        | widgets::Tool::Share
                 )
             })
             .filter(|p| p.rect.width == 0 || p.rect.height == 0)
@@ -3582,6 +3588,9 @@ impl<'a> Session<'a> {
                         holonomy_render::chrome::StyleFlagsSlot::Underline => {
                             holonomy_render::menus::Action::ToggleUnderline
                         }
+                        holonomy_render::chrome::StyleFlagsSlot::Strikethrough => {
+                            holonomy_render::menus::Action::ToggleStrike
+                        }
                     };
                     self.apply_action(action)?;
                     return Ok(());
@@ -3636,6 +3645,12 @@ impl<'a> Session<'a> {
                     }
                     Tool::Collapse => {
                         self.set_sidebar(!self.state.sidebar_open);
+                    }
+                    Tool::Comment => {
+                        self.apply_action(holonomy_render::menus::Action::ToggleComment)?;
+                    }
+                    Tool::Share => {
+                        self.apply_action(holonomy_render::menus::Action::Share)?;
                     }
                     // **Part 44: the font-size pair is the zoom pair.** `SizeUp` and `SizeDown` are
                     // the two atlas sizes the project can afford, reached from the toolbar rather than
@@ -4491,17 +4506,18 @@ impl<'a> Session<'a> {
     ///
     /// **So `armed_style` is the only reader of `pending_style` and `set_armed_style` the only writer, and
     /// they are adjacent.** `apply_action` and the toolbar's press both go through the setter.
-    fn set_armed_style(&mut self, bold: bool, italic: bool, underline: bool) {
+    fn set_armed_style(&mut self, bold: bool, italic: bool, underline: bool, strikethrough: bool) {
         self.state.styles.bold = bold;
         self.state.styles.italic = italic;
         self.state.styles.underline = underline;
+        self.state.styles.strikethrough = strikethrough;
         // **`Some(flags)` and never `None`, and that is the deliberate part.** Un-pressing Bold when nothing
         // else is armed writes `Some(0)` rather than `None`, because `None` means "inherit from the
         // character before the caret" and inheriting bold after the user turned bold off is the bug this
         // option type exists to prevent. **`None` is for a session nobody has toggled anything in.**
         // Inline toggles must not discard an armed paragraph's header bit.
-        let mut f =
-            self.pending_style.unwrap_or(0) & !(STYLE_BOLD | STYLE_ITALIC | STYLE_UNDERLINE);
+        let mut f = self.pending_style.unwrap_or(0)
+            & !(STYLE_BOLD | STYLE_ITALIC | STYLE_UNDERLINE | STYLE_STRIKE);
         if bold {
             f |= STYLE_BOLD;
         }
@@ -4511,6 +4527,9 @@ impl<'a> Session<'a> {
         if underline {
             f |= STYLE_UNDERLINE;
         }
+        if strikethrough {
+            f |= STYLE_STRIKE;
+        }
         self.pending_style = Some(f);
     }
 
@@ -4519,12 +4538,12 @@ impl<'a> Session<'a> {
     /// **`&self` and the session, not a `pub` accessor on the chrome**, so a gate cannot ask the chrome what
     /// it thinks is armed and conclude the two agree.
     ///
-    /// **A tuple of three, in the order `set_armed_style` takes them**, and that adjacency is the whole
+    /// **A tuple of four, in the order `set_armed_style` takes them**, and that adjacency is the whole
     /// contract: a caller reading this and a caller writing that must not be able to swap two of the
-    /// three without the compiler noticing. A named struct would be safer still and would be two hundred
+    /// four without the compiler noticing. A named struct would be safer still and would be two hundred
     /// lines of `..Default::default()` at three call sites; the adjacency and this sentence are the
     /// trade, and it is worth stating that it *is* one.
-    fn armed_style(&self) -> (bool, bool, bool) {
+    fn armed_style(&self) -> (bool, bool, bool, bool) {
         // **Through `unwrap_or(0)`, so "the user said nothing" and "the user said plain" both read as
         // nothing armed** — which is right for the bools and wrong for the model, and the difference is
         // the whole reason the model is an `Option`.
@@ -4533,6 +4552,7 @@ impl<'a> Session<'a> {
             f & STYLE_BOLD != 0,
             f & STYLE_ITALIC != 0,
             f & STYLE_UNDERLINE != 0,
+            f & STYLE_STRIKE != 0,
         )
     }
 
@@ -4902,6 +4922,18 @@ impl<'a> Session<'a> {
                 self.insert(&vec![b'\n'; n as usize], None)?;
                 return Ok(());
             }
+            Action::ToggleComment => {
+                // **Open the comments sidebar, or add a comment at the caret.** Sealed builds have no
+                // commenting backend, so this reports inert rather than inventing a dialog.
+                self.stats.pointer_inert += 1;
+                return Ok(());
+            }
+            Action::Share => {
+                // **Share the document.** Sealed builds have no sharing backend; the Share button
+                // paints blue and is clickable but opens nothing.
+                self.stats.pointer_inert += 1;
+                return Ok(());
+            }
             Action::WordCount => {
                 self.set_notice(Some(format!(
                     "{} words · {} lines",
@@ -5012,7 +5044,7 @@ impl<'a> Session<'a> {
             // **`None`, because the toolbar has no strikethrough button**, so there is no button
             // whose armed state could be drawn and nothing to invalidate. Passing `Underline` here
             // would light up a button for a flag it does not own.
-            Action::ToggleStrike => self.toggle_inline_style(STYLE_STRIKE, None)?,
+            Action::ToggleStrike => self.toggle_inline_style(STYLE_STRIKE, Some(widgets::Tool::Strikethrough))?,
             Action::ToggleSuperscript => self.toggle_decoration(STYLE_SUPERSCRIPT)?,
             Action::ToggleSubscript => self.toggle_decoration(STYLE_SUBSCRIPT)?,
             Action::ClearFormatting => {
@@ -6863,7 +6895,7 @@ impl<'a> Session<'a> {
         tool: Option<widgets::Tool>,
     ) -> Result<(), SessionError> {
         self.check_editable()?;
-        let (bold, italic, underline) = self.armed_style();
+        let (bold, italic, underline, strikethrough) = self.armed_style();
         if let Some(sel) = self.editor.selection() {
             // **A selection is restyled according to what is at its start**, which is the rule every
             // word processor uses: "select a bold word and press Bold" un-bolds it.
@@ -6873,10 +6905,8 @@ impl<'a> Session<'a> {
             // and then a click at a bare caret types what the selection now is. Without this the
             // button's highlight and the armed state disagreed the moment a selection was styled.
             //
-            // **The three `if`s and not an index**, because `flag` may be none of the three: a
-            // `STYLE_STRIKE` press with a selection restyles the text and changes no slot, and an
-            // arithmetic mapping from a bit to a position would have to answer what happens for every
-            // other bit in `STYLE_KNOWN`.
+            // **The four `if`s**, because every flag maps to its slot: a `STYLE_STRIKE` press with a
+            // selection restyles the text and changes no slot except strikethrough.
             self.set_armed_style(
                 if flag == STYLE_BOLD { on } else { bold },
                 if flag == STYLE_ITALIC { on } else { italic },
@@ -6885,24 +6915,25 @@ impl<'a> Session<'a> {
                 } else {
                     underline
                 },
+                if flag == STYLE_STRIKE { on } else { strikethrough },
             );
             self.damage = self.chrome.full_damage();
         } else {
             // **The bit flipped in the model, and then both copies rewritten from it.** A bare caret
             // has no text to restyle, so the flag is armed for the next character -- and doing the
-            // flip on `pending_style` rather than on a bool is what lets a flag with *no slot* work.
-            // `STYLE_STRIKE` has no toolbar button and therefore no bool in `StyleFlags`, and a
-            // version that flipped a bool could not arm it at all.
+            // flip on `pending_style` rather than on a bool is what lets every flag arm its button.
+            // `STYLE_STRIKE` now has a toolbar button and a bool in `StyleFlags`, so it arms too.
             //
             // **The `set_armed_style` call is still the only writer of the chrome's copy**, and it is
-            // an identity here: it masks out the three bits it owns and puts back the same three,
-            // every other bit -- strike, super, sub, header -- riding through the mask.
+            // an identity here: it masks out the four bits it owns and puts back the same four,
+            // every other bit -- super, sub, header -- riding through the mask.
             let f = self.pending_style.unwrap_or(0) ^ flag;
             self.pending_style = Some(f);
             self.set_armed_style(
                 f & STYLE_BOLD != 0,
                 f & STYLE_ITALIC != 0,
                 f & STYLE_UNDERLINE != 0,
+                f & STYLE_STRIKE != 0,
             );
             // **`None` for a flag with no button**, which is a no-op rather than a repaint: there is
             // nothing on screen that draws "strike is armed", so there is nothing to invalidate.
@@ -6997,6 +7028,7 @@ impl<'a> Session<'a> {
                     bold: f & STYLE_BOLD != 0,
                     italic: f & STYLE_ITALIC != 0,
                     underline: f & STYLE_UNDERLINE != 0,
+                    strikethrough: f & STYLE_STRIKE != 0,
                 };
             }
         }
@@ -10161,10 +10193,11 @@ fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::
         Tool::Undo => Command::Hotkey(Hotkey::Undo),
         Tool::Redo => Command::Hotkey(Hotkey::Redo),
         Tool::Image => Command::Hotkey(Hotkey::InsertImage),
-        // `Tool::Collapse` is handled in `Session::press` rather than here, because it toggles a
-        // chrome flag and is not a document command. **Listed as `None` here rather than omitted** so
-        // that this function's arms are exactly the `Tool` variants -- adding a tool makes this
-        // non-exhaustive and the compiler says so.
+        Tool::Strikethrough => Command::Hotkey(Hotkey::Strike),
+        // `Tool::Collapse`, `Tool::Comment`, `Tool::Share` are handled in `Session::press` rather
+        // than here, because they toggle chrome flags or run actions rather than document commands.
+        // **Listed as `None` here rather than omitted** so that this function's arms are exactly the
+        // `Tool` variants -- adding a tool makes this non-exhaustive and the compiler says so.
         _ => return None,
     })
 }
@@ -10295,7 +10328,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         Action::Find | Action::Replace | Action::ToggleBullets | Action::ToggleNumbering
         | Action::AlignLeft | Action::AlignCenter | Action::AlignRight | Action::Indent | Action::Outdent
         | Action::ToggleRibbon | Action::ToggleTheme | Action::ToggleAutosave | Action::ToggleNavigation
-        | Action::InsertPageBreak => return None,
+        | Action::InsertPageBreak | Action::ToggleComment | Action::Share => return None,
     })
 }
 

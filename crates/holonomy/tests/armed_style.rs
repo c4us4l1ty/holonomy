@@ -1,4 +1,4 @@
-//! **Bold, Italic and Underline: armed at the caret, and what that actually does.** 8 tests.
+//! **Bold, Italic, Underline and Strikethrough: armed at the caret, and what that actually does.** 8 tests.
 //!
 //! # The dead thing this part found
 //!
@@ -43,7 +43,7 @@ use holonomy_display::paint::Painter;
 use holonomy_display::HeadlessScanout;
 use holonomy_render::chrome::ChromeMetrics;
 use holonomy_render::widgets;
-use holonomy_text::{Editor, SpanPolicy, STYLE_BOLD, STYLE_ITALIC, STYLE_UNDERLINE};
+use holonomy_text::{Editor, SpanPolicy, STYLE_BOLD, STYLE_ITALIC, STYLE_STRIKE, STYLE_UNDERLINE};
 
 fn atlas() -> &'static holonomy_assets::atlas::Atlas {
     static ATLAS: std::sync::OnceLock<&'static holonomy_assets::atlas::Atlas> =
@@ -144,13 +144,14 @@ fn type_text(s: &mut Session<'static>, text: &str) {
 /// **`Option<u16>` and not `u16`, because the model has three states and the chrome has two.** `None` is
 /// "inherit", `Some(0)` is "plain", and two bools cannot tell those apart -- which is fine, because the
 /// chrome shows what is *on* and the model remembers what was *said*.
-fn both(s: &Session<'_>) -> (Option<u16>, (bool, bool, bool)) {
+fn both(s: &Session<'_>) -> (Option<u16>, (bool, bool, bool, bool)) {
     (
         s.pending_style(),
         (
             s.state.styles.bold,
             s.state.styles.italic,
             s.state.styles.underline,
+            s.state.styles.strikethrough,
         ),
     )
 }
@@ -165,14 +166,14 @@ fn the_bold_button_arms_bold_and_the_flag_is_the_chromes() {
     let mut s = session();
     assert_eq!(
         both(&s),
-        (None, (false, false, false)),
+        (None, (false, false, false, false)),
         "nothing is armed and nothing has been said, on a fresh session"
     );
 
     click_tool(&mut s, "bold");
     assert_eq!(
         both(&s),
-        (Some(STYLE_BOLD), (true, false, false)),
+        (Some(STYLE_BOLD), (true, false, false, false)),
         "the click armed bold in the model and in the chrome"
     );
     assert!(
@@ -183,7 +184,7 @@ fn the_bold_button_arms_bold_and_the_flag_is_the_chromes() {
     click_tool(&mut s, "bold");
     assert_eq!(
         both(&s),
-        (Some(0), (false, false, false)),
+        (Some(0), (false, false, false, false)),
         "**and a second click is `Some(0)`, not `None`** -- the user said plain, which is a different \
          fact from having said nothing. A `u16` here would be 0 and the next character would inherit \
          bold from the character before the caret, which is the bug this type exists to prevent."
@@ -276,21 +277,23 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
 
     // **The states actually visited, so the gate says it walked the space and not just that it agreed
     // once.** Seven presses on three buttons, cycled, reach all eight combinations of the three bools --
-    // which is the whole space, and the reason this is a cycle rather than a pair.
-    let mut seen: Vec<(bool, bool, bool)> = Vec::new();
+    // which is the whole space, and the reason this is a cycle rather than a pair. Strikethrough is the
+    // fourth bool and stays false throughout this walk.
+    let mut seen: Vec<(bool, bool, bool, bool)> = Vec::new();
     const BUTTONS: [&str; 3] = ["bold", "italic", "underline"];
     for step in 0..7 {
         let flags = (
             s.state.styles.bold,
             s.state.styles.italic,
             s.state.styles.underline,
+            s.state.styles.strikethrough,
         );
-        let (bold, italic, underline) = flags;
+        let (bold, italic, underline, strikethrough) = flags;
         assert_eq!(
             s.pending_style(),
-            model_of(bold, italic, underline),
+            model_of(bold, italic, underline, strikethrough),
             "after {step} transition(s) the model and the chrome disagree: the chrome says \
-             (bold={bold}, italic={italic}, underline={underline}) and the model says {:?}",
+             (bold={bold}, italic={italic}, underline={underline}, strikethrough={strikethrough}) and the model says {:?}",
             s.pending_style(),
         );
         if !seen.contains(&flags) {
@@ -312,20 +315,21 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
         model_of(
             s.state.styles.bold,
             s.state.styles.italic,
-            s.state.styles.underline
+            s.state.styles.underline,
+            s.state.styles.strikethrough,
         ),
         "eight presses in, the two copies still agree"
     );
 }
 
-/// **What the model must hold, given the chrome's three bools. Always `Some`**, because
+/// **What the model must hold, given the chrome's four bools. Always `Some`**, because
 /// `set_armed_style` never writes `None` -- a gate expecting `None` after a press would be asserting
 /// that a toggle is indistinguishable from never having touched it.
-fn model_of(bold: bool, italic: bool, underline: bool) -> Option<u16> {
-    Some(flags_of(bold, italic, underline))
+fn model_of(bold: bool, italic: bool, underline: bool, strikethrough: bool) -> Option<u16> {
+    Some(flags_of(bold, italic, underline, strikethrough))
 }
 
-fn flags_of(bold: bool, italic: bool, underline: bool) -> u16 {
+fn flags_of(bold: bool, italic: bool, underline: bool, strikethrough: bool) -> u16 {
     let mut f = 0u16;
     if bold {
         f |= STYLE_BOLD;
@@ -335,6 +339,9 @@ fn flags_of(bold: bool, italic: bool, underline: bool) -> u16 {
     }
     if underline {
         f |= STYLE_UNDERLINE;
+    }
+    if strikethrough {
+        f |= STYLE_STRIKE;
     }
     f
 }
@@ -347,13 +354,13 @@ fn bold_and_italic_are_independent_of_each_other() {
     click_tool(&mut s, "italic");
     assert_eq!(
         both(&s),
-        (Some(STYLE_BOLD | STYLE_ITALIC), (true, true, false)),
+        (Some(STYLE_BOLD | STYLE_ITALIC), (true, true, false, false)),
         "both armed"
     );
     click_tool(&mut s, "bold");
     assert_eq!(
         both(&s),
-        (Some(STYLE_ITALIC), (false, true, false)),
+        (Some(STYLE_ITALIC), (false, true, false, false)),
         "clearing bold leaves italic alone"
     );
 }
@@ -372,7 +379,7 @@ fn underline_is_armed_and_types_underlined_text() {
     click_tool(&mut s, "underline");
     assert_eq!(
         both(&s),
-        (Some(STYLE_UNDERLINE), (false, false, true)),
+        (Some(STYLE_UNDERLINE), (false, false, true, false)),
         "underline is armed and nothing else with it"
     );
     type_text(&mut s, "u");
@@ -396,7 +403,7 @@ fn underline_is_armed_and_types_underlined_text() {
     );
     assert_eq!(
         both(&s),
-        (Some(0), (false, false, false)),
+        (Some(0), (false, false, false, false)),
         "and the chrome agrees with the model on the way out"
     );
 }

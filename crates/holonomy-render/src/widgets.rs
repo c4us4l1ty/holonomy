@@ -67,14 +67,20 @@ pub enum Tool {
     Italic,
     /// Underline.
     Underline,
+    /// Strikethrough — Google Docs' fourth inline mark, missing from the ribbon toolbar.
+    Strikethrough,
     /// Text colour.
     TextColour,
     /// Highlight.
     Highlight,
     /// Link.
     Link,
+    /// Comment: open the comments sidebar / add a comment.
+    Comment,
     /// Image.
     Image,
+    /// Share: the prominent blue Share button at the far right.
+    Share,
     /// Overflow: the rest of the toolbar.
     Overflow,
     /// The mode switcher, at the right.
@@ -103,10 +109,13 @@ impl Tool {
             Tool::Bold => Some(IconId::Bold),
             Tool::Italic => Some(IconId::Italic),
             Tool::Underline => Some(IconId::Underline),
+            Tool::Strikethrough => Some(IconId::Strike),
             Tool::TextColour => Some(IconId::TextColour),
             Tool::Highlight => Some(IconId::Highlight),
             Tool::Link => Some(IconId::Link),
+            Tool::Comment => Some(IconId::Comment),
             Tool::Image => Some(IconId::Image),
+            Tool::Share => Some(IconId::Share),
             Tool::Overflow => Some(IconId::Overflow),
             Tool::Mode => Some(IconId::Pen),
             Tool::Collapse => Some(IconId::ChevronUp),
@@ -162,10 +171,13 @@ impl Tool {
             Tool::Bold => "bold",
             Tool::Italic => "italic",
             Tool::Underline => "underline",
+            Tool::Strikethrough => "strikethrough",
             Tool::TextColour => "text-colour",
             Tool::Highlight => "highlight",
             Tool::Link => "link",
+            Tool::Comment => "comment",
             Tool::Image => "image",
+            Tool::Share => "share",
             Tool::Overflow => "overflow",
             Tool::Mode => "mode",
             Tool::Collapse => "collapse",
@@ -344,12 +356,15 @@ pub const TOOLBAR: &[Tool] = &[
     Tool::Bold,
     Tool::Italic,
     Tool::Underline,
+    Tool::Strikethrough,
     Tool::TextColour,
     Tool::Highlight,
     Tool::Link,
+    Tool::Comment,
     Tool::Image,
     Tool::Overflow,
     Tool::Mode,
+    Tool::Share,
     Tool::Collapse,
 ];
 
