@@ -53,12 +53,12 @@ use crate::DamageRect;
 /// off: [`Rect`] and [`TextRun`] document their colours as `0xAARRGGBB`, so writing `0x00202020` for
 /// "opaque" would be relying on a mask three crates away.
 pub mod colour {
-    /// The panel behind everything.
-    pub const CHROME: u32 = 0xFFF8_FAFD;
+    /// The panel behind everything: white in Google Docs, like the page.
+    pub const CHROME: u32 = 0xFFFF_FFFF;
     /// The document page.
     pub const PAGE: u32 = 0xFFFF_FFFF;
-    /// The desktop writing surface, a little cooler than the paper and top chrome.
-    pub const DESK: u32 = 0xFFF1_F3F8;
+    /// The desktop writing surface around the page.
+    pub const DESK: u32 = 0xFFF5_F5F5;
     /// A soft shadow beneath desktop sheets.
     pub const PAGE_SHADOW: u32 = 0xFFDC_E1E9;
     /// A band that is one step **off** the chrome: the toolbar and the status bar.
@@ -76,29 +76,29 @@ pub mod colour {
     /// definition lighter than the band, so the band cannot get lighter without colliding with it.
     /// Since this palette is light-on-light, "off the panel" means **darker** here, which is also what
     /// makes the toolbar read as a depressed strip with a raised control surface on it.
-    pub const BAND: u32 = 0xFFEF_F2F6;
-    /// Rules, separators and box drawing.
-    pub const RULE: u32 = 0xFFC4_C7C5;
+    pub const BAND: u32 = 0xFFFF_FFFF;
+    /// Rules, separators and box drawing: Google Docs' `#DADCE0` border grey.
+    pub const RULE: u32 = 0xFFDA_DCE0;
     /// A rule that is *incidental* -- a tick, a gutter marker.
-    pub const RULE_DIM: u32 = 0xFFE0_E0E0;
-    /// Body text on the page.
-    pub const INK: u32 = 0xFF1F_1F1F;
-    /// Chrome text.
-    pub const INK_CHROME: u32 = 0xFF44_4746;
-    /// Chrome text that is inactive or merely informational.
-    pub const INK_DIM: u32 = 0xFF74_7775;
+    pub const RULE_DIM: u32 = 0xFFDA_DCE0;
+    /// Body text on the page: Google Docs' near-black `#202124`.
+    pub const INK: u32 = 0xFF20_2124;
+    /// Chrome text: Google Docs' secondary `#5F6368`.
+    pub const INK_CHROME: u32 = 0xFF5F_6368;
+    /// Chrome text that is inactive or merely informational: `#9AA0A6`.
+    pub const INK_DIM: u32 = 0xFF9A_A0A6;
     /// The text on a button: one step brighter than [`INK_CHROME`].
     ///
     /// **Separate from `INK_CHROME` so "this item is selected" is a colour rather than a rectangle.**
     /// The reference's open menu heading is the same weight and a slightly brighter ink inside the
     /// same pill, and a selected *item* inside a popup is the same again. Three states, two colours,
     /// and the third state is carried by the pill.
-    pub const INK_STRONG: u32 = 0xFF1F_1F1F;
+    pub const INK_STRONG: u32 = 0xFF20_2124;
     /// The raised surface: the toolbar's pill, a button, a popup, a selected sidebar row.
     ///
     /// **One value for all four**, because they are the same surface at different sizes. Giving each
     /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
-    pub const PILL: u32 = 0xFFF0_F4F9;
+    pub const PILL: u32 = 0xFFF8_FAFD;
     /// A hovered widget, one step above [`PILL`].
     ///
     /// **A separate value rather than `PILL_ACTIVE` reused for hover.** The two are one step apart on
@@ -106,7 +106,7 @@ pub mod colour {
     /// the same either way would not tell you which of the two your click had reached.
     pub const PILL_HOVER: u32 = 0xFFE8_EAED;
     /// A held or selected widget, one step above [`PILL_HOVER`].
-    pub const PILL_ACTIVE: u32 = 0xFFD3_E3FD;
+    pub const PILL_ACTIVE: u32 = 0xFFD2_E3FC;
     /// **The document's selected bytes, behind the text.** Part 28.
     ///
     /// **A light blue and not a darker grey, and that is the one deliberate departure from this
@@ -120,7 +120,7 @@ pub mod colour {
     /// contrast problem the moment the document's own colour changes, and the page background is
     /// white. At 0xFFC8_D9F0 the worst case is a document in near-black on near-white, which is
     /// legible at every selection the user can make.
-    pub const SELECTION: u32 = 0xFFD3_E3FD;
+    pub const SELECTION: u32 = 0xFFBD_FFFF;
     /// An open menu's panel, **lighter than everything it can be drawn over**.
     ///
     /// **This is the third surface and it needed its own value**, which the first version did not
@@ -141,7 +141,7 @@ pub mod colour {
     /// digits `FF5E | 5E | 6E`. **Same value, and the only reason it matters is that a colour read at
     /// 3am is compared digit by digit against its neighbours**: one constant in twenty with a different
     /// shape is the one that gets misread.
-    pub const POPUP_EDGE: u32 = 0xFFE0_E0E0;
+    pub const POPUP_EDGE: u32 = 0xFFDA_DCE0;
     /// **A popup's drop shadow**, in pixels: the width of the two flat bands down and to the right.
     ///
     /// **Three, the same as the page's, and not a hairline.** The two are the same device — a flat
@@ -149,17 +149,17 @@ pub mod colour {
     /// this cell size reads as a slightly wrong edge rather than as depth.
     pub const POPUP_SHADOW: u32 = 3;
     /// The `[SEALED]` badge: the one thing on screen that is a security claim.
-    pub const SEALED: u32 = 0xFF13_7333;
+    pub const SEALED: u32 = 0xFF1A_73E8;
     /// Accent for a toolbar toggle that is on.
-    pub const ACTIVE: u32 = 0xFF0B_57D0;
+    pub const ACTIVE: u32 = 0xFF1A_73E8;
     /// The caret.
-    pub const CARET: u32 = 0xFF1F_1F1F;
+    pub const CARET: u32 = 0xFF20_2124;
     /// The scrollbar track.
     ///
     /// **One step off the panel, for the same reason [`BAND`] is.** It was `0xFFF8_FAFD` -- the panel's
     /// own value -- so the rail around the thumb was invisible and the thumb read as a grey sliver
     /// floating at the window's edge with nothing behind it.
-    pub const TRACK: u32 = 0xFFEF_F2F6;
+    pub const TRACK: u32 = 0xFFF5_F5F5;
     /// The scrollbar thumb.
     pub const THUMB: u32 = 0xFFDA_DCE0;
     /// The page's drop shadow, as a flat band. A real gradient would need `f32` alpha.
@@ -169,17 +169,17 @@ pub mod colour {
     /// desk was the same colour as a divider, and at one pixel wide it read as neither. The band is
     /// still flat and still one pixel (`ChromeMetrics::shadow`), which is the honest limit of a blitter
     /// with no alpha; what changed is that the one pixel is now a step the eye can see.
-    pub const SHADOW: u32 = 0xFFD2_D5D9;
+    pub const SHADOW: u32 = 0xFFDA_DCE0;
     /// Google blue, for the document mark and active accents.
-    pub const BLUE: u32 = 0xFF42_85F4;
+    pub const BLUE: u32 = 0xFF1A_73E8;
     /// The cyan Share/Export pill.
-    pub const SHARE_BG: u32 = 0xFFC2_E7FF;
+    pub const SHARE_BG: u32 = 0xFF1A_73E8;
     /// Ink on the cyan pill.
-    pub const SHARE_INK: u32 = 0xFF00_4A77;
+    pub const SHARE_INK: u32 = 0xFFFF_FFFF;
     /// The blue Upgrade/Local pill.
-    pub const UPGRADE_BG: u32 = 0xFFD3_E3FD;
+    pub const UPGRADE_BG: u32 = 0xFFD2_E3FC;
     /// Ink on the blue pill and selected sidebar row.
-    pub const UPGRADE_INK: u32 = 0xFF08_42A0;
+    pub const UPGRADE_INK: u32 = 0xFF1A_73E8;
 }
 
 // ---------------------------------------------------------------- the runes
@@ -1567,6 +1567,8 @@ pub struct StyleFlags {
     pub italic: bool,
     /// **Underline is armed for the next character typed.**
     pub underline: bool,
+    /// **Strikethrough is armed for the next character typed.**
+    pub strikethrough: bool,
 }
 
 impl StyleFlags {
@@ -1576,6 +1578,7 @@ impl StyleFlags {
             StyleFlagsSlot::Bold => self.bold,
             StyleFlagsSlot::Italic => self.italic,
             StyleFlagsSlot::Underline => self.underline,
+            StyleFlagsSlot::Strikethrough => self.strikethrough,
         }
     }
 
@@ -1590,6 +1593,7 @@ impl StyleFlags {
             crate::widgets::Tool::Bold => Some(StyleFlagsSlot::Bold),
             crate::widgets::Tool::Italic => Some(StyleFlagsSlot::Italic),
             crate::widgets::Tool::Underline => Some(StyleFlagsSlot::Underline),
+            crate::widgets::Tool::Strikethrough => Some(StyleFlagsSlot::Strikethrough),
             _ => None,
         }
     }
@@ -1597,9 +1601,9 @@ impl StyleFlags {
 
 /// Which toolbar toggle a query is about.
 ///
-/// **Two variants, because there are two buttons.** `Mono` and `Heading` were deleted in part 25: the
-/// toolbar has no such button, and an unreachable variant of a `Copy` enum that a `match` must still
-/// cover is a variant somebody will eventually cover with `Some(true)`.
+/// **Four variants: bold, italic, underline, strikethrough.** `Mono` and `Heading` were deleted in
+/// part 25: the toolbar has no such button, and an unreachable variant of a `Copy` enum that a
+/// `match` must still cover is a variant somebody will eventually cover with `Some(true)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StyleFlagsSlot {
     /// Bold.
@@ -1613,6 +1617,8 @@ pub enum StyleFlagsSlot {
     /// it, so pressing it counted as inert — which was *correct* until `STYLE_UNDERLINE` existed. A
     /// slot with nothing behind it is exactly what part 25 deleted `Mono` and `Heading` for.
     Underline,
+    /// **Strikethrough.** Added for Google Docs parity.
+    Strikethrough,
 }
 
 /// Per-line vertical geometry, as a uniform pitch plus a sparse table of extra heights.
