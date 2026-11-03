@@ -51,7 +51,7 @@ jobs:
           if ! (cargo test --locked -p holonomy-render &&
                 cargo test --locked -p holonomy --features desktop --lib &&
                 cargo test --locked -p holonomy --features desktop --test svg_import --test desktop_documents --test session_image) 2>&1 | tee target/rust-check.log; then
-            echo "::error title=Rust build or SVG test failure::$(tail -c 12000 target/rust-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
+            echo "::error title=Rust build or SVG test failure::$(tail -c 3800 target/rust-check.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
             exit 1
           fi
       - name: Sealed, static release artifact and size gate
@@ -75,7 +75,11 @@ jobs:
       - name: Report a formatting patch through the Checks API
         if: always()
         run: |
-          cargo fmt --all
+          set -o pipefail
+          if ! cargo fmt --all 2>&1 | tee target/format.log; then
+            echo "::error title=rustfmt error::$(tail -c 3800 target/format.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
+            exit 1
+          fi
           if ! git diff --quiet -- . ':!Cargo.lock'; then
             git diff --binary -- . ':!Cargo.lock' | gzip -c | base64 -w0 > /tmp/holonomy-format-patch.txt
             split -b 3000 -d -a 3 /tmp/holonomy-format-patch.txt /tmp/holonomy-format-part-
