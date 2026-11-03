@@ -2230,7 +2230,7 @@ pub fn ascending_runs(text: &str) -> Vec<AscendingRun> {
 /// **A `const`, so the order is fixed at compile time**, and `ChromeState::open_menu` is an index into
 /// this. An index rather than an enum because a menu *is* a position in this list: painting heading `i`
 /// and testing `open_menu == Some(i)` cannot disagree when both are `i`.
-pub const MENUS: &[&str] = &["File", "Edit", "View", "Insert", "Format", "Tools", "Help"];
+pub const MENUS: &[&str] = &["File", "Edit", "View", "Insert", "Format", "Tools", "Table", "Help"];
 
 /// The menu bar's heading boxes, and where the next one starts.
 ///
