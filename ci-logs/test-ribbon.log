@@ -26,6 +26,8 @@
 [1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m secrecy v0.10.3
 [1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m ttf-parser v0.25.1
 [1m[92m   Compiling[0m digest v0.11.3
 [1m[92m   Compiling[0m universal-hash v0.6.1
@@ -41,26 +43,24 @@
 [1m[92m   Compiling[0m argon2 v0.6.0
 [1m[92m   Compiling[0m sha2 v0.11.0
 [1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
-[1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
 [1m[92m   Compiling[0m pdf-writer v0.15.0
-[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
 [1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
-[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
 [1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
 [1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
 [1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
 [1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
 [1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 8.34s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 7.86s
 [1m[92m     Running[0m tests/wordcraft_ribbon.rs (target/x86_64-unknown-linux-musl/debug/deps/wordcraft_ribbon-207c18ab30503e3a)
 
 running 11 tests
-test every_ribbon_label_fits_inside_its_button ... ok
 test every_group_caption_fits_inside_its_group ... ok
 test every_group_caption_is_inside_the_ribbon ... ok
+test every_ribbon_label_fits_inside_its_button ... ok
 test narrow_ribbon_overflows_instead_of_drawing_dead_buttons ... ok
 test no_button_label_is_drawn_over_its_group_caption ... ok
 test no_two_ribbon_buttons_overlap ... ok
