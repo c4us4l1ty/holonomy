@@ -986,7 +986,7 @@ pub fn hit_rect(l: &Layout, state: &ChromeState, h: Hit) -> Option<DamageRect> {
         // is the chrome's own chevron, drawn as part of the collapse button rather than on its own.
         // Returning `None` means a pointer moving over the page damages nothing, which is correct:
         // nothing changed.
-        Hit::Page | Hit::Dismiss | Hit::None => None,
+        Hit::Page | Hit::Dismiss | Hit::None | Hit::Outline(_) => None,
     }
 }
 
@@ -1275,7 +1275,7 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40).max(l.sidebar.y as i32 + 80) as u32
     };
     if !state.outline.is_empty() {
-        let mut row = outline_y + m.cell_h + 12;
+        let mut row = outline_y + l.cell_h + 12;
         let sidebar_w = l.sidebar.width as i32;
         for (_, line_idx, level) in &state.outline {
             let indent = level.saturating_sub(1) * 20;
@@ -1285,13 +1285,13 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
                 fill_x as u32,
                 row.saturating_sub(2),
                 fill_w as u32,
-                m.cell_h + 4,
+                l.cell_h + 4,
             );
             if rect.contains(x, y) {
                 return Hit::Outline(*line_idx);
             }
-            row += m.cell_h + 4;
-            if row + m.cell_h > l.sidebar.bottom() {
+            row += l.cell_h + 4;
+            if row + l.cell_h > l.sidebar.bottom() {
                 break;
             }
         }

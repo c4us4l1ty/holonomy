@@ -6474,7 +6474,7 @@ impl<'a> Session<'a> {
         // the caret lands at `start`; the text remains visible, pending accept or reject.
         if self.mode == holonomy_render::menus::ViewMode::Suggesting {
             // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
-            self.editor.format_range(start as u32, (start + len) as u32, |span| {
+            self.editor.format_range(start as u32, (start as u32 + len) as u32, |span| {
                 (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
             })?;
             self.counts.after_delete(&self.editor, start, removed);
@@ -7620,13 +7620,13 @@ impl<'a> Session<'a> {
             let is_header = span.style_flags & STYLE_HEADER != 0;
             // Heading 2 carries STYLE_BOLD with the heading blue but no STYLE_HEADER flag.
             let is_heading2 = span.style_flags & STYLE_BOLD != 0
-                && span.colour_rgb == 0x001A_5C75;
+                && span.color_rgb == 0x001A_5C75;
             if !is_header && !is_heading2 {
                 continue;
             }
             let line_len = end.saturating_sub(begin);
             // Strip a trailing newline.
-            let text_len = if line_len > 0 && self.editor.text_len() > begin as u64 {
+            let text_len = if line_len > 0 && self.editor.text_len() > begin {
                 let last = begin + line_len - 1;
                 if last < self.editor.text_len() as usize {
                     let mut byte = [0u8; 1];

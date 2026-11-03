@@ -945,8 +945,8 @@ impl<'a> Painter<'a> {
             frame.fill_rect(
                 whole.x as i64,
                 whole.y as i64,
-                whole.width as i64,
-                whole.height as i64,
+                whole.width as u32,
+                whole.height as u32,
                 0xFFD4_FDD4,
             );
             self.scratch.stats.rects += 1;
@@ -1608,10 +1608,10 @@ fn blit_rgba(
             let a = u32::from(a8);
             let inv = 255 - a;
             let mix = |src: u8, dst: u32| (u32::from(src) * a + dst * inv) / 255;
-            let out = 0xFF00_0000
-                | (mix(b8, (under >> 16) & 0xFF) << 16)
+            let out = 0x0000_0000
+                | (mix(r8, (under >> 16) & 0xFF) << 16)
                 | (mix(g8, (under >> 8) & 0xFF) << 8)
-                | mix(r8, under & 0xFF);
+                | mix(b8, under & 0xFF);
             dst_row[px as usize] = out;
             written += 1;
         }

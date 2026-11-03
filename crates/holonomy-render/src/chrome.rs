@@ -42,7 +42,7 @@
 //!
 //! [`TextRun`]: crate::TextRun
 
-use crate::tree::{Label, Rect, RoundRect, Style, SurfaceTree, TextRun};
+use crate::tree::{Label, Node, Rect, RoundRect, Style, SurfaceTree, TextRun};
 use crate::DamageRect;
 
 // ---------------------------------------------------------------- the palette
@@ -98,7 +98,7 @@ pub mod colour {
     ///
     /// **One value for all four**, because they are the same surface at different sizes. Giving each
     /// its own would be four numbers to keep in step, and the eye reads them as one lighter plane.
-    pub const PILL: u32 = 0xFFF8_FAFD;
+    pub const PILL: u32 = 0xFFE8_F0FE;
     /// A hovered widget, one step above [`PILL`].
     ///
     /// **A separate value rather than `PILL_ACTIVE` reused for hover.** The two are one step apart on
@@ -1989,7 +1989,7 @@ impl Default for ChromeState {
             ribbon: false,
             ribbon_tab: 1,
             ribbon_collapsed: false,
-            dark: true,
+            dark: false,
             autosave: true,
             navigation: Vec::new(),
             ribbon_overflow: Vec::new(),
@@ -3026,6 +3026,7 @@ impl Chrome {
                             caret.cell.y as i32,
                             compose,
                             Style::REGULAR,
+                            0,
                             colour::INK_CHROME,
                         ))));
                     }
