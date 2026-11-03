@@ -1038,6 +1038,7 @@ impl<'a> Session<'a> {
         self.state.bytes = self.editor.text_len() as u32;
         self.state.scroll_line = 0;
         self.caret_drawn_at = None;
+        self.refresh_navigation();
         if self.state.paged {
             let _ = self.reconcile_caret();
             self.scroll_line_into_view(self.state.caret_line);
@@ -4650,7 +4651,6 @@ impl<'a> Session<'a> {
         }
         let Ok(text) = self.editor.text() else { return };
         let mut out: Vec<(u32, String)> = Vec::new();
-        let mut line = 0u32;
         let mut start = 0usize;
         for (i, b) in text
             .iter()
@@ -4665,10 +4665,11 @@ impl<'a> Session<'a> {
                         .take(80)
                         .collect();
                     if !title.is_empty() {
-                        out.push((line, title));
+                        // Navigation scrolls visual rows, which differ from raw
+                        // newline counts once the desktop measure wraps paragraphs.
+                        out.push((self.lines.line_of(start), title));
                     }
                 }
-                line += 1;
                 start = i + 1;
             }
         }

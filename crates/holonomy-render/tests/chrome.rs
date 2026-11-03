@@ -1849,9 +1849,17 @@ fn larger_desktop_icons_have_static_masks_and_stay_inside_their_buttons() {
             large.bits.iter().any(|&row| row != 0),
             "empty desktop icon {id:?}"
         );
+        // Trusted SVG artwork is rasterised independently at 16 and 20 px; the
+        // legacy hand-written masks are nearest-neighbour scaled and must not drift.
         let native_svg = matches!(
             id,
             IconId::Doc | IconId::Folder | IconId::Pen | IconId::ArrowLeft
+                | IconId::PageBreak | IconId::Save | IconId::Undo | IconId::Redo
+                | IconId::ChevronDown | IconId::ChevronUp | IconId::Image
+                | IconId::Overflow | IconId::Table | IconId::Search | IconId::Cut
+                | IconId::Copy | IconId::Paste | IconId::Bullets | IconId::AlignLeft
+                | IconId::AlignCenter | IconId::AlignRight | IconId::Indent
+                | IconId::Outdent | IconId::Navigation | IconId::Theme | IconId::Close
         );
         for y in 0..20 {
             for x in 0..20 {

@@ -868,15 +868,12 @@ pub fn group_trigger(l: &Layout, group: &Group) -> DamageRect {
     if group.level != ribbon_fit::COLLAPSED || group.rect.is_empty() {
         return DamageRect::EMPTY;
     }
-    let body = group
-        .rect
-        .height
-        .saturating_sub(l.cell_h + CAPTION_AIR + CAPTION_GAP);
+    // The collapsed trigger is the whole group: its own label replaces the caption.
     DamageRect::new(
         group.rect.x + 4,
         group.rect.y + 3,
         group.rect.width.saturating_sub(8),
-        body.saturating_sub(6),
+        group.rect.height.saturating_sub(6),
     )
 }
 
@@ -1518,21 +1515,23 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
                 cell_h,
             );
         }
-        text(
-            v,
-            DamageRect::new(
-                g.rect.x,
-                g.rect.bottom().saturating_sub(caption_h),
-                g.rect.width,
-                caption_h,
-            ),
-            g.label,
-            t.group,
-            false,
-            true,
-            cell_w,
-            cell_h,
-        );
+        if g.level != ribbon_fit::COLLAPSED {
+            text(
+                v,
+                DamageRect::new(
+                    g.rect.x,
+                    g.rect.bottom().saturating_sub(caption_h),
+                    g.rect.width,
+                    caption_h,
+                ),
+                g.label,
+                t.group,
+                false,
+                true,
+                cell_w,
+                cell_h,
+            );
+        }
     }
     for b in buttons {
         if b.rect.is_empty() {
