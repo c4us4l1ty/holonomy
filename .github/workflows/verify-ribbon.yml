@@ -38,9 +38,16 @@ jobs:
           run test-icons cargo test -p holonomy-render --test icons
           run test-chrome cargo test -p holonomy-render --test chrome
           run test-all cargo test --workspace --no-fail-fast
-          echo "OVERALL=$status"
-          cat ci-logs/summary.log
+          echo "OVERALL=$status" | tee -a ci-logs/summary.log
           exit $status
+      - name: publish
+        if: always()
+        run: |
+          git config user.name ci
+          git config user.email ci@example.invalid
+          git add -f ci-logs
+          git commit --allow-empty -m "ci: logs [skip ci]" || true
+          git push
   baseline:
     runs-on: ubuntu-latest
     timeout-minutes: 90
