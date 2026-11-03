@@ -863,6 +863,13 @@ impl SpanMap {
         //   realistic number of runs on a line.
         let mut outputs = 0usize;
         let mut split: Option<(usize, TextIntervalSpan)> = None;
+        // **The face the inserted bytes inherit, read before the loop moves anything.** The run the
+        // caret is in is the one whose family the typed characters join -- that is the rule
+        // `GrowIntoInsert` implements for the flags and the colour, and the face has to follow it for
+        // the same reason. Read here rather than after the loop because the loop rewrites every
+        // boundary, and a lookup afterwards would be asking the map about a range it is midway through
+        // rebuilding.
+        let inherited_face = self.style_at(offset).font_face;
         for i in 0..self.spans.len() {
             let sp = self.spans[i];
             let (f, c) = (sp.style_flags, sp.color_rgb);
@@ -942,7 +949,7 @@ impl SpanMap {
             self.spans.insert(
                 at,
                 TextIntervalSpan::styled(offset, insert_end, inserted.0, inserted.1)
-                    .with_face(sp.font_face),
+                    .with_face(inherited_face),
             );
         }
 
