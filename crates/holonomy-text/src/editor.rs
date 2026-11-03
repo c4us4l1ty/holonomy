@@ -1131,6 +1131,25 @@ impl Editor {
         Ok(self.spans.style_range(start, end, style_flags, color_rgb)?)
     }
 
+    /// **Style `[start, end)` and set its face**, without a history record.
+    ///
+    /// The counterpart of [`style_range`](Self::style_range) for the insert path, which has already
+    /// recorded the *insert* and must not push a second action for the styling that came with it. The
+    /// four-argument form leaves the face alone; this one sets it, and the two exist side by side so a
+    /// caller cannot be ambiguous about which it meant.
+    pub fn style_range_faced(
+        &mut self,
+        start: u32,
+        end: u32,
+        style_flags: u16,
+        color_rgb: u32,
+        font_face: FontFace,
+    ) -> Result<(), EditorError> {
+        Ok(self
+            .spans
+            .style_range_faced(start, end, style_flags, color_rgb, font_face)?)
+    }
+
     /// Apply a formatting command as one bounded undoable transaction.
     ///
     /// Each existing run is transformed independently, preserving mixed formatting.
