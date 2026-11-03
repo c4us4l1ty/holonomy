@@ -1016,6 +1016,8 @@ pub enum Hit {
     Doc(usize),
     /// The active document row's overflow button.
     DocMenu(usize),
+    /// An entry in the document outline slider: the line index it jumps to.
+    Outline(u32),
     /// The "+" in the sidebar's header.
     NewDoc,
     /// The sidebar's back arrow.
@@ -1263,6 +1265,35 @@ pub fn hit(l: &Layout, state: &ChromeState, x: i32, y: i32) -> Hit {
         }
         if at(&l.sidebar) {
             return Hit::None;
+        }
+    }
+
+    // --- Document outline hit-testing: each entry jumps to its line.
+    let outline_y = if state.docs.is_empty() {
+        l.sidebar.y + 120
+    } else {
+        (l.sidebar.y as i32 + 80 + l.sidebar_rows as i32 * l.sidebar_row_h as i32 + 40).max(l.sidebar.y as i32 + 80) as u32
+    };
+    if !state.outline.is_empty() {
+        let mut row = outline_y + m.cell_h + 12;
+        let sidebar_w = l.sidebar.width as i32;
+        for (_, line_idx, level) in &state.outline {
+            let indent = level.saturating_sub(1) * 20;
+            let fill_x = l.sidebar.x as i32 + 16 + indent as i32;
+            let fill_w = (sidebar_w - 32 - indent as i32).max(4);
+            let rect = DamageRect::new(
+                fill_x as u32,
+                row.saturating_sub(2),
+                fill_w as u32,
+                m.cell_h + 4,
+            );
+            if rect.contains(x, y) {
+                return Hit::Outline(*line_idx);
+            }
+            row += m.cell_h + 4;
+            if row + m.cell_h > l.sidebar.bottom() {
+                break;
+            }
         }
     }
 
