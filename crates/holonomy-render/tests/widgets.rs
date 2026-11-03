@@ -817,9 +817,9 @@ fn tool_popup_in_ribbon_anchors_to_ribbon_button() {
 
     let p = popup(&l, &st, Some(Open::Tool(Tool::Font))).expect("font popup exists");
     assert!(
-        p.frame.y >= l.toolbar.y,
-        "popup frame y {} is above ribbon toolbar y {}",
-        p.frame.y,
+        p.rect.y >= l.toolbar.y,
+        "popup y {} is above ribbon toolbar y {}",
+        p.rect.y,
         l.toolbar.y
     );
 }

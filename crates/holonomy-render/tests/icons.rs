@@ -338,7 +338,7 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
         let others: u32 = rows
             .iter()
             .enumerate()
-            .filter(|(y, _)| (*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest))
+            .filter(|(y, _)| *y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest)
             .map(|(_, n)| n)
             .sum();
         assert!(

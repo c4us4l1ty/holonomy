@@ -55,10 +55,36 @@ jobs:
             exit 1
           fi
       - name: Sealed, static release artifact and size gate
-        run: cargo test --locked -p holonomy --release --test release_artifact -- --nocapture
-      - name: Desktop, static release artifact and size gate
-        run: cargo test --locked -p holonomy --release --features desktop --test release_artifact -- --nocapture
-      - name: Formatting and committed dependency lockfile
         run: |
-          cargo fmt --all -- --check
+          set -o pipefail
+          if cargo test --locked -p holonomy --release --test release_artifact -- --nocapture 2>&1 | tee target/release-sealed.log; then
+            echo "::notice title=Sealed release size::$(stat -c %s target/x86_64-unknown-linux-musl/release/holonomy) bytes (ceiling 4194304)"
+          else
+            echo "::error title=Sealed release gate::$(tail -c 3900 target/release-sealed.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
+            exit 1
+          fi
+      - name: Desktop, static release artifact and size gate
+        run: |
+          set -o pipefail
+          if cargo test --locked -p holonomy --release --features desktop --test release_artifact -- --nocapture 2>&1 | tee target/release-desktop.log; then
+            echo "::notice title=Desktop release size::$(stat -c %s target/x86_64-unknown-linux-musl/release/holonomy) bytes (ceiling 4194304)"
+          else
+            echo "::error title=Desktop release gate::$(tail -c 3900 target/release-desktop.log | tr '\n' '|' | sed 's/%/%25/g;s/\r/%0D/g')"
+            exit 1
+          fi
+      - name: Report a formatting patch through the Checks API
+        if: always()
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet -- . ':!Cargo.lock'; then
+            git diff --binary -- . ':!Cargo.lock' | gzip -c | base64 -w0 > /tmp/holonomy-format-patch.txt
+            split -b 3000 -d -a 3 /tmp/holonomy-format-patch.txt /tmp/holonomy-format-part-
+            for part in /tmp/holonomy-format-part-*; do
+              echo "::warning title=Formatting patch part ${part##*-}::$(cat "$part")"
+            done
+          fi
+      - name: Formatting and committed dependency lockfile
+        if: always()
+        run: |
           git diff --exit-code -- Cargo.lock
+          git diff --exit-code -- . ':!Cargo.lock'
