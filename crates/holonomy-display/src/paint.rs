@@ -945,8 +945,8 @@ impl<'a> Painter<'a> {
             frame.fill_rect(
                 whole.x as i64,
                 whole.y as i64,
-                whole.width as i64,
-                whole.height as i64,
+                whole.width as u32,
+                whole.height as u32,
                 0xFFD4_FDD4,
             );
             self.scratch.stats.rects += 1;
