@@ -2088,7 +2088,7 @@ impl<'a> Session<'a> {
         } else {
             self.type_metrics.page_pad
         };
-        let mut metrics = ChromeMetrics {
+        let metrics = ChromeMetrics {
             page_pad,
             sidebar_w: 0,
             ..self.chrome.metrics

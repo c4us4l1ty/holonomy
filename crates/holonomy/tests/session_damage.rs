@@ -46,15 +46,10 @@ use holonomy_render::chrome::{ChromeMetrics, ChromeState};
 use holonomy_render::widgets;
 use holonomy_text::{Editor, SpanPolicy};
 
-/// The toolbar's padding, as `place_toolbar` wants it. **8 px, and not the cell width** -- see
-/// [`tool_rect`] for why the two are not interchangeable.
-///
-/// **Now an alias rather than a literal, because it drifted the moment the real one changed.** When
-/// `widgets::TOOLBAR_PAD` went from 8 to 24 this file kept saying 8, so every rectangle in this gate
-/// named a position the painter would not use — and the file would still have *passed*, because it
-/// compares `place_toolbar(pad)` against `Session`, both of which it fed the same wrong number. **A
-/// duplicated constant in a test is a test that agrees with itself.** The alias is the fix; the reason
-/// it was a literal (that the parameter is the padding and not a cell) is kept in the doc above.
+/// The painter's toolbar padding, not the text cell width. An old test used a literal 8 px
+/// when the painter used 24 px: both sides of its own calculation agreed, but the test clicked
+/// the wrong position. Keep this alias even though the current responsive rim is 8 px; it
+/// prevents the same painted-versus-hit mismatch if the design margin changes again.
 const TOOLBAR_PAD: u32 = widgets::TOOLBAR_PAD;
 
 /// The shared atlas, built once for the whole test binary.

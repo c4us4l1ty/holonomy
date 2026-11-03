@@ -713,17 +713,11 @@ fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
     }
 }
 
-/// **The toolbar's groups are the reference's, and there are seven rules.**
-///
-/// Measured on `Plan/1.png`: seven one-pixel rules at x = 446, 641, 798, 942, 1,193, 1,347 and 1,674 of
-/// a 1,778 px window. The pattern that drew them was `Print | Zoom | Bold | Link | Mode | Collapse`,
-/// which put a rule where the reference has none (after paint format, after `Mode`) and missed six
-/// where it has one.
-///
-/// **This gate names the groups by their leading tool**, so a tool inserted into the middle of a group
-/// has to be placed in one here rather than silently inheriting its neighbour's side of a rule.
+/// Name each separator by the group it precedes, so removing or adding a control cannot leave
+/// a stray rule. The inert Link control (and its divider) was removed to keep actual insertion
+/// actions visible at the 1,280 px design width.
 #[test]
-fn the_toolbar_dividers_are_the_reference_s_seven() {
+fn toolbar_separators_match_visible_control_groups() {
     let leading: Vec<&'static str> = TOOLBAR
         .iter()
         .filter(|t| t.separated())
@@ -738,11 +732,10 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
             "font",
             "size-down",
             "bold",
-            "link",
             "overflow",
             "mode"
         ],
-        "nine leading tools, seven of them left-hand: the reference's six groups"
+        "six left-hand boundaries and two reserved for the right-hand group"
     );
     // **Nothing at the head of the bar**, because there is no group before the first one.
     assert!(
