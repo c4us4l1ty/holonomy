@@ -254,7 +254,11 @@ fn the_mode_button_opens_a_three_row_menu() {
     assert_eq!(s.state.open, Some(Open::Tool(Tool::Mode)), "**Mode opens**");
 
     let items = Open::Tool(Tool::Mode).items(&s.state);
-    assert_eq!(items.len(), 3, "Editing, Suggesting and Viewing all have rows");
+    assert_eq!(
+        items.len(),
+        3,
+        "Editing, Suggesting and Viewing all have rows"
+    );
     assert_eq!(items[0].label, "Editing");
     assert_eq!(items[1].label, "Suggesting");
     assert_eq!(items[2].label, "Viewing");
