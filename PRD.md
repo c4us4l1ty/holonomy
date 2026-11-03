@@ -11,6 +11,13 @@ Product Name: Holonomy (Calling the H1 to differentiate from the H2 folder)
 > in place on 2026-10-03 for FR-2.1, FR-2.2, FR-2.3, FR-4.3, FR-4.4 and FR-5.3a. Where this file
 > disagrees with Part 4, Part 4 wins.
 >
+> **2026-11-03 amendment:** The active stripped static binary ceiling is now **4 MiB**.
+> Approved SVG support is *import-time, desktop-only* static-vector-to-PNG conversion with
+> restricted resources; reviewed UI SVGs are compiled to masks before release. The sealed
+> default build remains PNG-only and preserves the existing jail and resource limits. Earlier
+> 2/2.5 MiB and blanket no-SVG requirements are historical where they conflict with this.
+> The desktop mode is not jailed and cannot yet claim the sealed mode's isolation.
+>
 > The execution order, measured performance constants, and phase gates are in **`PROJECT.md`**.
 >
 > Corrections already made against measurement, not preference:

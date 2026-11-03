@@ -1,94 +1,12 @@
-//! **The four toolbar buttons that now do something.** Part 44.
+//! Toolbar behaviour, tested through the same pointer and hit-testing path as the UI.
 //!
-//! # What this file holds
+//! The toolbar exposes real formatting, zoom, insertion, mode and overflow actions. Five
+//! placeholders still have no backing model: Search, Spellcheck, PaintFormat, FontSize and
+//! Highlight. This file names and counts them rather than pretending they are commands.
+//! The inactive Link button was removed: adding it back requires a URL/anchor model.
 //!
-//! Part 39 recorded *"ten toolbar buttons remain inert"* and named them. Four of those ten are now
-//! real, and this file is what says so:
-//!
-//! | button | what it does now |
-//! |---|---|
-//! | [`Tool::SizeUp`] / [`Tool::SizeDown`] | the zoom pair, reached from the toolbar |
-//! | [`Tool::Overflow`] | a menu of the tools that did not fit |
-//! | [`Tool::Mode`] | a real mode switcher, with a read-only mode that refuses edits |
-//!
-//! # And what is still inert, and why
-//!
-//! **Six: `Search`, `Spellcheck`, `PaintFormat`, `FontSize`, `Highlight`, `Link`.**
-//! Each is recorded below with the reason, because **a count with no reasons is a number nobody can
-//! act on**:
-//!
-//! - **`Search`** needs a search model — a query, a match range, and a way to walk the matches as
-//!   the document changes.
-//! - **`Spellcheck`** needs a dictionary. **The 512 KiB atlas budget cannot even hold the two zoom
-//!   sizes at the default `--ppem`** — see part 46 — and a word list of any useful size does not fit
-//!   in what is left of that.
-//! - **`PaintFormat`** needs a format model, so one range's formatting can be copied to another.
-//! - **`FontSize`** is a second size control; the face is chosen by `Font`, and a size list the
-//!   atlas can back is the same budget the zoom pair already spent.
-//! - **`Highlight`** needs a run-level highlight colour, which is the span field `Link` needs too.
-//! - **`Link`** needs a URL model — a span field plus something that resolves a URL.
-//!
-//! **`Underline` has left this list**, and it is the one that was cheapest to wrong: it needed a
-//! run-level underline flag in the document model, the model grew `STYLE_UNDERLINE`, and the button was
-//! left in this array for a compile-time-visible reason — **the array's type is a length**, so a tool
-//! that starts working cannot be forgotten silently. It is now a real toggle: armed at the caret, a
-//! restyle of the selection, a rule in the painter and a `<u>` in the export. `tests/armed_style.rs`
-//! holds the armed half.
-//!
-//! **None of the six is "not done yet".** They are features that need models this program does not
-//! have, and a button that pretends to one is worse than a button that is visibly absent.
-//!
-//! # And they now *look* like they work, which is a new problem
-//!
-//! Part 6 of `EDITOR_AUDIT.md` redrew every mask in `icons.rs`, because the first generation read as a
-//! row of unrelated doodles. **The inert tools were redrawn along with the ones that work**, so
-//! `Highlight` is a legible marker and `Link` a legible chain — where before they at least looked like
-//! pencil shavings. (`Underline`, the third example this paragraph used to give, is now wired and drawn
-//! with a real rule over real glyphs.)
-//!
-//! **That inverts the argument in the paragraph above.** A button that looks broken is visibly broken; a
-//! button that looks finished and does nothing is a dead end the user only discovers by pressing it. The
-//! count below still passes and still names all six — **this note exists so that the next reader does
-//! not read a green test as "these are fine".** The honest fixes are the models listed above, or removal
-//! in the style of `Comment`; what is *not* an option is leaving six convincing-looking buttons in a
-//! row whose other sixteen work.
-//!
-//! # `Comment` is gone, and it was the one that needed arguing
-//!
-//! **Part 46 intended to remove it and the removal never landed**, so `Tool::Comment`,
-//! `TitleButton::Comments`, `IconId::Comment` and `mask::COMMENT` were all still present and the counts
-//! in `pointer.rs` and `icons.rs` said 23 and 34 rather than 22 and 33 — written against the code, and
-//! correct about it.
-//!
-//! **It is removed now.** It needed an annotation store — a list, an anchor range, an author, and
-//! anchors that move when the text before them is edited — and this program has no reason to want that,
-//! so *a button that will never work is a lie about the product*: the same argument part 33 made about
-//! `Tool::Print`, which was resolved the other way, by giving it `Action::Export` to do.
-//!
-//! **Why this was a decision this repository had already taken**: `icons.rs`'s count note says in as
-//! many words that the number to change when that decision is made is 34 -> 33. **A gate that names
-//! the edit it will need is a gate that has already had the argument.** The six that remain each
-//! need a model this program does not have and are not the subject of a pre-authorised deletion.
-//!
-//! # The measurement
-//!
-//! [`every_tool_that_is_not_wired_is_one_of_the_six`] presses all twenty-two toolbar tools through the
-//! real hit test on a fresh session each time and counts the ones whose press lands in
-//! `pointer_inert`. **A fresh session per tool**, because a press that opens a popup swallows the next
-//! press as a dismissal — **the first version of this measurement looped over one session and counted
-//! four buttons as inert that were not**, and the reason is written on the loop.
-//!
-//! | what it proves | test |
-//! | --- | --- |
-//! | the count, and the list | [`every_tool_that_is_not_wired_is_one_of_the_six`] |
-//! | `SizeUp` changes the type | [`the_size_buttons_are_the_zoom_buttons`] |
-//! | and clamp at their ends | [`the_size_buttons_clamp_rather_than_wrapping`] |
-//! | `Overflow` lists what did not fit | [`the_overflow_menu_lists_the_tools_that_did_not_fit`] |
-//! | and is empty on a wide panel | [`an_overflow_button_with_nothing_hidden_opens_nothing`] |
-//! | `Mode` switches | [`the_mode_button_opens_a_two_row_menu`] |
-//! | and `Viewing` refuses an edit | [`viewing_mode_refuses_every_edit_and_counts_it`] |
-//! | and the caret still moves | [`viewing_mode_still_moves_the_caret`] |
-//! | a bad mode index falls back | [`an_out_of_range_mode_index_falls_back`] |
+//! A fresh session per tool prevents an open dropdown from swallowing the next test press.
+//! Both wide and narrow layouts are checked so tools do not disappear behind a dead Overflow.
 
 use holonomy::store::NoSource;
 use holonomy::Session;
@@ -155,33 +73,14 @@ fn press_at(s: &mut Session<'static>, x: i32, y: i32) {
     }
 }
 
-/// **The five buttons part 39 listed as inert and that are still inert, by name.**
-///
-/// **A `const` and not a list built from `TOOLBAR`**, because the claim is about *these five* and a
-/// computed list would silently become a different five when a tool is renamed. **Five is written
-/// down and the gate compares against it.**
-///
-/// **Seven, and it went eight -> seven by removing `Comment`, not by wiring it.** The count is in the
-/// type as well as the value, so dropping a tool from the list without dropping the array length is a
-/// compile error rather than a gate that quietly measures one fewer thing.
-///
-/// **The header above once said five, and once said that part 46 had removed `Comment`; both were
-/// wrong** — the tool was still there and still inert, which is why this list had eight entries. It is
-/// seven now because the tool is gone: no annotation store, no anchor range, no author, so nothing this
-/// session could ever do with it. See `icons.rs`'s count note.
-///
-/// **Six since `Underline` was wired**, and the *length of this array is the gate's second claim*: a tool
-/// that starts working while its name stays here fails the equality below rather than sitting in the
-/// list quietly, and a tool that stops working fails it from the other side. This array is written in
-/// `TOOLBAR` order, so a reordering of the toolbar shows up here as a diff rather than as a silent
-/// mismatch.
-const STILL_INERT: [Tool; 6] = [
+/// Independently named placeholders: removing or wiring one changes this array on purpose.
+/// Keep them in toolbar order so the observed inert set must match exactly.
+const STILL_INERT: [Tool; 5] = [
     Tool::Search,
     Tool::Spellcheck,
     Tool::PaintFormat,
     Tool::FontSize,
     Tool::Highlight,
-    Tool::Link,
 ];
 
 /// **Pressing every tool and counting the ones with nothing behind them.
@@ -199,7 +98,7 @@ const STILL_INERT: [Tool; 6] = [
 /// **Because a click is decided on the press.** `Session::press`'s own note says so, and a release
 /// would be measuring a different gesture.
 #[test]
-fn every_tool_that_is_not_wired_is_one_of_the_six() {
+fn every_tool_that_is_not_wired_is_one_of_the_five() {
     let mut inert: Vec<&'static str> = Vec::new();
     for &tool in TOOLBAR {
         let mut s = session();
@@ -217,11 +116,8 @@ fn every_tool_that_is_not_wired_is_one_of_the_six() {
     let expected: Vec<&str> = STILL_INERT.iter().map(|t| t.name()).collect();
     assert_eq!(
         inert, expected,
-        "**{inert:?} are inert, and the list is {expected:?}.** Part 39 said ten; part 44 wired \
-         SizeUp, SizeDown, Overflow and Mode; the count went eight -> seven when `Comment` was \
-         removed rather than wired, and seven -> six when `Underline` was. A tool that has started \
-         working and is still named here is a gate asserting a defect is present, which is worse \
-         than no gate at all."
+        "the only inert controls are {expected:?}, but {inert:?} were inert; a new control \
+         needs an action or must be explicitly listed as a placeholder"
     );
 }
 
@@ -350,24 +246,30 @@ fn an_overflow_button_with_nothing_hidden_opens_nothing() {
     assert_eq!(s.stats.pointer_inert, 0, "**and is not counted as inert**");
 }
 
-/// **`Mode` opens a two-row menu and switching changes the state.**
+/// **`Mode` opens Editing, Suggesting and Viewing, and switching changes the state.**
 #[test]
-fn the_mode_button_opens_a_two_row_menu() {
+fn the_mode_button_opens_a_three_row_menu() {
     let mut s = session();
     press_tool(&mut s, "mode");
     assert_eq!(s.state.open, Some(Open::Tool(Tool::Mode)), "**Mode opens**");
 
     let items = Open::Tool(Tool::Mode).items(&s.state);
-    assert_eq!(items.len(), 2, "**two rows: Editing and Viewing**");
+    assert_eq!(
+        items.len(),
+        3,
+        "Editing, Suggesting and Viewing all have rows"
+    );
     assert_eq!(items[0].label, "Editing");
-    assert!(items[0].checked, "**and Editing is the one that is on**");
-    assert!(!items[1].checked);
+    assert_eq!(items[1].label, "Suggesting");
+    assert_eq!(items[2].label, "Viewing");
+    assert!(items[0].checked, "Editing starts active");
+    assert!(!items[1].checked && !items[2].checked);
 
-    // **Choose the second row, through the real popup hit test.**
+    // Choose Viewing through the real popup hit test, not by writing the mode directly.
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("the mode popup has rows");
-    press_rect(&mut s, pop.rows[1]);
-    assert_eq!(s.state.mode_index, 1, "**the state moved**");
+    press_rect(&mut s, pop.rows[2]);
+    assert_eq!(s.state.mode_index, 2, "**the state moved**");
     assert_eq!(s.mode_name(), "Viewing", "**and the mode name follows**");
     assert_eq!(s.state.open, None, "**and the menu closed**");
 }
@@ -390,7 +292,7 @@ fn viewing_mode_refuses_every_edit_and_counts_it() {
     press_tool(&mut s, "mode");
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("rows");
-    press_rect(&mut s, pop.rows[1]);
+    press_rect(&mut s, pop.rows[2]);
     assert_eq!(s.mode_name(), "Viewing");
 
     // **Typing, backspace and delete-forward.**
@@ -426,7 +328,8 @@ fn viewing_mode_still_moves_the_caret() {
     press_tool(&mut s, "mode");
     let l = s.chrome_layout();
     let pop = widgets::popup(&l, &s.state, s.state.open).expect("rows");
-    press_rect(&mut s, pop.rows[1]);
+    press_rect(&mut s, pop.rows[2]);
+    assert_eq!(s.mode_name(), "Viewing");
 
     // **Two moves, so "the caret still moves" is a measurement rather than a tautology.** One move
     // from 6 that lands back on 6 would pass a gate that only compared to the start.

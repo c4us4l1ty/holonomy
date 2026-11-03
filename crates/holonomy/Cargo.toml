@@ -34,7 +34,9 @@ hardware = []
 # the other end of the `Scanout`/`InputSource` pair, for a machine that has a compositor. Enabling it
 # changes the binary: `tests/release_artifact.rs` asserts that a default-features release build contains
 # no X11 in it, and the seccomp census (`tests/census_session.rs`) covers the sealed path, not this one.
-desktop = ["holonomy-display/desktop", "holonomy-input/desktop", "dep:holonomy-x11"]
+# SVG is an import-time desktop dependency only. The sealed/default binary still stores and
+# paints PNG, never parses XML, opens resource links, or evaluates vector paths on a frame.
+desktop = ["holonomy-display/desktop", "holonomy-input/desktop", "dep:holonomy-x11", "dep:resvg", "dep:roxmltree", "dep:png", "dep:libc"]
 
 [lib]
 name = "holonomy"
@@ -77,6 +79,12 @@ holonomy-secure = { path = "../holonomy-secure" }
 holonomy-text = { path = "../holonomy-text" }
 # Only for the developer window: the driver's own key events and the window manager's messages.
 holonomy-x11 = { path = "../holonomy-x11", optional = true }
+# Only for the unsealed desktop import dialog. No XML/SVG/rasteriser dependency is linked
+# into the default (seccomp-jailed) product path.
+resvg = { version = "=0.45.1", default-features = false, optional = true }
+roxmltree = { version = "0.20", optional = true }
+png = { version = "0.17", optional = true }
+libc = { version = "0.2", optional = true }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 [dev-dependencies]

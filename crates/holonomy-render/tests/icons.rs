@@ -16,7 +16,7 @@
 //! | `ALL` and `mask()` cannot drift apart | [`the_all_list_and_the_match_agree`] |
 //! | and coverage is `false` outside the mask | [`coverage_is_false_outside_the_mask`] |
 
-use holonomy_render::icons::{mask, IconId, SIZE};
+use holonomy_render::icons::{IconId, SIZE};
 use holonomy_render::Icon;
 
 /// **The bit order, asserted rather than described.**
@@ -212,18 +212,14 @@ fn the_all_list_and_the_match_agree() {
     // remaining 33 are unchanged, `mask::PRINT` still resolves, and `Tool::Print` is still wired.
     assert_eq!(
         IconId::ALL.len(),
-        51,
+        50,
         "the set grew or shrank. That is fine -- update this number, and check the new icon against \
          `no_icon_is_mostly_ink` and `every_icon_is_sixteen_square_and_not_empty`. This went 34 -> 33 \
          when `Comment` was removed with `Tool::Comment` and `TitleButton::Comments`: it had no \
          annotation store and could never work, so it was a button that lied about the product. \
-         **33 -> 50 is the Wordcraft ribbon's own set**: Clone Format, Copy, Paste, Bullets, \
-         Numbering, Align Left/Centre/Right, Indent, Outdent, Strikethrough, Subscript, \
-         Superscript, Replace, Navigation, Theme and Close, each one painted by a command that \
-         reaches an action -- which is the standard the note above sets. \
-         **50 -> 51 is `Select`**: the ribbon drew `Select all` with `Check`, and a tick beside \
-         `Find` and `Replace` reads as *done* rather than as *select*, so the Editing group ended on \
-         a mark that appeared to confirm the two buttons before it."
+         The WordCraft-inspired ribbon added Copy, Paste, alignment and editing icons; `Select` \
+         distinguishes Select all from a confirmation checkmark. The unused Link icon and toolbar \
+         button were removed until a real URL/anchor model exists."
     );
     // Every `ALL` entry resolves, and `repr(u8)` keeps the values dense so `ALL` can be checked
     // against the range.
@@ -281,9 +277,9 @@ fn coverage_is_false_outside_the_mask() {
 
     // The same for a mask authored at a negative position, which is what a left-clipped toolbar button
     // produces: `bounds` clamps to 0 and `coverage` must not.
-    let icon = mask::DOC.len() as u32;
+    let mask_rows = id.mask().len() as u32;
     assert!(
-        icon > 0 && !id.at(-4, -4, 0).coverage(u32::MAX, u32::MAX),
+        mask_rows > 0 && !id.at(-4, -4, 0).coverage(u32::MAX, u32::MAX),
         "clipped icon, absurd coords"
     );
 }
@@ -338,7 +334,7 @@ fn a_horizontal_rule_is_one_wide_row_and_not_an_outline() {
         let others: u32 = rows
             .iter()
             .enumerate()
-            .filter(|(y, _)| (*y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest))
+            .filter(|(y, _)| *y as u32 + 2 < (SIZE as u32 - 2) && rows[*y] < widest)
             .map(|(_, n)| n)
             .sum();
         assert!(

@@ -275,13 +275,20 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
     // opinion.
     click_tool(&mut s, "bold");
 
-    // **The states actually visited, so the gate says it walked the space and not just that it agreed
-    // once.** Seven presses on three buttons, cycled, reach all eight combinations of the three bools --
-    // which is the whole space, and the reason this is a cycle rather than a pair. Strikethrough is the
-    // fourth bool and stays false throughout this walk.
+    // Walk the three independent toggles along a Gray-code path. Cycling B/I/U only reaches six
+    // states before repeating; the explicit transitions visit all eight without resetting the model.
+    // Strikethrough is the fourth bool and stays false throughout this walk.
     let mut seen: Vec<(bool, bool, bool, bool)> = Vec::new();
-    const BUTTONS: [&str; 3] = ["bold", "italic", "underline"];
-    for step in 0..7 {
+    const TRANSITIONS: [&str; 7] = [
+        "bold",
+        "italic",
+        "underline",
+        "italic",
+        "bold",
+        "italic",
+        "underline",
+    ];
+    for step in 0..8 {
         let flags = (
             s.state.styles.bold,
             s.state.styles.italic,
@@ -299,8 +306,9 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
         if !seen.contains(&flags) {
             seen.push(flags);
         }
-        // **Cycle, so a loop that only ever visited one button's two states would show up.**
-        click_tool(&mut s, BUTTONS[step % BUTTONS.len()]);
+        if let Some(&button) = TRANSITIONS.get(step) {
+            click_tool(&mut s, button);
+        }
     }
     assert_eq!(
         seen.len(),
@@ -318,7 +326,7 @@ fn the_model_and_the_chrome_agree_after_every_transition() {
             s.state.styles.underline,
             s.state.styles.strikethrough,
         ),
-        "eight presses in, the two copies still agree"
+        "after the eight visited states, the two copies still agree"
     );
 }
 

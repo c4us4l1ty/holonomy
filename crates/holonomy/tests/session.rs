@@ -949,10 +949,11 @@ fn a_rendered_table_puts_every_border_on_the_cell_grid_exactly() {
     for i in 0..=span.cols {
         let x = grid.border_x_at(i);
         assert_eq!(
-            x % m.cell_w,
+            (x - l.text.x) % m.cell_w,
             0,
-            "vertical border {i} is at x={x}, which is not a multiple of the {} px cell",
-            m.cell_w
+            "vertical border {i} at x={x} is off the {} px grid rooted at the text column x={}",
+            m.cell_w,
+            l.text.x
         );
         assert_eq!(
             x - l.text.x,

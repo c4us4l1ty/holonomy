@@ -2169,7 +2169,9 @@ mod tests {
             rise: opts.font_size / 3.0,
             ..plain
         };
-        let mut lines = l.feed(b"E=mc", plain, &mut stats, false);
+        // A changed style is a run boundary, not a 64 KiB chunk boundary within the same run.
+        // The producer commits the word there even when the two runs split a word in half.
+        let mut lines = l.feed(b"E=mc", plain, &mut stats, true);
         lines.extend(l.feed(b"2", raised, &mut stats, true));
         lines.extend(l.finish(&mut stats));
         assert_eq!(lines.len(), 1, "one line, three words or not");

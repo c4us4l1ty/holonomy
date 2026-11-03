@@ -113,6 +113,8 @@ fn painted_at(text: &str, style: Option<(u32, u32, u16)>, size: u8) -> Session<'
         m,
     );
     s.caret_to(0).expect("park the caret");
+    // These gates measure the document's ink, not the insertion caret's independent line.
+    s.state.caret_visible = false;
     s.repaint_all().expect("paint");
     s
 }
@@ -165,14 +167,23 @@ fn window(s: &Session<'_>) -> (u32, u32, u32, u32) {
 /// The ink extent inside [`window`]: `(top, bottom, left, right)`, or `None` if nothing drew.
 ///
 /// **All four edges, because the four decorations move three different ones.** An underline extends the
-/// bottom, a strike stays inside the glyphs, and a shift moves the top *and* the bottom together — so a
-/// measurement that only looked at the bottom could not tell an underline from a subscript.
+/// bottom, a strike stays inside the glyphs, and a shift moves the top *and* the bottom together.
+/// A white page is *nonzero* too; treating every nonzero pixel as ink made these boxes follow the page
+/// instead of the glyphs, masking all four styles when the layout moved to a light canvas. Restrict
+/// the probe to dark ink (including antialiased edges), excluding the page, desk and unpainted black.
+fn is_ink(pixel: u32) -> bool {
+    pixel != 0
+        && ((pixel >> 16) & 0xff) < 128
+        && ((pixel >> 8) & 0xff) < 128
+        && (pixel & 0xff) < 128
+}
+
 fn ink_box(s: &Session<'_>) -> Option<(u32, u32, u32, u32)> {
     let (x0, y0, x1, y1) = window(s);
     let (mut top, mut left, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for y in y0..y1 {
         for x in x0..x1 {
-            if s.frame().pixel(x, y) != 0 {
+            if is_ink(s.frame().pixel(x, y)) {
                 top = top.min(y);
                 bottom = bottom.max(y);
                 left = left.min(x);
@@ -280,29 +291,21 @@ fn a_struck_run_draws_a_rule_through_its_glyphs() {
         "the strikethrough drew nothing"
     );
 
-    // **The difference is inside the glyphs' own rows.** Everything that changed must sit between the
-    // plain frame's top and bottom of ink -- a strike is *within* the letters, so it cannot extend the
-    // box the way an underline does.
-    let (pt, pb, pl, pr) = ink_box(&plain).expect("plain text has ink");
-    // **The whole window, not just the line box**, because that is the assertion: a rule that leaked into
-    // the row above or below is exactly as wrong as one that leaked past the glyphs horizontally, and a
-    // scan clipped to `cell_h` could not see it.
+    // The rule spans the run's *advance*, which can extend a few pixels past the glyph's sidebearing.
+    // Vertically, however, a strike must stay inside the letters rather than behave like an underline.
+    let (pt, pb, _, _) = ink_box(&plain).expect("plain text has ink");
     let (x0, y0, x1, y1) = window(&plain);
-    let mut outside = 0u32;
+    let mut outside_rows = 0u32;
     for y in y0..y1 {
         for x in x0..x1 {
-            if plain.frame().pixel(x, y) != strike.frame().pixel(x, y)
-                && (y < pt || y > pb || x < pl || x > pr)
-            {
-                outside += 1;
+            if plain.frame().pixel(x, y) != strike.frame().pixel(x, y) && (y < pt || y > pb) {
+                outside_rows += 1;
             }
         }
     }
     assert_eq!(
-        outside, 0,
-        "**the strikethrough must be inside the glyphs' own box** (x {pl}..={pr}, y {pt}..={pb}) \\
-         and {outside} pixel(s) of it are not. A rule that extended the box would be an underline, \\
-         which is drawn deliberately below the descenders"
+        outside_rows, 0,
+        "the strikethrough extended outside the glyph rows {pt}..={pb} at {outside_rows} pixels"
     );
 }
 
@@ -621,23 +624,21 @@ fn a_heading_draws_at_the_larger_atlas_size() {
 
     // **The ink is taller, not merely wider** -- a face change is a different shape and a size change is
     // the same shape at 125 %. The two-size atlas makes the heading's glyphs a fifth bigger.
-    let (pt, pb, _, pr) = ink_box(&plain).expect("plain text has ink");
-    let (ht, hb, _, hr) = ink_box(&head).expect("heading has ink");
+    let (pt, pb, pl, pr) = ink_box(&plain).expect("plain text has ink");
+    let (ht, hb, hl, hr) = ink_box(&head).expect("heading has ink");
     assert!(
         (hb - ht) > (pb - pt),
         "**the heading's ink must be taller**: {} px plain and {} px as a heading",
         pb - pt,
         hb - ht
     );
-    // **And wider**, which is the half that matters for the caret: `pen_of` measures a run at the run's
-    // own size, so a heading's advance is 125 % of the body's -- see `Painter::advance_at`. A version
-    // that drew bigger glyphs and measured them at the body size would overlap them. Both boxes start at
-    // the same x, so the right edges are comparable directly.
+    // **And wider**: use each run's own width, not absolute right edges. These sessions use
+    // different zooms and their centred pages have different text origins.
     assert!(
-        hr > pr,
-        "**the heading's ink must be wider as well as taller**: the plain run ends at x = {pr} and the \
-         heading at x = {hr}. A heading drawn large and advanced at the body size would overlap its own \
-         letters, and the caret inside it would sit left of every glyph."
+        hr - hl > pr - pl,
+        "the heading must be wider as well as taller: {} px heading, {} px plain",
+        hr - hl,
+        pr - pl
     );
 }
 
@@ -678,26 +679,20 @@ fn a_headings_underline_is_where_a_headings_baseline_is() {
 /// line: the raised word's rule must be exactly as far below the raised word as the flat word's rule is
 /// below the flat one. A rule left at the line box makes the raised word's span a whole shift taller.
 ///
-/// **The two words are measured in their own columns**, so the flat word's rule cannot be mistaken for the
-/// raised word's — which is the failure a whole-line ink box would have, since the line's lowest ink is
-/// the flat word's rule in both the correct and the broken version.
+/// **The two words are measured in their own glyph-pen intervals**, so the flat word's rule cannot
+/// be mistaken for the raised word's. A whole-line ink box would see the flat rule in both frames.
 #[test]
 fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
-    // `raised` at 0..6 is raised *and* underlined; `flat` at 8..12 is underlined only. One line, so both
-    // rules are drawn by one frame -- and a bug that moved every rule on the line would move both, which
-    // the comparison below would then not see. That is deliberate: the *per-run* bug is the one this
-    // gate is for, and the per-line bug is `a_headings_underline_is_where_a_headings_baseline_is`.
-    //
-    // **Two spaces between the words, and they are the measurement's slack.** The first word ends at cell
-    // 6 and the second begins at cell 8, so a glyph that overhangs its own cell cannot reach the other
-    // word's scan and turn one word's rule into the other's.
+    // The *same* glyphs are repeated so their ink heights are comparable: only the first word's
+    // baseline is raised. Two spaces keep their ink and rules in disjoint horizontal probes.
+    // The per-line baseline case is covered separately by the heading/underline gate.
     let mut s = painted_at(
-        "raised  flat\n",
-        Some((0, 6, STYLE_SUPERSCRIPT | STYLE_UNDERLINE)),
+        "word  word\n",
+        Some((0, 4, STYLE_SUPERSCRIPT | STYLE_UNDERLINE)),
         0,
     );
     s.editor_mut()
-        .style_range(8, 12, STYLE_UNDERLINE, 0)
+        .style_range(6, 10, STYLE_UNDERLINE, 0)
         .expect("underline the second word");
     s.repaint_all().expect("paint both words");
 
@@ -705,20 +700,21 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
     // `cell_h` would report the raised word's ink as starting at the top of the box and the gap below it
     // would come out a shift short -- the same number the broken version produces.
     let (x0, y0, x1, y1) = window(&s);
-    let cell_w = s.chrome.metrics.cell_w;
     let left = s.text_rect().x;
-    debug_assert_eq!(
-        left, x0,
-        "the window starts at the text column, which is where cell 0 is"
-    );
-    // **Each word's ink in its own columns.** `raised` occupies cells 0..6 from the text rect's left edge,
-    // the two spaces are cells 6 and 7, and `flat` is cells 8..12 — both words at the body size, because
-    // neither is a heading.
+    debug_assert_eq!(left, x0, "the text column starts the probe window");
+    // Document text uses the glyph pen, not a fixed-width cell grid. Reading the pen at each
+    // byte boundary puts both probes over their actual words even when the font is proportional.
+    let mut pen_at = |byte: usize| -> u32 {
+        s.caret_to(byte).expect("resident word boundary");
+        s.state.caret_pen_x.expect("the painter measures the line")
+    };
+    let (a0, a1, b0, b1) = (pen_at(0), pen_at(4), pen_at(6), pen_at(10));
+    assert!(a1 < b0, "the two spaces separate the word probes");
     let word = |from: u32, to: u32| -> (u32, u32) {
         let (mut top, mut bottom) = (u32::MAX, 0u32);
         for y in y0..y1 {
-            for x in (left + from * cell_w)..(left + to * cell_w).min(x1) {
-                if s.frame().pixel(x, y) != 0 {
+            for x in (left + from)..(left + to).min(x1) {
+                if is_ink(s.frame().pixel(x, y)) {
                     top = top.min(y);
                     bottom = bottom.max(y);
                 }
@@ -726,8 +722,8 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
         }
         (top, bottom)
     };
-    let (raised_top, raised_bottom) = word(0, 6);
-    let (flat_top, flat_bottom) = word(8, 12);
+    let (raised_top, raised_bottom) = word(a0, a1);
+    let (flat_top, flat_bottom) = word(b0, b1);
     // **Both columns must have ink at all**, or `u32::MAX` and `0` would make the comparison below a
     // statement about two empty scans rather than about two rules.
     assert!(
@@ -781,12 +777,12 @@ fn a_rule_follows_the_baseline_its_glyphs_were_drawn_on() {
 fn a_heading_line_reserves_the_heading_s_height() {
     // The same two-line document twice: line 0 is a heading in one of them, and line 1 is identical in
     // both. **Two lines and not one**, because the claim is about the lines *below* the heading.
-    let plain = painted_at("Title\nbody\n", None, 1);
-    let head = painted_at("Title\nbody\n", Some((0, 5, STYLE_HEADER)), 1);
+    let plain = painted_at("Title\nbody\n", None, 0);
+    let head = painted_at("Title\nbody\n", Some((0, 5, STYLE_HEADER)), 0);
 
-    // **Both sessions use the atlas's second size as their own**, which is what a zoomed session looks
-    // like and the only configuration where `run_size_index` resolves to a different pitch than
-    // `ChromeMetrics::cell_h`.
+    // Both sessions use the 16 ppem body size. A heading uses the atlas's second, 20 ppem size;
+    // zooming the *whole* session to that size would make both line pitches equal and erase the
+    // height difference this gate is intended to measure.
     let heights = |s: &Session<'_>| {
         let h = &s.state.line_heights;
         (h.y(0), h.y(1), h.height(0))

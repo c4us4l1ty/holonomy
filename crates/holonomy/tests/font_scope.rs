@@ -223,7 +223,11 @@ fn the_face_survives_every_read_and_every_split() {
         .unwrap();
     // 1. A read.
     assert_eq!(e.style_at(3).font_face, FACE_MONO, "style_at");
-    assert_eq!(e.style_at(15).font_face, FACE_MONO, "style_at at the last byte");
+    assert_eq!(
+        e.style_at(15).font_face,
+        FACE_MONO,
+        "style_at at the last byte"
+    );
     assert_eq!(e.style_at(16).font_face, FACE_BODY, "past the run");
     // 2. A read through the range form the painter uses.
     for (s, _, _) in e.spans().runs_in(0, 16) {
@@ -232,13 +236,25 @@ fn the_face_survives_every_read_and_every_split() {
     // 3. An insert in the middle, which splits the run in two.
     e.insert_at(5, b"XY", holonomy_text::SpanPolicy::GrowIntoInsert)
         .unwrap();
-    assert_eq!(e.style_at(2).font_face, FACE_MONO, "the left half of the split");
+    assert_eq!(
+        e.style_at(2).font_face,
+        FACE_MONO,
+        "the left half of the split"
+    );
     assert_eq!(e.style_at(6).font_face, FACE_MONO, "the typed bytes");
-    assert_eq!(e.style_at(10).font_face, FACE_MONO, "the right half of the split");
+    assert_eq!(
+        e.style_at(10).font_face,
+        FACE_MONO,
+        "the right half of the split"
+    );
     assert_eq!(e.style_at(20).font_face, FACE_BODY, "past the run, still");
     // 4. A delete whose undo has to restore it.
     e.delete_at(2, 2).unwrap();
     assert_eq!(e.style_at(2).font_face, FACE_MONO, "after a delete");
     e.undo().unwrap();
-    assert_eq!(e.style_at(2).font_face, FACE_MONO, "after undoing the delete");
+    assert_eq!(
+        e.style_at(2).font_face,
+        FACE_MONO,
+        "after undoing the delete"
+    );
 }

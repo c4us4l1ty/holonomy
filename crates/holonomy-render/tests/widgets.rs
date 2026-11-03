@@ -28,7 +28,8 @@
 
 use holonomy_render::chrome::{menu_boxes, ChromeMetrics, ChromeState, Layout, MENUS};
 use holonomy_render::widgets::{
-    hit, place_title, place_toolbar, Hit, TitleButton, Tool, SEPARATOR, TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
+    hit, hit_rect, place_title, place_toolbar, popup, Hit, Open, TitleButton, Tool, SEPARATOR,
+    TITLE_PAD, TOOLBAR, TOOLBAR_PAD,
 };
 
 fn layout() -> Layout {
@@ -47,8 +48,15 @@ fn state() -> ChromeState {
 #[test]
 fn every_widget_has_a_rect_inside_the_panel() {
     let l = layout();
-    for p in place_toolbar(&l, 8) {
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
+    let mut visible = 0;
+    for p in placed {
         let r = p.rect;
+        if r.is_empty() {
+            // Narrow rows hide this tool and put it in Overflow; an empty rectangle is not drawn.
+            continue;
+        }
+        visible += 1;
         assert!(
             r.x + r.width <= l.width && r.y + r.height <= l.height,
             "{} is at {:?} with the panel {}x{}: it runs off the panel",
@@ -71,12 +79,31 @@ fn every_widget_has_a_rect_inside_the_panel() {
             l.toolbar.bottom()
         );
     }
+    assert!(
+        visible >= 12,
+        "too few controls are visible at the design width: {visible}"
+    );
     for (b, r) in place_title(&l, TITLE_PAD) {
         assert!(
             r.x + r.width <= l.width && r.bottom() <= l.title.bottom(),
             "{b:?} runs off the title band"
         );
     }
+}
+
+/// Image insertion is a primary action, including for desktop SVGs. It must not vanish into
+/// Overflow at the design width while placeholder controls take all the available space.
+#[test]
+fn image_insertion_is_visible_in_the_desktop_toolbar() {
+    let l = layout();
+    let image = place_toolbar(&l, TOOLBAR_PAD)
+        .into_iter()
+        .find(|p| p.tool == Tool::Image)
+        .expect("image belongs to toolbar");
+    assert!(
+        !image.rect.is_empty(),
+        "image insertion was hidden at the design width"
+    );
 }
 
 /// **No two toolbar widgets overlap.**
@@ -91,7 +118,7 @@ fn every_widget_has_a_rect_inside_the_panel() {
 #[test]
 fn no_two_widgets_overlap() {
     let l = layout();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     for (i, a) in placed.iter().enumerate() {
         for b in placed.iter().skip(i + 1) {
             let overlap_x = a.rect.x < b.rect.right() && b.rect.x < a.rect.right();
@@ -132,7 +159,10 @@ fn no_two_widgets_overlap() {
 fn hit_agrees_with_where_the_widget_was_drawn() {
     let l = layout();
     let st = state();
-    for p in place_toolbar(&l, 8) {
+    for p in place_toolbar(&l, TOOLBAR_PAD)
+        .into_iter()
+        .filter(|p| !p.rect.is_empty())
+    {
         let cx = (p.rect.x + p.rect.width / 2) as i32;
         let cy = (p.rect.y + p.rect.height / 2) as i32;
         assert_eq!(
@@ -615,7 +645,7 @@ fn a_popup_panel_is_exactly_as_wide_as_its_widest_row_needs() {
 #[test]
 fn the_right_hand_group_reserves_the_gaps_it_draws() {
     let l = layout();
-    let placed = place_toolbar(&l, 8);
+    let placed = place_toolbar(&l, TOOLBAR_PAD);
     let find = |tool| {
         placed
             .iter()
@@ -657,7 +687,7 @@ fn the_right_hand_group_reserves_the_gaps_it_draws() {
 fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
     let l = layout();
     let mut prev: Option<(Tool, u32)> = None;
-    for p in place_toolbar(&l, 8) {
+    for p in place_toolbar(&l, TOOLBAR_PAD) {
         // The right-hand group is laid out from the right and is covered above.
         if matches!(p.tool, Tool::Mode | Tool::Collapse | Tool::Overflow) {
             continue;
@@ -683,17 +713,11 @@ fn a_separator_is_a_gap_in_the_same_place_the_rule_is_drawn() {
     }
 }
 
-/// **The toolbar's groups are the reference's, and there are seven rules.**
-///
-/// Measured on `Plan/1.png`: seven one-pixel rules at x = 446, 641, 798, 942, 1,193, 1,347 and 1,674 of
-/// a 1,778 px window. The pattern that drew them was `Print | Zoom | Bold | Link | Mode | Collapse`,
-/// which put a rule where the reference has none (after paint format, after `Mode`) and missed six
-/// where it has one.
-///
-/// **This gate names the groups by their leading tool**, so a tool inserted into the middle of a group
-/// has to be placed in one here rather than silently inheriting its neighbour's side of a rule.
+/// Name each separator by the group it precedes, so removing or adding a control cannot leave
+/// a stray rule. The inert Link control (and its divider) was removed to keep actual insertion
+/// actions visible at the 1,280 px design width.
 #[test]
-fn the_toolbar_dividers_are_the_reference_s_seven() {
+fn toolbar_separators_match_visible_control_groups() {
     let leading: Vec<&'static str> = TOOLBAR
         .iter()
         .filter(|t| t.separated())
@@ -708,11 +732,10 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
             "font",
             "size-down",
             "bold",
-            "link",
             "overflow",
             "mode"
         ],
-        "nine leading tools, seven of them left-hand: the reference's six groups"
+        "six left-hand boundaries and two reserved for the right-hand group"
     );
     // **Nothing at the head of the bar**, because there is no group before the first one.
     assert!(
@@ -725,7 +748,6 @@ fn the_toolbar_dividers_are_the_reference_s_seven() {
         "the last tool is separated by the pill's rim, not by a rule"
     );
 }
-
 
 /// **A mixed font selection leaves the toolbar's font box blank.**
 ///
@@ -760,34 +782,13 @@ fn ruler_hit_testing_identifies_margins_and_indents() {
     let ruler_bot = l.ruler.bottom() as i32;
     let mid_y = ruler_top + (l.ruler.height as i32) / 2;
 
-    assert_eq!(
-        hit(&l, &st, col, ruler_top + 2),
-        Hit::RulerFirstLineIndent
-    );
-    assert_eq!(
-        hit(&l, &st, col, ruler_bot - 3),
-        Hit::RulerLeftIndent
-    );
-    assert_eq!(
-        hit(&l, &st, col, mid_y),
-        Hit::RulerLeftMargin
-    );
-    assert_eq!(
-        hit(&l, &st, col - 20, mid_y),
-        Hit::RulerLeftMargin
-    );
-    assert_eq!(
-        hit(&l, &st, right, ruler_bot - 3),
-        Hit::RulerRightIndent
-    );
-    assert_eq!(
-        hit(&l, &st, right + 20, mid_y),
-        Hit::RulerRightMargin
-    );
-    assert_eq!(
-        hit(&l, &st, col + 50, mid_y),
-        Hit::None
-    );
+    assert_eq!(hit(&l, &st, col, ruler_top + 2), Hit::RulerFirstLineIndent);
+    assert_eq!(hit(&l, &st, col, ruler_bot - 3), Hit::RulerLeftIndent);
+    assert_eq!(hit(&l, &st, col, mid_y), Hit::RulerLeftMargin);
+    assert_eq!(hit(&l, &st, col - 20, mid_y), Hit::RulerLeftMargin);
+    assert_eq!(hit(&l, &st, right, ruler_bot - 3), Hit::RulerRightIndent);
+    assert_eq!(hit(&l, &st, right + 20, mid_y), Hit::RulerRightMargin);
+    assert_eq!(hit(&l, &st, col + 50, mid_y), Hit::None);
 
     for h in [
         Hit::RulerLeftMargin,
@@ -816,9 +817,9 @@ fn tool_popup_in_ribbon_anchors_to_ribbon_button() {
 
     let p = popup(&l, &st, Some(Open::Tool(Tool::Font))).expect("font popup exists");
     assert!(
-        p.frame.y >= l.ribbon.y,
-        "popup frame y {} is above ribbon y {}",
-        p.frame.y,
-        l.ribbon.y
+        p.rect.y >= l.toolbar.y,
+        "popup y {} is above ribbon toolbar y {}",
+        p.rect.y,
+        l.toolbar.y
     );
 }

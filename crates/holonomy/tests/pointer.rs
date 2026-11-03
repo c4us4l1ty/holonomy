@@ -332,7 +332,7 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
     assert_eq!(s.state.open, Some(widgets::Open::Menu(3)));
 
     // The Undo button, which is under the popup's left edge.
-    let undo = widgets::place_toolbar(&l, 8)
+    let undo = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Undo)
         .expect("the toolbar has Undo")
@@ -377,7 +377,7 @@ fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     // * **so it is `Tool::Spellcheck`**, which is inert because a spellchecker needs a dictionary the
     //   512 KiB atlas budget cannot hold — a real feature someone will want, unlike a printer in a
     //   sandboxed text editor that cannot open a file dialog.
-    let bold = widgets::place_toolbar(&l, 8)
+    let bold = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Spellcheck)
         .expect("the toolbar has Spellcheck")
@@ -431,7 +431,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
         s.state.open = None;
         let _ = s.set_zoom(100);
         let _ = s.set_sidebar(true);
-        let r = widgets::place_toolbar(&s.chrome_layout(), 8)
+        let r = widgets::place_toolbar(&s.chrome_layout(), widgets::TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool.name() == name)
             .unwrap_or_else(|| panic!("the toolbar has {name}"))
@@ -480,79 +480,30 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
             "bold",
             "italic",
             "underline",
+            "strikethrough",
             "overflow"
         ],
-        "**and the tools that change chrome state are exactly these, in toolbar order.** Bold, Italic \
-         and Underline arm a style; SizeDown and SizeUp are the zoom pair; Overflow found an empty \
-         menu. A seventh would mean something else started claiming to work without a decision."
+        "the inline marks arm a style, SizeDown and SizeUp change zoom, and Overflow \
+         finds no hidden tools at the design width; got {chrome:?}"
     );
     // **Zoom, Style and Font are not in that list, and their absence is the point.** They *open a
     // dropdown* and return before anything is applied, so they are counted by the routing gate's
     // `opened` and not here. The first version of this assertion expected `["zoom", "bold", "italic"]`
     // and the compiler was right: a dropdown's opener has changed nothing yet.
     //
-    // **The arithmetic, spelled out so a change of category is a diff and not a mystery.** 22 tools:
-    // 3 fire a command (Undo, Redo, Image), 1 toggles the sidebar (Collapse), **5 open a dropdown**
-    // (Zoom, Style, Font, TextColour, Mode), 7 change chrome state (Bold, Italic, Underline, the zoom
-    // pair and Overflow), and the remaining six are inert.
-    //
-    // **The leading number said 21 and the categories said 3 + 1 + 4 + 2**, which left thirteen inert —
-    // neither matched the `22` asserted below nor the seven this file measures. The prose had drifted
-    // two parts behind the code, which is the failure mode of writing arithmetic in a comment: it is
-    // checked by nothing. The two assertions below are the arithmetic; this paragraph is the index.
-    //
-    // **Eleven, and it was twelve until part 29.** `Tool::TextColour` joined `has_dropdown` and opened
-    // a palette of six colours, which put it in the same category as Zoom and **took it out of the
-    // inert list** -- the first of the twelve to leave it. **The list in the assertion message is the
-    // evidence** and it no longer contains `text-colour`; everything else is where it was.
-    //
-    // **And the colour dropdown's opener is counted by `opened`, like the other three**, for the same
-    // reason the comment above gives: opening a popup has applied nothing yet.
-    // **Six inert, and it was eight until `Tool::Comment` was removed.** Part 33's `Tool::Print`
-    // was given `Action::Export` to do rather than taken off the toolbar; part 46's `Tool::Comment`
-    // was intended to go, never did, and is now gone. **The removal is why the tool count moved and
-    // not the inert count alone.**
-    // **And it was seven until `Underline` was wired**: `STYLE_UNDERLINE` is in the document model, the
-    // button arms it, the painter draws a rule and the export writes a `<u>`, so the button is no
-    // longer a widget with nothing behind it.
-    // **The arithmetic follows: 22 tools, so 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns,
-    // 7 chrome changes and 6 inert leaves nothing unaccounted for.**
+    // A removed fake control cannot occupy space or be counted as a successful press.
+    // The remaining placeholders are explicitly counted below and in toolbar_wiring.rs.
     assert_eq!(
         widgets::TOOLBAR.len(),
         22,
-        "**twenty-two tools.** This was twenty-three while `Tool::Comment` was still on the bar: it had \
-         no annotation store -- no list, no anchor range, no author -- so it could never work, and a \
-         button that will never work is a lie about the product. `Tool::Print` went the other way and \
-         was given `Action::Export` to do. The count is asserted separately so that the inert \
-         arithmetic below cannot be quietly wrong on both sides."
+        "22 controls, including Image and Strikethrough; fake Comment, Share and Link buttons \
+         must not return without a backing action."
     );
-    // **Eight.** Four buttons left the inert list in part 44, each with a decision
-    // behind it:
-    //
-    // | left | part | what it is now |
-    // |---|---|---|
-    // | `size-down`, `size-up` | 44 | the zoom pair, reached from the toolbar |
-    // | `mode` | 44 | a two-row switcher -- **a fifth dropdown** |
-    // | `overflow` | 44 | a menu of the tools that did not fit |
-    //
-    // **The arithmetic, restated: 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 6 chrome
-    // changes leaves the 7 above.**
-    // Two of those five are new categories this part created rather than new members of an old one --
-    // `mode` made the dropdown count five, and `overflow` is a chrome change that changes nothing at
-    // `DESKTOP`, which the comment on the `chrome` assertion above explains at length.
-    //
-    // **The list in the message is the evidence.** It is [`search`, `spellcheck`, `paint-format`,
-    // `font-size`, `highlight`, `link`] -- six, not seven -- and every one of them needs a model this
-    // program does not have (a search query, a dictionary, a format model, a size list the atlas can
-    // back, a highlight colour, a URL). `toolbar_wiring.rs::every_tool_that_is_not_wired_is_one_of_the_six`
-    // records them by name, with a reason for each.
+    // Only the five placeholders named by toolbar_wiring.rs may count as inert.
     assert_eq!(
         inert.len(),
-        6,
-        "**six inert buttons**, which is 22 minus 3 commands, 1 sidebar toggle, 5 dropdowns and 7 \
-         chrome changes. The list is {inert:?}. Part 44 removed four from this list and each removal \
-         came with a recorded decision; the fifth left the toolbar altogether when `Comment` was \
-         removed; the sixth started working when `Underline` did."
+        5,
+        "the five known placeholders are the only inert controls: {inert:?}"
     );
 }
 
@@ -567,7 +518,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
 fn moving_off_a_button_clears_its_highlight() {
     let mut s = session("x");
     let l = s.chrome_layout();
-    let bold = widgets::place_toolbar(&l, 8)
+    let bold = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Bold)
         .expect("the toolbar has Bold")
@@ -687,7 +638,7 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         s.state.open = None;
         let _ = s.set_zoom(100);
         let _ = s.set_sidebar(true);
-        let (p, r) = widgets::place_toolbar(&s.chrome_layout(), 8)
+        let (p, r) = widgets::place_toolbar(&s.chrome_layout(), widgets::TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool.name() == name)
             .map(|p| (p.tool, p.rect))

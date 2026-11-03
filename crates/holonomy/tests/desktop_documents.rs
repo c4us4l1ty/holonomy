@@ -407,6 +407,16 @@ fn managed_insert_actions_request_input_instead_of_a_test_chart() {
         Some(DocumentRequest::InsertImage)
     );
     assert_eq!(s.text().unwrap(), b"Before");
+    // The toolbar and menu both dispatch this hotkey; neither may insert the demo chart.
+    s.apply(holonomy_input::Command::Hotkey(
+        holonomy_input::Hotkey::InsertImage,
+    ))
+    .unwrap();
+    assert_eq!(
+        s.take_document_request(),
+        Some(DocumentRequest::InsertImage)
+    );
+    assert_eq!(s.text().unwrap(), b"Before");
     s.apply_action(Action::InsertTable).unwrap();
     assert_eq!(
         s.take_document_request(),

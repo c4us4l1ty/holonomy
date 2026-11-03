@@ -8,7 +8,7 @@ The project is being built in phases, each one ending in a gate with recorded ev
 finished. `PROJECT.md` is the build plan and the authority on scope; this file is the map.
 
 ```sh
-# Quick start: a real window on a desktop, for development.
+# A real window on a desktop (unsealed). Insert > Image accepts PNG or static SVG.
 cargo run --release --features desktop -p holonomy -- --window
 ```
 
@@ -29,20 +29,33 @@ The key derivation is Argon2id → a verifiable delay function → HKDF → a de
 CIOS squaring chain `S_i = S_{i-1}² (mod N)` over the RSA-2048 challenge number, hardcoded, because a
 VDF that occasionally stalls the machine for an hour is a VDF that gets skipped.
 
-## The one hard constraint
+## Product limits (amended 2026-11-03)
 
-The release binary must fit in **2 MiB**, statically linked, stripped, with `panic = "abort"`. That
-number is why there is no TeX engine, no SVG, no JPEG, no WebP, no variable-length tables, and no
-sync protocol. It is not an optimisation target that was missed; it is the constraint the design is
-derived from, and `crates/holonomy/tests/release_artifact.rs` fails the build if it is crossed.
+The stripped, statically linked release binary has a **4 MiB (4,194,304-byte) ceiling**, with
+`panic = "abort"`. `crates/holonomy/tests/release_artifact.rs` checks **both** the sealed/default
+binary and the desktop-feature binary under a release build. Earlier 2 MiB measurements in the
+phase log describe the old constraint, not this one; the security boundaries and image-cache
+budgets were *not* doubled.
 
-Current: **1,478,456 bytes**, static-pie, against a 2,097,152-byte ceiling — 618,696 bytes of room.
-Measured by the gate itself, so the number above is one `cargo test` away rather than a remembered one.
+The default/sealed build still has no SVG or XML runtime, X11, filesystem-based resource resolver,
+or vector-curve paint path. In the unsealed desktop editor, **Insert > Image accepts PNG and static
+SVG**. It rasterises a bounded SVG **once at import time**, and saves only the generated PNG in
+the encrypted document; PDF/HTML export and repaints use that PNG. SVG text, external/embedded
+images, CSS stylesheets, filters, animation, `<use>`, scripts and DTDs are refused, not silently
+dropped. This is not an arbitrary SVG viewer or a promise of SVG editing. See
+[`crates/holonomy/src/svg_import.rs`](crates/holonomy/src/svg_import.rs) for the exact bounds and
+rejection rules. The desktop mode remains **unsealed**; it should not be described as having the
+same isolation as the jailed build.
 
 ## Build and run
 
 ```sh
-# Tests. --release because the artifact gate resolves the binary relative to its own profile.
+# Targeted SVG/security + 4 MiB gates (each feature set rebuilds the product binary).
+cargo test -p holonomy --features desktop --test svg_import
+cargo test -p holonomy --release --test release_artifact
+cargo test -p holonomy --release --features desktop --test release_artifact
+
+# Full suite. --release because the artifact gate resolves the binary relative to its own profile.
 cargo test --workspace --release
 
 # The shipping artifact.
@@ -93,7 +106,11 @@ The suite has four tiers, and knowing which one you are in saves a failed first 
 
 Several gates assert wall-clock latency (`session_latency.rs`, `write_through_cost.rs`,
 `holonomy-text/tests/latency.rs`); on a loaded or throttled machine those can fail without anything
-being wrong with the code. Re-run them on a quiet host before treating a failure as real.
+being wrong with the code. Re-run them on a quiet host before treating a failure as real. CI's
+workspace **functional** gate skips three host-dependent assertions: the session's 500 µs edit
+budget, the text offset-map timing comparison, and the VDF calibration measurement. It does not
+lower their budgets or change the VDF iteration count to suit a faster CI machine. Run the
+unfiltered command above on the deployment/performance hardware before making timing claims.
 
 ## Layout
 
@@ -117,9 +134,11 @@ being wrong with the code. Re-run them on a quiet host before treating a failure
 `H2/` is a superseded Tauri + TypeScript + SQLite stack. It is excluded from the workspace and is
 never a dependency: it is a reference for what to salvage and, mostly, what to refuse.
 
-Fifteen external crates, all vendored into a static musl binary: `argon2`, `blake2`, `chacha20`,
-`chacha20poly1305`, `getrandom`, `hkdf`, `sha2`, `libc`, `pdf-writer`, `ttf-parser`,
-`brotli-decompressor`, `secrecy`, `zeroize`, `inout`, `unicode-normalization`, `miniz_oxide`.
+The sealed runtime uses a deliberately small dependency tree, including `argon2`, `blake2`,
+`chacha20poly1305`, `hkdf`, `libc`, `pdf-writer`, `ttf-parser`, `brotli-decompressor`, `zeroize`,
+`unicode-normalization` and `miniz_oxide`. `resvg`/`usvg` and the `png` encoder are **desktop-only**;
+trusted SVG icons are converted by a *host-side build script* to 1-bit masks. The release workflow
+checks that SVG/XML/PNG-encoder crates are absent from the sealed runtime dependency tree.
 `holonomy-jail` and `holonomy-x11` depend on `libc` and nothing else.
 
 `miniz_oxide` is the only addition Phase 9C made, and it is reachable from exactly one crate —
@@ -136,7 +155,8 @@ type into on an ordinary desktop without `sudo` — is the designated target.
 `Ctrl+T` inserts a 3×3 table and Tab moves between cells. `Ctrl+M` inserts an inline formula: with the
 caret outside it the box draws as compiled math — glyphs from Noto Sans Math for the symbols, Inter
 Italic for the variables, and 1 px integer fills for the fraction bars and radical overlines — and with
-the caret inside it expands in place to the raw LaTeX in monospace. `Ctrl+I` inserts an image.
+the caret inside it expands in place to the raw LaTeX in monospace. `Ctrl+I` toggles italic;
+choose **Insert > Image** or the image toolbar button to insert a picture.
 
 **Images.** The container format is frozen, so an image lives in the document payload's tail as a
 content-addressed catalog entry — `BLAKE2b | w u16 | h u16 | len | PNG` — and its *position* is a
@@ -145,14 +165,18 @@ implementation detail: the frozen entry shape has nowhere to record which anchor
 the pairing is positional whether it is wanted or not, and a character in the text is the one anchor
 that survives every edit for free. Decoded rasters are page-column-width (§2.9.3's arithmetic), held
 in an Iceberg cache bounded at 8.0 MiB with a ±1-page window, and scrubbed on eviction before the next
-frame. `Ctrl+I` inserts a committed 1920×1080 chart rather than a file you choose, because the sealed
-allowlist has no `openat` on a user path — everything either side of that boundary is real.
+frame. In the **sealed** path, the image action inserts a bundled chart because the allowlist
+has no `openat` on a user path. The **desktop** image dialog accepts a PNG file or a bounded
+static SVG, which is converted to PNG before insertion. No SVG source survives in the encrypted document.
 
-**Cost.** 1,439,288 B against the 2,097,152 B ceiling: **657,864 B of room**. The decoder is **51.6 KiB**
-of it, measured by symbol size out of an unstripped build.
+**Current static release sizes.** The pinned musl CI run `41651444311` measured 1,863,000 B
+for the sealed/default binary and 3,333,880 B for the SVG-enabled desktop binary. Both pass the
+4,194,304 B ceiling; the desktop build has 860,424 B of headroom. The historical Phase 9C
+measurement (1,439,288 B under the former 2 MiB limit) is not a measurement of this build.
 
-**1335 tests pass in release, 0 failed, across 102 test binaries** — the whole workspace, measured,
-not the subset a fast run happens to cover. 175 files / 97,684 lines under `crates/*/src` and
+**Historical Phase 9C measurement:** 1,335 tests passed in release across 102 test binaries at
+that point. It is **not** a test result for this amended SVG build. 175 files / 97,684 lines under
+`crates/*/src` and
 `crates/*/tests` (`git ls-files 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | xargs wc -l`). The
 previous "1005 tests / 125 files / 67,294 lines" is superseded by this line rather than by a claim.
 

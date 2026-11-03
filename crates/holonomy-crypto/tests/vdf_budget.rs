@@ -240,14 +240,14 @@ fn the_committed_cost_still_describes_this_host() {
     assert!(
         ratio >= 0.5,
         "**{VDF_ITERATIONS} squarings cost {actual_ms:.0} ms here, under half the {TARGET_VDF_MS} ms \
-         budget.** The committed {MEASURED_NS_PER_SQUARING} ns is far below the {ns} ns measured, so \
-         `T` is sized for a host several times faster than this one and the time-lock is weaker than \
-         its budget claims. Re-derive with `vdf-calibrate` on the deployment target."
+         budget.** The committed {MEASURED_NS_PER_SQUARING} ns is far above the {ns} ns measured, so \
+         `T` is sized for a slower host and the time-lock is weaker on this one than its budget claims. \
+         Re-derive with `vdf-calibrate` on the deployment target."
     );
     assert!(
         ratio <= 2.0,
         "**{VDF_ITERATIONS} squarings cost {actual_ms:.0} ms here, more than twice the \
-         {TARGET_VDF_MS} ms budget.** The committed {MEASURED_NS_PER_SQUARING} ns is well above the \
+         {TARGET_VDF_MS} ms budget.** The committed {MEASURED_NS_PER_SQUARING} ns is well below the \
          {ns} ns measured. Overspending is the safe direction -- a slower unlock is not a weaker \
          time-lock -- but 2x means unlock latency is now a usability problem and the constant is \
          stale."

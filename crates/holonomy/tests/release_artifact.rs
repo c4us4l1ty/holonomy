@@ -2,8 +2,8 @@
 //!
 //! # The two claims
 //!
-//! 1. A default-features release build is a **static PIE**, under **2.0 MiB**, and contains **no X11**.
-//! 2. A `--features desktop` build is still a static PIE and still under 2.0 MiB, and it *does* contain
+//! 1. A default-features release build is a **static PIE**, under **4.0 MiB**, and contains **no X11**.
+//! 2. A `--features desktop` build is still a static PIE and still under 4.0 MiB, and it *does* contain
 //!    the X11 client -- because that is what the feature is for, and a gate that could not tell the two
 //!    apart would be testing nothing.
 //!
@@ -48,8 +48,8 @@ const X11_MARKERS: &[&str] = &[
     "HOLONOMY_X11_TRACE",
 ];
 
-/// The ceiling from the build profile: 2.0 MiB.
-const CEILING: u64 = 2 * 1024 * 1024;
+/// Product decision, 2026-11-03: 4 MiB for the stripped static musl binary.
+const CEILING: u64 = 4 * 1024 * 1024;
 
 /// The binary at `path` is a static PIE.
 fn assert_static_pie(path: &Path, what: &str) {
@@ -109,13 +109,11 @@ fn assert_static_pie(path: &Path, what: &str) {
 
 /// A default-features release binary has none of the X11 client in it.
 ///
-/// Measured on this host after Phase 9B: 1,101,944 bytes, static PIE, and zero of the five markers.
-/// The desktop build of the same source is 1,192,824 bytes -- 90,880 more, which is the whole crate.
-///
-/// Both are well inside the 2,097,152 ceiling: 995,208 bytes of room for the default and 904,328 for
-/// the desktop build. Phase 9B's whole cost was 69,472 bytes on the default build, and it came *down*
-/// on the asset side -- the pruned math face removed 22,468 bytes of compressed payload, which is more
-/// than the parser, the layout and the wiring added.
+/// Current measurement from the pinned musl CI build at `7d919ec` (run `41651444311`):
+/// 1,863,000 bytes sealed/default and 3,333,880 bytes desktop with import-time SVG support.
+/// Both are static PIE and below the 4,194,304-byte ceiling; the sealed build excludes X11.
+/// Phase 9B's 1,101,944/1,192,824-byte measurements used the old feature set and old 2 MiB
+/// limit, and are historical rather than a claim about this build.
 ///
 /// # CORRECTION, part 39: this gate is `#[cfg]`d to the run it can actually say something about
 ///
@@ -167,6 +165,33 @@ fn the_default_release_binary_carries_no_x11_client() {
         path.display(),
         bytes.len()
     );
+}
+
+/// The default binary must not contain the desktop SVG parser or its user-facing error paths.
+/// Build-time icon compilation is fine: only fixed bit rows reach this binary.
+#[test]
+#[cfg(not(feature = "desktop"))]
+fn the_sealed_binary_has_no_svg_import_runtime() {
+    let path = binary();
+    if !path.exists() && cfg!(debug_assertions) {
+        eprintln!("skipping: no binary exists at {}", path.display());
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read the sealed binary");
+    for marker in [
+        "resvg",
+        "usvg",
+        "roxmltree",
+        "SVG must be UTF-8 XML",
+        "SVG viewBox produces",
+    ] {
+        assert!(
+            !bytes
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()),
+            "the sealed binary contains desktop SVG importer marker {marker:?}"
+        );
+    }
 }
 
 /// **This file's byte ceiling is a release-profile number, so it declines to run in a debug one.**

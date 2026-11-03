@@ -483,13 +483,16 @@ fn ruler_drag_draws_guide_line() {
     ribbon::paint(&mut v, &l, &s, l.cell_h);
 
     let has_guide = v.iter().any(|node| match &node.node {
-        Some(holonomy_render::Node::Solid(r)) => {
+        Some(holonomy_render::Node::Rect(r)) => {
             r.x == 350
-                && r.y == l.ruler.bottom()
+                && r.y == l.ruler.bottom() as i32
                 && r.width == 1
                 && r.height == l.height.saturating_sub(l.ruler.bottom())
         }
         _ => false,
     });
-    assert!(has_guide, "guide line must be painted when ruler_drag_x is set");
+    assert!(
+        has_guide,
+        "guide line must be painted when ruler_drag_x is set"
+    );
 }

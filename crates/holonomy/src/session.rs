@@ -56,8 +56,8 @@ use holonomy_render::DamageRect;
 use holonomy_render::{widgets, DocRun, Node, Rect, SurfaceTree, TextRun, TextSource};
 use holonomy_text::{
     Editor, EditorError, FontFace, SpanPolicy, ANCHOR_BYTES, FACE_BODY, FACE_MONO, STYLE_BOLD,
-    STYLE_HEADER, STYLE_ITALIC, STYLE_STRIKE, STYLE_SUBSCRIPT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
-    STYLE_SPELLING, STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT,
+    STYLE_HEADER, STYLE_ITALIC, STYLE_SPELLING, STYLE_STRIKE, STYLE_SUBSCRIPT,
+    STYLE_SUGGESTION_DELETE, STYLE_SUGGESTION_INSERT, STYLE_SUPERSCRIPT, STYLE_UNDERLINE,
 };
 use holonomy_text::{MathSpan, Nav, ResolvedTable, TableCursor, TableSpan};
 
@@ -1193,10 +1193,7 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode
-                        | widgets::Tool::Collapse
-                        | widgets::Tool::Overflow
-                        | widgets::Tool::Share
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
                 ) && (p.rect.width == 0 || p.rect.height == 0)
             })
             .map(|p| p.tool)
@@ -1400,21 +1397,15 @@ impl<'a> Session<'a> {
         Ok(Some(byte[0]))
     }
 
-    /// Insert an image at the caret, from the built-in chart.
+    /// Insert the bundled PNG test chart at the caret in the sealed demo.
     ///
-    /// # Where the bytes come from, and why that is stated rather than hidden
-    ///
-    /// From a PNG committed to this repository and `include_bytes!`-ed. **Not** from a file the user
-    /// chose, and not from the network, because FR-5.1's `unshare(CLONE_NEWNET)` forbids the second and
-    /// the sealed 50-syscall allowlist forbids the first: there is no `openat` on a user-chosen path in
-    /// the jail. A real "insert image from disk" is therefore a Phase 13 question, where §4's windowed
-    /// document model brings a read path with it.
-    ///
-    /// Everything *else* is real end to end, and it is the part worth testing: a keystroke becomes a
-    /// U+FFFC anchor, a BLAKE2b content address, a catalog entry in the payload's tail, a PNG decode, a
-    /// fixed-point downscale to page-column width, a `SecureBlock` in the Iceberg cache, a
-    /// `Node::Image`, an integer blit, a displacement of every line below it, and -- in
-    /// `holonomy-export` -- a `<img>` and an `/XObject`. The only thing stubbed is the file dialog.
+    /// The sealed process cannot open a user-chosen path after its filesystem and syscall
+    /// restrictions are installed. The unsealed desktop instead requests a file using
+    /// [`DocumentRequest::InsertImage`], validates PNG or bounded SVG at the UI boundary, and
+    /// calls [`insert_image_bytes`](Self::insert_image_bytes) with PNG bytes. Both modes then use
+    /// the same document image path: a U+FFFC anchor, content address, catalog entry, PNG decode,
+    /// fixed-point page-column downscale, secure cache block, image node, and integer blit.
+    /// Exports use the same PNG as an HTML image or PDF image object.
     ///
     /// The chart is 1920x1080 on purpose. §2.9.3's scaler runs on *every* image precisely because the
     /// cache holds page-column-width rasters, so a fixture at or below the column width would never
@@ -1985,10 +1976,7 @@ impl<'a> Session<'a> {
             .filter(|p| {
                 !matches!(
                     p.tool,
-                    widgets::Tool::Mode
-                        | widgets::Tool::Collapse
-                        | widgets::Tool::Overflow
-                        | widgets::Tool::Share
+                    widgets::Tool::Mode | widgets::Tool::Collapse | widgets::Tool::Overflow
                 )
             })
             .filter(|p| p.rect.width == 0 || p.rect.height == 0)
@@ -2100,7 +2088,7 @@ impl<'a> Session<'a> {
         } else {
             self.type_metrics.page_pad
         };
-        let mut metrics = ChromeMetrics {
+        let metrics = ChromeMetrics {
             page_pad,
             sidebar_w: 0,
             ..self.chrome.metrics
@@ -3184,7 +3172,9 @@ impl<'a> Session<'a> {
         match drag {
             RulerDrag::LeftMargin => {
                 let page_x = self.chrome.layout.page.x as i32;
-                let raw_pad = (x - page_x).max(16).min(self.chrome.layout.page.width as i32 / 3);
+                let raw_pad = (x - page_x)
+                    .max(16)
+                    .min(self.chrome.layout.page.width as i32 / 3);
                 let snapped = ((raw_pad as u32) / cell_w) * cell_w;
                 let new_pad = snapped.max(16);
                 if new_pad != self.chrome.metrics.page_pad {
@@ -3199,7 +3189,9 @@ impl<'a> Session<'a> {
             }
             RulerDrag::RightMargin => {
                 let page_right = self.chrome.layout.page.right() as i32;
-                let raw_pad = (page_right - x).max(16).min(self.chrome.layout.page.width as i32 / 3);
+                let raw_pad = (page_right - x)
+                    .max(16)
+                    .min(self.chrome.layout.page.width as i32 / 3);
                 let snapped = ((raw_pad as u32) / cell_w) * cell_w;
                 let new_pad = snapped.max(16);
                 if new_pad != self.chrome.metrics.page_pad {
@@ -3654,12 +3646,6 @@ impl<'a> Session<'a> {
                     Tool::Collapse => {
                         self.set_sidebar(!self.state.sidebar_open);
                     }
-                    Tool::Comment => {
-                        self.apply_action(holonomy_render::menus::Action::ToggleComment)?;
-                    }
-                    Tool::Share => {
-                        self.apply_action(holonomy_render::menus::Action::Share)?;
-                    }
                     // **Part 44: the font-size pair is the zoom pair.** `SizeUp` and `SizeDown` are
                     // the two atlas sizes the project can afford, reached from the toolbar rather than
                     // from the zoom dropdown.
@@ -4013,10 +3999,7 @@ impl<'a> Session<'a> {
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
                     .map_or((self.body_style(), 0), |sp| {
-                        (
-                            self.span_style(sp),
-                            self.run_size_index(sp.style_flags),
-                        )
+                        (self.span_style(sp), self.run_size_index(sp.style_flags))
                     });
                 // **One scalar at a time, because the boundary is per glyph.** A chunk-wide advance
                 // would give the click the whole chunk's midpoint, which is not a column.
@@ -4327,10 +4310,7 @@ impl<'a> Session<'a> {
                     .get(si)
                     .filter(|_| (at + from as u32) < run_end)
                     .map_or((self.body_style(), 0), |sp| {
-                        (
-                            self.span_style(sp),
-                            self.run_size_index(sp.style_flags),
-                        )
+                        (self.span_style(sp), self.run_size_index(sp.style_flags))
                     });
                 // **To the end of this run, or to the end of the chunk, whichever comes first.**
                 let to = n.min((run_end - at) as usize).max(from + 1);
@@ -4942,18 +4922,6 @@ impl<'a> Session<'a> {
                 self.insert(&vec![b'\n'; n as usize], None)?;
                 return Ok(());
             }
-            Action::ToggleComment => {
-                // **Open the comments sidebar, or add a comment at the caret.** Sealed builds have no
-                // commenting backend, so this reports inert rather than inventing a dialog.
-                self.stats.pointer_inert += 1;
-                return Ok(());
-            }
-            Action::Share => {
-                // **Share the document.** Sealed builds have no sharing backend; the Share button
-                // paints blue and is clickable but opens nothing.
-                self.stats.pointer_inert += 1;
-                return Ok(());
-            }
             Action::WordCount => {
                 self.set_notice(Some(format!(
                     "{} words · {} lines",
@@ -5064,7 +5032,9 @@ impl<'a> Session<'a> {
             // **`None`, because the toolbar has no strikethrough button**, so there is no button
             // whose armed state could be drawn and nothing to invalidate. Passing `Underline` here
             // would light up a button for a flag it does not own.
-            Action::ToggleStrike => self.toggle_inline_style(STYLE_STRIKE, Some(widgets::Tool::Strikethrough))?,
+            Action::ToggleStrike => {
+                self.toggle_inline_style(STYLE_STRIKE, Some(widgets::Tool::Strikethrough))?
+            }
             Action::ToggleSuperscript => self.toggle_decoration(STYLE_SUPERSCRIPT)?,
             Action::ToggleSubscript => self.toggle_decoration(STYLE_SUBSCRIPT)?,
             Action::ClearFormatting => {
@@ -5077,8 +5047,8 @@ impl<'a> Session<'a> {
                 // per-run attribute goes back to the paragraph's. `format_range` cannot do it -- its
                 // transform has no third answer -- so this is the face-aware form with all three
                 // cleared, and it is the one caller that wants `FACE_BODY` rather than inheritance.
-                let cleared =
-                    from < to && self
+                let cleared = from < to
+                    && self
                         .editor
                         .face_format_range(from, to, |_| (0, 0, FACE_BODY))?;
                 // **The armed flags go with it, whether or not there was a range to clear.** Leaving
@@ -5151,11 +5121,9 @@ impl<'a> Session<'a> {
                 };
                 let (from, to) = self.paragraph_range();
                 if from < to {
-                    if self.editor.face_format_range(
-                        from as u32,
-                        to as u32,
-                        |_| (flags, colour, FACE_BODY),
-                    )?
+                    if self
+                        .editor
+                        .face_format_range(from as u32, to as u32, |_| (flags, colour, FACE_BODY))?
                     {
                         self.after_edit(0)?;
                         self.damage = self.chrome.full_damage();
@@ -5180,8 +5148,7 @@ impl<'a> Session<'a> {
             }
             Action::SetFont(i) => {
                 self.check_editable()?;
-                let idx =
-                    usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
+                let idx = usize::from(i).min(holonomy_render::menus::FONTS.len().saturating_sub(1));
                 // **The face this index names, in the model's own terms.** A `usize` from the menu is a
                 // *row*; the document stores a *face*, and the two are related by the one match below
                 // rather than by a cast -- `MONO_FONT_INDEX` is 1 and `FACE_MONO` is 1 today, and the
@@ -5611,7 +5578,9 @@ impl<'a> Session<'a> {
         // armed bits over the inherited ones.
         if self.editor.selection().is_none() {
             if let Some(face) = self.pending_face {
-                return holonomy_render::menus::FONTS.get(usize::from(face)).copied();
+                return holonomy_render::menus::FONTS
+                    .get(usize::from(face))
+                    .copied();
             }
         }
         holonomy_render::menus::FONTS
@@ -6058,7 +6027,12 @@ impl<'a> Session<'a> {
                     self.set_notice(Some("Move outside the table to insert an image.".into()));
                 } else {
                     self.check_editable()?;
-                    self.insert_image()?;
+                    if self.managed_documents {
+                        // Desktop input is chosen and validated outside the sealed session.
+                        self.document_request = Some(DocumentRequest::InsertImage);
+                    } else {
+                        self.insert_image()?;
+                    }
                 }
             }
             Command::Hotkey(Hotkey::InsertTable) => {
@@ -6605,9 +6579,10 @@ impl<'a> Session<'a> {
         // the caret lands at `start`; the text remains visible, pending accept or reject.
         if self.mode == holonomy_render::menus::ViewMode::Suggesting {
             // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
-            self.editor.format_range(start as u32, (start as u32 + len) as u32, |span| {
-                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
-            })?;
+            self.editor
+                .format_range(start as u32, (start as u32 + len) as u32, |span| {
+                    (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+                })?;
             self.counts.after_delete(&self.editor, start, removed);
             self.after_edit(len as u32)?;
             return Ok(Some(len));
@@ -6664,10 +6639,7 @@ impl<'a> Session<'a> {
             // with 0 (black); `format_range` reads each span and only flips the flag, keeping colour
             // and face intact — which is what "strike through the previous character" means.
             self.editor.format_range(start as u32, end as u32, |span| {
-                (
-                    span.style_flags | STYLE_SUGGESTION_DELETE,
-                    span.color_rgb,
-                )
+                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
             })?;
             self.editor.caret_to(start)?;
             self.counts.after_delete(&self.editor, start, &buf[..n]);
@@ -6723,9 +6695,10 @@ impl<'a> Session<'a> {
             let want = len.min(buf.len());
             let n = self.editor.read_into(at, &mut buf[..want]).unwrap_or(0);
             // **`format_range`, not `style_range`:** keeps the existing colour and face intact.
-            self.editor.format_range(at as u32, (at + len) as u32, |span| {
-                (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
-            })?;
+            self.editor
+                .format_range(at as u32, (at + len) as u32, |span| {
+                    (span.style_flags | STYLE_SUGGESTION_DELETE, span.color_rgb)
+                })?;
             self.counts.after_delete(&self.editor, at, &buf[..n]);
             return self.after_edit(1);
         }
@@ -7021,7 +6994,11 @@ impl<'a> Session<'a> {
                 } else {
                     underline
                 },
-                if flag == STYLE_STRIKE { on } else { strikethrough },
+                if flag == STYLE_STRIKE {
+                    on
+                } else {
+                    strikethrough
+                },
             );
             self.damage = self.chrome.full_damage();
         } else {
@@ -7750,8 +7727,7 @@ impl<'a> Session<'a> {
             let span = self.editor.style_at(begin as u32);
             let is_header = span.style_flags & STYLE_HEADER != 0;
             // Heading 2 carries STYLE_BOLD with the heading blue but no STYLE_HEADER flag.
-            let is_heading2 = span.style_flags & STYLE_BOLD != 0
-                && span.color_rgb == 0x001A_5C75;
+            let is_heading2 = span.style_flags & STYLE_BOLD != 0 && span.color_rgb == 0x001A_5C75;
             if !is_header && !is_heading2 {
                 continue;
             }
@@ -10367,8 +10343,8 @@ fn tool_command(tool: holonomy_render::widgets::Tool) -> Option<holonomy_input::
         Tool::Redo => Command::Hotkey(Hotkey::Redo),
         Tool::Image => Command::Hotkey(Hotkey::InsertImage),
         Tool::Strikethrough => Command::Hotkey(Hotkey::Strike),
-        // `Tool::Collapse`, `Tool::Comment`, `Tool::Share` are handled in `Session::press` rather
-        // than here, because they toggle chrome flags or run actions rather than document commands.
+        // `Tool::Collapse` is handled in `Session::press`, because it toggles a chrome flag
+        // rather than running a document command.
         // **Listed as `None` here rather than omitted** so that this function's arms are exactly the
         // `Tool` variants -- adding a tool makes this non-exhaustive and the compiler says so.
         _ => return None,
@@ -10501,7 +10477,7 @@ pub fn action_command(action: holonomy_render::menus::Action) -> Option<holonomy
         Action::Find | Action::Replace | Action::ToggleBullets | Action::ToggleNumbering
         | Action::AlignLeft | Action::AlignCenter | Action::AlignRight | Action::Indent | Action::Outdent
         | Action::ToggleRibbon | Action::ToggleTheme | Action::ToggleAutosave | Action::ToggleNavigation
-        | Action::InsertPageBreak | Action::ToggleComment | Action::Share => return None,
+        | Action::InsertPageBreak => return None,
     })
 }
 
@@ -10562,7 +10538,9 @@ fn opener_rect(l: &holonomy_render::chrome::Layout, open: widgets::Open) -> Dama
     let h = match open {
         widgets::Open::RibbonOverflow => widgets::Hit::Tool(widgets::Tool::Overflow),
         widgets::Open::Menu(i) => widgets::Hit::Menu(i),
-        widgets::Open::Tool(t) => widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t)),
+        widgets::Open::Tool(t) => {
+            widgets::Hit::Ribbon(holonomy_render::menus::Action::SelectTool(t))
+        }
     };
     let mut st = holonomy_render::ChromeState::default();
     st.ribbon = true;

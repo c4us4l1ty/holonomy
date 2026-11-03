@@ -4,10 +4,10 @@
 //!
 //! The end-to-end path for a [`Node::Image`], asserted in the order the path runs:
 //!
-//! 1. `Ctrl+I` reaches [`Session::insert_image`] through the **real keymap** -- not by calling
-//!    `insert_image` directly, because "does Ctrl+I reach the image code" is the requirement and calling
-//!    the image code directly would not test it. This is the same discipline `holonomy-text`'s Ctrl+T
-//!    gate uses, for the same reason.
+//! 1. The toolbar and Insert menu dispatch the image command; Ctrl+I remains italic, the familiar
+//!    document-editor shortcut. `toolbar_wiring.rs` exercises the pointer route; this file checks
+//!    the command through storage and painting without replacing user PNG input with a test chart
+//!    in the managed desktop session.
 //! 2. The document gains a U+FFFC anchor and the payload's tail gains a catalog entry.
 //! 3. A paint decodes the PNG, downsamples it to page-column width with the fixed-point scaler, and
 //!    admits the raster to the Iceberg cache.
@@ -131,9 +131,9 @@ fn column_width(s: &Session<'_>) -> u32 {
 }
 
 #[test]
-fn ctrl_i_reaches_the_image_code_through_the_real_keymap() {
-    // `dispatch_into`, not `dispatch`: Ctrl+I arrives as two events -- the ctrl press and the I press
-    // -- and the folding of the modifier is part of what has to work for the binding to fire at all.
+fn ctrl_i_formats_text_and_the_insert_image_command_still_inserts_an_image() {
+    // Ctrl+I arrives as two events. It must stay italic, rather than unexpectedly inserting
+    // a chart into the document when a user expects standard document-editor formatting.
     let km = Keymap::us();
     let mut mods = ModifierState::new();
     assert_eq!(
@@ -142,8 +142,7 @@ fn ctrl_i_reaches_the_image_code_through_the_real_keymap() {
     );
     assert!(mods.ctrl());
     let cmd = km.dispatch_into(InputEvent::press(holonomy_input::KEY_I), &mut mods);
-    assert_eq!(cmd, Some(Command::Hotkey(Hotkey::InsertImage)));
-    assert_eq!(cmd, Some(Command::Hotkey(Hotkey::InsertImage)));
+    assert_eq!(cmd, Some(Command::Hotkey(Hotkey::Italic)));
 
     let (mut s, _) = with_image();
     assert_eq!(s.stats.image_inserts, 1, "the helper already inserted one");
@@ -158,13 +157,15 @@ fn ctrl_i_reaches_the_image_code_through_the_real_keymap() {
     );
     assert_eq!(s.assets().len(), 0, "and so is its asset");
 
-    s.apply(cmd.expect("ctrl+i decodes")).expect("apply");
-    assert_eq!(
-        s.stats.image_inserts, 2,
-        "the helper's insert, then Ctrl+I's"
-    );
-    // One anchor and one asset, not two: the undo took the helper's asset away with its anchor, so
-    // Ctrl+I starts from an empty catalog rather than appending to a stale one.
+    s.apply(cmd.expect("ctrl+i decodes"))
+        .expect("toggle italic");
+    assert_eq!(s.stats.image_inserts, 1, "italic must not insert a chart");
+    assert_eq!(s.assets().len(), 0);
+    // The menu/toolbar still has an image command; the sealed demo supplies its bundled PNG.
+    s.apply(Command::Hotkey(Hotkey::InsertImage))
+        .expect("image command");
+    assert_eq!(s.stats.image_inserts, 2);
+    // One anchor and one asset, not two: the undo took the helper's asset with its anchor.
     assert_eq!(s.assets().len(), 1);
     assert_eq!(s.image_anchors().expect("anchors").len(), 1);
 }
@@ -190,13 +191,8 @@ fn a_bare_i_is_still_the_letter_i() {
         Keymap::us().dispatch(InputEvent::press(holonomy_input::KEY_I), &shift),
         Some(Command::Insert('I'))
     );
-    // **And Ctrl+Shift+I is italic, which is the one conflict this file has to state out loud.**
-    //
-    // It was an unbound combo when the image shortcut was the only thing on `I`, and this assertion
-    // said so. The Wordcraft ribbon needs an italic accelerator and `Ctrl+I` belongs to the image, so
-    // `Ctrl+Shift+I` took italic -- the same pairing Wordcraft uses, and the reason `Ctrl+I` is still
-    // the image: an accelerator that replaces a shipped one is a regression, and this file's whole
-    // subject is that `Ctrl+I` keeps reaching the image.
+    // Ctrl+Shift+I also toggles italic, never inserts a capital I or an image. Both modified
+    // shortcuts agree with the keymap's own italic-shortcut test.
     let mut both = ModifierState::new();
     both.update(holonomy_input::KEY_LEFTSHIFT, 1);
     both.update(holonomy_input::KEY_LEFTCTRL, 1);
@@ -785,12 +781,11 @@ fn the_painters_image_counters_are_what_a_session_frame_records() {
         (rw * rh) as u64,
         "every pixel of the raster was written"
     );
-    // `Frame` stores `0xAARRGGBB`, so an RGBA source of `(10, 20, 30, 255)` lands as `0x001E140A`.
-    // Written in that order rather than `0x000A141E` on purpose: the first version of this assertion
-    // wrote the bytes in RGB order and reported a blend bug that was not there.
+    // The frame stores its opaque RGB colour as 0x00RRGGBB. An RGBA source of
+    // (10, 20, 30, 255) must retain each channel in that same order.
     assert_eq!(
         frame.pixel(5, 5) & 0x00FF_FFFF,
-        0x001E_140A,
+        0x000A_141E,
         "an opaque blit is the identity: no channel may be altered"
     );
 }

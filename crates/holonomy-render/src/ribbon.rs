@@ -31,23 +31,25 @@ pub mod tokens {
         pub const RULER_MARGIN: u32 = 0xFF2E2E2E;
     }
     pub mod light {
-        pub const TITLE: u32 = 0xFFF0F0F0;
-        pub const RIBBON: u32 = 0xFFF9F9F9;
-        pub const CANVAS: u32 = 0xFFE6E6E6;
-        pub const BORDER: u32 = 0xFFE1E1E1;
-        pub const TEXT: u32 = 0xFF242424;
-        pub const DIM: u32 = 0xFF616161;
-        pub const DISABLED: u32 = 0xFFA8A8A8;
-        pub const HOVER: u32 = 0xFFE6E6E6;
-        pub const PRESSED: u32 = 0xFFD6D6D6;
-        pub const CHECKED: u32 = 0xFFDDE3F8;
-        pub const ACCENT: u32 = 0xFF3B5BDB;
+        // Shared neutrals and blue with chrome.rs; the optional ribbon must not look
+        // like a second application when the user switches layouts.
+        pub const TITLE: u32 = 0xFFF8FAFD;
+        pub const RIBBON: u32 = 0xFFF1F3F4;
+        pub const CANVAS: u32 = 0xFFF1F3F4;
+        pub const BORDER: u32 = 0xFFDADCE0;
+        pub const TEXT: u32 = 0xFF202124;
+        pub const DIM: u32 = 0xFF5F6368;
+        pub const DISABLED: u32 = 0xFF9AA0A6;
+        pub const HOVER: u32 = 0xFFE8EAED;
+        pub const PRESSED: u32 = 0xFFD2E3FC;
+        pub const CHECKED: u32 = 0xFFD2E3FC;
+        pub const ACCENT: u32 = 0xFF1A73E8;
         pub const ON_ACCENT: u32 = 0xFFFFFFFF;
         pub const INPUT: u32 = 0xFFFFFFFF;
-        pub const INPUT_BORDER: u32 = 0xFF8A8A8A;
-        pub const GROUP: u32 = 0xFF707070;
+        pub const INPUT_BORDER: u32 = 0xFFDADCE0;
+        pub const GROUP: u32 = 0xFF5F6368;
         pub const RULER: u32 = 0xFFFFFFFF;
-        pub const RULER_MARGIN: u32 = 0xFFD4D4D4;
+        pub const RULER_MARGIN: u32 = 0xFFDADCE0;
     }
 }
 
@@ -1499,8 +1501,16 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
     // Margin boundaries and draggable indent markers matching Google Docs and Word.
     if col_w > 0 {
         // Vertical boundary lines between page margin gutters and body text
-        fill(v, DamageRect::new(col, l.ruler.y, 1, l.ruler.height), t.border);
-        fill(v, DamageRect::new(col + col_w, l.ruler.y, 1, l.ruler.height), t.border);
+        fill(
+            v,
+            DamageRect::new(col, l.ruler.y, 1, l.ruler.height),
+            t.border,
+        );
+        fill(
+            v,
+            DamageRect::new(col + col_w, l.ruler.y, 1, l.ruler.height),
+            t.border,
+        );
 
         // First Line Indent: downward triangle at top of left margin
         let fl_x = if s.pressed == Some(crate::widgets::Hit::RulerFirstLineIndent) {
@@ -1535,11 +1545,17 @@ pub fn paint(v: &mut Vec<SurfaceTree>, l: &Layout, s: &ChromeState, cell_h: u32)
         let rect_h = 4u32;
         let rect_left = li_x.saturating_sub(rect_w / 2);
         let rect_top = l.ruler.bottom().saturating_sub(rect_h);
-        fill(v, DamageRect::new(rect_left, rect_top, rect_w, rect_h), t.accent);
+        fill(
+            v,
+            DamageRect::new(rect_left, rect_top, rect_w, rect_h),
+            t.accent,
+        );
 
         // Right Indent: upward triangle at bottom of right margin
         let ri_x = if s.pressed == Some(crate::widgets::Hit::RulerRightIndent) {
-            s.ruler_drag_x.map(|dx| dx.max(0) as u32).unwrap_or(col + col_w)
+            s.ruler_drag_x
+                .map(|dx| dx.max(0) as u32)
+                .unwrap_or(col + col_w)
         } else {
             col + col_w
         };

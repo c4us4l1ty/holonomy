@@ -1,5 +1,11 @@
 # Holonomy → Google Docs GUI Rework Plan
 
+> **Amended 2026-11-03:** Keep this compact, light Google Docs-like layout as the
+> desktop default. The older 2 MiB/no-SVG constraints below record the earlier work;
+> the current static ceiling is 4 MiB. Trusted SVG artwork becomes static masks at
+> build time, and the unsealed desktop image dialog converts bounded user SVGs to PNG
+> before insertion. The sealed renderer's security boundaries are unchanged.
+
 ## Current state
 Phase 1 (colour retheme + Docs toolbar) — DONE, committed
 Phase 2 (suggestion mode + Suggesting ViewMode) — DONE, committed
@@ -7,7 +13,7 @@ Phase 3a (rulers + spelling squiggles) — DONE, committed
 Phase 3b (Smart Compose inline predictions) — DONE, committed
 
 ## Constraints (in force)
-- 2 MiB static musl binary ceiling (current 1,478,456 bytes → ~619 KB headroom)
+- 4 MiB stripped static musl binary ceiling (CI run `41651444311`: sealed 1,863,000 B; SVG-enabled desktop 3,333,880 B)
 - No runtime rasterisation / sealed 512 KiB atlas
 - Native Rust crates only (holonomy-render, holonomy-display, holonomy-text, holonomy-input, holonomy)
 - No egui/winit/compositor/GPU

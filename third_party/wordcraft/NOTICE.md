@@ -9,3 +9,10 @@ license. Upstream reference commit:
 The MIT license text is preserved in `LICENSE-MIT`. Holonomy does not link
 Wordcraft's egui/GPU frontend; the adaptation targets Holonomy's integer
 framebuffer renderer and preserves Holonomy's sealed execution model.
+
+The document, folder, pencil and left-arrow path geometry in
+`crates/holonomy-render/assets/icons/*.svg` is adapted from WordCraft's
+`crates/render/src/icon_lib.rs` at `ffb155a0321bba08da495efda66495104c1c8b9a`.
+These **trusted, reviewed** SVGs are converted to 16/20 px bit masks at build time, not
+parsed or evaluated in the sealed editor. WordCraft's license is MIT OR Apache-2.0;
+these four pieces are used under MIT. No Microsoft/Google icon assets were copied.

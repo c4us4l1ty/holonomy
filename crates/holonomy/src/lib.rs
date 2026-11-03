@@ -21,6 +21,9 @@ pub mod manifest;
 pub mod sample;
 pub mod session;
 pub mod store;
+/// Bounded import-time SVG rasterisation, absent from the sealed binary.
+#[cfg(feature = "desktop")]
+pub mod svg_import;
 #[cfg(feature = "desktop")]
 pub mod windowed;
 
