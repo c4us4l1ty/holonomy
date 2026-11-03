@@ -474,7 +474,7 @@ impl ChromeMetrics {
         // labels silently dropped for want of a pixel. One line plus `RULER_TICK_H` is what a ruler
         // needs to be readable, and 26 px at the design pitch is 25 + 1, which is why the literal was
         // always going to be tight.
-        self.ruler_h = at_least_a_line(by(26, cell_h), cell_h).saturating_add(RULER_TICK_H);
+        self.ruler_h = at_least_a_line(by(26, cell_h), cell_h).saturating_add(Self::RULER_TICK_H);
         self.status_h = by(28, cell_h);
         // **Raised to a line afterwards**, because `by` rounds down and a band under one line cannot
         // hold one -- the rule [`with_line_pitch`](Self::with_line_pitch) already enforces and that a
