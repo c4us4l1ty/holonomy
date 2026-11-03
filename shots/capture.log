@@ -13,8 +13,8 @@
 [1m[92m   Compiling[0m adler2 v2.0.1
 [1m[92m   Compiling[0m tinyvec v1.13.3
 [1m[92m   Compiling[0m miniz_oxide v0.9.1
-[1m[92m   Compiling[0m unicode-normalization v0.1.25
 [1m[92m   Compiling[0m hybrid-array v0.4.15
+[1m[92m   Compiling[0m unicode-normalization v0.1.25
 [1m[92m   Compiling[0m getrandom v0.4.3
 [1m[92m   Compiling[0m holonomy-jail v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-jail)
 [1m[92m   Compiling[0m phc v0.6.1
@@ -26,44 +26,154 @@
 [1m[92m   Compiling[0m password-hash v0.6.1
 [1m[92m   Compiling[0m secrecy v0.10.3
 [1m[92m   Compiling[0m ttf-parser v0.25.1
+[1m[92m   Compiling[0m bitflags v2.13.2
 [1m[92m   Compiling[0m ryu v1.0.23
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m memchr v2.8.3
 [1m[92m   Compiling[0m digest v0.11.3
-[1m[92m   Compiling[0m universal-hash v0.6.1
-[1m[92m   Compiling[0m cipher v0.5.2
 [1m[92m   Compiling[0m blake2 v0.11.0
-[1m[92m   Compiling[0m hmac v0.13.0
-[1m[92m   Compiling[0m chacha20 v0.10.2
 [1m[92m   Compiling[0m holonomy-text v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-text)
-[1m[91merror[E0425][0m[1m: cannot find value `RECORD_BYTES` in this scope[0m
-    [1m[94m--> [0mcrates/holonomy-text/src/editor.rs:1242:48
-     [1m[94m|[0m
-[1m[94m1242[0m [1m[94m|[0m         let needed = runs.len().saturating_mul(RECORD_BYTES);
-     [1m[94m|[0m                                                [1m[91m^^^^^^^^^^^^[0m [1m[91mnot found in this scope[0m
-     [1m[94m|[0m
-[1m[96mhelp[0m: consider using the associated constant on `Self`
-     [1m[94m|[0m
-[1m[94m1242[0m [1m[94m| [0m        let needed = runs.len().saturating_mul([92mSelf::[0mRECORD_BYTES);
-     [1m[94m|[0m                                                [92m++++++[0m
-
-[1m[91merror[E0425][0m[1m: cannot find value `RECORD_BYTES` in this scope[0m
-    [1m[94m--> [0mcrates/holonomy-text/src/editor.rs:1301:40
-     [1m[94m|[0m
-[1m[94m1301[0m [1m[94m|[0m         for run in record.chunks_exact(RECORD_BYTES) {
-     [1m[94m|[0m                                        [1m[91m^^^^^^^^^^^^[0m [1m[91mnot found in this scope[0m
-     [1m[94m|[0m
-[1m[96mhelp[0m: consider using the associated constant on `Self`
-     [1m[94m|[0m
-[1m[94m1301[0m [1m[94m| [0m        for run in record.chunks_exact([92mSelf::[0mRECORD_BYTES) {
-     [1m[94m|[0m                                        [92m++++++[0m
-
+[1m[92m   Compiling[0m cipher v0.5.2
+[1m[92m   Compiling[0m universal-hash v0.6.1
 [1m[92m   Compiling[0m poly1305 v0.9.1
+[1m[92m   Compiling[0m chacha20 v0.10.2
+[1m[92m   Compiling[0m hmac v0.13.0
 [1m[92m   Compiling[0m aead v0.6.1
 [1m[92m   Compiling[0m hkdf v0.13.0
 [1m[92m   Compiling[0m chacha20poly1305 v0.11.0
 [1m[92m   Compiling[0m argon2 v0.6.0
+[1m[92m   Compiling[0m holonomy-render v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-render)
 [1m[92m   Compiling[0m sha2 v0.11.0
-[1mFor more information about this error, try `rustc --explain E0425`.[0m
-[1m[91merror[0m: could not compile `holonomy-text` (lib) due to 2 previous errors
-[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m pdf-writer v0.15.0
+[1m[92m   Compiling[0m holonomy-crypto v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-crypto)
+[1m[92m   Compiling[0m holonomy-image v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-image)
+[1m[92m   Compiling[0m holonomy-assets v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-assets)
+[1m[92m   Compiling[0m holonomy-container v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-container)
+[1m[92m   Compiling[0m holonomy-geometry v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-geometry)
+[1m[92m   Compiling[0m holonomy-input v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-input)
+[1m[92m   Compiling[0m holonomy-display v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-display)
+[1m[92m   Compiling[0m holonomy-export v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy-export)
+[1m[92m   Compiling[0m holonomy v3.0.0-singularity (/home/runner/work/holonomy/holonomy/crates/holonomy)
+[1m[91merror[E0425][0m[1m: cannot find type `FontFace` in this scope[0m
+   [1m[94m--> [0mcrates/holonomy/src/session.rs:539:26
+    [1m[94m|[0m
+[1m[94m539[0m [1m[94m|[0m     pending_face: Option<FontFace>,
+    [1m[94m|[0m                          [1m[91m^^^^^^^^[0m [1m[91mnot found in this scope[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: you might be missing a type parameter
+    [1m[94m|[0m
+[1m[94m449[0m [1m[94m| [0mpub struct Session<'a[92m, FontFace[0m> {
+    [1m[94m|[0m                      [92m++++++++++[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `FACE_BODY` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:4897:65
+     [1m[94m|[0m
+[1m[94m4897[0m [1m[94m|[0m                         .face_format_range(from, to, |_| (0, 0, FACE_BODY))?;
+     [1m[94m|[0m                                                                 [1m[91m^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `FACE_BODY` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:4971:45
+     [1m[94m|[0m
+[1m[94m4971[0m [1m[94m|[0m                         |_| (flags, colour, FACE_BODY),
+     [1m[94m|[0m                                             [1m[91m^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `FACE_BODY` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:4987:46
+     [1m[94m|[0m
+[1m[94m4987[0m [1m[94m|[0m                     self.pending_face = Some(FACE_BODY);
+     [1m[94m|[0m                                              [1m[91m^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `FACE_MONO` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5004:21
+     [1m[94m|[0m
+[1m[94m5004[0m [1m[94m|[0m                     FACE_MONO
+     [1m[94m|[0m                     [1m[91m^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+
+[1m[91merror[E0425][0m[1m: cannot find value `FACE_BODY` in this scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5006:21
+     [1m[94m|[0m
+[1m[94m5006[0m [1m[94m|[0m                     FACE_BODY
+     [1m[94m|[0m                     [1m[91m^^^^^^^^^[0m [1m[91mnot found in this scope[0m
+
+[1m[91merror[E0599][0m[1m: no method named `style_range_faced` found for struct `holonomy_text::Editor` in the current scope[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:6103:25
+     [1m[94m|[0m
+[1m[94m6103[0m [1m[94m|[0m             self.editor.style_range_faced(
+     [1m[94m|[0m             [1m[94m------------[0m[1m[91m^^^^^^^^^^^^^^^^^[0m
+     [1m[94m|[0m
+[1m[96mhelp[0m: there is a method `style_range` with a similar name, but with different arguments
+    [1m[94m--> [0mcrates/holonomy-text/src/editor.rs:1124:5
+     [1m[94m|[0m
+[1m[94m1124[0m [1m[94m|[0m [1m[96m/[0m     pub fn style_range(
+[1m[94m1125[0m [1m[94m|[0m [1m[96m|[0m         &mut self,
+[1m[94m1126[0m [1m[94m|[0m [1m[96m|[0m         start: u32,
+[1m[94m1127[0m [1m[94m|[0m [1m[96m|[0m         end: u32,
+[1m[94m1128[0m [1m[94m|[0m [1m[96m|[0m         style_flags: u16,
+[1m[94m1129[0m [1m[94m|[0m [1m[96m|[0m         color_rgb: u32,
+[1m[94m1130[0m [1m[94m|[0m [1m[96m|[0m     ) -> Result<(), EditorError> {
+     [1m[94m|[0m [1m[96m|________________________________^[0m
+
+[1m[91merror[E0308][0m[1m: mismatched types[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:8421:41
+     [1m[94m|[0m
+[1m[94m8421[0m [1m[94m|[0m                         self.span_style(span),
+     [1m[94m|[0m                              [1m[94m----------[0m [1m[91m^^^^[0m [1m[91mexpected `&TextIntervalSpan`, found `TextIntervalSpan`[0m
+     [1m[94m|[0m                              [1m[94m|[0m
+     [1m[94m|[0m                              [1m[94marguments to this method are incorrect[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: method defined here
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5244:8
+     [1m[94m|[0m
+[1m[94m5244[0m [1m[94m|[0m     fn span_style(&self, span: &holonomy_text::TextIntervalSpan) -> holonomy_render::Style {
+     [1m[94m|[0m        [1m[92m^^^^^^^^^^[0m        [1m[94m--------------------------------------[0m
+[1m[96mhelp[0m: consider borrowing here
+     [1m[94m|[0m
+[1m[94m8421[0m [1m[94m| [0m                        self.span_style([92m&[0mspan),
+     [1m[94m|[0m                                         [92m+[0m
+
+[1m[91merror[E0308][0m[1m: mismatched types[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:8437:41
+     [1m[94m|[0m
+[1m[94m8437[0m [1m[94m|[0m                         self.span_style(span),
+     [1m[94m|[0m                              [1m[94m----------[0m [1m[91m^^^^[0m [1m[91mexpected `&TextIntervalSpan`, found `TextIntervalSpan`[0m
+     [1m[94m|[0m                              [1m[94m|[0m
+     [1m[94m|[0m                              [1m[94marguments to this method are incorrect[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: method defined here
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5244:8
+     [1m[94m|[0m
+[1m[94m5244[0m [1m[94m|[0m     fn span_style(&self, span: &holonomy_text::TextIntervalSpan) -> holonomy_render::Style {
+     [1m[94m|[0m        [1m[92m^^^^^^^^^^[0m        [1m[94m--------------------------------------[0m
+[1m[96mhelp[0m: consider borrowing here
+     [1m[94m|[0m
+[1m[94m8437[0m [1m[94m| [0m                        self.span_style([92m&[0mspan),
+     [1m[94m|[0m                                         [92m+[0m
+
+[1m[33mwarning[0m[1m: unused variable: `FACE_MONO`[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5247:13
+     [1m[94m|[0m
+[1m[94m5247[0m [1m[94m|[0m             FACE_MONO if raw == 0 => holonomy_render::Style::MONOSPACE,
+     [1m[94m|[0m             [1m[33m^^^^^^^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_FACE_MONO`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: unreachable pattern[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5260:13
+     [1m[94m|[0m
+[1m[94m5259[0m [1m[94m|[0m             FACE_MONO => holonomy_render::menus::MONO_FONT_INDEX,
+     [1m[94m|[0m             [1m[94m---------[0m [1m[94mmatches any value[0m
+[1m[94m5260[0m [1m[94m|[0m             _ => 0,
+     [1m[94m|[0m             [1m[33m^[0m [1m[33mno value can reach this[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: unused variable: `FACE_MONO`[0m
+    [1m[94m--> [0mcrates/holonomy/src/session.rs:5259:13
+     [1m[94m|[0m
+[1m[94m5259[0m [1m[94m|[0m             FACE_MONO => holonomy_render::menus::MONO_FONT_INDEX,
+     [1m[94m|[0m             [1m[33m^^^^^^^^^[0m [1m[33mhelp: if this is intentional, prefix it with an underscore: `_FACE_MONO`[0m
+
+[1mSome errors have detailed explanations: E0308, E0425, E0599.[0m
+[1mFor more information about an error, try `rustc --explain E0308`.[0m
+[1m[33mwarning[0m: `holonomy` (lib) generated 3 warnings
+[1m[91merror[0m: could not compile `holonomy` (lib) due to 9 previous errors; 3 warnings emitted
