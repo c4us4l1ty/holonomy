@@ -406,17 +406,14 @@ pub struct Placed {
 ///
 /// # And it is the *pill's* margin, not the first button's
 ///
-/// **There are two insets in the reference and the first version of this change conflated them.**
-/// Measured on `Plan/Screenshot From 2026-10-01 00-17-10.png`: the pill's rim is at x = 24 and the
-/// first glyph's ink starts at x = 55 — so there is **31 px of bare pill** before the search icon,
-/// which is a button's own leading space and not the window margin. Scaling that to this build's
-/// 16 px glyph gives ~25 px of bare pill, and a 40 px button with a centred 16 px glyph carries 12 of
-/// that itself — so the buttons start about 13 px inside the rim.
+/// The toolbar's outer rim, separate from the buttons' [`TOOLBAR_INSET`].
 ///
-/// **So `TOOLBAR_PAD` is the rim** (read by `toolbar_pill`), and the buttons are inset from it by
-/// [`TOOLBAR_INSET`]. Putting both in one constant is what produced a first button flush against the
-/// pill's rounded corner.
-pub const TOOLBAR_PAD: u32 = 24;
+/// The reference's wider window has a 24 px margin. At this app's 1,280 px design width that
+/// margin hides controls behind Overflow. Use an 8 px outer margin here, retaining the 13 px
+/// inner inset: the first 16 px icon still has 25 px of bare pill before its ink, while all
+/// primary controls (especially image insertion) remain reachable without opening a menu.
+/// Painting, hit testing and overflow detection must all use this same constant.
+pub const TOOLBAR_PAD: u32 = 8;
 
 /// **The gap between the pill's rim and the first button, in pixels.**
 ///

@@ -332,7 +332,7 @@ fn an_open_menu_swallows_a_click_on_the_toolbar_below_it() {
     assert_eq!(s.state.open, Some(widgets::Open::Menu(3)));
 
     // The Undo button, which is under the popup's left edge.
-    let undo = widgets::place_toolbar(&l, 8)
+    let undo = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Undo)
         .expect("the toolbar has Undo")
@@ -377,7 +377,7 @@ fn a_button_with_nothing_behind_it_is_counted_not_faked() {
     // * **so it is `Tool::Spellcheck`**, which is inert because a spellchecker needs a dictionary the
     //   512 KiB atlas budget cannot hold — a real feature someone will want, unlike a printer in a
     //   sandboxed text editor that cannot open a file dialog.
-    let bold = widgets::place_toolbar(&l, 8)
+    let bold = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Spellcheck)
         .expect("the toolbar has Spellcheck")
@@ -431,7 +431,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
         s.state.open = None;
         let _ = s.set_zoom(100);
         let _ = s.set_sidebar(true);
-        let r = widgets::place_toolbar(&s.chrome_layout(), 8)
+        let r = widgets::place_toolbar(&s.chrome_layout(), widgets::TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool.name() == name)
             .unwrap_or_else(|| panic!("the toolbar has {name}"))
@@ -563,7 +563,7 @@ fn bold_and_italic_left_the_inert_set_and_nothing_else_did() {
 fn moving_off_a_button_clears_its_highlight() {
     let mut s = session("x");
     let l = s.chrome_layout();
-    let bold = widgets::place_toolbar(&l, 8)
+    let bold = widgets::place_toolbar(&l, widgets::TOOLBAR_PAD)
         .into_iter()
         .find(|p| p.tool == widgets::Tool::Bold)
         .expect("the toolbar has Bold")
@@ -683,7 +683,7 @@ fn every_tool_that_has_a_command_is_routed_through_it() {
         s.state.open = None;
         let _ = s.set_zoom(100);
         let _ = s.set_sidebar(true);
-        let (p, r) = widgets::place_toolbar(&s.chrome_layout(), 8)
+        let (p, r) = widgets::place_toolbar(&s.chrome_layout(), widgets::TOOLBAR_PAD)
             .into_iter()
             .find(|p| p.tool.name() == name)
             .map(|p| (p.tool, p.rect))
