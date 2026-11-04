@@ -45,6 +45,7 @@ impl StratumId {
         }
     }
 
+    /// The 1-based index, `L_1` ..= `L_4`.
     pub fn index(self) -> u8 {
         self.0
     }
@@ -91,14 +92,22 @@ impl ActiveStratum {
         Self { id, keys, innermost }
     }
 
+    /// Which stratum this unlock resolved to.
     pub fn id(&self) -> StratumId {
         self.id
     }
 
+    /// The highest stratum index present in this container.
+    ///
+    /// Knowing the *count* is not a secret from somebody holding a valid passphrase — they can
+    /// discover it — and holding it avoids re-deriving the number on every save. No other
+    /// stratum's key material is retained.
     pub fn innermost(&self) -> StratumId {
         self.innermost
     }
 
+    /// The derived keys for this stratum, by reference only: [`StratumKeys`] is `ZeroizeOnDrop`
+    /// and not `Clone`, so no copy can escape.
     pub fn keys(&self) -> &StratumKeys {
         &self.keys
     }

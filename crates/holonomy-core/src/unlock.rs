@@ -101,6 +101,7 @@ impl SealedPassphrase {
         })
     }
 
+    /// The normalised passphrase bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }
@@ -119,7 +120,12 @@ pub enum UnlockError {
     /// Wrong passphrase, corrupt container, or both. Not distinguishable, by design.
     Rejected,
     /// The container is not exactly [`CONTAINER_BYTES`](crate::layout::CONTAINER_BYTES).
-    WrongSize { found: u64, expected: u64 },
+    WrongSize {
+        /// Length found on disk.
+        found: u64,
+        /// [`CONTAINER_BYTES`](crate::layout::CONTAINER_BYTES).
+        expected: u64,
+    },
     /// No usable transport for `κ_USB` and the container requires one.
     TransportUnavailable,
     /// The stratum index resolved outside `1..=4`.
@@ -172,14 +178,17 @@ impl Unlocked {
         }
     }
 
+    /// Which stratum this unlock resolved to.
     pub fn stratum(&self) -> StratumId {
         self.id
     }
 
+    /// Which transport supplied `κ_USB`.
     pub fn topology(&self) -> Topology {
         self.topology
     }
 
+    /// What protects this snapshot's bytes. Reported to the UI; never inferred.
     pub fn protection(&self) -> ProtectionLayer {
         self.layer
     }
