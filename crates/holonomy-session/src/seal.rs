@@ -521,8 +521,8 @@ mod tests {
         // unlock path opens it. This test is what pins that down -- guessing the stratum's key fails
         // here rather than in review.
         let k_unwrap = derive_subkey(&root(0x40), labels::K_UNWRAP, &[3u8, 0]).0;
-        let dem = envelope_keys_for_test(&sealed.capsule, &k_unwrap, &KAPPA)
-            .expect("envelope opens");
+        let dem =
+            envelope_keys_for_test(&sealed.capsule, &k_unwrap, &KAPPA).expect("envelope opens");
         let plain =
             holonomy_crypto::commit::open_directory(&dem.k_dem, &capsule.directory_nonce, &field)
                 .expect("directory opens");
@@ -555,7 +555,10 @@ mod tests {
             &commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -574,7 +577,10 @@ mod tests {
             &sealed.slots[0].commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -593,7 +599,10 @@ mod tests {
         // A colliding placement is refused rather than silently writing the same block twice.
         let two = seal_container(&s, &[b"x", b"y"], salt(0x72), 0, &KAPPA).expect("seal");
         let err = two.encode_into(&mut image, |_| 2).unwrap_err();
-        assert!(matches!(err, SealError::BadPlacement { slot: 1, .. }), "{err}");
+        assert!(
+            matches!(err, SealError::BadPlacement { slot: 1, .. }),
+            "{err}"
+        );
     }
 
     #[test]
