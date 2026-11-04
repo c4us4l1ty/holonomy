@@ -81,10 +81,7 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(writable).open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -260,14 +257,9 @@ pub fn save(
     // salt the container is written under, and the value the next reader finds in slot 1.
     let new_salt_bytes = *new_salt.as_bytes();
     let slots = split_payload(payload);
-    let sealed: SealedContainer = seal_container(
-        stratum,
-        &slots,
-        new_salt,
-        ctx.cursor,
-        ctx.kappa_usb,
-    )
-    .map_err(|e| e.to_string())?;
+    let sealed: SealedContainer =
+        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
+            .map_err(|e| e.to_string())?;
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
@@ -343,11 +335,7 @@ pub fn open_document(
 /// than the earlier `k_perm`-from-the-salt draft implied, and `holonomy-usb`'s `PadPlan` has to be
 /// given the same key for the device path to agree. It is recorded in `docs/AUDIT-v5.1.0.md` §10
 /// rather than left for a reader of this comment to infer.
-pub fn pad_window_for_save(
-    kappa_usb: &[u8; 32],
-    salt: &[u8; SALT_BYTES],
-    cursor: u64,
-) -> Vec<u8> {
+pub fn pad_window_for_save(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor: u64) -> Vec<u8> {
     let mut pad = vec![0u8; PAD_SECTORS * SECTOR_BYTES];
     for j in 0..PAD_SECTORS {
         let material = sector_material(sector_index(kappa_usb, salt, cursor, j));
@@ -363,12 +351,7 @@ pub fn pad_window_for_save(
 /// the pad and a stick is required to read one. Exposed because the pad window is not the only
 /// consumer: `holonomy-usb`'s `PadReader` must produce the same indices, and
 /// `the_store_and_the_usb_crate_choose_the_same_sectors` is the test that says so.
-pub fn sector_index(
-    kappa_usb: &[u8; 32],
-    salt: &[u8; SALT_BYTES],
-    cursor: u64,
-    j: usize,
-) -> u32 {
+pub fn sector_index(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor: u64, j: usize) -> u32 {
     use blake2::{Blake2b512, Digest};
     use holonomy_core::feistel::Feistel22;
 
@@ -441,7 +424,10 @@ pub fn first_write(
     sealed
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
-    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, &salt_bytes, ctx.cursor));
+    fold(
+        &mut image,
+        &pad_window_for_save(ctx.kappa_usb, &salt_bytes, ctx.cursor),
+    );
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
