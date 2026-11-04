@@ -352,7 +352,9 @@ mod tests {
         assert_eq!(Workload::Unlocked.floor_bytes(), MANDATORY_FLOOR_BYTES);
         // And the container-only rung sits below the full unlock floor, but is still a floor.
         assert!(Workload::Container.floor_bytes() < Workload::Unlocked.floor_bytes());
-        assert!(check_measurement(20 * MIB, Workload::Container).unwrap_err().is_understatement());
+        assert!(check_measurement(20 * MIB, Workload::Container)
+            .unwrap_err()
+            .is_understatement());
         assert!(check_measurement(CONTAINER_RESIDENT_BYTES, Workload::Container).is_ok());
     }
 
@@ -361,7 +363,10 @@ mod tests {
         // Idle means "no floor", not "no ceiling". The one direction that always applies is up.
         assert!(check_measurement(UNLOCK_PEAK_CEILING_BYTES, Workload::Idle).is_ok());
         let err = check_measurement(UNLOCK_PEAK_CEILING_BYTES + 1, Workload::Idle).unwrap_err();
-        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }), "{err:?}");
+        assert!(
+            matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }),
+            "{err:?}"
+        );
         // ... and a real unlock that fits the ceiling passes on both counts.
         assert!(check_measurement(300 * MIB, Workload::Unlocked).is_ok());
     }
