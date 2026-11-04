@@ -61,7 +61,12 @@ impl EditorSession {
     }
 
     fn with_document(session: DocumentSession, document: Document, writable: bool) -> Self {
-        Self { session, saved: document.clone(), document, writable }
+        Self {
+            session,
+            saved: document.clone(),
+            document,
+            writable,
+        }
     }
 
     /// Current Wordcraft document.
@@ -106,7 +111,9 @@ impl EditorSession {
     /// undoes their edits. Serialization errors do not attempt a container write.
     pub fn save(&mut self) -> Result<Option<SaveReport>, BridgeError> {
         if self.state() != DocumentSessionState::Ready {
-            return Err(BridgeError::Save("recovery required after a previous save failure".into()));
+            return Err(BridgeError::Save(
+                "recovery required after a previous save failure".into(),
+            ));
         }
         if !self.has_unsaved_changes() {
             return Ok(None);
@@ -154,8 +161,13 @@ mod tests {
         let path = directory.path().join("document");
         let kappa = [0x43; 32];
         let mut editor = EditorSession::create(
-            &path, Box::new(DerivedPad::new()), passphrase(), kappa, options(0, true),
-        ).expect("create");
+            &path,
+            Box::new(DerivedPad::new()),
+            passphrase(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
         assert!(editor.is_writable());
         assert!(!editor.has_unsaved_changes());
         assert!(editor.save().expect("unchanged").is_none());
@@ -178,8 +190,13 @@ mod tests {
         drop(editor);
 
         let mut reopened = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), passphrase(), kappa, options(1, false),
-        ).expect("open");
+            &path,
+            Box::new(DerivedPad::new()),
+            passphrase(),
+            kappa,
+            options(1, false),
+        )
+        .expect("open");
         assert!(!reopened.is_writable());
         assert!(reopened.document().same_content(&expected));
         assert!(!reopened.has_unsaved_changes());
@@ -196,8 +213,13 @@ mod tests {
         let path = directory.path().join("document");
         let kappa = [0x44; 32];
         let mut editor = EditorSession::create(
-            &path, Box::new(FailedRatchet(DerivedPad::new())), passphrase(), kappa, options(0, true),
-        ).expect("create");
+            &path,
+            Box::new(FailedRatchet(DerivedPad::new())),
+            passphrase(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
         *editor.document_mut() = Document::from_text("new content");
         assert!(editor.save().is_err());
         assert_eq!(editor.state(), DocumentSessionState::RecoveryRequired);
@@ -208,8 +230,15 @@ mod tests {
         assert!(editor.save().is_err());
         drop(editor);
         let reopened = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), passphrase(), kappa, options(1, false),
-        ).expect("the new image was written before ratchet failed");
-        assert!(reopened.document().same_content(&Document::from_text("new content")));
+            &path,
+            Box::new(DerivedPad::new()),
+            passphrase(),
+            kappa,
+            options(1, false),
+        )
+        .expect("the new image was written before ratchet failed");
+        assert!(reopened
+            .document()
+            .same_content(&Document::from_text("new content")));
     }
 }
