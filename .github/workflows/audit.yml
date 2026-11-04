@@ -42,7 +42,7 @@ jobs:
       - name: Fetch the dependency graph and generate Cargo.lock
         run: |
           set -o pipefail
-          cargo fetch --message-format=short 2>&1 | tee fetch.log | tail -40
+          cargo fetch 2>&1 | tee fetch.log | tail -40
       - name: Report fetch errors as annotations
         if: failure()
         run: |
