@@ -18,9 +18,9 @@
 //! A save:
 //!
 //! ```text
-//!   1. read slot 1 of the *old* container           → the old salt
+//!   1. read the *old* container                      → its bytes, still folded
 //!   2. read 32,768 pad sectors under the old cursor  → the pad window
-//!   3. undo the pad                                  → the old capsule, and the old directory
+//!   3. undo the pad                                  → the old salt, capsule and directory
 //!   4. the handshake says whether that stratum is real
 //!   5. choose a new salt        (only now; the old capsule is legible)
 //!   6. seal the new container under the new salt
@@ -35,11 +35,12 @@
 //! replaced, so refreshing those sectors is the ratchet the 54-save budget is counting, and the next
 //! save reads window `c`.
 //!
-//! Steps 1 and 5 are the pair that can lose data. Writing the new salt before reading the old one
-//! destroys the only record of which pad window the old container used, and the container becomes
-//! unreadable — the salt is covered by the pad, so it is not recoverable from the file. That is why
-//! `holonomy-session`'s `ContainerHeader::after_reading` consumes the header and why this function
-//! takes the salt out of it rather than being handed one.
+//! Steps 3 and 5 are the pair that can lose data. Writing the new salt before recovering the old one
+//! destroys the only record of which pad window the old container used *and* which permutation its
+//! payload was written under, and the container becomes unreadable — the salt is covered by the pad,
+//! so it is not recoverable from the file afterwards. That is why `holonomy-session`'s
+//! `ContainerHeader::after_reading` consumes the header and why this function takes the salt out of
+//! it rather than being handed one.
 //!
 //! # Where the pad comes from
 //!
@@ -239,17 +240,16 @@ pub fn save(
         ));
     }
 
-    // 1. The old container, and the old salt, before anything is written.
+    // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
-    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
-    let mut old_salt = [0u8; SALT_BYTES];
-    old_salt.copy_from_slice(&old_image[salt_off..salt_off + SALT_BYTES]);
-    if old_salt.iter().all(|&b| b == 0) {
-        return Err(format!(
-            "{} holds no salt; it has never been written, so there is no pad window to consume",
-            file.path()
-        ));
-    }
+
+    //    The salt cannot be read yet. It lives in slot 1, which is *inside* the pad-covered region, so
+    //    every byte of it on disk is folded. Reading it here and checking for zeros -- which this used
+    //    to do -- inspected pad bytes, and the "never written" test only ever fired by luck. It has to
+    //    come after step 3.
+    //
+    //    A file that has never been written is still detectable, and step 4 finds it: the handshake
+    //    fails on a capsule that is really pad, which is the same answer with a better reason.
 
     // 2. The pad window the container on disk was written under -- which is *not* this save's.
     //
@@ -270,8 +270,23 @@ pub fn save(
         .map_err(|e| format!("reading pad window {old_cursor}: {e}"))?;
     let pad_sectors = PAD_SECTORS;
 
-    // 3. Undo the old pad, so the old capsule is legible.
+    // 3. Undo the old pad, so the old capsule and the old salt are legible.
     fold(&mut old_image, old_pad.as_slice());
+
+    //    *Now* the salt. It keys the permutation the container was written under, so this is the line
+    //    that makes the epoch permutation recoverable rather than stored: the map to the payload
+    //    follows from a value the reader already has to extract.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut old_salt = [0u8; SALT_BYTES];
+    old_salt.copy_from_slice(&old_image[salt_off..salt_off + SALT_BYTES]);
+    if old_salt.iter().all(|&b| b == 0) {
+        return Err(format!(
+            "{} has no salt in slot 1 after unfolding; it was never written, or the cursor {} is \
+             wrong for it",
+            file.path(),
+            old_cursor
+        ));
+    }
 
     // 4. The handshake over the old container. Its error is coarse, and this is where a wrong
     //    passphrase stops the save before a single byte is written.

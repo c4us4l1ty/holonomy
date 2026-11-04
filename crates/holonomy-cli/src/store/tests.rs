@@ -710,16 +710,21 @@ fn a_saved_payload_is_not_written_in_logical_order() {
     );
     let place = epoch_placement(&new_salt);
 
-    let flat = place(0);
-    assert_ne!(
-        flat, PAYLOAD_SLOT_BASE,
-        "logical slot 0 landed on the first payload block, which is what the identity placement does"
+    // Across all slots, not just slot 0: a single slot has a 1-in-2,046 chance of landing where the
+    // identity would have put it, so asserting on one would be a test that fails about once per two
+    // thousand runs for no reason. A permutation that is *mostly* the identity is not one.
+    let moved = (0..PAYLOAD_SLOTS)
+        .filter(|&i| place(i) != PAYLOAD_SLOT_BASE + i)
+        .count();
+    assert!(
+        moved > PAYLOAD_SLOTS / 2,
+        "only {moved} of {PAYLOAD_SLOTS} slots moved: the save wrote its payload in logical order"
     );
-    assert!(flat < PAYLOAD_SLOTS + PAYLOAD_SLOT_BASE);
 
-    // The slot at the permuted position carries ciphertext; the block the identity would have used
-    // is not necessarily empty (another slot may have landed there), so the assertion is about the
-    // mapping rather than about which block is occupied.
+    // The one payload slot this document filled is somewhere the permutation chose, and it is not
+    // empty. Which logical index it is does not matter -- the document is one slot -- but the block
+    // has to hold something, or the permutation would be pointing at unused space.
+    let flat = place(0);
     let (off, len) = slot_range(flat);
     assert!(
         unfolded[off..off + len].iter().any(|&b| b != 0),
