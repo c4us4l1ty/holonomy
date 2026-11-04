@@ -102,6 +102,19 @@ jobs:
             git commit -m "style: cargo fmt (automated, no manual edits)"
             # Retry once: another job or a human push may land between the fetch and the push.
             git push || { git fetch origin "${{ github.ref_name }}"; git rebase "origin/${{ github.ref_name }}"; git push; }
+      - name: Report formatting failures as annotations
+        if: failure()
+        run: |
+          set +e
+          # This job has no log channel the author can reach, so everything diagnostic has to come
+          # back as an annotation or it may as well not exist.
+          echo "::error::rustfmt gate failed; see the diff below"
+          cargo fmt --all -- --check 2>&1 | head -30 | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done
+          git status --porcelain | head -10 | while IFS= read -r line; do
+            echo "::error::dirty: $line"
+          done
           fi
   core-crates:
     name: core crates (no wordcraft)
