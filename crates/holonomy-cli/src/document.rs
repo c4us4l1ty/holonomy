@@ -85,7 +85,8 @@ impl DocumentSession {
             })?;
         if !document.as_slice().is_empty() {
             return Err(
-                "the created container did not open as an empty document; inspect it before use".into(),
+                "the created container did not open as an empty document; inspect it before use"
+                    .into(),
             );
         }
         Ok(session)
