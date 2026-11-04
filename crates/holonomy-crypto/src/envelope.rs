@@ -329,9 +329,11 @@ impl HybridKem for MlKem1024X25519 {
         // `MlKem1024::generate_keypair()` exists but is gated behind ml-kem's `getrandom` feature
         // and returns an opaque pair; going through `try_generate_from_rng` keeps the CSPRNG choice
         // ours (see `crate::rng`) and avoids enabling a second entropy path inside the dependency.
-        // `Generate::try_generate_from_rng` wants a *panicking* `CryptoRng`, so the adapter is
-        // given through `rand_core::UnwrapErr`, which turns its `io::Error` into a panic with the
-        // same message we would have written ourselves.
+        // `Generate::try_generate_from_rng` takes `&mut R where R: TryCryptoRng`, and returns a
+        // `Result` whose `Error` matches the RNG's. `rand_core::UnwrapErr` is the documented
+        // adapter: it sets `Error = Infallible` and panics inside the fill with rand_core's own
+        // message, so the `expect` below is unreachable for a live OS entropy source and the
+        // failure path is a panic rather than a key drawn from a fallback.
         let dk = <MlKem1024 as ml_kem::kem::Kem>::DecapsulationKey::try_generate_from_rng(
             &mut rand_core::UnwrapErr(OsRng),
         )

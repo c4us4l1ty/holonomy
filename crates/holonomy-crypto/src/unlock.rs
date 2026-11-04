@@ -228,7 +228,7 @@ mod tests {
             // Every pair is the same, which is fine: the tests care about which *stratum index*
             // authenticated, not about per-keypair uniqueness.
             (
-                HybridDecapsulationKey::for_test([0x5A; 3_168], [0x5B; 32]),
+                HybridDecapsulationKey::for_test([0x5A; 64], [0x5B; 32]),
                 HybridEncapsulationKey::for_test(vec![0x5A; 1_568], [0x5B; 32]),
             )
         }
@@ -317,7 +317,7 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
+        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
+        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
+        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
     }
 
     #[test]

@@ -84,6 +84,17 @@ pub struct ActiveStratum {
     innermost: StratumId,
 }
 
+impl std::fmt::Debug for ActiveStratum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Which stratum, never the keys. `StratumKeys` derives Zeroize, not Debug, on purpose;
+        // this impl is what lets the unlock be logged at all.
+        f.debug_struct("ActiveStratum")
+            .field("id", &self.id)
+            .field("innermost", &self.innermost)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ActiveStratum {
     /// Only the unlock path may construct this. `pub(crate)` would not be enough if the modules
     /// were ever split differently, so it is a sealed-constructor pattern: the field is private
