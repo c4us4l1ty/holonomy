@@ -48,12 +48,25 @@ pub const UMBILICAL_GAP_NS: u64 = 12_000_000;
 /// Thread B's poll quantum.
 pub const POLL_INTERVAL_NS: u64 = 1_500_000;
 
-/// Pause/hibernate detection. A suspended machine returns from `clock_nanosleep` with a huge
-/// wall-clock delta; that is not a yanked drive and must not trigger a wipe.
+/// How long a gap may be *before* Thread B treats it as a possible suspend rather than a yank.
 ///
-/// 2 s is comfortably above the 12 ms threshold and comfortably below any suspend a laptop does,
-/// so the two are separable without asking the OS which one happened.
-pub const SUSPEND_DELTA_NS: u64 = 2_000_000_000;
+/// # What this constant is not
+///
+/// It does not distinguish a suspend from a yank, and no threshold on a monotonic gap can. A
+/// drive unplugged and left for two seconds looks exactly like a laptop that slept for two
+/// seconds: both are "no heartbeat for 2 s". An earlier version of this file returned
+/// [`ReaperDecision::Suspend`] for `gap > 2 s`, which meant **yanking the USB and waiting two
+/// seconds avoided the wipe entirely** -- the attack the reaper exists to stop.
+///
+/// The only thing that actually distinguishes the two is an OS suspend notification, which is why
+/// [`PhyHeartbeat::signal_suspend`] exists. Without a notification, a long gap is a yank.
+///
+/// So `std::thread::sleep(3 s)` with no `signal_suspend()` fires, and that is the intended
+/// behaviour: a false wipe is loud and recoverable from the last save, while a missed wipe is not.
+/// Note this makes a *suspended* machine wipe on resume unless the platform delivers a suspend
+/// event, which every supported one does -- `WM_POWERBROADCAST`, `NSWorkspaceWillSleepNotification`
+/// and the `systemd-logind` `PrepareForSleep` signal.
+pub const SUSPEND_SUSPICION_NS: u64 = 2_000_000_000;
 
 /// Thread priority as requested, and what was actually obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,22 +179,19 @@ impl PhyHeartbeat {
     }
 
     /// Thread B's entire decision procedure. Pure, no I/O, no allocation.
+    ///
+    /// Suspension is decided by *notification*, never by elapsed time; see
+    /// [`SUSPEND_SUSPICION_NS`] for why a gap cannot stand in for one.
     pub fn evaluate(&self, now_ns: u64) -> ReaperDecision {
-        if self.suspended.load(Ordering::Acquire) {
-            return ReaperDecision::Suspend;
-        }
         if self.disconnected.load(Ordering::Acquire) {
             return ReaperDecision::Wipe(FireReason::Disconnected);
         }
+        if self.suspended.load(Ordering::Acquire) {
+            return ReaperDecision::Suspend;
+        }
         let last = self.last_phy_ok_ns.load(Ordering::Acquire);
-        let gap = now_ns.saturating_sub(last);
-        if gap > UMBILICAL_GAP_NS {
-            // Distinguish a suspend from a yank: a machine that slept sees a gap of seconds.
-            if gap > SUSPEND_DELTA_NS {
-                ReaperDecision::Suspend
-            } else {
-                ReaperDecision::Wipe(FireReason::GapExceeded)
-            }
+        if now_ns.saturating_sub(last) > UMBILICAL_GAP_NS {
+            ReaperDecision::Wipe(FireReason::GapExceeded)
         } else {
             ReaperDecision::Continue
         }
@@ -209,10 +219,32 @@ pub enum ReaperDecision {
 ///
 /// A trait rather than direct calls so the *timing* of the sequence is testable without a
 /// framebuffer, a display server or an `_exit`.
+/// # The order is wipe -> terminate -> blackout, and it matters
+///
+/// The obvious order is wipe -> blackout -> terminate: hide the screen, then exit. It is wrong, and
+/// the reason is that [`blackout`](Self::blackout) is a *compositor* call -- it submits a frame and
+/// waits for it to be presented. On a machine under the conditions that trigger a wipe, that wait
+/// can block: a hung GPU driver, a display server that has stopped servicing clients, a DRM
+/// ioctl that never returns. Putting it before `terminate` means the process may not exit, and a
+/// process that does not exit is a process whose secrets are still mapped.
+///
+/// The correct order keeps the essential work essential:
+///
+/// 1. [`wipe_secrets`](Self::wipe_secrets) -- zero the arenas. Never blocks, cannot fail.
+/// 2. [`terminate`](Self::terminate) -- `_exit`/`ExitProcess`. The secrets are already gone, so
+///    whatever the framebuffer still shows is a picture of a document, not a key.
+/// 3. [`blackout`](Self::blackout) -- best effort, and only if the platform can do it *without*
+///    blocking. On Windows this is `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` at window
+///    creation, already in force; on compositors with no guarantee there is nothing honest to do.
+///
+/// Set `HOLONOMY_BLACKOUT_IS_SAFE=1` only if the platform's blackout is known non-blocking, in
+/// which case the guard will call it before `terminate` instead. The default is the safe order.
 pub trait EmergencyActions: Send + Sync + 'static {
     /// Zero every registered secret arena. Must be idempotent and must not allocate.
     fn wipe_secrets(&self);
     /// Zero the scanout buffer and force the compositor to show it now.
+    ///
+    /// May block. Called *after* [`terminate`](Self::terminate) by default; see the trait docs.
     fn blackout(&self);
     /// Decommit physical pages and terminate. Must not return.
     fn terminate(&self);
@@ -283,9 +315,21 @@ impl ReaperGuard {
                         ReaperDecision::Wipe(reason) => {
                             hb.fire_reason.store(reason as u8, Ordering::Release);
                             hb.firing.store(true, Ordering::Release);
+
+                            // Secrets first: never blocking, never fallible, and everything after
+                            // this is a courtesy. See `EmergencyActions` for why `blackout` is
+                            // not second.
                             actions.wipe_secrets();
-                            actions.blackout();
+                            if blackout_before_terminate() {
+                                // Only for a platform whose blackout is known not to block.
+                                actions.blackout();
+                            }
                             actions.terminate();
+                            // `terminate` is documented not to return. If it did -- a mock, a
+                            // hosted test, a platform where exit was intercepted -- the process is
+                            // about to die with its secrets zeroed, so the blackout is still worth
+                            // attempting here rather than skipping it.
+                            actions.blackout();
                             return;
                         }
                     }
@@ -357,8 +401,28 @@ impl Drop for ReaperGuard {
 /// Monotonic nanoseconds. A thin wrapper so the tests can find every clock read in one place.
 pub fn monotonic_ns() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = START.get_or_init(Instant::now);
+    start_ns(*START.get_or_init(Instant::now))
+}
+
+/// Nanoseconds since `start`, on the same time base as [`monotonic_ns`].
+///
+/// Tests need to synthesise "a moment 13 ms ago" and have it comparable to what the loop will read
+/// a moment later. Two independent `Instant` origins make that comparison meaningless, which is
+/// why the origin lives in one place and this is the only way to build a timestamp from it.
+fn start_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos() as u64
+}
+
+/// Whether blackout is known non-blocking on this run, so it may precede termination.
+///
+/// Off by default. An environment variable rather than a compile-time feature because the answer
+/// depends on the *compositor*, not the OS: the same Linux build is safe under a DRM session run
+/// by a responsive compositor and not safe behind a frozen one.
+fn blackout_before_terminate() -> bool {
+    matches!(
+        std::env::var_os("HOLONOMY_BLACKOUT_IS_SAFE"),
+        Some(v) if v == "1"
+    )
 }
 
 #[cfg(unix)]
@@ -396,10 +460,13 @@ mod tests {
         blackouts: AtomicUsize,
         terminated: AtomicBool,
         hang_ns: u64,
+        /// Every call, in the order it arrived.
+        order: std::sync::Mutex<Vec<&'static str>>,
     }
 
     impl EmergencyActions for CountingActions {
         fn wipe_secrets(&self) {
+            self.order.lock().unwrap().push("wipe");
             self.wipes.fetch_add(1, Ordering::SeqCst);
             if self.hang_ns > 0 {
                 std::thread::sleep(Duration::from_nanos(self.hang_ns));
@@ -407,9 +474,11 @@ mod tests {
             self.heartbeat_like_work();
         }
         fn blackout(&self) {
+            self.order.lock().unwrap().push("blackout");
             self.blackouts.fetch_add(1, Ordering::SeqCst);
         }
         fn terminate(&self) {
+            self.order.lock().unwrap().push("terminate");
             self.terminated.store(true, Ordering::SeqCst);
         }
     }
@@ -421,6 +490,7 @@ mod tests {
                 blackouts: AtomicUsize::new(0),
                 terminated: AtomicBool::new(false),
                 hang_ns,
+                order: std::sync::Mutex::new(Vec::new()),
             }
         }
         /// Stand-in for a sizeable arena wipe: 16.6 MiB of writes.
@@ -443,19 +513,19 @@ mod tests {
     #[test]
     fn gap_beyond_twelve_ms_fires() {
         let hb = PhyHeartbeat::new();
-        let now = monotonic_ns();
-        hb.last_phy_ok_ns
-            .store(now.saturating_sub(UMBILICAL_GAP_NS + 1), Ordering::Release);
-        assert!(matches!(hb.evaluate(now), ReaperDecision::Wipe(FireReason::GapExceeded)));
+        // A beat now, then evaluate as if 13 ms have passed: the same time base, so the gap is
+        // exactly what the test says it is rather than swamped by however long the test took.
+        hb.beat();
+        let later = monotonic_ns() + UMBILICAL_GAP_NS + 1_000_000;
+        assert!(matches!(hb.evaluate(later), ReaperDecision::Wipe(FireReason::GapExceeded)));
     }
 
     #[test]
     fn just_inside_the_threshold_does_not_fire() {
         let hb = PhyHeartbeat::new();
-        let now = monotonic_ns();
-        hb.last_phy_ok_ns
-            .store(now.saturating_sub(UMBILICAL_GAP_NS - 1), Ordering::Release);
-        assert_eq!(hb.evaluate(now), ReaperDecision::Continue);
+        hb.beat();
+        let slightly_later = monotonic_ns() + UMBILICAL_GAP_NS / 2;
+        assert_eq!(hb.evaluate(slightly_later), ReaperDecision::Continue);
     }
 
     #[test]
@@ -466,14 +536,66 @@ mod tests {
     }
 
     #[test]
-    fn suspend_is_not_confused_with_a_yank() {
-        // The correction the old design did not have: a laptop that slept for an hour must not
-        // wipe the user's document.
+    fn a_long_gap_without_a_suspend_notification_is_a_yank() {
+        // The bug this replaces: `gap > 2 s` used to return Suspend, so unplugging the stick and
+        // waiting two seconds avoided the wipe altogether. Only the OS can tell us it slept.
         let hb = PhyHeartbeat::new();
-        let now = monotonic_ns();
-        hb.last_phy_ok_ns
-            .store(now.saturating_sub(SUSPEND_DELTA_NS + 1), Ordering::Release);
-        assert_eq!(hb.evaluate(now), ReaperDecision::Suspend);
+        hb.beat();
+        let an_hour_later = monotonic_ns() + 3_600 * SUSPEND_SUSPICION_NS;
+        assert_eq!(
+            hb.evaluate(an_hour_later),
+            ReaperDecision::Wipe(FireReason::GapExceeded),
+            "a long gap with no suspend signal must wipe: silence is not evidence of sleep"
+        );
+    }
+
+    #[test]
+    fn a_suspend_notification_suppresses_the_wipe() {
+        // The other half: when the platform *does* tell us, the document survives.
+        let hb = PhyHeartbeat::new();
+        hb.beat();
+        hb.signal_suspend();
+        let an_hour_later = monotonic_ns() + 3_600 * SUSPEND_SUSPICION_NS;
+        assert_eq!(hb.evaluate(an_hour_later), ReaperDecision::Suspend);
+    }
+
+    #[test]
+    fn the_wipe_runs_before_termination() {
+        // The ordering the trait docs argue for, as an assertion: `terminate` is the last thing
+        // that certainly happens, and `wipe_secrets` is the first.
+        let hb = Arc::new(PhyHeartbeat::new());
+        let actions = Arc::new(CountingActions::new(0));
+        let guard =
+            ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        hb.signal_disconnect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !actions.terminated.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        guard.stop();
+        assert!(actions.terminated.load(Ordering::SeqCst), "Thread B never terminated");
+        assert_eq!(
+            actions.wipes.load(Ordering::SeqCst),
+            1,
+            "the wipe must have run before termination, exactly once"
+        );
+        assert_eq!(
+            actions.order.lock().unwrap().as_slice()[..2],
+            ["wipe", "terminate"],
+            "secrets are wiped, then the process exits; the blackout is a courtesy after both"
+        );
+    }
+
+    #[test]
+    fn a_suspend_signal_does_not_outrank_a_disconnect() {
+        // If the OS says both, the drive is gone either way and the wipe is the safe reading.
+        let hb = PhyHeartbeat::new();
+        hb.signal_suspend();
+        hb.signal_disconnect();
+        assert!(matches!(
+            hb.evaluate(monotonic_ns()),
+            ReaperDecision::Wipe(FireReason::Disconnected)
+        ));
     }
 
     #[test]
