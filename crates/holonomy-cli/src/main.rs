@@ -26,7 +26,7 @@ use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_crypto::ParamsClass;
 use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
 
-mod store;
+use holonomy_cli::store;
 
 /// The pad trait has to be in scope for its methods to be callable on a concrete `DevicePad`; a
 /// trait import that looks unused is the one that makes `device.can_ratchet()` compile.

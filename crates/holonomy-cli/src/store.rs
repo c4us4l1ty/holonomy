@@ -155,7 +155,7 @@ impl ContainerFile {
     ///
     /// Writes in place with `write_all` and then `sync_all`. This is not atomic: a failed
     /// write or crash can leave a partially replaced, unreadable container. Keep a backup.
-    pub fn write_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn write_image(&mut self, image: &[u8]) -> std::io::Result<()> {
         if !self.writable {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -179,7 +179,7 @@ impl ContainerFile {
     /// A directory-sync error can occur *after* replacement, and is reported as such. This
     /// does not serialize concurrent writers or guarantee storage hardware honors flushes.
     #[cfg(unix)]
-    pub fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         if !self.writable {
@@ -237,7 +237,7 @@ impl ContainerFile {
 
     /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
     #[cfg(not(unix))]
-    pub fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
@@ -666,7 +666,7 @@ fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum,
 /// undid a pad before opening, so the very next save reported "wrong passphrase" for a correct one.
 /// Every write goes through this function for that reason, and `save` folds with the same
 /// `PadSource::window` call.
-pub fn first_write(
+pub(crate) fn first_write(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
