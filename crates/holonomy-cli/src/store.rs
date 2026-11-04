@@ -81,7 +81,10 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(writable).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -228,7 +231,7 @@ pub fn save(
     // 2. The pad window for this save. Derived from the old salt: the permutation is keyed by it,
     //    so the pad a save reads is always the pad belonging to the container it is about to
     //    replace.
-    let pad = pad_window_for_save(ctx.kappa_usb, &old_salt, ctx.cursor);
+    let pad = pad_window_for_save(ctx.kappa_usb, ctx.cursor);
     let pad_sectors = PAD_SECTORS;
 
     // 3. Undo the old pad, so the old capsule is legible.
@@ -252,25 +255,31 @@ pub fn save(
     // 5-6. A new salt, then the new container under it.
     let stratum: &ActiveStratum = &opened.stratum;
     let new_salt = SaltBytes::fresh();
-    // Copied out *before* the salt is moved into `seal_container`: `SaltBytes` zeroizes on drop and
-    // is consumed there, so borrowing it afterwards is not allowed -- rightly. These bytes are the
-    // salt the container is written under, and the value the next reader finds in slot 1.
-    let new_salt_bytes = *new_salt.as_bytes();
+    // The salt is moved into `seal_container` and zeroized there; nothing after this line needs it,
+    // because the pad window is keyed by the stick and the cursor rather than by the salt.
     let slots = split_payload(payload);
-    let sealed: SealedContainer =
-        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
-            .map_err(|e| e.to_string())?;
+    let sealed: SealedContainer = seal_container(
+        stratum,
+        &slots,
+        new_salt,
+        ctx.cursor,
+        ctx.kappa_usb,
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
 
-    // 7-8. Fold the new window over it and write. The window is re-read rather than reused: the
-    //    new salt re-keys the permutation, so it is a different 32,768 sectors, and reusing the
-    //    old buffer would write a container under the previous save's pad.
-    let new_pad = pad_window_for_save(ctx.kappa_usb, &new_salt_bytes, ctx.cursor);
-    fold(&mut image, &new_pad);
+    // 7-8. Fold over it and write.
+    //
+    // The same window that was unfolded at step 3, not a freshly derived one. The window is keyed by
+    // `(κ_USB, cursor)`, and neither changes inside one save: *this* save spends cursor `c`, so it
+    // reads window `c` and must write window `c`. Deriving a second window here would be the
+    // asymmetry that has already cost this module two rounds -- a container written under a window
+    // its own reader cannot reconstruct.
+    fold(&mut image, &pad);
     let digest = holonomy_session::seal::image_digest(&image);
     file.write_image(&image).map_err(|e| e.to_string())?;
 
@@ -293,7 +302,7 @@ pub fn open_document(
     let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
     let mut salt = [0u8; SALT_BYTES];
     salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
-    let pad = pad_window_for_save(ctx.kappa_usb, &salt, ctx.cursor);
+    let pad = pad_window_for_save(ctx.kappa_usb, ctx.cursor);
     fold(&mut image, &pad);
 
     let opened = open_container(
@@ -314,31 +323,35 @@ pub fn open_document(
 
 /// The pad window for one save, in read order.
 ///
-/// # What keys it, and the circularity that rules out the obvious answer
+/// # Keyed by the stick, never by the salt — and why that is forced
 ///
-/// The per-save salt is the natural key: it is fresh every save, so every save reads a different
-/// window, and that is exactly what the format wants. But the salt is *stored inside the
-/// pad-covered region* (slot 1, and `PAD_COVERAGE_BYTES` is the whole container), so a reader must
-/// undo the pad before it can learn the salt — and it cannot undo the pad without the salt. Keyed
-/// by the salt alone the format is unopenable, which is the defect this function had until a store
-/// test proved that a container written one call earlier could not be read back.
+/// The per-save salt looks like the natural key: it is fresh every save, so every save would read a
+/// different window. But the salt is *stored inside the pad-covered region* (slot 1, and
+/// `PAD_COVERAGE_BYTES` is the whole container, which is the point — a plaintext salt would be the
+/// one stable fingerprint in the file). A reader would therefore have to undo the pad to learn the
+/// salt, and know the salt to undo the pad. **Keyed by the salt, the format cannot be opened at
+/// all.**
 ///
-/// So the key is `κ_USB ‖ σ_epoch`: the USB share first, because it is the half of the bipartite
-/// key that a reader can hold *before* reading anything, and because it is the one input an
-/// attacker with the file alone does not have. The salt still keys the window per save, so
-/// consecutive saves read disjoint sectors; the USB share only makes the window computable.
+/// That is not a hypothetical: it is why five store tests failed with "wrong passphrase or damaged
+/// container" on containers the same process had written a moment earlier. `the_store_round_trips_
+/// one_raw_save_without_the_pad` isolates it — the seal/open path is fine, the fold is what breaks,
+/// because the reader reconstructs a different window from a salt it read out of folded bytes.
+///
+/// So the window is keyed by `κ_USB` and the cursor. Both are inputs the reader holds *before*
+/// reading anything: `κ_USB` comes from the stick, the cursor from the pad accounting. Save-to-save
+/// disjointness is carried by the cursor, which is what `holonomy_core::feistel::logical_sector`
+/// already does; the salt's job remains what it is documented to do — keying the KDF — and not this.
 ///
 /// # The consequence, stated plainly
 ///
-/// The pad is no longer a property of the file alone. Losing the stick loses the pad, which is
-/// consistent with the bipartite design (the capsule needs `κ_USB` too) but is a stronger statement
-/// than the earlier `k_perm`-from-the-salt draft implied, and `holonomy-usb`'s `PadPlan` has to be
-/// given the same key for the device path to agree. It is recorded in `docs/AUDIT-v5.1.0.md` §10
-/// rather than left for a reader of this comment to infer.
-pub fn pad_window_for_save(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor: u64) -> Vec<u8> {
+/// The pad is a property of the stick, not of the file. Losing the stick loses the pad; the file
+/// alone yields nothing legible. That is consistent with the bipartite design (the capsule needs
+/// `κ_USB` as well) but it is a stronger statement than the earlier draft implied, and
+/// `holonomy-usb`'s `PadPlan` must be handed this same key for the device path to agree.
+pub fn pad_window_for_save(kappa_usb: &[u8; 32], cursor: u64) -> Vec<u8> {
     let mut pad = vec![0u8; PAD_SECTORS * SECTOR_BYTES];
     for j in 0..PAD_SECTORS {
-        let material = sector_material(sector_index(kappa_usb, salt, cursor, j));
+        let material = sector_material(sector_index(kappa_usb, cursor, j));
         let at = j * SECTOR_BYTES;
         pad[at..at + SECTOR_BYTES].copy_from_slice(&material);
     }
@@ -347,11 +360,10 @@ pub fn pad_window_for_save(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor
 
 /// The `j`-th physical sector of save `cursor`.
 ///
-/// The permutation key is `κ_USB ‖ σ_epoch` mixed through BLAKE2b, so neither half alone defines
-/// the pad and a stick is required to read one. Exposed because the pad window is not the only
-/// consumer: `holonomy-usb`'s `PadReader` must produce the same indices, and
-/// `the_store_and_the_usb_crate_choose_the_same_sectors` is the test that says so.
-pub fn sector_index(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor: u64, j: usize) -> u32 {
+/// The permutation key is `BLAKE2b("K_PERM" ‖ κ_USB)`: derived from the stick alone, so it can be
+/// computed before any byte is read. `holonomy-usb`'s `PadReader` must produce the same indices, and
+/// `the_store_and_the_usb_crate_choose_the_same_sectors` is the test that holds the two together.
+pub fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
     use blake2::{Blake2b512, Digest};
     use holonomy_core::feistel::Feistel22;
 
@@ -359,7 +371,6 @@ pub fn sector_index(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES], cursor: u64, 
     h.update(b"HOLONOMY_V51_K_PERM");
     h.update([0u8]);
     h.update(kappa_usb);
-    h.update(salt);
     let digest = h.finalize();
     let mut k_perm = [0u8; 32];
     k_perm.copy_from_slice(&digest[..32]);
@@ -424,10 +435,7 @@ pub fn first_write(
     sealed
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
-    fold(
-        &mut image,
-        &pad_window_for_save(ctx.kappa_usb, &salt_bytes, ctx.cursor),
-    );
+    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, ctx.cursor));
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
