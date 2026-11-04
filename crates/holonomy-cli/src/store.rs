@@ -223,7 +223,9 @@ pub struct SaveReport {
 fn validate_save_cursor(cursor: u64) -> Result<(), String> {
     let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
     if cursor == 0 {
-        return Err("save cursor must be at least 1; use the previous container cursor plus one".into());
+        return Err(
+            "save cursor must be at least 1; use the previous container cursor plus one".into(),
+        );
     }
     if cursor >= limit {
         return Err(format!(
