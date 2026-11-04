@@ -598,7 +598,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev xvfb xauth libgl1-mesa-dri
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -617,6 +617,27 @@ jobs:
           set -o pipefail
           cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-test.log
           cargo build --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-build.log
+      - name: Smoke-test the scratch window on a virtual display
+        run: |
+          set -euo pipefail
+          binary=crates/holonomy-preview/target/debug/holonomy-preview
+          # With no explicit opt-in the binary must exit before creating a window.
+          if "$binary" > preview-denied.log 2>&1; then
+            echo "::error::preview launched without the unencrypted-scratch opt-in"
+            exit 1
+          fi
+          grep -q 'UNENCRYPTED SCRATCH PREVIEW' preview-denied.log
+          # A live GUI should keep its event loop running until timeout. This is
+          # a startup check, not a visual, interaction, or security test.
+          set +e
+          timeout 25s xvfb-run -a "$binary" --unencrypted-scratch-preview > preview-window.log 2>&1
+          status=$?
+          set -e
+          cat preview-window.log
+          if [ "$status" -ne 124 ]; then
+            echo "::error::scratch window exited before the smoke-test timeout (status $status)"
+            exit 1
+          fi
       - name: Lint preview
         run: |
           set -o pipefail
