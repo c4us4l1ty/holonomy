@@ -272,9 +272,12 @@ jobs:
         run: |
           set -o pipefail
           cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
-          # Anchor on the end of the line: the same line carries "... (budget N MiB steady, ...)",
-          # so an unanchored pattern picks up whichever number the regex engine finds first.
-          measured=$(grep -oE '^peak RSS: [0-9]+ KiB$' check.log | grep -oE '[0-9]+')
+          # `^` anchors the match to the start of the line, which is what keeps the budget figures
+          # in the trailing "(budget 180 MiB ..., 440 MiB ...)" out of it. Do *not* anchor the end:
+          # the line continues past the measurement, so `$` matches nothing at all and the gate
+          # fails while reporting a perfectly good number. That happened: this step failed a run
+          # whose measured peak was 17,756 KiB against a 184,320 KiB ceiling.
+          measured=$(sed -n 's/^peak RSS: \([0-9][0-9]*\) KiB.*/\1/p' check.log | head -1)
           if [ -z "$measured" ]; then
             echo "::error::--check did not report a peak RSS measurement"
             exit 1
