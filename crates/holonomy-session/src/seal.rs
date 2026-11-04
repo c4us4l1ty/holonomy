@@ -518,8 +518,8 @@ mod tests {
         // `holonomy-crypto`'s `the_fallback_keys_equal_the_ones_the_capsule_was_built_with`, which
         // is where that equality is actually asserted.
         let k_unwrap = keys(0x40).k_unwrap;
-        let dem = envelope_keys_for_test(&sealed.capsule, &k_unwrap, &KAPPA)
-            .expect("envelope opens");
+        let dem =
+            envelope_keys_for_test(&sealed.capsule, &k_unwrap, &KAPPA).expect("envelope opens");
         let plain =
             holonomy_crypto::commit::open_directory(&dem.k_dem, &capsule.directory_nonce, &field)
                 .expect("directory opens");
@@ -552,7 +552,10 @@ mod tests {
             &commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -571,7 +574,10 @@ mod tests {
             &sealed.slots[0].commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -590,7 +596,10 @@ mod tests {
         // A colliding placement is refused rather than silently writing the same block twice.
         let two = seal_container(&s, &[b"x", b"y"], salt(0x72), 0, &KAPPA).expect("seal");
         let err = two.encode_into(&mut image, |_| 2).unwrap_err();
-        assert!(matches!(err, SealError::BadPlacement { slot: 1, .. }), "{err}");
+        assert!(
+            matches!(err, SealError::BadPlacement { slot: 1, .. }),
+            "{err}"
+        );
     }
 
     #[test]
