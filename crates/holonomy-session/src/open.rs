@@ -35,7 +35,9 @@
 //! version before the handshake — for the same reason the handshake does not.
 
 use holonomy_core::capsule::CapsuleWire;
-use holonomy_core::layout::{slot_range, PAYLOAD_SLOTS, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS};
+use holonomy_core::layout::{
+    slot_range, PAYLOAD_SLOTS, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS,
+};
 use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology, UnlockError};
 use holonomy_crypto::commit::{open_directory, CMT4_TAG_BYTES, DIRECTORY_PLAINTEXT_BYTES};
@@ -43,8 +45,8 @@ use holonomy_crypto::kdf::ParamsClass;
 use holonomy_crypto::unlock::{unlock_fixed, UnlockRequest};
 
 use crate::directory::{DirectoryError, DirectoryLedger};
-use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 use crate::seal::{open_payload_slot, SealError, Zeroizing};
+use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 
 /// Everything needed to open a container. Borrowed, like [`UnlockRequest`], because none of it is
 /// secret except the passphrase and that is already sealed.
@@ -76,6 +78,23 @@ pub struct OpenedContainer {
     pub directory: DirectoryLedger,
     /// Plaintext payload slots, in logical order, zeroizing on drop.
     pub payload: Vec<Zeroizing>,
+}
+
+impl std::fmt::Debug for OpenedContainer {
+    /// Names the stratum, the cursor and the *number* of slots — never the plaintext and never the
+    /// keys. `expect` in a test prints its error value, so a missing `Debug` would either fail to
+    /// compile or, worse, invite a derive that dumps a document to a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenedContainer")
+            .field("stratum", &self.stratum.id().index())
+            .field("cursor", &self.directory.cursor)
+            .field("slots", &self.payload.len())
+            .field(
+                "bytes",
+                &self.payload.iter().map(|s| s.as_slice().len()).sum::<usize>(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenedContainer {
@@ -296,8 +315,8 @@ fn open_with_salt(
 /// Bounded here rather than left to [`DirectoryLedger::decode`], because this number is used to
 /// decide how much of the image to read before that function runs.
 fn slot_count_of(plaintext: &[u8; DIRECTORY_PLAINTEXT_BYTES]) -> Result<usize, OpenError> {
-    let count =
-        u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]]) as usize;
+    let count = u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]])
+        as usize;
     if count > PAYLOAD_SLOTS {
         return Err(OpenError::Directory(DirectoryError::TooManySlots {
             found: count,
