@@ -11,7 +11,7 @@
 //! legible. Second, it changes with the salt, which is what makes a save genuinely re-keyed.
 
 use super::*;
-use holonomy_core::layout::SALT_BYTES;
+use holonomy_core::layout::{slot_range, SALT_BYTES, SALT_SLOT_INDEX};
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_crypto::ParamsClass;
 
@@ -44,12 +44,56 @@ fn provision(path: &std::path::Path, salt: [u8; SALT_BYTES], cursor: u64) {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let ctx = ctx(&pass, cursor);
     let mut file = ContainerFile::open(path, true).expect("open");
-    first_write(
-        &mut file,
-        &ctx,
-        holonomy_session::SaltBytes::of_unknown_origin(salt),
-    )
-    .expect("first write");
+    first_write(&mut file, &ctx, holonomy_session::SaltBytes::of_unknown_origin(salt))
+        .expect("first write");
+}
+
+#[test]
+fn a_provisioned_container_opens_before_any_save() {
+    // The invariant the unpadded-first-write bug violated. A container `provision` wrote must be
+    // readable by the same reader a later save uses, because *every* write folds its own pad
+    // window -- including the first. If the two write paths differ here, the first `save` after
+    // provisioning destroys the capsule it was meant to replace.
+    let path = tempfile("provisioned");
+    let salt = [0x09u8; SALT_BYTES];
+    provision(&path, salt, 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+
+    let mut file = ContainerFile::open(&path, false).expect("open");
+    let (opened, document) = open_document(&mut file, &ctx(&pass, 0)).expect("a provisioned container must open");
+    assert_eq!(document, b"", "provisioning writes an empty document");
+    assert_eq!(opened.cursor(), 0);
+    drop(file);
+
+    // And its salt is not sitting in the clear: the fold covers slot 1 like everything else, so
+    // the bytes on disk are not the salt the container was written under.
+    let on_disk = std::fs::read(&path).expect("read");
+    let (off, _) = slot_range(SALT_SLOT_INDEX);
+    assert_ne!(
+        &on_disk[off..off + SALT_BYTES],
+        &salt[..],
+        "the salt must be covered by the pad, not stored in the clear"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_first_save_after_provisioning_succeeds() {
+    // The bug, directly: `save` undoes the old pad before opening the old container, so a
+    // provision that wrote an unpadded capsule made the very next save report "wrong passphrase".
+    let path = tempfile("firstsave");
+    provision(&path, [0x0Au8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    save(&mut file, &ctx, b"the first thing written by a user").expect("the first save must succeed");
+    drop(file);
+
+    let mut file = ContainerFile::open(&path, false).expect("reopen");
+    let (_, document) = open_document(&mut file, &ctx).expect("open");
+    assert_eq!(document, b"the first thing written by a user");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -130,10 +174,7 @@ fn a_read_only_handle_cannot_save() {
     provision(&path, [0x14u8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let mut file = ContainerFile::open(&path, false).expect("open");
-    assert!(
-        !file.is_writable(),
-        "opened read-only, so is_writable must say so"
-    );
+    assert!(!file.is_writable(), "opened read-only, so is_writable must say so");
     let err = save(&mut file, &ctx(&pass, 1), b"x").unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     let _ = std::fs::remove_file(&path);
@@ -162,10 +203,7 @@ fn consecutive_cursors_read_disjoint_sectors() {
     for cursor in 0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE {
         for j in 0..PAD_SECTORS {
             let sector = sector_index(&[0x31u8; SALT_BYTES], cursor, j);
-            assert!(
-                seen.insert(sector),
-                "sector {sector} reused at save {cursor}"
-            );
+            assert!(seen.insert(sector), "sector {sector} reused at save {cursor}");
         }
     }
     assert_eq!(
@@ -230,12 +268,7 @@ fn a_second_save_replaces_the_first() {
 
     let mut file = ContainerFile::open(&path, true).expect("open");
     save(&mut file, &ctx(&pass, 1), b"the first document").expect("first");
-    save(
-        &mut file,
-        &ctx(&pass, 2),
-        b"the second document, longer than the first",
-    )
-    .expect("second");
+    save(&mut file, &ctx(&pass, 2), b"the second document, longer than the first").expect("second");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");

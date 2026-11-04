@@ -173,7 +173,7 @@ fn provision(args: &[String]) -> ExitCode {
                 "  {} bytes, one stratum, an empty document",
                 CONTAINER_BYTES
             );
-            println!("  this first save is unpadded; every save after it folds a pad window");
+            println!("  the container is written under its own pad window, as every save is");
             println!(
                 "  the next save must be run with --cursor {}",
                 flags.cursor + 1
@@ -215,11 +215,7 @@ fn save(args: &[String]) -> ExitCode {
             );
             println!(
                 "  image digest {}",
-                report
-                    .digest
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
+                report.digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
             println!(
                 "  ratchet: {}",

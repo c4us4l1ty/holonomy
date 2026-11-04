@@ -217,6 +217,8 @@ jobs:
         # The first gate in this project that runs `holonomy save` and `holonomy open` against a real
         # file. A binary that "runs" is not a binary that saves.
         run: |
+          cargo test -p holonomy-cli --bin holonomy a_provisioned_container_opens_before_any_save -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy the_first_save_after_provisioning_succeeds -- --nocapture
           cargo test -p holonomy-cli --bin holonomy a_document_survives_a_save_and_a_reopen -- --nocapture
           cargo test -p holonomy-cli --bin holonomy a_multi_slot_document_reassembles_in_order -- --nocapture
           cargo test -p holonomy-cli --bin holonomy the_wrong_passphrase_fails_before_a_byte_is_written -- --nocapture
