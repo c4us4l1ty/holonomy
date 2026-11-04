@@ -102,7 +102,8 @@ impl DocumentSession {
     pub fn save(&mut self, document: &[u8]) -> Result<SaveReport, String> {
         if self.state != DocumentSessionState::Ready {
             return Err(
-                "save blocked: reopen and verify the container and pad after the previous failure".into(),
+                "save blocked: reopen and verify the container and pad after the previous failure"
+                    .into(),
             );
         }
         if !self.options.writable {
