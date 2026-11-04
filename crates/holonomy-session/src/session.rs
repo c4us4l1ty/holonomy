@@ -411,13 +411,20 @@ mod tests {
         // What happens past the window, stated rather than left to be discovered: the window index
         // exceeds the permutation domain, so it wraps onto an earlier window. That is precisely why
         // saves past 54 are refused on a device that cannot ratchet.
+        //
+        // The wrap point is arithmetic, not policy: the permutation domain is 2^22 and a save
+        // consumes 2^15 sectors, so cursor 2^22/2^15 = 128 is the first cursor whose logical
+        // indices reduce onto cursor 0's. Asserting it pins the number rather than describing it.
         let s = unlocked_session(PadMode::ReadOnly);
+        let domain_cursor = holonomy_core::feistel::DOMAIN as u64 / PAD_SECTORS_PER_SAVE as u64;
+        assert_eq!(domain_cursor, 128);
         assert_eq!(
             s.plan_for_save(0),
-            s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE * 32_768 / PAD_SECTORS_PER_SAVE as u64
-                + 0),
-            "the wrap is deterministic, which is what makes it a correctness issue rather than noise"
+            s.plan_for_save(domain_cursor),
+            "cursor 128 must alias cursor 0, which is exactly why 128 > the 54-save budget matters"
         );
+        // And well inside the budget there is no aliasing, which is the property that is claimed.
+        assert_ne!(s.plan_for_save(0), s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE - 1));
     }
 
     #[test]
