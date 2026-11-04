@@ -126,7 +126,7 @@ fn a_read_only_handle_cannot_save() {
     provision(&path, [0x14u8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let mut file = ContainerFile::open(&path, false).expect("open");
-    assert_eq!(file.pad_mode(), holonomy_crypto::PadMode::ReadOnly);
+    assert!(!file.is_writable(), "opened read-only, so is_writable must say so");
     let err = save(&mut file, &ctx(&pass, 1), b"x").unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     let _ = std::fs::remove_file(&path);

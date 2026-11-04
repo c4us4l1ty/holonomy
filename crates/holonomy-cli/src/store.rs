@@ -59,7 +59,7 @@ use holonomy_core::layout::{
 };
 use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
-use holonomy_crypto::{PadMode, ParamsClass};
+use holonomy_crypto::ParamsClass;
 use holonomy_session::open::{open_container, OpenError, OpenedContainer, ReaderRequest};
 use holonomy_session::{seal_container, SaltBytes, SealedContainer};
 
@@ -102,20 +102,6 @@ impl ContainerFile {
     /// Whether this handle may write.
     pub fn is_writable(&self) -> bool {
         self.writable
-    }
-
-    /// The pad mode this handle corresponds to.
-    ///
-    /// Used by the store's tests to assert that a read-only handle reports `ReadOnly`, which is the
-    /// property `a_read_only_handle_cannot_save` depends on. Not called from `main`, which picks
-    /// the mode by opening the file, so it is `cfg(test)`-visible rather than dead.
-    #[cfg(test)]
-    pub fn pad_mode(&self) -> PadMode {
-        if self.writable {
-            PadMode::ReadWrite
-        } else {
-            PadMode::ReadOnly
-        }
     }
 
     /// Read the container image.
