@@ -270,7 +270,6 @@ jobs:
       # a gate that dies on a missing tool is not measuring the product.
       - name: Measured peak RSS is inside the steady-state ceiling
         run: |
-          set -x
           set -o pipefail
           cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
           # `^` anchors the match to the start of the line, which is what keeps the budget figures
@@ -278,7 +277,13 @@ jobs:
           # the line continues past the measurement, so `$` matches nothing at all and the gate
           # fails while reporting a perfectly good number. That happened: this step failed a run
           # whose measured peak was 17,756 KiB against a 184,320 KiB ceiling.
-          measured=$(sed -n 's/^peak RSS: \([0-9][0-9]*\) KiB.*/\1/p' check.log | head -1)
+          # awk, not `sed | head -1`. Under `set -e` plus `pipefail` -- and Actions runs `bash -e`
+          # -- a `head -1` that exits early sends SIGPIPE to sed, the pipeline returns 141, the
+          # assignment fails and the shell aborts. That is exactly what happened: the gate reported
+          # "measured-RSS gate failed: parsed 'peak RSS: 17648 KiB ...'" with a good number in the
+          # message and no comparison run at all. awk reads the file to the end and `exit`s itself,
+          # so there is no pipeline to poison.
+          measured=$(awk '/^peak RSS:/ { print $3; exit }' check.log)
           if [ -z "$measured" ]; then
             echo "::error::--check did not report a peak RSS measurement"
             exit 1
