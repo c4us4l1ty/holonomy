@@ -327,7 +327,12 @@ jobs:
           # sparingly: the one-line tally, then each failing gate (there are never many).
           tally=$(grep -E '^[0-9]+ ok, ' "$log" | tail -1)
           echo "::error::--check tally: ${tally:-<no tally line>}"
-          grep -E '^\[(failed|deferred|degraded)' "$log" | head -6 | while IFS= read -r line; do
+          # Failing gates first: they are the reason this step exists, and the annotation budget
+          # runs out partway through the list.
+          grep -E '^\[failed' "$log" | head -4 | while IFS= read -r line; do
             echo "::error::$line"
+          done
+          grep -E '^\[(degraded|deferred)' "$log" | head -4 | while IFS= read -r line; do
+            echo "::error::note: $line"
           done
           { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
