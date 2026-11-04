@@ -128,6 +128,7 @@ impl CommittedCiphertext {
         self.ciphertext.len()
     }
 
+    /// Whether the ciphertext is empty (only possible for an empty plaintext).
     pub fn is_empty(&self) -> bool {
         self.ciphertext.is_empty()
     }

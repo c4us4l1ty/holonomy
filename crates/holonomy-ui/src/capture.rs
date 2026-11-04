@@ -50,6 +50,7 @@ pub enum EnforcedBy {
 /// The result of an attempt, with the sentence the UI should show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureReport {
+    /// Which rung of capture exclusion was obtained.
     pub exclusion: CaptureExclusion,
 }
 

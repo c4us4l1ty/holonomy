@@ -32,12 +32,19 @@
 // site. Everything else is safe Rust.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// `CMT-4` key commitment and the committed `XChaCha20-Poly1305` wrapper.
 pub mod commit;
+/// The two-phase `ML-KEM-1024` + `X25519` envelope.
 pub mod envelope;
+/// `Argon2id` → labelled subkeys. Deterministic by construction.
 pub mod kdf;
+/// Per-OS page locking, with an honest capability ladder.
 pub mod lock;
+/// The single OS-CSPRNG draw point.
 pub mod rng;
+/// The end-to-end unlock: passphrase + capsule + `κ_USB` → one `ActiveStratum`.
 pub mod unlock;
+/// The 54-save pad budget and ratchet accounting.
 pub mod usb_pad;
 
 pub use commit::{cmt4_tag, cmt4_verify, AeadError, CommittedCiphertext};

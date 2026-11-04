@@ -43,6 +43,7 @@ pub const ROOT_SECRET_BYTES: usize = 64;
 pub struct RootSecret(pub [u8; ROOT_SECRET_BYTES]);
 
 impl RootSecret {
+    /// The root secret bytes, for subkey derivation. Never for logging.
     pub fn as_bytes(&self) -> &[u8; ROOT_SECRET_BYTES] {
         &self.0
     }

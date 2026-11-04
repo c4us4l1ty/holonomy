@@ -303,6 +303,7 @@ impl ReaperGuard {
         self.sched
     }
 
+    /// The heartbeat Thread A stamps and this guard reads.
     pub fn heartbeat(&self) -> &Arc<PhyHeartbeat> {
         &self.heartbeat
     }

@@ -31,7 +31,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// The decoupled, zero-I/O PHY reaper.
 pub mod reaper;
+/// Secret arenas and the bounded wipe the reaper performs.
 pub mod scrub;
 
 pub use reaper::{

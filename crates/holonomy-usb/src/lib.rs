@@ -25,8 +25,11 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// Device geometry, derived from one measurement instead of a hand-summed table.
 pub mod geometry;
+/// Aligned, unbuffered block I/O — the one thing salvaged from `holonomy-old/`.
 pub mod io;
+/// The pad plan and the sector ratchet.
 pub mod pad;
 
 pub use geometry::{Geometry, GeometryError};

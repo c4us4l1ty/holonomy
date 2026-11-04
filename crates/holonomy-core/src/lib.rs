@@ -25,13 +25,21 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// The real memory budget: 180 MiB steady, 440 MiB unlock peak, and the gate that checks it.
 pub mod budgets;
+/// `StratumRootCapsuleV5`: the 65,536-byte, 4,096-aligned stratum root node.
 pub mod capsule;
+/// Forward-only duress co-evolution: effort-matched, generated-not-stored decoy deltas.
 pub mod duress;
+/// `FPE-22`: the 22-bit sector permutation that reaches every sector of Zone B.
 pub mod feistel;
+/// Container geometry, as exact constants.
 pub mod layout;
+/// Indistinguishability gates: 3.5σ monobit and the longest-run test.
 pub mod stats;
+/// Strata, capability keys and the one-stratum-per-unlock rule.
 pub mod stratum;
+/// The unlock state machine: passphrase in, exactly one `ActiveStratum` out.
 pub mod unlock;
 
 pub use capsule::{CapsuleWire, EpochSalt, StratumRootCapsuleV5};

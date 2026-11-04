@@ -134,6 +134,7 @@ pub const MIN_ZONE_B_BYTES: u64 = ZONE_B_SECTORS as u64 * SECTOR_BYTES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryError {
     /// The device cannot hold the fixed zones plus a full pad budget.
+    /// The device cannot hold the fixed zones plus a full pad budget.
     TooSmall { found: u64, needed: u64 },
     /// The device has room for the fixed zones but not for 54 saves of pad.
     ZoneBTooSmall { found: u64, needed: u64 },

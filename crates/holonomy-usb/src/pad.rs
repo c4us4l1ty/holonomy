@@ -58,14 +58,17 @@ impl PadPlan {
         Self { lbas }
     }
 
+    /// Sectors in this plan: always 32,768.
     pub fn len(&self) -> usize {
         self.lbas.len()
     }
 
+    /// Always `false`; present for symmetry with `len`.
     pub fn is_empty(&self) -> bool {
         self.lbas.is_empty()
     }
 
+    /// The physical Zone B sector indices, in read order.
     pub fn lbas(&self) -> &[u32] {
         &self.lbas
     }
@@ -149,6 +152,7 @@ impl<'a> PadReader<'a> {
         Ok(Self { device, plan })
     }
 
+    /// The read plan this reader will issue.
     pub fn plan(&self) -> &PadPlan {
         &self.plan
     }

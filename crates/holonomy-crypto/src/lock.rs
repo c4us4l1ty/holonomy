@@ -155,6 +155,7 @@ impl LockedRegion {
         })
     }
 
+    /// What was actually obtained, including why the strongest option was not.
     pub fn report(&self) -> LockReport {
         self.report
     }

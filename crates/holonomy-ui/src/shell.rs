@@ -174,10 +174,12 @@ impl Session {
         })
     }
 
+    /// The monotonic save cursor. Persisted in the root capsule, never in memory alone.
     pub fn cursor(&self) -> u64 {
         self.cursor
     }
 
+    /// The capture-exclusion state to show in the status line.
     pub fn capture(&self) -> CaptureReport {
         self.capture
     }

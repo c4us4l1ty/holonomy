@@ -67,28 +67,34 @@ impl AlignedBuf {
         Self { ptr, len }
     }
 
+    /// Buffer length in bytes.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Always `false`; present because clippy wants `len` accompanied by it.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// The bytes, read-only.
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: `ptr` is valid for `len` bytes for `self`'s lifetime.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
+    /// The bytes, writable. Wiped on drop either way.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: as above, and `&mut self` excludes aliasing.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
+    /// The raw address, guaranteed `IO_ALIGN`-aligned.
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr
     }
 
+    /// The raw address for a direct read. Guaranteed `IO_ALIGN`-aligned.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.ptr
     }
@@ -187,18 +193,22 @@ impl DirectFile {
         self.direct
     }
 
+    /// How the handle was opened.
     pub fn access(&self) -> Access {
         self.access
     }
 
+    /// The path as given, for error messages.
     pub fn path(&self) -> &str {
         &self.path
     }
 
+    /// The logical block size the alignment check uses.
     pub fn block_size(&self) -> u64 {
         self.block
     }
 
+    /// The descriptor, for an `ioctl` parity or PHY-status probe.
     pub fn raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
     }
@@ -208,6 +218,7 @@ impl DirectFile {
         Ok(self.file.metadata()?.len())
     }
 
+    /// Whether the device is zero length.
     pub fn is_empty(&self) -> io::Result<bool> {
         Ok(self.len()? == 0)
     }

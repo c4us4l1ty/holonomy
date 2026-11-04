@@ -23,7 +23,9 @@
 
 #![deny(missing_docs)]
 
+/// OS-level capture exclusion, and the platforms that do not have it.
 pub mod capture;
+/// The session shell: what a save does and what it may claim afterwards.
 pub mod shell;
 
 pub use capture::{CaptureExclusion, CaptureReport};
