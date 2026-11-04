@@ -89,6 +89,18 @@ pub enum BudgetViolation {
         /// The measured or projected figure.
         bytes: usize,
     },
+    /// A published figure claims less than the system's mandatory terms.
+    ///
+    /// This is the direction an over-budget check cannot catch, and it is exactly how §6.2 came
+    /// to say 16.60 MiB: a number too *small* is not a violation of an upper bound, so a gate that
+    /// only rejects large values passes a false claim silently.
+    ClaimBelowMandatoryFloor {
+        /// The figure being claimed.
+        claimed: usize,
+        /// The sum of terms that certainly exist: the resident container plus the transient
+        /// `Argon2id` arena, which cannot both be zero.
+        floor: usize,
+    },
     /// Peak plus host floor exceeds physical RAM.
     DoesNotFitLegacyHost {
         /// The unlock peak.
@@ -99,6 +111,22 @@ pub enum BudgetViolation {
         ram: usize,
     },
 }
+
+impl BudgetViolation {
+    /// Whether this describes a claim that is too small rather than one that is too large.
+    pub fn is_understatement(&self) -> bool {
+        matches!(self, Self::ClaimBelowMandatoryFloor { .. })
+    }
+}
+
+/// The terms that must be paid at least once in any real session.
+///
+/// The container has to be resident to be authenticated (`CMT-4` binds the whole payload), and the
+/// `Argon2id` arena has to exist to derive the root secret. They do not overlap in time, so the
+/// floor is the larger of the two rather than the sum — but any claim below it is describing a
+/// program that either skips authentication or skips key derivation.
+pub const MANDATORY_FLOOR_BYTES: usize =
+    if CONTAINER_RESIDENT_BYTES > ARGON2_ARENA_BYTES { CONTAINER_RESIDENT_BYTES } else { ARGON2_ARENA_BYTES };
 
 impl std::fmt::Display for BudgetViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,6 +142,13 @@ impl std::fmt::Display for BudgetViolation {
                 "unlock peak {} MiB exceeds the {} MiB ceiling",
                 bytes / MIB,
                 UNLOCK_PEAK_CEILING_BYTES / MIB
+            ),
+            Self::ClaimBelowMandatoryFloor { claimed, floor } => write!(
+                f,
+                "claim of {} MiB is below the {} MiB floor: the container and the Argon2id arena \
+                 cannot both be absent",
+                claimed / MIB,
+                floor / MIB
             ),
             Self::DoesNotFitLegacyHost { peak, host_floor, ram } => write!(
                 f,
@@ -131,6 +166,20 @@ impl std::fmt::Display for BudgetViolation {
 /// Call this in CI with measured RSS. A budget that is only checked by hand is a budget that
 /// drifts, which is exactly how §6.2 came to say 16.60 MiB.
 pub fn check_against_envelope(steady_state: usize, unlock_peak: usize) -> Result<(), BudgetViolation> {
+    // Both directions first: an understated claim is not an upper-bound violation, so the order
+    // matters. Checking the ceiling first would let `16.60 MiB` through as "fine".
+    if unlock_peak < MANDATORY_FLOOR_BYTES {
+        return Err(BudgetViolation::ClaimBelowMandatoryFloor {
+            claimed: unlock_peak,
+            floor: MANDATORY_FLOOR_BYTES,
+        });
+    }
+    if steady_state < ARGON2_ARENA_BYTES.min(CONTAINER_RESIDENT_BYTES) {
+        return Err(BudgetViolation::ClaimBelowMandatoryFloor {
+            claimed: steady_state,
+            floor: ARGON2_ARENA_BYTES.min(CONTAINER_RESIDENT_BYTES),
+        });
+    }
     if steady_state > STEADY_STATE_CEILING_BYTES {
         return Err(BudgetViolation::SteadyStateTooLarge { bytes: steady_state });
     }
@@ -169,11 +218,16 @@ mod tests {
     }
 
     #[test]
-    fn old_claim_is_rejected_as_too_large() {
-        // The point of the module: 16.60 MiB cannot even hold the container.
+    fn old_claim_is_rejected_as_an_understatement() {
+        // The point of the module: 16.60 MiB is not "too large", it is impossible. A one-sided
+        // upper-bound gate would accept it, which is precisely how §6.2 survived review.
         let old_claim = 16 * MIB + 614 * 1024;
         let err = check_against_envelope(old_claim, old_claim).unwrap_err();
-        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }));
+        assert!(
+            err.is_understatement(),
+            "a claim smaller than the container must be reported as an understatement, got {err:?}"
+        );
+        assert!(!err.to_string().contains("exceeds"), "it does not exceed anything: {err}");
         assert!(
             CONTAINER_RESIDENT_BYTES > old_claim,
             "the container alone is larger than the entire old budget"
@@ -182,8 +236,18 @@ mod tests {
 
     #[test]
     fn a_real_peak_over_the_ceiling_fails() {
-        let err = check_against_envelope(200 * MIB, 441 * MIB).unwrap_err();
-        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }));
+        // Steady state has to be legal for the *peak* check to be the one that fires; passing an
+        // illegal steady value just tests the first branch twice.
+        let err = check_against_envelope(170 * MIB, 441 * MIB).unwrap_err();
+        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }), "got {err:?}");
         assert!(err.to_string().contains("440"));
+    }
+
+    #[test]
+    fn the_gate_is_two_sided() {
+        // Under and over are distinct failures, and both are refused.
+        assert!(check_against_envelope(1 * MIB, 1 * MIB).unwrap_err().is_understatement());
+        assert!(!check_against_envelope(181 * MIB, 440 * MIB).unwrap_err().is_understatement());
+        assert!(check_against_envelope(180 * MIB, 440 * MIB).is_ok());
     }
 }
