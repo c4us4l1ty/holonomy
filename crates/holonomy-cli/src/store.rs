@@ -19,21 +19,34 @@
 //!
 //! ```text
 //!   1. read slot 1 of the *old* container           → the old salt
-//!   2. read 32,768 pad sectors under the old salt    → the pad window
+//!   2. read 32,768 pad sectors under the old cursor  → the pad window
 //!   3. undo the pad                                  → the old capsule, and the old directory
 //!   4. the handshake says whether that stratum is real
-//!   5. choose a new salt        (only now; it re-keys the permutation)
+//!   5. choose a new salt        (only now; the old capsule is legible)
 //!   6. seal the new container under the new salt
 //!   7. fold the *new* pad window over it
 //!   8. write, atomically, at the container's offset
-//!   9. ratchet the spent sectors (writable stick only)
+//!   9. ratchet the sectors window `c-1` spent (writable stick only)
 //! ```
+//!
+//! Step 9 ratchets the *old* window, not the new one. The container just written is folded with
+//! window `c`, so ratcheting `c` would overwrite the pad that container needs and it would be
+//! unreadable the moment the write returned. What is spent is `c-1`: its container has been
+//! replaced, so refreshing those sectors is the ratchet the 54-save budget is counting, and the next
+//! save reads window `c`.
 //!
 //! Steps 1 and 5 are the pair that can lose data. Writing the new salt before reading the old one
 //! destroys the only record of which pad window the old container used, and the container becomes
 //! unreadable — the salt is covered by the pad, so it is not recoverable from the file. That is why
 //! `holonomy-session`'s `ContainerHeader::after_reading` consumes the header and why this function
 //! takes the salt out of it rather than being handed one.
+//!
+//! # Where the pad comes from
+//!
+//! From a [`PadSource`]. With `--device` that is [`pad::DevicePad`], which reads Zone B of a real
+//! stick; without one it is [`pad::DerivedPad`], which derives sector material from the permutation
+//! and says so in every report. The trait exists so the second cannot be mistaken for the first: a
+//! stand-in that is called directly is a stand-in that ships.
 //!
 //! # The pad, honestly
 //!
@@ -58,6 +71,10 @@ use holonomy_core::layout::{
     slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX, SECTOR_BYTES,
 };
 use holonomy_core::stratum::ActiveStratum;
+
+pub mod pad;
+
+pub use pad::PadSource;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_crypto::ParamsClass;
 use holonomy_session::open::{open_container, OpenError, OpenedContainer, ReaderRequest};
@@ -203,6 +220,7 @@ pub struct SaveReport {
 /// `payload` is split into slots of [`holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT`] bytes.
 pub fn save(
     file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
     payload: &[u8],
 ) -> Result<SaveReport, String> {
@@ -239,11 +257,13 @@ pub fn save(
     //    window 0, so the first real save is cursor 1 and reads window 0 -- which is exactly what
     //    `provision` printed at the end of its run.
     let old_cursor = ctx.cursor.saturating_sub(1);
-    let old_pad = pad_window_for_save(ctx.kappa_usb, old_cursor);
+    let old_pad = pad
+        .window(ctx.kappa_usb, old_cursor)
+        .map_err(|e| format!("reading pad window {old_cursor}: {e}"))?;
     let pad_sectors = PAD_SECTORS;
 
     // 3. Undo the old pad, so the old capsule is legible.
-    fold(&mut old_image, &old_pad);
+    fold(&mut old_image, old_pad.as_slice());
 
     // 4. The handshake over the old container. Its error is coarse, and this is where a wrong
     //    passphrase stops the save before a single byte is written.
@@ -294,13 +314,43 @@ pub fn save(
     // is the point: the pad a save consumes is fresh, and the container it produces must be
     // readable only by someone with the stick and the cursor that produced it. Writing here with
     // `old_pad` would be just as wrong as reading the new cursor's window was.
-    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, ctx.cursor));
+    let new_pad = pad
+        .window(ctx.kappa_usb, ctx.cursor)
+        .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
+    fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
     file.write_image(&image).map_err(|e| e.to_string())?;
 
+    // 9. Ratchet window `c-1`, *after* the container is on the device.
+    //
+    //    Two decisions in one line, and this tree has had both wrong.
+    //
+    //    **After, not before.** Ratcheting first destroys the pad the container on disk was folded
+    //    with, so a write that then failed would leave a container nothing can open -- not this
+    //    build, not a later one. Done after, a failed write leaves the pad intact and the previous
+    //    container readable under the cursor it was last written with.
+    //
+    //    **`old_cursor`, not `ctx.cursor`.** The image just written is folded with window `c`, so
+    //    ratcheting `c` would overwrite the pad that image needs and it would be unreadable the
+    //    moment the write returned. What is spent is `c-1`: its container has been replaced, so
+    //    refreshing those sectors is exactly the ratchet the 54-save budget counts, and the next
+    //    save reads window `c`.
+    //
+    //    A source that cannot ratchet is not an error: `ratcheted` is `None` and the caller says so.
+    //    That is the difference between "this pad is fresh" and "this is the pad the last save
+    //    used", and a caller that conflates the two reports freshness it does not have.
+    let ratcheted = if pad.can_ratchet() {
+        Some(
+            pad.ratchet(ctx.kappa_usb, old_cursor)
+                .map_err(|e| format!("ratcheting pad window {old_cursor}: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     let plaintext_bytes = slot_bytes.iter().map(|s| s.len()).sum();
     Ok(SaveReport {
-        ratcheted: None,
+        ratcheted,
         pad_sectors,
         plaintext_bytes,
         slots: slot_bytes.len(),
@@ -311,14 +361,17 @@ pub fn save(
 /// Open `file` and return the document it holds.
 pub fn open_document(
     file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
 ) -> Result<(OpenedContainer, Vec<u8>), String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
-    // window the container was written under, and that is enough -- see `pad_window_for_save`.
-    let pad = pad_window_for_save(ctx.kappa_usb, ctx.cursor);
-    fold(&mut image, &pad);
+    // window the container was written under, and that is enough -- see `PadSource`.
+    let window = pad
+        .window(ctx.kappa_usb, ctx.cursor)
+        .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
+    fold(&mut image, window.as_slice());
 
     let opened = open_container(
         &ReaderRequest {
@@ -336,61 +389,37 @@ pub fn open_document(
     Ok((opened, document))
 }
 
-/// The pad window for one save, in read order.
+/// The `j`-th physical sector of save `cursor`.
+///
+/// The permutation key is `BLAKE2b("HOLONOMY_V51_K_PERM" ‖ κ_USB)` — derived from the stick alone, so
+/// it can be computed before any byte is read. `holonomy-usb`'s `PadPlan` must produce the same
+/// indices, and `the_store_and_the_usb_crate_choose_the_same_sectors` holds the two together.
 ///
 /// # Keyed by the stick, never by the salt — and why that is forced
 ///
 /// The per-save salt looks like the natural key: it is fresh every save, so every save would read a
-/// different window. But the salt is *stored inside the pad-covered region* (slot 1, and
-/// `PAD_COVERAGE_BYTES` is the whole container, which is the point — a plaintext salt would be the
-/// one stable fingerprint in the file). A reader would therefore have to undo the pad to learn the
-/// salt, and know the salt to undo the pad. **Keyed by the salt, the format cannot be opened at
-/// all.**
+/// different window. But the salt is stored inside the pad-covered region (slot 1, and the pad covers
+/// the whole container — that is the point, since a plaintext salt would be the one stable
+/// fingerprint in the file). A reader would therefore have to undo the pad to learn the salt, and
+/// know the salt to undo the pad. Keyed by the salt, the format cannot be opened at all.
 ///
-/// That is not a hypothetical: it is why five store tests failed with "wrong passphrase or damaged
-/// container" on containers the same process had written a moment earlier. `the_store_round_trips_
-/// one_raw_save_without_the_pad` isolates it — the seal/open path is fine, the fold is what breaks,
-/// because the reader reconstructs a different window from a salt it read out of folded bytes.
+/// That is not hypothetical: it is why five store tests failed with "wrong passphrase or damaged
+/// container" on containers the same process had written a moment earlier.
+/// `the_store_round_trips_one_raw_save_without_the_pad` isolates it — the seal/open path was fine,
+/// the fold was what broke, because the reader reconstructed a different window from a salt it had
+/// read out of folded bytes.
 ///
 /// So the window is keyed by `κ_USB` and the cursor. Both are inputs the reader holds *before*
-/// reading anything: `κ_USB` comes from the stick, the cursor from the pad accounting. Save-to-save
-/// disjointness is carried by the cursor, which is what `holonomy_core::feistel::logical_sector`
-/// already does; the salt's job remains what it is documented to do — keying the KDF — and not this.
+/// reading anything: `κ_USB` from the stick, the cursor from the pad accounting. Save-to-save
+/// disjointness comes from the cursor, via `holonomy_core::feistel::logical_sector`; the salt keeps
+/// its documented job of keying the KDF, and not this one.
 ///
-/// # The consequence, stated plainly
-///
-/// The pad is a property of the stick, not of the file. Losing the stick loses the pad; the file
-/// alone yields nothing legible. That is consistent with the bipartite design (the capsule needs
-/// `κ_USB` as well) but it is a stronger statement than the earlier draft implied, and
-/// `holonomy-usb`'s `PadPlan` must be handed this same key for the device path to agree.
-pub fn pad_window_for_save(kappa_usb: &[u8; 32], cursor: u64) -> Vec<u8> {
-    let mut pad = vec![0u8; PAD_SECTORS * SECTOR_BYTES];
-    for j in 0..PAD_SECTORS {
-        let material = sector_material(sector_index(kappa_usb, cursor, j));
-        let at = j * SECTOR_BYTES;
-        pad[at..at + SECTOR_BYTES].copy_from_slice(&material);
-    }
-    pad
-}
-
-/// The `j`-th physical sector of save `cursor`.
-///
-/// The permutation key is `BLAKE2b("K_PERM" ‖ κ_USB)`: derived from the stick alone, so it can be
-/// computed before any byte is read. `holonomy-usb`'s `PadReader` must produce the same indices, and
-/// `the_store_and_the_usb_crate_choose_the_same_sectors` is the test that holds the two together.
+/// The consequence, stated plainly: the pad is a property of the stick, not of the file. Losing the
+/// stick loses the pad, and the file alone yields nothing legible.
 pub fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
-    use blake2::{Blake2b512, Digest};
     use holonomy_core::feistel::Feistel22;
-
-    let mut h = Blake2b512::new();
-    h.update(b"HOLONOMY_V51_K_PERM");
-    h.update([0u8]);
-    h.update(kappa_usb);
-    let digest = h.finalize();
-    let mut k_perm = [0u8; 32];
-    k_perm.copy_from_slice(&digest[..32]);
-
-    Feistel22::provisioned(&k_perm).permute(Feistel22::logical_sector(cursor, j as u32))
+    Feistel22::provisioned(&pad::k_perm_key(kappa_usb))
+        .permute(Feistel22::logical_sector(cursor, j as u32))
 }
 
 /// Write the first container at `path`: full size, then one save of an empty document.
@@ -399,7 +428,11 @@ pub fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
 /// unprovisioned device, and the reader says so rather than pretending to open it — so the file is
 /// filled with CSPRNG bytes first, exactly as an unformatted stick would be, and then given a real
 /// capsule, a real salt and a real fold.
-pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
+pub fn provision(
+    path: &Path,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(), String> {
     if path.exists() {
         return Err(format!(
             "{} already exists; provisioning will not overwrite a container",
@@ -412,7 +445,7 @@ pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
     std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
 
     let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
-    first_write(&mut file, ctx, SaltBytes::fresh())
+    first_write(&mut file, pad, ctx, SaltBytes::fresh())
 }
 
 /// The stratum `(passphrase, salt, κ_USB)` derives: one derivation, used by every write path.
@@ -447,9 +480,10 @@ fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum,
 /// provisioning impossible once already: the first version wrote an unpadded capsule while `save`
 /// undid a pad before opening, so the very next save reported "wrong passphrase" for a correct one.
 /// Every write goes through this function for that reason, and `save` folds with the same
-/// `pad_window_for_save` call.
+/// `PadSource::window` call.
 pub fn first_write(
     file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
     salt: SaltBytes,
 ) -> Result<(), String> {
@@ -460,7 +494,14 @@ pub fn first_write(
     sealed
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
-    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, ctx.cursor));
+    let window = pad
+        .window(ctx.kappa_usb, ctx.cursor)
+        .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
+    fold(&mut image, window.as_slice());
+    // No ratchet here, deliberately. Provisioning *creates* window `cursor`; ratcheting it would
+    // destroy the pad the container was just folded with and the first `open` would fail for a
+    // container that had only just been made. A save ratchets the window it spent, because the
+    // container it wrote is meant to be read under the *next* one; provisioning has no next one yet.
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
@@ -485,29 +526,6 @@ pub(crate) fn first_write_unpadded_for_test(
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
     file.write_image(&image).map_err(|e| e.to_string())
-}
-
-/// 4,096 bytes of deterministic material for a sector index.
-///
-/// **This is not the pad.** The real pad is CSPRNG bytes written to Zone B at provisioning time and
-/// read back; this function stands in for the device so that a container file can be exercised
-/// without one. It is labelled `sector_material` rather than `sector_pad` so that a reader cannot
-/// mistake it for entropy, and [`pad_window_for_save`]'s documentation says the same thing twice
-/// because this is the one place in the project where a stand-in could be mistaken for the real
-/// thing.
-fn sector_material(sector: u32) -> [u8; SECTOR_BYTES] {
-    use blake2::{Blake2b512, Digest};
-    let mut out = [0u8; SECTOR_BYTES];
-    for (block, chunk) in out.chunks_mut(64).enumerate() {
-        let mut h = Blake2b512::new();
-        h.update(b"HOLONOMY_V51_STAND_IN_PAD");
-        h.update(sector.to_le_bytes());
-        h.update((block as u64).to_le_bytes());
-        let d = h.finalize();
-        let take = chunk.len();
-        chunk.copy_from_slice(&d[..take]);
-    }
-    out
 }
 
 /// The identity placement: logical slot `i` at physical block `2 + i`.
