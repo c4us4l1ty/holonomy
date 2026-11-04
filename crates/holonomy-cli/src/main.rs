@@ -232,8 +232,8 @@ fn provision(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    if flags.cursor == u64::MAX {
-        return usage_error("provision cursor must leave room for a subsequent save");
+    if flags.cursor != 0 {
+        return usage_error("provision cursor must be 0; pad history is not tracked yet");
     }
     let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
         Some(p) => p,
@@ -430,6 +430,7 @@ fn help() {
          does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
          in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
          previous container recorded for open; for save use that cursor plus one.\n\
+         Provision uses 0; saves refuse cursor 54 or higher until pad history is tracked.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\

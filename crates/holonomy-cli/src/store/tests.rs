@@ -852,3 +852,34 @@ fn provision_refuses_existing_path_without_overwriting_it() {
     assert_eq!(std::fs::read(&path).expect("read"), b"preserve me");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn pad_reuse_boundary_refuses_without_touching_container() {
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    assert!(validate_save_cursor(0).is_err());
+    assert!(validate_save_cursor(1).is_ok());
+    assert!(validate_save_cursor(limit - 1).is_ok());
+    assert!(validate_save_cursor(limit).is_err());
+    assert!(validate_save_cursor(u64::MAX).is_err());
+
+    let path = tempfile("pad-reuse-boundary");
+    std::fs::write(&path, b"unchanged").expect("seed");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let err = save(&mut file, &mut source(), &ctx(&pass, limit), b"new")
+        .expect_err("the first overlapping window must be refused");
+    assert!(err.contains("pad reuse"), "{err}");
+    drop(file);
+    assert_eq!(std::fs::read(&path).expect("read"), b"unchanged");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn provision_rejects_nonzero_cursor_without_creating_file() {
+    let path = tempfile("provision-nonzero");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let err = super::provision(&path, &mut source(), &ctx(&pass, 1))
+        .expect_err("provisioning must start at zero");
+    assert!(err.contains("cursor must be 0"), "{err}");
+    assert!(!path.exists());
+}

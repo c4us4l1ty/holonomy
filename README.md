@@ -34,7 +34,7 @@ those documents are historical and code and current CI results govern implementa
 | Editor | Wordcraft integration is planned; `holonomy-ui` is a separate skeleton outside the workspace and its editor bridge is not operational. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Saves overwrite the container in place. A crash or partial write can destroy the only copy; the save is **not atomic**. |
-| Pad budget | The design has a 54-window disjointness bound. The CLI does **not** persist or enforce the complete reuse budget across invocations. |
+| Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
 facilities. `--check` reports several deferred checks and a successful exit is **not** a security
@@ -92,7 +92,9 @@ A fixed, keyed 22-bit Feistel-based sector permutation maps logical window posit
 With one unchanged permutation, windows 0–53 cover disjoint logical positions; window 54 begins
 to overlap previously used positions. This is a **capacity calculation**, not a guarantee that
 physical media were provisioned with secret independent entropy or that the CLI prevents reuse.
-The writable device path attempts to refresh the previous window after writing the new image; a
+The CLI refuses save cursors 54 and above even on writable devices until it can verify pad history.
+This does not detect a reused stick, another container, or rollback to an older snapshot. The writable
+device path attempts to refresh the previous window after writing the new image; a
 ratchet failure can occur **after** the container was changed. The current window must not be
 ratcheted while it is needed to read that image.
 
@@ -170,7 +172,7 @@ The audit workflow runs build, tests, lint, and focused CLI safety regressions. 
 result of a particular commit; a badge is not an independent security audit.
 
 For experimental CLI usage, `--help` documents the required arguments. The provisioned image's
-cursor is the one supplied to `provision`; `open` needs the cursor used to write the image and
+cursor is 0; `open` needs the cursor used to write the image and
 `save` needs the **next** cursor. Keep track of it externally. An omitted `--device` selects the
 demo pad, not physical USB protection. Do not paste real secrets into a shell command or point the
 experimental device path at a disk containing valuable data. This tool does not provision a USB

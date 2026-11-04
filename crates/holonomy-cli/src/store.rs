@@ -219,6 +219,21 @@ pub struct SaveReport {
     pub digest: [u8; 32],
 }
 
+/// Refuse wraparound until there is durable accounting of the pad's history.
+fn validate_save_cursor(cursor: u64) -> Result<(), String> {
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    if cursor == 0 {
+        return Err("save cursor must be at least 1; use the previous container cursor plus one".into());
+    }
+    if cursor >= limit {
+        return Err(format!(
+            "save cursor {cursor} would enter the pad reuse window (starting at {limit}); \
+             saving is disabled until durable pad accounting and recovery are implemented"
+        ));
+    }
+    Ok(())
+}
+
 /// Save `payload` into `file`, under the pad and the old container's salt.
 ///
 /// The old container *must* already exist and open: a save is a rewrite of a container in place, and
@@ -247,13 +262,9 @@ pub fn save(
         ));
     }
 
-    // Cursor zero is the provisioning window, not a valid successor. Reusing it would
-    // overwrite the new image's pad during ratcheting and make the image unrecoverable.
-    if ctx.cursor == 0 {
-        return Err(
-            "save cursor must be at least 1; use the previous container cursor plus one".into(),
-        );
-    }
+    // Provisioning uses window zero. Until we can prove the history of refreshed
+    // sectors, do not enter a window that can overlap the first 54 windows.
+    validate_save_cursor(ctx.cursor)?;
 
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
@@ -500,6 +511,11 @@ pub fn provision(
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
 ) -> Result<(), String> {
+    // A fresh container starts at the first window; accepting an arbitrary initial
+    // cursor would bypass the conservative boundary on later saves.
+    if ctx.cursor != 0 {
+        return Err("provision cursor must be 0; pad history is not tracked yet".into());
+    }
     // `create_new` atomically rejects existing paths, including symlinks. Checking
     // `exists` before `write` would allow another process to replace the path in between.
     let handle = OpenOptions::new()
