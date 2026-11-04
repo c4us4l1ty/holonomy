@@ -448,7 +448,8 @@ pub fn probe_sched_class() -> SchedClass {
     } else if lim.rlim_cur == 0 {
         SchedClass::EpermFallback
     } else {
-        SchedClass::RealTime(lim.rlim_cur as i32)
+        // `SchedClass::RealTime` is a `u8` because the Linux priority range is 1..=99.
+        SchedClass::RealTime(lim.rlim_cur.min(99) as u8)
     }
 }
 
