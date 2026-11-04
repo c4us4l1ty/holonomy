@@ -42,8 +42,8 @@ use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockE
 
 use crate::commit::{cmt4_verify, open_directory};
 use crate::envelope::{
-    ct_lengths_are_canonical, derive_dem_key, phase1_commitment, phase2_commitment,
-    unwrap_stratum_key, HybridCiphertext, HybridKem,
+    ct_lengths_are_canonical, derive_dem_key, phase1_commitment,
+    phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
 };
 use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};
 
