@@ -148,7 +148,11 @@ impl DevicePad {
     /// codomain. Exercising the read loop against a file therefore needs the offsets relocated,
     /// which is all this does. `#[cfg(test)]`, so no released build can select it.
     #[cfg(test)]
-    pub fn open_relocated(path: &std::path::Path, zone_b_lba_start: u64) -> std::io::Result<Self> {
+    pub fn open_relocated(
+        path: &std::path::Path,
+        kappa_usb: &[u8; 32],
+        zone_b_lba_start: u64,
+    ) -> std::io::Result<Self> {
         let device = DirectFile::open(
             path,
             Access::ReadOnly,
@@ -156,7 +160,10 @@ impl DevicePad {
         )?;
         Ok(Self {
             device,
-            k_perm: [0u8; 32],
+            // Derived from the caller's share, not a placeholder: a handle whose key disagreed with
+            // the one its window is checked against reads the wrong 32,768 sectors and returns an
+            // unwritten file's zeros, which looks like working code until the assertions land.
+            k_perm: k_perm_key(kappa_usb),
             zone_b_lba_start,
         })
     }

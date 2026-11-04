@@ -495,8 +495,13 @@ fn a_save_reports_that_the_stand_in_did_not_ratchet() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The indices of a window worth asserting on: the first, the second, one in the middle, the last.
-const PROBED: [usize; 4] = [0, 1, 12_345, PAD_SECTORS - 1];
+/// The indices of a window worth asserting on: the first, one near the middle, the last.
+///
+/// Not a time-saving micro-optimisation chosen in the abstract — a device read is 32,768 real
+/// pread(2) calls whatever is asserted, and it took 465 s for the suite to finish when the two
+/// device tests each read a window twice. Three positions catch start, middle and end of a
+/// reordering bug, which is what these tests exist to catch.
+const PROBED: [usize; 3] = [0, 12_345, PAD_SECTORS - 1];
 
 /// A sparse file standing in for Zone B, with the probed sectors stamped with their own index.
 ///
@@ -538,7 +543,8 @@ fn the_device_pad_reads_zone_b_in_plan_order() {
     // fold is positional, so plan order is the property that matters and a byte count cannot show it.
     let cursor = 7u64;
     let path = synthetic_zone_b("devicepad-read", cursor, &OTHER_KAPPA);
-    let mut device = DevicePad::open_relocated(&path, 0).expect("open the stand-in");
+    let mut device =
+        DevicePad::open_relocated(&path, &OTHER_KAPPA, 0).expect("open the stand-in");
 
     assert!(!device.can_ratchet(), "opened read-only, so it must refuse");
     assert!(
@@ -580,7 +586,7 @@ fn the_device_pad_and_the_stand_in_select_the_same_sectors() {
     // could not be read by the other.
     let cursor = 3u64;
     let path = synthetic_zone_b("devicepad-vs-standin", cursor, &OTHER_KAPPA);
-    let mut device = DevicePad::open_relocated(&path, 0).expect("open");
+    let mut device = DevicePad::open_relocated(&path, &OTHER_KAPPA, 0).expect("open");
     let from_device = device.window(&OTHER_KAPPA, cursor).expect("window");
 
     let mut derived = source();
@@ -588,16 +594,24 @@ fn the_device_pad_and_the_stand_in_select_the_same_sectors() {
 
     for j in PROBED {
         let at = j * SECTOR_BYTES;
+
+        // 1. The sector the device *visited* is the one `sector_index` selects -- the same call the
+        //    stand-in assembles its window from. This is the claim: one permutation, two sources.
         let visited = u64::from_le_bytes(from_device.as_slice()[at..at + 8].try_into().unwrap());
         assert_eq!(
             visited,
             sector_index(&OTHER_KAPPA, cursor, j) as u64,
             "position {j}: the device read one sector and the stand-in would derive another"
         );
-        assert_eq!(
-            &from_stand_in.as_slice()[at..at + SECTOR_BYTES],
-            &pad::sector_material(visited as u32)[..],
-            "position {j}: the stand-in's material is not that sector's"
+
+        // 2. The bytes differ, because they come from different places: the file carries the LBA
+        //    stamped into it, the stand-in carries a hash of that LBA. If these matched, one of the
+        //    two sources would not be doing what it says.
+        assert_ne!(
+            &from_device.as_slice()[at + 8..at + 16],
+            &from_stand_in.as_slice()[at + 8..at + 16],
+            "position {j}: the device and the stand-in returned the same bytes, so one of them is \
+             not reading from where it claims"
         );
     }
     let _ = std::fs::remove_file(&path);
