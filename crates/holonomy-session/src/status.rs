@@ -6,8 +6,8 @@
 //! claimed `16.60 MiB` and "zero heap" in a table, and the table was wrong because nothing forced it
 //! to be derived from anything.
 
-use holonomy_crypto::lock::LockCapability;
 use holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+use holonomy_crypto::lock::LockCapability;
 
 /// Which capture-exclusion rung the platform actually provided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,22 +82,20 @@ impl StatusLine {
             ));
         }
 
-        parts.push(
-            match self.lock {
-                LockCapability::DirectMapExcluded => {
-                    "memory excluded from the kernel direct map".to_string()
-                }
-                LockCapability::ResidentNoDump => {
-                    "memory resident and excluded from core dumps".to_string()
-                }
-                LockCapability::Resident => {
-                    "memory resident but dumpable: enable process protection".to_string()
-                }
-                LockCapability::None => {
-                    "MEMORY NOT LOCKED: swap and core dumps may contain the document".to_string()
-                }
-            },
-        );
+        parts.push(match self.lock {
+            LockCapability::DirectMapExcluded => {
+                "memory excluded from the kernel direct map".to_string()
+            }
+            LockCapability::ResidentNoDump => {
+                "memory resident and excluded from core dumps".to_string()
+            }
+            LockCapability::Resident => {
+                "memory resident but dumpable: enable process protection".to_string()
+            }
+            LockCapability::None => {
+                "MEMORY NOT LOCKED: swap and core dumps may contain the document".to_string()
+            }
+        });
 
         parts.push(self.capture.describe().to_string());
         parts.push(if self.realtime {
