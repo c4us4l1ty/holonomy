@@ -123,10 +123,7 @@ impl CheckReport {
 
     /// How many results at a given severity.
     pub fn count(&self, severity: Severity) -> usize {
-        self.results
-            .iter()
-            .filter(|r| r.severity == severity)
-            .count()
+        self.results.iter().filter(|r| r.severity == severity).count()
     }
 
     /// The machine-readable body, without a header. Used by the CI gate.
@@ -194,10 +191,7 @@ mod tests {
     #[test]
     fn a_report_with_a_failure_does_not_pass() {
         let mut r = CheckReport::new();
-        r.push(CheckResult::failed(
-            "capsule size",
-            "65,552 bytes, expected 65,536",
-        ));
+        r.push(CheckResult::failed("capsule size", "65,552 bytes, expected 65,536"));
         assert!(!r.passed());
     }
 
@@ -207,10 +201,7 @@ mod tests {
         // train users to ignore the exit code.
         let mut r = CheckReport::new();
         r.push(CheckResult::degraded("memfd_secret", "unavailable"));
-        r.push(CheckResult::deferred(
-            "capture exclusion",
-            "not implemented on linux",
-        ));
+        r.push(CheckResult::deferred("capture exclusion", "not implemented on linux"));
         assert!(r.passed());
         assert_eq!(r.count(Severity::Degraded), 1);
         assert_eq!(r.count(Severity::Deferred), 1);
@@ -232,10 +223,7 @@ mod tests {
         r.push(CheckResult::deferred("d", "later"));
         r.peak_rss_bytes = Some(12 * 1024 * 1024);
         let text = r.render();
-        assert!(
-            text.contains("1 ok, 1 degraded, 1 failed, 1 deferred"),
-            "{text}"
-        );
+        assert!(text.contains("1 ok, 1 degraded, 1 failed, 1 deferred"), "{text}");
         assert!(text.contains("peak RSS: 12288 KiB"), "{text}");
     }
 
