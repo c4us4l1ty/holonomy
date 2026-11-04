@@ -36,7 +36,7 @@
 
 use holonomy_core::capsule::CapsuleWire;
 use holonomy_core::layout::{
-    slot_range, PAYLOAD_SLOTS, SALT_BYTES, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS,
+    slot_range, PAYLOAD_SLOTS, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS,
 };
 use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology, UnlockError};
@@ -45,8 +45,8 @@ use holonomy_crypto::kdf::ParamsClass;
 use holonomy_crypto::unlock::{unlock_fixed, UnlockRequest};
 
 use crate::directory::{DirectoryError, DirectoryLedger};
-use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 use crate::seal::{open_payload_slot, SealError, Zeroizing};
+use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 
 /// Everything needed to open a container. Borrowed, like [`UnlockRequest`], because none of it is
 /// secret except the passphrase and that is already sealed.
@@ -236,8 +236,10 @@ fn open_with_salt(
         &capsule_body.encrypted_directory_and_reservoir,
         &capsule_body.directory_poly1305_tag,
     );
+    // `open_directory` returns an `AeadError`; `SealError::Aead` is the variant that carries one,
+    // so the mapping is explicit rather than a bare constructor reference.
     let plaintext = open_directory(&keys.k_dem, &capsule_body.directory_nonce, &directory_field)
-        .map_err(OpenError::Slot)?;
+        .map_err(|e| OpenError::Slot(SealError::Aead(e)))?;
 
     // 4. The commitments, read from the image at the permuted positions, and the ledger over
     //    them. The slot count comes from the directory *plaintext*, which is safe because the AEAD
@@ -296,8 +298,8 @@ fn open_with_salt(
 /// Bounded here rather than left to [`DirectoryLedger::decode`], because this number is used to
 /// decide how much of the image to read before that function runs.
 fn slot_count_of(plaintext: &[u8; DIRECTORY_PLAINTEXT_BYTES]) -> Result<usize, OpenError> {
-    let count =
-        u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]]) as usize;
+    let count = u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]])
+        as usize;
     if count > PAYLOAD_SLOTS {
         return Err(OpenError::Directory(DirectoryError::TooManySlots {
             found: count,
