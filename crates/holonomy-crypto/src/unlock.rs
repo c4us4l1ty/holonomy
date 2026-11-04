@@ -40,7 +40,7 @@ use holonomy_core::capsule::{
 use holonomy_core::stratum::{ActiveStratum, StratumId, StratumKeys, MAX_STRATA};
 use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockError, Unlocked};
 
-use crate::commit::cmt4_verify;
+use crate::commit::{cmt4_verify, open_directory};
 use crate::envelope::{
     ct_lengths_are_canonical, derive_dem_key, derive_passphrase_only_keys, phase1_commitment,
     phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
@@ -94,9 +94,12 @@ pub fn unlock_fixed(
 
     // 3. The directory reassembles from the field plus its trailing tag. The split exists so the
     // 16-byte tag has a home inside the 65,536-byte slot; the AEAD input needs them concatenated.
-    let mut directory: Vec<u8> = Vec::with_capacity(ENCRYPTED_DIRECTORY_BYTES + 16);
-    directory.extend_from_slice(&capsule.encrypted_directory_and_reservoir);
-    directory.extend_from_slice(&capsule.directory_poly1305_tag);
+    // Note this is a *fixed* total length, not `what the plaintext needed` -- see
+    // `crate::commit::seal_directory` for the two bugs that came from getting that wrong.
+    let directory: DirectoryField = directory_ciphertext(
+        &capsule.encrypted_directory_and_reservoir,
+        &capsule.directory_poly1305_tag,
+    );
 
     // Reported, not assumed. `pad_fresh` is a property of the pad accounting and is set by the
     // caller that consumed a plan; `post_quantum` is true because CT_ML-KEM is present and
@@ -152,6 +155,13 @@ pub fn unlock_fixed(
             continue;
         }
 
+        // (e') Open the directory. If the commitment matched this cannot fail except on a
+        // serialisation change, so the error path is a `continue` and the caller still sees the
+        // same coarse `Rejected`.
+        if open_directory(&keys.k_dem, &capsule.directory_nonce, &directory).is_err() {
+            continue;
+        }
+
         // (f) Commit. The directory that just verified was decrypted with `keys.k_dem`, so those
         // are the stratum keys; `derive_passphrase_only_keys` is the equivalent derivation for the
         // path that has no capsule wide enough to hold a KEM ciphertext (the sealed reservoir).
@@ -174,6 +184,11 @@ pub fn unlock(req: &UnlockRequest<'_>) -> Result<ActiveStratum, UnlockError> {
     unlock_fixed(req, &crate::envelope::MlKem1024X25519)
 }
 
+/// The AEAD input for the directory: exactly [`ENCRYPTED_DIRECTORY_BYTES`] plus the tag.
+///
+/// A fixed-size array rather than a `Vec`, so the length cannot be wrong: it is the type.
+pub type DirectoryField = [u8; ENCRYPTED_DIRECTORY_BYTES + 16];
+
 /// Reassemble a capsule's directory ciphertext from its two fields.
 ///
 /// Public because the save path needs the same reassembly, and a second copy of this would be a
@@ -181,28 +196,24 @@ pub fn unlock(req: &UnlockRequest<'_>) -> Result<ActiveStratum, UnlockError> {
 pub fn directory_ciphertext(
     field: &[u8; ENCRYPTED_DIRECTORY_BYTES],
     tag: &[u8; 16],
-) -> Vec<u8> {
-    let mut v = Vec::with_capacity(ENCRYPTED_DIRECTORY_BYTES + 16);
-    v.extend_from_slice(field);
-    v.extend_from_slice(tag);
+) -> DirectoryField {
+    let mut v = [0u8; ENCRYPTED_DIRECTORY_BYTES + 16];
+    v[..ENCRYPTED_DIRECTORY_BYTES].copy_from_slice(field);
+    v[ENCRYPTED_DIRECTORY_BYTES..].copy_from_slice(tag);
     v
 }
 
 /// Split an AEAD output back into the capsule's two fields. Inverse of
 /// [`directory_ciphertext`]; panics if the input is shorter than the tag.
 pub fn split_directory_ciphertext(
-    sealed: &[u8],
+    sealed: &DirectoryField,
 ) -> ([u8; ENCRYPTED_DIRECTORY_BYTES], [u8; 16]) {
-    assert!(sealed.len() >= 16, "AEAD output cannot be shorter than its tag");
-    let body_len = sealed.len() - 16;
-    assert!(
-        body_len <= ENCRYPTED_DIRECTORY_BYTES,
-        "directory ciphertext is {body_len} bytes, the field holds {ENCRYPTED_DIRECTORY_BYTES}"
-    );
+    // No length checks: the argument's type already fixed the length, which is the point of
+    // taking an array rather than a slice.
     let mut field = [0u8; ENCRYPTED_DIRECTORY_BYTES];
-    field[..body_len].copy_from_slice(&sealed[..body_len]);
     let mut tag = [0u8; 16];
-    tag.copy_from_slice(&sealed[body_len..]);
+    field.copy_from_slice(&sealed[..ENCRYPTED_DIRECTORY_BYTES]);
+    tag.copy_from_slice(&sealed[ENCRYPTED_DIRECTORY_BYTES..]);
     (field, tag)
 }
 
@@ -217,7 +228,7 @@ pub const WRAPPED_KEY_BYTES: usize = WRAPPED_SK_BYTES;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::seal_committed;
+    use crate::commit::seal_directory;
     use crate::envelope::{create_envelope, EnvelopeError, HybridDecapsulationKey, HybridEncapsulationKey, SharedSecrets};
 
     /// A deterministic stand-in for the lattice KEM. Valid only for exercising the ring logic.
@@ -261,11 +272,11 @@ mod tests {
         let (ct, wrapped, keys) = create_envelope(&k_unwrap, &nonce, kappa, &kem).unwrap();
 
         let directory = b"one stratum, no media".as_slice();
-        let sealed = seal_committed(&keys.k_dem, &keys.n_epoch, b"HOLONOMY_V51_DIRECTORY", directory);
-        let (field, tag) = split_directory_ciphertext(&sealed.ciphertext);
+        let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
+        let (field, tag) = split_directory_ciphertext(&sealed);
 
         let p1 = phase1_commitment(&k_unwrap, &nonce, &ct, &wrapped);
-        let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &directory_ciphertext(&field, &tag));
+        let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed);
 
         let capsule = holonomy_core::capsule::StratumRootCapsuleV5 {
             ct_ml_kem_1024: ct.ml_kem,

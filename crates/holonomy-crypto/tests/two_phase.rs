@@ -6,7 +6,7 @@
 
 use holonomy_core::capsule::{CapsuleWire, StratumRootCapsuleV5, WRAPPED_SK_BYTES};
 use holonomy_core::layout::SLOT_BYTES;
-use holonomy_crypto::commit::{open_committed, seal_committed, CommittedCiphertext};
+use holonomy_crypto::commit::{open_directory, seal_directory};
 use holonomy_crypto::envelope::{
     create_envelope, derive_dem_key, phase1_commitment, phase2_commitment, unwrap_stratum_key,
     verify_phase_commitments, HybridCiphertext, HybridKem, MlKem1024X25519,
@@ -27,23 +27,23 @@ fn build_capsule(
     let (ct, wrapped, keys) = create_envelope(k_unwrap, sk_nonce, kappa, &kem).unwrap();
     let p1 = phase1_commitment(k_unwrap, sk_nonce, &ct, &wrapped);
 
-    // Phase 2: encrypt the directory under K_DEM, with the epoch nonce.
-    let sealed = seal_committed(&keys.k_dem, &keys.n_epoch, b"HOLONOMY_V51_DIRECTORY", directory);
-    assert!(
-        sealed.ciphertext.len() <= DIR_CAPACITY + 16,
-        "directory exceeds the capsule field: {} > {}",
-        sealed.ciphertext.len(),
-        DIR_CAPACITY + 16
+    // Phase 2: encrypt the directory under K_DEM, with the epoch nonce. `seal_directory` pads the
+    // plaintext to the fixed field length first -- see its docs for why a variable-length
+    // ciphertext cannot work with a capsule that has no length field.
+    let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
+    assert_eq!(
+        sealed.len(),
+        DIR_CAPACITY + 16,
+        "the fixed-length seal must fill the field exactly"
     );
-    let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed.ciphertext);
+    let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed);
 
     // The capsule stores the ciphertext in the big field and the Poly1305 tag separately, which is
     // how the 60,592 + 16 layout is meant to be used: the tag is *not* duplicated inside the field.
     let mut enc = [0u8; DIR_CAPACITY];
-    let body = &sealed.ciphertext[..sealed.ciphertext.len() - 16];
-    enc[..body.len()].copy_from_slice(body);
     let mut poly = [0u8; 16];
-    poly.copy_from_slice(&sealed.ciphertext[sealed.ciphertext.len() - 16..]);
+    enc.copy_from_slice(&sealed[..DIR_CAPACITY]);
+    poly.copy_from_slice(&sealed[DIR_CAPACITY..]);
 
     StratumRootCapsuleV5 {
         ct_ml_kem_1024: ct.ml_kem,
@@ -58,11 +58,11 @@ fn build_capsule(
     }
 }
 
-/// Reassemble the AEAD input from the two capsule fields.
-fn reassemble(c: &StratumRootCapsuleV5) -> Vec<u8> {
-    let mut v = Vec::with_capacity(DIR_CAPACITY + 16);
-    v.extend_from_slice(&c.encrypted_directory_and_reservoir);
-    v.extend_from_slice(&c.directory_poly1305_tag);
+/// Reassemble the AEAD input from the two capsule fields. Fixed length, by type.
+fn reassemble(c: &StratumRootCapsuleV5) -> [u8; DIR_CAPACITY + 16] {
+    let mut v = [0u8; DIR_CAPACITY + 16];
+    v[..DIR_CAPACITY].copy_from_slice(&c.encrypted_directory_and_reservoir);
+    v[DIR_CAPACITY..].copy_from_slice(&c.directory_poly1305_tag);
     v
 }
 
@@ -84,8 +84,7 @@ fn open_capsule(
     verify_phase_commitments(&c.phase1_cmt4_tag, &p1, &c.phase2_cmt4_tag, &p2)
         .map_err(|e| format!("commitment: {e}"))?;
 
-    let committed = CommittedCiphertext { ciphertext: reassemble(c), cmt4: p2 };
-    open_committed(&keys.k_dem, &c.directory_nonce, b"HOLONOMY_V51_DIRECTORY", &committed)
+    open_directory(&keys.k_dem, &c.directory_nonce, &reassemble(c))
         .map_err(|e| format!("directory: {e}"))
 }
 

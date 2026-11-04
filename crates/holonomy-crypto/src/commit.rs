@@ -39,6 +39,19 @@ pub const POLY1305_TAG_BYTES: usize = 16;
 /// Length of an XChaCha20 nonce.
 pub const NONCE_BYTES: usize = 24;
 
+/// Plaintext budget of the directory, and therefore the exact ciphertext length before the tag.
+///
+/// `60,592` bytes of field minus the 16-byte Poly1305 tag: `XChaCha20-Poly1305` output is
+/// `plaintext + 16`, so the plaintext has to be exactly this for the field to be exactly full.
+/// A serialised directory is a varint count, one entry per stratum, and a reservoir descriptor --
+/// tens of bytes at most -- so this is a reservoir-sized allowance, not a directory-sized one.
+pub const DIRECTORY_PLAINTEXT_BYTES: usize = 60_576;
+
+/// Ciphertext length of a sealed directory, tag included. Equal to the capsule field.
+pub const ENCRYPTED_FIELD_LEN: usize = DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES;
+
+const _: () = assert!(DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES == 60_592);
+
 /// `CMT-4` commitment over `(key, nonce, associated data, ciphertext)`.
 ///
 /// Truncated `BLAKE2b-512`. The domain string `"CMT4"` is what keeps this from being confused with
@@ -91,6 +104,88 @@ pub fn slot_associated_data(stratum: u8, slot_index: u32) -> [u8; 8] {
     ad
 }
 
+/// Seal a directory into its **fixed-length** capsule field.
+///
+/// # Why the length is not "whatever the plaintext needs"
+///
+/// The capsule allots 60,592 bytes plus a 16-byte tag. If the ciphertext carried only its own
+/// plaintext plus tag, two things would break, and both were live bugs:
+///
+/// 1. **The commitment would not survive a round trip.** `cmt4_tag` hashes
+///    `len(ciphertext) ‖ ciphertext`, and the capsule has no length field — so the verifier has to
+///    reconstruct the ciphertext from the 60,592-byte field, giving it zero padding on the right.
+///    Computed over the short ciphertext and verified over the padded one, the commitment can
+///    never match. (Found by `two_phase::unlock_recovers_the_directory`.)
+/// 2. **The directory's length would leak.** A 200-byte directory and a 60 KiB one would produce
+///    differently sized fields, and the capsule is the one structure an adversary can read without
+///    any passphrase. Fixed-length ciphertext under a fixed-length AAD discloses nothing about how
+///    many strata a container holds or how large the reservoir is.
+///
+/// So the plaintext is zero-padded to exactly [`DIRECTORY_PLAINTEXT_BYTES`] *before* encryption,
+/// the AAD carries the constant `expected_len`, and the AEAD then refuses a field that was truncated
+/// or extended. The padding is inside the authenticated ciphertext.
+pub fn seal_directory(
+    k_dem: &[u8; 32],
+    nonce: &[u8; NONCE_BYTES],
+    plaintext: &[u8],
+) -> Result<([u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES], AeadError), AeadError> {
+    let mut padded = [0u8; DIRECTORY_PLAINTEXT_BYTES];
+    if plaintext.len() > DIRECTORY_PLAINTEXT_BYTES {
+        return Err(AeadError::TooLarge {
+            offered: plaintext.len(),
+            capacity: DIRECTORY_PLAINTEXT_BYTES,
+        });
+    }
+    padded[..plaintext.len()].copy_from_slice(plaintext);
+
+    let cipher = XChaCha20Poly1305::new(k_dem.into());
+    let aad = directory_aad();
+    let out = cipher
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload { msg: &padded, aad: &aad },
+        )
+        .map_err(|_| AeadError::AuthenticationFailed)?;
+    assert_eq!(out.len(), DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES);
+
+    let mut sealed = [0u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES];
+    sealed.copy_from_slice(&out);
+    Ok(sealed)
+}
+
+/// Open a fixed-length directory field back into its plaintext.
+///
+/// The returned slice is trimmed at the first zero byte, which is sound because the plaintext is a
+/// serialised directory whose first byte never differs across versions -- see
+/// [`DIRECTORY_PLAINTEXT_BYTES`]. Trimmed rather than returned whole so callers do not have to know
+/// the padding rule.
+pub fn open_directory(
+    k_dem: &[u8; 32],
+    nonce: &[u8; NONCE_BYTES],
+    sealed: &[u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES],
+) -> Result<Vec<u8>, AeadError> {
+    let cipher = XChaCha20Poly1305::new(k_dem.into());
+    let aad = directory_aad();
+    let padded = cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload { msg: sealed, aad: &aad },
+        )
+        .map_err(|_| AeadError::AuthenticationFailed)?;
+    Ok(padded.into_iter().take_while(|&b| b != 0).collect())
+}
+
+/// AAD for the directory field: constant, and equal to the plaintext length.
+///
+/// Binding the expected length is what makes a truncated-or-extended field a decryption failure
+/// rather than a different plaintext.
+fn directory_aad() -> Vec<u8> {
+    let mut aad = Vec::with_capacity(32);
+    aad.extend_from_slice(b"HOLONOMY_V51_DIRECTORY");
+    aad.extend_from_slice(&(DIRECTORY_PLAINTEXT_BYTES as u64).to_le_bytes());
+    aad
+}
+
 /// Failure of a committed decrypt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AeadError {
@@ -100,6 +195,13 @@ pub enum AeadError {
     AuthenticationFailed,
     /// The plaintext buffer was too small for the output.
     OutputTooSmall,
+    /// The plaintext does not fit the fixed-length field it is destined for.
+    TooLarge {
+        /// Bytes offered.
+        offered: usize,
+        /// Bytes available.
+        capacity: usize,
+    },
 }
 
 impl std::fmt::Display for AeadError {
@@ -108,6 +210,9 @@ impl std::fmt::Display for AeadError {
             Self::CommitmentMismatch => f.write_str("CMT-4 commitment mismatch"),
             Self::AuthenticationFailed => f.write_str("AEAD authentication failed"),
             Self::OutputTooSmall => f.write_str("output buffer too small"),
+            Self::TooLarge { offered, capacity } => {
+                write!(f, "plaintext of {offered} bytes does not fit {capacity} bytes of field")
+            }
         }
     }
 }
@@ -209,6 +314,65 @@ pub fn slot_nonce(base: &[u8; NONCE_BYTES], save_cursor: u64, slot_index: u32, s
 /// Scrub a buffer. Wraps `zeroize` so call sites cannot forget the compiler fence.
 pub fn scrub(buf: &mut [u8]) {
     buf.zeroize();
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+
+    const K: [u8; 32] = [0x11u8; 32];
+    const N: [u8; NONCE_BYTES] = [0x22u8; NONCE_BYTES];
+
+    #[test]
+    fn a_short_directory_still_produces_the_full_field() {
+        let sealed = seal_directory(&K, &N, b"one stratum").unwrap();
+        assert_eq!(sealed.len(), ENCRYPTED_FIELD_LEN);
+        assert_eq!(sealed.len(), 60_592);
+        assert_eq!(open_directory(&K, &N, &sealed).unwrap(), b"one stratum");
+    }
+
+    #[test]
+    fn an_empty_directory_is_legal_and_round_trips() {
+        let sealed = seal_directory(&K, &N, b"").unwrap();
+        assert_eq!(open_directory(&K, &N, &sealed).unwrap(), b"");
+    }
+
+    #[test]
+    fn the_ciphertext_length_does_not_depend_on_the_plaintext_length() {
+        // The confidentiality property: an observer with no key learns nothing about how many
+        // strata exist from the capsule's shape.
+        let a = seal_directory(&K, &N, b"x").unwrap();
+        let b = seal_directory(&K, &N, &vec![b'y'; 60_000]).unwrap();
+        assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn an_oversized_directory_is_refused_rather_than_truncated() {
+        let too_big = vec![0u8; DIRECTORY_PLAINTEXT_BYTES + 1];
+        assert!(matches!(
+            seal_directory(&K, &N, &too_big),
+            Err(AeadError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn flipping_any_byte_of_the_field_fails_to_open() {
+        let sealed = seal_directory(&K, &N, b"directories are small").unwrap();
+        for i in [0usize, 1, 15, 60_590, 60_591] {
+            let mut bad = sealed;
+            bad[i] ^= 1;
+            assert!(open_directory(&K, &N, &bad).is_err(), "byte {i} went undetected");
+        }
+    }
+
+    #[test]
+    fn a_different_key_or_nonce_fails_to_open() {
+        let sealed = seal_directory(&K, &N, b"x").unwrap();
+        assert!(open_directory(&[0x99u8; 32], &N, &sealed).is_err());
+        let mut other_nonce = N;
+        other_nonce[0] ^= 1;
+        assert!(open_directory(&K, &other_nonce, &sealed).is_err());
+    }
 }
 
 #[cfg(test)]
