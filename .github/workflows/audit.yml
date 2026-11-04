@@ -79,6 +79,114 @@ jobs:
     if: github.event_name == 'push'
     permissions:
       contents: write
+    env:
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Format and commit
+        run: |
+          set -euo pipefail
+          # `actions/checkout` can leave a detached HEAD, in which case a bare `git push` fails with
+          # "you are not currently on a branch". Check out a real local branch tracking the remote,
+          # so both the commit and the push have a ref to attach to. Two pushes in quick succession
+          # also leave this job behind, hence the fetch-then-reset rather than a plain checkout.
+          git fetch origin "$BRANCH"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+
+          cargo fmt --all
+
+          # `git diff` only reports tracked files; `status --porcelain` also catches a file that
+          # formatting would create. Formatting never creates files today, but a gate that silently
+          # ignores a class of change is the kind of gate this project keeps having to fix.
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "already formatted"
+            exit 0
+          fi
+
+          git config user.name  "holonomy-ci"
+          git config user.email "ci@holonomy.invalid"
+          git add -A
+          git commit -m "style: cargo fmt (automated, no manual edits)"
+          git push origin "HEAD:refs/heads/$BRANCH" || {
+            git fetch origin "$BRANCH"
+            git rebase "origin/$BRANCH"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          }
+      - name: Report formatting failures as annotations
+        if: failure()
+        run: |
+          set +e
+          # This job has no log channel the author can reach, so every diagnostic has to come back
+          # as an annotation or it may as well not exist.
+          echo "::error::rustfmt gate failed"
+          cargo fmt --all -- --check 2>&1 | head -30 | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::fmt: $line"
+          done
+          git status --porcelain | head -20 | while IFS= read -r line; do
+            echo "::error::dirty: $line"
+          done
+
+  ui-probe:
+    name: holonomy-ui probe
+    runs-on: ubuntu-latest
+    needs: format
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ui-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-ui-
+      - name: Fetch the dependency graph and generate Cargo.lock
+        run: |
+          set -o pipefail
+          cargo fetch 2>&1 | tee fetch.log | tail -40
+      - name: Report fetch errors as annotations
+        if: failure()
+        run: |
+          set +e
+          # `cargo fetch` failing is the most likely outcome and the most useful one: it says
+          # whether the blocker is crates.io, a git pin, or the MSRV.
+          tail -25 fetch.log 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done
+      - name: Build holonomy-ui
+        run: |
+          set -o pipefail
+          cargo build -p holonomy-ui --all-targets --message-format=short 2>&1 | tee ui.log
+      - name: Report compiler errors as annotations
+        if: failure()
+        run: |
+          set +e
+          grep -E '^(error|warning)(\[|:)' ui.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+      - name: Upload the lockfile attempt
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cargo.lock
+          path: Cargo.lock
+          if-no-files-found: ignore
+
+  # rustfmt is deterministic and non-negotiable, so it should not be something a human has to
+  # round-trip through review. This job formats the tree and, if that changed anything, commits
+  # and pushes. The next run finds nothing to format, so it converges after one extra run.
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
