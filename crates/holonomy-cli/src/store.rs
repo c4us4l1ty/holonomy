@@ -81,10 +81,7 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(writable).open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -258,14 +255,9 @@ pub fn save(
     // The salt is moved into `seal_container` and zeroized there; nothing after this line needs it,
     // because the pad window is keyed by the stick and the cursor rather than by the salt.
     let slots = split_payload(payload);
-    let sealed: SealedContainer = seal_container(
-        stratum,
-        &slots,
-        new_salt,
-        ctx.cursor,
-        ctx.kappa_usb,
-    )
-    .map_err(|e| e.to_string())?;
+    let sealed: SealedContainer =
+        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
+            .map_err(|e| e.to_string())?;
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
