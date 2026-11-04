@@ -25,7 +25,7 @@
 //!   5. choose a new salt        (only now; the old capsule is legible)
 //!   6. seal the new container under the new salt
 //!   7. fold the *new* pad window over it
-//!   8. write, atomically, at the container's offset
+//!   8. write in place and sync (not crash-atomic)
 //!   9. ratchet the sectors window `c-1` spent (writable stick only)
 //! ```
 //!
@@ -237,6 +237,12 @@ pub fn save(
             "{} was opened read-only; a save needs a writable handle",
             file.path()
         ));
+    }
+
+    let capacity = holonomy_core::layout::PAYLOAD_SLOTS
+        * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+    if payload.len() > capacity {
+        return Err(format!("document exceeds the {capacity}-byte container payload limit"));
     }
 
     // Cursor zero is the provisioning window, not a valid successor. Reusing it would

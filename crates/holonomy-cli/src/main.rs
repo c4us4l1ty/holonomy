@@ -282,10 +282,10 @@ fn save(args: &[String]) -> ExitCode {
     };
     // The document comes from stdin. A path argument would be a second way to name a secret and a
     // second thing to get wrong; stdin is what an editor and a pipe both produce.
-    let mut document = Vec::new();
-    if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut document) {
-        return usage_error(format!("reading the document from stdin: {e}"));
-    }
+    let document = match read_document(std::io::stdin(), max_document_bytes()) {
+        Ok(document) => document,
+        Err(e) => return usage_error(format!("reading the document from stdin: {e}")),
+    };
 
     let ctx = context(&passphrase, &flags.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), true) {
@@ -323,6 +323,25 @@ fn save(args: &[String]) -> ExitCode {
         }
         Err(e) => failure(e),
     }
+}
+
+/// The maximum payload representable by the container, excluding per-slot authentication data.
+fn max_document_bytes() -> usize {
+    holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT
+}
+
+/// Read at most one byte beyond the format limit, so an unbounded pipe cannot exhaust memory.
+fn read_document(input: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut document = Vec::new();
+    input.take(limit as u64 + 1).read_to_end(&mut document)?;
+    if document.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("document exceeds the {limit}-byte container payload limit"),
+        ));
+    }
+    Ok(document)
 }
 
 /// `holonomy open <path> --passphrase P --kappa HEX [--cursor N]`
@@ -730,7 +749,14 @@ fn check(device: Option<&str>) -> ExitCode {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::{parse_flags, parse_kappa};
+    use super::{parse_flags, parse_kappa, read_document};
+
+    #[test]
+    fn input_is_bounded_and_exact_limit_is_accepted() {
+        assert_eq!(read_document(&b"abcd"[..], 4).unwrap(), b"abcd");
+        assert!(read_document(&b"abcde"[..], 4).is_err());
+        assert_eq!(read_document(&b""[..], 0).unwrap(), b"");
+    }
 
     #[test]
     fn flags_reject_missing_values_duplicates_and_extra_paths() {

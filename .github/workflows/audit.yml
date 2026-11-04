@@ -708,7 +708,7 @@ jobs:
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail
-          for test in kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
+          for test in input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
             output=$(cargo test -p holonomy-cli "$test" -- --nocapture 2>&1) || { echo "$output"; exit 1; }
             echo "$output"
             echo "$output" | grep -qE 'test result: ok\. [1-9]' || { echo "::error::no test matched $test"; exit 1; }
