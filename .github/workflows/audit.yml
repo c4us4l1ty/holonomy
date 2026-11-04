@@ -590,6 +590,76 @@ jobs:
           done
           { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+  # One-off formatter for the isolated preview, removed after this run.
+  format-development-preview:
+    name: Format development preview
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'arena/62cf8603-holonomy'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - run: |
+          set -euo pipefail
+          cargo +stable fmt --manifest-path crates/holonomy-preview/Cargo.toml --all
+          if ! git diff --quiet; then
+            git config user.name holonomy-ci
+            git config user.email ci@holonomy.invalid
+            git add -u
+            git commit -m 'style: format scratch window preview'
+            git push origin HEAD:refs/heads/arena/62cf8603-holonomy
+          fi
+
+  wordcraft-window-preview:
+    name: Unencrypted Wordcraft window preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/holonomy-preview/target
+          key: ${{ runner.os }}-preview-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-preview-
+      - name: Build and test preview
+        run: |
+          set -o pipefail
+          cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-test.log
+          cargo build --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-build.log
+      - name: Lint preview
+        run: |
+          set -o pipefail
+          cargo clippy --manifest-path crates/holonomy-preview/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee preview-clippy.log
+      - name: Check preview formatting
+        run: cargo fmt --manifest-path crates/holonomy-preview/Cargo.toml --all -- --check
+      - name: Annotate preview failures
+        if: failure()
+        run: |
+          set +e
+          for log in preview-test.log preview-build.log preview-clippy.log; do
+            [ -f "$log" ] || continue
+            grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          done
+
   wordcraft-bridge:
     name: Wordcraft document bridge
     runs-on: ubuntu-latest

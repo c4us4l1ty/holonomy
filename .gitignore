@@ -2,3 +2,4 @@
 **/*.rs.bk
 /Cargo.lock
 /crates/holonomy-wordcraft/Cargo.lock
+/crates/holonomy-preview/Cargo.lock
