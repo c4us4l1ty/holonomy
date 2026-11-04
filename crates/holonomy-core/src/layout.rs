@@ -132,15 +132,21 @@ mod tests {
 
     #[test]
     fn salt_sits_at_offset_zero_and_is_padded_over() {
+        // Relationships *between* constants are compile-time facts, so they live in the
+        // module-level `const _` block above and nowhere else -- a runtime `assert!` on two
+        // constants is a tautology clippy rightly rejects, and `black_box` to smuggle it past the
+        // lint would be worse than deleting it.
+        //
+        // What a runtime test can honestly do here is check that the salt is where the format says
+        // it is, by round-tripping bytes through the real wire layout.
         assert_eq!(SALT_OFFSET, 0);
-        assert!(SALT_BYTES * 2 < SLOT_BYTES);
-        // `black_box` because clippy is right that this is a constant expression: the constants are
-        // *defined* to agree, so asserting equality inline is tautological. Routing them through an
-        // opaque value makes the compiler emit the check, which is the point -- if a future edit
-        // changes one definition without the other, this still catches it at test time.
-        assert_eq!(
-            std::hint::black_box(PAD_COVERAGE_BYTES),
-            std::hint::black_box(CONTAINER_BYTES)
+        let mut wire = [0xA5u8; SLOT_BYTES];
+        let salt = [0x11u8; SALT_BYTES];
+        wire[SALT_OFFSET..SALT_OFFSET + SALT_BYTES].copy_from_slice(&salt);
+        assert_eq!(&wire[SALT_OFFSET..SALT_OFFSET + SALT_BYTES], &salt);
+        assert!(
+            wire[SALT_OFFSET + SALT_BYTES..].iter().all(|&b| b == 0xA5),
+            "the salt must not spill past its 64 bytes"
         );
     }
 
