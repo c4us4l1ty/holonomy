@@ -49,6 +49,48 @@ pub struct DocumentSession {
 }
 
 impl DocumentSession {
+    /// Create a new empty container and verify it can be opened.
+    ///
+    /// Creation requires a writable session at cursor zero. If creation or the
+    /// verification step fails, the path may contain an incomplete container; it
+    /// is not removed automatically. USB provisioning and pad history are not
+    /// handled here, and a reused pad cannot be detected by this method.
+    pub fn create(
+        path: &Path,
+        mut pad: Box<dyn PadSource>,
+        passphrase: SealedPassphrase,
+        kappa: [u8; 32],
+        options: DocumentSessionOptions,
+    ) -> Result<Self, String> {
+        if !options.writable || options.cursor != 0 {
+            return Err("creating a session requires writable mode and cursor zero".into());
+        }
+        if !cfg!(unix) {
+            return Err("creating an editable session is unavailable on this platform".into());
+        }
+        let kappa = Zeroizing::new(kappa);
+        let context = SaveContext {
+            passphrase: &passphrase,
+            kappa_usb: &kappa,
+            topology: options.topology,
+            params: options.params,
+            cursor: 0,
+        };
+        store::provision(path, pad.as_mut(), &context).map_err(|e| {
+            format!("creation did not complete; the path may exist and must be inspected: {e}")
+        })?;
+        let (session, document) =
+            Self::open(path, pad, passphrase, *kappa, options).map_err(|e| {
+                format!("the container was created but could not be verified; inspect it before use: {e}")
+            })?;
+        if !document.as_slice().is_empty() {
+            return Err(
+                "the created container did not open as an empty document; inspect it before use".into(),
+            );
+        }
+        Ok(session)
+    }
+
     /// Open an existing container and return both the session and its plaintext.
     ///
     /// The caller must provide the cursor which wrote the current image. The
@@ -171,28 +213,36 @@ mod tests {
     }
 
     #[test]
+    fn create_rejects_invalid_options_without_creating_a_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("container");
+        for opts in [options(1, true), options(0, false)] {
+            let result = DocumentSession::create(
+                &path,
+                Box::new(DerivedPad::new()),
+                SealedPassphrase::new("test").expect("valid"),
+                [0x42; 32],
+                opts,
+            );
+            assert!(result.is_err());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
     fn failed_ratchet_requires_recovery_even_after_image_was_replaced() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("container");
         let kappa = [0x42; 32];
         let passphrase = SealedPassphrase::new("test passphrase").expect("valid");
-        let context = SaveContext {
-            passphrase: &passphrase,
-            kappa_usb: &kappa,
-            topology: Topology::UmbilicalUsb,
-            params: ParamsClass::Test,
-            cursor: 0,
-        };
-        store::provision(&path, &mut DerivedPad::new(), &context).expect("provision");
-        let (mut session, document) = DocumentSession::open(
+        let mut session = DocumentSession::create(
             &path,
             Box::new(FailedRatchet(DerivedPad::new())),
             passphrase,
             kappa,
             options(0, true),
         )
-        .expect("open");
-        assert!(document.as_slice().is_empty());
+        .expect("create and verify");
         assert!(session.save(b"new document").is_err());
         assert_eq!(session.state(), DocumentSessionState::RecoveryRequired);
         assert_eq!(session.cursor(), 0);
