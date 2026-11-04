@@ -470,6 +470,29 @@ pub fn first_write(
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
+/// Write a container **without** the pad fold, for the store's tests only.
+///
+/// Exists so `the_store_round_trips_one_raw_save_without_the_pad` can separate "the seal/open path
+/// and the salt derivation agree" from "the fold is symmetric". A test that could not remove one of
+/// two variables can only report that the pair is broken, which is where this defect spent four
+/// rounds before the isolation test was added.
+#[cfg(test)]
+pub(crate) fn first_write_unpadded_for_test(
+    file: &mut ContainerFile,
+    ctx: &SaveContext<'_>,
+    salt: [u8; SALT_BYTES],
+) -> Result<(), String> {
+    let salt = SaltBytes::of_unknown_origin(salt);
+    let stratum = stratum_for(ctx, &salt)?;
+    let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
+        .map_err(|e| e.to_string())?;
+    let mut image = vec![0u8; CONTAINER_BYTES];
+    sealed
+        .encode_into(&mut image, identity_placement)
+        .map_err(|e| e.to_string())?;
+    file.write_image(&image).map_err(|e| e.to_string())
+}
+
 /// 4,096 bytes of deterministic material for a sector index.
 ///
 /// **This is not the pad.** The real pad is CSPRNG bytes written to Zone B at provisioning time and
