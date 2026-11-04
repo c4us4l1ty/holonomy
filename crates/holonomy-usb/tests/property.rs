@@ -110,7 +110,8 @@ fn the_possible_sector_count_is_what_the_geometry_says() {
     // The arithmetic the whole budget rests on, checked against the constants rather than restated.
     assert_eq!(DOMAIN, 4_194_304);
     assert_eq!(ZONE_B_SECTORS_U64, 1_782_579);
-    assert_eq!(ZONE_B_SECTORS_U64 * 4_096, 7_299_043_584);
+    // 1,782,579 x 4,096 = 7,301,443,584 bytes = 6.80 GiB of pad reservoir.
+    assert_eq!(ZONE_B_SECTORS_U64 * 4_096, 7_301_443_584);
     // 54 saves fit; 55 do not. Pigeonhole, so this is a fact about the device.
     let per_save = PAD_SECTORS_PER_SAVE as u64;
     assert!(SAVES_BEFORE_DOMAIN_REUSE * per_save <= ZONE_B_SECTORS_U64);
@@ -152,9 +153,6 @@ fn each_single_save_is_collision_free_and_covers_its_own_window() {
     for cursor in [0u64, 1, 26, 53] {
         let plan = PadPlan::for_save(&key(0x66), cursor);
         assert_eq!(plan.len(), PAD_SECTORS_PER_SAVE as usize);
-        assert!(
-            plan.is_collision_free(),
-            "save {cursor} plans a sector twice"
-        );
+        assert!(plan.is_collision_free(), "save {cursor} plans a sector twice");
     }
 }
