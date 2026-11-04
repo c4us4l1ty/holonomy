@@ -235,26 +235,48 @@ rung 4.
 (the SCSI handler holds it 5–30 s in `TASK_UNINTERRUPTIBLE`). Thread B performs **no** I/O: it sleeps
 1.5 ms, reads two atomics, and either loops or wipes. That structure is correct and is kept.
 
-**FR-9.2 — Suspend is not a yank.** A gap greater than 2 s is treated as suspend, not disconnect. A
-laptop that slept for an hour must not wipe the document.
+**FR-9.2 — Suspend is not a yank, and elapsed time cannot tell them apart.** A laptop that slept for
+an hour must not wipe the document; a drive yanked for two seconds must. The first draft of this
+requirement said "a gap greater than 2 s is treated as suspend", which satisfied the first clause by
+failing the second: a monotonic gap is the same number in both cases, so an adversary who pulls the
+stick and waits two seconds avoids the wipe — the precise attack the reaper exists to prevent.
+
+Suspension is therefore decided only by **OS notification** (`signal_suspend`, fed by
+`WM_POWERBROADCAST`, `NSWorkspaceWillSleepNotification` and logind `PrepareForSleep`). A gap beyond
+the 12 ms threshold with no notification is a disconnect, whatever its size.
+
+*Consequence, accepted deliberately:* a machine that sleeps without delivering a suspend event wipes
+on resume. That is the safe direction — loud, and recoverable from the last save — and it makes the
+platform notification plumbing a hard dependency rather than an optimisation. Every supported
+platform delivers one; where a platform cannot, the product must say so rather than assume silence
+means sleep.
 
 **FR-9.3 — `SCHED_FIFO` is attempted, not assumed.** `EPERM` is expected on an unprivileged desktop
 account; the reaper starts at normal priority and *reports* that it did. Priority is an optimisation
 of latency, not a precondition of function.
 
-**FR-9.4 — The 15 ms budget, decomposed.**
+**FR-9.4 — The 15 ms budget, decomposed, and the order of the three actions.**
 
 ```text
   1.5 ms   poll quantum                       fixed by design
   +        wipe of registered secret arenas   measured, a few MiB
-  +        blackout (scanout zero + flush)    measured
-  =        total                              must be <= 15 ms
+  =        total to unreachability            must be <= 15 ms
+  (then)   terminate                          cannot block
+  (then)   blackout (scanout zero + flush)    best effort, off the critical path
 ```
 
 Wiping all 180 MiB of steady state at legacy DDR2 bandwidth is ~45 ms, which is **over** the
 ceiling. The reaper therefore wipes the registered *secret* arenas — keys, scanout, plaintext pages
 — and evaporates everything else by terminating, rather than pretending it scrubbed 180 MiB in
 15 ms. `ReaperGuard::measure` records what it actually took on the host.
+
+**Blackout is not in the budget, and must not be.** It is a compositor call: it submits a frame and
+waits for it to be presented, which can block indefinitely behind a stuck GPU driver — and a stuck
+driver is a plausible companion to the yanked drive that triggered the wipe. Putting it before
+`terminate` means the process may never exit, and a process that does not exit still has its keys
+mapped. The order is **wipe → terminate → best-effort blackout**. `HOLONOMY_BLACKOUT_IS_SAFE=1`
+opts into blackout-first for a platform whose blackout is known non-blocking, and the trait's own
+documentation carries the argument so an implementer cannot miss it.
 
 ---
 
@@ -273,8 +295,13 @@ ceiling. The reaper therefore wipes the registered *secret* arenas — keys, sca
 first slot is decrypted.
 
 **FR-10.3 — Envelope.** `440 + 512` MiB of host floor = 952 MiB, inside 2,048 MiB.
-`check_against_envelope` is called in CI with measured RSS, so the table cannot drift from the code
-again.
+`check_against_envelope` is **two-sided**: it rejects an over-budget figure *and* any claim below
+`MANDATORY_FLOOR_BYTES` (the larger of the resident container and the `Argon2id` arena, since both
+cannot be absent). The second direction is not a nicety — a one-sided upper bound accepts any small
+number, which is exactly how §6.2's 16.60 MiB survived review.
+
+The *measured* RSS gate is deferred until the `holonomy` binary links, because it needs the editor
+running. Until then CI asserts the documented envelope and states that it has measured nothing.
 
 **FR-10.4 — No zero-heap claim.** Sensitive data lives in `zeroize`d, page-locked arenas owned by
 `holonomy-crypto`. The rest of the editor allocates, as editors do.
@@ -298,18 +325,19 @@ Every gate is machine-checkable and runs in CI.
 | :--- | :--- |
 | `capsule_is_exactly_one_slot` | `size_of == 65,536`, compile-time and runtime |
 | `encrypted_directory_field_is_60_592` | plus 16-byte tag = 60,608 of AEAD output |
-| `zero_overlap_across_fifty_four_saves` | 1,769,472 distinct LBAs over 54 saves |
-| `full_zone_b_is_reachable` | >35% of samples above `2^20` |
+| `fifty_four_saves_never_touch_the_same_sector` | 1,769,472 distinct LBAs over 54 saves, four keys |
+| `sectors_that_fpe_20_could_never_reach_are_reached` | the share above `2^20` matches the geometry |
 | `monobit`/`longest_run` | `50.0000% ± 0.0053%`, run ≤ 42 |
 | `no_environmental_input_enters_a_key` | source audit; no `rdtsc`/`RIP`/`.text`/clock |
 | `unlock_recovers_the_directory` | real ML-KEM-1024 + X25519 round trip |
 | `wrong_usb_cannot_open_the_directory` | κ participates in `K_DEM` |
 | `read_only_session_refuses_at_the_pad_budget` | save 55 on `O_RDONLY` errors, does not degrade |
 | `thread_b_fires_and_wipes` | wipe exactly once, blackout, terminate |
-| `suspend_is_not_confused_with_a_yank` | 2 s gap ⇒ `Suspend` |
+| `a_long_gap_without_a_suspend_notification_is_a_yank` | no notification ⇒ wipe, however long the gap |
+| `a_suspend_notification_suppresses_the_wipe` | notification ⇒ `Suspend`, no wipe |
 | `duress_binding_must_be_invariant` | `P_1` opens every snapshot |
 | `proportional_growth_rejects_a_frozen_decoy` | cross-snapshot tell is caught |
-| budget gates | `check_against_envelope(180, 440)` passes; 16.60 MiB fails |
+| budget gate | `check_against_envelope(180, 440)` passes; 16.60 MiB fails *as an understatement* |
 
 ---
 

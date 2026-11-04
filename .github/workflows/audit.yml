@@ -42,7 +42,16 @@ jobs:
       - name: Fetch the dependency graph and generate Cargo.lock
         run: |
           set -o pipefail
-          cargo fetch --message-format=short 2>&1 | tail -40
+          cargo fetch --message-format=short 2>&1 | tee fetch.log | tail -40
+      - name: Report fetch errors as annotations
+        if: failure()
+        run: |
+          set +e
+          # `cargo fetch` failing is the most likely outcome and the most useful one: it says
+          # whether the blocker is crates.io, a git pin, or the MSRV.
+          tail -25 fetch.log 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done
       - name: Build holonomy-ui
         run: |
           set -o pipefail

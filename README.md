@@ -70,8 +70,14 @@ This is the part previous drafts got wrong, and it is why the doc is this blunt.
 | unlock peak | **≤ 440 MiB** | + 256 `Argon2id` arena, freed before the first slot decrypts |
 
 `440 + 512` MiB of host floor is 952 MiB, comfortably inside 2,048 MiB. The numbers are constants in
-`holonomy-core::budgets` and are checked against measured RSS in CI, so they cannot drift from the
-code again.
+`holonomy-core::budgets` and the gate is **two-sided**: over-budget fails, and so does any claim
+below the mandatory floor (the container plus the `Argon2id` arena cannot both be absent). That
+second direction is what the old 16.60 MiB figure needed and did not get — an upper-bound check
+accepts any small number, which is how a claim off by 16× survived review.
+
+The *measured* RSS gate is still a placeholder. It needs the `holonomy` binary, which needs
+`wordcraft` to link; until it does, CI checks the documented envelope and says plainly that it has
+not measured anything.
 
 ---
 
@@ -82,10 +88,21 @@ Pulling the stick triggers a wipe. The mechanism is two threads with one rule be
 ```text
  Thread A (may block forever)          Thread B (never does I/O)
  pread / ioctl on the USB              sleep 1.5 ms
- on success: stamp LAST_PHY_OK_NS      read LAST_PHY_OK_NS
-                                       gap > 12 ms  →  wipe, blackout, exit
-                                       gap > 2 s    →  suspend, do not wipe
+ on success: stamp LAST_PHY_OK_NS      read two atomics
+ on suspend:  signal_suspend()         disconnected      →  wipe
+                                       suspend_signalled →  wait, do not wipe
+                                       gap > 12 ms       →  wipe
 ```
+
+**Suspension is decided by OS notification, never by elapsed time**, and that distinction is load
+bearing. A monotonic gap cannot tell a suspend from a yank: a drive unplugged and left for two
+seconds is indistinguishable from a laptop that slept for two seconds. An earlier version of this
+diagram said `gap > 2 s → suspend`, which meant pulling the stick and waiting two seconds avoided
+the wipe — the exact attack the reaper exists to stop. A long gap with no notification is now a
+yank. The consequence is stated rather than hidden: a machine that sleeps *without* delivering a
+suspend event wipes on resume. Every supported platform does deliver one (`WM_POWERBROADCAST`,
+`NSWorkspaceWillSleepNotification`, logind `PrepareForSleep`), and the failure mode of the safe
+direction — a loud wipe recoverable from the last save — is the right one to have.
 
 A `pread` on a yanked USB device hangs in `TASK_UNINTERRUPTIBLE` for 5–30 s, so any watchdog that
 touches the device is dead exactly when it is needed. Thread B touches two atomics and nothing else.
@@ -96,6 +113,12 @@ of function.
 Wiping all 180 MiB at legacy bandwidth would take ~45 ms — over the 15 ms target. So the reaper
 wipes the registered *secret* arenas (keys, scanout, plaintext pages) and evaporates the rest by
 terminating, rather than claiming it scrubbed 180 MiB in 15 ms.
+
+The order is `wipe → terminate → best-effort blackout`, not `wipe → blackout → terminate`. A blackout
+is a compositor call that can block, and the conditions that trigger a wipe (yanked drive, hostile
+bus reset) are exactly the conditions under which a GPU driver may also be stuck. `terminate` is
+what makes the secrets unreachable; the blackout is a courtesy and must not sit in front of it.
+`HOLONOMY_BLACKOUT_IS_SAFE=1` opts into the other order on platforms whose blackout cannot block.
 
 ---
 
@@ -129,12 +152,14 @@ cargo build --release
 ```
 
 **Status: v5.1.0 is the audited core, not a finished editor.** The container, key schedule, USB pad,
-permutation, duress bookkeeping, watchdog and capture exclusion are implemented and tested across
-five crates. The `wordcraft` document↔container bridge is not yet wired, and `holonomy --check`
-reports the state of everything else. Note that `holonomy --version`/`--check` build only the four
-core crates; the `holonomy-ui` library (and therefore the `holonomy` binary) pulls in `wordcraft`,
-which needs `crates.io` and its pinned `craft-*` git dependencies. `docs/AUDIT-v5.1.0.md` §8 lists the five decisions that
-unblock the rest, first among them whether to vendor or track `wordcraft`.
+permutation, duress bookkeeping, watchdog and capture exclusion are implemented; 164 of the 182
+tests execute in CI and all four gate jobs are green. The `wordcraft` document↔container bridge is
+not yet wired.
+
+`holonomy` (the binary) lives in `holonomy-ui`, which pulls in six `wordcraft` crates and their
+pinned `craft-*` git dependencies. That crate has **never been compiled** — the authoring sandbox
+had no route to `crates.io` — so its 18 tests have never run and nothing in the audit relies on
+them. `docs/AUDIT-v5.1.0.md` §8 separates what is proven from what is deferred and why.
 
 Requires Rust 1.95+ (`wordcraft`'s MSRV) and network access to `github.com` for its pinned `craft-*`
 dependencies.
