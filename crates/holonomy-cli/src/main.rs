@@ -43,7 +43,7 @@ fn main() -> ExitCode {
         help();
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|a| a == "--check") {
+    if args.first().map(String::as_str) == Some("--check") {
         // `--check --device /dev/sdX` checks the stick as well. Anything else after `--check` is
         // rejected rather than ignored: a typo that silently checked nothing is the one failure mode a
         // health gate must not have.
@@ -51,15 +51,14 @@ fn main() -> ExitCode {
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--check" => i += 1,
+                "--check" if i == 0 => i += 1,
                 "--device" => match args.get(i + 1) {
-                    Some(d) => {
+                    Some(d) if !d.starts_with("--") && device.is_none() => {
                         device = Some(d.clone());
                         i += 2;
                     }
-                    None => return usage_error("--device needs a path"),
+                    _ => return usage_error("--device needs one path and may only be specified once"),
                 },
-                other if other.starts_with("--") => i += 1,
                 other => {
                     return usage_error(format!(
                         "--check does not take the argument '{other}'; pass a container path to a \
@@ -83,9 +82,12 @@ fn main() -> ExitCode {
         return provision(rest);
     }
 
-    // Everything else needs the editor.
-    banner();
-    ExitCode::SUCCESS
+    if args.is_empty() {
+        banner();
+        ExitCode::SUCCESS
+    } else {
+        usage_error(format!("unknown command '{}'", args[0]))
+    }
 }
 
 /// Parsed flags shared by `save`, `open` and `provision`.
@@ -104,52 +106,35 @@ struct Flags {
 fn parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut path = None;
     let mut passphrase = None;
-    let mut kappa: Option<[u8; 32]> = None;
-    let mut cursor = 0u64;
-    let mut device: Option<String> = None;
+    let mut kappa = None;
+    let mut cursor = None;
+    let mut device = None;
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--passphrase" => {
-                passphrase = args.get(i + 1).cloned();
-                i += 2;
+        let flag = args[i].as_str();
+        if flag.starts_with("--") {
+            if !matches!(flag, "--passphrase" | "--kappa" | "--device" | "--cursor") {
+                return Err(format!("unknown flag '{flag}'"));
             }
-            "--kappa" => {
-                let hex = args
-                    .get(i + 1)
-                    .ok_or_else(|| "--kappa needs 64 hex characters".to_string())?;
-                kappa = Some(parse_kappa(hex)?);
-                i += 2;
+            let value = args.get(i + 1).filter(|v| !v.starts_with("--"))
+                .ok_or_else(|| format!("{flag} needs a value"))?;
+            match flag {
+                "--passphrase" if passphrase.is_none() => passphrase = Some(value.clone()),
+                "--kappa" if kappa.is_none() => kappa = Some(parse_kappa(value)?),
+                "--device" if device.is_none() => device = Some(value.clone()),
+                "--cursor" if cursor.is_none() => {
+                    cursor = Some(value.parse().map_err(|_| format!("--cursor '{value}' is not a number"))?);
+                }
+                _ => return Err(format!("{flag} may only be specified once")),
             }
-            "--device" => {
-                device = Some(
-                    args.get(i + 1)
-                        .ok_or_else(|| {
-                            "--device needs a path; pass the whole stick (e.g. /dev/sdX), not a \
-                             partition"
-                                .to_string()
-                        })?
-                        .clone(),
-                );
-                i += 2;
+            i += 2;
+        } else {
+            if path.is_some() {
+                return Err("only one container path may be specified".to_string());
             }
-            "--cursor" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or_else(|| "--cursor needs a number".to_string())?;
-                cursor = v
-                    .parse()
-                    .map_err(|_| format!("--cursor '{v}' is not a number"))?;
-                i += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag '{other}'"));
-            }
-            other => {
-                path = Some(other.to_string());
-                i += 1;
-            }
+            path = Some(flag.to_string());
+            i += 1;
         }
     }
 
@@ -161,7 +146,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
              Zone A yet"
                 .to_string()
         })?,
-        cursor,
+        cursor: cursor.unwrap_or(0),
         device,
     })
 }
@@ -735,7 +720,15 @@ fn check(device: Option<&str>) -> ExitCode {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::parse_kappa;
+    use super::{parse_flags, parse_kappa};
+
+    #[test]
+    fn flags_reject_missing_values_duplicates_and_extra_paths() {
+        let args = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(parse_flags(&args(&["book", "--passphrase", "--kappa"])).is_err());
+        assert!(parse_flags(&args(&["book", "other"])).is_err());
+        assert!(parse_flags(&args(&["book", "--cursor", "0", "--cursor", "1"])).is_err());
+    }
 
     #[test]
     fn kappa_rejects_non_ascii_without_panicking() {
