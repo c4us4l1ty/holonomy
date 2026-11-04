@@ -162,7 +162,11 @@ fn a_provisioned_container_opens_before_any_save() {
     let mut file = ContainerFile::open(&path, false).expect("open");
     let (opened, document) = open_document(&mut file, &mut source(), &ctx(&pass, 0))
         .expect("a provisioned container must open");
-    assert_eq!(document.as_slice(), b"", "provisioning writes an empty document");
+    assert_eq!(
+        document.as_slice(),
+        b"",
+        "provisioning writes an empty document"
+    );
     assert_eq!(opened.cursor(), 0);
     drop(file);
 
@@ -786,7 +790,10 @@ fn a_second_save_replaces_the_first() {
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) =
         open_document(&mut file, &mut source(), &ctx(&pass, 2)).expect("open at 2");
-    assert_eq!(read_back.as_slice(), b"the second document, longer than the first");
+    assert_eq!(
+        read_back.as_slice(),
+        b"the second document, longer than the first"
+    );
     assert_eq!(opened.cursor(), 2);
     drop(file);
 
