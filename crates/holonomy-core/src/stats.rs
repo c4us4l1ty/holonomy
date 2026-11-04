@@ -266,7 +266,7 @@ mod tests {
         // The gate's actual job: a cipher whose difference is 49.5% rather than 50%. At 1 MiB that
         // is 10σ, so it fails; the point is that the *tolerance* is calibrated so it can.
         let n = 1 << 20;
-        let mut a = vec![0u8; n];
+        let a = vec![0u8; n];
         let mut b = vec![0u8; n];
         // Set exactly 49.5% of the bits in the difference.
         let differing_bits = (n as u64 * 8 * 495) / 1000;
