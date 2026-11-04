@@ -190,7 +190,15 @@ fn credentials_with_prompt(
         Some(value) => **value,
         None => {
             let value = Zeroizing::new(prompt("USB root share (64 hex characters): ")?);
-            parse_kappa(&value)?
+            let parsed = Zeroizing::new(parse_kappa(&value)?);
+            if confirm {
+                let repeated = Zeroizing::new(prompt("Confirm USB root share: ")?);
+                let repeated = Zeroizing::new(parse_kappa(&repeated)?);
+                if *parsed != *repeated {
+                    return Err("USB root shares do not match".into());
+                }
+            }
+            *parsed
         }
     };
     Ok(Credentials {
@@ -808,7 +816,7 @@ mod argument_tests {
     fn prompted_credentials_are_confirmed_and_fail_closed() {
         let flags = parse_flags(&["book".to_string()]).expect("no credentials in arguments");
         let mut replies =
-            vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32)].into_iter();
+            vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32), "AB".repeat(32)].into_iter();
         let credentials = credentials_with_prompt(&flags, true, |_| {
             replies
                 .next()
@@ -817,6 +825,8 @@ mod argument_tests {
         .expect("matching confirmation and valid share");
         assert_eq!(credentials.passphrase.as_bytes(), b"secret");
         assert_eq!(&*credentials.kappa, &[0xab; 32]);
+        let mut wrong_share = vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32), "cd".repeat(32)].into_iter();
+        assert!(credentials_with_prompt(&flags, true, |_| wrong_share.next().ok_or_else(|| "unexpected prompt".to_string())).is_err());
         let mut mismatch = vec!["one".to_string(), "two".to_string()].into_iter();
         assert!(credentials_with_prompt(&flags, true, |_| {
             mismatch
