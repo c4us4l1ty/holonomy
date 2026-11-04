@@ -826,3 +826,18 @@ fn the_document_is_split_evenly_and_only_the_last_slot_is_short() {
     assert_eq!(split_payload(&[]).len(), 1);
     assert!(split_payload(&[])[0].is_empty());
 }
+
+#[test]
+fn save_rejects_provisioning_cursor_without_changing_container() {
+    let path = tempfile("zero-cursor");
+    provision(&path, [0x19u8; SALT_BYTES], 0);
+    let before = std::fs::read(&path).expect("read before");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let error = save(&mut file, &mut source(), &ctx(&pass, 0), b"new")
+        .expect_err("zero is not a successor cursor");
+    assert!(error.contains("at least 1"));
+    drop(file);
+    assert_eq!(std::fs::read(&path).expect("read after"), before);
+    let _ = std::fs::remove_file(&path);
+}

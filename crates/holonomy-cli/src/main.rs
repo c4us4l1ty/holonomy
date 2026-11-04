@@ -175,10 +175,18 @@ fn parse_kappa(hex: &str) -> Result<[u8; 32], String> {
         ));
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let pair = &hex[i * 2..i * 2 + 2];
-        *byte = u8::from_str_radix(pair, 16)
-            .map_err(|_| format!("--kappa has a non-hex byte '{pair}' at position {i}"))?;
+    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        };
+        let high = digit(pair[0])
+            .ok_or_else(|| format!("--kappa has a non-hex character at byte {}", i * 2))?;
+        let low = digit(pair[1])
+            .ok_or_else(|| format!("--kappa has a non-hex character at byte {}", i * 2 + 1))?;
+        out[i] = high << 4 | low;
     }
     Ok(out)
 }
@@ -229,6 +237,9 @@ fn provision(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
+    if flags.cursor == u64::MAX {
+        return usage_error("provision cursor must leave room for a subsequent save");
+    }
     let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
         Some(p) => p,
         None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
@@ -404,7 +415,7 @@ fn help() {
          `--kappa` is the 32-byte USB root share, as 64 hex characters. It is required: this build\n\
          does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
          in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
-         previous save recorded, and 0 for a container that has only been provisioned.\n\
+         previous container recorded for open; for save use that cursor plus one.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
@@ -719,5 +730,23 @@ fn check(device: Option<&str>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::parse_kappa;
+
+    #[test]
+    fn kappa_rejects_non_ascii_without_panicking() {
+        let input = format!("aé{}", "a".repeat(61));
+        assert_eq!(input.len(), 64);
+        assert!(parse_kappa(&input).is_err());
+    }
+
+    #[test]
+    fn kappa_accepts_upper_and_lowercase_hex() {
+        let key = parse_kappa(&"aF".repeat(32)).expect("valid hex");
+        assert_eq!(key, [0xaf; 32]);
     }
 }

@@ -151,9 +151,8 @@ impl ContainerFile {
 
     /// Write the image.
     ///
-    /// One `write_all` at the container's offset, then `sync_all`. A container is a fixed-size
-    /// record; writing it in pieces would leave a window in which the file holds half of one save
-    /// and half of another, and no reader could tell which.
+    /// Writes in place with `write_all` and then `sync_all`. This is not atomic: a failed
+    /// write or crash can leave a partially replaced, unreadable container. Keep a backup.
     pub fn write_image(&mut self, image: &[u8]) -> std::io::Result<()> {
         if !self.writable {
             return Err(std::io::Error::new(
@@ -240,6 +239,14 @@ pub fn save(
         ));
     }
 
+    // Cursor zero is the provisioning window, not a valid successor. Reusing it would
+    // overwrite the new image's pad during ratcheting and make the image unrecoverable.
+    if ctx.cursor == 0 {
+        return Err(
+            "save cursor must be at least 1; use the previous container cursor plus one".into(),
+        );
+    }
+
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
 
@@ -264,7 +271,7 @@ pub fn save(
     //    *writing* and the store subtracts one for the window it is *reading*. Provisioning writes
     //    window 0, so the first real save is cursor 1 and reads window 0 -- which is exactly what
     //    `provision` printed at the end of its run.
-    let old_cursor = ctx.cursor.saturating_sub(1);
+    let old_cursor = ctx.cursor - 1;
     let old_pad = pad
         .window(ctx.kappa_usb, old_cursor)
         .map_err(|e| format!("reading pad window {old_cursor}: {e}"))?;
@@ -297,7 +304,7 @@ pub fn save(
     //    The placement is `epoch_placement(&old_salt)`: the container on disk was written under the
     //    old salt's permutation, and it is the *only* permutation that can read it. This is why the
     //    epoch permutation needs no stored table -- the salt is step 1, and the map follows from it.
-    let _opened: OpenedContainer = open_container(
+    let opened: OpenedContainer = open_container(
         &ReaderRequest {
             image: &old_image,
             passphrase: ctx.passphrase,
@@ -309,6 +316,12 @@ pub fn save(
         epoch_placement(&old_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
+    if opened.cursor() != old_cursor {
+        return Err(format!(
+            "container cursor {} does not match expected previous cursor {old_cursor}; refusing to save",
+            opened.cursor()
+        ));
+    }
 
     // 5-6. A new salt, and a stratum for the *new* container.
     //
@@ -357,8 +370,8 @@ pub fn save(
     //
     //    **After, not before.** Ratcheting first destroys the pad the container on disk was folded
     //    with, so a write that then failed would leave a container nothing can open -- not this
-    //    build, not a later one. Done after, a failed write leaves the pad intact and the previous
-    //    container readable under the cursor it was last written with.
+    //    build, not a later one. Done after, a failed write leaves the old pad intact, but the
+    //    in-place container write can still be partial and leave the previous image unreadable.
     //
     //    **`old_cursor`, not `ctx.cursor`.** The image just written is folded with window `c`, so
     //    ratcheting `c` would overwrite the pad that image needs and it would be unreadable the

@@ -151,12 +151,22 @@ cargo build --release
 ./target/release/holonomy --version
 ```
 
+**Warning: this is an experimental prototype, not a finished or security-reviewed application.**
+Do not use it for sensitive or irreplaceable documents. The CLI takes secrets on the command line,
+which can expose them through process listings and shell history; it does not read the USB root
+share from Zone A. Saves overwrite the container in place and are not crash-atomic. Keep independent
+backups. The reaper and other platform protections are not integrated into a running editor session.
+The stand-in pad is not a physical one-time pad. The CLI does not enforce the documented pad-reuse
+budget across invocations. These limitations must be addressed and independently reviewed before
+production use.
+
 **Status: v5.1.0 is the audited core, not a finished editor.** The container, key schedule, USB pad,
 permutation, duress bookkeeping, watchdog and capture exclusion are implemented; 164 of the 182
 tests execute in CI and all four gate jobs are green. The `wordcraft` document↔container bridge is
 not yet wired.
 
-`holonomy` (the binary) lives in `holonomy-ui`, which pulls in six `wordcraft` crates and their
+The current workspace binary lives in `holonomy-cli`; it offers experimental provision, save, open,
+and check commands. The separate, excluded `holonomy-ui` skeleton pulls in six `wordcraft` crates and their
 pinned `craft-*` git dependencies. That crate has **never been compiled** — the authoring sandbox
 had no route to `crates.io` — so its 18 tests have never run and nothing in the audit relies on
 them. `docs/AUDIT-v5.1.0.md` §8 separates what is proven from what is deferred and why.
