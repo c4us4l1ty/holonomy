@@ -245,18 +245,27 @@ fn check() -> ExitCode {
     );
 
     // ---- Memory. The gate that used to be a placeholder. ----
+    //
+    // What this process has actually done matters to how the number is judged. It verified
+    // constants and probed the host; it did not open the container or run Argon2id. Measuring a few
+    // MiB is therefore correct, and comparing that to the 180 MiB steady-state ceiling would be
+    // comparing an observation to a claim about a different program. `Workload::Idle` says so
+    // explicitly, so the check still fails if a few MiB becomes hundreds.
+    //
+    // The unlock peak is *not* measured here, because it has not happened. Reporting the steady
+    // figure as the peak would be a fabrication of exactly the kind this project exists to avoid,
+    // so the peak is a Deferred with its reason.
     match peak_rss_bytes() {
         Some(rss) => {
-            // Unlock peak is not measured here: this process has not run Argon2id. Passing the
-            // steady-state figure as both would be a fabrication, so the *ceiling* is passed for
-            // the peak term and the report says what was actually measured.
-            let steady = rss as usize;
-            match budgets::check_against_envelope(steady, budgets::UNLOCK_PEAK_CEILING_BYTES) {
+            let measured = rss as usize;
+            match budgets::check_measurement(measured, budgets::Workload::Idle) {
                 Ok(()) => report.push(CheckResult::ok(
-                    "measured RSS is inside the steady-state ceiling",
+                    "measured peak RSS is inside the envelope",
                     format!(
-                        "{} KiB against {} MiB steady (unlock peak not exercised in this process)",
-                        steady / 1024,
+                        "{} KiB against {} MiB ceiling; this process did not unlock, so the \
+                         {} MiB steady-state claim is not being checked here",
+                        measured / 1024,
+                        budgets::UNLOCK_PEAK_CEILING_BYTES / MIB,
                         budgets::STEADY_STATE_CEILING_BYTES / MIB,
                     ),
                 )),
@@ -270,6 +279,11 @@ fn check() -> ExitCode {
              security tool is worse than a visible absence",
         )),
     }
+    report.push(CheckResult::deferred(
+        "steady-state and unlock-peak RSS",
+        "requires opening the container and running Argon2id; run against a real device once one \
+         is attached, because a claim measured without the workload is not a measurement of it",
+    ));
 
     report.push(CheckResult::deferred(
         "capture exclusion",

@@ -209,6 +209,60 @@ pub fn check_against_envelope(
     Ok(())
 }
 
+/// What a measured process actually did.
+///
+/// [`check_against_envelope`] demands a *floor* as well as a ceiling, because it validates a
+/// **claim**: a figure published about the product must be big enough to describe the thing it
+/// claims to describe, and that is how the old 16.60 MiB number fails. A **measurement** answers a
+/// different question. A process that verified constants and probed the host -- which is what
+/// `holonomy --check` does -- legitimately occupies a few MiB, and comparing that to the floor
+/// reports a correct measurement as a violation of a rule about something else. That conflation
+/// made `--check` fail its own CI gate with "claim of 17 MiB is below the 128 MiB floor" while
+/// every actual gate passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Workload {
+    /// The process opened the container and derived keys. The floor applies.
+    Unlocked,
+    /// The process opened the container only. The container floor applies, not the arena floor.
+    Container,
+    /// The process opened nothing: constants, host probes, and its own memory. Only the ceiling
+    /// applies, and no statement is made about the product's footprint.
+    Idle,
+}
+
+impl Workload {
+    /// The floor this workload must clear, if any.
+    pub fn floor_bytes(self) -> usize {
+        match self {
+            Workload::Unlocked => MANDATORY_FLOOR_BYTES,
+            Workload::Container => CONTAINER_RESIDENT_BYTES,
+            Workload::Idle => 0,
+        }
+    }
+}
+
+/// Verify a measurement against the envelope, given what the process did.
+///
+/// Unlike [`check_against_envelope`], which judges a published claim, this never fails for being
+/// *small*. It fails for being too large, or for being too small given a workload that should have
+/// produced a large footprint -- a process claiming to have unlocked a 64 MiB container while
+/// measuring 20 MiB has not unlocked it.
+pub fn check_measurement(measured: usize, workload: Workload) -> Result<(), BudgetViolation> {
+    if measured > UNLOCK_PEAK_CEILING_BYTES {
+        return Err(BudgetViolation::UnlockPeakTooLarge { bytes: measured });
+    }
+    let floor = workload.floor_bytes();
+    if measured < floor {
+        // Reaching here with a floor of zero is impossible, so this arm only fires for a real
+        // discrepancy: the workload says the footprint should be at least `floor` and it is not.
+        return Err(BudgetViolation::ClaimBelowMandatoryFloor {
+            claimed: measured,
+            floor,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +319,43 @@ mod tests {
             "got {err:?}"
         );
         assert!(err.to_string().contains("440"));
+    }
+
+    #[test]
+    fn an_idle_measurement_is_not_judged_against_the_claim_floor() {
+        // The bug this exists to prevent: `holonomy --check` verified constants and probed the
+        // host, measured 17 MiB, and was told "claim of 17 MiB is below the 128 MiB floor". The
+        // measurement was right; the rule was being applied to the wrong kind of number.
+        assert!(check_measurement(17 * MIB, Workload::Idle).is_ok());
+        assert!(check_measurement(1 * MIB, Workload::Idle).is_ok());
+        // The same figure against `check_against_envelope` is still a violation, because there it
+        // is a claim about the product rather than an observation of one process.
+        assert!(check_against_envelope(17 * MIB, 17 * MIB)
+            .unwrap_err()
+            .is_understatement());
+    }
+
+    #[test]
+    fn a_workload_that_should_be_big_cannot_measure_small() {
+        // The floor is not abandoned, it is attached to the workload. A process claiming to have
+        // unlocked the container and reporting 20 MiB has not unlocked it.
+        let err = check_measurement(20 * MIB, Workload::Unlocked).unwrap_err();
+        assert!(err.is_understatement(), "{err:?}");
+        assert_eq!(err.to_string().contains("128"), true, "{err}");
+        // And the container-only rung sits below the full unlock floor, but is still a floor.
+        assert!(Workload::Container.floor_bytes() < Workload::Unlocked.floor_bytes());
+        assert!(check_measurement(20 * MIB, Workload::Container).unwrap_err().is_understatement());
+        assert!(check_measurement(CONTAINER_RESIDENT_BYTES, Workload::Container).is_ok());
+    }
+
+    #[test]
+    fn a_measurement_is_still_capped_by_the_peak_ceiling() {
+        // Idle means "no floor", not "no ceiling". The one direction that always applies is up.
+        assert!(check_measurement(UNLOCK_PEAK_CEILING_BYTES, Workload::Idle).is_ok());
+        let err = check_measurement(UNLOCK_PEAK_CEILING_BYTES + 1, Workload::Idle).unwrap_err();
+        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }), "{err:?}");
+        // ... and a real unlock that fits the ceiling passes on both counts.
+        assert!(check_measurement(300 * MIB, Workload::Unlocked).is_ok());
     }
 
     #[test]
