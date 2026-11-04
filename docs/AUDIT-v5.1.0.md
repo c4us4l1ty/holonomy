@@ -449,7 +449,15 @@ Four jobs, all green on `main`:
 | `invariant gates` | 15 named tests, one per claim in §2–§7, each run individually so a failure names the claim it broke |
 | `memory envelope` | the documented 180/440 MiB envelope fits a 2 GiB host, and the old 16.60 MiB claim is rejected as an understatement |
 
-The items in §1–§7 marked **Pass** above are the ones this covers. There are 74 tests.
+The items in §1–§7 marked **Pass** above are the ones this covers. There are **182 `#[test]`
+functions**, of which 164 run in CI — the 18 in `holonomy-ui` are in the crate that does not link
+here, and the audit counts them rather than pretending they run.
+
+### The UIs's eighteen tests are not evidence
+
+Worth saying plainly: `holonomy-ui` has 18 tests covering capture exclusion and the save shell,
+and none of them have executed. They are counted above and relied on by nothing in this document.
+A test that has never run is a comment with punctuation.
 
 ### Deferred, with the reason
 
