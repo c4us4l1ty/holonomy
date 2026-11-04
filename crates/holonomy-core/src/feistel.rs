@@ -99,8 +99,23 @@ fn round_function(half: u32, key: u32, round: u32) -> u32 {
 }
 
 impl Feistel22 {
+    /// The permutation a provisioned container uses, for the life of the epoch.
+    ///
+    /// Equivalent to [`Feistel22::new`]`(k_perm, 0)` and preferred at call sites, because the
+    /// epoch argument of `new` is a trap: passing a save cursor there gives every save its own
+    /// permutation, and two different bijections over one codomain collide. Save-to-save
+    /// disjointness requires a single `π` with disjoint logical windows; see
+    /// [`Self::logical_sector`].
+    pub fn provisioned(k_perm: &[u8; 32]) -> Self {
+        Self::new(k_perm, 0)
+    }
+
     /// Build a permutation for one epoch. `epoch` is mixed into the round keys, so consecutive
     /// epochs produce unrelated permutations even with a constant `K_perm`.
+    ///
+    /// **Do not pass a save cursor here.** Epochs are for re-provisioning the stick (a fresh
+    /// `k_perm` with a coincidentally fresh epoch number), not for distinguishing saves. See
+    /// [`Self::provisioned`].
     pub fn new(k_perm: &[u8; 32], epoch: u64) -> Self {
         let mut round_keys = expand_round_keys(k_perm);
         let e = epoch as u32;
@@ -217,6 +232,38 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 54 * PAD_SECTORS_PER_SAVE as usize);
+    }
+
+    #[test]
+    fn a_per_save_epoch_would_collide() {
+        // Why `provisioned` exists. Two *different* permutations over one 1.78M-sector codomain
+        // have no reason to keep their 32,768-wide images apart: expected overlap is
+        // 32,768^2 / 1,782,579 ~= 602 sectors per pair. This asserts the failure mode instead of
+        // describing it, so a future refactor that reintroduces a per-save epoch fails here.
+        let mut a = std::collections::HashSet::new();
+        for j in 0..PAD_SECTORS_PER_SAVE {
+            a.insert(Feistel22::new(&k(0x11), 0).permute(Feistel22::logical_sector(0, j)));
+        }
+        let b: std::collections::HashSet<u32> = (0..PAD_SECTORS_PER_SAVE)
+            .map(|j| Feistel22::new(&k(0x11), 1).permute(Feistel22::logical_sector(1, j)))
+            .collect();
+        assert!(
+            !a.is_disjoint(&b),
+            "two distinct permutations happened not to intersect, which is possible but is not \
+             a property to rely on"
+        );
+    }
+
+    #[test]
+    fn one_permutation_keeps_saves_apart() {
+        // The property the pad actually needs, in isolation from the plan builder.
+        let f = Feistel22::provisioned(&k(0x12));
+        let mut seen = std::collections::HashSet::new();
+        for cursor in 0..54u64 {
+            for j in 0..PAD_SECTORS_PER_SAVE {
+                assert!(seen.insert(f.permute(Feistel22::logical_sector(cursor, j))));
+            }
+        }
     }
 
     #[test]

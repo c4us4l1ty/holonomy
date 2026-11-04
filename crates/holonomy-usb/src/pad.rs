@@ -48,9 +48,30 @@ pub struct PadPlan {
 }
 
 impl PadPlan {
-    /// Build the plan for `cursor` (the monotonic save counter) under `k_perm`.
+    /// Build the plan for `cursor` (the monotonic save counter) under a **provisioning**
+    /// permutation.
+    ///
+    /// # One permutation for the life of the epoch, not one per save
+    ///
+    /// This used to pass `cursor` as the Feistel epoch, which gave every save its own unrelated
+    /// permutation. Two different bijections map two different 32,768-wide windows into the *same*
+    /// 1,782,579-sector codomain, so nothing stops them intersecting: expected overlap per pair of
+    /// saves is `32,768² / 1,782,579 ≈ 602` sectors, and it compounds. That is why
+    /// `plans_for_consecutive_saves_are_disjoint` failed -- the code was not doing what the module
+    /// documentation said.
+    ///
+    /// Disjointness requires a *single* bijection `π` under which the save windows are disjoint
+    /// logical ranges. Since `π` is injective, disjoint inputs give disjoint outputs, and the
+    /// property holds exactly. `k_perm` is therefore provisioned once (mixed with the container's
+    /// salt) and `cursor` selects the window rather than the key.
+    ///
+    /// The consequence, stated honestly: `π` is fixed for the container's lifetime, so an
+    /// adversary who obtains `κ_USB` and observes *which* LBAs a save reads learns that save's
+    /// window index -- i.e. its cursor, which is already in the root capsule in plaintext. The
+    /// permutation is a sector-index scrambler that stops a passive bus trace from revealing the
+    /// pad's physical layout, not a pseudonym that hides the save count.
     pub fn for_save(k_perm: &[u8; 32], cursor: u64) -> Self {
-        let feistel = Feistel22::new(k_perm, cursor);
+        let feistel = Feistel22::provisioned(k_perm);
         let mut lbas = Vec::with_capacity(PAD_SECTORS_PER_SAVE as usize);
         for j in 0..PAD_SECTORS_PER_SAVE {
             lbas.push(feistel.permute(Feistel22::logical_sector(cursor, j)));

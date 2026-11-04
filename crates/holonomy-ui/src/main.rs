@@ -83,7 +83,7 @@ fn self_check() -> ExitCode {
     }
 
     // 3. The permutation actually reaches the whole of Zone B.
-    let f = holonomy_core::feistel::Feistel22::new(&[0x5Au8; 32], 0);
+    let f = holonomy_core::feistel::Feistel22::provisioned(&[0x5Au8; 32]);
     let above_2_20 = (0..100_000u32)
         .filter(|&j| f.permute(holonomy_core::feistel::Feistel22::logical_sector(0, j)) >= (1 << 20))
         .count();
