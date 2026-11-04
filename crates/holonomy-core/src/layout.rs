@@ -88,7 +88,7 @@ const _: () = {
     assert!(TOTAL_BLOCKS * SLOT_BYTES == CONTAINER_BYTES);
     // One save of pad is exactly one container: 32,768 sectors x 4,096 bytes. That is the 1:1
     // property the fold depends on, stated as an identity rather than as a comment.
-    assert!(PAD_SECTORS_PER_SAVE as u64 * SECTOR_BYTES == CONTAINER_BYTES as u64);
+    assert!(PAD_SECTORS_PER_SAVE as usize * SECTOR_BYTES == CONTAINER_BYTES);
     assert!(SAVES_BEFORE_DOMAIN_REUSE == 54);
 };
 
