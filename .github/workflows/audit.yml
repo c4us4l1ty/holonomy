@@ -291,13 +291,10 @@ jobs:
         if: failure()
         run: |
           set +e
-          echo "::error::measured-RSS gate failed"
-          cat check.log 2>/dev/null | head -40 | while IFS= read -r line; do
-            [ -n "$line" ] && echo "::error::$line"
-          done
-          grep -E 'peak RSS' check.log 2>/dev/null | while IFS= read -r line; do
-            echo "::error::$line"
-          done
+          # One annotation, not a loop: GitHub keeps about ten per step and drops the remainder, so
+          # a loop over the report loses exactly the lines at the bottom.
+          echo "::error::measured-RSS gate failed: parsed '$(grep -E '^peak RSS' check.log 2>/dev/null | head -1)'"
+          { echo '## holonomy --check (measured RSS)'; echo '```'; cat check.log 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: check exits zero on this runner
         run: |
@@ -307,7 +304,13 @@ jobs:
         if: failure()
         run: |
           set +e
-          grep -E '^\[FAIL' check-exit.log 2>/dev/null | while IFS= read -r line; do
+          # GitHub caps a step at about ten annotations and silently drops the rest. A whole report
+          # of `::error::` lines therefore loses its tail -- which, in a report that ends with the
+          # summary, is the part worth reading. So: one annotation that says what failed, and the
+          # entire report into the step summary, which has no such limit.
+          failed=$(grep -cE '^\[failed' check-exit.log 2>/dev/null || echo 0)
+          echo "::error::--check reported ${failed} failing gate(s); full report in the step summary"
+          grep -E '^\[failed' check-exit.log 2>/dev/null | head -5 | while IFS= read -r line; do
             echo "::error::$line"
           done
-          cat check-exit.log 2>/dev/null | head -40
+          { echo '## holonomy --check'; echo '```'; cat check-exit.log 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
