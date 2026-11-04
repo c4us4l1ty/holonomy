@@ -44,12 +44,8 @@ fn provision(path: &std::path::Path, salt: [u8; SALT_BYTES], cursor: u64) {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let ctx = ctx(&pass, cursor);
     let mut file = ContainerFile::open(path, true).expect("open");
-    first_write(
-        &mut file,
-        &ctx,
-        holonomy_session::SaltBytes::of_unknown_origin(salt),
-    )
-    .expect("first write");
+    first_write(&mut file, &ctx, holonomy_session::SaltBytes::of_unknown_origin(salt))
+        .expect("first write");
 }
 
 #[test]
@@ -130,10 +126,7 @@ fn a_read_only_handle_cannot_save() {
     provision(&path, [0x14u8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let mut file = ContainerFile::open(&path, false).expect("open");
-    assert!(
-        !file.is_writable(),
-        "opened read-only, so is_writable must say so"
-    );
+    assert!(!file.is_writable(), "opened read-only, so is_writable must say so");
     let err = save(&mut file, &ctx(&pass, 1), b"x").unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     let _ = std::fs::remove_file(&path);
@@ -162,10 +155,7 @@ fn consecutive_cursors_read_disjoint_sectors() {
     for cursor in 0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE {
         for j in 0..PAD_SECTORS {
             let sector = sector_index(&[0x31u8; SALT_BYTES], cursor, j);
-            assert!(
-                seen.insert(sector),
-                "sector {sector} reused at save {cursor}"
-            );
+            assert!(seen.insert(sector), "sector {sector} reused at save {cursor}");
         }
     }
     assert_eq!(
@@ -230,12 +220,7 @@ fn a_second_save_replaces_the_first() {
 
     let mut file = ContainerFile::open(&path, true).expect("open");
     save(&mut file, &ctx(&pass, 1), b"the first document").expect("first");
-    save(
-        &mut file,
-        &ctx(&pass, 2),
-        b"the second document, longer than the first",
-    )
-    .expect("second");
+    save(&mut file, &ctx(&pass, 2), b"the second document, longer than the first").expect("second");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");

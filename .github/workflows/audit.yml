@@ -172,7 +172,13 @@ jobs:
         if: failure()
         run: |
           set +e
-          grep -E "^(error|failures:)|panicked at|test result: FAILED" test.log | head -60 | while IFS= read -r line; do
+          # A panic's location and its message are on consecutive lines, and an annotation that
+          # carries only the location is useless: "panicked at store/tests.rs:62:50" says where, not
+          # what. `grep -A2` and `tr` join them onto one line, which is what the annotation shows.
+          grep -A2 "panicked at" test.log | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -20 | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done
+          grep -E "^(error|test result: FAILED)" test.log | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
           grep -E "^---- .* stdout ----$" -A 12 test.log | head -200
