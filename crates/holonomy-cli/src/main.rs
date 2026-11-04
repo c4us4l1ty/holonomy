@@ -170,7 +170,7 @@ fn parse_kappa(hex: &str) -> Result<[u8; 32], String> {
         ));
     }
     let mut out = [0u8; 32];
-    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let digit = |b: u8| match b {
             b'0'..=b'9' => Some(b - b'0'),
             b'a'..=b'f' => Some(b - b'a' + 10),
