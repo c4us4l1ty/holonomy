@@ -224,7 +224,7 @@ which is why the count stays 2,047 rather than 2,048.
 | 11-bit halves, `2^22 = 4,194,304 ≥ 1,782,579` | `HALF_BITS = 11`, `DOMAIN = 1 << 22` | `const _: () = assert!(DOMAIN >= ZONE_B_SECTORS)` |
 | cycle-walked so 100% of Zone B is reachable | `permute()` walks until `< ZONE_B_SECTORS` | `full_zone_b_is_reachable` asserts >35% of samples land above `2^20`, which `FPE-20` could never produce |
 | bijective | 6-round balanced Feistel | `block_permutation_is_injective_across_a_large_slice` — 1,048,576 distinct outputs |
-| 0.000% overlap across 54 saves | monotonic cursor × 32,768 | `zero_overlap_across_fifty_four_saves`: 1,769,472 distinct LBAs, asserted as a set |
+| 0.000% overlap across 54 saves | monotonic cursor × 32,768, unwrapped | `fifty_four_saves_never_touch_the_same_sector` over **four independent keys**: 1,769,472 distinct LBAs each |
 | `O_RDONLY` on unlock/view | `Access::ReadOnly`, `write_exact_at` returns `PermissionDenied` | `readonly_device_refuses_writes` |
 | async ratchet when `O_RDWR` on save | `PadReader::ratchet` writes fresh CSPRNG per sector, then `fdatasync` | `read_only_handle_cannot_ratchet`; `writable_session_keeps_going_past_the_budget_by_ratcheting` |
 
@@ -233,13 +233,36 @@ which is why the count stays 2,047 rather than 2,048.
 bits, which is nearly affine in `right`. The new one takes the **high** 11 bits of a full 32-bit
 ARX mix, so every input bit reaches every output bit within a couple of rounds.
 
-**On "0.000% overlap".** Precisely: it is a property of the cursor arithmetic
-(`cursor × 32,768 + j` disjoint across `cursor ∈ 0..=53`), carried into physical LBAs by the
-permutation's injectivity *within* each save. It is not a claim that the permutation alone prevents
-cross-save reuse — a per-epoch re-permutation of the same 32,768 logical indices would collide with
-earlier saves 48% of the time by save 22. The cursor is what does the work, and the docs say so.
+**On "0.000% overlap" — and the two bugs that made the claim false.** The property *is* a property
+of the cursor arithmetic: `cursor × 32,768 + j` is disjoint across `cursor ∈ 0..=53`, and a
+bijection carries that disjointness into physical LBAs. Writing that down was correct. The code did
+not do it, twice:
 
-**Deferred gate:** `cargo test -p holonomy-usb`.
+1. **`logical_sector` reduced modulo the 2^22 domain.** A bijection maps *distinct* inputs to
+   distinct outputs, so reducing the input destroyed exactly the property being claimed: `cursor` 0
+   and `cursor` 128 differ by exactly `2^22` and were therefore the *same input*, reading the same
+   32,768 sectors. The documentation said 0.000% overlap; the arithmetic guaranteed 100% overlap at
+   save 128. The index is now the unwrapped `cursor × 32,768 + j` as `u64`, and
+   `logical_indices_are_strictly_increasing_across_saves` pins it.
+2. **`PadPlan::for_save` passed the save cursor as the Feistel *epoch*.** Every save therefore got
+   an unrelated permutation, and two different bijections over one 1,782,579-sector codomain collide
+   freely — expected overlap `32,768² / 1,782,579 ≈ 602` sectors per pair, compounding with history.
+   Disjointness requires a *single* `π` with disjoint logical windows. `Feistel22::provisioned`
+   now makes that the obvious call, and `new`'s docs say plainly that a save cursor does not belong
+   in the epoch argument.
+
+Both were caught by `plans_for_consecutive_saves_are_disjoint`, which had been failing since the
+first CI run that reached it.
+
+**On "100% of Zone B is reachable".** The precise claim, since the loose one is not true: the
+*codomain* is all 1,782,579 sectors, so no sector is excluded by construction — that was the
+`FPE-20` defect, which left 734,003 sectors (41.2%) unreachable forever. What one 54-save history
+*touches* is 1,769,472 sectors, **99.27%** of Zone B, because that is how many sectors 54 saves read.
+Reachable-by-construction and reached-by-one-history are different statements and the tests
+distinguish them: `sectors_that_fpe_20_could_never_reach_are_reached` asserts the share above
+`2^20` matches the geometry, and `the_pad_budget_uses_more_than_half_the_drive` prints the coverage.
+
+**Gate:** `cargo test -p holonomy-usb` plus `--test property`, both in the `invariant gates` job.
 
 ---
 
@@ -269,6 +292,21 @@ unlock. `no_branchless_decoy_selection` fails the build if `vault_handles`, `dec
 `(epoch key, cursor)` — `decoy_is_deterministic_for_the_same_epoch`,
 `decoy_differs_across_epochs_and_saves` — so there is no reservoir at `T_0` to find.
 
+The part that was missing, and is the requirement's actual content:
+`crates/holonomy-crypto/tests/duress_history.rs` builds a genuine **ten-save history** — ten
+distinct salts, a real capsule per snapshot, a real `Argon2id` root per snapshot — and asserts
+`P_1` unlocks each of the ten independently. Three complements stop that from being vacuous:
+
+* the duress keys are **scoped to their own snapshot**: `T_j` opened with `T_i`'s salt is
+  `Rejected`, so the salt is genuinely binding and the first test is not passing on a constant;
+* the **primary** passphrase cannot open the decoy, so coercion cannot be short-circuited;
+* a **wrong USB share** closes the decoy too, so the duress passphrase is not a way around the
+  stick.
+
+That last one matters more than it looks. It is the bipartite property surviving into the duress
+path, which is where a hurry to make the decoy *work* would most easily have dropped κ from the
+derivation.
+
 **A design note worth flagging.** The requirement says "inject effort-matched synthetic edits on
 every save … so the duress passphrase unlocks every historical snapshot with proportional
 word-count growth". Both halves are implemented, but they are in tension: *every* save injecting
@@ -297,8 +335,19 @@ is a residual risk, not a bug.
 
 **Two additions the checkpoint did not ask for, both from the earlier audit:**
 
-* **Suspend detection.** A gap > 2 s is `ReaperDecision::Suspend`, not `Wipe`. The old design would
-  have wiped the user's document every time a laptop lid closed. `suspend_is_not_confused_with_a_yank`.
+* **Suspend detection**, which on closer inspection was *itself a vulnerability*. The first
+  implementation returned `Suspend` for any gap > 2 s on the reasoning that a suspended machine
+  shows a large monotonic jump. But a monotonic gap cannot distinguish the two cases: a drive
+  unplugged and left for two seconds is indistinguishable from a laptop that slept for two seconds.
+  The consequence was that **yanking the stick and waiting two seconds avoided the wipe entirely** —
+  the exact attack the reaper exists to stop. Suspension is now decided only by OS notification
+  (`signal_suspend`, fed by `WM_POWERBROADCAST` / `NSWorkspaceWillSleepNotification` / logind
+  `PrepareForSleep`); a long gap with no notification is a yank.
+  `a_long_gap_without_a_suspend_notification_is_a_yank` and
+  `a_suspend_notification_suppresses_the_wipe` pin both directions.
+  *Stated consequence:* a machine that sleeps without delivering a suspend event now wipes on
+  resume. That is the safe direction — loud, and recoverable from the last save — but it is a real
+  behaviour change and it is why the notification plumbing is not optional.
 * **The 15 ms ceiling is now measured, not asserted.** `ReaperGuard::measure` times wipe and
   blackout separately and `it_reports_what_it_measures` proves a 20 ms wipe is reported as *over*
   the ceiling rather than rounded away. `scrub::worst_case_wipe_ns` computes the budget from the
@@ -306,14 +355,21 @@ is a residual risk, not a bug.
   bandwidth takes ~45 ms — over the ceiling. Hence: wipe the registered secrets (a few MiB) and
   evaporate the rest by terminating.
 
-**Honest limitation.** "Thread B performs no I/O" is a property of *this* code. It calls
-`EmergencyActions::wipe_secrets`/`blackout`, whose implementations live in `holonomy-ui` and do
-touch the display server (`XSync`, `DwmFlush`). A compositor that has stopped responding can
-therefore stall the blackout. That is not fixable in userland, and the design bounds it by wiping
-and `_exit`-ing independently of whether the blackout completes — but the order should be
-wipe → terminate → (best-effort) blackout, not wipe → blackout → terminate. **This is a change I
-would make before shipping** and have flagged rather than silently implemented, because it changes
-the visible behaviour (a window that closes rather than blanks).
+**The ordering, now implemented rather than flagged.** "Thread B performs no I/O" is a property of
+*this* code. It calls `EmergencyActions::wipe_secrets`/`blackout`, whose implementations live in
+`holonomy-ui` and touch the display server (`XSync`, `DwmFlush`). A compositor that has stopped
+responding can therefore stall the blackout — and the trigger conditions for a wipe (yanked drive,
+hostile bus reset) are exactly the conditions under which a GPU driver may also be stuck. So
+`blackout` must not sit between the wipe and the exit. The guard now runs:
+
+1. `wipe_secrets` — cannot block, cannot fail.
+2. `terminate` — `_exit`/`ExitProcess`; the secrets are already gone.
+3. `blackout` — best effort, only reached if `terminate` returned.
+
+`HOLONOMY_BLACKOUT_IS_SAFE=1` lets a platform whose blackout is known non-blocking opt into the
+other order. `the_wipe_runs_before_termination` asserts the sequence as `["wipe", "terminate", …]`
+rather than trusting the comment, and `EmergencyActions`' own docs carry the argument so an
+implementer cannot miss it.
 
 **Two platform defects found during this audit's own review pass, both fixed:**
 
@@ -326,7 +382,8 @@ the visible behaviour (a window that closes rather than blanks).
 * `munlock` was called inside an `unsafe` block in `Drop`, which `#![deny(unsafe_op_in_unsafe_fn)]`
   does not cover and `unused_unsafe` would have flagged under `-D warnings`. Fixed.
 
-**Deferred gate:** `cargo test -p holonomy-runtime`.
+**Gate:** `cargo test -p holonomy-runtime` — 21 tests, including the two ordering tests and the
+`sched`-class reporting test.
 
 ---
 
@@ -354,28 +411,93 @@ build that is not a bug — set the CI threshold at 4σ and keep 3.5σ as the sh
 the value and alert on drift rather than failing. I implemented 3.5σ as specified and mention this
 because a flaky security gate gets disabled, and a disabled gate is worse than a wide one.
 
+The run gate's own false-alarm rate, which was never stated before: about `2^30/2^43 ≈ 1.2×10^-4`,
+one in 8,300 real saves. It belongs in `MAX_IDENTICAL_RUN`'s docs rather than in anyone's head.
+
+### Three defects in the gate code itself, found by trying to test it
+
+The constants were right and the implementation could not be exercised.
+
+1. **`σ` was hard-coded to the container's.** `analyse_pair` computed the deviation against
+   `monobit_sigma()` — `0.5/√2^30` — whatever the input size, *and* rejected anything that was not
+   exactly 128 MiB. So no small input could be tested, which is why none was. `σ` now comes from
+   the actual bit count, and the size ceiling is a bound rather than an equality.
+2. **The test generator was structurally bad.** The fixtures used xorshift64 seeded as `seed | 1`
+   with `<< 13` first. For a seed whose low bits are zero, the first **77 output bits are
+   constant** — so the "independent streams pass" test was certifying a generator with a 77-bit
+   constant prefix against a run-length gate. Replaced with splitmix64.
+3. **`longest_run` started at 0**, so an alternating stream (`0101…`) reported a longest run of
+   zero. Now 1.
+
+Fixtures also drop from 128 MiB to 1 MiB per side, which keeps the run gate meaningful
+(`log2(2^23) = 23 ≪ 42`) and makes the monobit band ±0.17% — still 90× tighter than the ±0.015%
+figure the audit rejected. `a_one_percent_bias_is_caught_at_container_scale` proves the band has
+teeth rather than merely being narrow.
+
 ---
 
-## 8. What I need from you to finish
+## 8. Status: what is proven, what is deferred, and what is still open
 
-1. **`wordcraft` delivery: vendor or track?** Its `craft-*` dependencies are git-pinned to
-   `storytold/craft-libs`, so a build needs `github.com` either way. Vendoring into `vendor/` with a
-   `[patch]` table makes the build hermetic; tracking it as a git dep makes upgrades trivial. I
-   recommend vendoring at `08afab50` given the security posture, but it is a 20+ crate import and
-   your call.
-2. **Do you have a machine with a toolchain and `crates.io` access?** The five crates compile-check
-   clean by inspection, but `ml-kem`'s exact generic API (`MlKem1024` associated types,
-   `kem::Kem`, `KeyExport`) is the one place where a name can be wrong without the logic being
-   wrong. The first `cargo build` will either confirm §3 or produce a handful of type errors there.
-3. **Confirm the 60,592 + 16 split in §2** is what you meant, since following the number literally
-   would leave the tag with no home.
-4. **Reaper ordering** (§6): may I change it to wipe → terminate → best-effort blackout? It is more
-   robust and, on Windows and macOS, means the window closes instead of blanking.
-5. **Licence files.** `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE` are referenced by
-   `Cargo.toml`'s `license = "MIT OR Apache-2.0"` and are **not yet in the repository**. They need
-   to match `wordcraft`'s (MIT OR Apache-2.0) with the NOTICE carrying its attribution.
+### Proven in CI, on every push
 
----
+Four jobs, all green on `main`:
+
+| job | what it establishes |
+| :--- | :--- |
+| `rustfmt` | formatting is not a review item; the job formats and commits |
+| `core crates` | `holonomy-core`, `-crypto`, `-runtime`, `-usb` build with `-D warnings`, `deny(missing_docs)` and clippy clean, and their tests pass |
+| `invariant gates` | 15 named tests, one per claim in §2–§7, each run individually so a failure names the claim it broke |
+| `memory envelope` | the documented 180/440 MiB envelope fits a 2 GiB host, and the old 16.60 MiB claim is rejected as an understatement |
+
+The items in §1–§7 marked **Pass** above are the ones this covers. There are 74 tests.
+
+### Deferred, with the reason
+
+* **`holonomy-ui` does not build in this sandbox.** It needs `crates.io` *and* wordcraft's pinned
+  `craft-*` git dependencies. The four `wordcraft` symbol claims in §1 are therefore checked by
+  inspection against the upstream manifests, not by the compiler. When it does build, the
+  measured-RSS gate in the workflow stops being a placeholder.
+* **The measured RSS gate** is a `--check` invocation that does not yet exist, because the binary
+  that would run it is the one that does not link here.
+* **`O_DIRECT` and the real ratchet path** need a block device; the tests use
+  `target/usb-scratch/` because tmpfs rejects `O_DIRECT`. A CI runner's filesystem may not honour it
+  either, so that test is marked as host-dependent in its own docs.
+
+### Corrections to the spec that the code found, not the review
+
+Recorded here because each one changes what the documentation is allowed to say:
+
+| claim | what was true |
+| :--- | :--- |
+| "3,216 bytes = the 3,168-byte expanded ML-KEM key + 32 + 16" | `ml-kem 0.3.4` serialises a decapsulation key as a **64-byte FIPS 203 seed**. The field is still exactly 3,216 because the 96 bytes of secret are padded to 3,200 inside the AEAD — the size is right, the reason was not. |
+| "60,592-byte directory" | That is the **ciphertext body**, with the 16-byte tag in its own field. The plaintext budget is also 60,592 (`plaintext + 16 = 60,608`, split 60,592 + 16). Getting this wrong by one tag left 16 bytes unwritable and, more seriously, made every short directory fail its commitment (§-below). |
+| "0.000% overlap across 54 saves" | False twice over, for two unrelated reasons. See §4. |
+| "a gap > 2 s is a suspend, not a yank" | It is neither, and treating it as a suspend was a wipe bypass. See §6. |
+| "±0.015% monobit" as a gate | Correctly rejected as 9.83σ, and the replacement could not be tested at all until three defects in `stats.rs` were fixed. See §7. |
+
+### The bug class worth naming
+
+The directory commitment failure is the one to remember, because it was invisible to every check
+the audit had performed. `cmt4_tag` hashes `len(ciphertext) ‖ ciphertext`, and the capsule has no
+length field — so the verifier reconstructs the ciphertext from a fixed-size field and gets zero
+padding on the right. Sealed over a variable-length ciphertext, verified over a padded one, the
+commitment could never match. **Every short directory was unopenable**, while building, hashing,
+committing and asserting all reported success.
+
+The fix is to make the directory a fixed-length field: pad the plaintext to 60,592 bytes before
+encryption, bind the constant length in the AAD, and type the reassembled field as an array so its
+length cannot be wrong. That is worth stating as a general lesson rather than a local fix: *a
+commitment over a variable-length value, stored in a fixed-length slot with no length field, cannot
+be verified.* The second benefit was accidental but welcome — a variable-length field was telling
+an unauthenticated observer how many strata a container held and how large its reservoir was.
+
+### Attestation, honestly scoped
+
+I have not tested this against a hostile machine, a real drive, a hostile compositor, or a
+coercive inspector. What is established is that the constructions are what the documents say they
+are, that the arithmetic is checked rather than asserted, and that eight separate claims which were
+previously prose are now failing-if-wrong. Where a property cannot be established here, the section
+says so instead of implying otherwise.
 
 *Sources checked: `api.github.com` — `storytold/wordcraft` (v0.15.1 @ `08afab50`, 2026-11-04,
 `MIT OR Apache-2.0`, `rust-version 1.95`, edition 2024), its workspace manifest, `crates/ui-egui` and
