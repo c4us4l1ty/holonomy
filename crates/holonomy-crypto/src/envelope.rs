@@ -93,6 +93,14 @@ pub struct HybridDecapsulationKey {
     x25519: [u8; X25519_SK_BYTES],
 }
 
+impl std::fmt::Debug for HybridDecapsulationKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the bytes: this is the one value in the crate that must not reach a log, a panic
+        // message or a `dbg!`.
+        f.write_str("HybridDecapsulationKey(<redacted>)")
+    }
+}
+
 /// The public half.
 #[derive(Clone)]
 pub struct HybridEncapsulationKey {
@@ -315,14 +323,17 @@ pub struct MlKem1024X25519;
 
 impl HybridKem for MlKem1024X25519 {
     fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
-        use ml_kem::kem::Generate;
+        use ml_kem::kem::{Generate, KeyExport};
         use ml_kem::MlKem1024;
 
         // `MlKem1024::generate_keypair()` exists but is gated behind ml-kem's `getrandom` feature
         // and returns an opaque pair; going through `try_generate_from_rng` keeps the CSPRNG choice
         // ours (see `crate::rng`) and avoids enabling a second entropy path inside the dependency.
+        // `Generate::try_generate_from_rng` wants a *panicking* `CryptoRng`, so the adapter is
+        // given through `rand_core::UnwrapErr`, which turns its `io::Error` into a panic with the
+        // same message we would have written ourselves.
         let dk = <MlKem1024 as ml_kem::kem::Kem>::DecapsulationKey::try_generate_from_rng(
-            &mut OsRng,
+            &mut rand_core::UnwrapErr(OsRng),
         )
         .expect("OS CSPRNG unavailable");
         let ek = dk.encapsulation_key().clone();
@@ -361,7 +372,7 @@ impl HybridKem for MlKem1024X25519 {
         &self,
         pk: &HybridEncapsulationKey,
     ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
-        use ml_kem::kem::{Encapsulate, Kem};
+        use ml_kem::kem::{Encapsulate, Kem, KeyExport};
         use ml_kem::MlKem1024;
 
         // `EncapsulationKey::new(&Key<Self>)` is the only constructor: a fallible `From<&[u8]>` is
@@ -402,7 +413,14 @@ impl HybridKem for MlKem1024X25519 {
         use ml_kem::MlKem1024;
 
         // Re-expand the seed, decapsulate, drop. The expanded key never has to be serialised.
-        let dk = <<MlKem1024 as Kem>::DecapsulationKey as KeyInit>::new_from_slice(&sk.ml_kem);
+        //
+        // `KeyInit::new_from_slice` returns `Ok` directly only for an input whose length matches
+        // `KeySize`; the seed is 64 bytes and `KeySize` for ML-KEM-1024's decapsulation key is
+        // also 64 (the seed), so this is the infallible branch. If ml-kem ever changes `KeySize`
+        // to the expanded 3,168 bytes, this stops compiling rather than silently reinterpreting
+        // the seed -- which is the failure mode worth having.
+        let dk = <<MlKem1024 as Kem>::DecapsulationKey as KeyInit>::new_from_slice(&sk.ml_kem)
+            .expect("64-byte seed is the decapsulation key's KeySize");
         let ml_ct = ml_kem::Ciphertext::<MlKem1024>::try_from(ct.ml_kem.as_slice())
             .map_err(|_| EnvelopeError::KemRejected)?;
         let ss = dk.decapsulate(&ml_ct);

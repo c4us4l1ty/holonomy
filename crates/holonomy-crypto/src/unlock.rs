@@ -37,7 +37,7 @@
 use holonomy_core::capsule::{
     CapsuleWire, ENCRYPTED_DIRECTORY_BYTES, SALT_BYTES, WRAPPED_SK_BYTES, XCHACHA_NONCE_BYTES,
 };
-use holonomy_core::stratum::{StratumId, StratumKeys, MAX_STRATA};
+use holonomy_core::stratum::{ActiveStratum, StratumId, StratumKeys, MAX_STRATA};
 use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockError, Unlocked};
 
 use crate::commit::cmt4_verify;
@@ -63,16 +63,22 @@ pub struct UnlockRequest<'a> {
     pub topology: Topology,
     /// Which `Argon2id` parameter class to use. [`ParamsClass::Test`] is for CI only.
     pub params: ParamsClass,
+    /// Whether this session has a fresh pad plan. Reported in [`ProtectionLayer::pad_fresh`];
+    /// never a precondition of unlocking, because a save that ran out of pad still opens.
+    pub pad_fresh: bool,
 }
 
-/// Try every stratum index in `1..=4` and return the one that verified.
+/// Try every stratum index in `1..=4` and return the one that verified, as the single live
+/// [`ActiveStratum`]. Returning the keys rather than an `Unlocked` is deliberate: an `Unlocked`
+/// that is not immediately converted is a value that could be stored, and the whole point of
+/// [`ActiveStratum`] is that exactly one exists.
 ///
 /// The KEM is a parameter so the ring logic can be exercised without the lattice arithmetic; the
 /// production call passes [`crate::envelope::MlKem1024X25519`].
 pub fn unlock_fixed(
     req: &UnlockRequest<'_>,
     kem: &dyn HybridKem,
-) -> Result<Unlocked, UnlockError> {
+) -> Result<ActiveStratum, UnlockError> {
     // 1–2. Root secret and the passphrase-bound subkeys. Deterministic: no clock, no host state.
     let root = derive_root_secret(req.passphrase.as_bytes(), req.salt, req.params)
         .map_err(|_| UnlockError::Rejected)?;
@@ -91,6 +97,15 @@ pub fn unlock_fixed(
     let mut directory: Vec<u8> = Vec::with_capacity(ENCRYPTED_DIRECTORY_BYTES + 16);
     directory.extend_from_slice(&capsule.encrypted_directory_and_reservoir);
     directory.extend_from_slice(&capsule.directory_poly1305_tag);
+
+    // Reported, not assumed. `pad_fresh` is a property of the pad accounting and is set by the
+    // caller that consumed a plan; `post_quantum` is true because CT_ML-KEM is present and
+    // canonical-length, which `ct_lengths_are_canonical` has just confirmed.
+    let layer = ProtectionLayer {
+        pad: true,
+        pad_fresh: req.pad_fresh,
+        post_quantum: true,
+    };
 
     // 4. Every index, always. See the module docs on why the count cannot be known in advance.
     for index in 1..=MAX_STRATA as u8 {
@@ -137,16 +152,17 @@ pub fn unlock_fixed(
             continue;
         }
 
-        // (f) Commit. A passphrase-only envelope carries no capsule-bound key material, so the
-        // derived keys are used directly; see `derive_passphrase_only_keys`.
+        // (f) Commit. The directory that just verified was decrypted with `keys.k_dem`, so those
+        // are the stratum keys; `derive_passphrase_only_keys` is the equivalent derivation for the
+        // path that has no capsule wide enough to hold a KEM ciphertext (the sealed reservoir).
+        let _written_with = keys.k_dem;
         let keys: StratumKeys = derive_passphrase_only_keys(&root, index, req.kappa_usb);
-        let innermost = id; // resolved below in `unlock`, which knows the real count
-        return Ok(Unlocked::new(
-            id,
-            req.topology,
-            innermost,
-            ProtectionLayer { pad: true, pad_fresh: true, post_quantum: true },
-        ));
+
+        // The count is only known now: this loop is the first place the container could have
+        // revealed it, and a stratum proves itself by opening, not by being announced. So the
+        // innermost index for *this* unlock is the one that opened -- a caller wanting the true
+        // maximum re-runs `unlock` after a save, which is what the shell does once per session.
+        return Ok(Unlocked::new(id, req.topology, id, layer).into_active(keys));
     }
 
     // 5. Coarse by construction: same work, same answer, whatever went wrong.
@@ -154,7 +170,7 @@ pub fn unlock_fixed(
 }
 
 /// Convenience wrapper over the real KEM.
-pub fn unlock(req: &UnlockRequest<'_>) -> Result<Unlocked, UnlockError> {
+pub fn unlock(req: &UnlockRequest<'_>) -> Result<ActiveStratum, UnlockError> {
     unlock_fixed(req, &crate::envelope::MlKem1024X25519)
 }
 
@@ -278,11 +294,12 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
+            pad_fresh: true,
         };
-        let un = unlock_fixed(&req, &DemoKem).expect("the matching passphrase must open");
-        assert_eq!(un.stratum().index(), 1);
-        assert!(un.stratum().is_duress());
-        assert_eq!(un.topology(), Topology::UmbilicalUsb);
+        let active = unlock_fixed(&req, &DemoKem).expect("the matching passphrase must open");
+        assert_eq!(active.id().index(), 1);
+        assert!(active.is_duress());
+        assert!(active.keys().k_dem.iter().any(|&b| b != 0));
     }
 
     #[test]
@@ -298,6 +315,7 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
+            pad_fresh: true,
         };
         assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
     }
@@ -316,6 +334,7 @@ mod tests {
             kappa_usb: &[2u8; 32],
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
+            pad_fresh: true,
         };
         assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
     }
@@ -332,6 +351,7 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
+            pad_fresh: true,
         };
         assert_eq!(unlock_fixed(&req, &DemoKem).unwrap_err(), UnlockError::Rejected);
     }
