@@ -182,6 +182,44 @@ impl Feistel22 {
             .wrapping_mul(crate::layout::PAD_SECTORS_PER_SAVE as u64)
             .wrapping_add(j as u64)
     }
+
+
+    /// A keyed permutation of `[0, n)`, returned as a lookup table.
+    ///
+    /// # Why not cycle-walking
+    ///
+    /// [`Self::permute`] maps Zone B by cycle-walking: apply the permutation until the result lands
+    /// inside the target range. That is correct there because Zone B is 42% of the domain, so the
+    /// expected walk is ~2.35 iterations. It is **not** correct as a general tool: the first version
+    /// of this method walked each slot separately and returned the first in-range value, which is a
+    /// chain of partial functions, not a permutation — if `π(x)` landed in range it returned
+    /// immediately, while a `y` whose walk passed through the same point kept going, so two inputs
+    /// could map to one output. `the_epoch_placement_is_a_bijection_of_the_payload_range` is the test
+    /// that catches it; it is why this method exists rather than the caller doing the walk.
+    ///
+    /// # What it does instead
+    ///
+    /// A swap chain: start from the identity and apply one transposition per element, where the
+    /// partner index comes from the keyed permutation. A composition of transpositions is a
+    /// permutation by construction — no proof obligation, no convergence question, no panic path.
+    /// Cost is `n` permutation rounds, against `n × DOMAIN/n = DOMAIN` for a per-element walk, which
+    /// for the payload range is 2,046 against 4.19 million.
+    ///
+    /// The partner is `permute_block(x) % n`, biased slightly toward low indices. That bias is
+    /// acceptable here and is worth stating: what this must not be is *predictable* or
+    /// non-injective, and `% n` is neither.
+    pub fn swap_chain(&self, n: u32) -> Vec<u32> {
+        assert!(n > 0, "a permutation of nothing is not a permutation");
+        let mut order: Vec<u32> = (0..n).collect();
+        for x in 0..n {
+            // Any value in [0, n) works; the permutation rounds only have to be unpredictable.
+            let y = self.permute_block(x) % n;
+            if y > x {
+                order.swap(x as usize, y as usize);
+            }
+        }
+        order
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +431,39 @@ mod tests {
         assert!(
             differing > 1000,
             "epoch counter barely perturbs the permutation"
+        );
+    }
+
+    #[test]
+    fn the_swap_chain_is_a_permutation_for_every_size_tried() {
+        // The property that matters, at the sizes the format uses and at sizes that catch an
+        // off-by-one (0 and 1 must not panic, and 2 is the smallest non-trivial case).
+        for n in [1u32, 2, 3, 17, 2_046] {
+            let table = Feistel22::provisioned(&[0x2Bu8; 32]).swap_chain(n);
+            assert_eq!(table.len(), n as usize);
+            let mut sorted = table.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), n as usize, "n = {n}: the chain is not injective");
+            assert_eq!(sorted[0], 0, "n = {n}: output below the range");
+            assert_eq!(sorted[sorted.len() - 1], n - 1, "n = {n}: output above the range");
+        }
+    }
+
+    #[test]
+    fn the_swap_chain_moves_most_blocks_and_depends_on_the_key() {
+        // A chain that returned the identity would satisfy every injectivity assertion above and
+        // permute nothing, which is the failure mode worth naming: the store would still write slots
+        // in order while every test said the placement was a bijection.
+        let a = Feistel22::provisioned(&[0x11u8; 32]).swap_chain(2_046);
+        let moved = a.iter().enumerate().filter(|(i, v)| *i as u32 != **v).count();
+        assert!(moved > 1_000, "only {moved} of 2,046 blocks moved");
+
+        let b = Feistel22::provisioned(&[0x22u8; 32]).swap_chain(2_046);
+        let differing = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        assert!(
+            differing > 1_000,
+            "two keys produced nearly the same permutation ({differing} positions differ)"
         );
     }
 

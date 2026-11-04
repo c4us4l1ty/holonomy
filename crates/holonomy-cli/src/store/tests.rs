@@ -139,7 +139,9 @@ fn the_store_round_trips_one_raw_save_without_the_pad() {
             params: ParamsClass::Test,
             pad_fresh: true,
         },
-        identity_placement,
+        // The container was written by `first_write_unpadded_for_test`, which now uses the epoch
+        // permutation keyed by the salt it was given, so the reader must use the same one.
+        epoch_placement(&salt),
     )
     .expect("the unpadded container must open");
     assert_eq!(opened.cursor(), 0);
@@ -447,7 +449,13 @@ fn the_fold_does_not_move_the_salt_or_the_capsule() {
             params: ParamsClass::Test,
             pad_fresh: true,
         },
-        identity_placement,
+        // The permutation is a function of the salt, and slot 1 of the unfolded image is the salt.
+        epoch_placement(&{
+            let (off, _) = slot_range(SALT_SLOT_INDEX);
+            let mut s = [0u8; SALT_BYTES];
+            s.copy_from_slice(&unfolded[off..off + SALT_BYTES]);
+            s
+        }),
     )
     .expect("the unfolded image must open");
     assert_eq!(opened.cursor(), 0);
@@ -613,6 +621,100 @@ fn the_device_pad_and_the_stand_in_select_the_same_sectors() {
              not reading from where it claims"
         );
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_epoch_placement_is_a_bijection_of_the_payload_range() {
+    // Every property the format depends on, in one place. A placement that failed any of these would
+    // either overwrite a slot with another (not injective), write into the capsule or the salt (out of
+    // range), or leave a payload block permanently unused (not surjective -- which would make the
+    // container's occupancy map a fingerprint of *which* slots a document used).
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, TOTAL_BLOCKS};
+    for salt in [[0x00u8; SALT_BYTES], [0x33u8; SALT_BYTES], [0xFFu8; SALT_BYTES]] {
+        let place = epoch_placement(&salt);
+        let mut seen = vec![false; TOTAL_BLOCKS];
+        for logical in 0..PAYLOAD_SLOTS {
+            let physical = place(logical);
+            assert!(
+                (PAYLOAD_SLOT_BASE..TOTAL_BLOCKS).contains(&physical),
+                "salt {:02x}: slot {logical} placed at block {physical}, which is not a payload block",
+                salt[0]
+            );
+            assert!(
+                !seen[physical],
+                "salt {:02x}: block {physical} used twice -- the placement is not injective",
+                salt[0]
+            );
+            seen[physical] = true;
+        }
+        // Surjective onto exactly the payload range: every payload block is used once.
+        assert_eq!(seen.iter().filter(|&&b| b).count(), PAYLOAD_SLOTS);
+        assert!(!seen[0] && !seen[1], "the capsule and the salt must be untouched");
+    }
+}
+
+#[test]
+fn two_salts_permute_the_same_slot_differently() {
+    // Without this the permutation is just the identity with extra steps. If two epochs
+    // produced the same mapping, a save would leave the layout of the previous one intact and the
+    // whole mechanism would buy nothing.
+    let a = epoch_placement(&[0x11u8; SALT_BYTES]);
+    let b = epoch_placement(&[0x22u8; SALT_BYTES]);
+    let differing = (0..holonomy_core::layout::PAYLOAD_SLOTS)
+        .filter(|&i| a(i) != b(i))
+        .count();
+    let slots = holonomy_core::layout::PAYLOAD_SLOTS;
+    assert!(
+        differing > slots * 99 / 100,
+        "only {differing} of {slots} slots moved between two epochs; the permutation is barely doing anything"
+    );
+}
+
+#[test]
+fn a_saved_payload_is_not_written_in_logical_order() {
+    // The observable consequence, on a real container: after unfolding, the ciphertext of slot 0 must
+    // *not* be at block 2, because block 2 is where an identity placement would have put it. A test
+    // that only checked the placement function in isolation could pass while the store still called
+    // the identity.
+    use holonomy_core::layout::{PAYLOAD_SLOT_BASE, PAYLOAD_SLOTS};
+    let path = tempfile("permuted");
+    let salt = [0x5Du8; SALT_BYTES];
+    provision(&path, salt, 0);
+
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let document = b"a document long enough to occupy exactly one payload slot";
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    save(&mut file, &mut source(), &ctx, document).expect("save");
+    drop(file);
+
+    let raw = std::fs::read(&path).expect("read");
+    let mut unfolded = raw;
+    fold(&mut unfolded, &pad(1));
+
+    // The salt the save chose is in slot 1, and it is what keys the permutation.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut new_salt = [0u8; SALT_BYTES];
+    new_salt.copy_from_slice(&unfolded[salt_off..salt_off + SALT_BYTES]);
+    assert_ne!(new_salt, [0u8; SALT_BYTES], "the save must choose a fresh salt");
+    let place = epoch_placement(&new_salt);
+
+    let flat = place(0);
+    assert_ne!(
+        flat, PAYLOAD_SLOT_BASE,
+        "logical slot 0 landed on the first payload block, which is what the identity placement does"
+    );
+    assert!(flat < PAYLOAD_SLOTS + PAYLOAD_SLOT_BASE);
+
+    // The slot at the permuted position carries ciphertext; the block the identity would have used
+    // is not necessarily empty (another slot may have landed there), so the assertion is about the
+    // mapping rather than about which block is occupied.
+    let (off, len) = slot_range(flat);
+    assert!(
+        unfolded[off..off + len].iter().any(|&b| b != 0),
+        "the block the permutation selected is empty, so nothing was written there"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

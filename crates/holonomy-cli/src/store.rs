@@ -56,6 +56,14 @@
 //! **which** sectors, not what becomes of them; that is why the fold here is over the concatenation
 //! in read order, and why the store must read them in exactly the order `PadPlan` gives.
 //!
+//! # The epoch permutation
+//!
+//! Payload slots are not written in logical order. Each save chooses a fresh salt, and the salt keys
+//! a permutation of the payload block range, so the same document saved twice does not share a
+//! layout. The reader needs the same mapping and recovers it from the salt, which is the first thing
+//! it reads — nothing is stored, because storing it would put a map to the document in the one
+//! structure an adversary reads without a passphrase. See [`epoch_placement`].
+//!
 //! # What is still not here
 //!
 //! Zone A, the 256 MiB AONT+RS region that holds `κ_USB`. `kappa_usb` is therefore an argument to
@@ -271,6 +279,9 @@ pub fn save(
     //    The returned container is deliberately *not* used below except as proof: its stratum holds
     //    keys derived from the old save's KEM keypair, and sealing under those would produce a
     //    capsule and a payload that disagree. See step 5.
+    //    The placement is `epoch_placement(&old_salt)`: the container on disk was written under the
+    //    old salt's permutation, and it is the *only* permutation that can read it. This is why the
+    //    epoch permutation needs no stored table -- the salt is step 1, and the map follows from it.
     let _opened: OpenedContainer = open_container(
         &ReaderRequest {
             image: &old_image,
@@ -280,7 +291,7 @@ pub fn save(
             params: ctx.params,
             pad_fresh: true,
         },
-        identity_placement,
+        epoch_placement(old_salt.as_bytes()),
     )
     .map_err(|e: OpenError| e.to_string())?;
 
@@ -296,6 +307,10 @@ pub fn save(
     // cursor. The *keys* are re-derived from `(passphrase, new salt, κ)`, which is exactly what a
     // reader does, and therefore the only derivation that can work.
     let new_salt = SaltBytes::fresh();
+    // The bytes, before `seal_container` takes the salt by value: the permutation is a function of
+    // them, and a placement derived from a moved-out value would not compile for a reason worth
+    // reading rather than silencing.
+    let new_salt_bytes = *new_salt.as_bytes();
     let slot_bytes = split_payload(payload);
     let sealed: SealedContainer = {
         let stratum = stratum_for(ctx, &new_salt)?;
@@ -305,7 +320,7 @@ pub fn save(
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&new_salt_bytes))
         .map_err(|e| e.to_string())?;
 
     // 7-8. Fold the *new* image with *this* save's window and write.
@@ -373,6 +388,18 @@ pub fn open_document(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, window.as_slice());
 
+    //    The placement comes from the salt, which is in slot 1 of the image we just unfolded. It has
+    //    to be read here rather than passed in: `--cursor` says which pad window to undo, and nothing
+    //    in the caller's arguments says which permutation the file was written under.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut file_salt = [0u8; SALT_BYTES];
+    file_salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
+    if file_salt.iter().all(|&b| b == 0) {
+        return Err(format!(
+            "{} holds no salt after unfolding; the cursor is probably wrong",
+            file.path()
+        ));
+    }
     let opened = open_container(
         &ReaderRequest {
             image: &image,
@@ -382,7 +409,7 @@ pub fn open_document(
             params: ctx.params,
             pad_fresh: true,
         },
-        identity_placement,
+        epoch_placement(&file_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
     let document = opened.payload_bytes();
@@ -488,11 +515,13 @@ pub fn first_write(
     salt: SaltBytes,
 ) -> Result<(), String> {
     let stratum = stratum_for(ctx, &salt)?;
+    // The bytes before `seal_container` consumes the salt: the permutation is a function of them.
+    let salt_bytes = *salt.as_bytes();
     let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
         .map_err(|e| e.to_string())?;
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&salt_bytes))
         .map_err(|e| e.to_string())?;
     let window = pad
         .window(ctx.kappa_usb, ctx.cursor)
@@ -519,23 +548,86 @@ pub(crate) fn first_write_unpadded_for_test(
 ) -> Result<(), String> {
     let salt = SaltBytes::of_unknown_origin(salt);
     let stratum = stratum_for(ctx, &salt)?;
+    let salt_bytes = *salt.as_bytes();
     let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
         .map_err(|e| e.to_string())?;
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&salt_bytes))
         .map_err(|e| e.to_string())?;
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
-/// The identity placement: logical slot `i` at physical block `2 + i`.
+/// `K_perm` for one epoch: `BLAKE2b("HOLONOMY_V51_K_PERM_SLOT" ‖ 0x00 ‖ σ_epoch)`.
 ///
-/// The epoch permutation over payload slots is a separate mechanism from the pad permutation and is
-/// not yet wired into the store. Stated here rather than implied: a container written by this build
-/// has its payload slots in order, which is *less* than the PRD's FR-4.4 asks for, and
-/// `docs/AUDIT-v5.1.0.md` §10 records it as outstanding.
-pub fn identity_placement(i: usize) -> usize {
-    holonomy_core::layout::PAYLOAD_SLOT_BASE + i
+/// Domain-separated from [`pad::k_perm_key`] on purpose. The pad permutation is keyed by `κ_USB`,
+/// because it must be computable before any byte is read; this one is keyed by `σ_epoch`, because it
+/// is a property of the container rather than of the stick. Sharing a domain would make one
+/// permutation a function of the other's key, and a fixed point in either would move a payload slot
+/// onto the salt.
+fn slot_perm_key(salt: &[u8; SALT_BYTES]) -> [u8; 32] {
+    use blake2::{Blake2b512, Digest};
+    let mut h = Blake2b512::new();
+    h.update(b"HOLONOMY_V51_K_PERM_SLOT");
+    h.update([0u8]);
+    h.update(salt);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d[..32]);
+    out
+}
+
+/// The epoch permutation over payload slots: logical slot `i` goes to a block the save's `σ_epoch`
+/// selects.
+///
+/// # Why it is a function and not a stored table
+///
+/// The reader must recover the same mapping, and storing it would put a map to the document in the
+/// very structure an adversary reads without a passphrase. So it is derived: the salt is the first
+/// thing a reader extracts, and `π(salt)` is then cheap to recompute. `holonomy-session`'s
+/// `open_container` takes this as its `placement` argument for exactly that reason.
+///
+/// # Why it is a permutation of the payload range and not of the whole container
+///
+/// `encode_into` pre-marks blocks 0 and 1 — the capsule and the salt — and rejects a placement that
+/// returns either. So the permutation targets `[0, PAYLOAD_SLOTS)` and is shifted by
+/// [`PAYLOAD_SLOT_BASE`], and every output is already a legal payload block.
+///
+/// It is a permutation by construction, not by argument. The first version cycle-walked each slot
+/// individually — apply `π` until the result lands in range — which is how `Feistel22::permute`
+/// handles Zone B and is **not** a permutation when applied per-element to a small range: a slot
+/// whose first application landed in range returned immediately, while a slot whose walk passed
+/// through that same point kept going, so two inputs could map to one output. The swap chain that
+/// replaced it (`holonomy_core::feistel::Feistel22::swap_chain`) applies one transposition per element, and a composition
+/// of transpositions cannot fail to be a permutation. It is also 2,049 times cheaper: 2,046 rounds
+/// against `DOMAIN / PAYLOAD_SLOTS × PAYLOAD_SLOTS = 4.19 million`.
+///
+/// # What this does and does not buy
+///
+/// It stops a container's slot order from being a fingerprint: two saves of the same document do not
+/// share a layout, and the physical position of slot `i` says nothing about `i` to anyone without the
+/// salt. It does **not** hide the slot count or which blocks are in use — every container fills
+/// blocks `2..` contiguously after permutation, so the occupancy map is the same for every container
+/// of the same size. That is what the padding slots in the session reservoir are for, and they are
+/// not wired into this store yet.
+pub fn epoch_placement(salt: &[u8; SALT_BYTES]) -> impl Fn(usize) -> usize {
+    use holonomy_core::layout::{PAYLOAD_SLOT_BASE, PAYLOAD_SLOTS};
+
+    // Built once, as a table: `swap_chain` costs 2,046 permutation rounds, and a save places at most
+    // 2,046 slots, so the table is paid for by one use and every later lookup is free.
+    let feistel = holonomy_core::feistel::Feistel22::provisioned(&slot_perm_key(salt));
+    let table: Vec<u16> = feistel
+        .swap_chain(PAYLOAD_SLOTS as u32)
+        .into_iter()
+        // The chain permutes [0, PAYLOAD_SLOTS); shift it onto payload blocks so every output is a
+        // legal block and neither the capsule (0) nor the salt (1) can be addressed.
+        .map(|block| (block as usize + PAYLOAD_SLOT_BASE) as u16)
+        .collect();
+
+    move |logical: usize| {
+        debug_assert!(logical < PAYLOAD_SLOTS, "logical slot out of range");
+        table[logical] as usize
+    }
 }
 
 /// Split a document into slot-sized pieces.
