@@ -54,10 +54,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use holonomy_core::capsule::CapsuleWire;
 use holonomy_core::layout::{
     slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX, SECTOR_BYTES,
-    SLOT_BYTES,
 };
 use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
@@ -107,6 +105,11 @@ impl ContainerFile {
     }
 
     /// The pad mode this handle corresponds to.
+    ///
+    /// Used by the store's tests to assert that a read-only handle reports `ReadOnly`, which is the
+    /// property `a_read_only_handle_cannot_save` depends on. Not called from `main`, which picks
+    /// the mode by opening the file, so it is `cfg(test)`-visible rather than dead.
+    #[cfg(test)]
     pub fn pad_mode(&self) -> PadMode {
         if self.writable {
             PadMode::ReadWrite
@@ -476,13 +479,6 @@ pub fn split_payload(payload: &[u8]) -> Vec<&[u8]> {
         return vec![&[]];
     }
     payload.chunks(per).collect()
-}
-
-/// Read the capsule out of an image, for the one caller that wants to look at it: `--inspect`.
-pub fn capsule_of(image: &[u8]) -> CapsuleWire {
-    let mut bytes = [0u8; SLOT_BYTES];
-    bytes.copy_from_slice(&image[..SLOT_BYTES]);
-    CapsuleWire(bytes)
 }
 
 #[cfg(test)]
