@@ -1,0 +1,18 @@
+[package]
+name = "holonomy-core"
+description = "Container geometry, capsule layout, 22-bit sector permutation, duress bookkeeping and statistics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zeroize = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"

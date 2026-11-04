@@ -1,0 +1,17 @@
+[package]
+name = "holonomy-usb"
+description = "USB geometry, O_DIRECT aligned I/O, pad plan and sector ratchet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+holonomy-core = { path = "../holonomy-core" }
+libc = { workspace = true }
+getrandom = "0.2"
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"

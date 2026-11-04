@@ -1,0 +1,19 @@
+[package]
+name = "holonomy-runtime"
+description = "Decoupled zero-I/O PHY reaper, secret arenas and the emergency wipe budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+holonomy-core = { path = "../holonomy-core" }
+libc = { workspace = true }
+
+[dev-dependencies]
+holonomy-crypto = { path = "../holonomy-crypto" }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
