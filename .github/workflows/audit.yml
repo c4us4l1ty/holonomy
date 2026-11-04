@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   RUSTFLAGS: "-D warnings"
 
 jobs:
@@ -26,24 +26,82 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
           rustc --version
+          cargo --version
 
-      # `holonomy-ui` is excluded here: it depends on wordcraft, which needs crates.io and the
-      # craft-libs git pins. Everything security-relevant is in the other four crates and must
-      # build and test with nothing but the upstream RustCrypto + dalek + libc + getrandom set.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # `--message-format=short` keeps each diagnostic on one line with `file:line:col: error: ...`,
+      # which is what the annotation step below turns into a check annotation. That matters here
+      # because GitHub's raw job logs live on a blob host this project's CI author cannot reach;
+      # annotations come back through api.github.com instead.
       - name: Build the four core crates
         run: |
-          cargo build -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime --all-targets
+          set -o pipefail
+          cargo build -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
+            --all-targets --message-format=short 2>&1 | tee build.log
+
+      - name: Report compiler errors as annotations
+        if: failure()
+        run: |
+          set +e
+          echo "### build diagnostics (first 60 error lines)"
+          grep -E ': (error|warning)(\[[A-Z0-9]+\])?:' build.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          echo "### context (last 80 lines of the build)"
+          tail -80 build.log
 
       - name: Test the four core crates
         run: |
-          cargo test -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime
+          set -o pipefail
+          cargo test -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
+            --message-format=short 2>&1 | tee test.log
+
+      - name: Report test failures as annotations
+        if: failure()
+        run: |
+          set +e
+          grep -E "^(error|failures:|test .* FAILED)|panicked at" test.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          grep -E "^---- .* stdout ----$" -A 12 test.log | head -200
 
       - name: Clippy
         run: |
-          cargo clippy -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime --all-targets -- -D warnings
+          set -o pipefail
+          cargo clippy -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
+            --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.log
+
+      - name: Report clippy findings as annotations
+        if: failure()
+        run: |
+          set +e
+          grep -E ': (error|warning)(\[[A-Z0-9]+\])?:' clippy.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
       - name: Formatting
-        run: cargo fmt --check
+        run: |
+          set -o pipefail
+          cargo fmt --check 2>&1 | tee fmt.log
+
+      - name: Report formatting as annotations
+        if: failure()
+        run: |
+          set +e
+          echo "### cargo fmt --check diff"
+          head -120 fmt.log
+          grep -E '^Diff in ' fmt.log | head -40 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
   invariants:
     name: invariant gates
@@ -51,6 +109,14 @@ jobs:
     needs: core-crates
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
       - run: rustup toolchain install stable --profile minimal && rustup default stable
 
       # The compile-time assertions in holonomy-core are the deliverable for FR-4.3. A build is the
@@ -91,6 +157,14 @@ jobs:
     needs: core-crates
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
       - run: rustup toolchain install stable --profile minimal && rustup default stable
 
       - name: Documented envelope fits a 2 GiB host
@@ -103,4 +177,4 @@ jobs:
       # when it is, replace with `/usr/bin/time -v ./target/release/holonomy --check` and assert
       # Maximum resident set size <= 180 MiB steady / 440 MiB peak via budgets::check_against_envelope.
       - name: Measured RSS gate (deferred until the editor links)
-        run: 'echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"' 
+        run: 'echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"'
