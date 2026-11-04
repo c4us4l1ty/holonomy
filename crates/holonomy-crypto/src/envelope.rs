@@ -67,7 +67,7 @@ pub struct HybridEncapsulationKey {
 }
 
 /// A ciphertext pair.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HybridCiphertext {
     /// FIPS 203 ciphertext, exactly 1,568 bytes.
     pub ml_kem: [u8; ML_KEM_1024_CT_BYTES],
@@ -415,6 +415,31 @@ pub fn verify_phase_commitments(
         return Err(EnvelopeError::Phase2CommitmentMismatch);
     }
     Ok(())
+}
+
+impl HybridDecapsulationKey {
+    /// Construct from raw halves. **Test-only**: a production keypair comes from
+    /// [`HybridKem::keygen`], which draws from the OS CSPRNG.
+    #[doc(hidden)]
+    pub fn for_test(ml_kem: [u8; ML_KEM_1024_SK_BYTES], x25519: [u8; X25519_SK_BYTES]) -> Self {
+        Self { ml_kem, x25519 }
+    }
+}
+
+impl HybridEncapsulationKey {
+    /// Construct from raw halves. **Test-only.**
+    #[doc(hidden)]
+    pub fn for_test(ml_kem: Vec<u8>, x25519: [u8; X25519_SK_BYTES]) -> Self {
+        Self { ml_kem, x25519 }
+    }
+}
+
+impl SharedSecrets {
+    /// Construct from raw halves. **Test-only.**
+    #[doc(hidden)]
+    pub fn for_test(pq: [u8; 32], ecc: [u8; 32]) -> Self {
+        Self { pq, ecc }
+    }
 }
 
 /// Length check for a pair read out of a capsule, before any crypto touches it.

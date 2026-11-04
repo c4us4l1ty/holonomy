@@ -152,8 +152,13 @@ pub struct Unlocked {
 }
 
 impl Unlocked {
-    /// Only the crypto crate constructs this, after it has verified the capsule.
-    pub(crate) fn new(
+    /// Construct an unlock once the capsule has been authenticated.
+    ///
+    /// `pub` rather than `pub(crate)` because the only caller is `holonomy-crypto`'s
+    /// [`unlock`](holonomy_crypto::unlock) function, and the type is evidence rather than a
+    /// capability on its own: it carries no key material, so minting one proves nothing except
+    /// that a caller has run the checks it claims to have run.
+    pub fn new(
         id: StratumId,
         topology: Topology,
         innermost: StratumId,

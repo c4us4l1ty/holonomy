@@ -145,10 +145,12 @@ impl CapsuleWire {
         Self([0u8; SLOT_BYTES])
     }
 
+    /// The wire bytes, for a direct write to the device.
     pub fn as_bytes(&self) -> &[u8; SLOT_BYTES] {
         &self.0
     }
 
+    /// The wire bytes, for a direct read from the device.
     pub fn as_mut_bytes(&mut self) -> &mut [u8; SLOT_BYTES] {
         &mut self.0
     }
@@ -243,6 +245,7 @@ impl CapsuleWire {
 pub struct EpochSalt(pub [u8; SALT_BYTES]);
 
 impl EpochSalt {
+    /// The 64 salt bytes, as the `Argon2id` salt and as the `K_perm`/`K_whiten` context.
     pub fn as_bytes(&self) -> &[u8; SALT_BYTES] {
         &self.0
     }

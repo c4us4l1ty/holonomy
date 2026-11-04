@@ -80,11 +80,24 @@ pub const HOST_MIN_FREE_BYTES: usize = 512 * MIB;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetViolation {
     /// Steady state exceeds [`STEADY_STATE_CEILING_BYTES`].
-    SteadyStateTooLarge { bytes: usize },
+    SteadyStateTooLarge {
+        /// The measured or projected figure.
+        bytes: usize,
+    },
     /// Unlock peak exceeds [`UNLOCK_PEAK_CEILING_BYTES`].
-    UnlockPeakTooLarge { bytes: usize },
+    UnlockPeakTooLarge {
+        /// The measured or projected figure.
+        bytes: usize,
+    },
     /// Peak plus host floor exceeds physical RAM.
-    DoesNotFitLegacyHost { peak: usize, host_floor: usize, ram: usize },
+    DoesNotFitLegacyHost {
+        /// The unlock peak.
+        peak: usize,
+        /// [`HOST_MIN_FREE_BYTES`].
+        host_floor: usize,
+        /// [`LEGACY_HOST_RAM_BYTES`].
+        ram: usize,
+    },
 }
 
 impl std::fmt::Display for BudgetViolation {

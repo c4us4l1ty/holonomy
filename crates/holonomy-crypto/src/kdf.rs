@@ -58,15 +58,29 @@ impl std::fmt::Debug for RootSecret {
 /// unlock on a slower machine does not silently change the derived key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamsClass {
-    /// 256 MiB / t=4 / p=2. The documented default and the only class v5.1.0 ships enabled.
+    /// 256 MiB / t=4 / p=2. The documented parameters and the only class a real container uses.
     Legacy,
+    /// 8 MiB / t=1 / p=1. **Tests and CI only.** Deriving a container's key with this class makes
+    /// offline passphrase search roughly thirty times cheaper, so it must never be selected by
+    /// anything that touches a user's file; it exists because a test suite that spends 1.5 s and
+    /// 256 MiB per unlock is a test suite that gets marked `#[ignore]`.
+    Test,
 }
 
 impl ParamsClass {
+    /// `(m_cost_kib, t_cost, p_cost)` for this class.
+    pub fn costs(&self) -> (u32, u32, u32) {
+        match self {
+            Self::Legacy => (M_COST_KIB, T_COST, P_COST),
+            Self::Test => (8_192, 1, 1),
+        }
+    }
+
     /// The concrete `Argon2` instance.
     pub fn argon2(&self) -> Result<Argon2<'static>, KdfError> {
-        let params = Params::new(M_COST_KIB, T_COST, P_COST, Some(ROOT_SECRET_BYTES))
-            .map_err(|_| KdfError::InvalidParams)?;
+        let (m, t, p) = self.costs();
+        let params =
+            Params::new(m, t, p, Some(ROOT_SECRET_BYTES)).map_err(|_| KdfError::InvalidParams)?;
         Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
     }
 }

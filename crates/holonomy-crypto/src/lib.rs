@@ -22,6 +22,7 @@
 //! | [`kdf`] | `Argon2id` → labelled subkeys. Deterministic. |
 //! | [`commit`] | `CMT-4` key commitment + committed `XChaCha20-Poly1305`, and the nonce sequence. |
 //! | [`envelope`] | Two-phase `ML-KEM-1024` + `X25519` envelope, `K_DEM` derivation. |
+//! | [`unlock`] | The unlock state machine: passphrase + capsule + κ_USB → one `ActiveStratum`. |
 //! | [`usb_pad`] | The 54-save pad budget and ratchet accounting. |
 //! | [`lock`] | Per-OS page locking, with an honest capability ladder. |
 //! | [`rng`] | The single OS-CSPRNG draw point. |
@@ -36,10 +37,12 @@ pub mod envelope;
 pub mod kdf;
 pub mod lock;
 pub mod rng;
+pub mod unlock;
 pub mod usb_pad;
 
 pub use commit::{cmt4_tag, cmt4_verify, AeadError, CommittedCiphertext};
 pub use envelope::{EnvelopeError, HybridKem, MlKem1024X25519};
 pub use kdf::{derive_root_secret, derive_subkey, ParamsClass, RootSecret};
 pub use lock::{LockCapability, LockReport};
+pub use unlock::{unlock, unlock_fixed, UnlockRequest};
 pub use usb_pad::{PadBudget, PadError, PadMode};

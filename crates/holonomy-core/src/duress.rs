@@ -185,8 +185,11 @@ pub fn base36_token(mut value: u64) -> String {
 /// One observed snapshot, for the growth check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotRecord {
+    /// Monotonic save counter for this snapshot.
     pub save_cursor: u64,
+    /// Cumulative word count of the primary stratum.
     pub primary_words: u64,
+    /// Cumulative word count of the duress stratum.
     pub duress_words: u64,
 }
 
