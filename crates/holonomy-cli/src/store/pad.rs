@@ -170,11 +170,6 @@ impl DevicePad {
         self.device.is_direct()
     }
 
-    /// The device path, for messages.
-    pub fn path(&self) -> &str {
-        self.device.path()
-    }
-
     /// The read plan for one save.
     ///
     /// On a real device this goes through [`PadReader::new`], which verifies the plan is
