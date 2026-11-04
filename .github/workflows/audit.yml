@@ -103,4 +103,4 @@ jobs:
       # when it is, replace with `/usr/bin/time -v ./target/release/holonomy --check` and assert
       # Maximum resident set size <= 180 MiB steady / 440 MiB peak via budgets::check_against_envelope.
       - name: Measured RSS gate (deferred until the editor links)
-        run: echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"
+        run: 'echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"' 
