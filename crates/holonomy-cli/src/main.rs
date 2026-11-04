@@ -57,7 +57,11 @@ fn main() -> ExitCode {
                         device = Some(d.clone());
                         i += 2;
                     }
-                    _ => return usage_error("--device needs one path and may only be specified once"),
+                    _ => {
+                        return usage_error(
+                            "--device needs one path and may only be specified once",
+                        )
+                    }
                 },
                 other => {
                     return usage_error(format!(
@@ -117,14 +121,20 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             if !matches!(flag, "--passphrase" | "--kappa" | "--device" | "--cursor") {
                 return Err(format!("unknown flag '{flag}'"));
             }
-            let value = args.get(i + 1).filter(|v| !v.starts_with("--"))
+            let value = args
+                .get(i + 1)
+                .filter(|v| !v.starts_with("--"))
                 .ok_or_else(|| format!("{flag} needs a value"))?;
             match flag {
                 "--passphrase" if passphrase.is_none() => passphrase = Some(value.clone()),
                 "--kappa" if kappa.is_none() => kappa = Some(parse_kappa(value)?),
                 "--device" if device.is_none() => device = Some(value.clone()),
                 "--cursor" if cursor.is_none() => {
-                    cursor = Some(value.parse().map_err(|_| format!("--cursor '{value}' is not a number"))?);
+                    cursor = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("--cursor '{value}' is not a number"))?,
+                    );
                 }
                 _ => return Err(format!("{flag} may only be specified once")),
             }
