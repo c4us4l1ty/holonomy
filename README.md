@@ -28,7 +28,7 @@ those documents are historical and code and current CI results govern implementa
 | Area | Current state |
 | :--- | :--- |
 | Container and cryptographic primitives | Implemented in the core, crypto, session, USB, and CLI crates; still requires independent review. |
-| CLI container round trip | Experimental `provision`, `save`, and `open` commands; passphrase and root share are supplied as command-line arguments. |
+| CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
 | USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | Wordcraft integration is planned; `holonomy-ui` is a separate skeleton outside the workspace and its editor bridge is not operational. |
@@ -37,7 +37,9 @@ those documents are historical and code and current CI results govern implementa
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
-facilities. `--check` reports several deferred checks and a successful exit is **not** a security
+facilities. Omit `--passphrase` and `--kappa` to use hidden terminal prompts instead. The legacy
+passphrase mapping lowercases input (so ASCII case variants are equivalent) and does **not** perform
+Unicode normalization. Changing that mapping requires a versioned migration for existing containers. `--check` reports several deferred checks and a successful exit is **not** a security
 certification. Platforms, storage behavior, memory locking, and device I/O need further testing on
 real hardware.
 
@@ -171,7 +173,7 @@ The audit workflow runs build, tests, lint, and focused CLI safety regressions. 
 [Actions page](https://github.com/c4us4l1ty/holonomy/actions/workflows/audit.yml) for the actual
 result of a particular commit; a badge is not an independent security audit.
 
-For experimental CLI usage, `--help` documents the required arguments. The provisioned image's
+For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
 `save` needs the **next** cursor. Keep track of it externally. An omitted `--device` selects the
 demo pad, not physical USB protection. Do not paste real secrets into a shell command or point the
@@ -183,7 +185,7 @@ stick for you.
 - Integrate and test the Wordcraft editor and document serialization with the container session.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
 - Design crash-consistent saves and durable pad-use/ratchet accounting, including failure recovery.
-- Replace command-line secret handling and integrate memory, watchdog, suspend, and capture protections.
+- Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
 - Measure resource use and latency under real workloads, and obtain independent cryptographic and security review.
 
 ## License

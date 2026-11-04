@@ -13,6 +13,8 @@
 
 use std::process::ExitCode;
 
+use zeroize::Zeroizing;
+
 use holonomy_core::budgets::{self, MIB};
 use holonomy_core::capsule::{CapsuleWire, ENCRYPTED_DIRECTORY_BYTES};
 use holonomy_core::feistel::{Feistel22, DOMAIN};
@@ -100,8 +102,8 @@ fn main() -> ExitCode {
 /// a binary whose job is to be auditable is a crate somebody has to audit.
 struct Flags {
     path: String,
-    passphrase: String,
-    kappa: [u8; 32],
+    passphrase: Option<Zeroizing<String>>,
+    kappa: Option<Zeroizing<[u8; 32]>>,
     cursor: u64,
     /// The stick's Zone B, if one was named. `None` selects the stand-in pad, and the report says so.
     device: Option<String>,
@@ -126,8 +128,8 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
                 .filter(|v| !v.starts_with("--"))
                 .ok_or_else(|| format!("{flag} needs a value"))?;
             match flag {
-                "--passphrase" if passphrase.is_none() => passphrase = Some(value.clone()),
-                "--kappa" if kappa.is_none() => kappa = Some(parse_kappa(value)?),
+                "--passphrase" if passphrase.is_none() => passphrase = Some(Zeroizing::new(value.clone())),
+                "--kappa" if kappa.is_none() => kappa = Some(Zeroizing::new(parse_kappa(value)?)),
                 "--device" if device.is_none() => device = Some(value.clone()),
                 "--cursor" if cursor.is_none() => {
                     cursor = Some(
@@ -150,14 +152,56 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
 
     Ok(Flags {
         path: path.ok_or_else(|| "a container path is required".to_string())?,
-        passphrase: passphrase.ok_or_else(|| "--passphrase is required".to_string())?,
-        kappa: kappa.ok_or_else(|| {
-            "--kappa is required: the USB root share is half the key, and this build does not read \
-             Zone A yet"
-                .to_string()
-        })?,
+        passphrase,
+        kappa,
         cursor: cursor.unwrap_or(0),
         device,
+    })
+}
+
+/// Credentials held only as long as a command needs them. Prompt buffers and the
+/// copied root share are wiped on drop; command-line arguments remain visible to the OS.
+struct Credentials {
+    passphrase: holonomy_core::unlock::SealedPassphrase,
+    kappa: Zeroizing<[u8; 32]>,
+}
+
+fn credentials_with_prompt(
+    flags: &Flags,
+    confirm: bool,
+    mut prompt: impl FnMut(&str) -> Result<String, String>,
+) -> Result<Credentials, String> {
+    let prompted = flags.passphrase.is_none();
+    let pass = Zeroizing::new(match &flags.passphrase {
+        Some(value) => value.to_string(),
+        None => prompt("Passphrase: ")?,
+    });
+    if confirm && prompted {
+        let repeated = Zeroizing::new(prompt("Confirm passphrase: ")?);
+        if *pass != *repeated {
+            return Err("passphrases do not match".into());
+        }
+    }
+    let passphrase = holonomy_core::unlock::SealedPassphrase::new(&pass)
+        .ok_or_else(|| "the passphrase must be 1..=255 bytes after lowercasing".to_string())?;
+    let kappa = match &flags.kappa {
+        Some(value) => **value,
+        None => {
+            let value = Zeroizing::new(prompt("USB root share (64 hex characters): ")?);
+            parse_kappa(&value)?
+        }
+    };
+    Ok(Credentials {
+        passphrase,
+        kappa: Zeroizing::new(kappa),
+    })
+}
+
+fn credentials(flags: &Flags, confirm: bool) -> Result<Credentials, String> {
+    credentials_with_prompt(flags, confirm, |label| {
+        rpassword::prompt_password(label).map_err(|e| {
+            format!("cannot read credentials from the terminal: {e}")
+        })
     })
 }
 
@@ -205,11 +249,11 @@ fn context<'a>(
 /// `--device` means a real stick, read `O_DIRECT` wherever the kernel allows it. Without it the
 /// stand-in is used, and every caller says so in the same breath as the result, because a demo path
 /// that quietly looks like the real one is how a stand-in ships.
-fn pad_source(flags: &Flags, read_write: bool) -> Result<Box<dyn store::PadSource>, String> {
+fn pad_source(flags: &Flags, kappa: &[u8; 32], read_write: bool) -> Result<Box<dyn store::PadSource>, String> {
     match &flags.device {
         Some(path) => {
             let device =
-                store::pad::DevicePad::open(std::path::Path::new(path), &flags.kappa, read_write)
+                store::pad::DevicePad::open(std::path::Path::new(path), kappa, read_write)
                     .map_err(|e| format!("opening the device {path}: {e}"))?;
             if read_write && !device.can_ratchet() {
                 return Err(format!(
@@ -235,13 +279,13 @@ fn provision(args: &[String]) -> ExitCode {
     if flags.cursor != 0 {
         return usage_error("provision cursor must be 0; pad history is not tracked yet");
     }
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    let credentials = match credentials(&flags, true) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
-    let mut pad = match pad_source(&flags, true) {
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
+    let mut pad = match pad_source(&flags, &credentials.kappa, true) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
@@ -276,9 +320,9 @@ fn save(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    let credentials = match credentials(&flags, false) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
     // The document comes from stdin. A path argument would be a second way to name a secret and a
     // second thing to get wrong; stdin is what an editor and a pipe both produce.
@@ -287,12 +331,12 @@ fn save(args: &[String]) -> ExitCode {
         Err(e) => return usage_error(format!("reading the document from stdin: {e}")),
     };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), true) {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    let mut pad = match pad_source(&flags, true) {
+    let mut pad = match pad_source(&flags, &credentials.kappa, true) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
@@ -350,22 +394,23 @@ fn open(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    let credentials = match credentials(&flags, false) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    let mut pad = match pad_source(&flags, false) {
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
     match store::open_document(&mut file, pad.as_mut(), &ctx) {
         Ok((opened, document)) => {
+            eprintln!("pad: {}", pad.describe());
             eprintln!(
                 "opened {}: stratum L_{}, {} slot(s), save cursor {}",
                 flags.path,
@@ -422,13 +467,16 @@ fn help() {
          \x20   holonomy --help       this text\n\
          \n\
          CONTAINERS:\n\
-         \x20   holonomy provision <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
-         \x20   holonomy save <path> --passphrase P --kappa HEX [--cursor N] [--device D] < document\n\
-         \x20   holonomy open <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
+         \x20   holonomy provision <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
+         \x20   holonomy save <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D] < document\n\
+         \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \n\
-         `--kappa` is the 32-byte USB root share, as 64 hex characters. It is required: this build\n\
-         does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
-         in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
+         Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
+         Argument values may appear in process listings or shell history. The root share is 64 hex\n\
+         characters; this build does not read it from Zone A yet. Passphrases are lowercased for\n\
+         compatibility, so ASCII case variants are equivalent; Unicode normalization is not implemented.\n\
+         \n\
+         `--cursor` is the save counter that selects the pad window; it must be the number the\n\
          previous container recorded for open; for save use that cursor plus one.\n\
          Provision uses 0; saves refuse cursor 54 or higher until pad history is tracked.\n\
          \n\
@@ -750,7 +798,30 @@ fn check(device: Option<&str>) -> ExitCode {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::{parse_flags, parse_kappa, read_document};
+    use super::{credentials_with_prompt, parse_flags, parse_kappa, read_document};
+
+    #[test]
+    fn prompted_credentials_are_confirmed_and_fail_closed() {
+        let flags = parse_flags(&["book".to_string()]).expect("no credentials in arguments");
+        let mut replies = vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32)].into_iter();
+        let credentials = credentials_with_prompt(&flags, true, |_| {
+            replies.next().ok_or_else(|| "unexpected prompt".to_string())
+        }).expect("matching confirmation and valid share");
+        assert_eq!(credentials.passphrase.as_bytes(), b"secret");
+        assert_eq!(&*credentials.kappa, &[0xab; 32]);
+        let mut mismatch = vec!["one".to_string(), "two".to_string()].into_iter();
+        assert!(credentials_with_prompt(&flags, true, |_| {
+            mismatch.next().ok_or_else(|| "unexpected prompt".to_string())
+        }).is_err());
+        assert!(credentials_with_prompt(&flags, false, |_| Err("terminal unavailable".into())).is_err());
+    }
+
+    #[test]
+    fn explicit_credentials_do_not_prompt() {
+        let flags = parse_flags(&["book".into(), "--passphrase".into(), "Secret".into(), "--kappa".into(), "ab".repeat(32)]).expect("arguments");
+        let credentials = credentials_with_prompt(&flags, true, |_| Err("unexpected prompt".into())).expect("explicit credentials");
+        assert_eq!(credentials.passphrase.as_bytes(), b"secret");
+    }
 
     #[test]
     fn input_is_bounded_and_exact_limit_is_accepted() {
