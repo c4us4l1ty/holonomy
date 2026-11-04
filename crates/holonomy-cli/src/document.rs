@@ -21,8 +21,25 @@ pub struct DocumentSessionOptions {
     pub writable: bool,
     /// Transport represented by the supplied root share.
     pub topology: Topology,
-    /// Key derivation settings; `Test` is for tests only.
-    pub params: ParamsClass,
+    // Private so production frontends cannot select the weak test KDF profile.
+    params: ParamsClass,
+}
+
+impl DocumentSessionOptions {
+    /// Construct options using the production Argon2id parameter profile.
+    pub fn new(cursor: u64, writable: bool, topology: Topology) -> Self {
+        Self {
+            cursor,
+            writable,
+            topology,
+            params: ParamsClass::Legacy,
+        }
+    }
+
+    /// The Argon2id profile used for this session.
+    pub fn params(&self) -> ParamsClass {
+        self.params
+    }
 }
 
 /// Whether a session may initiate another save.

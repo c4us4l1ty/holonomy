@@ -80,7 +80,9 @@ root capsule ── unwrap secret ──► ML-KEM-1024 + X25519 decapsulation
                    shared secrets + ciphertexts + κ_USB ──► K_DEM
 ```
 
-The CLI's legacy Argon2id parameters are 256 MiB, four iterations, and two lanes. The code uses
+The CLI's legacy Argon2id parameters are 256 MiB, four iterations, and two lanes. The higher-level
+document-session options use that profile; the low-level experimental store still exposes a
+weaker test-only profile and must not be used with it for real data. The code uses
 ML-KEM-1024, X25519, XChaCha20-Poly1305, and a BLAKE2b-based commitment construction. The
 non-circular separation of `K_unwrap` and `K_DEM` is a Holonomy design choice, not a claim that
 these primitives or the resulting protocol are novel or formally proven. The present CLI requires
