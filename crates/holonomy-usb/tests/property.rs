@@ -25,8 +25,11 @@
 
 use std::collections::HashSet;
 
-use holonomy_core::feistel::{Feistel22, DOMAIN};
+use holonomy_core::feistel::DOMAIN;
 use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, ZONE_B_SECTORS};
+
+/// `ZONE_B_SECTORS` is a `u32`; comparisons against lengths and `u64` arithmetic want this form.
+const ZONE_B_SECTORS_U64: u64 = ZONE_B_SECTORS as u64;
 use holonomy_usb::pad::PadPlan;
 
 fn key(seed: u8) -> [u8; 32] {
@@ -57,12 +60,13 @@ fn fifty_four_saves_never_touch_the_same_sector() {
     // Across several independent keys, so this is not a lucky key.
     for seed in [0x01u8, 0x5A, 0xA5, 0xFF] {
         let seen = full_history(&key(seed));
+        // `SAVES_BEFORE_DOMAIN_REUSE` is a u64 and a HashSet length is usize; compare as u64.
         assert_eq!(
-            seen.len(),
-            SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as usize,
+            seen.len() as u64,
+            SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as u64,
             "seed {seed:#04x}: {} distinct sectors, expected {}",
             seen.len(),
-            SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as usize
+            SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as u64
         );
     }
 }
@@ -71,12 +75,12 @@ fn fifty_four_saves_never_touch_the_same_sector() {
 fn every_sector_read_is_inside_zone_b() {
     // Off-by-one here is a write past the end of the pad and into partition 1's launch stub.
     let seen = full_history(&key(0x22));
-    assert!(seen.iter().all(|&lba| (lba as u64) < ZONE_B_SECTORS));
+    assert!(seen.iter().all(|&lba| (lba as u64) < ZONE_B_SECTORS_U64));
     // And the maximum observed is close to the top, not clustered in the low half — the failure
     // mode FPE-20 had.
     let max = *seen.iter().max().expect("a 54-save history is not empty");
     assert!(
-        (max as u64) > ZONE_B_SECTORS * 3 / 4,
+        (max as u64) > ZONE_B_SECTORS_U64 * 3 / 4,
         "highest sector reached is {max} of {ZONE_B_SECTORS}"
     );
 }
@@ -87,7 +91,7 @@ fn sectors_that_fpe_20_could_never_reach_are_reached() {
     // any sector >= 2^20. 41.2% of Zone B sits above that line.
     let seen = full_history(&key(0x33));
     let above = seen.iter().filter(|&&lba| lba >= (1 << 20)).count();
-    let expected_share = (ZONE_B_SECTORS - (1 << 20)) as f64 / ZONE_B_SECTORS as f64;
+    let expected_share = (ZONE_B_SECTORS_U64 - (1 << 20)) as f64 / ZONE_B_SECTORS_U64 as f64;
     let observed_share = above as f64 / seen.len() as f64;
     // A permutation is injective, not uniform, but over 1.77M draws from 1.78M sectors the
     // observed share should be very close. Generous band: this is a construction check, not a
@@ -105,12 +109,12 @@ fn sectors_that_fpe_20_could_never_reach_are_reached() {
 fn the_possible_sector_count_is_what_the_geometry_says() {
     // The arithmetic the whole budget rests on, checked against the constants rather than restated.
     assert_eq!(DOMAIN, 4_194_304);
-    assert_eq!(ZONE_B_SECTORS, 1_782_579);
-    assert!((ZONE_B_SECTORS as u64) * 4_096 == 7_299_043_584);
+    assert_eq!(ZONE_B_SECTORS_U64, 1_782_579);
+    assert_eq!(ZONE_B_SECTORS_U64 * 4_096, 7_299_043_584);
     // 54 saves fit; 55 do not. Pigeonhole, so this is a fact about the device.
     let per_save = PAD_SECTORS_PER_SAVE as u64;
-    assert!(SAVES_BEFORE_DOMAIN_REUSE as u64 * per_save <= ZONE_B_SECTORS as u64);
-    assert!((SAVES_BEFORE_DOMAIN_REUSE as u64 + 1) * per_save > ZONE_B_SECTORS as u64);
+    assert!(SAVES_BEFORE_DOMAIN_REUSE * per_save <= ZONE_B_SECTORS_U64);
+    assert!((SAVES_BEFORE_DOMAIN_REUSE + 1) * per_save > ZONE_B_SECTORS_U64);
 }
 
 #[test]
@@ -119,7 +123,7 @@ fn the_pad_budget_uses_more_than_half_the_drive() {
     // 54 saves cover 1,769,472 of 1,782,579 sectors: 99.3%. Anything much lower means the
     // construction is wasting Zone B again.
     let seen = full_history(&key(0x44));
-    let coverage = seen.len() as f64 / ZONE_B_SECTORS as f64;
+    let coverage = seen.len() as f64 / ZONE_B_SECTORS_U64 as f64;
     assert!(
         coverage > 0.99,
         "54 saves cover {:.2}% of Zone B; the budget is supposed to use almost all of it",
@@ -148,9 +152,6 @@ fn each_single_save_is_collision_free_and_covers_its_own_window() {
     for cursor in [0u64, 1, 26, 53] {
         let plan = PadPlan::for_save(&key(0x66), cursor);
         assert_eq!(plan.len(), PAD_SECTORS_PER_SAVE as usize);
-        assert!(
-            plan.is_collision_free(),
-            "save {cursor} plans a sector twice"
-        );
+        assert!(plan.is_collision_free(), "save {cursor} plans a sector twice");
     }
 }
