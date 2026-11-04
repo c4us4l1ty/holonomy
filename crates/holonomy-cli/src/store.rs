@@ -231,7 +231,7 @@ pub fn save(
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
     let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
     let mut old_salt = [0u8; SALT_BYTES];
-    old_salt.copy_from_slice(&old_image[salt_off..salt_off + old_salt.len()]);
+    old_salt.copy_from_slice(&old_image[salt_off..salt_off + SALT_BYTES]);
     if old_salt.iter().all(|&b| b == 0) {
         return Err(format!(
             "{} holds no salt; it has never been written, so there is no pad window to consume",
@@ -266,6 +266,11 @@ pub fn save(
     // 5-6. A new salt, then the new container under it.
     let stratum: &ActiveStratum = &opened.stratum;
     let new_salt = SaltBytes::fresh();
+    // The bytes are copied out *before* the salt is moved into `seal_container`, because
+    // `SaltBytes` zeroizes on drop and is consumed there: borrowing it afterwards is not allowed,
+    // and rightly so. This copy is the salt the container is written under, and it is what the pad
+    // window below is keyed by -- the same value the next reader will find in slot 1.
+    let new_salt_bytes = *new_salt.as_bytes();
     let slots = split_payload(payload);
     let sealed: SealedContainer = seal_container(
         stratum,
@@ -284,7 +289,7 @@ pub fn save(
     // 7-8. Fold the new window over it and write. The window is re-read rather than reused: the
     //    new salt re-keys the permutation, so it is a different 32,768 sectors, and reusing the
     //    old buffer would write a container under the previous save's pad.
-    let new_pad = pad_window_for_save(new_salt.as_bytes(), ctx.cursor);
+    let new_pad = pad_window_for_save(&new_salt_bytes, ctx.cursor);
     fold(&mut image, &new_pad);
     let digest = holonomy_session::seal::image_digest(&image);
     file.write_image(&image).map_err(|e| e.to_string())?;
@@ -307,7 +312,7 @@ pub fn open_document(
     let mut image = file.read_image().map_err(|e| e.to_string())?;
     let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
     let mut salt = [0u8; SALT_BYTES];
-    salt.copy_from_slice(&image[salt_off..salt_off + salt.len()]);
+    salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
     let pad = pad_window_for_save(&salt, ctx.cursor);
     fold(&mut image, &pad);
 
