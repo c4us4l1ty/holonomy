@@ -157,9 +157,13 @@ jobs:
         run: |
           cargo test -p holonomy-core zero_overlap_across_fifty_four_saves -- --nocapture
           cargo test -p holonomy-usb plans_for_consecutive_saves_are_disjoint -- --nocapture
+          cargo test -p holonomy-usb --test property -- --nocapture
 
       - name: FPE-22 reaches the whole of Zone B
-        run: cargo test -p holonomy-core full_zone_b_is_reachable -- --nocapture
+        run: |
+          cargo test -p holonomy-core full_zone_b_is_reachable -- --nocapture
+          cargo test -p holonomy-usb sectors_that_fpe_20_could_never_reach_are_reached -- --nocapture
+          cargo test -p holonomy-usb the_pad_budget_uses_more_than_half_the_drive -- --nocapture
 
       - name: Statistical gates use the corrected constants
         run: |
