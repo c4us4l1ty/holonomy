@@ -38,8 +38,8 @@ use blake2::{Blake2b512, Digest};
 
 use holonomy_core::capsule::{CapsuleWire, StratumRootCapsuleV5};
 use holonomy_core::layout::{
-    slot_range, CONTAINER_BYTES, PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, SALT_BYTES, SALT_OFFSET,
-    SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS,
+    slot_range, CONTAINER_BYTES, PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, SALT_BYTES, SALT_SLOT_INDEX,
+    SLOT_BYTES, TOTAL_BLOCKS,
 };
 use holonomy_core::stratum::{ActiveStratum, StratumKeys};
 use holonomy_crypto::commit::{
@@ -439,8 +439,9 @@ mod tests {
 
         // Root capsule in slot 0, salt in slot 1, payload where placement said.
         assert_eq!(&image[..SLOT_BYTES], sealed.capsule.as_bytes());
+        let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
         assert_eq!(
-            &image[SALT_OFFSET..SALT_OFFSET + SALT_BYTES],
+            &image[salt_off..salt_off + SALT_BYTES],
             sealed.salt.as_bytes()
         );
 
@@ -488,8 +489,8 @@ mod tests {
         )
         .expect("directory opens");
         // `open_directory` returns the fixed-length array, so no copy is needed to know its size.
-        let ledger =
-            crate::directory::DirectoryLedger::decode(&plain, &[commitment]).expect("decode");
+        let ledger = crate::directory::DirectoryLedger::decode(&plain, &[commitment])
+            .expect("decode");
         assert_eq!(ledger.cursor, 54);
         assert_eq!(ledger.stratum, 3);
         assert_eq!(ledger.slot_count(), 1);
@@ -516,10 +517,7 @@ mod tests {
             &commitment,
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            SealError::Aead(AeadError::CommitmentMismatch)
-        ));
+        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
     }
 
     #[test]
@@ -538,10 +536,7 @@ mod tests {
             &sealed.slots[0].commitment,
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            SealError::Aead(AeadError::CommitmentMismatch)
-        ));
+        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
     }
 
     #[test]
@@ -560,10 +555,7 @@ mod tests {
         // A colliding placement is refused rather than silently writing the same block twice.
         let two = seal_container(&s, &[b"x", b"y"], salt(0x72), 0, &KAPPA).expect("seal");
         let err = two.encode_into(&mut image, |_| 2).unwrap_err();
-        assert!(
-            matches!(err, SealError::BadPlacement { slot: 1, .. }),
-            "{err}"
-        );
+        assert!(matches!(err, SealError::BadPlacement { slot: 1, .. }), "{err}");
     }
 
     #[test]
