@@ -43,10 +43,10 @@
 
 use blake2::{Blake2b512, Digest};
 use holonomy_core::layout::{MAX_STRATA, PAYLOAD_SLOTS, SLOT_BYTES};
-pub use holonomy_crypto::commit::DIRECTORY_VERSION;
 #[cfg(test)]
 use holonomy_crypto::commit::NONCE_BYTES;
 use holonomy_crypto::commit::{CMT4_TAG_BYTES, DIRECTORY_PLAINTEXT_BYTES};
+pub use holonomy_crypto::commit::DIRECTORY_VERSION;
 
 use crate::seal::{SealError, SealedPayloadSlot};
 
@@ -425,9 +425,7 @@ mod tests {
         let s = vec![slot(64)];
         let commits = commitments_of(&s);
         for cursor in [0u64, 1, 53, 54, u64::MAX] {
-            let field = DirectoryLedger::new(3, cursor, &s)
-                .encode(&commits)
-                .unwrap();
+            let field = DirectoryLedger::new(3, cursor, &s).encode(&commits).unwrap();
             let back = DirectoryLedger::decode(&field, &commits).unwrap();
             assert_eq!(back.cursor, cursor);
             assert_eq!(back.stratum, 3);

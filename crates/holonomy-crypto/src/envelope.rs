@@ -27,9 +27,12 @@
 //!   been built from the crates the PRD named. It is not needed either: the whole 64 KiB root
 //!   block is stream-whitened with `XChaCha20(K_whiten)`, so the on-disk bytes are uniform
 //!   regardless of what the ephemeral key looks like. The field is a plain `X25519` public key.
-//! * **No `SK_stratum` retention.** It is unwrapped, used, and dropped before `K_DEM` is returned.
-//!   Only `PK_stratum` survives, which is what lets a background save encapsulate without the
-//!   private key present.
+//! * **No long-lived `SK_stratum`.** [`create_envelope`] generates a keypair per save, encapsulates,
+//!   and drops the decapsulation key before it returns; the unlock path unwraps `SK_stratum`, uses
+//!   it to decapsulate, and drops it before `K_DEM` reaches the caller. What survives is
+//!   `K_unwrap`, which is derived from the passphrase and can be re-derived at any time, and the
+//!   *ciphertext*. That is what lets a background save encapsulate again without the private key:
+//!   it has `K_unwrap` and generates a fresh keypair, so it never needs the old one.
 
 use blake2::{Blake2b512, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};

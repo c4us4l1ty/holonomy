@@ -394,6 +394,8 @@ mod tests {
     use super::*;
     use holonomy_core::stratum::StratumId;
     use holonomy_core::unlock::{ProtectionLayer, Topology, Unlocked};
+    use holonomy_crypto::envelope::HybridKem;
+    use holonomy_crypto::kdf::{derive_subkey, labels, RootSecret};
 
     /// Stand-in for the USB root share. Present in every call because the parameter is what keeps
     /// the bipartite property from being quietly dropped.
@@ -421,6 +423,36 @@ mod tests {
 
     fn salt(seed: u8) -> SaltBytes {
         SaltBytes::of_unknown_origin([seed; SALT_BYTES])
+    }
+
+    /// A root secret with the given first byte, so a test can rebuild `K_unwrap` the way an opener
+    /// does.
+    fn root(seed: u8) -> RootSecret {
+        RootSecret([seed; 64])
+    }
+
+    /// Open a capsule's envelope and return the `K_DEM` the directory was sealed with.
+    ///
+    /// This mirrors `holonomy_crypto::unlock` deliberately and narrowly: phase 1 unwraps `SK_stratum`
+    /// with a κ-free `K_unwrap`, phase 2 decapsulates, and `derive_dem_key` rebuilds the key from the
+    /// shared secrets, both ciphertexts, `K_unwrap` and κ. It does not check the commitments, because
+    /// the point of this helper is to reach the directory — the commitments have their own tests.
+    fn envelope_keys_for_test(
+        capsule: &CapsuleWire,
+        k_unwrap: &[u8; 32],
+        kappa: &[u8; 32],
+    ) -> Option<StratumKeys> {
+        use holonomy_crypto::envelope::{
+            derive_dem_key, unwrap_stratum_key, HybridCiphertext, MlKem1024X25519,
+        };
+        let c = capsule.to_capsule();
+        let dk = unwrap_stratum_key(k_unwrap, &c.sk_unwrap_nonce, &c.wrapped_stratum_sk).ok()?;
+        let ct = HybridCiphertext {
+            ml_kem: c.ct_ml_kem_1024,
+            x25519: c.ct_x25519,
+        };
+        let ss = MlKem1024X25519.decapsulate(&dk, &ct).ok()?;
+        Some(derive_dem_key(&ss, &ct, k_unwrap, kappa))
     }
 
     /// The identity placement the store replaces with the epoch permutation.
@@ -482,12 +514,18 @@ mod tests {
             &capsule.encrypted_directory_and_reservoir,
             &capsule.directory_poly1305_tag,
         );
-        let plain = holonomy_crypto::commit::open_directory(
-            &keys(0x40).k_dem,
-            &capsule.directory_nonce,
-            &field,
-        )
-        .expect("directory opens");
+        // The directory is sealed under the *envelope-derived* `K_DEM`, not under the stratum's own
+        // `k_dem`: it is written by the save path that owns `SK_stratum` (which lets a background
+        // save encapsulate without the private key present), whereas the vault blob is sealed under
+        // the static key. Reading it therefore needs the envelope, which is opened the same way the
+        // unlock path opens it. This test is what pins that down -- guessing the stratum's key fails
+        // here rather than in review.
+        let k_unwrap = derive_subkey(&root(0x40), labels::K_UNWRAP, &[3u8, 0]).0;
+        let dem =
+            envelope_keys_for_test(&capsule, &k_unwrap, &KAPPA).expect("envelope opens");
+        let plain =
+            holonomy_crypto::commit::open_directory(&dem.k_dem, &capsule.directory_nonce, &field)
+                .expect("directory opens");
         // `open_directory` returns the fixed-length array, so no copy is needed to know its size.
         let ledger =
             crate::directory::DirectoryLedger::decode(&plain, &[commitment]).expect("decode");
@@ -517,10 +555,7 @@ mod tests {
             &commitment,
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            SealError::Aead(AeadError::CommitmentMismatch)
-        ));
+        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
     }
 
     #[test]
@@ -539,10 +574,7 @@ mod tests {
             &sealed.slots[0].commitment,
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            SealError::Aead(AeadError::CommitmentMismatch)
-        ));
+        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
     }
 
     #[test]
@@ -561,10 +593,7 @@ mod tests {
         // A colliding placement is refused rather than silently writing the same block twice.
         let two = seal_container(&s, &[b"x", b"y"], salt(0x72), 0, &KAPPA).expect("seal");
         let err = two.encode_into(&mut image, |_| 2).unwrap_err();
-        assert!(
-            matches!(err, SealError::BadPlacement { slot: 1, .. }),
-            "{err}"
-        );
+        assert!(matches!(err, SealError::BadPlacement { slot: 1, .. }), "{err}");
     }
 
     #[test]
