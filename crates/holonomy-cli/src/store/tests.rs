@@ -158,8 +158,8 @@ fn a_provisioned_container_opens_before_any_save() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
 
     let mut file = ContainerFile::open(&path, false).expect("open");
-    let (opened, document) =
-        open_document(&mut file, &mut source(), &ctx(&pass, 0)).expect("a provisioned container must open");
+    let (opened, document) = open_document(&mut file, &mut source(), &ctx(&pass, 0))
+        .expect("a provisioned container must open");
     assert_eq!(document, b"", "provisioning writes an empty document");
     assert_eq!(opened.cursor(), 0);
     drop(file);
@@ -186,8 +186,13 @@ fn the_first_save_after_provisioning_succeeds() {
     let ctx = ctx(&pass, 1);
 
     let mut file = ContainerFile::open(&path, true).expect("open");
-    save(&mut file, &mut source(), &ctx, b"the first thing written by a user")
-        .expect("the first save must succeed");
+    save(
+        &mut file,
+        &mut source(),
+        &ctx,
+        b"the first thing written by a user",
+    )
+    .expect("the first save must succeed");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
@@ -335,7 +340,8 @@ fn a_container_written_under_one_stick_does_not_open_under_another() {
     // The right stick still opens it, so the refusal above is not just "everything fails".
     let ctx = ctx(&pass, 0);
     let mut file = ContainerFile::open(&path, false).expect("open");
-    open_document(&mut file, &mut source(), &ctx).expect("the stick it was written with must open it");
+    open_document(&mut file, &mut source(), &ctx)
+        .expect("the stick it was written with must open it");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -466,7 +472,11 @@ fn the_stand_in_refuses_to_pretend_it_ratcheted() {
     let err = derived.ratchet(&KAPPA, 0).unwrap_err();
     assert!(err.contains("cannot ratchet"), "{err}");
     assert!(err.contains("demo"), "{err}");
-    assert!(derived.describe().contains("stand-in"), "{}", derived.describe());
+    assert!(
+        derived.describe().contains("stand-in"),
+        "{}",
+        derived.describe()
+    );
 }
 
 #[test]
@@ -531,7 +541,11 @@ fn the_device_pad_reads_zone_b_in_plan_order() {
     let mut device = DevicePad::open_relocated(&path, 0).expect("open the stand-in");
 
     assert!(!device.can_ratchet(), "opened read-only, so it must refuse");
-    assert!(device.describe().contains("read-only"), "{}", device.describe());
+    assert!(
+        device.describe().contains("read-only"),
+        "{}",
+        device.describe()
+    );
 
     let window = device.window(&OTHER_KAPPA, cursor).expect("window");
     assert_eq!(window.byte_len(), WINDOW_BYTES);
@@ -618,7 +632,13 @@ fn a_second_save_replaces_the_first() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
 
     let mut file = ContainerFile::open(&path, true).expect("open");
-    save(&mut file, &mut source(), &ctx(&pass, 1), b"the first document").expect("first");
+    save(
+        &mut file,
+        &mut source(),
+        &ctx(&pass, 1),
+        b"the first document",
+    )
+    .expect("first");
     save(
         &mut file,
         &mut source(),
@@ -629,7 +649,8 @@ fn a_second_save_replaces_the_first() {
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
-    let (opened, read_back) = open_document(&mut file, &mut source(), &ctx(&pass, 2)).expect("open at 2");
+    let (opened, read_back) =
+        open_document(&mut file, &mut source(), &ctx(&pass, 2)).expect("open at 2");
     assert_eq!(read_back, b"the second document, longer than the first");
     assert_eq!(opened.cursor(), 2);
     drop(file);

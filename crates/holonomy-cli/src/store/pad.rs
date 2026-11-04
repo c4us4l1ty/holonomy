@@ -188,7 +188,9 @@ impl DevicePad {
         }
         let plan = PadPlan::for_save(&self.k_perm, cursor);
         if !plan.is_collision_free() {
-            return Err(format!("the pad plan for save {cursor} is not collision-free"));
+            return Err(format!(
+                "the pad plan for save {cursor} is not collision-free"
+            ));
         }
         Ok(plan)
     }

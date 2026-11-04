@@ -450,19 +450,16 @@ fn banner() {
 /// partition or some device nodes report zero, so a zero is reported as unmeasurable rather than as
 /// too small.
 fn check_device(path: &str) -> CheckResult {
-    let mut device = match store::pad::DevicePad::open(
-        std::path::Path::new(path),
-        &[0u8; 32],
-        false,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            return CheckResult::failed(
-                "USB device present and writable",
-                format!("{path}: {e}"),
-            )
-        }
-    };
+    let mut device =
+        match store::pad::DevicePad::open(std::path::Path::new(path), &[0u8; 32], false) {
+            Ok(d) => d,
+            Err(e) => {
+                return CheckResult::failed(
+                    "USB device present and writable",
+                    format!("{path}: {e}"),
+                )
+            }
+        };
 
     // Zone B runs from ZONE_B_LBA_START to the end of the pad reservoir.
     let need = (store::pad::ZONE_B_LBA_START_SECTOR + ZONE_B_SECTORS as u64) * SECTOR_BYTES as u64;

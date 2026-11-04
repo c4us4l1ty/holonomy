@@ -74,11 +74,11 @@ use holonomy_core::stratum::ActiveStratum;
 
 pub mod pad;
 
-pub use pad::PadSource;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_crypto::ParamsClass;
 use holonomy_session::open::{open_container, OpenError, OpenedContainer, ReaderRequest};
 use holonomy_session::{seal_container, SaltBytes, SealedContainer};
+pub use pad::PadSource;
 
 /// Sectors one save consumes, as a `usize` for indexing.
 const PAD_SECTORS: usize = PAD_SECTORS_PER_SAVE as usize;
