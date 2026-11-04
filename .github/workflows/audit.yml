@@ -72,7 +72,15 @@ jobs:
           #
           # Cheap by comparison: the toolchain and cache are already here, and `cargo check` over the
           # core crates is under two minutes.
-          cargo check --workspace --exclude holonomy-ui --all-targets
+          # `|| { ... }` so a compile error is *annotated* rather than ending the step with a
+          # bare exit code. Without this the only annotation was a list of dirty files, and the
+          # compiler's message -- the one thing worth reading -- was never surfaced.
+          if ! cargo check --workspace --exclude holonomy-ui --all-targets 2>&1 | tee /tmp/check.log; then
+            grep -E '^(error|warning: unused)' /tmp/check.log | head -20 | while IFS= read -r line; do
+              echo "::error::pre-push check: $line"
+            done
+            exit 1
+          fi
           git config user.name  "holonomy-ci"
           git config user.email "ci@holonomy.invalid"
           git add -A
@@ -80,7 +88,12 @@ jobs:
           git push origin "HEAD:refs/heads/$BRANCH" || {
             git fetch origin "$BRANCH"
             git rebase "origin/$BRANCH"
-            cargo check --workspace --exclude holonomy-ui --all-targets
+            if ! cargo check --workspace --exclude holonomy-ui --all-targets 2>&1 | tee /tmp/check2.log; then
+              grep -E '^error' /tmp/check2.log | head -20 | while IFS= read -r line; do
+                echo "::error::post-rebase check: $line"
+              done
+              exit 1
+            fi
             git push origin "HEAD:refs/heads/$BRANCH"
           }
       - name: Report formatting failures as annotations
@@ -93,6 +106,11 @@ jobs:
           done
           git status --porcelain | head -20 | while IFS= read -r line; do
             echo "::error::dirty: $line"
+          done
+          for f in /tmp/check.log /tmp/check2.log; do
+            [ -f "$f" ] && grep -E '^error' "$f" | head -20 | while IFS= read -r line; do
+              echo "::error::compile: $line"
+            done
           done
 
   core-crates:
