@@ -227,13 +227,7 @@ pub fn seal_container(
         });
     }
 
-    let capsule = build_capsule(
-        keys,
-        &sealed,
-        index,
-        save_cursor,
-        (ct, wrapped, &dem_keys),
-    )?;
+    let capsule = build_capsule(keys, &sealed, index, save_cursor, (ct, wrapped, &dem_keys))?;
     Ok(SealedContainer {
         stratum: index,
         salt,
@@ -264,8 +258,9 @@ fn build_capsule(
     let commitments = crate::directory::commitments_of(sealed);
     let ledger = crate::directory::DirectoryLedger::new(stratum_index, save_cursor, sealed);
     let plaintext = ledger.encode(&commitments)?;
-    let directory_sealed = commit_mod::seal_directory(&dem_keys.k_dem, &dem_keys.n_epoch, &plaintext)
-        .map_err(SealError::Aead)?;
+    let directory_sealed =
+        commit_mod::seal_directory(&dem_keys.k_dem, &dem_keys.n_epoch, &plaintext)
+            .map_err(SealError::Aead)?;
     let (body, tag) = holonomy_crypto::unlock::split_directory_ciphertext(&directory_sealed);
     let p2 = phase2_commitment(&dem_keys.k_dem, &dem_keys.n_epoch, &directory_sealed);
     let p1 = phase1_commitment(&keys.k_unwrap, &keys.n_epoch, &ct, &wrapped);
@@ -599,7 +594,11 @@ mod tests {
         let mut image = vec![0u8; CONTAINER_BYTES];
         sealed.encode_into(&mut image, identity).expect("encode");
 
-        assert_eq!(&image[..SLOT_BYTES], sealed.capsule.as_bytes(), "capsule in slot 0");
+        assert_eq!(
+            &image[..SLOT_BYTES],
+            sealed.capsule.as_bytes(),
+            "capsule in slot 0"
+        );
         let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
         assert_eq!(
             &image[salt_off..salt_off + SALT_BYTES],
@@ -628,8 +627,14 @@ mod tests {
         // and the directory under the envelope's, so one container held two unrelated keys and
         // nothing could open it. Here the envelope is opened *once* and must open both.
         let s = active(1, keys(0x20));
-        let sealed = seal_container(&s, &[b"payload under the envelope key"], salt(0x21), 3, &KAPPA)
-            .expect("seal");
+        let sealed = seal_container(
+            &s,
+            &[b"payload under the envelope key"],
+            salt(0x21),
+            3,
+            &KAPPA,
+        )
+        .expect("seal");
         let dem = envelope_keys_for_test(&sealed.capsule, &keys(0x20).k_unwrap, &KAPPA)
             .expect("envelope opens");
 
@@ -719,8 +724,8 @@ mod tests {
     #[test]
     fn a_tampered_slot_fails_its_commitment() {
         let s = active(1, keys(0x50));
-        let (sealed, dem) = seal_container_with_keys(&s, &[b"confidential"], salt(0x51), 0, &KAPPA)
-            .expect("seal");
+        let (sealed, dem) =
+            seal_container_with_keys(&s, &[b"confidential"], salt(0x51), 0, &KAPPA).expect("seal");
         let mut image = vec![0u8; CONTAINER_BYTES];
         sealed.encode_into(&mut image, identity).expect("encode");
 
@@ -749,8 +754,8 @@ mod tests {
         // The commitment covers `(K_DEM, nonce, AAD, ciphertext)` and the AAD carries the slot index,
         // so relocating a slot invalidates it even when ciphertext and tag travel together.
         let s = active(1, keys(0x60));
-        let (sealed, dem) = seal_container_with_keys(&s, &[b"a", b"b"], salt(0x61), 0, &KAPPA)
-            .expect("seal");
+        let (sealed, dem) =
+            seal_container_with_keys(&s, &[b"a", b"b"], salt(0x61), 0, &KAPPA).expect("seal");
         let ct_len = sealed.slots[0].ciphertext.len();
         let err = open_payload_slot(
             &dem,
