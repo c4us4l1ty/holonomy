@@ -255,10 +255,9 @@ pub fn save(
     // 5-6. A new salt, then the new container under it.
     let stratum: &ActiveStratum = &opened.stratum;
     let new_salt = SaltBytes::fresh();
-    // The bytes are copied out *before* the salt is moved into `seal_container`, because
-    // `SaltBytes` zeroizes on drop and is consumed there: borrowing it afterwards is not allowed,
-    // and rightly so. This copy is the salt the container is written under, and it is what the pad
-    // window below is keyed by -- the same value the next reader will find in slot 1.
+    // Copied out *before* the salt is moved into `seal_container`: `SaltBytes` zeroizes on drop and
+    // is consumed there, so borrowing it afterwards is not allowed -- rightly. These bytes are the
+    // salt the container is written under, and the value the next reader finds in slot 1.
     let new_salt_bytes = *new_salt.as_bytes();
     let slots = split_payload(payload);
     let sealed: SealedContainer = seal_container(
@@ -380,59 +379,28 @@ pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
 /// # The asymmetry that made a save-after-provision impossible
 ///
 /// An earlier version wrote this first container **unpadded**, reasoning that a first save has no
-/// earlier pad window to be consistent with, so folding against one would produce a file only the
-/// holder of that window could read. That reasoning was wrong about which direction the constraint
-/// runs. The pad window is *derived*, not remembered: `pad_window_for_save(salt, cursor)` computes
-/// it from the salt that is in the container. So the first save can fold with its own new salt and
-/// any later reader computes exactly the same window from the same salt — nothing needs to be
-/// remembered, and nothing is lost.
+/// earlier pad window to be consistent with, so folding against one would produce a file that only
+/// the holder of that window could read. That reasoning was wrong about the direction the
+/// constraint runs. The pad window is *derived*, not remembered: `pad_window_for_save(salt, cursor)`
+/// recomputes it from the salt that is in the container, so the first save can fold with its own
+/// new salt and a later reader computes exactly the same window from the same salt. Nothing needs
+/// to be remembered and nothing is lost.
 ///
-/// What the asymmetry actually did was make every subsequent `save` fail: `save` undoes the pad
-/// before opening the old container, so folding a never-padded capsule destroys it, and the
-/// handshake reported "wrong passphrase" for a perfectly correct passphrase. Three store tests
-/// caught it. The lesson is the one this project keeps relearning: two code paths that write the
-/// same format must write it *identically*, and a comment explaining why they differ is not a
+/// What the asymmetry actually did was make every subsequent `save` fail. `save` undoes the pad
+/// before opening the old container, so folding a never-padded capsule destroys it and the
+/// handshake reports "wrong passphrase" for a perfectly correct passphrase. Three store tests
+/// caught it, and it is the same lesson this project keeps relearning: two code paths that write
+/// one format must write it *identically*, and a comment explaining why they differ is not a
 /// substitute for them not differing.
-///
-/// # Why the file is seeded with noise first
-///
-/// A container is never created empty-on-disk. A sparse file of zeros is indistinguishable from an
-/// unprovisioned device, and the reader says so rather than pretending to open it — so the file is
-/// filled with CSPRNG bytes first, exactly as an unformatted stick would be, and then given a real
-/// capsule, a real salt and a real fold.
-pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; provisioning will not overwrite a container",
-            path.display()
-        ));
-    }
-    let mut bytes = vec![0u8; CONTAINER_BYTES];
-    holonomy_crypto::rng::fill(&mut bytes)
-        .map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
-    std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
-
-    let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
-    first_write(&mut file, ctx, SaltBytes::fresh())
-}
-
-/// Seal one container under `salt`, fold its pad window over it, and write it.
-///
-/// This is what `save` does at its own steps 6–8, factored out because `provision` needs the same
-/// thing and two copies of "how a container is written" is exactly the drift that produced the bug
-/// in this function's documentation.
 pub fn first_write(
     file: &mut ContainerFile,
     ctx: &SaveContext<'_>,
     salt: SaltBytes,
 ) -> Result<(), String> {
     let salt_bytes = *salt.as_bytes();
-    let root = holonomy_crypto::derive_root_secret(
-        ctx.passphrase.as_bytes(),
-        &salt_bytes,
-        ctx.params,
-    )
-    .map_err(|e| format!("deriving the root secret: {e}"))?;
+    let root =
+        holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), &salt_bytes, ctx.params)
+            .map_err(|e| format!("deriving the root secret: {e}"))?;
     // The fallback set: the save path needs only `k_unwrap` and `n_epoch` from it, because the
     // envelope supplies `K_DEM`. See `holonomy_session::open::tests::stratum_from_root`.
     let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
@@ -454,89 +422,6 @@ pub fn first_write(
     fold(&mut image, &pad_window_for_save(&salt_bytes, ctx.cursor));
     file.write_image(&image).map_err(|e| e.to_string())
 }
-
-/// Open `file` and return the document it holds.
-pub fn open_document(
-    file: &mut ContainerFile,
-    ctx: &SaveContext<'_>,
-) -> Result<(OpenedContainer, Vec<u8>), String> {
-    let mut image = file.read_image().map_err(|e| e.to_string())?;
-    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
-    let mut salt = [0u8; SALT_BYTES];
-    salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
-    let pad = pad_window_for_save(&salt, ctx.cursor);
-    fold(&mut image, &pad);
-
-    let opened = open_container(
-        &ReaderRequest {
-            image: &image,
-            passphrase: ctx.passphrase,
-            kappa_usb: ctx.kappa_usb,
-            topology: ctx.topology,
-            params: ctx.params,
-            pad_fresh: true,
-        },
-        identity_placement,
-    )
-    .map_err(|e: OpenError| e.to_string())?;
-    let document = opened.payload_bytes();
-    Ok((opened, document))
-}
-
-/// The pad window for one save, in read order.
-///
-/// `holonomy-usb`'s `PadPlan` is the same computation against a device; this one produces the bytes
-/// as a buffer rather than reading them, because a container file in a test has no USB behind it.
-/// `the_two_pad_plans_agree` in the CLI's tests asserts the sector indices match, so this cannot
-/// drift into a second definition of the permutation.
-pub fn pad_window_for_save(salt: &[u8; SALT_BYTES], cursor: u64) -> Vec<u8> {
-    let mut pad = vec![0u8; PAD_SECTORS * SECTOR_BYTES];
-    for j in 0..PAD_SECTORS {
-        // The pad *material* here is derived from the sector index rather than read off a stick,
-        // because there is no stick. That is the honest description: this function is the
-        // mechanical half of the pad (which bytes are XORed where), not the entropy half. The real
-        // store reads these sectors through `holonomy-usb::pad::PadReader`.
-        let material = sector_material(sector_index(salt, cursor, j));
-        let at = j * SECTOR_BYTES;
-        pad[at..at + SECTOR_BYTES].copy_from_slice(&material);
-    }
-    pad
-}
-
-/// The `j`-th physical sector of save `cursor`, under the salt's permutation.
-///
-/// The permutation key is the salt's first 32 bytes: `Feistel22` takes 32 and the salt is 64, and
-/// the layout module specifies the salt as the key rather than something derived from it. Exposed
-/// because the pad window is not the only consumer — the USB reader must produce the same indices,
-/// and `the_store_and_the_usb_crate_choose_the_same_sectors` is the test that says so.
-pub fn sector_index(salt: &[u8; SALT_BYTES], cursor: u64, j: usize) -> u32 {
-    use holonomy_core::feistel::Feistel22;
-    let mut k_perm = [0u8; 32];
-    k_perm.copy_from_slice(&salt[..32]);
-    Feistel22::provisioned(&k_perm).permute(Feistel22::logical_sector(cursor, j as u32))
-}
-
-/// Write the first container at `path`: full size, then one save of an empty document.
-///
-/// A container is never created empty-on-disk. A sparse file of zeros is indistinguishable from an
-/// unprovisioned device, and the reader says so rather than pretending to open it — so the file is
-/// seeded with CSPRNG bytes first, exactly as an unformatted stick would be, and then given a real
-/// capsule and salt.
-pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; provisioning will not overwrite a container",
-            path.display()
-        ));
-    }
-    let mut bytes = vec![0u8; CONTAINER_BYTES];
-    holonomy_crypto::rng::fill(&mut bytes).map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
-    std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
-
-    let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
-    first_write(&mut file, ctx, SaltBytes::fresh())
-}
-
 
 /// 4,096 bytes of deterministic material for a sector index.
 ///
