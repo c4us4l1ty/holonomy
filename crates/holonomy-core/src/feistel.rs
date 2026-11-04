@@ -131,8 +131,12 @@ impl Feistel22 {
     /// Terminates with probability 1, and the loop is bounded in expectation at `DOMAIN /
     /// ZONE_B_SECTORS ≈ 2.35` iterations. The hard iteration cap exists only so a hypothetical
     /// key that made the walk diverge would fail loudly instead of hanging a save.
-    pub fn permute(&self, logical: u32) -> u32 {
-        let mut x = logical % DOMAIN;
+    pub fn permute(&self, logical: u64) -> u32 {
+        // Reduce to the permutation domain. Distinct inputs inside one save's 32,768-wide window
+        // stay distinct because 32,768 < 2^22, and distinct saves' windows are disjoint ranges of
+        // this same value -- so the only thing the reduction can do is wrap a *very* long history,
+        // which the 54-save budget makes unreachable.
+        let mut x = (logical % DOMAIN as u64) as u32;
         // 256 attempts against an expected 2.35 is a 10^-90 event; if it trips, the caller has a
         // bug or the constant table is corrupt, and a panic beats a silent hang.
         for _ in 0..256 {
@@ -155,9 +159,13 @@ impl Feistel22 {
     /// carries that disjointness into physical LBAs. This is what makes the documented
     /// "0.000% overlap across 54 saves" true: it is a property of the *cursor arithmetic*,
     /// with the permutation only required not to alias within a save.
-    pub fn logical_sector(cursor: u64, j: u32) -> u32 {
-        ((cursor.wrapping_mul(crate::layout::PAD_SECTORS_PER_SAVE as u64).wrapping_add(j as u64))
-            % DOMAIN as u64) as u32
+    pub fn logical_sector(cursor: u64, j: u32) -> u64 {
+        // `wrapping_*` only to make the overflow behaviour explicit; at 54 saves this is
+        // `53 * 32,768 + 32,767 = 1,769,471` and nothing overflows. Saturating would be worse: it
+        // would map every cursor past the limit onto one range.
+        cursor
+            .wrapping_mul(crate::layout::PAD_SECTORS_PER_SAVE as u64)
+            .wrapping_add(j as u64)
     }
 }
 
@@ -189,6 +197,47 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_saves_never_collide_at_any_epoch() {
+        // The bug this catches: `logical_sector` used to reduce modulo the 2^22 domain, so cursor
+        // 0 and cursor 128 were the same input to the permutation and read the same 32,768 sectors.
+        // The documented claim was "0.000% overlap across 54 saves".
+        let f = Feistel22::new(&k(0x77), 0);
+        let mut seen = std::collections::HashSet::with_capacity(64 * PAD_SECTORS_PER_SAVE as usize);
+        for cursor in 0..64u64 {
+            for j in 0..PAD_SECTORS_PER_SAVE {
+                let lba = f.permute(Feistel22::logical_sector(cursor, j));
+                assert!(
+                    seen.insert(lba),
+                    "sector {lba} reused at save {cursor}, slot {j} -- overlapping pad"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 64 * PAD_SECTORS_PER_SAVE as usize);
+    }
+
+    #[test]
+    fn logical_indices_are_strictly_increasing_across_saves() {
+        // The property, stated directly: disjointness of the logical ranges is what carries into
+        // physical LBAs, and it must not depend on the modulus.
+        let a_last = Feistel22::logical_sector(0, PAD_SECTORS_PER_SAVE - 1);
+        let b_first = Feistel22::logical_sector(1, 0);
+        assert_eq!(a_last, PAD_SECTORS_PER_SAVE as u64 - 1);
+        assert_eq!(b_first, PAD_SECTORS_PER_SAVE as u64);
+        assert!(a_last < b_first);
+    }
+
+    #[test]
+    fn the_54_save_budget_stays_inside_the_domain() {
+        // 54 saves cover 1,769,472 of 4,194,304 logical indices. The margin is why a 54-save
+        // history never needs the reduction to wrap, and therefore why the budget number is
+        // honest rather than aspirational.
+        let last = Feistel22::logical_sector(54, PAD_SECTORS_PER_SAVE - 1);
+        assert_eq!(last, 1_769_471);
+        assert!(last < DOMAIN as u64);
+        assert!(last < ZONE_B_SECTORS as u64 * 1);
+    }
+
+    #[test]
     fn cycle_walk_stays_inside_zone_b() {
         let f = Feistel22::new(&k(0x22), 0);
         for j in 0..PAD_SECTORS_PER_SAVE {
@@ -199,8 +248,34 @@ mod tests {
 
     #[test]
     fn full_zone_b_is_reachable() {
-        // The whole point of 11-bit halves: the codomain covers all of Zone B. Sample densely
-        // and assert we see sectors above 2^20 (which FPE-20 could never produce).
+        // What is actually true, stated precisely: the *codomain* is all of Zone B, so no sector
+        // is excluded by construction -- that was the FPE-20 bug, which left 41.2% unreachable
+        // forever. What a single epoch reaches is bounded by how many logical indices it is asked
+        // for: 32,768 per save, so ~1.77M across the 54-save budget against 1,782,579 sectors.
+        //
+        // Reachable-by-construction and reached-by-one-history are different claims, and the
+        // honest version of the latter is "no sector is excluded; 54 saves touch ~99.3% of Zone B
+        // because that is how many sectors 54 saves read".
+        let f = Feistel22::new(&k(0x33), 3);
+        let mut seen = std::collections::HashSet::new();
+        for cursor in 0..54u64 {
+            for j in 0..PAD_SECTORS_PER_SAVE {
+                seen.insert(f.permute(Feistel22::logical_sector(cursor, j)));
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            54 * PAD_SECTORS_PER_SAVE as usize,
+            "no collisions, so every read sector is distinct"
+        );
+        // FPE-20 could never produce a sector at or above 2^20; this can, and does.
+        assert!(
+            seen.iter().any(|&s| s >= (1 << 20)),
+            "the 11-bit halves must reach the 41.2% of Zone B that FPE-20 excluded"
+        );
+        // Density: what 54 saves actually cover, as a fraction of Zone B.
+        let coverage = seen.len() as f64 / ZONE_B_SECTORS as f64;
+        assert!(coverage > 0.99, "54 saves cover {:.2}% of Zone B", coverage * 100.0);
         let f = Feistel22::new(&k(0x33), 3);
         let mut above = 0;
         for j in 0..200_000u32 {
