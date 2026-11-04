@@ -25,7 +25,7 @@
 //!   5. choose a new salt        (only now; the old capsule is legible)
 //!   6. seal the new container under the new salt
 //!   7. fold the *new* pad window over it
-//!   8. write in place and sync (not crash-atomic)
+//!   8. stage and replace the encrypted image, then sync its directory (Unix)
 //!   9. ratchet the sectors window `c-1` spent (writable stick only)
 //! ```
 //!
@@ -74,7 +74,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use holonomy_core::layout::{
     slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX, SECTOR_BYTES,
@@ -100,6 +100,7 @@ const PAD_SECTORS: usize = PAD_SECTORS_PER_SAVE as usize;
 pub struct ContainerFile {
     file: File,
     path: String,
+    filesystem_path: PathBuf,
     offset: u64,
     writable: bool,
 }
@@ -112,6 +113,7 @@ impl ContainerFile {
         Ok(Self {
             file,
             path: path.display().to_string(),
+            filesystem_path: path.to_path_buf(),
             offset,
             writable,
         })
@@ -169,6 +171,54 @@ impl ContainerFile {
         self.file.seek(SeekFrom::Start(self.offset))?;
         self.file.write_all(image)?;
         self.file.sync_all()
+    }
+
+    /// Stage a complete encrypted image beside the original and replace it on Unix.
+    ///
+    /// A successful return means the staged file and its containing directory were synced.
+    /// A directory-sync error can occur *after* replacement, and is reported as such. This
+    /// does not serialize concurrent writers or guarantee storage hardware honors flushes.
+    #[cfg(unix)]
+    pub fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        if !self.writable {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "container is read-only"));
+        }
+        if self.offset != 0 || image.len() != CONTAINER_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "replacement requires one whole container at offset zero"));
+        }
+        let original = self.file.metadata()?;
+        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !path_metadata.file_type().is_file()
+            || original.dev() != path_metadata.dev()
+            || original.ino() != path_metadata.ino()
+        {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
+        }
+        let parent = self.filesystem_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut staged = tempfile::Builder::new().prefix(".holonomy-save-").tempfile_in(parent)?;
+        staged.as_file_mut().set_permissions(original.permissions())?;
+        staged.as_file_mut().write_all(image)?;
+        staged.as_file().sync_all()?;
+
+        // Catch stale handles before replacement. This does not close the race with a
+        // concurrent writer between the check and rename; callers must serialize saves.
+        let current = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !current.file_type().is_file() || current.dev() != original.dev() || current.ino() != original.ino() {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "container path changed while saving; refusing to replace it"));
+        }
+        let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
+        self.file = new_file;
+        File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("container replacement occurred, but directory sync failed; durability is uncertain and pad ratcheting was not started: {e}"))
+        })
+    }
+
+    /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
+    #[cfg(not(unix))]
+    pub fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("safe container replacement for {} is not implemented on this platform", self.filesystem_path.display())))
     }
 }
 
@@ -383,7 +433,8 @@ pub fn save(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
-    file.write_image(&image).map_err(|e| e.to_string())?;
+    file.replace_image(&image)
+        .map_err(|e| format!("saving cursor {}: {e}", ctx.cursor))?;
 
     // 9. Ratchet window `c-1`, *after* the container is on the device.
     //
@@ -391,8 +442,8 @@ pub fn save(
     //
     //    **After, not before.** Ratcheting first destroys the pad the container on disk was folded
     //    with, so a write that then failed would leave a container nothing can open -- not this
-    //    build, not a later one. Done after, a failed write leaves the old pad intact, but the
-    //    in-place container write can still be partial and leave the previous image unreadable.
+    //    build, not a later one. A failed staged write leaves the old pad intact. A directory
+    //    sync error may occur after replacement, so the error warns that the image changed.
     //
     //    **`old_cursor`, not `ctx.cursor`.** The image just written is folded with window `c`, so
     //    ratcheting `c` would overwrite the pad that image needs and it would be unreadable the
@@ -543,6 +594,7 @@ pub fn provision(
     let mut file = ContainerFile {
         file: handle,
         path: path.display().to_string(),
+        filesystem_path: path.to_path_buf(),
         offset: 0,
         writable: true,
     };

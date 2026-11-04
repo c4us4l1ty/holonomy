@@ -26,6 +26,7 @@ holonomy-runtime = { path = "../holonomy-runtime" }
 libc = { workspace = true }
 zeroize = { workspace = true }
 rpassword = "7.3"
+tempfile = "3"
 # The store's stand-in pad material, and the image digest it reports alongside a save.
 blake2 = { workspace = true }
 

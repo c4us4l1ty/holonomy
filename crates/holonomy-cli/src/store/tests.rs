@@ -914,3 +914,49 @@ fn open_rejects_cursor_alias_even_when_pad_window_matches() {
     drop(file);
     let _ = std::fs::remove_file(&path);
 }
+
+#[cfg(unix)]
+#[test]
+fn staged_replacement_updates_file_and_open_handle() {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let path = tempfile("staged-replacement");
+    let original = std::fs::File::create(&path).expect("create");
+    original.set_len(CONTAINER_BYTES as u64).expect("size");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("permissions");
+    let old_ino = original.metadata().expect("metadata").ino();
+    drop(original);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let image = vec![0x5au8; CONTAINER_BYTES];
+    file.replace_image(&image).expect("replace");
+    let metadata = std::fs::metadata(&path).expect("new metadata");
+    assert_ne!(old_ino, metadata.ino());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+    let mut byte = [0u8; 1];
+    file.file.seek(SeekFrom::Start(0)).expect("seek");
+    file.file.read_exact(&mut byte).expect("read from updated handle");
+    assert_eq!(byte, [0x5a]);
+    assert_eq!(std::fs::metadata(&path).expect("metadata").len(), CONTAINER_BYTES as u64);
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_replacement_refuses_changed_path() {
+    let path = tempfile("staged-path-change");
+    let moved = tempfile("staged-path-original");
+    std::fs::write(&path, b"original").expect("original");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    std::fs::rename(&path, &moved).expect("move original");
+    std::fs::write(&path, b"replacement").expect("replace path");
+    let image = vec![0u8; CONTAINER_BYTES];
+    let err = file.replace_image(&image).expect_err("stale handle must be refused");
+    assert!(err.to_string().contains("same regular file"), "{err}");
+    assert_eq!(std::fs::read(&path).expect("new file"), b"replacement");
+    assert_eq!(std::fs::read(&moved).expect("old file"), b"original");
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&moved);
+}

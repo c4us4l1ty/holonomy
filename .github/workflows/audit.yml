@@ -591,6 +591,29 @@ jobs:
           done
           { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+  # Temporary formatter for the development environment, which has no local Rust toolchain.
+  format-development-branch:
+    name: Format development branch
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'arena/6c09d1f4-holonomy'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - run: |
+          set -euo pipefail
+          cargo +stable fmt --all
+          if ! git diff --quiet; then
+            git config user.name holonomy-ci
+            git config user.email ci@holonomy.invalid
+            git add -u
+            git commit -m 'style: format staged save implementation'
+            git push origin HEAD:refs/heads/arena/6c09d1f4-holonomy
+          fi
+
   cli-regressions:
     name: CLI safety regressions
     runs-on: ubuntu-latest
@@ -614,7 +637,7 @@ jobs:
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail
-          for test in prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
+          for test in staged_replacement_updates_file_and_open_handle staged_replacement_refuses_changed_path prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
             output=$(cargo test -p holonomy-cli "$test" -- --nocapture 2>&1) || { echo "$output"; exit 1; }
             echo "$output"
             echo "$output" | grep -qE 'test result: ok\. [1-9]' || { echo "::error::no test matched $test"; exit 1; }

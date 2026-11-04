@@ -33,7 +33,7 @@ those documents are historical and code and current CI results govern implementa
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | Wordcraft integration is planned; `holonomy-ui` is a separate skeleton outside the workspace and its editor bridge is not operational. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Saves overwrite the container in place. A crash or partial write can destroy the only copy; the save is **not atomic**. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
@@ -98,7 +98,9 @@ The CLI refuses save cursors 54 and above even on writable devices until it can 
 This does not detect a reused stick, another container, or rollback to an older snapshot. The writable
 device path attempts to refresh the previous window after writing the new image; a
 ratchet failure can occur **after** the container was changed. The current window must not be
-ratcheted while it is needed to read that image.
+ratcheted while it is needed to read that image. Ratcheting old windows can also make older container
+backups unreadable unless the corresponding pad material is retained; backup and recovery are not yet
+solved.
 
 A one-time pad requires independent, secret material that is never reused. If the same pad bytes
 mask two corresponding plaintext bytes, they cancel: $(M_1 \oplus P) \oplus (M_2 \oplus P) =
@@ -184,7 +186,7 @@ stick for you.
 
 - Integrate and test the Wordcraft editor and document serialization with the container session.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
-- Design crash-consistent saves and durable pad-use/ratchet accounting, including failure recovery.
+- Complete and test crash recovery, cross-platform replacement, concurrent-save coordination, and durable pad-use/ratchet accounting.
 - Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
 - Measure resource use and latency under real workloads, and obtain independent cryptographic and security review.
 
