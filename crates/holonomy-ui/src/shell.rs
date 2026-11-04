@@ -162,8 +162,14 @@ impl Session {
     /// The cursor is persisted in the container's root capsule, not in memory: it is the one piece
     /// of state that must survive a crash, because a cursor that went backwards would reuse pad
     /// material.
-    pub fn new(config: SessionConfig, cursor: u64, capture: CaptureReport) -> Result<Self, SessionError> {
-        if let (Some(steady), Some(peak)) = (config.measured_steady_state, config.measured_unlock_peak) {
+    pub fn new(
+        config: SessionConfig,
+        cursor: u64,
+        capture: CaptureReport,
+    ) -> Result<Self, SessionError> {
+        if let (Some(steady), Some(peak)) =
+            (config.measured_steady_state, config.measured_unlock_peak)
+        {
             check_against_envelope(steady, peak).map_err(SessionError::Budget)?;
         }
         Ok(Self {
@@ -202,7 +208,9 @@ impl Session {
             || self.cursor < holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
 
         if !fresh && !self.config.usb_writable {
-            return Err(SessionError::PadExhausted { cursor: self.cursor });
+            return Err(SessionError::PadExhausted {
+                cursor: self.cursor,
+            });
         }
 
         let decoy = decoy_seed.map(|seed| {
@@ -263,7 +271,10 @@ mod tests {
     #[test]
     fn an_idle_save_is_refused_and_does_not_burn_the_cursor() {
         let mut s = Session::new(SessionConfig::default(), 0, capture()).unwrap();
-        assert_eq!(s.save(DocumentDelta::EMPTY, None).unwrap_err(), SessionError::NothingToSave);
+        assert_eq!(
+            s.save(DocumentDelta::EMPTY, None).unwrap_err(),
+            SessionError::NothingToSave
+        );
         assert_eq!(s.cursor(), 0);
     }
 
@@ -291,7 +302,10 @@ mod tests {
 
     #[test]
     fn writable_session_keeps_going_past_the_budget_by_ratcheting() {
-        let cfg = SessionConfig { usb_writable: true, ..Default::default() };
+        let cfg = SessionConfig {
+            usb_writable: true,
+            ..Default::default()
+        };
         let mut s = Session::new(cfg, 0, capture()).unwrap();
         for _ in 0..60 {
             let out = s.save(delta(10), None).unwrap();
@@ -304,13 +318,19 @@ mod tests {
     #[test]
     fn protection_language_flips_at_the_budget() {
         // A read-only session that somehow reaches past 54 must report stale pad, not fresh.
-        let cfg = SessionConfig { usb_writable: true, ..Default::default() };
+        let cfg = SessionConfig {
+            usb_writable: true,
+            ..Default::default()
+        };
         let mut s = Session::new(cfg, 54, capture()).unwrap();
         // Writable, so it may continue — and the report says fresh, because it ratchets.
         let out = s.save(delta(10), None).unwrap();
         assert!(out.protection.describe().contains("fresh"));
 
-        let cfg = SessionConfig { usb_writable: false, ..Default::default() };
+        let cfg = SessionConfig {
+            usb_writable: false,
+            ..Default::default()
+        };
         let mut s = Session::new(cfg, 53, capture()).unwrap();
         let out = s.save(delta(10), None).unwrap();
         assert!(out.protection.describe().contains("fresh"));

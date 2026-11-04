@@ -186,7 +186,10 @@ impl CapsuleWire {
         w[o..o + CMT4_TAG_BYTES].copy_from_slice(&c.phase2_cmt4_tag);
         o += CMT4_TAG_BYTES;
 
-        debug_assert_eq!(o, SLOT_BYTES, "capsule serialisation must fill the whole slot");
+        debug_assert_eq!(
+            o, SLOT_BYTES,
+            "capsule serialisation must fill the whole slot"
+        );
         out
     }
 
@@ -276,7 +279,10 @@ mod tests {
     fn field_sum_matches_the_audited_table() {
         assert_eq!(ML_KEM_1024_CT_BYTES, 1_568);
         assert_eq!(WRAPPED_SK_BYTES, 3_216);
-        assert_eq!(ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES, 3_216);
+        assert_eq!(
+            ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES,
+            3_216
+        );
         assert_eq!(ENCRYPTED_DIRECTORY_BYTES, 60_592);
         // The old PRD's number was 16 too large; pin the correction.
         assert_eq!(ENCRYPTED_DIRECTORY_BYTES + 16, 60_608);
@@ -310,7 +316,10 @@ mod tests {
         assert_eq!(wire.as_bytes()[SLOT_BYTES - 1], 0xAB);
         let back = wire.to_capsule();
         assert_eq!(back.ct_ml_kem_1024, c.ct_ml_kem_1024);
-        assert_eq!(back.encrypted_directory_and_reservoir, c.encrypted_directory_and_reservoir);
+        assert_eq!(
+            back.encrypted_directory_and_reservoir,
+            c.encrypted_directory_and_reservoir
+        );
         assert_eq!(back.phase2_cmt4_tag, c.phase2_cmt4_tag);
     }
 }

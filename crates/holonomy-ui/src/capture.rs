@@ -89,15 +89,21 @@ impl CaptureReport {
         {
             // The real call needs an HWND, which only exists after the window is created; the
             // shell calls `apply_windows` there.
-            Self { exclusion: CaptureExclusion::NotAttempted }
+            Self {
+                exclusion: CaptureExclusion::NotAttempted,
+            }
         }
         #[cfg(target_os = "macos")]
         {
-            Self { exclusion: CaptureExclusion::NotAttempted }
+            Self {
+                exclusion: CaptureExclusion::NotAttempted,
+            }
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            Self { exclusion: CaptureExclusion::LinuxUnavailable }
+            Self {
+                exclusion: CaptureExclusion::LinuxUnavailable,
+            }
         }
     }
 }
@@ -132,7 +138,9 @@ pub unsafe fn apply_windows(hwnd: *mut core::ffi::c_void) -> CaptureReport {
 pub fn apply_macos() -> CaptureReport {
     // The implementation needs the `NSWindow` the shell created; that call site owns it. This
     // module keeps the *decision* and the *copy*, so the claim cannot drift from the API.
-    CaptureReport { exclusion: CaptureExclusion::NotAttempted }
+    CaptureReport {
+        exclusion: CaptureExclusion::NotAttempted,
+    }
 }
 
 /// Document the Linux answer in code, not only in prose.
@@ -153,12 +161,16 @@ mod tests {
 
     #[test]
     fn claims_never_overpromise() {
-        let linux = CaptureReport { exclusion: CaptureExclusion::LinuxUnavailable };
+        let linux = CaptureReport {
+            exclusion: CaptureExclusion::LinuxUnavailable,
+        };
         assert!(!linux.is_enforced());
         assert!(linux.describe().contains("cannot exclude"));
         assert!(!linux.describe().contains("is blocked"));
 
-        let failed = CaptureReport { exclusion: CaptureExclusion::Failed { code: 5 } };
+        let failed = CaptureReport {
+            exclusion: CaptureExclusion::Failed { code: 5 },
+        };
         assert!(!failed.is_enforced());
         assert!(failed.describe().contains("refused"));
 

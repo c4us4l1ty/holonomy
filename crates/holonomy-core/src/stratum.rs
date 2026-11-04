@@ -100,7 +100,11 @@ impl ActiveStratum {
     /// were ever split differently, so it is a sealed-constructor pattern: the field is private
     /// and there is exactly one caller.
     pub(crate) fn new(id: StratumId, keys: StratumKeys, innermost: StratumId) -> Self {
-        Self { id, keys, innermost }
+        Self {
+            id,
+            keys,
+            innermost,
+        }
     }
 
     /// Which stratum this unlock resolved to.

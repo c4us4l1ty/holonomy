@@ -49,8 +49,8 @@ pub mod usb_pad;
 
 pub use commit::{cmt4_tag, cmt4_verify, AeadError, CommittedCiphertext};
 pub use envelope::{EnvelopeError, HybridKem, MlKem1024X25519};
+pub use holonomy_core::stratum::ActiveStratum;
 pub use kdf::{derive_root_secret, derive_subkey, ParamsClass, RootSecret};
 pub use lock::{LockCapability, LockReport};
 pub use unlock::{unlock, unlock_fixed, UnlockRequest};
-pub use holonomy_core::stratum::ActiveStratum;
 pub use usb_pad::{PadBudget, PadError, PadMode};

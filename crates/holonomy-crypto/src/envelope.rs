@@ -205,7 +205,8 @@ pub fn unwrap_stratum_key(
     nonce: &[u8; XCHACHA_NONCE_BYTES],
     wrapped: &[u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES],
 ) -> Result<HybridDecapsulationKey, EnvelopeError> {
-    let cipher = XChaCha20Poly1305::new_from_slice(k_unwrap).map_err(|_| EnvelopeError::UnwrapFailed)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(k_unwrap).map_err(|_| EnvelopeError::UnwrapFailed)?;
     let mut plain = cipher
         .decrypt(
             XNonce::from_slice(nonce),
@@ -224,7 +225,10 @@ pub fn unwrap_stratum_key(
     dk.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
     x.copy_from_slice(&plain[ML_KEM_1024_SK_BYTES..]);
     plain.zeroize();
-    Ok(HybridDecapsulationKey { ml_kem: dk, x25519: x })
+    Ok(HybridDecapsulationKey {
+        ml_kem: dk,
+        x25519: x,
+    })
 }
 
 /// Everything a save needs to write a root capsule's phase 1, without the secret key ever leaving
@@ -241,14 +245,7 @@ pub fn create_envelope(
     sk_unwrap_nonce: &[u8; XCHACHA_NONCE_BYTES],
     kappa_usb: &[u8; 32],
     kem: &dyn HybridKem,
-) -> Result<
-    (
-        HybridCiphertext,
-        [u8; WRAPPED_SK_BYTES],
-        StratumKeys,
-    ),
-    EnvelopeError,
-> {
+) -> Result<(HybridCiphertext, [u8; WRAPPED_SK_BYTES], StratumKeys), EnvelopeError> {
     let (dk, ek) = kem.keygen();
     let (ct, ss) = kem.encapsulate(&ek)?;
     // The wrapped blob needs the two secret halves once; `wrap_stratum_key` takes them as slices.
@@ -287,7 +284,12 @@ pub fn phase2_commitment(
     nonce: &[u8; XCHACHA_NONCE_BYTES],
     directory_ciphertext: &[u8],
 ) -> [u8; CMT4_TAG_BYTES] {
-    cmt4_tag(k_dem, nonce, b"HOLONOMY_V51_DIRECTORY", directory_ciphertext)
+    cmt4_tag(
+        k_dem,
+        nonce,
+        b"HOLONOMY_V51_DIRECTORY",
+        directory_ciphertext,
+    )
 }
 
 /// The KEM operations the envelope needs, behind a trait.
@@ -303,7 +305,10 @@ pub trait HybridKem {
     fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey);
 
     /// Encapsulate.
-    fn encapsulate(&self, pk: &HybridEncapsulationKey) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError>;
+    fn encapsulate(
+        &self,
+        pk: &HybridEncapsulationKey,
+    ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError>;
 
     /// Decapsulate.
     fn decapsulate(
@@ -362,7 +367,10 @@ impl HybridKem for MlKem1024X25519 {
         ml_seed.copy_from_slice(&seed);
 
         (
-            HybridDecapsulationKey { ml_kem: ml_seed, x25519: x_bytes },
+            HybridDecapsulationKey {
+                ml_kem: ml_seed,
+                x25519: x_bytes,
+            },
             HybridEncapsulationKey {
                 ml_kem: ek.to_bytes().to_vec(),
                 x25519: x_pk.to_bytes(),
@@ -403,7 +411,10 @@ impl HybridKem for MlKem1024X25519 {
         let mut ct_ml = [0u8; ML_KEM_1024_CT_BYTES];
         ct_ml.copy_from_slice(&ct);
         Ok((
-            HybridCiphertext { ml_kem: ct_ml, x25519: eph_pk.to_bytes() },
+            HybridCiphertext {
+                ml_kem: ct_ml,
+                x25519: eph_pk.to_bytes(),
+            },
             SharedSecrets { pq, ecc },
         ))
     }
@@ -477,7 +488,11 @@ pub fn derive_dem_key(
 ///
 /// This is the path that makes `P_1` invariant across saves: it depends only on
 /// `(passphrase, σ_epoch_of_the_snapshot)`, never on anything a save ratchets.
-pub fn derive_passphrase_only_keys(root: &RootSecret, stratum_index: u8, kappa_usb: &[u8; 32]) -> StratumKeys {
+pub fn derive_passphrase_only_keys(
+    root: &RootSecret,
+    stratum_index: u8,
+    kappa_usb: &[u8; 32],
+) -> StratumKeys {
     let ctx = [stratum_index, 0u8];
     let unwrap: Subkey = derive_subkey(root, labels::K_UNWRAP, &ctx);
     let dem: Subkey = derive_subkey(root, labels::K_DEM, &ctx);
@@ -493,7 +508,11 @@ pub fn derive_passphrase_only_keys(root: &RootSecret, stratum_index: u8, kappa_u
     // changes, and the `copy_from_slice` length check then fails loudly instead of truncating.
     let mut n_epoch = [0u8; XCHACHA_NONCE_BYTES];
     n_epoch.copy_from_slice(&nonce.0[..XCHACHA_NONCE_BYTES]);
-    StratumKeys { k_unwrap, k_dem, n_epoch }
+    StratumKeys {
+        k_unwrap,
+        k_dem,
+        n_epoch,
+    }
 }
 
 /// Verify both phase commitments. Separate function so the caller cannot skip one by accident.
@@ -587,9 +606,17 @@ mod tests {
 
     #[test]
     fn wrap_is_exactly_the_documented_size() {
-        let wrapped = wrap_stratum_key(&[1u8; 32], &[2u8; 24], &[3u8; ML_KEM_1024_SEED_BYTES], &[4u8; 32]);
+        let wrapped = wrap_stratum_key(
+            &[1u8; 32],
+            &[2u8; 24],
+            &[3u8; ML_KEM_1024_SEED_BYTES],
+            &[4u8; 32],
+        );
         assert_eq!(wrapped.len(), 3_216);
-        assert_eq!(wrapped.len(), ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES);
+        assert_eq!(
+            wrapped.len(),
+            ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES
+        );
     }
 
     #[test]
@@ -618,7 +645,10 @@ mod tests {
     fn phase1_commitment_binds_every_input() {
         let k = [1u8; 32];
         let n = [2u8; 24];
-        let ct = HybridCiphertext { ml_kem: [3u8; 1568], x25519: [4u8; 32] };
+        let ct = HybridCiphertext {
+            ml_kem: [3u8; 1568],
+            x25519: [4u8; 32],
+        };
         let w = [5u8; 3216];
         let base = phase1_commitment(&k, &n, &ct, &w);
 
@@ -634,8 +664,14 @@ mod tests {
 
     #[test]
     fn dem_key_is_deterministic_and_binds_its_inputs() {
-        let ss = SharedSecrets { pq: [1u8; 32], ecc: [2u8; 32] };
-        let ct = HybridCiphertext { ml_kem: [3u8; 1568], x25519: [4u8; 32] };
+        let ss = SharedSecrets {
+            pq: [1u8; 32],
+            ecc: [2u8; 32],
+        };
+        let ct = HybridCiphertext {
+            ml_kem: [3u8; 1568],
+            x25519: [4u8; 32],
+        };
         let a = derive_dem_key(&ss, &ct, &[5u8; 32], &[6u8; 32]);
         let b = derive_dem_key(&ss, &ct, &[5u8; 32], &[6u8; 32]);
         assert_eq!(a.k_dem, b.k_dem);
@@ -674,7 +710,10 @@ mod tests {
 
     #[test]
     fn length_check() {
-        let ok = HybridCiphertext { ml_kem: [0u8; 1568], x25519: [0u8; 32] };
+        let ok = HybridCiphertext {
+            ml_kem: [0u8; 1568],
+            x25519: [0u8; 32],
+        };
         assert!(ct_lengths_are_canonical(&ok));
     }
 }

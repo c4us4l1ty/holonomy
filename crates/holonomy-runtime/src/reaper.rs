@@ -517,7 +517,10 @@ mod tests {
         // exactly what the test says it is rather than swamped by however long the test took.
         hb.beat();
         let later = monotonic_ns() + UMBILICAL_GAP_NS + 1_000_000;
-        assert!(matches!(hb.evaluate(later), ReaperDecision::Wipe(FireReason::GapExceeded)));
+        assert!(matches!(
+            hb.evaluate(later),
+            ReaperDecision::Wipe(FireReason::GapExceeded)
+        ));
     }
 
     #[test]
@@ -532,7 +535,10 @@ mod tests {
     fn explicit_disconnect_fires_immediately() {
         let hb = PhyHeartbeat::new();
         hb.signal_disconnect();
-        assert!(matches!(hb.evaluate(monotonic_ns()), ReaperDecision::Wipe(FireReason::Disconnected)));
+        assert!(matches!(
+            hb.evaluate(monotonic_ns()),
+            ReaperDecision::Wipe(FireReason::Disconnected)
+        ));
     }
 
     #[test]
@@ -565,15 +571,20 @@ mod tests {
         // that certainly happens, and `wipe_secrets` is the first.
         let hb = Arc::new(PhyHeartbeat::new());
         let actions = Arc::new(CountingActions::new(0));
-        let guard =
-            ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&actions) as Arc<dyn EmergencyActions>,
+        );
         hb.signal_disconnect();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !actions.terminated.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
         guard.stop();
-        assert!(actions.terminated.load(Ordering::SeqCst), "Thread B never terminated");
+        assert!(
+            actions.terminated.load(Ordering::SeqCst),
+            "Thread B never terminated"
+        );
         assert_eq!(
             actions.wipes.load(Ordering::SeqCst),
             1,
@@ -602,11 +613,16 @@ mod tests {
     fn thread_b_fires_and_wipes_when_the_heartbeat_stops() {
         let hb = Arc::new(PhyHeartbeat::new());
         let actions = Arc::new(CountingActions::new(0));
-        let guard = ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&actions) as Arc<dyn EmergencyActions>,
+        );
 
         // Stop beating: simulate the drive leaving.
-        hb.last_phy_ok_ns
-            .store(monotonic_ns().saturating_sub(UMBILICAL_GAP_NS + 1), Ordering::Release);
+        hb.last_phy_ok_ns.store(
+            monotonic_ns().saturating_sub(UMBILICAL_GAP_NS + 1),
+            Ordering::Release,
+        );
 
         // Within a few poll quanta the reaper must have acted.
         for _ in 0..100 {
@@ -617,7 +633,11 @@ mod tests {
         }
         guard.stop();
 
-        assert_eq!(actions.wipes.load(Ordering::SeqCst), 1, "wipe must happen exactly once");
+        assert_eq!(
+            actions.wipes.load(Ordering::SeqCst),
+            1,
+            "wipe must happen exactly once"
+        );
         assert_eq!(actions.blackouts.load(Ordering::SeqCst), 1);
         assert!(actions.terminated.load(Ordering::SeqCst));
         assert!(hb.firing.load(Ordering::SeqCst));
@@ -631,7 +651,10 @@ mod tests {
     fn a_continuing_heartbeat_never_fires() {
         let hb = Arc::new(PhyHeartbeat::new());
         let actions = Arc::new(CountingActions::new(0));
-        let guard = ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&actions) as Arc<dyn EmergencyActions>,
+        );
         for _ in 0..30 {
             hb.beat();
             std::thread::sleep(Duration::from_millis(1));
@@ -647,7 +670,10 @@ mod tests {
         // `RealTime(99)`. Both are acceptable, and neither may panic or abort the reaper.
         let hb = Arc::new(PhyHeartbeat::new());
         let actions = Arc::new(CountingActions::new(0));
-        let guard = ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&actions) as Arc<dyn EmergencyActions>,
+        );
         let sched = guard.sched();
         guard.stop();
         match sched {
@@ -664,7 +690,10 @@ mod tests {
     fn measured_timeline_is_recorded_and_bounded() {
         let hb = Arc::new(PhyHeartbeat::new());
         let actions = Arc::new(CountingActions::new(0));
-        let guard = ReaperGuard::start(Arc::clone(&hb), Arc::clone(&actions) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&actions) as Arc<dyn EmergencyActions>,
+        );
         let t = guard.measure(actions.as_ref());
         guard.stop();
         assert_eq!(t.detection_ns, POLL_INTERVAL_NS);
@@ -678,11 +707,17 @@ mod tests {
         // A deliberately slow wipe must be *reported* as over the ceiling rather than rounded away.
         let hb = Arc::new(PhyHeartbeat::new());
         let slow = Arc::new(CountingActions::new(20_000_000));
-        let guard = ReaperGuard::start(Arc::clone(&hb), Arc::clone(&slow) as Arc<dyn EmergencyActions>);
+        let guard = ReaperGuard::start(
+            Arc::clone(&hb),
+            Arc::clone(&slow) as Arc<dyn EmergencyActions>,
+        );
         let t = guard.measure(slow.as_ref());
         guard.stop();
         assert!(t.wipe_ns >= 20_000_000, "wipe_ns was {}", t.wipe_ns);
-        assert!(!t.within_ceiling(), "a 20 ms wipe must not be reported as inside 15 ms");
+        assert!(
+            !t.within_ceiling(),
+            "a 20 ms wipe must not be reported as inside 15 ms"
+        );
     }
 
     #[test]

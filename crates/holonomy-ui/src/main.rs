@@ -26,8 +26,15 @@ fn main() -> ExitCode {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("holonomy {}", holonomy_core::VERSION);
-        println!("container: {} bytes, {} slots", holonomy_core::layout::CONTAINER_BYTES, holonomy_core::layout::TOTAL_BLOCKS);
-        println!("pad budget: {} saves before domain reuse", holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE);
+        println!(
+            "container: {} bytes, {} slots",
+            holonomy_core::layout::CONTAINER_BYTES,
+            holonomy_core::layout::TOTAL_BLOCKS
+        );
+        println!(
+            "pad budget: {} saves before domain reuse",
+            holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -63,7 +70,11 @@ fn self_check() -> ExitCode {
 
     // 1. Capsule size, which is a compile-time assert too — this is the runtime echo.
     let capsule = std::mem::size_of::<holonomy_core::capsule::StratumRootCapsuleV5>();
-    report("capsule is exactly one 65,536-byte slot", capsule == 65_536, &format!("{capsule} bytes"));
+    report(
+        "capsule is exactly one 65,536-byte slot",
+        capsule == 65_536,
+        &format!("{capsule} bytes"),
+    );
     ok &= capsule == 65_536;
 
     // 2. Zone B geometry.
@@ -85,7 +96,9 @@ fn self_check() -> ExitCode {
     // 3. The permutation actually reaches the whole of Zone B.
     let f = holonomy_core::feistel::Feistel22::provisioned(&[0x5Au8; 32]);
     let above_2_20 = (0..100_000u32)
-        .filter(|&j| f.permute(holonomy_core::feistel::Feistel22::logical_sector(0, j)) >= (1 << 20))
+        .filter(|&j| {
+            f.permute(holonomy_core::feistel::Feistel22::logical_sector(0, j)) >= (1 << 20)
+        })
         .count();
     report(
         "22-bit Feistel reaches sectors above 2^20 (FPE-20 could not)",

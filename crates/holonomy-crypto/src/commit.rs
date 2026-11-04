@@ -158,7 +158,10 @@ pub fn seal_directory(
     let out = cipher
         .encrypt(
             XNonce::from_slice(nonce),
-            Payload { msg: &padded, aad: &aad },
+            Payload {
+                msg: &padded,
+                aad: &aad,
+            },
         )
         .map_err(|_| AeadError::AuthenticationFailed)?;
     assert_eq!(out.len(), SEALED_DIRECTORY_BYTES);
@@ -184,7 +187,10 @@ pub fn open_directory(
     let padded = cipher
         .decrypt(
             XNonce::from_slice(nonce),
-            Payload { msg: sealed, aad: &aad },
+            Payload {
+                msg: sealed,
+                aad: &aad,
+            },
         )
         .map_err(|_| AeadError::AuthenticationFailed)?;
     Ok(padded.into_iter().take_while(|&b| b != 0).collect())
@@ -226,7 +232,10 @@ impl std::fmt::Display for AeadError {
             Self::AuthenticationFailed => f.write_str("AEAD authentication failed"),
             Self::OutputTooSmall => f.write_str("output buffer too small"),
             Self::TooLarge { offered, capacity } => {
-                write!(f, "plaintext of {offered} bytes does not fit {capacity} bytes of field")
+                write!(
+                    f,
+                    "plaintext of {offered} bytes does not fit {capacity} bytes of field"
+                )
             }
         }
     }
@@ -293,7 +302,8 @@ pub fn open_committed(
     if !cmt4_verify(&expected, &committed.cmt4) {
         return Err(AeadError::CommitmentMismatch);
     }
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::AuthenticationFailed)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::AuthenticationFailed)?;
     cipher
         .decrypt(
             XNonce::from_slice(nonce),
@@ -311,12 +321,15 @@ pub fn open_committed(
 /// a nonce collision under one `K_DEM` requires 2^24 slots within one save, and a container has
 /// 2,047. It also means a save is reproducible from `(K_DEM, N_epoch, cursor)`, which is the
 /// determinism rule again.
-pub fn slot_nonce(base: &[u8; NONCE_BYTES], save_cursor: u64, slot_index: u32, stratum: u8) -> [u8; NONCE_BYTES] {
+pub fn slot_nonce(
+    base: &[u8; NONCE_BYTES],
+    save_cursor: u64,
+    slot_index: u32,
+    stratum: u8,
+) -> [u8; NONCE_BYTES] {
     let mut n = *base;
     // XOR the counter fields into the tail 16 bytes of the nonce; the first 8 are the base's own.
-    let counter = save_cursor
-        .wrapping_shl(32)
-        .wrapping_add(slot_index as u64);
+    let counter = save_cursor.wrapping_shl(32).wrapping_add(slot_index as u64);
     let mut tail = [0u8; 16];
     tail[0..8].copy_from_slice(&counter.to_le_bytes());
     tail[8] = stratum;
@@ -385,7 +398,10 @@ mod directory_tests {
         for i in [0usize, 1, 15, 60_590, 60_591] {
             let mut bad = sealed;
             bad[i] ^= 1;
-            assert!(open_directory(&K, &N, &bad).is_err(), "byte {i} went undetected");
+            assert!(
+                open_directory(&K, &N, &bad).is_err(),
+                "byte {i} went undetected"
+            );
         }
     }
 
@@ -451,7 +467,10 @@ mod tests {
         let l1 = slot_associated_data(1, 0);
         let l2 = slot_associated_data(2, 0);
         let c = seal_committed(&k, &n, &l1, b"payload");
-        assert_eq!(open_committed(&k, &n, &l2, &c).unwrap_err(), AeadError::CommitmentMismatch);
+        assert_eq!(
+            open_committed(&k, &n, &l2, &c).unwrap_err(),
+            AeadError::CommitmentMismatch
+        );
     }
 
     #[test]

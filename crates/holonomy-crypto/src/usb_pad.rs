@@ -71,7 +71,11 @@ impl Default for PadBudget {
 impl PadBudget {
     /// A fresh container at provisioning time.
     pub fn fresh() -> Self {
-        Self { cursor: 0, mode: PadMode::ReadWrite, ratcheted_last_save: false }
+        Self {
+            cursor: 0,
+            mode: PadMode::ReadWrite,
+            ratcheted_last_save: false,
+        }
     }
 
     /// Sectors this save will consume.
@@ -112,7 +116,9 @@ impl PadBudget {
         let was_fresh = self.is_fresh();
         self.cursor = self.cursor.wrapping_add(1);
         if !was_fresh && !self.mode.can_ratchet() && !self.ratcheted_last_save {
-            return Err(PadError::PadExhausted { cursor: self.cursor });
+            return Err(PadError::PadExhausted {
+                cursor: self.cursor,
+            });
         }
         Ok(())
     }
@@ -157,7 +163,10 @@ impl std::fmt::Display for PadError {
                  post-quantum layer only (ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4)"
             ),
             Self::WrongSectorCount { got } => {
-                write!(f, "ratchet reported {got} sectors, expected {PAD_SECTORS_PER_SAVE}")
+                write!(
+                    f,
+                    "ratchet reported {got} sectors, expected {PAD_SECTORS_PER_SAVE}"
+                )
             }
         }
     }
@@ -181,7 +190,8 @@ mod tests {
         let mut b = PadBudget::fresh();
         b.mode = PadMode::ReadOnly;
         for _ in 0..SAVES_BEFORE_DOMAIN_REUSE {
-            b.complete_save().expect("saves inside the window must succeed");
+            b.complete_save()
+                .expect("saves inside the window must succeed");
         }
         assert_eq!(b.cursor, 54);
         assert!(!b.is_fresh());
@@ -202,14 +212,18 @@ mod tests {
         b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap();
         assert!(b.is_fresh(), "a completed ratchet must restore the window");
         assert_eq!(b.remaining_fresh_saves(), 54);
-        b.complete_save().expect("after a ratchet the next save is fresh again");
+        b.complete_save()
+            .expect("after a ratchet the next save is fresh again");
     }
 
     #[test]
     fn readonly_device_cannot_ratchet() {
         let mut b = PadBudget::fresh();
         b.mode = PadMode::ReadOnly;
-        assert_eq!(b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap_err(), PadError::NotWritable);
+        assert_eq!(
+            b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap_err(),
+            PadError::NotWritable
+        );
     }
 
     #[test]

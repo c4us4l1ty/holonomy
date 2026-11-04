@@ -63,7 +63,8 @@ pub const STEADY_STATE_CEILING_BYTES: usize =
     CONTAINER_RESIDENT_BYTES + WORDCRAFT_STATE_ALLOWANCE_BYTES + FIXED_OVERHEAD_BYTES;
 
 /// Unlock-peak ceiling. `180 + 256 = 436`, rounded up to the documented 440.
-pub const UNLOCK_PEAK_CEILING_BYTES: usize = STEADY_STATE_CEILING_BYTES + ARGON2_ARENA_BYTES + 4 * MIB;
+pub const UNLOCK_PEAK_CEILING_BYTES: usize =
+    STEADY_STATE_CEILING_BYTES + ARGON2_ARENA_BYTES + 4 * MIB;
 
 /// The target machine's physical RAM: 2,048 MiB.
 pub const LEGACY_HOST_RAM_BYTES: usize = 2048 * MIB;
@@ -125,8 +126,11 @@ impl BudgetViolation {
 /// `Argon2id` arena has to exist to derive the root secret. They do not overlap in time, so the
 /// floor is the larger of the two rather than the sum — but any claim below it is describing a
 /// program that either skips authentication or skips key derivation.
-pub const MANDATORY_FLOOR_BYTES: usize =
-    if CONTAINER_RESIDENT_BYTES > ARGON2_ARENA_BYTES { CONTAINER_RESIDENT_BYTES } else { ARGON2_ARENA_BYTES };
+pub const MANDATORY_FLOOR_BYTES: usize = if CONTAINER_RESIDENT_BYTES > ARGON2_ARENA_BYTES {
+    CONTAINER_RESIDENT_BYTES
+} else {
+    ARGON2_ARENA_BYTES
+};
 
 impl std::fmt::Display for BudgetViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,7 +154,11 @@ impl std::fmt::Display for BudgetViolation {
                 claimed / MIB,
                 floor / MIB
             ),
-            Self::DoesNotFitLegacyHost { peak, host_floor, ram } => write!(
+            Self::DoesNotFitLegacyHost {
+                peak,
+                host_floor,
+                ram,
+            } => write!(
                 f,
                 "peak {} MiB + host floor {} MiB exceeds {} MiB of physical RAM",
                 peak / MIB,
@@ -165,7 +173,10 @@ impl std::fmt::Display for BudgetViolation {
 ///
 /// Call this in CI with measured RSS. A budget that is only checked by hand is a budget that
 /// drifts, which is exactly how §6.2 came to say 16.60 MiB.
-pub fn check_against_envelope(steady_state: usize, unlock_peak: usize) -> Result<(), BudgetViolation> {
+pub fn check_against_envelope(
+    steady_state: usize,
+    unlock_peak: usize,
+) -> Result<(), BudgetViolation> {
     // Both directions first: an understated claim is not an upper-bound violation, so the order
     // matters. Checking the ceiling first would let `16.60 MiB` through as "fine".
     if unlock_peak < MANDATORY_FLOOR_BYTES {
@@ -181,7 +192,9 @@ pub fn check_against_envelope(steady_state: usize, unlock_peak: usize) -> Result
         });
     }
     if steady_state > STEADY_STATE_CEILING_BYTES {
-        return Err(BudgetViolation::SteadyStateTooLarge { bytes: steady_state });
+        return Err(BudgetViolation::SteadyStateTooLarge {
+            bytes: steady_state,
+        });
     }
     if unlock_peak > UNLOCK_PEAK_CEILING_BYTES {
         return Err(BudgetViolation::UnlockPeakTooLarge { bytes: unlock_peak });
@@ -216,7 +229,10 @@ mod tests {
             .expect("the documented envelope must fit a 2 GiB host");
         // A relationship, not a literal: the peak plus the host floor must leave the host room.
         let headroom = LEGACY_HOST_RAM_BYTES - UNLOCK_PEAK_CEILING_BYTES - HOST_MIN_FREE_BYTES;
-        assert!(headroom > MIB, "only {headroom} bytes of headroom on the legacy host");
+        assert!(
+            headroom > MIB,
+            "only {headroom} bytes of headroom on the legacy host"
+        );
     }
 
     #[test]
@@ -229,7 +245,10 @@ mod tests {
             err.is_understatement(),
             "a claim smaller than the container must be reported as an understatement, got {err:?}"
         );
-        assert!(!err.to_string().contains("exceeds"), "it does not exceed anything: {err}");
+        assert!(
+            !err.to_string().contains("exceeds"),
+            "it does not exceed anything: {err}"
+        );
         assert!(
             CONTAINER_RESIDENT_BYTES > old_claim,
             "the container alone is larger than the entire old budget"
@@ -241,15 +260,22 @@ mod tests {
         // Steady state has to be legal for the *peak* check to be the one that fires; passing an
         // illegal steady value just tests the first branch twice.
         let err = check_against_envelope(170 * MIB, 441 * MIB).unwrap_err();
-        assert!(matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }), "got {err:?}");
+        assert!(
+            matches!(err, BudgetViolation::UnlockPeakTooLarge { .. }),
+            "got {err:?}"
+        );
         assert!(err.to_string().contains("440"));
     }
 
     #[test]
     fn the_gate_is_two_sided() {
         // Under and over are distinct failures, and both are refused.
-        assert!(check_against_envelope(MIB, MIB).unwrap_err().is_understatement());
-        assert!(!check_against_envelope(181 * MIB, 440 * MIB).unwrap_err().is_understatement());
+        assert!(check_against_envelope(MIB, MIB)
+            .unwrap_err()
+            .is_understatement());
+        assert!(!check_against_envelope(181 * MIB, 440 * MIB)
+            .unwrap_err()
+            .is_understatement());
         assert!(check_against_envelope(180 * MIB, 440 * MIB).is_ok());
     }
 }

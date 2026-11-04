@@ -122,8 +122,11 @@ pub fn unlock_fixed(
         let k_unwrap = derive_subkey(&root, labels::K_UNWRAP, &ctx).0;
 
         // (b) Unwrap. An authentication failure here is the expected path for a wrong stratum.
-        let Ok(dk) = unwrap_stratum_key(&k_unwrap, &capsule.sk_unwrap_nonce, &capsule.wrapped_stratum_sk)
-        else {
+        let Ok(dk) = unwrap_stratum_key(
+            &k_unwrap,
+            &capsule.sk_unwrap_nonce,
+            &capsule.wrapped_stratum_sk,
+        ) else {
             continue;
         };
 
@@ -229,7 +232,10 @@ pub const WRAPPED_KEY_BYTES: usize = WRAPPED_SK_BYTES;
 mod tests {
     use super::*;
     use crate::commit::seal_directory;
-    use crate::envelope::{create_envelope, EnvelopeError, HybridDecapsulationKey, HybridEncapsulationKey, SharedSecrets};
+    use crate::envelope::{
+        create_envelope, EnvelopeError, HybridDecapsulationKey, HybridEncapsulationKey,
+        SharedSecrets,
+    };
 
     /// A deterministic stand-in for the lattice KEM. Valid only for exercising the ring logic.
     struct DemoKem;
@@ -249,7 +255,10 @@ mod tests {
             _pk: &HybridEncapsulationKey,
         ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
             Ok((
-                HybridCiphertext { ml_kem: [0x5A; 1_568], x25519: [0x5B; 32] },
+                HybridCiphertext {
+                    ml_kem: [0x5A; 1_568],
+                    x25519: [0x5B; 32],
+                },
                 SharedSecrets::for_test([0x11; 32], [0x22; 32]),
             ))
         }
@@ -264,7 +273,12 @@ mod tests {
     }
 
     /// Build the capsule an `L_1` unlock would find.
-    fn capsule_for(passphrase: &str, salt: &[u8; SALT_BYTES], kappa: &[u8; 32], index: u8) -> CapsuleWire {
+    fn capsule_for(
+        passphrase: &str,
+        salt: &[u8; SALT_BYTES],
+        kappa: &[u8; 32],
+        index: u8,
+    ) -> CapsuleWire {
         let root = derive_root_secret(passphrase.as_bytes(), salt, ParamsClass::Test).unwrap();
         let k_unwrap = derive_subkey(&root, labels::K_UNWRAP, &[index, 0]).0;
         let kem = DemoKem;
@@ -329,7 +343,10 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
+        assert!(matches!(
+            unlock_fixed(&req, &DemoKem),
+            Err(UnlockError::Rejected)
+        ));
     }
 
     #[test]
@@ -348,7 +365,10 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
+        assert!(matches!(
+            unlock_fixed(&req, &DemoKem),
+            Err(UnlockError::Rejected)
+        ));
     }
 
     #[test]
@@ -365,7 +385,10 @@ mod tests {
             params: ParamsClass::Test,
             pad_fresh: true,
         };
-        assert!(matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)));
+        assert!(matches!(
+            unlock_fixed(&req, &DemoKem),
+            Err(UnlockError::Rejected)
+        ));
     }
 
     #[test]

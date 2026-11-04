@@ -177,7 +177,10 @@ mod tests {
         // Keep the finding executable: 16 + 1024 + 6.80 GiB + 150 + 4 MiB against an 8 GB stick.
         const MIB: u64 = 1024 * 1024;
         let old = 16 * MIB + 4 * 256 * MIB + 1_782_579 * 4096 + 150 * MIB + 4 * MIB;
-        assert!(old > DEVICE_BYTES, "the old table must be shown to overflow");
+        assert!(
+            old > DEVICE_BYTES,
+            "the old table must be shown to overflow"
+        );
         // And by how much: about 526 MiB.
         let over_mib = (old - DEVICE_BYTES) / MIB;
         assert!((520..535).contains(&over_mib), "over by {over_mib} MiB");
@@ -188,7 +191,11 @@ mod tests {
         let g = Geometry::nominal();
         assert!(g.device_bytes <= DEVICE_BYTES);
         assert!(g.zone_b_bytes() + OVERHEAD_BYTES <= g.device_bytes);
-        assert!(g.meets_pad_budget(), "saves afforded: {}", g.saves_afforded());
+        assert!(
+            g.meets_pad_budget(),
+            "saves afforded: {}",
+            g.saves_afforded()
+        );
         // Zone B is at least the documented 1,782,579 sectors.
         assert!(g.zone_b_sectors >= ZONE_B_SECTORS as u64);
     }

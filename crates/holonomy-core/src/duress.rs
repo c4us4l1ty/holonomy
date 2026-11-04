@@ -283,7 +283,10 @@ mod tests {
         };
         let a = DecoyDelta::generate(DuressProfile::DEFAULT, &s, 9, &key(7));
         let b = DecoyDelta::generate(DuressProfile::DEFAULT, &s, 9, &key(7));
-        assert_eq!(a, b, "same save + same epoch must regenerate the same decoy");
+        assert_eq!(
+            a, b,
+            "same save + same epoch must regenerate the same decoy"
+        );
     }
 
     #[test]
@@ -310,7 +313,10 @@ mod tests {
             duration_ms: 1_000,
         };
         let d = DecoyDelta::generate(DuressProfile::DEFAULT, &s, 1, &key(1));
-        assert!(d.char_delta < 0, "deleting from the primary must shrink the decoy");
+        assert!(
+            d.char_delta < 0,
+            "deleting from the primary must shrink the decoy"
+        );
     }
 
     #[test]
@@ -336,7 +342,9 @@ mod tests {
         for v in [0u64, 1, 35, 36, u64::MAX] {
             let t = base36_token(v);
             assert_eq!(t.len(), 5);
-            assert!(t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+            assert!(t
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
         }
     }
 
@@ -363,8 +371,16 @@ mod tests {
     fn proportional_growth_rejects_a_frozen_decoy() {
         // The cross-snapshot tell the PRD never addressed: `L_1` byte-identical while `L_k` grows.
         let history = [
-            SnapshotRecord { save_cursor: 0, primary_words: 1_000, duress_words: 900 },
-            SnapshotRecord { save_cursor: 1, primary_words: 1_500, duress_words: 900 },
+            SnapshotRecord {
+                save_cursor: 0,
+                primary_words: 1_000,
+                duress_words: 900,
+            },
+            SnapshotRecord {
+                save_cursor: 1,
+                primary_words: 1_500,
+                duress_words: 900,
+            },
         ];
         let err = check_proportional_growth(DuressProfile::DEFAULT, &history).unwrap_err();
         assert!(err.contains("did not grow"), "{err}");

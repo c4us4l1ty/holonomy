@@ -100,7 +100,11 @@ impl IndistinguishabilityReport {
 /// and silently truncating would make the gate pass on a prefix.
 pub fn analyse_pair(a: &[u8], b: &[u8]) -> IndistinguishabilityReport {
     assert_eq!(a.len(), b.len(), "snapshots must be the same size");
-    assert_eq!(a.len() as u64 * 8, CONTAINER_BITS, "not a container-sized pair");
+    assert_eq!(
+        a.len() as u64 * 8,
+        CONTAINER_BITS,
+        "not a container-sized pair"
+    );
 
     let mut ones: u64 = 0;
     let mut longest: u32 = 0;

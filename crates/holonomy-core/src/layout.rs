@@ -69,8 +69,7 @@ pub const SECTOR_BYTES: usize = 4_096;
 /// by the post-quantum layer (`ML-KEM-1024` + `X25519` + `XChaCha20-Poly1305` with `CMT-4`
 /// commitment) rather than by the pad. [`crate::feistel`] and the USB crate both read this
 /// constant so the statement cannot drift from the code.
-pub const SAVES_BEFORE_DOMAIN_REUSE: u64 =
-    (ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE) as u64;
+pub const SAVES_BEFORE_DOMAIN_REUSE: u64 = (ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE) as u64;
 
 /// Bytes of the container that are *not* under the pad: none.
 ///
@@ -155,8 +154,9 @@ mod tests {
         assert_eq!(SAVES_BEFORE_DOMAIN_REUSE, 54);
         assert!(SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as u64 <= ZONE_B_SECTORS as u64);
         // And the 55th does wrap: the budget is tight, not slack.
-        assert!((SAVES_BEFORE_DOMAIN_REUSE + 1) * PAD_SECTORS_PER_SAVE as u64
-            > ZONE_B_SECTORS as u64);
+        assert!(
+            (SAVES_BEFORE_DOMAIN_REUSE + 1) * PAD_SECTORS_PER_SAVE as u64 > ZONE_B_SECTORS as u64
+        );
     }
 
     #[test]

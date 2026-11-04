@@ -139,7 +139,9 @@ impl std::fmt::Display for UnlockError {
             Self::WrongSize { found, expected } => {
                 write!(f, "container is {found} bytes, expected {expected}")
             }
-            Self::TransportUnavailable => f.write_str("no USB umbilical or sealed reservoir present"),
+            Self::TransportUnavailable => {
+                f.write_str("no USB umbilical or sealed reservoir present")
+            }
             Self::MalformedStratum => f.write_str("container names a stratum outside L_1..=L_4"),
         }
     }
@@ -239,12 +241,24 @@ mod tests {
 
     #[test]
     fn protection_language_is_honest_about_pad_reuse() {
-        let fresh = ProtectionLayer { pad: true, pad_fresh: true, post_quantum: true };
+        let fresh = ProtectionLayer {
+            pad: true,
+            pad_fresh: true,
+            post_quantum: true,
+        };
         assert!(fresh.describe().contains("fresh"));
-        let stale = ProtectionLayer { pad: true, pad_fresh: false, post_quantum: true };
+        let stale = ProtectionLayer {
+            pad: true,
+            pad_fresh: false,
+            post_quantum: true,
+        };
         assert!(stale.describe().contains("reused"));
         assert!(stale.describe().contains("54-save"));
-        let none = ProtectionLayer { pad: false, pad_fresh: false, post_quantum: true };
+        let none = ProtectionLayer {
+            pad: false,
+            pad_fresh: false,
+            post_quantum: true,
+        };
         assert!(none.describe().starts_with("no pad"));
     }
 }

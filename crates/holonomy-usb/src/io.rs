@@ -116,7 +116,8 @@ impl AlignedBuf {
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
         self.wipe();
-        let layout = Layout::from_size_align(self.len, IO_ALIGN).expect("layout was valid on alloc");
+        let layout =
+            Layout::from_size_align(self.len, IO_ALIGN).expect("layout was valid on alloc");
         // SAFETY: `ptr` came from `alloc_zeroed` with this exact layout.
         unsafe { dealloc(self.ptr, layout) };
     }
@@ -311,7 +312,10 @@ impl DirectFile {
             if !(len as u64).is_multiple_of(self.block) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("direct-I/O length {len} is not a multiple of {}", self.block),
+                    format!(
+                        "direct-I/O length {len} is not a multiple of {}",
+                        self.block
+                    ),
                 ));
             }
         }
@@ -398,7 +402,10 @@ mod tests {
     #[test]
     fn readonly_device_refuses_writes() {
         let path = scratch("ro");
-        File::create(&path).unwrap().write_all(&vec![0u8; 8192]).unwrap();
+        File::create(&path)
+            .unwrap()
+            .write_all(&vec![0u8; 8192])
+            .unwrap();
         let dev = DirectFile::open(&path, Access::ReadOnly, 4096).unwrap();
         let buf = AlignedBuf::new(4096);
         let err = dev.write_exact_at(0, &buf).unwrap_err();
@@ -410,7 +417,10 @@ mod tests {
     #[test]
     fn short_read_is_an_error_not_a_silent_zero_fill() {
         let path = scratch("short");
-        File::create(&path).unwrap().write_all(&vec![0u8; 4096]).unwrap();
+        File::create(&path)
+            .unwrap()
+            .write_all(&vec![0u8; 4096])
+            .unwrap();
         let dev = DirectFile::open(&path, Access::ReadOnly, 4096).unwrap();
         let mut buf = AlignedBuf::new(8192);
         let err = dev.read_exact_at(0, &mut buf).unwrap_err();

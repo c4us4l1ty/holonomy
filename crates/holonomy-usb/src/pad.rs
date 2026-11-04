@@ -172,14 +172,12 @@ impl<'a> PadReader<'a> {
     /// Verifies the device is at least `ZONE_B_LBA_START + ZONE_B_SECTORS` sectors long before
     /// issuing a single read, so a truncated image fails with a clear message instead of 32,768
     /// identical `EIO`s.
-    pub fn new(
-        device: &'a DirectFile,
-        k_perm: &[u8; 32],
-        cursor: u64,
-    ) -> Result<Self, PadIoError> {
+    pub fn new(device: &'a DirectFile, k_perm: &[u8; 32], cursor: u64) -> Result<Self, PadIoError> {
         let plan = PadPlan::for_save(k_perm, cursor);
         if !plan.is_collision_free() {
-            return Err(PadIoError::BadPlan("plan contains a repeated or out-of-range sector"));
+            return Err(PadIoError::BadPlan(
+                "plan contains a repeated or out-of-range sector",
+            ));
         }
         let needed = (ZONE_B_LBA_START + ZONE_B_SECTORS as u64) * SECTOR_BYTES;
         let found = device.len()?;
@@ -206,11 +204,14 @@ impl<'a> PadReader<'a> {
         mut on_beat: impl FnMut(),
     ) -> Result<(), PadIoError> {
         if out.len() as u64 != PAD_BYTES_PER_SAVE {
-            return Err(PadIoError::BadPlan("output buffer is not exactly one save of pad"));
+            return Err(PadIoError::BadPlan(
+                "output buffer is not exactly one save of pad",
+            ));
         }
         let mut sector = AlignedBuf::new(SECTOR_BYTES as usize);
         for i in 0..self.plan.len() {
-            self.device.read_exact_at(self.plan.byte_offset(i), &mut sector)?;
+            self.device
+                .read_exact_at(self.plan.byte_offset(i), &mut sector)?;
             on_beat();
             let at = i * SECTOR_BYTES as usize;
             out.as_mut_slice()[at..at + SECTOR_BYTES as usize].copy_from_slice(sector.as_slice());
@@ -237,11 +238,14 @@ impl<'a> PadReader<'a> {
         let mut fresh = AlignedBuf::new(SECTOR_BYTES as usize);
         let mut written = 0u32;
         for i in order {
-            fresh.as_mut_slice().copy_from_slice(&[0u8; SECTOR_BYTES as usize]);
+            fresh
+                .as_mut_slice()
+                .copy_from_slice(&[0u8; SECTOR_BYTES as usize]);
             // CSPRNG, not a counter: a ratchet whose replacement bytes are predictable is not a
             // ratchet. See `holonomy_crypto::rng`.
             fill_random(fresh.as_mut_slice())?;
-            self.device.write_exact_at(self.plan.byte_offset(i), &fresh)?;
+            self.device
+                .write_exact_at(self.plan.byte_offset(i), &fresh)?;
             written += 1;
         }
         self.device.sync()?;
@@ -304,7 +308,10 @@ mod tests {
     fn pad_bytes_per_save_is_the_container_size() {
         // The 1:1 property: one save consumes precisely as many pad bytes as there are container
         // bytes, which is what makes the XOR a fold rather than a stream.
-        assert_eq!(PAD_BYTES_PER_SAVE, holonomy_core::layout::CONTAINER_BYTES as u64);
+        assert_eq!(
+            PAD_BYTES_PER_SAVE,
+            holonomy_core::layout::CONTAINER_BYTES as u64
+        );
     }
 
     #[test]

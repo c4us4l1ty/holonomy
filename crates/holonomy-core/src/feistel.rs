@@ -343,7 +343,11 @@ mod tests {
         );
         // Density: what 54 saves actually cover, as a fraction of Zone B.
         let coverage = seen.len() as f64 / ZONE_B_SECTORS as f64;
-        assert!(coverage > 0.99, "54 saves cover {:.2}% of Zone B", coverage * 100.0);
+        assert!(
+            coverage > 0.99,
+            "54 saves cover {:.2}% of Zone B",
+            coverage * 100.0
+        );
         let f = Feistel22::new(&k(0x33), 3);
         let mut above = 0;
         for j in 0..200_000u32 {
@@ -354,7 +358,11 @@ mod tests {
         // Expected share is 1 - 2^20/1782579 = 41.2%; require a healthy fraction so a regression
         // to a 20-bit domain fails loudly.
         let frac = above as f64 / 200_000.0;
-        assert!(frac > 0.35, "only {:.1}% of samples above 2^20; domain regressed?", frac * 100.0);
+        assert!(
+            frac > 0.35,
+            "only {:.1}% of samples above 2^20; domain regressed?",
+            frac * 100.0
+        );
     }
 
     #[test]
@@ -382,7 +390,10 @@ mod tests {
         let differing = (0..1024u32)
             .filter(|&i| a.permute_block(i * 7) != b.permute_block(i * 7))
             .count();
-        assert!(differing > 1000, "epoch counter barely perturbs the permutation");
+        assert!(
+            differing > 1000,
+            "epoch counter barely perturbs the permutation"
+        );
     }
 
     #[test]

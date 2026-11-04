@@ -305,7 +305,10 @@ mod tests {
         let bytes = 180 * 1024 * 1024;
         let ns = worst_case_wipe_ns(bytes, default_bandwidth());
         let ms = ns as f64 / 1e6;
-        assert!(ms > 40.0, "180 MiB cannot be wiped in under 40 ms at 4 GB/s (got {ms:.1})");
+        assert!(
+            ms > 40.0,
+            "180 MiB cannot be wiped in under 40 ms at 4 GB/s (got {ms:.1})"
+        );
         // And the much smaller realistic secret set — the container's key material and the
         // scanout — is comfortably inside the budget.
         let realistic = 8 * 1024 * 1024;

@@ -40,4 +40,4 @@ pub use reaper::{
     EmergencyActions, EmergencyTimeline, FireReason, PhyHeartbeat, ReaperDecision, ReaperGuard,
     SchedClass,
 };
-pub use scrub::{SecretAreas, ScrubError};
+pub use scrub::{ScrubError, SecretAreas};

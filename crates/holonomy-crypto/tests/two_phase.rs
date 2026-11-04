@@ -75,8 +75,13 @@ fn open_capsule(
     let kem = MlKem1024X25519;
     let dk = unwrap_stratum_key(k_unwrap, &c.sk_unwrap_nonce, &c.wrapped_stratum_sk)
         .map_err(|e| format!("phase 1: {e}"))?;
-    let ct = HybridCiphertext { ml_kem: c.ct_ml_kem_1024, x25519: c.ct_x25519 };
-    let ss = kem.decapsulate(&dk, &ct).map_err(|e| format!("phase 2 kem: {e}"))?;
+    let ct = HybridCiphertext {
+        ml_kem: c.ct_ml_kem_1024,
+        x25519: c.ct_x25519,
+    };
+    let ss = kem
+        .decapsulate(&dk, &ct)
+        .map_err(|e| format!("phase 2 kem: {e}"))?;
     let keys = derive_dem_key(&ss, &ct, k_unwrap, kappa);
 
     let p1 = phase1_commitment(k_unwrap, &c.sk_unwrap_nonce, &ct, &c.wrapped_stratum_sk);
@@ -108,7 +113,8 @@ fn unlock_recovers_the_directory() {
     let wire = CapsuleWire::from_capsule(&c);
     let back = wire.to_capsule();
 
-    let plain = open_capsule(&back, &k_unwrap, &kappa).expect("a correctly built capsule must open");
+    let plain =
+        open_capsule(&back, &k_unwrap, &kappa).expect("a correctly built capsule must open");
     assert_eq!(&plain[..directory.len()], directory);
 }
 
@@ -116,8 +122,8 @@ fn unlock_recovers_the_directory() {
 fn wrong_passphrase_cannot_reach_phase_two() {
     // The deadlock test: with the wrong K_unwrap, phase 1 fails and nothing downstream runs.
     let c = build_capsule(&[0x01u8; 32], &[0x02u8; 24], &[0x03u8; 32], b"x");
-    let err = unwrap_stratum_key(&[0xFFu8; 32], &c.sk_unwrap_nonce, &c.wrapped_stratum_sk)
-        .unwrap_err();
+    let err =
+        unwrap_stratum_key(&[0xFFu8; 32], &c.sk_unwrap_nonce, &c.wrapped_stratum_sk).unwrap_err();
     assert_eq!(err, holonomy_crypto::envelope::EnvelopeError::UnwrapFailed);
     assert!(open_capsule(&c, &[0xFFu8; 32], &[0x03u8; 32]).is_err());
 }
@@ -129,7 +135,10 @@ fn wrong_usb_cannot_open_the_directory() {
     let k_unwrap = [0x11u8; 32];
     let c = build_capsule(&k_unwrap, &[0x12u8; 24], &[0x22u8; 32], b"confidential");
     let err = open_capsule(&c, &k_unwrap, &[0x23u8; 32]).unwrap_err();
-    assert!(err.contains("commitment") || err.contains("directory"), "{err}");
+    assert!(
+        err.contains("commitment") || err.contains("directory"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -157,8 +166,10 @@ fn relocating_the_ciphertext_to_another_phase_fails() {
 #[test]
 fn derivation_is_reproducible_across_calls() {
     let salt = [0x5Au8; 64];
-    let a = derive_root_secret(b"correct horse battery staple", &salt, ParamsClass::Legacy).unwrap();
-    let b = derive_root_secret(b"correct horse battery staple", &salt, ParamsClass::Legacy).unwrap();
+    let a =
+        derive_root_secret(b"correct horse battery staple", &salt, ParamsClass::Legacy).unwrap();
+    let b =
+        derive_root_secret(b"correct horse battery staple", &salt, ParamsClass::Legacy).unwrap();
     assert_eq!(a.as_bytes(), b.as_bytes());
 }
 
