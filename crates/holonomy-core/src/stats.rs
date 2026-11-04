@@ -257,7 +257,17 @@ mod tests {
             let a = vec![0u8; len];
             let r = analyse_pair(&a, &a);
             assert!(!r.passes(), "an all-zero difference passed at {len} bytes");
-            assert!(r.sigmas.is_infinite() || r.sigmas > 1e6);
+            // A zero difference means a Hamming fraction of exactly 0.0, so the deviation is
+            // exactly 0.5 and in sigmas that is 0.5 / (0.5/sqrt(bits)) = sqrt(bits). The gate is
+            // scale-invariant in the sense that matters: it is astronomically past the bound at
+            // every size, not that the same sigma value is produced.
+            let expected = (len as f64 * 8.0).sqrt();
+            assert!(
+                (r.sigmas - expected).abs() / expected < 1e-9,
+                "at {len} bytes: {} sigma, expected {expected}",
+                r.sigmas
+            );
+            assert!(r.sigmas > MONOBIT_SIGMAS);
         }
     }
 
