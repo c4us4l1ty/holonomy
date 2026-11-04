@@ -15,6 +15,52 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Can `holonomy-ui` link here at all? GitHub runners have crates.io and github.com, unlike the
+  # sandbox this workspace was authored in, so this is an exploratory job: it *generates the
+  # lockfile* (which the repository does not carry) and attempts a build, publishing diagnostics as
+  # annotations. It is allowed to fail while the answer is being established.
+  ui-probe:
+    name: holonomy-ui probe
+    runs-on: ubuntu-latest
+    needs: format
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ui-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-ui-
+      - name: Fetch the dependency graph and generate Cargo.lock
+        run: |
+          set -o pipefail
+          cargo fetch --message-format=short 2>&1 | tail -40
+      - name: Build holonomy-ui
+        run: |
+          set -o pipefail
+          cargo build -p holonomy-ui --all-targets --message-format=short 2>&1 | tee ui.log
+      - name: Report compiler errors as annotations
+        if: failure()
+        run: |
+          set +e
+          grep -E '^(error|warning)(\[|:)' ui.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+      - name: Upload the lockfile attempt
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cargo.lock
+          path: Cargo.lock
+          if-no-files-found: ignore
+
   # rustfmt is deterministic and non-negotiable, so it should not be something a human has to
   # round-trip through review. This job formats the tree and, if that changed anything, commits
   # and pushes. The next run finds nothing to format, so it converges after one extra run.
