@@ -883,3 +883,34 @@ fn provision_rejects_nonzero_cursor_without_creating_file() {
     assert!(err.contains("cursor must be 0"), "{err}");
     assert!(!path.exists());
 }
+
+#[test]
+fn open_rejects_cursor_alias_even_when_pad_window_matches() {
+    // Simulate a reused window: the bytes unfold successfully, but the authenticated
+    // directory still names cursor zero rather than the caller's cursor one.
+    struct AliasPad(DerivedPad);
+    impl PadSource for AliasPad {
+        fn window(&mut self, kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            self.0.window(kappa, 0)
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            Err("not supported".into())
+        }
+        fn can_ratchet(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "alias test pad".into()
+        }
+    }
+
+    let path = tempfile("open-cursor-alias");
+    provision(&path, [0x1au8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, false).expect("open");
+    let err = open_document(&mut file, &mut AliasPad(source()), &ctx(&pass, 1))
+        .expect_err("authenticated cursor must match");
+    assert!(err.contains("does not match requested cursor"), "{err}");
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+}

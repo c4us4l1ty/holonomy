@@ -465,6 +465,14 @@ pub fn open_document(
         epoch_placement(&file_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
+    // A different cursor can select the same physical window after wraparound (or
+    // through a faulty pad source). Authenticate the caller's cursor before returning data.
+    if opened.cursor() != ctx.cursor {
+        return Err(format!(
+            "container cursor {} does not match requested cursor {}; refusing to open",
+            opened.cursor(), ctx.cursor
+        ));
+    }
     let document = opened.payload_bytes();
     Ok((opened, document))
 }
