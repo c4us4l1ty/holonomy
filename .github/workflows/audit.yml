@@ -270,6 +270,7 @@ jobs:
       # a gate that dies on a missing tool is not measuring the product.
       - name: Measured peak RSS is inside the steady-state ceiling
         run: |
+          set -x
           set -o pipefail
           cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
           # `^` anchors the match to the start of the line, which is what keeps the budget figures
@@ -289,6 +290,9 @@ jobs:
             exit 1
           fi
           echo "inside the ceiling"
+          # Belt and braces: if this step is reported as failed by something other than the
+          # comparisons above, say so explicitly rather than leaving the next reader to infer it.
+          echo "rss-gate: parsed=${measured} ceiling=${ceiling}"
 
       - name: Report the measured RSS step as annotations
         if: failure()
