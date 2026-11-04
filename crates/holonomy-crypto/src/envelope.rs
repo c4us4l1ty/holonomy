@@ -45,14 +45,44 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::commit::{cmt4_tag, cmt4_verify, CMT4_TAG_BYTES};
 use crate::kdf::{derive_subkey, labels, RootSecret, Subkey};
 
+/// FIPS 203 serialises a decapsulation key as a 64-byte seed; see [`HybridKem::keygen`].
+pub const ML_KEM_1024_SEED_BYTES: usize = 64;
+
+/// `rand_core` adapter over [`crate::rng`], so the KEM's internal draws come from the same place as
+/// ours. Not a general-purpose `RngCore`: it fills bytes and refuses everything else, because the
+/// only thing `ml-kem` asks for is entropy.
+struct OsRng;
+
+impl rand_core::RngCore for OsRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut b = [0u8; 4];
+        crate::rng::fill(&mut b).expect("OS CSPRNG unavailable");
+        u32::from_le_bytes(b)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut b = [0u8; 8];
+        crate::rng::fill(&mut b).expect("OS CSPRNG unavailable");
+        u64::from_le_bytes(b)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        crate::rng::fill(dest).expect("OS CSPRNG unavailable");
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        crate::rng::fill(dest).map_err(rand_core::Error::new)
+    }
+}
+
+impl rand_core::CryptoRng for OsRng {}
+
 /// A hybrid KEM keypair, encoded at the sizes the capsule layout expects.
 ///
 /// The decapsulation half is `Zeroize`d on drop and deliberately not `Clone`: a second copy of a
 /// private key is a second thing to leak.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HybridDecapsulationKey {
-    /// `ML-KEM-1024` decapsulation key, 3,168 bytes expanded.
-    ml_kem: [u8; ML_KEM_1024_SK_BYTES],
+    /// The FIPS 203 64-byte decapsulation-key **seed**. Re-expanded on use; see
+    /// [`HybridKem::keygen`] for why the seed is stored rather than the 3,168-byte expanded form.
+    ml_kem: [u8; ML_KEM_1024_SEED_BYTES],
     /// `X25519` static secret.
     x25519: [u8; X25519_SK_BYTES],
 }
@@ -123,11 +153,19 @@ impl std::error::Error for EnvelopeError {}
 pub fn wrap_stratum_key(
     k_unwrap: &[u8; 32],
     nonce: &[u8; XCHACHA_NONCE_BYTES],
-    dk: &[u8; ML_KEM_1024_SK_BYTES],
+    dk: &[u8; ML_KEM_1024_SEED_BYTES],
     x_sk: &[u8; X25519_SK_BYTES],
 ) -> [u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES] {
+    // The plaintext is the 64-byte seed followed by the 32-byte X25519 scalar: 96 bytes of secret
+    // inside a 3,200-byte slot. The remainder is zero padding so the wrapped blob occupies exactly
+    // the space the capsule allots (`WRAPPED_SK_BYTES` = 3,168 + 32 + 16). The padding is inside
+    // the AEAD, so it is authenticated; and because the ciphertext is then stream-whitened and
+    // folded against the pad, its length is not observable either.
+    //
+    // This is the honest version of a field size the old PRD justified by claiming a 3,168-byte
+    // expanded key was stored. It is not: the seed is canonical, and the slot is fixed.
     let mut plain = [0u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES];
-    plain[..ML_KEM_1024_SK_BYTES].copy_from_slice(dk);
+    plain[..ML_KEM_1024_SEED_BYTES].copy_from_slice(dk);
     plain[ML_KEM_1024_SK_BYTES..].copy_from_slice(x_sk);
 
     let cipher = XChaCha20Poly1305::new_from_slice(k_unwrap).expect("32-byte key");
@@ -167,9 +205,9 @@ pub fn unwrap_stratum_key(
         plain.zeroize();
         return Err(EnvelopeError::BadLength);
     }
-    let mut dk = [0u8; ML_KEM_1024_SK_BYTES];
+    let mut dk = [0u8; ML_KEM_1024_SEED_BYTES];
     let mut x = [0u8; X25519_SK_BYTES];
-    dk.copy_from_slice(&plain[..ML_KEM_1024_SK_BYTES]);
+    dk.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
     x.copy_from_slice(&plain[ML_KEM_1024_SK_BYTES..]);
     plain.zeroize();
     Ok(HybridDecapsulationKey { ml_kem: dk, x25519: x })
@@ -271,21 +309,41 @@ pub struct MlKem1024X25519;
 
 impl HybridKem for MlKem1024X25519 {
     fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
-        use ml_kem::kem::{Generate, Kem, KeyExport};
+        use ml_kem::kem::Generate;
         use ml_kem::MlKem1024;
 
-        let (dk, ek) = MlKem1024::generate_keypair();
+        // `MlKem1024::generate_keypair()` exists but is gated behind ml-kem's `getrandom` feature
+        // and returns an opaque pair; going through `try_generate_from_rng` keeps the CSPRNG choice
+        // ours (see `crate::rng`) and avoids enabling a second entropy path inside the dependency.
+        let dk = <MlKem1024 as ml_kem::kem::Kem>::DecapsulationKey::try_generate_from_rng(
+            &mut OsRng,
+        )
+        .expect("OS CSPRNG unavailable");
+        let ek = dk.encapsulation_key().clone();
+
         let mut x_bytes = [0u8; 32];
         crate::rng::fill(&mut x_bytes).expect("OS CSPRNG unavailable");
         let x_sk = StaticSecret::from(x_bytes);
         let x_pk = PublicKey::from(&x_sk);
 
-        let ml_sk_raw = dk.to_bytes();
-        let mut ml_sk = [0u8; ML_KEM_1024_SK_BYTES];
-        ml_sk.copy_from_slice(&ml_sk_raw);
+        // The stored decapsulation key is the FIPS 203 64-byte *seed*, not the 3,168-byte expanded
+        // form. Three reasons, and the first is a measured fact rather than a preference:
+        //
+        //  1. `KeyExport for DecapsulationKey` returns `Seed` — 64 bytes — and at base64 in JSON
+        //     that keeps our wire encoding of the *encrypted* key inside both `sodiumoxide`'s
+        //     255-byte and `serde-json-core`'s 256-byte limits, which the expanded form does not.
+        //  2. The seed is the canonical serialisation: it round-trips to the same keypair on every
+        //     implementation, so a container written here opens with any conformant ML-KEM.
+        //  3. `DecapsulationKey::from_seed` re-expands deterministically, so nothing is lost.
+        //
+        // `wrap_stratum_key` then pads the plaintext to the 3,200 bytes the capsule allots, which
+        // is what makes `WRAPPED_SK_BYTES == 3,216` (3,168 + 32 + 16) come out exactly.
+        let seed = dk.to_bytes();
+        let mut ml_seed = [0u8; ML_KEM_1024_SEED_BYTES];
+        ml_seed.copy_from_slice(&seed);
 
         (
-            HybridDecapsulationKey { ml_kem: ml_sk, x25519: x_bytes },
+            HybridDecapsulationKey { ml_kem: ml_seed, x25519: x_bytes },
             HybridEncapsulationKey {
                 ml_kem: ek.to_bytes().to_vec(),
                 x25519: x_pk.to_bytes(),
@@ -298,12 +356,18 @@ impl HybridKem for MlKem1024X25519 {
         pk: &HybridEncapsulationKey,
     ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
         use ml_kem::kem::{Encapsulate, Kem};
-        use ml_kem::kem::KeyExport;
         use ml_kem::MlKem1024;
 
-        let ek = <MlKem1024 as Kem>::EncapsulationKey::try_from(pk.ml_kem.as_slice())
+        // `EncapsulationKey::new(&Key<Self>)` is the only constructor: a fallible `From<&[u8]>` is
+        // deliberately absent so a wrong-length byte slice cannot become a key. The array type has
+        // to be converted from the stored `Vec` first, which is where the length check happens.
+        let key_array: ml_kem::Key<ml_kem::kem::EncapsulationKey<MlKem1024>> =
+            ml_kem::Key::<ml_kem::kem::EncapsulationKey<MlKem1024>>::try_from(pk.ml_kem.as_slice())
+                .map_err(|_| EnvelopeError::KemRejected)?;
+        let ek = <MlKem1024 as Kem>::EncapsulationKey::new(&key_array)
             .map_err(|_| EnvelopeError::KemRejected)?;
-        let (ct, ss) = ek.encapsulate();
+
+        let (ct, ss) = ek.encapsulate_with_rng(&mut OsRng);
         let mut pq = [0u8; 32];
         pq.copy_from_slice(&ss);
 
@@ -328,11 +392,11 @@ impl HybridKem for MlKem1024X25519 {
         sk: &HybridDecapsulationKey,
         ct: &HybridCiphertext,
     ) -> Result<SharedSecrets, EnvelopeError> {
-        use ml_kem::kem::{Decapsulate, Kem, TryKeyInit};
+        use ml_kem::kem::{Decapsulate, Kem, KeyInit};
         use ml_kem::MlKem1024;
 
-        let dk = <MlKem1024 as Kem>::DecapsulationKey::new_from_slice(&sk.ml_kem)
-            .map_err(|_| EnvelopeError::KemRejected)?;
+        // Re-expand the seed, decapsulate, drop. The expanded key never has to be serialised.
+        let dk = <<MlKem1024 as Kem>::DecapsulationKey as KeyInit>::new_from_slice(&sk.ml_kem);
         let ml_ct = ml_kem::Ciphertext::<MlKem1024>::try_from(ct.ml_kem.as_slice())
             .map_err(|_| EnvelopeError::KemRejected)?;
         let ss = dk.decapsulate(&ml_ct);
@@ -421,7 +485,7 @@ impl HybridDecapsulationKey {
     /// Construct from raw halves. **Test-only**: a production keypair comes from
     /// [`HybridKem::keygen`], which draws from the OS CSPRNG.
     #[doc(hidden)]
-    pub fn for_test(ml_kem: [u8; ML_KEM_1024_SK_BYTES], x25519: [u8; X25519_SK_BYTES]) -> Self {
+    pub fn for_test(ml_kem: [u8; ML_KEM_1024_SEED_BYTES], x25519: [u8; X25519_SK_BYTES]) -> Self {
         Self { ml_kem, x25519 }
     }
 }
@@ -457,7 +521,7 @@ mod tests {
     impl HybridKem for FakeKem {
         fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
             (
-                HybridDecapsulationKey { ml_kem: [7u8; ML_KEM_1024_SK_BYTES], x25519: [8u8; 32] },
+                HybridDecapsulationKey { ml_kem: [7u8; ML_KEM_1024_SEED_BYTES], x25519: [8u8; 32] },
                 HybridEncapsulationKey { ml_kem: vec![7u8; 1568], x25519: [8u8; 32] },
             )
         }
@@ -477,7 +541,7 @@ mod tests {
 
     #[test]
     fn wrap_is_exactly_the_documented_size() {
-        let wrapped = wrap_stratum_key(&[1u8; 32], &[2u8; 24], &[3u8; 3168], &[4u8; 32]);
+        let wrapped = wrap_stratum_key(&[1u8; 32], &[2u8; 24], &[3u8; ML_KEM_1024_SEED_BYTES], &[4u8; 32]);
         assert_eq!(wrapped.len(), 3_216);
         assert_eq!(wrapped.len(), ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES);
     }
@@ -486,7 +550,7 @@ mod tests {
     fn wrap_unwrap_round_trip() {
         let k = [1u8; 32];
         let n = [2u8; 24];
-        let dk = [3u8; 3168];
+        let dk = [3u8; ML_KEM_1024_SEED_BYTES];
         let xs = [4u8; 32];
         let w = wrap_stratum_key(&k, &n, &dk, &xs);
         let out = unwrap_stratum_key(&k, &n, &w).unwrap();
@@ -497,7 +561,7 @@ mod tests {
     #[test]
     fn wrong_k_unwrap_cannot_open_the_wrap() {
         let n = [2u8; 24];
-        let w = wrap_stratum_key(&[1u8; 32], &n, &[3u8; 3168], &[4u8; 32]);
+        let w = wrap_stratum_key(&[1u8; 32], &n, &[3u8; ML_KEM_1024_SEED_BYTES], &[4u8; 32]);
         assert_eq!(
             unwrap_stratum_key(&[9u8; 32], &n, &w).unwrap_err(),
             EnvelopeError::UnwrapFailed

@@ -39,7 +39,9 @@
 //! `align_of === 4,096` is requested via `repr(C, align(4096))` for the transient in-RAM value
 //! so a capsule can back a direct-I/O read without a copy.
 
-use crate::layout::{CAPSULE_BYTES, IO_ALIGN, SALT_BYTES, SLOT_BYTES};
+pub use crate::layout::SALT_BYTES;
+
+use crate::layout::{CAPSULE_BYTES, IO_ALIGN, SLOT_BYTES};
 
 /// `ML-KEM-1024` ciphertext size, FIPS 203.
 pub const ML_KEM_1024_CT_BYTES: usize = 1_568;

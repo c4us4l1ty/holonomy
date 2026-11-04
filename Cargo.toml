@@ -54,7 +54,9 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 blake2 = { version = "0.10", default-features = false }
 sha3 = { version = "0.10", default-features = false }
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
-rand_core = { version = "0.6", default-features = false }
+# ml-kem 0.3.4 depends on rand_core 0.10, so the adapter in `holonomy-crypto` must use the
+# same trait version or the `RngCore` impl will not be the one the KEM asks for.
+rand_core = { version = "0.10", default-features = false }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # --- platform -----------------------------------------------------------------------

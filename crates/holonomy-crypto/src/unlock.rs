@@ -45,7 +45,7 @@ use crate::envelope::{
     ct_lengths_are_canonical, derive_dem_key, derive_passphrase_only_keys, phase1_commitment,
     phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
 };
-use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass, RootSecret};
+use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};
 
 /// Everything needed to attempt an unlock. Borrowed, not owned: none of it is secret except the
 /// passphrase, and that is already sealed.
