@@ -16,6 +16,16 @@ use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_crypto::ParamsClass;
 
 const KAPPA: [u8; 32] = [0x4Du8; 32];
+
+/// The pad window under the test's fixed `κ_USB`.
+fn pad(salt: [u8; SALT_BYTES], cursor: u64) -> Vec<u8> {
+    pad_window_for_save(&KAPPA, &salt, cursor)
+}
+
+/// The sector index under the test's fixed `κ_USB`.
+fn sector(salt: [u8; SALT_BYTES], cursor: u64, j: usize) -> u32 {
+    sector_index(&KAPPA, &salt, cursor, j)
+}
 const PASSPHRASE: &str = "correct horse battery staple";
 
 fn ctx<'a>(pass: &'a SealedPassphrase, cursor: u64) -> SaveContext<'a> {
@@ -44,12 +54,8 @@ fn provision(path: &std::path::Path, salt: [u8; SALT_BYTES], cursor: u64) {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let ctx = ctx(&pass, cursor);
     let mut file = ContainerFile::open(path, true).expect("open");
-    first_write(
-        &mut file,
-        &ctx,
-        holonomy_session::SaltBytes::of_unknown_origin(salt),
-    )
-    .expect("first write");
+    first_write(&mut file, &ctx, holonomy_session::SaltBytes::of_unknown_origin(salt))
+        .expect("first write");
 }
 
 #[test]
@@ -61,20 +67,16 @@ fn the_fold_does_not_move_the_salt_or_the_capsule() {
     // window and no container opens -- which is exactly the failure this pins down.
     let salt = [0x77u8; SALT_BYTES];
     let image: Vec<u8> = (0..CONTAINER_BYTES).map(|i| (i % 253) as u8).collect();
-    let pad = pad_window_for_save(&salt, 3);
+    let window = pad(salt, 3);
 
     let mut folded = image.clone();
-    fold(&mut folded, &pad);
+    fold(&mut folded, &window);
     let (off, _) = slot_range(SALT_SLOT_INDEX);
     for i in 0..SALT_BYTES {
-        assert_eq!(
-            folded[off + i],
-            image[off + i] ^ pad[off + i],
-            "byte {i} of slot 1"
-        );
+        assert_eq!(folded[off + i], image[off + i] ^ window[off + i], "byte {i} of slot 1");
     }
     // Slot 0 too: the capsule is covered by the pad and lives where the layout says.
-    assert_eq!(folded[0], image[0] ^ pad[0]);
+    assert_eq!(folded[0], image[0] ^ window[0]);
 }
 
 #[test]
@@ -89,8 +91,7 @@ fn a_provisioned_container_opens_before_any_save() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
 
     let mut file = ContainerFile::open(&path, false).expect("open");
-    let (opened, document) =
-        open_document(&mut file, &ctx(&pass, 0)).expect("a provisioned container must open");
+    let (opened, document) = open_document(&mut file, &ctx(&pass, 0)).expect("a provisioned container must open");
     assert_eq!(document, b"", "provisioning writes an empty document");
     assert_eq!(opened.cursor(), 0);
     drop(file);
@@ -117,8 +118,7 @@ fn the_first_save_after_provisioning_succeeds() {
     let ctx = ctx(&pass, 1);
 
     let mut file = ContainerFile::open(&path, true).expect("open");
-    save(&mut file, &ctx, b"the first thing written by a user")
-        .expect("the first save must succeed");
+    save(&mut file, &ctx, b"the first thing written by a user").expect("the first save must succeed");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
@@ -205,10 +205,7 @@ fn a_read_only_handle_cannot_save() {
     provision(&path, [0x14u8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let mut file = ContainerFile::open(&path, false).expect("open");
-    assert!(
-        !file.is_writable(),
-        "opened read-only, so is_writable must say so"
-    );
+    assert!(!file.is_writable(), "opened read-only, so is_writable must say so");
     let err = save(&mut file, &ctx(&pass, 1), b"x").unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     let _ = std::fs::remove_file(&path);
@@ -217,14 +214,14 @@ fn a_read_only_handle_cannot_save() {
 #[test]
 fn the_salt_changes_on_every_save_and_with_it_the_pad() {
     // The two properties that make a save a re-keying rather than a rewrite.
-    let a = pad_window_for_save(&[0x21u8; SALT_BYTES], 0);
-    let b = pad_window_for_save(&[0x22u8; SALT_BYTES], 0);
+    let a = pad([0x21u8; SALT_BYTES], 0);
+    let b = pad([0x22u8; SALT_BYTES], 0);
     assert_eq!(a.len(), CONTAINER_BYTES);
     assert_ne!(a, b, "the pad must depend on the salt");
     // Same salt and cursor, same window: this is what lets a reader undo the fold.
-    assert_eq!(a, pad_window_for_save(&[0x21u8; SALT_BYTES], 0));
+    assert_eq!(a, pad([0x21u8; SALT_BYTES], 0));
     // Different cursor, different window.
-    let c = pad_window_for_save(&[0x21u8; SALT_BYTES], 1);
+    let c = pad([0x21u8; SALT_BYTES], 1);
     assert_ne!(a, c, "the pad must depend on the cursor");
 }
 
@@ -236,11 +233,8 @@ fn consecutive_cursors_read_disjoint_sectors() {
     let mut seen = HashSet::new();
     for cursor in 0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE {
         for j in 0..PAD_SECTORS {
-            let sector = sector_index(&[0x31u8; SALT_BYTES], cursor, j);
-            assert!(
-                seen.insert(sector),
-                "sector {sector} reused at save {cursor}"
-            );
+            let sector = sector([0x31u8; SALT_BYTES], cursor, j);
+            assert!(seen.insert(sector), "sector {sector} reused at save {cursor}");
         }
     }
     assert_eq!(
@@ -255,19 +249,19 @@ fn the_store_and_the_usb_crate_choose_the_same_sectors() {
     // off a device, and `sector_index` derives the sectors this store folds. If they disagree, a
     // container written here cannot be read by the path that reads a stick, and vice versa.
     //
-    // They take *different key material* by design at the moment: `PadPlan` is given a `k_perm`
-    // directly and this store passes the salt's first 32 bytes as that key. So the comparison is
-    // between `PadPlan::for_save(&salt[..32], cursor)` and `sector_index(&salt, cursor, j)`.
+    // The store keys the permutation with `κ_USB ‖ σ_epoch` mixed through BLAKE2b; `PadPlan` takes
+    // that 32-byte key directly. So this test reconstructs the key the same way the store does and
+    // checks every sector of four saves. `k_perm_key` below must stay byte-identical to the mixing
+    // inside `sector_index` -- two places, one definition, and this is what holds them together.
     let salt = [0x41u8; SALT_BYTES];
-    let mut k_perm = [0u8; 32];
-    k_perm.copy_from_slice(&salt[..32]);
+    let k_perm = k_perm_key(&KAPPA, &salt);
 
     for cursor in [0u64, 1, 27, 53] {
         let plan = holonomy_usb::pad::PadPlan::for_save(&k_perm, cursor);
         assert_eq!(plan.len(), PAD_SECTORS);
         for (j, &lba) in plan.lbas().iter().enumerate() {
             assert_eq!(
-                sector_index(&salt, cursor, j),
+                sector(salt, cursor, j),
                 lba,
                 "save {cursor}, sector {j}: the store and the USB plan disagree"
             );
@@ -275,14 +269,32 @@ fn the_store_and_the_usb_crate_choose_the_same_sectors() {
     }
 }
 
+/// The permutation key `sector_index` builds, duplicated here deliberately.
+///
+/// A test that called the production function to build its expected value would not be testing
+/// anything. This is the second, independent statement of the mixing, and
+/// `the_store_and_the_usb_crate_choose_the_same_sectors` is what fails if the two drift.
+fn k_perm_key(kappa_usb: &[u8; 32], salt: &[u8; SALT_BYTES]) -> [u8; 32] {
+    use blake2::{Blake2b512, Digest};
+    let mut h = Blake2b512::new();
+    h.update(b"HOLONOMY_V51_K_PERM");
+    h.update([0u8]);
+    h.update(kappa_usb);
+    h.update(salt);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d[..32]);
+    out
+}
+
 #[test]
 fn the_fold_is_its_own_inverse() {
     let image: Vec<u8> = (0..CONTAINER_BYTES).map(|i| (i % 251) as u8).collect();
-    let pad = pad_window_for_save(&[0x51u8; SALT_BYTES], 3);
+    let window = pad([0x51u8; SALT_BYTES], 3);
     let mut folded = image.clone();
-    fold(&mut folded, &pad);
+    fold(&mut folded, &window);
     assert_ne!(folded, image, "the fold did nothing");
-    fold(&mut folded, &pad);
+    fold(&mut folded, &window);
     assert_eq!(folded, image, "folding twice must restore the image");
 }
 
@@ -305,12 +317,7 @@ fn a_second_save_replaces_the_first() {
 
     let mut file = ContainerFile::open(&path, true).expect("open");
     save(&mut file, &ctx(&pass, 1), b"the first document").expect("first");
-    save(
-        &mut file,
-        &ctx(&pass, 2),
-        b"the second document, longer than the first",
-    )
-    .expect("second");
+    save(&mut file, &ctx(&pass, 2), b"the second document, longer than the first").expect("second");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
