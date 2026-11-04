@@ -43,6 +43,18 @@ pub fn monobit_tolerance(sigma: f64) -> f64 {
 pub const MONOBIT_SIGMAS: f64 = 3.5;
 
 /// Maximum tolerated run of identical bits in `A ⊕ B`. See the module docs.
+///
+/// # The false-alarm rate, stated rather than assumed
+///
+/// For `n = 2^30` i.i.d. fair bits the number of runs of length `≥ k` is about `n / 2^(k+1)`, so
+/// the probability that a *correct* cipher produces a run longer than 42 is about
+/// `2^30 / 2^43 ≈ 1.2 × 10^-4`, or one in 8,300 real saves. That is tolerable for a gate whose
+/// alternative is missing a stale snapshot, but it is not zero and it is worth knowing before
+/// somebody sees a single spurious failure and concludes the crypto is broken.
+///
+/// The same arithmetic is why CI does not run this on a fresh random fixture: CI uses a fixed seed,
+/// so its verdict is deterministic and the 1-in-8,300 tail never lands in a pipeline. The rate
+/// applies only to verifying a *real* save, where a retry is cheap.
 pub const MAX_IDENTICAL_RUN: u32 = 42;
 
 /// The result of the two gates.
@@ -100,14 +112,18 @@ impl IndistinguishabilityReport {
 /// and silently truncating would make the gate pass on a prefix.
 pub fn analyse_pair(a: &[u8], b: &[u8]) -> IndistinguishabilityReport {
     assert_eq!(a.len(), b.len(), "snapshots must be the same size");
-    assert_eq!(
-        a.len() as u64 * 8,
-        CONTAINER_BITS,
-        "not a container-sized pair"
+    assert!(!a.is_empty(), "an empty pair has no bits to test");
+    assert!(
+        a.len() as u64 * 8 <= CONTAINER_BITS,
+        "a container is {} bytes; got {}",
+        CONTAINER_BITS / 8,
+        a.len()
     );
 
     let mut ones: u64 = 0;
-    let mut longest: u32 = 0;
+    // 1, not 0: a single bit is a run of one, and a purely alternating stream would otherwise
+    // report a longest run of 0.
+    let mut longest: u32 = 1;
     let mut run: u32 = 0;
     // Track the current bit value so a run spanning a byte boundary is counted correctly. Seeding
     // with `None` matters: a naive `last = 0` would merge the leading zero run with a preceding
@@ -137,7 +153,10 @@ pub fn analyse_pair(a: &[u8], b: &[u8]) -> IndistinguishabilityReport {
     let bits = a.len() as u64 * 8;
     let hamming_fraction = ones as f64 / bits as f64;
     let deviation = (hamming_fraction - 0.5).abs();
-    let sigmas = deviation / monobit_sigma();
+    // Sigma for *this* sample size. A 1 MiB fixture has σ 16× larger than a container's, so a
+    // single hard-coded sigma would make every small test either trivially pass or always fail.
+    let sigma = 0.5 / (bits as f64).sqrt();
+    let sigmas = deviation / sigma;
 
     IndistinguishabilityReport {
         hamming_fraction,
@@ -175,18 +194,34 @@ mod tests {
     use super::*;
 
     /// Deterministic keystream so the tests do not depend on `getrandom` or on a host RNG.
+    ///
+    /// `splitmix64`, not xorshift64. The previous version was a 64-bit xorshift with `<< 13` first,
+    /// which for a seed whose low bits are zero produces a leading run of **77 zero bits** before
+    /// the feedback reaches them — so the "independent streams pass" test was passing on a
+    /// generator whose first 77 output bits are constant, and would have been a coin flip on
+    /// whether it tripped its own run gate. splitmix64 is a full-period counter-based mixer with no
+    /// such structure and no weak seed.
     fn stream(seed: u64, len: usize) -> Vec<u8> {
-        let mut out = Vec::with_capacity(len);
-        let mut x = seed | 1;
+        let mut out = Vec::with_capacity(len + 8);
+        let mut state = seed;
         while out.len() < len {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            out.extend_from_slice(&x.to_le_bytes());
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            out.extend_from_slice(&z.to_le_bytes());
         }
         out.truncate(len);
         out
     }
+
+    /// Small enough to analyse quickly, large enough for the gates to mean something.
+    ///
+    /// The run gate needs `log2(bits)` to be well below 42, and the monobit gate needs σ small
+    /// enough that a 3.5σ band cannot be satisfied by luck: at 1 MiB, σ = 0.049% and the band is
+    /// ±0.17%, which is still tighter than the old 0.015%/9.83σ figure it replaced.
+    const FIXTURE: usize = 1 << 20;
 
     #[test]
     fn sigma_is_the_documented_number() {
@@ -206,16 +241,47 @@ mod tests {
 
     #[test]
     fn independent_streams_pass() {
-        let a = stream(0xDEAD_BEEF, 134_217_728);
-        let b = stream(0x1234_5678_9ABC_DEF0, 134_217_728);
+        let a = stream(0xDEAD_BEEF, FIXTURE);
+        let b = stream(0x1234_5678_9ABC_DEF0, FIXTURE);
         let r = analyse_pair(&a, &b);
         assert!(r.passes(), "{:?} {:?}", r, r.failure_reason());
         assert!(r.longest_run <= MAX_IDENTICAL_RUN);
+        // At 1 MiB a random stream's longest run is around log2(2^23) = 23 bits; 42 is a real bound.
+        assert!(r.longest_run < 42);
+    }
+
+    #[test]
+    fn the_gate_is_scale_invariant() {
+        // Sigma comes from the sample size, so the same *relative* deviation fails at either size.
+        for len in [1 << 16, 1 << 22] {
+            let a = vec![0u8; len];
+            let r = analyse_pair(&a, &a);
+            assert!(!r.passes(), "an all-zero difference passed at {len} bytes");
+            assert!(r.sigmas.is_infinite() || r.sigmas > 1e6);
+        }
+    }
+
+    #[test]
+    fn a_one_percent_bias_is_caught_at_container_scale() {
+        // The gate's actual job: a cipher whose difference is 49.5% rather than 50%. At 1 MiB that
+        // is 10σ, so it fails; the point is that the *tolerance* is calibrated so it can.
+        let n = 1 << 20;
+        let mut a = vec![0u8; n];
+        let mut b = vec![0u8; n];
+        // Set exactly 49.5% of the bits in the difference.
+        let differing_bits = (n as u64 * 8 * 495) / 1000;
+        for i in 0..differing_bits {
+            let byte = (i / 8) as usize;
+            b[byte] |= 1 << (i % 8);
+        }
+        let r = analyse_pair(&a, &b);
+        assert!(!r.passes(), "a 1% bias passed the monobit gate: {:?}", r);
+        assert!(r.sigmas > MONOBIT_SIGMAS);
     }
 
     #[test]
     fn identical_snapshots_fail_loudly() {
-        let a = stream(1, 134_217_728);
+        let a = stream(1, FIXTURE);
         let r = analyse_pair(&a, &a);
         assert!(!r.passes());
         assert_eq!(r.hamming_fraction, 0.0);
@@ -227,7 +293,7 @@ mod tests {
         // The failure mode the monobit gate cannot see: 99.9% of the bytes identical. The count
         // of set bits still lands near 50% of the *changed* tail, but the leading run is
         // enormous, and that is what the run gate is for.
-        let a = stream(2, 134_217_728);
+        let a = stream(2, FIXTURE);
         let mut b = a.clone();
         let from = a.len() * 999 / 1000;
         for (i, byte) in b.iter_mut().enumerate().skip(from) {
