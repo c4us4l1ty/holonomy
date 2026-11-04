@@ -36,6 +36,11 @@ those documents are historical and code and current CI results govern implementa
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
+Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
+ownership, ACLs, extended attributes, hard links, or other filesystem metadata. The path check is
+not a lock: do not save the same container concurrently. Provisioning is not crash-atomic. Always
+keep independently tested backups together with the pad material needed to open them.
+
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
 facilities. Omit `--passphrase` and `--kappa` to use hidden terminal prompts instead. The legacy
 passphrase mapping lowercases input (so ASCII case variants are equivalent) and does **not** perform
