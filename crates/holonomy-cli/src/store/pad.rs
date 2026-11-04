@@ -112,7 +112,7 @@ pub trait PadSource {
 /// makes it impossible for two calls in one session to disagree about the key.
 pub struct DevicePad {
     device: DirectFile,
-    k_perm: [u8; 32],
+    k_perm: zeroize::Zeroizing<[u8; 32]>,
     /// LBA where Zone B begins. Always [`ZONE_B_LBA_START`] in production; the tests move it so the
     /// same code can be pointed at a small file instead of a 7.3 GiB one.
     zone_b_lba_start: u64,
@@ -136,7 +136,7 @@ impl DevicePad {
         let device = DirectFile::open(path, access, holonomy_core::layout::IO_ALIGN as u64)?;
         Ok(Self {
             device,
-            k_perm: k_perm_key(kappa_usb),
+            k_perm: zeroize::Zeroizing::new(k_perm_key(kappa_usb)),
             zone_b_lba_start: ZONE_B_LBA_START,
         })
     }
@@ -163,7 +163,7 @@ impl DevicePad {
             // Derived from the caller's share, not a placeholder: a handle whose key disagreed with
             // the one its window is checked against reads the wrong 32,768 sectors and returns an
             // unwritten file's zeros, which looks like working code until the assertions land.
-            k_perm: k_perm_key(kappa_usb),
+            k_perm: zeroize::Zeroizing::new(k_perm_key(kappa_usb)),
             zone_b_lba_start,
         })
     }

@@ -100,14 +100,13 @@ impl std::fmt::Debug for OpenedContainer {
 }
 
 impl OpenedContainer {
-    /// The payload concatenated, in slot order.
+    /// Concatenate the payload slots into a buffer that is wiped on drop.
     ///
-    /// Allocates a copy of the document, which is the caller's explicit choice: the slots
-    /// themselves zeroize, and an editor that needs one contiguous buffer takes on that buffer's
-    /// lifetime. Kept here rather than in the editor so the copy is made once, from the zeroizing
-    /// source, rather than per redraw from decrypted material.
-    pub fn payload_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.payload.iter().map(|s| s.as_slice().len()).sum());
+    /// This creates another plaintext copy. Zeroization is best effort and does not
+    /// cover copies held by the OS, earlier allocations, aborts, or other consumers.
+    pub fn payload_bytes(&self) -> Zeroizing {
+        let size = self.payload.iter().map(|s| s.as_slice().len()).sum();
+        let mut out = Zeroizing::from_vec(Vec::with_capacity(size));
         for slot in &self.payload {
             out.extend_from_slice(slot.as_slice());
         }

@@ -611,6 +611,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Lint CLI
         run: cargo clippy -p holonomy-cli --all-targets -- -D warnings
+      - name: Test redacted document buffer
+        run: cargo test -p holonomy-session --lib a_saved_container_reopens_to_the_bytes_that_went_in
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail

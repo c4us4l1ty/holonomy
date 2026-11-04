@@ -162,7 +162,7 @@ fn a_provisioned_container_opens_before_any_save() {
     let mut file = ContainerFile::open(&path, false).expect("open");
     let (opened, document) = open_document(&mut file, &mut source(), &ctx(&pass, 0))
         .expect("a provisioned container must open");
-    assert_eq!(document, b"", "provisioning writes an empty document");
+    assert_eq!(document.as_slice(), b"", "provisioning writes an empty document");
     assert_eq!(opened.cursor(), 0);
     drop(file);
 
@@ -199,7 +199,7 @@ fn the_first_save_after_provisioning_succeeds() {
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (_, document) = open_document(&mut file, &mut source(), &ctx).expect("open");
-    assert_eq!(document, b"the first thing written by a user");
+    assert_eq!(document.as_slice(), b"the first thing written by a user");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -224,7 +224,7 @@ fn a_document_survives_a_save_and_a_reopen() {
     drop(file);
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) = open_document(&mut file, &mut source(), &ctx).expect("open");
-    assert_eq!(read_back, document);
+    assert_eq!(read_back.as_slice(), document);
     assert_eq!(opened.cursor(), 1);
     assert_eq!(opened.stratum.id().index(), 1);
     let _ = std::fs::remove_file(&path);
@@ -253,7 +253,7 @@ fn a_multi_slot_document_reassembles_in_order() {
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) = open_document(&mut file, &mut source(), &ctx).expect("open");
     assert_eq!(opened.directory.slot_count(), 3);
-    assert_eq!(read_back, document);
+    assert_eq!(read_back.as_slice(), document);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -786,7 +786,7 @@ fn a_second_save_replaces_the_first() {
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) =
         open_document(&mut file, &mut source(), &ctx(&pass, 2)).expect("open at 2");
-    assert_eq!(read_back, b"the second document, longer than the first");
+    assert_eq!(read_back.as_slice(), b"the second document, longer than the first");
     assert_eq!(opened.cursor(), 2);
     drop(file);
 

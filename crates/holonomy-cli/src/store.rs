@@ -508,7 +508,7 @@ pub fn open_document(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
-) -> Result<(OpenedContainer, Vec<u8>), String> {
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
