@@ -249,20 +249,19 @@ mod tests {
     }
 
     #[test]
-    fn ranges_advance_by_one_save_and_wrap_inside_zone_b() {
+    fn ranges_advance_by_one_save_and_do_not_wrap() {
         let mut b = PadBudget::fresh();
-        let (s0, e0) = b.logical_range();
-        assert_eq!((s0, e0), (0, 32_768));
+        assert_eq!(b.logical_range(), (0, 32_768));
         b.cursor = 1;
-        assert_eq!(b.logical_range().0, 32_768);
-        b.cursor = 54; // past the disjoint window
+        assert_eq!(b.logical_range(), (32_768, 65_536));
+        b.cursor = 54; // the first cursor past the disjoint window
         let (s, e) = b.logical_range();
-        // The range is expressed in logical (pre-permutation) index space, which is bounded by the
-        // FPE domain, not by Zone B. At cursor 54 it runs past the end of Zone B in *logical* space;
-        // the cycle-walk in `Feistel22::permute` is what folds it back inside. Asserting the range
-        // stayed inside Zone B here would be asserting the wrong thing.
-        assert!(s < ZONE_B_SECTORS);
-        assert!(e > s);
+        // The range is in logical (pre-permutation) index space, which is bounded by the FPE
+        // domain, not by Zone B; the cycle-walk folds it back inside. What this must *not* do is
+        // wrap: the previous version reduced modulo ZONE_B_SECTORS and reported `[0, 32,768)` at
+        // cursor 54, which is a fresh-looking window over sectors that had already been spent.
+        assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
+        assert_ne!(s, 0, "cursor 54 must not report the same window as cursor 0");
         assert!(e <= holonomy_core::feistel::DOMAIN);
     }
 
@@ -275,10 +274,7 @@ mod tests {
         for _ in 0..54 {
             b.complete_save().unwrap();
         }
-        assert!(
-            !b.is_fresh(),
-            "54 saves exhaust the window whatever the mode"
-        );
+        assert!(!b.is_fresh(), "54 saves exhaust the window whatever the mode");
         b.complete_save().expect("writable device may continue");
         assert!(!b.is_fresh(), "continuing does not make stale pad fresh");
     }
@@ -305,8 +301,7 @@ mod tests {
         // fresh when it is not.
         let mut b = PadBudget::fresh();
         for _ in 0..200 {
-            b.complete_save()
-                .expect("a ratcheting session never exhausts");
+            b.complete_save().expect("a ratcheting session never exhausts");
             assert!(b.is_fresh(), "one save after a ratchet is always fresh");
             b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap();
         }
@@ -351,9 +346,6 @@ mod tests {
         let (s, e) = b.logical_range();
         assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
         assert!(e - s == PAD_SECTORS_PER_SAVE as u64 + 0);
-        assert_ne!(
-            s, 0,
-            "cursor 54 must not report the window cursor 0 reported"
-        );
+        assert_ne!(s, 0, "cursor 54 must not report the window cursor 0 reported");
     }
 }
