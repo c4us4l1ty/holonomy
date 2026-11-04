@@ -382,6 +382,16 @@ pub fn open_payload_slot(
 pub struct Zeroizing(Vec<u8>);
 
 impl Zeroizing {
+    /// Wrap an owned plaintext buffer for wiping on drop.
+    pub(crate) fn from_vec(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Append plaintext while keeping the buffer under the drop guard.
+    pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
     /// The plaintext.
     pub fn as_slice(&self) -> &[u8] {
         &self.0

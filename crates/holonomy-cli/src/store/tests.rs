@@ -139,7 +139,9 @@ fn the_store_round_trips_one_raw_save_without_the_pad() {
             params: ParamsClass::Test,
             pad_fresh: true,
         },
-        identity_placement,
+        // The container was written by `first_write_unpadded_for_test`, which now uses the epoch
+        // permutation keyed by the salt it was given, so the reader must use the same one.
+        epoch_placement(&salt),
     )
     .expect("the unpadded container must open");
     assert_eq!(opened.cursor(), 0);
@@ -160,7 +162,11 @@ fn a_provisioned_container_opens_before_any_save() {
     let mut file = ContainerFile::open(&path, false).expect("open");
     let (opened, document) = open_document(&mut file, &mut source(), &ctx(&pass, 0))
         .expect("a provisioned container must open");
-    assert_eq!(document, b"", "provisioning writes an empty document");
+    assert_eq!(
+        document.as_slice(),
+        b"",
+        "provisioning writes an empty document"
+    );
     assert_eq!(opened.cursor(), 0);
     drop(file);
 
@@ -197,7 +203,7 @@ fn the_first_save_after_provisioning_succeeds() {
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (_, document) = open_document(&mut file, &mut source(), &ctx).expect("open");
-    assert_eq!(document, b"the first thing written by a user");
+    assert_eq!(document.as_slice(), b"the first thing written by a user");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -222,7 +228,7 @@ fn a_document_survives_a_save_and_a_reopen() {
     drop(file);
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) = open_document(&mut file, &mut source(), &ctx).expect("open");
-    assert_eq!(read_back, document);
+    assert_eq!(read_back.as_slice(), document);
     assert_eq!(opened.cursor(), 1);
     assert_eq!(opened.stratum.id().index(), 1);
     let _ = std::fs::remove_file(&path);
@@ -251,7 +257,7 @@ fn a_multi_slot_document_reassembles_in_order() {
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) = open_document(&mut file, &mut source(), &ctx).expect("open");
     assert_eq!(opened.directory.slot_count(), 3);
-    assert_eq!(read_back, document);
+    assert_eq!(read_back.as_slice(), document);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -447,7 +453,13 @@ fn the_fold_does_not_move_the_salt_or_the_capsule() {
             params: ParamsClass::Test,
             pad_fresh: true,
         },
-        identity_placement,
+        // The permutation is a function of the salt, and slot 1 of the unfolded image is the salt.
+        epoch_placement(&{
+            let (off, _) = slot_range(SALT_SLOT_INDEX);
+            let mut s = [0u8; SALT_BYTES];
+            s.copy_from_slice(&unfolded[off..off + SALT_BYTES]);
+            s
+        }),
     )
     .expect("the unfolded image must open");
     assert_eq!(opened.cursor(), 0);
@@ -617,6 +629,120 @@ fn the_device_pad_and_the_stand_in_select_the_same_sectors() {
 }
 
 #[test]
+fn the_epoch_placement_is_a_bijection_of_the_payload_range() {
+    // Every property the format depends on, in one place. A placement that failed any of these would
+    // either overwrite a slot with another (not injective), write into the capsule or the salt (out of
+    // range), or leave a payload block permanently unused (not surjective -- which would make the
+    // container's occupancy map a fingerprint of *which* slots a document used).
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, TOTAL_BLOCKS};
+    for salt in [
+        [0x00u8; SALT_BYTES],
+        [0x33u8; SALT_BYTES],
+        [0xFFu8; SALT_BYTES],
+    ] {
+        let place = epoch_placement(&salt);
+        let mut seen = vec![false; TOTAL_BLOCKS];
+        for logical in 0..PAYLOAD_SLOTS {
+            let physical = place(logical);
+            assert!(
+                (PAYLOAD_SLOT_BASE..TOTAL_BLOCKS).contains(&physical),
+                "salt {:02x}: slot {logical} placed at block {physical}, which is not a payload block",
+                salt[0]
+            );
+            assert!(
+                !seen[physical],
+                "salt {:02x}: block {physical} used twice -- the placement is not injective",
+                salt[0]
+            );
+            seen[physical] = true;
+        }
+        // Surjective onto exactly the payload range: every payload block is used once.
+        assert_eq!(seen.iter().filter(|&&b| b).count(), PAYLOAD_SLOTS);
+        assert!(
+            !seen[0] && !seen[1],
+            "the capsule and the salt must be untouched"
+        );
+    }
+}
+
+#[test]
+fn two_salts_permute_the_same_slot_differently() {
+    // Without this the permutation is just the identity with extra steps. If two epochs
+    // produced the same mapping, a save would leave the layout of the previous one intact and the
+    // whole mechanism would buy nothing.
+    let a = epoch_placement(&[0x11u8; SALT_BYTES]);
+    let b = epoch_placement(&[0x22u8; SALT_BYTES]);
+    let slots = holonomy_core::layout::PAYLOAD_SLOTS;
+    let differing = (0..slots).filter(|&i| a(i) != b(i)).count();
+
+    // Not "almost every slot differs". A swap chain leaves a given element in place with probability
+    // about 1/4 (no transposition touches it), so two independent chains agree on a slot about 1/4 of
+    // the time and the expectation here is ~1,535 of 2,046 -- 1,874 in the run that turned this up.
+    // An earlier version of this assertion demanded 99%, which is true of a permutation of 2^22
+    // elements and not of one drawn from 2,046 swaps. What must hold is that the layouts are
+    // substantially unrelated, not that they are disjoint.
+    assert!(
+        differing > slots / 2,
+        "only {differing} of {slots} slots differ between two epochs; the permutation is barely doing anything"
+    );
+}
+
+#[test]
+fn a_saved_payload_is_not_written_in_logical_order() {
+    // The observable consequence, on a real container: after unfolding, the ciphertext of slot 0 must
+    // *not* be at block 2, because block 2 is where an identity placement would have put it. A test
+    // that only checked the placement function in isolation could pass while the store still called
+    // the identity.
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE};
+    let path = tempfile("permuted");
+    let salt = [0x5Du8; SALT_BYTES];
+    provision(&path, salt, 0);
+
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let document = b"a document long enough to occupy exactly one payload slot";
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    save(&mut file, &mut source(), &ctx, document).expect("save");
+    drop(file);
+
+    let raw = std::fs::read(&path).expect("read");
+    let mut unfolded = raw;
+    fold(&mut unfolded, &pad(1));
+
+    // The salt the save chose is in slot 1, and it is what keys the permutation.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut new_salt = [0u8; SALT_BYTES];
+    new_salt.copy_from_slice(&unfolded[salt_off..salt_off + SALT_BYTES]);
+    assert_ne!(
+        new_salt, [0u8; SALT_BYTES],
+        "the save must choose a fresh salt"
+    );
+    let place = epoch_placement(&new_salt);
+
+    // Across all slots, not just slot 0: a single slot has a 1-in-2,046 chance of landing where the
+    // identity would have put it, so asserting on one would be a test that fails about once per two
+    // thousand runs for no reason. A permutation that is *mostly* the identity is not one.
+    let moved = (0..PAYLOAD_SLOTS)
+        .filter(|&i| place(i) != PAYLOAD_SLOT_BASE + i)
+        .count();
+    assert!(
+        moved > PAYLOAD_SLOTS / 2,
+        "only {moved} of {PAYLOAD_SLOTS} slots moved: the save wrote its payload in logical order"
+    );
+
+    // The one payload slot this document filled is somewhere the permutation chose, and it is not
+    // empty. Which logical index it is does not matter -- the document is one slot -- but the block
+    // has to hold something, or the permutation would be pointing at unused space.
+    let flat = place(0);
+    let (off, len) = slot_range(flat);
+    assert!(
+        unfolded[off..off + len].iter().any(|&b| b != 0),
+        "the block the permutation selected is empty, so nothing was written there"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn the_fold_is_its_own_inverse() {
     let image: Vec<u8> = (0..CONTAINER_BYTES).map(|i| (i % 251) as u8).collect();
     let window = pad(3);
@@ -664,7 +790,10 @@ fn a_second_save_replaces_the_first() {
     let mut file = ContainerFile::open(&path, false).expect("reopen");
     let (opened, read_back) =
         open_document(&mut file, &mut source(), &ctx(&pass, 2)).expect("open at 2");
-    assert_eq!(read_back, b"the second document, longer than the first");
+    assert_eq!(
+        read_back.as_slice(),
+        b"the second document, longer than the first"
+    );
     assert_eq!(opened.cursor(), 2);
     drop(file);
 
@@ -703,4 +832,145 @@ fn the_document_is_split_evenly_and_only_the_last_slot_is_short() {
     // nothing, which no reader path expects.
     assert_eq!(split_payload(&[]).len(), 1);
     assert!(split_payload(&[])[0].is_empty());
+}
+
+#[test]
+fn save_rejects_provisioning_cursor_without_changing_container() {
+    let path = tempfile("zero-cursor");
+    provision(&path, [0x19u8; SALT_BYTES], 0);
+    let before = std::fs::read(&path).expect("read before");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let error = save(&mut file, &mut source(), &ctx(&pass, 0), b"new")
+        .expect_err("zero is not a successor cursor");
+    assert!(error.contains("at least 1"));
+    drop(file);
+    assert_eq!(std::fs::read(&path).expect("read after"), before);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn provision_refuses_existing_path_without_overwriting_it() {
+    let path = tempfile("existing-provision");
+    std::fs::write(&path, b"preserve me").expect("seed");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let error = super::provision(&path, &mut source(), &ctx(&pass, 0)).unwrap_err();
+    assert!(error.contains("existing paths"));
+    assert_eq!(std::fs::read(&path).expect("read"), b"preserve me");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn pad_reuse_boundary_refuses_without_touching_container() {
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    assert!(validate_save_cursor(0).is_err());
+    assert!(validate_save_cursor(1).is_ok());
+    assert!(validate_save_cursor(limit - 1).is_ok());
+    assert!(validate_save_cursor(limit).is_err());
+    assert!(validate_save_cursor(u64::MAX).is_err());
+
+    let path = tempfile("pad-reuse-boundary");
+    std::fs::write(&path, b"unchanged").expect("seed");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let err = save(&mut file, &mut source(), &ctx(&pass, limit), b"new")
+        .expect_err("the first overlapping window must be refused");
+    assert!(err.contains("pad reuse"), "{err}");
+    drop(file);
+    assert_eq!(std::fs::read(&path).expect("read"), b"unchanged");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn provision_rejects_nonzero_cursor_without_creating_file() {
+    let path = tempfile("provision-nonzero");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let err = super::provision(&path, &mut source(), &ctx(&pass, 1))
+        .expect_err("provisioning must start at zero");
+    assert!(err.contains("cursor must be 0"), "{err}");
+    assert!(!path.exists());
+}
+
+#[test]
+fn open_rejects_cursor_alias_even_when_pad_window_matches() {
+    // Simulate a reused window: the bytes unfold successfully, but the authenticated
+    // directory still names cursor zero rather than the caller's cursor one.
+    struct AliasPad(DerivedPad);
+    impl PadSource for AliasPad {
+        fn window(&mut self, kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            self.0.window(kappa, 0)
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            Err("not supported".into())
+        }
+        fn can_ratchet(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "alias test pad".into()
+        }
+    }
+
+    let path = tempfile("open-cursor-alias");
+    provision(&path, [0x1au8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, false).expect("open");
+    let err = open_document(&mut file, &mut AliasPad(source()), &ctx(&pass, 1))
+        .expect_err("authenticated cursor must match");
+    assert!(err.contains("does not match requested cursor"), "{err}");
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_replacement_updates_file_and_open_handle() {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let path = tempfile("staged-replacement");
+    let original = std::fs::File::create(&path).expect("create");
+    original.set_len(CONTAINER_BYTES as u64).expect("size");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("permissions");
+    let old_ino = original.metadata().expect("metadata").ino();
+    drop(original);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let image = vec![0x5au8; CONTAINER_BYTES];
+    file.replace_image(&image).expect("replace");
+    let metadata = std::fs::metadata(&path).expect("new metadata");
+    assert_ne!(old_ino, metadata.ino());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+    let mut byte = [0u8; 1];
+    file.file.seek(SeekFrom::Start(0)).expect("seek");
+    file.file
+        .read_exact(&mut byte)
+        .expect("read from updated handle");
+    assert_eq!(byte, [0x5a]);
+    assert_eq!(
+        std::fs::metadata(&path).expect("metadata").len(),
+        CONTAINER_BYTES as u64
+    );
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_replacement_refuses_changed_path() {
+    let path = tempfile("staged-path-change");
+    let moved = tempfile("staged-path-original");
+    std::fs::write(&path, b"original").expect("original");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    std::fs::rename(&path, &moved).expect("move original");
+    std::fs::write(&path, b"replacement").expect("replace path");
+    let image = vec![0u8; CONTAINER_BYTES];
+    let err = file
+        .replace_image(&image)
+        .expect_err("stale handle must be refused");
+    assert!(err.to_string().contains("same regular file"), "{err}");
+    assert_eq!(std::fs::read(&path).expect("new file"), b"replacement");
+    assert_eq!(std::fs::read(&moved).expect("old file"), b"original");
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&moved);
 }

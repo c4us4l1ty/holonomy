@@ -140,7 +140,9 @@ fn a_saved_container_reopens_to_the_bytes_that_went_in() {
     for part in doc {
         expected.extend_from_slice(part);
     }
-    assert_eq!(opened.payload_bytes(), expected);
+    let document = opened.payload_bytes();
+    assert_eq!(document.as_slice(), expected);
+    assert!(!format!("{document:?}").contains("CHAPTER ONE"));
     // Slot by slot too, so a concatenation that happened to match is not enough.
     assert_eq!(opened.payload[0].as_slice(), doc[0]);
     assert_eq!(opened.payload[1].as_slice(), doc[1]);

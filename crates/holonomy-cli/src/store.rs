@@ -18,14 +18,14 @@
 //! A save:
 //!
 //! ```text
-//!   1. read slot 1 of the *old* container           → the old salt
+//!   1. read the *old* container                      → its bytes, still folded
 //!   2. read 32,768 pad sectors under the old cursor  → the pad window
-//!   3. undo the pad                                  → the old capsule, and the old directory
+//!   3. undo the pad                                  → the old salt, capsule and directory
 //!   4. the handshake says whether that stratum is real
 //!   5. choose a new salt        (only now; the old capsule is legible)
 //!   6. seal the new container under the new salt
 //!   7. fold the *new* pad window over it
-//!   8. write, atomically, at the container's offset
+//!   8. stage and replace the encrypted image, then sync its directory (Unix)
 //!   9. ratchet the sectors window `c-1` spent (writable stick only)
 //! ```
 //!
@@ -35,11 +35,12 @@
 //! replaced, so refreshing those sectors is the ratchet the 54-save budget is counting, and the next
 //! save reads window `c`.
 //!
-//! Steps 1 and 5 are the pair that can lose data. Writing the new salt before reading the old one
-//! destroys the only record of which pad window the old container used, and the container becomes
-//! unreadable — the salt is covered by the pad, so it is not recoverable from the file. That is why
-//! `holonomy-session`'s `ContainerHeader::after_reading` consumes the header and why this function
-//! takes the salt out of it rather than being handed one.
+//! Steps 3 and 5 are the pair that can lose data. Writing the new salt before recovering the old one
+//! destroys the only record of which pad window the old container used *and* which permutation its
+//! payload was written under, and the container becomes unreadable — the salt is covered by the pad,
+//! so it is not recoverable from the file afterwards. That is why `holonomy-session`'s
+//! `ContainerHeader::after_reading` consumes the header and why this function takes the salt out of
+//! it rather than being handed one.
 //!
 //! # Where the pad comes from
 //!
@@ -56,6 +57,14 @@
 //! **which** sectors, not what becomes of them; that is why the fold here is over the concatenation
 //! in read order, and why the store must read them in exactly the order `PadPlan` gives.
 //!
+//! # The epoch permutation
+//!
+//! Payload slots are not written in logical order. Each save chooses a fresh salt, and the salt keys
+//! a permutation of the payload block range, so the same document saved twice does not share a
+//! layout. The reader needs the same mapping and recovers it from the salt, which is the first thing
+//! it reads — nothing is stored, because storing it would put a map to the document in the one
+//! structure an adversary reads without a passphrase. See [`epoch_placement`].
+//!
 //! # What is still not here
 //!
 //! Zone A, the 256 MiB AONT+RS region that holds `κ_USB`. `kappa_usb` is therefore an argument to
@@ -65,7 +74,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use holonomy_core::layout::{
     slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX, SECTOR_BYTES,
@@ -91,6 +100,7 @@ const PAD_SECTORS: usize = PAD_SECTORS_PER_SAVE as usize;
 pub struct ContainerFile {
     file: File,
     path: String,
+    filesystem_path: PathBuf,
     offset: u64,
     writable: bool,
 }
@@ -103,6 +113,7 @@ impl ContainerFile {
         Ok(Self {
             file,
             path: path.display().to_string(),
+            filesystem_path: path.to_path_buf(),
             offset,
             writable,
         })
@@ -142,10 +153,9 @@ impl ContainerFile {
 
     /// Write the image.
     ///
-    /// One `write_all` at the container's offset, then `sync_all`. A container is a fixed-size
-    /// record; writing it in pieces would leave a window in which the file holds half of one save
-    /// and half of another, and no reader could tell which.
-    pub fn write_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+    /// Writes in place with `write_all` and then `sync_all`. This is not atomic: a failed
+    /// write or crash can leave a partially replaced, unreadable container. Keep a backup.
+    pub(crate) fn write_image(&mut self, image: &[u8]) -> std::io::Result<()> {
         if !self.writable {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -161,6 +171,80 @@ impl ContainerFile {
         self.file.seek(SeekFrom::Start(self.offset))?;
         self.file.write_all(image)?;
         self.file.sync_all()
+    }
+
+    /// Stage a complete encrypted image beside the original and replace it on Unix.
+    ///
+    /// A successful return means the staged file and its containing directory were synced.
+    /// A directory-sync error can occur *after* replacement, and is reported as such. This
+    /// does not serialize concurrent writers or guarantee storage hardware honors flushes.
+    #[cfg(unix)]
+    pub(crate) fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        if !self.writable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "container is read-only",
+            ));
+        }
+        if self.offset != 0 || image.len() != CONTAINER_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement requires one whole container at offset zero",
+            ));
+        }
+        let original = self.file.metadata()?;
+        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !path_metadata.file_type().is_file()
+            || original.dev() != path_metadata.dev()
+            || original.ino() != path_metadata.ino()
+        {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
+        }
+        let parent = self
+            .filesystem_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut staged = tempfile::Builder::new()
+            .prefix(".holonomy-save-")
+            .tempfile_in(parent)?;
+        staged
+            .as_file_mut()
+            .set_permissions(original.permissions())?;
+        staged.as_file_mut().write_all(image)?;
+        staged.as_file().sync_all()?;
+
+        // Catch stale handles before replacement. This does not close the race with a
+        // concurrent writer between the check and rename; callers must serialize saves.
+        let current = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !current.file_type().is_file()
+            || current.dev() != original.dev()
+            || current.ino() != original.ino()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "container path changed while saving; refusing to replace it",
+            ));
+        }
+        let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
+        self.file = new_file;
+        File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("container replacement occurred, but directory sync failed; durability is uncertain and pad ratcheting was not started: {e}"))
+        })
+    }
+
+    /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
+    #[cfg(not(unix))]
+    pub(crate) fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "safe container replacement for {} is not implemented on this platform",
+                self.filesystem_path.display()
+            ),
+        ))
     }
 }
 
@@ -211,6 +295,23 @@ pub struct SaveReport {
     pub digest: [u8; 32],
 }
 
+/// Refuse wraparound until there is durable accounting of the pad's history.
+fn validate_save_cursor(cursor: u64) -> Result<(), String> {
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    if cursor == 0 {
+        return Err(
+            "save cursor must be at least 1; use the previous container cursor plus one".into(),
+        );
+    }
+    if cursor >= limit {
+        return Err(format!(
+            "save cursor {cursor} would enter the pad reuse window (starting at {limit}); \
+             saving is disabled until durable pad accounting and recovery are implemented"
+        ));
+    }
+    Ok(())
+}
+
 /// Save `payload` into `file`, under the pad and the old container's salt.
 ///
 /// The old container *must* already exist and open: a save is a rewrite of a container in place, and
@@ -231,17 +332,28 @@ pub fn save(
         ));
     }
 
-    // 1. The old container, and the old salt, before anything is written.
-    let mut old_image = file.read_image().map_err(|e| e.to_string())?;
-    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
-    let mut old_salt = [0u8; SALT_BYTES];
-    old_salt.copy_from_slice(&old_image[salt_off..salt_off + SALT_BYTES]);
-    if old_salt.iter().all(|&b| b == 0) {
+    let capacity =
+        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+    if payload.len() > capacity {
         return Err(format!(
-            "{} holds no salt; it has never been written, so there is no pad window to consume",
-            file.path()
+            "document exceeds the {capacity}-byte container payload limit"
         ));
     }
+
+    // Provisioning uses window zero. Until we can prove the history of refreshed
+    // sectors, do not enter a window that can overlap the first 54 windows.
+    validate_save_cursor(ctx.cursor)?;
+
+    // 1. The old container, before anything is written.
+    let mut old_image = file.read_image().map_err(|e| e.to_string())?;
+
+    //    The salt cannot be read yet. It lives in slot 1, which is *inside* the pad-covered region, so
+    //    every byte of it on disk is folded. Reading it here and checking for zeros -- which this used
+    //    to do -- inspected pad bytes, and the "never written" test only ever fired by luck. It has to
+    //    come after step 3.
+    //
+    //    A file that has never been written is still detectable, and step 4 finds it: the handshake
+    //    fails on a capsule that is really pad, which is the same answer with a better reason.
 
     // 2. The pad window the container on disk was written under -- which is *not* this save's.
     //
@@ -256,14 +368,29 @@ pub fn save(
     //    *writing* and the store subtracts one for the window it is *reading*. Provisioning writes
     //    window 0, so the first real save is cursor 1 and reads window 0 -- which is exactly what
     //    `provision` printed at the end of its run.
-    let old_cursor = ctx.cursor.saturating_sub(1);
+    let old_cursor = ctx.cursor - 1;
     let old_pad = pad
         .window(ctx.kappa_usb, old_cursor)
         .map_err(|e| format!("reading pad window {old_cursor}: {e}"))?;
     let pad_sectors = PAD_SECTORS;
 
-    // 3. Undo the old pad, so the old capsule is legible.
+    // 3. Undo the old pad, so the old capsule and the old salt are legible.
     fold(&mut old_image, old_pad.as_slice());
+
+    //    *Now* the salt. It keys the permutation the container was written under, so this is the line
+    //    that makes the epoch permutation recoverable rather than stored: the map to the payload
+    //    follows from a value the reader already has to extract.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut old_salt = [0u8; SALT_BYTES];
+    old_salt.copy_from_slice(&old_image[salt_off..salt_off + SALT_BYTES]);
+    if old_salt.iter().all(|&b| b == 0) {
+        return Err(format!(
+            "{} has no salt in slot 1 after unfolding; it was never written, or the cursor {} is \
+             wrong for it",
+            file.path(),
+            old_cursor
+        ));
+    }
 
     // 4. The handshake over the old container. Its error is coarse, and this is where a wrong
     //    passphrase stops the save before a single byte is written.
@@ -271,7 +398,10 @@ pub fn save(
     //    The returned container is deliberately *not* used below except as proof: its stratum holds
     //    keys derived from the old save's KEM keypair, and sealing under those would produce a
     //    capsule and a payload that disagree. See step 5.
-    let _opened: OpenedContainer = open_container(
+    //    The placement is `epoch_placement(&old_salt)`: the container on disk was written under the
+    //    old salt's permutation, and it is the *only* permutation that can read it. This is why the
+    //    epoch permutation needs no stored table -- the salt is step 1, and the map follows from it.
+    let opened: OpenedContainer = open_container(
         &ReaderRequest {
             image: &old_image,
             passphrase: ctx.passphrase,
@@ -280,9 +410,15 @@ pub fn save(
             params: ctx.params,
             pad_fresh: true,
         },
-        identity_placement,
+        epoch_placement(&old_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
+    if opened.cursor() != old_cursor {
+        return Err(format!(
+            "container cursor {} does not match expected previous cursor {old_cursor}; refusing to save",
+            opened.cursor()
+        ));
+    }
 
     // 5-6. A new salt, and a stratum for the *new* container.
     //
@@ -296,6 +432,10 @@ pub fn save(
     // cursor. The *keys* are re-derived from `(passphrase, new salt, κ)`, which is exactly what a
     // reader does, and therefore the only derivation that can work.
     let new_salt = SaltBytes::fresh();
+    // The bytes, before `seal_container` takes the salt by value: the permutation is a function of
+    // them, and a placement derived from a moved-out value would not compile for a reason worth
+    // reading rather than silencing.
+    let new_salt_bytes = *new_salt.as_bytes();
     let slot_bytes = split_payload(payload);
     let sealed: SealedContainer = {
         let stratum = stratum_for(ctx, &new_salt)?;
@@ -305,7 +445,7 @@ pub fn save(
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&new_salt_bytes))
         .map_err(|e| e.to_string())?;
 
     // 7-8. Fold the *new* image with *this* save's window and write.
@@ -319,7 +459,8 @@ pub fn save(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
-    file.write_image(&image).map_err(|e| e.to_string())?;
+    file.replace_image(&image)
+        .map_err(|e| format!("saving cursor {}: {e}", ctx.cursor))?;
 
     // 9. Ratchet window `c-1`, *after* the container is on the device.
     //
@@ -327,8 +468,8 @@ pub fn save(
     //
     //    **After, not before.** Ratcheting first destroys the pad the container on disk was folded
     //    with, so a write that then failed would leave a container nothing can open -- not this
-    //    build, not a later one. Done after, a failed write leaves the pad intact and the previous
-    //    container readable under the cursor it was last written with.
+    //    build, not a later one. A failed staged write leaves the old pad intact. A directory
+    //    sync error may occur after replacement, so the error warns that the image changed.
     //
     //    **`old_cursor`, not `ctx.cursor`.** The image just written is folded with window `c`, so
     //    ratcheting `c` would overwrite the pad that image needs and it would be unreadable the
@@ -341,8 +482,12 @@ pub fn save(
     //    used", and a caller that conflates the two reports freshness it does not have.
     let ratcheted = if pad.can_ratchet() {
         Some(
-            pad.ratchet(ctx.kappa_usb, old_cursor)
-                .map_err(|e| format!("ratcheting pad window {old_cursor}: {e}"))?,
+            pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
+                format!(
+                    "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
+                    ctx.cursor
+                )
+            })?,
         )
     } else {
         None
@@ -363,7 +508,7 @@ pub fn open_document(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
-) -> Result<(OpenedContainer, Vec<u8>), String> {
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
@@ -373,6 +518,18 @@ pub fn open_document(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, window.as_slice());
 
+    //    The placement comes from the salt, which is in slot 1 of the image we just unfolded. It has
+    //    to be read here rather than passed in: `--cursor` says which pad window to undo, and nothing
+    //    in the caller's arguments says which permutation the file was written under.
+    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
+    let mut file_salt = [0u8; SALT_BYTES];
+    file_salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
+    if file_salt.iter().all(|&b| b == 0) {
+        return Err(format!(
+            "{} holds no salt after unfolding; the cursor is probably wrong",
+            file.path()
+        ));
+    }
     let opened = open_container(
         &ReaderRequest {
             image: &image,
@@ -382,9 +539,18 @@ pub fn open_document(
             params: ctx.params,
             pad_fresh: true,
         },
-        identity_placement,
+        epoch_placement(&file_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
+    // A different cursor can select the same physical window after wraparound (or
+    // through a faulty pad source). Authenticate the caller's cursor before returning data.
+    if opened.cursor() != ctx.cursor {
+        return Err(format!(
+            "container cursor {} does not match requested cursor {}; refusing to open",
+            opened.cursor(),
+            ctx.cursor
+        ));
+    }
     let document = opened.payload_bytes();
     Ok((opened, document))
 }
@@ -433,18 +599,37 @@ pub fn provision(
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
 ) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; provisioning will not overwrite a container",
-            path.display()
-        ));
+    // A fresh container starts at the first window; accepting an arbitrary initial
+    // cursor would bypass the conservative boundary on later saves.
+    if ctx.cursor != 0 {
+        return Err("provision cursor must be 0; pad history is not tracked yet".into());
     }
+    // `create_new` atomically rejects existing paths, including symlinks. Checking
+    // `exists` before `write` would allow another process to replace the path in between.
+    let handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "creating {} (existing paths are never overwritten): {e}",
+                path.display()
+            )
+        })?;
+    let mut file = ContainerFile {
+        file: handle,
+        path: path.display().to_string(),
+        filesystem_path: path.to_path_buf(),
+        offset: 0,
+        writable: true,
+    };
     let mut bytes = vec![0u8; CONTAINER_BYTES];
     holonomy_crypto::rng::fill(&mut bytes)
         .map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
-    std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
-
-    let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
+    file.write_image(&bytes)
+        .map_err(|e| format!("initializing {}: {e}", path.display()))?;
+    drop(bytes);
     first_write(&mut file, pad, ctx, SaltBytes::fresh())
 }
 
@@ -481,18 +666,20 @@ fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum,
 /// undid a pad before opening, so the very next save reported "wrong passphrase" for a correct one.
 /// Every write goes through this function for that reason, and `save` folds with the same
 /// `PadSource::window` call.
-pub fn first_write(
+pub(crate) fn first_write(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
     salt: SaltBytes,
 ) -> Result<(), String> {
     let stratum = stratum_for(ctx, &salt)?;
+    // The bytes before `seal_container` consumes the salt: the permutation is a function of them.
+    let salt_bytes = *salt.as_bytes();
     let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
         .map_err(|e| e.to_string())?;
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&salt_bytes))
         .map_err(|e| e.to_string())?;
     let window = pad
         .window(ctx.kappa_usb, ctx.cursor)
@@ -519,23 +706,86 @@ pub(crate) fn first_write_unpadded_for_test(
 ) -> Result<(), String> {
     let salt = SaltBytes::of_unknown_origin(salt);
     let stratum = stratum_for(ctx, &salt)?;
+    let salt_bytes = *salt.as_bytes();
     let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
         .map_err(|e| e.to_string())?;
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
-        .encode_into(&mut image, identity_placement)
+        .encode_into(&mut image, epoch_placement(&salt_bytes))
         .map_err(|e| e.to_string())?;
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
-/// The identity placement: logical slot `i` at physical block `2 + i`.
+/// `K_perm` for one epoch: `BLAKE2b("HOLONOMY_V51_K_PERM_SLOT" ‖ 0x00 ‖ σ_epoch)`.
 ///
-/// The epoch permutation over payload slots is a separate mechanism from the pad permutation and is
-/// not yet wired into the store. Stated here rather than implied: a container written by this build
-/// has its payload slots in order, which is *less* than the PRD's FR-4.4 asks for, and
-/// `docs/AUDIT-v5.1.0.md` §10 records it as outstanding.
-pub fn identity_placement(i: usize) -> usize {
-    holonomy_core::layout::PAYLOAD_SLOT_BASE + i
+/// Domain-separated from [`pad::k_perm_key`] on purpose. The pad permutation is keyed by `κ_USB`,
+/// because it must be computable before any byte is read; this one is keyed by `σ_epoch`, because it
+/// is a property of the container rather than of the stick. Sharing a domain would make one
+/// permutation a function of the other's key, and a fixed point in either would move a payload slot
+/// onto the salt.
+fn slot_perm_key(salt: &[u8; SALT_BYTES]) -> [u8; 32] {
+    use blake2::{Blake2b512, Digest};
+    let mut h = Blake2b512::new();
+    h.update(b"HOLONOMY_V51_K_PERM_SLOT");
+    h.update([0u8]);
+    h.update(salt);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d[..32]);
+    out
+}
+
+/// The epoch permutation over payload slots: logical slot `i` goes to a block the save's `σ_epoch`
+/// selects.
+///
+/// # Why it is a function and not a stored table
+///
+/// The reader must recover the same mapping, and storing it would put a map to the document in the
+/// very structure an adversary reads without a passphrase. So it is derived: the salt is the first
+/// thing a reader extracts, and `π(salt)` is then cheap to recompute. `holonomy-session`'s
+/// `open_container` takes this as its `placement` argument for exactly that reason.
+///
+/// # Why it is a permutation of the payload range and not of the whole container
+///
+/// `encode_into` pre-marks blocks 0 and 1 — the capsule and the salt — and rejects a placement that
+/// returns either. So the permutation targets `[0, PAYLOAD_SLOTS)` and is shifted by
+/// [`PAYLOAD_SLOT_BASE`], and every output is already a legal payload block.
+///
+/// It is a permutation by construction, not by argument. The first version cycle-walked each slot
+/// individually — apply `π` until the result lands in range — which is how `Feistel22::permute`
+/// handles Zone B and is **not** a permutation when applied per-element to a small range: a slot
+/// whose first application landed in range returned immediately, while a slot whose walk passed
+/// through that same point kept going, so two inputs could map to one output. The swap chain that
+/// replaced it (`holonomy_core::feistel::Feistel22::swap_chain`) applies one transposition per element, and a composition
+/// of transpositions cannot fail to be a permutation. It is also 2,049 times cheaper: 2,046 rounds
+/// against `DOMAIN / PAYLOAD_SLOTS × PAYLOAD_SLOTS = 4.19 million`.
+///
+/// # What this does and does not buy
+///
+/// It stops a container's slot order from being a fingerprint: two saves of the same document do not
+/// share a layout, and the physical position of slot `i` says nothing about `i` to anyone without the
+/// salt. It does **not** hide the slot count or which blocks are in use — every container fills
+/// blocks `2..` contiguously after permutation, so the occupancy map is the same for every container
+/// of the same size. That is what the padding slots in the session reservoir are for, and they are
+/// not wired into this store yet.
+pub fn epoch_placement(salt: &[u8; SALT_BYTES]) -> impl Fn(usize) -> usize {
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE};
+
+    // Built once, as a table: `swap_chain` costs 2,046 permutation rounds, and a save places at most
+    // 2,046 slots, so the table is paid for by one use and every later lookup is free.
+    let feistel = holonomy_core::feistel::Feistel22::provisioned(&slot_perm_key(salt));
+    let table: Vec<u16> = feistel
+        .swap_chain(PAYLOAD_SLOTS as u32)
+        .into_iter()
+        // The chain permutes [0, PAYLOAD_SLOTS); shift it onto payload blocks so every output is a
+        // legal block and neither the capsule (0) nor the salt (1) can be addressed.
+        .map(|block| (block as usize + PAYLOAD_SLOT_BASE) as u16)
+        .collect();
+
+    move |logical: usize| {
+        debug_assert!(logical < PAYLOAD_SLOTS, "logical slot out of range");
+        table[logical] as usize
+    }
 }
 
 /// Split a document into slot-sized pieces.

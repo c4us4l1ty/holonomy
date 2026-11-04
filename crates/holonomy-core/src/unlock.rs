@@ -26,7 +26,7 @@
 //! transitions and their invariants, so the rules that matter are testable without a container.
 
 use crate::stratum::{ActiveStratum, StratumId, StratumKeys};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Which physical source supplied `κ_USB` for this unlock.
 ///
@@ -79,16 +79,19 @@ pub struct SealedPassphrase {
 }
 
 impl SealedPassphrase {
-    /// Construct from a string slice, NFKD-normalising first so two visually identical
-    /// passphrases typed in different Unicode compositions derive the same key.
+    /// Construct from a string slice using the legacy Unicode lowercase mapping.
     ///
-    /// Returns `None` if the normalised form exceeds 255 bytes. A silent truncation would make a
-    /// long passphrase weaker than the user believes, so this fails instead.
+    /// This is NOT Unicode normalization and makes ASCII case variants equivalent.
+    /// The mapping is kept for compatibility with existing containers. Changing it
+    /// requires a versioned format and an explicit migration path.
+    /// Returns `None` if the resulting byte sequence is empty or exceeds 255 bytes.
     pub fn new(passphrase: &str) -> Option<Self> {
-        // `nfkd` without pulling `unicode-normalization` into this crate: the crypto crate does
-        // the real work, but this is the choke point every caller goes through, so the length
-        // check has to live here.
-        let normalised: String = passphrase.chars().flat_map(|c| c.to_lowercase()).collect();
+        let normalised = Zeroizing::new(
+            passphrase
+                .chars()
+                .flat_map(|c| c.to_lowercase())
+                .collect::<String>(),
+        );
         let raw = normalised.as_bytes();
         if raw.is_empty() || raw.len() > 255 {
             return None;
@@ -101,7 +104,7 @@ impl SealedPassphrase {
         })
     }
 
-    /// The normalised passphrase bytes.
+    /// The legacy lowercased passphrase bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }

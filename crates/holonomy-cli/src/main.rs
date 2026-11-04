@@ -13,6 +13,8 @@
 
 use std::process::ExitCode;
 
+use zeroize::Zeroizing;
+
 use holonomy_core::budgets::{self, MIB};
 use holonomy_core::capsule::{CapsuleWire, ENCRYPTED_DIRECTORY_BYTES};
 use holonomy_core::feistel::{Feistel22, DOMAIN};
@@ -24,7 +26,7 @@ use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_crypto::ParamsClass;
 use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
 
-mod store;
+use holonomy_cli::store;
 
 /// The pad trait has to be in scope for its methods to be callable on a concrete `DevicePad`; a
 /// trait import that looks unused is the one that makes `device.can_ratchet()` compile.
@@ -43,7 +45,7 @@ fn main() -> ExitCode {
         help();
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|a| a == "--check") {
+    if args.first().map(String::as_str) == Some("--check") {
         // `--check --device /dev/sdX` checks the stick as well. Anything else after `--check` is
         // rejected rather than ignored: a typo that silently checked nothing is the one failure mode a
         // health gate must not have.
@@ -51,15 +53,18 @@ fn main() -> ExitCode {
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--check" => i += 1,
+                "--check" if i == 0 => i += 1,
                 "--device" => match args.get(i + 1) {
-                    Some(d) => {
+                    Some(d) if !d.starts_with("--") && device.is_none() => {
                         device = Some(d.clone());
                         i += 2;
                     }
-                    None => return usage_error("--device needs a path"),
+                    _ => {
+                        return usage_error(
+                            "--device needs one path and may only be specified once",
+                        )
+                    }
                 },
-                other if other.starts_with("--") => i += 1,
                 other => {
                     return usage_error(format!(
                         "--check does not take the argument '{other}'; pass a container path to a \
@@ -83,9 +88,12 @@ fn main() -> ExitCode {
         return provision(rest);
     }
 
-    // Everything else needs the editor.
-    banner();
-    ExitCode::SUCCESS
+    if args.is_empty() {
+        banner();
+        ExitCode::SUCCESS
+    } else {
+        usage_error(format!("unknown command '{}'", args[0]))
+    }
 }
 
 /// Parsed flags shared by `save`, `open` and `provision`.
@@ -94,8 +102,8 @@ fn main() -> ExitCode {
 /// a binary whose job is to be auditable is a crate somebody has to audit.
 struct Flags {
     path: String,
-    passphrase: String,
-    kappa: [u8; 32],
+    passphrase: Option<Zeroizing<String>>,
+    kappa: Option<Zeroizing<[u8; 32]>>,
     cursor: u64,
     /// The stick's Zone B, if one was named. `None` selects the stand-in pad, and the report says so.
     device: Option<String>,
@@ -104,65 +112,105 @@ struct Flags {
 fn parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut path = None;
     let mut passphrase = None;
-    let mut kappa: Option<[u8; 32]> = None;
-    let mut cursor = 0u64;
-    let mut device: Option<String> = None;
+    let mut kappa = None;
+    let mut cursor = None;
+    let mut device = None;
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--passphrase" => {
-                passphrase = args.get(i + 1).cloned();
-                i += 2;
+        let flag = args[i].as_str();
+        if flag.starts_with("--") {
+            if !matches!(flag, "--passphrase" | "--kappa" | "--device" | "--cursor") {
+                return Err(format!("unknown flag '{flag}'"));
             }
-            "--kappa" => {
-                let hex = args
-                    .get(i + 1)
-                    .ok_or_else(|| "--kappa needs 64 hex characters".to_string())?;
-                kappa = Some(parse_kappa(hex)?);
-                i += 2;
+            let value = args
+                .get(i + 1)
+                .filter(|v| !v.starts_with("--"))
+                .ok_or_else(|| format!("{flag} needs a value"))?;
+            match flag {
+                "--passphrase" if passphrase.is_none() => {
+                    passphrase = Some(Zeroizing::new(value.clone()))
+                }
+                "--kappa" if kappa.is_none() => kappa = Some(Zeroizing::new(parse_kappa(value)?)),
+                "--device" if device.is_none() => device = Some(value.clone()),
+                "--cursor" if cursor.is_none() => {
+                    cursor = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("--cursor '{value}' is not a number"))?,
+                    );
+                }
+                _ => return Err(format!("{flag} may only be specified once")),
             }
-            "--device" => {
-                device = Some(
-                    args.get(i + 1)
-                        .ok_or_else(|| {
-                            "--device needs a path; pass the whole stick (e.g. /dev/sdX), not a \
-                             partition"
-                                .to_string()
-                        })?
-                        .clone(),
-                );
-                i += 2;
+            i += 2;
+        } else {
+            if path.is_some() {
+                return Err("only one container path may be specified".to_string());
             }
-            "--cursor" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or_else(|| "--cursor needs a number".to_string())?;
-                cursor = v
-                    .parse()
-                    .map_err(|_| format!("--cursor '{v}' is not a number"))?;
-                i += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag '{other}'"));
-            }
-            other => {
-                path = Some(other.to_string());
-                i += 1;
-            }
+            path = Some(flag.to_string());
+            i += 1;
         }
     }
 
     Ok(Flags {
         path: path.ok_or_else(|| "a container path is required".to_string())?,
-        passphrase: passphrase.ok_or_else(|| "--passphrase is required".to_string())?,
-        kappa: kappa.ok_or_else(|| {
-            "--kappa is required: the USB root share is half the key, and this build does not read \
-             Zone A yet"
-                .to_string()
-        })?,
-        cursor,
+        passphrase,
+        kappa,
+        cursor: cursor.unwrap_or(0),
         device,
+    })
+}
+
+/// Credentials held only as long as a command needs them. Prompt buffers and the
+/// copied root share are wiped on drop; command-line arguments remain visible to the OS.
+struct Credentials {
+    passphrase: holonomy_core::unlock::SealedPassphrase,
+    kappa: Zeroizing<[u8; 32]>,
+}
+
+fn credentials_with_prompt(
+    flags: &Flags,
+    confirm: bool,
+    mut prompt: impl FnMut(&str) -> Result<String, String>,
+) -> Result<Credentials, String> {
+    let prompted = flags.passphrase.is_none();
+    let pass = Zeroizing::new(match &flags.passphrase {
+        Some(value) => value.to_string(),
+        None => prompt("Passphrase: ")?,
+    });
+    if confirm && prompted {
+        let repeated = Zeroizing::new(prompt("Confirm passphrase: ")?);
+        if *pass != *repeated {
+            return Err("passphrases do not match".into());
+        }
+    }
+    let passphrase = holonomy_core::unlock::SealedPassphrase::new(&pass)
+        .ok_or_else(|| "the passphrase must be 1..=255 bytes after lowercasing".to_string())?;
+    let kappa = match &flags.kappa {
+        Some(value) => **value,
+        None => {
+            let value = Zeroizing::new(prompt("USB root share (64 hex characters): ")?);
+            let parsed = Zeroizing::new(parse_kappa(&value)?);
+            if confirm {
+                let repeated = Zeroizing::new(prompt("Confirm USB root share: ")?);
+                let repeated = Zeroizing::new(parse_kappa(&repeated)?);
+                if *parsed != *repeated {
+                    return Err("USB root shares do not match".into());
+                }
+            }
+            *parsed
+        }
+    };
+    Ok(Credentials {
+        passphrase,
+        kappa: Zeroizing::new(kappa),
+    })
+}
+
+fn credentials(flags: &Flags, confirm: bool) -> Result<Credentials, String> {
+    credentials_with_prompt(flags, confirm, |label| {
+        rpassword::prompt_password(label)
+            .map_err(|e| format!("cannot read credentials from the terminal: {e}"))
     })
 }
 
@@ -175,10 +223,18 @@ fn parse_kappa(hex: &str) -> Result<[u8; 32], String> {
         ));
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let pair = &hex[i * 2..i * 2 + 2];
-        *byte = u8::from_str_radix(pair, 16)
-            .map_err(|_| format!("--kappa has a non-hex byte '{pair}' at position {i}"))?;
+    for (i, pair) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        };
+        let high = digit(pair[0])
+            .ok_or_else(|| format!("--kappa has a non-hex character at byte {}", i * 2))?;
+        let low = digit(pair[1])
+            .ok_or_else(|| format!("--kappa has a non-hex character at byte {}", i * 2 + 1))?;
+        out[i] = high << 4 | low;
     }
     Ok(out)
 }
@@ -202,12 +258,15 @@ fn context<'a>(
 /// `--device` means a real stick, read `O_DIRECT` wherever the kernel allows it. Without it the
 /// stand-in is used, and every caller says so in the same breath as the result, because a demo path
 /// that quietly looks like the real one is how a stand-in ships.
-fn pad_source(flags: &Flags, read_write: bool) -> Result<Box<dyn store::PadSource>, String> {
+fn pad_source(
+    flags: &Flags,
+    kappa: &[u8; 32],
+    read_write: bool,
+) -> Result<Box<dyn store::PadSource>, String> {
     match &flags.device {
         Some(path) => {
-            let device =
-                store::pad::DevicePad::open(std::path::Path::new(path), &flags.kappa, read_write)
-                    .map_err(|e| format!("opening the device {path}: {e}"))?;
+            let device = store::pad::DevicePad::open(std::path::Path::new(path), kappa, read_write)
+                .map_err(|e| format!("opening the device {path}: {e}"))?;
             if read_write && !device.can_ratchet() {
                 return Err(format!(
                     "{path} opened read-only; a save must be able to ratchet the pad, and a \
@@ -229,13 +288,16 @@ fn provision(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    if flags.cursor != 0 {
+        return usage_error("provision cursor must be 0; pad history is not tracked yet");
+    }
+    let credentials = match credentials(&flags, true) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
-    let mut pad = match pad_source(&flags, true) {
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
+    let mut pad = match pad_source(&flags, &credentials.kappa, true) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
@@ -270,23 +332,23 @@ fn save(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    let credentials = match credentials(&flags, false) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
     // The document comes from stdin. A path argument would be a second way to name a secret and a
     // second thing to get wrong; stdin is what an editor and a pipe both produce.
-    let mut document = Vec::new();
-    if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut document) {
-        return usage_error(format!("reading the document from stdin: {e}"));
-    }
+    let document = match read_document(std::io::stdin(), max_document_bytes()) {
+        Ok(document) => document,
+        Err(e) => return usage_error(format!("reading the document from stdin: {e}")),
+    };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), true) {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    let mut pad = match pad_source(&flags, true) {
+    let mut pad = match pad_source(&flags, &credentials.kappa, true) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
@@ -319,28 +381,48 @@ fn save(args: &[String]) -> ExitCode {
     }
 }
 
+/// The maximum payload representable by the container, excluding per-slot authentication data.
+fn max_document_bytes() -> usize {
+    holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT
+}
+
+/// Read at most one byte beyond the format limit, so an unbounded pipe cannot exhaust memory.
+fn read_document(input: impl std::io::Read, limit: usize) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    use std::io::Read;
+    let mut document = Zeroizing::new(Vec::new());
+    input.take(limit as u64 + 1).read_to_end(&mut document)?;
+    if document.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("document exceeds the {limit}-byte container payload limit"),
+        ));
+    }
+    Ok(document)
+}
+
 /// `holonomy open <path> --passphrase P --kappa HEX [--cursor N]`
 fn open(args: &[String]) -> ExitCode {
     let flags = match parse_flags(args) {
         Ok(f) => f,
         Err(e) => return usage_error(e),
     };
-    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
-        Some(p) => p,
-        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    let credentials = match credentials(&flags, false) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
     };
 
-    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    let mut pad = match pad_source(&flags, false) {
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
         Ok(p) => p,
         Err(e) => return usage_error(e),
     };
     match store::open_document(&mut file, pad.as_mut(), &ctx) {
         Ok((opened, document)) => {
+            eprintln!("pad: {}", pad.describe());
             eprintln!(
                 "opened {}: stratum L_{}, {} slot(s), save cursor {}",
                 flags.path,
@@ -349,7 +431,7 @@ fn open(args: &[String]) -> ExitCode {
                 opened.cursor()
             );
             use std::io::Write;
-            if let Err(e) = std::io::stdout().write_all(&document) {
+            if let Err(e) = std::io::stdout().write_all(document.as_slice()) {
                 return failure(format!("writing the document to stdout: {e}"));
             }
             ExitCode::SUCCESS
@@ -397,14 +479,18 @@ fn help() {
          \x20   holonomy --help       this text\n\
          \n\
          CONTAINERS:\n\
-         \x20   holonomy provision <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
-         \x20   holonomy save <path> --passphrase P --kappa HEX [--cursor N] [--device D] < document\n\
-         \x20   holonomy open <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
+         \x20   holonomy provision <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
+         \x20   holonomy save <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D] < document\n\
+         \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \n\
-         `--kappa` is the 32-byte USB root share, as 64 hex characters. It is required: this build\n\
-         does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
-         in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
-         previous save recorded, and 0 for a container that has only been provisioned.\n\
+         Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
+         Argument values may appear in process listings or shell history. The root share is 64 hex\n\
+         characters; this build does not read it from Zone A yet. Passphrases are lowercased for\n\
+         compatibility, so ASCII case variants are equivalent; Unicode normalization is not implemented.\n\
+         \n\
+         `--cursor` is the save counter that selects the pad window; it must be the number the\n\
+         previous container recorded for open; for save use that cursor plus one.\n\
+         Provision uses 0; saves refuse cursor 54 or higher until pad history is tracked.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
@@ -719,5 +805,95 @@ fn check(device: Option<&str>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::{credentials_with_prompt, parse_flags, parse_kappa, read_document};
+
+    #[test]
+    fn prompted_credentials_are_confirmed_and_fail_closed() {
+        let flags = parse_flags(&["book".to_string()]).expect("no credentials in arguments");
+        let mut replies = vec![
+            "secret".to_string(),
+            "secret".to_string(),
+            "ab".repeat(32),
+            "AB".repeat(32),
+        ]
+        .into_iter();
+        let credentials = credentials_with_prompt(&flags, true, |_| {
+            replies
+                .next()
+                .ok_or_else(|| "unexpected prompt".to_string())
+        })
+        .expect("matching confirmation and valid share");
+        assert_eq!(credentials.passphrase.as_bytes(), b"secret");
+        assert_eq!(&*credentials.kappa, &[0xab; 32]);
+        let mut wrong_share = vec![
+            "secret".to_string(),
+            "secret".to_string(),
+            "ab".repeat(32),
+            "cd".repeat(32),
+        ]
+        .into_iter();
+        assert!(credentials_with_prompt(&flags, true, |_| wrong_share
+            .next()
+            .ok_or_else(|| "unexpected prompt".to_string()))
+        .is_err());
+        let mut mismatch = vec!["one".to_string(), "two".to_string()].into_iter();
+        assert!(credentials_with_prompt(&flags, true, |_| {
+            mismatch
+                .next()
+                .ok_or_else(|| "unexpected prompt".to_string())
+        })
+        .is_err());
+        assert!(
+            credentials_with_prompt(&flags, false, |_| Err("terminal unavailable".into())).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_credentials_do_not_prompt() {
+        let flags = parse_flags(&[
+            "book".into(),
+            "--passphrase".into(),
+            "Secret".into(),
+            "--kappa".into(),
+            "ab".repeat(32),
+        ])
+        .expect("arguments");
+        let credentials =
+            credentials_with_prompt(&flags, true, |_| Err("unexpected prompt".into()))
+                .expect("explicit credentials");
+        assert_eq!(credentials.passphrase.as_bytes(), b"secret");
+    }
+
+    #[test]
+    fn input_is_bounded_and_exact_limit_is_accepted() {
+        assert_eq!(read_document(&b"abcd"[..], 4).unwrap().as_slice(), b"abcd");
+        assert!(read_document(&b"abcde"[..], 4).is_err());
+        assert_eq!(read_document(&b""[..], 0).unwrap().as_slice(), b"");
+    }
+
+    #[test]
+    fn flags_reject_missing_values_duplicates_and_extra_paths() {
+        let args = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(parse_flags(&args(&["book", "--passphrase", "--kappa"])).is_err());
+        assert!(parse_flags(&args(&["book", "other"])).is_err());
+        assert!(parse_flags(&args(&["book", "--cursor", "0", "--cursor", "1"])).is_err());
+    }
+
+    #[test]
+    fn kappa_rejects_non_ascii_without_panicking() {
+        let input = format!("aé{}", "a".repeat(61));
+        assert_eq!(input.len(), 64);
+        assert!(parse_kappa(&input).is_err());
+    }
+
+    #[test]
+    fn kappa_accepts_upper_and_lowercase_hex() {
+        let key = parse_kappa(&"aF".repeat(32)).expect("valid hex");
+        assert_eq!(key, [0xaf; 32]);
     }
 }

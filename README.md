@@ -1,182 +1,201 @@
 # Holonomy `v5.1.0`
+### An experimental encrypted document workspace
 
-**A daily-use, hard-security document workspace.** A rich word processor that keeps your document in
-a fixed-size encrypted container instead of a file, and needs a physical USB stick to unlock.
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/Rust-1.95%2B-dea584.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/c4us4l1ty/holonomy/actions/workflows/audit.yml/badge.svg)](https://github.com/c4us4l1ty/holonomy/actions/workflows/audit.yml)
+[![Post-quantum: ML-KEM-1024](https://img.shields.io/badge/KEM-ML--KEM--1024-blueviolet.svg)](https://github.com/RustCrypto/KEMs)
+[![Editor: Wordcraft planned](https://img.shields.io/badge/editor-Wordcraft%20planned-orange.svg)](https://github.com/storytold/wordcraft)
 
-Built on [`storytold/wordcraft`](https://github.com/storytold/wordcraft) for the editor and on
-RustCrypto for the cryptography. Linux, Windows and macOS.
+> **Prototype, not a finished security product.** Do not use Holonomy for sensitive or irreplaceable
+> documents. It has not received an independent security review; its editor, physical-key
+> provisioning, and end-to-end protections are incomplete.
 
----
+Holonomy explores a rich-document workspace backed by a fixed-size encrypted container and a
+physical USB entropy reservoir. The **current deliverable is an experimental CLI**, not a word
+processor: it can provision, save, and open a byte-oriented document using a supplied passphrase,
+USB root share, and pad source. The Wordcraft document bridge is not wired into the workspace.
 
-## What actually protects your document
-
-Three layers, and it is worth being precise about which one covers what.
-
-**1. The container leaks nothing, even across revisions.**
-Every save is exactly `134,217,728` bytes of indistinguishable noise — no magic bytes, no header, no
-version tag, no plaintext metadata. Every save regenerates the 64-byte epoch salt, re-permutes all
-2,047 payload slots and re-encrypts under a fresh `K_DEM`. Consecutive cloud snapshots XOR to
-`50.0000% ± 0.0053%` differing bits (3.5σ monobit) with no identical run longer than 42 bits, so a
-diff of `T_0` against `T_n` reveals neither where you edited nor how much.
-
-**2. Unlocking needs your passphrase *and* your USB stick.**
-The document key is derived from a `ML-KEM-1024` + `X25519` decapsulation **and** a 32-byte root
-share `κ_USB` that exists only on the stick. The cloud copy alone is not decryptable; the stick
-alone is not decryptable. Your passphrase alone is not decryptable.
-
-* Passphrase → `Argon2id` (256 MiB, t=4, p=2) → a 64-byte root secret → labelled subkeys.
-* Root secret → unwhitens slot 0 → unwraps `SK_stratum` → decapsulates → derives `K_DEM`.
-* Slot 0 is readable without circularity because `K_unwrap` comes from the passphrase and never
-  from the capsule. That was `v4.0.0`'s deadlock and it is fixed.
-
-**3. The pad is a one-time pad for 54 saves, then it is something weaker and says so.**
-Each save folds all 128 MiB of the container against 32,768 distinct 4 KiB sectors of physical
-entropy from the stick, chosen by a 22-bit Feistel permutation that reaches every sector of the
-6.80 GiB reservoir. Zone B holds `1,782,579` sectors; a save consumes `32,768`; so **54 saves** read
-mutually disjoint pad material and save 55 is the first that wraps.
-
-* **Saving with the stick writable** ratchets the spent sectors to fresh CSPRNG bytes, so the window
-  restarts and the pad stays fresh indefinitely.
-* **Saving/inspecting through a hardware write-blocker** opens the device `O_RDONLY`, issues zero
-  writes, and therefore cannot ratchet. Past save 54 the sectors are reused.
-
-Past save 54, protection is `ML-KEM-1024` + `X25519` + `XChaCha20-Poly1305` with `CMT-4` commitment
-— a strong claim, but **not** a one-time pad. A reused pad byte gives `C₀ ⊕ C₅₄ = M₀ ⊕ M₅₄` to
-anyone holding two snapshots *and* the stick. The status line states which layer you are on, and the
-save path refuses at the boundary rather than silently degrading.
+This README describes **what exists and what is intended**, not a promise that the prototype is
+safe against a particular attacker. See the [v5.1 design](docs/PRD-v5.1.0.md),
+[build audit](docs/AUDIT-v5.1.0.md), and [earlier adversarial teardown](PRD_AUDIT.md) for context;
+those documents are historical and code and current CI results govern implementation status.
 
 ---
 
-## What it does not claim
+## Status at a glance
 
-This is the part previous drafts got wrong, and it is why the doc is this blunt.
-
-| not claimed | why |
+| Area | Current state |
 | :--- | :--- |
-| Plaintext never exists in RAM | It exists in RAM while you edit. That is what editing is. Pages are locked and the process is not dumpable; registers are not a security boundary. |
-| Screenshots can never see the document | Windows and macOS can exclude a window from capture (`WDA_EXCLUDEFROMCAPTURE`, `sharingType = .none`). **Linux has no equivalent** and the UI says so. |
-| A video recorder cannot reconstruct the text | The ±42 flicker scheme that claimed this is deleted: the phase relation *is* the signal, and a cross-correlating scraper recovers it. |
-| Anti-debugging that cannot be bypassed | Deleted. The old scheme mixed `.text` bytes and `RDTSC` into the keystream, which is patchable *and* made the document undecryptable on any other machine. |
-| 16.6 MiB resident, zero heap | Off by 16×. Real budget: **≤180 MiB steady, ≤440 MiB unlock peak.** |
-| `memfd_secret` everywhere | Linux 5.14+ only, often blocked by seccomp. The fallback is `mlock` + `MADV_DONTDUMP`, and the UI reports which rung you got. |
+| Container and cryptographic primitives | Implemented in the core, crypto, session, USB, and CLI crates; still requires independent review. |
+| CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
+| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
+| USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
+| Editor | Wordcraft integration is planned; `holonomy-ui` is a separate skeleton outside the workspace and its editor bridge is not operational. |
+| Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
+| Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
+
+Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
+ownership, ACLs, extended attributes, hard links, or other filesystem metadata. The path check is
+not a lock: do not save the same container concurrently. Provisioning is not crash-atomic. Always
+keep independently tested backups together with the pad material needed to open them.
+
+Command-line secrets can be exposed through process listings, shell history, logs, and other host
+facilities. Omit `--passphrase` and `--kappa` to use hidden terminal prompts instead. The legacy
+passphrase mapping lowercases input (so ASCII case variants are equivalent) and does **not** perform
+Unicode normalization. Changing that mapping requires a versioned migration for existing containers. `--check` reports several deferred checks and a successful exit is **not** a security
+certification. Platforms, storage behavior, memory locking, and device I/O need further testing on
+real hardware.
 
 ---
 
-## Memory
+## Design: container, envelope, and pad
 
-| state | budget | breakdown |
-| :--- | ---: | :--- |
-| steady | **≤ 180 MiB** | 128 container (mlocked) + 50 `wordcraft` + 2 reaper/buffers |
-| unlock peak | **≤ 440 MiB** | + 256 `Argon2id` arena, freed before the first slot decrypts |
+The following is a description of this prototype's construction, not a proof of secrecy.
 
-`440 + 512` MiB of host floor is 952 MiB, comfortably inside 2,048 MiB. The numbers are constants in
-`holonomy-core::budgets` and the gate is **two-sided**: over-budget fails, and so does any claim
-below the mandatory floor (the container plus the `Argon2id` arena cannot both be absent). That
-second direction is what the old 16.60 MiB figure needed and did not get — an upper-bound check
-accepts any small number, which is how a claim off by 16× survived review.
+### Fixed-size container
 
-The *measured* RSS gate is still a placeholder. It needs the `holonomy` binary, which needs
-`wordcraft` to link; until it does, CI checks the documented envelope and says plainly that it has
-not measured anything.
+A container has 2,048 slots of 65,536 bytes each:
 
----
+$$
+2{,}048 \times 65{,}536 = 134{,}217{,}728\text{ bytes} = 128\text{ MiB}.
+$$
 
-## The watchdog
+Slot 0 carries the root capsule, slot 1 includes the epoch salt, and the remaining **2,046** slots
+are available for payload. The session layer reserves authentication data in each payload slot.
+The file's fixed size does not hide its existence, access times, save frequency, or other external
+metadata. A fixed size or random-looking ciphertext alone is not a proof that revisions leak no
+information.
 
-Pulling the stick triggers a wipe. The mechanism is two threads with one rule between them:
+### Two-phase key envelope
+
+The design separates the key used to unwrap the capsule from the key derived by decapsulation:
 
 ```text
- Thread A (may block forever)          Thread B (never does I/O)
- pread / ioctl on the USB              sleep 1.5 ms
- on success: stamp LAST_PHY_OK_NS      read two atomics
- on suspend:  signal_suspend()         disconnected      →  wipe
-                                       suspend_signalled →  wait, do not wipe
-                                       gap > 12 ms       →  wipe
+passphrase + epoch salt ── Argon2id ──► root secret ──► K_unwrap
+                                                          │
+root capsule ── unwrap secret ──► ML-KEM-1024 + X25519 decapsulation
+                                                          │
+                   shared secrets + ciphertexts + κ_USB ──► K_DEM
 ```
 
-**Suspension is decided by OS notification, never by elapsed time**, and that distinction is load
-bearing. A monotonic gap cannot tell a suspend from a yank: a drive unplugged and left for two
-seconds is indistinguishable from a laptop that slept for two seconds. An earlier version of this
-diagram said `gap > 2 s → suspend`, which meant pulling the stick and waiting two seconds avoided
-the wipe — the exact attack the reaper exists to stop. A long gap with no notification is now a
-yank. The consequence is stated rather than hidden: a machine that sleeps *without* delivering a
-suspend event wipes on resume. Every supported platform does deliver one (`WM_POWERBROADCAST`,
-`NSWorkspaceWillSleepNotification`, logind `PrepareForSleep`), and the failure mode of the safe
-direction — a loud wipe recoverable from the last save — is the right one to have.
+The CLI's legacy Argon2id parameters are 256 MiB, four iterations, and two lanes. The code uses
+ML-KEM-1024, X25519, XChaCha20-Poly1305, and a BLAKE2b-based commitment construction. The
+non-circular separation of `K_unwrap` and `K_DEM` is a Holonomy design choice, not a claim that
+these primitives or the resulting protocol are novel or formally proven. The present CLI requires
+`κ_USB` as an argument; it does not establish that the share exists only on a physical stick.
 
-A `pread` on a yanked USB device hangs in `TASK_UNINTERRUPTIBLE` for 5–30 s, so any watchdog that
-touches the device is dead exactly when it is needed. Thread B touches two atomics and nothing else.
-`SCHED_FIFO` is attempted and `EPERM` is expected on a normal desktop account: the reaper starts
-anyway and reports that it did, because priority is an optimisation of latency, not a precondition
-of function.
+### Pad-window arithmetic
 
-Wiping all 180 MiB at legacy bandwidth would take ~45 ms — over the 15 ms target. So the reaper
-wipes the registered *secret* arenas (keys, scanout, plaintext pages) and evaporates the rest by
-terminating, rather than claiming it scrubbed 180 MiB in 15 ms.
+Zone B is modeled as 1,782,579 sectors, with 32,768 sectors of 4,096 bytes per container:
 
-The order is `wipe → terminate → best-effort blackout`, not `wipe → blackout → terminate`. A blackout
-is a compositor call that can block, and the conditions that trigger a wipe (yanked drive, hostile
-bus reset) are exactly the conditions under which a GPU driver may also be stuck. `terminate` is
-what makes the secrets unreachable; the blackout is a courtesy and must not sit in front of it.
-`HOLONOMY_BLACKOUT_IS_SAFE=1` opts into the other order on platforms whose blackout cannot block.
+$$
+32{,}768 \times 4{,}096 = 134{,}217{,}728,\qquad
+\left\lfloor\frac{1{,}782{,}579}{32{,}768}\right\rfloor = 54.
+$$
+
+A fixed, keyed 22-bit Feistel-based sector permutation maps logical window positions into Zone B.
+With one unchanged permutation, windows 0–53 cover disjoint logical positions; window 54 begins
+to overlap previously used positions. This is a **capacity calculation**, not a guarantee that
+physical media were provisioned with secret independent entropy or that the CLI prevents reuse.
+The CLI refuses save cursors 54 and above even on writable devices until it can verify pad history.
+This does not detect a reused stick, another container, or rollback to an older snapshot. The writable
+device path attempts to refresh the previous window after writing the new image; a
+ratchet failure can occur **after** the container was changed. The current window must not be
+ratcheted while it is needed to read that image. Ratcheting old windows can also make older container
+backups unreadable unless the corresponding pad material is retained; backup and recovery are not yet
+solved.
+
+A one-time pad requires independent, secret material that is never reused. If the same pad bytes
+mask two corresponding plaintext bytes, they cancel: $(M_1 \oplus P) \oplus (M_2 \oplus P) =
+M_1 \oplus M_2$. The demo pad is derived deterministically and is **not** a one-time pad. Reuse,
+backups, partial ratchets, and shared devices all require careful accounting that the CLI does not
+yet provide.
+
+### Watchdog design, not a deployed guarantee
+
+The runtime separates a potentially blocking device probe from an atomics-only reaper loop. Explicit
+suspend notifications are distinguished from missed heartbeats, and the intended fail-safe order is
+wipe registered secrets, terminate, then best-effort blackout. This is library-level design work:
+the CLI does not currently start an end-to-end USB watchdog for an editor, and timing, actual
+coverage, OS suspend integration, and reliable blackout have not been established as product
+properties.
+
+> **Deliberately not claimed:** plaintext-free RAM or CPU registers; screenshot-proof display on
+> every OS; unbreakable anti-debugging; a 15 ms wipe guarantee; or information-theoretic security
+> from the deterministic demo pad. Previous proposals for these claims are examined in the audit.
 
 ---
 
-## Layout
+## Crates
 
-```text
-crates/
-  holonomy-core      container geometry · 65,536-byte capsule · FPE-22 · duress · stats · budgets
-  holonomy-crypto    Argon2id → subkeys · CMT-4 AEAD · ML-KEM-1024 envelope · pad budget · locking
-  holonomy-usb       device geometry · O_DIRECT aligned I/O · pad plan · sector ratchet
-  holonomy-runtime   zero-I/O PHY reaper · secret arenas
-  holonomy-ui        wordcraft shell · capture exclusion · the `holonomy` binary
-holonomy-old/        READ-ONLY scrapyard. Not a dependency. Do not build on it.
-docs/
-  PRD-v5.1.0.md      the authoritative spec
-  AUDIT-v5.1.0.md    build audit against the seven checkpoints
-PRD_AUDIT.md         the teardown of v5.0.0-OMEGA that motivated all of this
-```
+| Crate | Responsibility | Status |
+| :--- | :--- | :--- |
+| [`holonomy-core`](crates/holonomy-core) | Container geometry, capsule layout, sector permutation, budget and bookkeeping types. | Workspace library |
+| [`holonomy-crypto`](crates/holonomy-crypto) | Argon2id, hybrid envelope, committed AEAD, pad accounting, and memory-locking helpers. | Workspace library |
+| [`holonomy-usb`](crates/holonomy-usb) | Device geometry, aligned I/O, sector plans, and ratchet operations. | Workspace library; physical-device provisioning incomplete |
+| [`holonomy-runtime`](crates/holonomy-runtime) | Reaper and secret-arena primitives. | Workspace library; not wired into the CLI editor |
+| [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
+| [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
+| [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
 
-`holonomy-old/` is 142,500 lines at `v3.0.0-SINGULARITY`, kept as a reference. Exactly one module
-was salvaged from it: the `O_DIRECT` alignment rules in `holonomy-usb/src/io.rs`.
+[`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its
+aligned direct-I/O rules informed the current USB I/O module.
+
+## Open-source foundations & inspiration
+
+Roles below distinguish current dependencies from planned integration. See [NOTICE](NOTICE) and the
+upstream repositories for attribution and their license terms.
+
+| Project | Role in Holonomy |
+| :--- | :--- |
+| [`storytold/wordcraft`](https://github.com/storytold/wordcraft) | Intended rich-document editor foundation; pinned in the UI skeleton, not linked into the current workspace binary. |
+| [`RustCrypto/KEMs`](https://github.com/RustCrypto/KEMs) | `ml-kem`, used for the ML-KEM-1024 portion of the hybrid envelope. |
+| [`dalek-cryptography/curve25519-dalek`](https://github.com/dalek-cryptography/curve25519-dalek) | X25519 key agreement via `x25519-dalek`; no Elligator mapping is claimed. |
+| [`RustCrypto/AEADs`](https://github.com/RustCrypto/AEADs) and [`RustCrypto/hashes`](https://github.com/RustCrypto/hashes) | XChaCha20-Poly1305 and hash primitives used by the crypto layer. |
+| [`RustCrypto/password-hashes`](https://github.com/RustCrypto/password-hashes) | Argon2id passphrase derivation. |
+| [`RustCrypto/utils`](https://github.com/RustCrypto/utils) | `zeroize` helpers for secret-handling code. |
+| [`holonomy-old`](holonomy-old/) | Prior-generation code and design reference, including direct-I/O alignment rules. |
+
+These projects supply components or inspiration; their maintainers do not endorse Holonomy, and
+upstream library security does not validate Holonomy's composition or implementation.
 
 ---
 
-## Build
+## Build and inspect
+
+Requirements: Rust **1.95 or later** and access to the dependency sources. The current workspace
+contains the CLI and five libraries; `holonomy-ui` is not a workspace member.
 
 ```bash
-cargo build --release
-./target/release/holonomy --check     # verify the invariants on this machine
+cargo build --release -p holonomy-cli
 ./target/release/holonomy --version
+./target/release/holonomy --help
+./target/release/holonomy --check
+cargo test --workspace
 ```
 
-**Status: v5.1.0 is the audited core, not a finished editor.** The container, key schedule, USB pad,
-permutation, duress bookkeeping, watchdog and capture exclusion are implemented; 164 of the 182
-tests execute in CI and all four gate jobs are green. The `wordcraft` document↔container bridge is
-not yet wired.
+The audit workflow runs build, tests, lint, and focused CLI safety regressions. Use the
+[Actions page](https://github.com/c4us4l1ty/holonomy/actions/workflows/audit.yml) for the actual
+result of a particular commit; a badge is not an independent security audit.
 
-`holonomy` (the binary) lives in `holonomy-ui`, which pulls in six `wordcraft` crates and their
-pinned `craft-*` git dependencies. That crate has **never been compiled** — the authoring sandbox
-had no route to `crates.io` — so its 18 tests have never run and nothing in the audit relies on
-them. `docs/AUDIT-v5.1.0.md` §8 separates what is proven from what is deferred and why.
+For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
+cursor is 0; `open` needs the cursor used to write the image and
+`save` needs the **next** cursor. Keep track of it externally. An omitted `--device` selects the
+demo pad, not physical USB protection. Do not paste real secrets into a shell command or point the
+experimental device path at a disk containing valuable data. This tool does not provision a USB
+stick for you.
 
-Requires Rust 1.95+ (`wordcraft`'s MSRV) and network access to `github.com` for its pinned `craft-*`
-dependencies.
+## Remaining work
 
----
+- Integrate and test the Wordcraft editor and document serialization with the container session.
+- Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
+- Complete and test crash recovery, cross-platform replacement, concurrent-save coordination, and durable pad-use/ratchet accounting.
+- Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
+- Measure resource use and latency under real workloads, and obtain independent cryptographic and security review.
 
-## Licence
+## License
 
-`MIT OR Apache-2.0`, matching `wordcraft` and RustCrypto. `LICENSE-MIT`, `LICENSE-APACHE` and
-`NOTICE` carry the dual grant and the upstream attribution.
-
----
-
-## Honest credits
-
-The architecture in `PRD_AUDIT.md` and `docs/PRD-v5.1.0.md` is the result of an adversarial teardown
-of five prior drafts. Most of what was removed was removed because the numbers did not work, not
-because the ideas were uninteresting: the 54-save budget, the 41.2% unreachable drive, the 1,027 MiB
-of scanline bitplanes, the 9.83σ tolerance and the 65,552-byte capsule are all arithmetic, and all
-of them are now asserted in code.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. See
+[NOTICE](NOTICE) for upstream attribution.
