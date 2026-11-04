@@ -201,9 +201,13 @@ mod tests {
         // The bug this catches: `logical_sector` used to reduce modulo the 2^22 domain, so cursor
         // 0 and cursor 128 were the same input to the permutation and read the same 32,768 sectors.
         // The documented claim was "0.000% overlap across 54 saves".
+        // 54, not 64: Zone B holds 1,782,579 sectors and a save needs 32,768, so 54 saves
+        // (1,769,472) fit and 55 (1,802,240) cannot. That is where the budget number comes from --
+        // a pigeonhole bound, not a policy choice -- and `the_budget_is_a_pigeonhole_bound` below
+        // asserts exactly that.
         let f = Feistel22::new(&k(0x77), 0);
-        let mut seen = std::collections::HashSet::with_capacity(64 * PAD_SECTORS_PER_SAVE as usize);
-        for cursor in 0..64u64 {
+        let mut seen = std::collections::HashSet::with_capacity(54 * PAD_SECTORS_PER_SAVE as usize);
+        for cursor in 0..54u64 {
             for j in 0..PAD_SECTORS_PER_SAVE {
                 let lba = f.permute(Feistel22::logical_sector(cursor, j));
                 assert!(
@@ -212,7 +216,18 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen.len(), 64 * PAD_SECTORS_PER_SAVE as usize);
+        assert_eq!(seen.len(), 54 * PAD_SECTORS_PER_SAVE as usize);
+    }
+
+    #[test]
+    fn the_budget_is_a_pigeonhole_bound() {
+        // 54 saves fit in Zone B; 55 cannot, so a 55th save must reuse a sector whatever the
+        // permutation is asked to do. This is the arithmetic that makes `SAVES_BEFORE_DOMAIN_REUSE`
+        // a fact about the geometry rather than a limit someone picked.
+        let budget = crate::layout::SAVES_BEFORE_DOMAIN_REUSE;
+        assert_eq!(budget, 54);
+        assert!((budget as u64) * PAD_SECTORS_PER_SAVE as u64 <= ZONE_B_SECTORS as u64);
+        assert!((budget as u64 + 1) * PAD_SECTORS_PER_SAVE as u64 > ZONE_B_SECTORS as u64);
     }
 
     #[test]
@@ -231,10 +246,16 @@ mod tests {
         // 54 saves cover 1,769,472 of 4,194,304 logical indices. The margin is why a 54-save
         // history never needs the reduction to wrap, and therefore why the budget number is
         // honest rather than aspirational.
-        let last = Feistel22::logical_sector(54, PAD_SECTORS_PER_SAVE - 1);
+        // Cursor 53 is the 54th save, so its last slot is the largest index a full budget reads.
+        let last = Feistel22::logical_sector(53, PAD_SECTORS_PER_SAVE - 1);
+        assert_eq!(last, 53 * 32_768 + 32_767);
         assert_eq!(last, 1_769_471);
         assert!(last < DOMAIN as u64);
-        assert!(last < ZONE_B_SECTORS as u64 * 1);
+        // And the next save's first index is still inside the domain, so the *only* reason not to
+        // take it is that Zone B has no room -- not that the index would wrap.
+        let next = Feistel22::logical_sector(54, 0);
+        assert_eq!(next, 1_769_472);
+        assert!(next < DOMAIN as u64);
     }
 
     #[test]
