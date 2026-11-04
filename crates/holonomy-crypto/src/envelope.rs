@@ -374,7 +374,7 @@ impl HybridKem for MlKem1024X25519 {
         &self,
         pk: &HybridEncapsulationKey,
     ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
-        use ml_kem::kem::{Encapsulate, Kem, KeyExport};
+        use ml_kem::kem::{Encapsulate, Kem};
         use ml_kem::MlKem1024;
 
         // `EncapsulationKey::new(&Key<Self>)` is the only constructor: a fallible `From<&[u8]>` is
@@ -386,7 +386,9 @@ impl HybridKem for MlKem1024X25519 {
         let ek = <MlKem1024 as Kem>::EncapsulationKey::new(&key_array)
             .map_err(|_| EnvelopeError::KemRejected)?;
 
-        let (ct, ss) = ek.encapsulate_with_rng(&mut OsRng);
+        // `encapsulate_with_rng` also wants `R: CryptoRng` (i.e. `Error = Infallible`), for the
+        // same reason as the keygen draw: a KEM encapsulation cannot proceed on half entropy.
+        let (ct, ss) = ek.encapsulate_with_rng(&mut rand_core::UnwrapErr(OsRng));
         let mut pq = [0u8; 32];
         pq.copy_from_slice(&ss);
 
