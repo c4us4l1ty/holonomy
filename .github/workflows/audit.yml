@@ -61,13 +61,17 @@ jobs:
           # failed" for a tree that was perfectly formatted.
           rm -f Cargo.lock
 
-          cargo fmt --all
+          if ! cargo fmt --all; then
+            echo "::error::cargo fmt failed"
+            exit 1
+          fi
           # `status --porcelain`, not `diff --quiet`: the latter ignores files formatting would
           # create, which is a class of change this gate should not silently skip.
           if [ -z "$(git status --porcelain)" ]; then
             echo "already formatted"
             exit 0
           fi
+          echo "::notice::formatting changed; the fix commit follows after a build check"
 
           # The formatted tree must compile before it is pushed. This job used to format and push
           # without building, and a push made with the default token does not trigger a workflow
@@ -123,7 +127,13 @@ jobs:
     needs: format
     # `needs: format` alone means "skip if format was skipped", and format is push-only. That made
     # every pull request run zero checks: four green-looking "skipping" entries and no gate at all.
-    if: always() && (needs.format.result == 'success' || needs.format.result == 'skipped')
+    #
+    # `always()` and no condition on `format`'s *result*, only on whether it ran: a formatting job
+    # that fails must not be able to hide a compiler error by skipping the job that reports it. That
+    # is what happened while the fmt job was misbehaving -- four consecutive runs showed
+    # "rustfmt: failure, everything else: skipped" and the build error underneath was invisible.
+    # Formatting is now a separate report, not a gate in front of compilation.
+    if: always() && (needs.format.result == 'success' || needs.format.result == 'failure' || needs.format.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
 
