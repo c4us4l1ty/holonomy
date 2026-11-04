@@ -591,29 +591,6 @@ jobs:
           done
           { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Temporary formatter for the development environment, which has no local Rust toolchain.
-  format-development-branch:
-    name: Format development branch
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref_name == 'arena/6c09d1f4-holonomy'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-      - run: rustup toolchain install stable --profile minimal --component rustfmt
-      - run: |
-          set -euo pipefail
-          cargo +stable fmt --all
-          if ! git diff --quiet; then
-            git config user.name holonomy-ci
-            git config user.email ci@holonomy.invalid
-            git add -u
-            git commit -m 'style: format staged save implementation'
-            git push origin HEAD:refs/heads/arena/6c09d1f4-holonomy
-          fi
-
   cli-regressions:
     name: CLI safety regressions
     runs-on: ubuntu-latest
