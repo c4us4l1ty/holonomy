@@ -631,7 +631,11 @@ fn the_epoch_placement_is_a_bijection_of_the_payload_range() {
     // range), or leave a payload block permanently unused (not surjective -- which would make the
     // container's occupancy map a fingerprint of *which* slots a document used).
     use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, TOTAL_BLOCKS};
-    for salt in [[0x00u8; SALT_BYTES], [0x33u8; SALT_BYTES], [0xFFu8; SALT_BYTES]] {
+    for salt in [
+        [0x00u8; SALT_BYTES],
+        [0x33u8; SALT_BYTES],
+        [0xFFu8; SALT_BYTES],
+    ] {
         let place = epoch_placement(&salt);
         let mut seen = vec![false; TOTAL_BLOCKS];
         for logical in 0..PAYLOAD_SLOTS {
@@ -650,7 +654,10 @@ fn the_epoch_placement_is_a_bijection_of_the_payload_range() {
         }
         // Surjective onto exactly the payload range: every payload block is used once.
         assert_eq!(seen.iter().filter(|&&b| b).count(), PAYLOAD_SLOTS);
-        assert!(!seen[0] && !seen[1], "the capsule and the salt must be untouched");
+        assert!(
+            !seen[0] && !seen[1],
+            "the capsule and the salt must be untouched"
+        );
     }
 }
 
@@ -677,7 +684,7 @@ fn a_saved_payload_is_not_written_in_logical_order() {
     // *not* be at block 2, because block 2 is where an identity placement would have put it. A test
     // that only checked the placement function in isolation could pass while the store still called
     // the identity.
-    use holonomy_core::layout::{PAYLOAD_SLOT_BASE, PAYLOAD_SLOTS};
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE};
     let path = tempfile("permuted");
     let salt = [0x5Du8; SALT_BYTES];
     provision(&path, salt, 0);
@@ -697,7 +704,10 @@ fn a_saved_payload_is_not_written_in_logical_order() {
     let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
     let mut new_salt = [0u8; SALT_BYTES];
     new_salt.copy_from_slice(&unfolded[salt_off..salt_off + SALT_BYTES]);
-    assert_ne!(new_salt, [0u8; SALT_BYTES], "the save must choose a fresh salt");
+    assert_ne!(
+        new_salt, [0u8; SALT_BYTES],
+        "the save must choose a fresh salt"
+    );
     let place = epoch_placement(&new_salt);
 
     let flat = place(0);

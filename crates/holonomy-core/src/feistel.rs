@@ -183,7 +183,6 @@ impl Feistel22 {
             .wrapping_add(j as u64)
     }
 
-
     /// A keyed permutation of `[0, n)`, returned as a lookup table.
     ///
     /// # Why not cycle-walking
@@ -444,9 +443,17 @@ mod tests {
             let mut sorted = table.clone();
             sorted.sort_unstable();
             sorted.dedup();
-            assert_eq!(sorted.len(), n as usize, "n = {n}: the chain is not injective");
+            assert_eq!(
+                sorted.len(),
+                n as usize,
+                "n = {n}: the chain is not injective"
+            );
             assert_eq!(sorted[0], 0, "n = {n}: output below the range");
-            assert_eq!(sorted[sorted.len() - 1], n - 1, "n = {n}: output above the range");
+            assert_eq!(
+                sorted[sorted.len() - 1],
+                n - 1,
+                "n = {n}: output above the range"
+            );
         }
     }
 
@@ -456,7 +463,11 @@ mod tests {
         // permute nothing, which is the failure mode worth naming: the store would still write slots
         // in order while every test said the placement was a bijection.
         let a = Feistel22::provisioned(&[0x11u8; 32]).swap_chain(2_046);
-        let moved = a.iter().enumerate().filter(|(i, v)| *i as u32 != **v).count();
+        let moved = a
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| *i as u32 != **v)
+            .count();
         assert!(moved > 1_000, "only {moved} of 2,046 blocks moved");
 
         let b = Feistel22::provisioned(&[0x22u8; 32]).swap_chain(2_046);

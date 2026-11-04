@@ -611,7 +611,7 @@ fn slot_perm_key(salt: &[u8; SALT_BYTES]) -> [u8; 32] {
 /// of the same size. That is what the padding slots in the session reservoir are for, and they are
 /// not wired into this store yet.
 pub fn epoch_placement(salt: &[u8; SALT_BYTES]) -> impl Fn(usize) -> usize {
-    use holonomy_core::layout::{PAYLOAD_SLOT_BASE, PAYLOAD_SLOTS};
+    use holonomy_core::layout::{PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE};
 
     // Built once, as a table: `swap_chain` costs 2,046 permutation rounds, and a save places at most
     // 2,046 slots, so the table is paid for by one use and every later lookup is free.
