@@ -128,7 +128,7 @@ pub fn seal_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     plaintext: &[u8],
-) -> Result<([u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES], AeadError), AeadError> {
+) -> Result<[u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES], AeadError> {
     let mut padded = [0u8; DIRECTORY_PLAINTEXT_BYTES];
     if plaintext.len() > DIRECTORY_PLAINTEXT_BYTES {
         return Err(AeadError::TooLarge {

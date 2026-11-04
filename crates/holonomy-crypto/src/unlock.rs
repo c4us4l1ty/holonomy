@@ -273,10 +273,12 @@ mod tests {
 
         let directory = b"one stratum, no media".as_slice();
         let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
-        let (field, tag) = split_directory_ciphertext(&sealed);
+        let field = split_directory_ciphertext(&sealed).0;
+        let tag = split_directory_ciphertext(&sealed).1;
+        let reassembled = directory_ciphertext(&field, &tag);
 
         let p1 = phase1_commitment(&k_unwrap, &nonce, &ct, &wrapped);
-        let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed);
+        let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &reassembled);
 
         let capsule = holonomy_core::capsule::StratumRootCapsuleV5 {
             ct_ml_kem_1024: ct.ml_kem,
