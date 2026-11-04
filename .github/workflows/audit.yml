@@ -3,10 +3,9 @@ name: Audit
 # Runs the gates that make docs/PRD-v5.1.0.md §12 true, and the source audits that defend the
 # invariants v5.1.0 deleted.
 #
-# Deliberately split in two. The five non-`wordcraft` crates build anywhere; `holonomy-ui` needs
-# crates.io plus wordcraft's pinned `craft-*` git dependencies, and its graph transitively reaches
-# `craft-pdf`, which does not compile at the pinned rev. The gates that decide whether a container
-# is safe must not depend on that.
+# Keep core/CLI gates separate from the experimental Wordcraft bridge. The UI is not
+# integrated yet; the bridge has a separate workspace and repeats the pinned upstream krilla
+# patch required by the engine's PDF dependency. Passing CI is not a security certification.
 on:
 
   push:

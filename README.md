@@ -14,8 +14,8 @@
 Holonomy explores a rich-document workspace backed by a fixed-size encrypted container and a
 physical USB entropy reservoir. The **current deliverable is an experimental CLI**, not a word
 processor: it can provision, save, and open a byte-oriented document using a supplied passphrase,
-USB root share, and pad source. An experimental Wordcraft document codec and session bridge lives
-in a separate workspace, but it is not connected to an editor window.
+USB root share, and pad source. An experimental Wordcraft codec, editing-engine adapter and
+session bridge live in a separate workspace, but they are not connected to an editor window.
 
 This README describes **what exists and what is intended**, not a promise that the prototype is
 safe against a particular attacker. See the [v5.1 design](docs/PRD-v5.1.0.md),
@@ -32,7 +32,7 @@ those documents are historical and code and current CI results govern implementa
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
 | USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
-| Editor | An experimental Wordcraft document codec and session bridge is in development. `holonomy-ui` remains a separate skeleton; no editor window is operational. |
+| Editor | An experimental Wordcraft document codec and limited editing-engine adapter are in development. `holonomy-ui` remains a separate skeleton; no editor window is operational. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
@@ -68,7 +68,9 @@ are available for payload. The session layer reserves authentication data in eac
 stores versioned JSON **inside** the encrypted payload and refuses unrecognized nonempty CLI data.
 Its frontend session tracks edits and avoids spending a cursor on an unchanged save; after any store
 failure it conservatively reports unsaved changes until recovery. Wordcraft's in-memory document,
-saved snapshot and intermediate copies are not guaranteed to be wiped.
+saved snapshot, undo history and intermediate copies are not guaranteed to be wiped. The engine
+adapter exposes only a few editing commands; it does not expose Wordcraft's general file or export
+commands, which require separate integration and plaintext-leak review.
 The file's fixed size does not hide its existence, access times, save frequency, or other external
 metadata. A fixed size or random-looking ciphertext alone is not a proof that revisions leak no
 information.
@@ -145,7 +147,7 @@ properties.
 | [`holonomy-runtime`](crates/holonomy-runtime) | Reaper and secret-arena primitives. | Workspace library; not wired into the CLI editor |
 | [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
 | [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
-| [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft codec and frontend session with dirty-state and save handling. | Experimental separate workspace; no editor UI |
+| [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft codec, frontend session, and limited editing-engine adapter. | Experimental separate workspace; no editor UI |
 | [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its
@@ -175,7 +177,9 @@ upstream library security does not validate Holonomy's composition or implementa
 
 Requirements: Rust **1.95 or later** and access to the dependency sources. The main workspace
 contains the CLI and five libraries; `holonomy-ui` and the experimental `holonomy-wordcraft`
-bridge are not members. The bridge uses the pinned Wordcraft document model in its own workspace.
+bridge are not members. The bridge uses the pinned Wordcraft document model and engine in its own
+workspace. Its manifest repeats Wordcraft's pinned `krilla` patch because Cargo does not inherit
+patches from dependency workspaces.
 
 ```bash
 cargo build --release -p holonomy-cli
