@@ -291,7 +291,7 @@ pub fn save(
             params: ctx.params,
             pad_fresh: true,
         },
-        epoch_placement(old_salt.as_bytes()),
+        epoch_placement(&old_salt),
     )
     .map_err(|e: OpenError| e.to_string())?;
 
