@@ -49,30 +49,36 @@ use crate::kdf::{derive_subkey, labels, RootSecret, Subkey};
 pub const ML_KEM_1024_SEED_BYTES: usize = 64;
 
 /// `rand_core` adapter over [`crate::rng`], so the KEM's internal draws come from the same place as
-/// ours. Not a general-purpose `RngCore`: it fills bytes and refuses everything else, because the
-/// only thing `ml-kem` asks for is entropy.
+/// ours.
+///
+/// Implemented as `TryRng` + `TryCryptoRng` (the 0.10 traits) and then `Rng` + `CryptoRng` via the
+/// provided blanket impls, because `ml-kem` asks for `TryCryptoRng` and the *deprecated* `RngCore`
+/// only requires `Rng`. Filling is the only operation; there is no state to advance, and every call
+/// goes to the OS.
+#[derive(Debug, Clone, Copy)]
 struct OsRng;
 
-impl rand_core::RngCore for OsRng {
-    fn next_u32(&mut self) -> u32 {
+impl rand_core::TryRng for OsRng {
+    type Error = std::io::Error;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut b = [0u8; 4];
-        crate::rng::fill(&mut b).expect("OS CSPRNG unavailable");
-        u32::from_le_bytes(b)
+        crate::rng::fill(&mut b)?;
+        Ok(u32::from_le_bytes(b))
     }
-    fn next_u64(&mut self) -> u64 {
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut b = [0u8; 8];
-        crate::rng::fill(&mut b).expect("OS CSPRNG unavailable");
-        u64::from_le_bytes(b)
+        crate::rng::fill(&mut b)?;
+        Ok(u64::from_le_bytes(b))
     }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        crate::rng::fill(dest).expect("OS CSPRNG unavailable");
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        crate::rng::fill(dest).map_err(rand_core::Error::new)
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        crate::rng::fill(dst)
     }
 }
 
-impl rand_core::CryptoRng for OsRng {}
+impl rand_core::TryCryptoRng for OsRng {}
 
 /// A hybrid KEM keypair, encoded at the sizes the capsule layout expects.
 ///
