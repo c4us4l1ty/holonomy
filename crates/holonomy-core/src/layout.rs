@@ -133,7 +133,8 @@ mod tests {
     #[test]
     fn salt_sits_at_offset_zero_and_is_padded_over() {
         assert_eq!(SALT_OFFSET, 0);
-        assert!(SALT_BYTES < SLOT_BYTES);
+        // Stated as a relationship so this keeps testing something if SLOT_BYTES changes.
+        assert!(SALT_BYTES * 2 < SLOT_BYTES);
         assert_eq!(PAD_COVERAGE_BYTES, CONTAINER_BYTES);
     }
 

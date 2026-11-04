@@ -299,7 +299,7 @@ impl DirectFile {
 
     fn check_offset(&self, offset: u64, len: usize) -> io::Result<()> {
         if self.direct {
-            if offset % self.block != 0 {
+            if !offset.is_multiple_of(self.block) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -308,7 +308,7 @@ impl DirectFile {
                     ),
                 ));
             }
-            if len as u64 % self.block != 0 {
+            if !(len as u64).is_multiple_of(self.block) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("direct-I/O length {len} is not a multiple of {}", self.block),

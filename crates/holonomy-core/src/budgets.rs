@@ -214,7 +214,9 @@ mod tests {
         // 440 + 512 = 952 MiB, well inside 2,048 MiB.
         check_against_envelope(STEADY_STATE_CEILING_BYTES, UNLOCK_PEAK_CEILING_BYTES)
             .expect("the documented envelope must fit a 2 GiB host");
-        assert!(UNLOCK_PEAK_CEILING_BYTES + HOST_MIN_FREE_BYTES < LEGACY_HOST_RAM_BYTES);
+        // A relationship, not a literal: the peak plus the host floor must leave the host room.
+        let headroom = LEGACY_HOST_RAM_BYTES - UNLOCK_PEAK_CEILING_BYTES - HOST_MIN_FREE_BYTES;
+        assert!(headroom > MIB, "only {headroom} bytes of headroom on the legacy host");
     }
 
     #[test]
@@ -246,7 +248,7 @@ mod tests {
     #[test]
     fn the_gate_is_two_sided() {
         // Under and over are distinct failures, and both are refused.
-        assert!(check_against_envelope(1 * MIB, 1 * MIB).unwrap_err().is_understatement());
+        assert!(check_against_envelope(MIB, MIB).unwrap_err().is_understatement());
         assert!(!check_against_envelope(181 * MIB, 440 * MIB).unwrap_err().is_understatement());
         assert!(check_against_envelope(180 * MIB, 440 * MIB).is_ok());
     }

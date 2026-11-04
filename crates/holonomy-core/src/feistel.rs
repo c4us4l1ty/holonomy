@@ -273,8 +273,8 @@ mod tests {
         // a fact about the geometry rather than a limit someone picked.
         let budget = crate::layout::SAVES_BEFORE_DOMAIN_REUSE;
         assert_eq!(budget, 54);
-        assert!((budget as u64) * PAD_SECTORS_PER_SAVE as u64 <= ZONE_B_SECTORS as u64);
-        assert!((budget as u64 + 1) * PAD_SECTORS_PER_SAVE as u64 > ZONE_B_SECTORS as u64);
+        assert!(budget * PAD_SECTORS_PER_SAVE as u64 <= ZONE_B_SECTORS as u64);
+        assert!((budget + 1) * PAD_SECTORS_PER_SAVE as u64 > ZONE_B_SECTORS as u64);
     }
 
     #[test]
