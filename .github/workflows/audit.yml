@@ -636,6 +636,9 @@ jobs:
           cat preview-window.log
           if [ "$status" -ne 124 ]; then
             echo "::error::scratch window exited before the smoke-test timeout (status $status)"
+            tail -30 preview-window.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
             exit 1
           fi
       - name: Lint preview
