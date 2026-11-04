@@ -192,12 +192,12 @@ jobs:
 
       - name: Directory is a fixed length, so its commitment can be verified
         run: |
-          cargo test -p holonomy-crypto directory_tests -- --nocapture
+          cargo test -p holonomy-crypto --lib directory_plaintext_is_returned_whole -- --nocapture
           cargo test -p holonomy-crypto --test two_phase unlock_recovers_the_directory -- --nocapture
 
       - name: Pad budget is 54 saves with zero overlap
         run: |
-          cargo test -p holonomy-core never_collide -- --nocapture
+          cargo test -p holonomy-core consecutive_saves_never_collide_at_any_epoch -- --nocapture
           cargo test -p holonomy-core the_budget_is_a_pigeonhole_bound -- --nocapture
           cargo test -p holonomy-usb --test property -- --nocapture
           cargo test -p holonomy-session the_plan_over_a_full_budget_is_disjoint -- --nocapture
@@ -213,14 +213,14 @@ jobs:
           cargo test -p holonomy-session the_fifty_fifth_save_on_a_read_only_device_is_refused -- --nocapture
           cargo test -p holonomy-session a_partial_ratchet_is_refused_rather_than_counted -- --nocapture
           cargo test -p holonomy-session a_refused_save_does_not_advance_the_budget -- --nocapture
-          cargo test -p holonomy-crypto pad_budget -- --nocapture
+          cargo test -p holonomy-crypto --lib window_runs_out_exactly_at_fifty_four -- --nocapture
 
       - name: Statistical gates use the corrected constants
         run: |
           cargo test -p holonomy-core sigma_is_the_documented_number -- --nocapture
           cargo test -p holonomy-core old_tolerance_is_ten_sigma -- --nocapture
           cargo test -p holonomy-core barely_changed_snapshot_fails_on_the_run_gate -- --nocapture
-          cargo test -p holonomy-core a_one_percent_bias_is_caught -- --nocapture
+          cargo test -p holonomy-core a_one_percent_bias_is_caught_at_container_scale -- --nocapture
 
       - name: No environmental input reaches a key
         run: |
@@ -233,7 +233,7 @@ jobs:
 
       - name: Reaper wipes before it terminates, and never on a suspend signal
         run: |
-          cargo test -p holonomy-runtime thread_b_fires_and_wipes -- --nocapture
+          cargo test -p holonomy-runtime thread_b_fires_and_wipes_when_the_heartbeat_stops -- --nocapture
           cargo test -p holonomy-runtime the_wipe_runs_before_termination -- --nocapture
           cargo test -p holonomy-runtime a_long_gap_without_a_suspend_notification_is_a_yank -- --nocapture
           cargo test -p holonomy-runtime a_suspend_notification_suppresses_the_wipe -- --nocapture

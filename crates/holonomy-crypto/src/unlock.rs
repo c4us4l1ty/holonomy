@@ -28,7 +28,7 @@
 //!
 //! # Why the duress passphrase opens every historical snapshot
 //!
-//! [`derive_passphrase_only_keys`](crate::envelope::derive_passphrase_only_keys) depends only on
+//! [`derive_stratum_keys`](crate::envelope::derive_stratum_keys) depends only on
 //! `(root secret, stratum index, κ_USB)`. The root secret is `Argon2id(passphrase, σ_epoch)` and
 //! `σ_epoch` is per-save — so `P_1` against `T_k`'s salt derives `T_k`'s `L_1` key, whatever the
 //! save did to the primary stratum's keypair. That is the FR-7.2 invariant, and it is why the
@@ -42,7 +42,7 @@ use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockE
 
 use crate::commit::{cmt4_verify, open_directory};
 use crate::envelope::{
-    ct_lengths_are_canonical, derive_dem_key, derive_passphrase_only_keys, phase1_commitment,
+    ct_lengths_are_canonical, derive_dem_key, derive_stratum_keys, phase1_commitment,
     phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
 };
 use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};
@@ -161,15 +161,28 @@ pub fn unlock_fixed(
         // (e') Open the directory. If the commitment matched this cannot fail except on a
         // serialisation change, so the error path is a `continue` and the caller still sees the
         // same coarse `Rejected`.
-        if open_directory(&keys.k_dem, &capsule.directory_nonce, &directory).is_err() {
+        //
+        // The length is part of the check, because `open_directory` returns the whole fixed-length
+        // plaintext: a directory that is not exactly that length cannot be one this format wrote.
+        // Before that, a trimming reader would return a short "directory" and every layer above it
+        // would carry on.
+        let Ok(plain) = open_directory(&keys.k_dem, &capsule.directory_nonce, &directory) else {
+            continue;
+        };
+        if plain.len() != crate::commit::DIRECTORY_PLAINTEXT_BYTES {
+            continue;
+        }
+        // And the version, which is the only part of the index an unlock needs. A container written
+        // by a later format is refused here rather than mis-parsed further down.
+        if u16::from_le_bytes([plain[0], plain[1]]) != crate::commit::DIRECTORY_VERSION {
             continue;
         }
 
         // (f) Commit. The directory that just verified was decrypted with `keys.k_dem`, so those
-        // are the stratum keys; `derive_passphrase_only_keys` is the equivalent derivation for the
+        // are the stratum keys; `derive_stratum_keys` is the equivalent derivation for the
         // path that has no capsule wide enough to hold a KEM ciphertext (the sealed reservoir).
         let _written_with = keys.k_dem;
-        let keys: StratumKeys = derive_passphrase_only_keys(&root, index, req.kappa_usb);
+        let keys: StratumKeys = derive_stratum_keys(&root, index, req.kappa_usb);
 
         // The count is only known now: this loop is the first place the container could have
         // revealed it, and a stratum proves itself by opening, not by being announced. So the
