@@ -81,7 +81,10 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(writable).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -225,14 +228,25 @@ pub fn save(
         ));
     }
 
-    // 2. The pad window for this save. Derived from the old salt: the permutation is keyed by it,
-    //    so the pad a save reads is always the pad belonging to the container it is about to
-    //    replace.
-    let pad = pad_window_for_save(ctx.kappa_usb, ctx.cursor);
+    // 2. The pad window the container on disk was written under -- which is *not* this save's.
+    //
+    //    This is the asymmetry the store got wrong for three rounds. `ctx.cursor` is the window
+    //    this save will spend and write; the bytes already on disk were folded by the save before
+    //    it, at `ctx.cursor - 1`. Unfolding with `ctx.cursor` reads the container through the wrong
+    //    window, so the capsule that comes out is noise, and the handshake reports "wrong
+    //    passphrase or damaged container" for a passphrase that was never wrong.
+    //
+    //    It has to be derived rather than stored: the cursor is in the sealed directory, and the
+    //    directory cannot be read until the pad is undone. So the caller supplies the window it is
+    //    *writing* and the store subtracts one for the window it is *reading*. Provisioning writes
+    //    window 0, so the first real save is cursor 1 and reads window 0 -- which is exactly what
+    //    `provision` printed at the end of its run.
+    let old_cursor = ctx.cursor.saturating_sub(1);
+    let old_pad = pad_window_for_save(ctx.kappa_usb, old_cursor);
     let pad_sectors = PAD_SECTORS;
 
     // 3. Undo the old pad, so the old capsule is legible.
-    fold(&mut old_image, &pad);
+    fold(&mut old_image, &old_pad);
 
     // 4. The handshake over the old container. Its error is coarse, and this is where a wrong
     //    passphrase stops the save before a single byte is written.
@@ -255,23 +269,27 @@ pub fn save(
     // The salt is moved into `seal_container` and zeroized there; nothing after this line needs it,
     // because the pad window is keyed by the stick and the cursor rather than by the salt.
     let slots = split_payload(payload);
-    let sealed: SealedContainer =
-        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
-            .map_err(|e| e.to_string())?;
+    let sealed: SealedContainer = seal_container(
+        stratum,
+        &slots,
+        new_salt,
+        ctx.cursor,
+        ctx.kappa_usb,
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
 
-    // 7-8. Fold over it and write.
+    // 7-8. Fold the *new* image with *this* save's window and write.
     //
-    // The same window that was unfolded at step 3, not a freshly derived one. The window is keyed by
-    // `(κ_USB, cursor)`, and neither changes inside one save: *this* save spends cursor `c`, so it
-    // reads window `c` and must write window `c`. Deriving a second window here would be the
-    // asymmetry that has already cost this module two rounds -- a container written under a window
-    // its own reader cannot reconstruct.
-    fold(&mut image, &pad);
+    // Step 3 read window `c - 1`; this writes window `c`. Two different windows, and the difference
+    // is the point: the pad a save consumes is fresh, and the container it produces must be
+    // readable only by someone with the stick and the cursor that produced it. Writing here with
+    // `old_pad` would be just as wrong as reading the new cursor's window was.
+    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, ctx.cursor));
     let digest = holonomy_session::seal::image_digest(&image);
     file.write_image(&image).map_err(|e| e.to_string())?;
 
@@ -291,9 +309,9 @@ pub fn open_document(
     ctx: &SaveContext<'_>,
 ) -> Result<(OpenedContainer, Vec<u8>), String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
-    let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
-    let mut salt = [0u8; SALT_BYTES];
-    salt.copy_from_slice(&image[salt_off..salt_off + SALT_BYTES]);
+    // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
+    // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
+    // window the container was written under, and that is enough -- see `pad_window_for_save`.
     let pad = pad_window_for_save(ctx.kappa_usb, ctx.cursor);
     fold(&mut image, &pad);
 
