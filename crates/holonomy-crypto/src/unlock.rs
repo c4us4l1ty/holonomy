@@ -37,12 +37,12 @@
 use holonomy_core::capsule::{
     CapsuleWire, ENCRYPTED_DIRECTORY_BYTES, SALT_BYTES, WRAPPED_SK_BYTES, XCHACHA_NONCE_BYTES,
 };
-use holonomy_core::stratum::{ActiveStratum, StratumId, StratumKeys, MAX_STRATA};
+use holonomy_core::stratum::{ActiveStratum, StratumId, MAX_STRATA};
 use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockError, Unlocked};
 
 use crate::commit::{cmt4_verify, open_directory};
 use crate::envelope::{
-    ct_lengths_are_canonical, derive_dem_key, derive_stratum_keys, phase1_commitment,
+    ct_lengths_are_canonical, derive_dem_key, phase1_commitment,
     phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
 };
 use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};

@@ -92,8 +92,7 @@ fn save_to_image(
 ) -> Vec<u8> {
     let stratum = stratum_from_root(passphrase, &salt_bytes, kappa, 1);
     let salt = SaltBytes::of_unknown_origin(salt_bytes);
-    let sealed =
-        crate::seal::seal_container(&stratum, document, salt, cursor, kappa).expect("seal");
+    let sealed = crate::seal::seal_container(&stratum, document, salt, cursor, kappa).expect("seal");
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed.encode_into(&mut image, placement).expect("encode");
     image
@@ -238,14 +237,7 @@ fn a_relocated_payload_slot_is_caught() {
     // only thing that catches this is the AAD binding the logical index -- plus the ledger tag over
     // the commitments, which no longer line up with the slots they name.
     let salt = [0x81u8; SALT_BYTES];
-    let image = save_to_image(
-        &[b"first", b"second"],
-        PASSPHRASE,
-        salt,
-        0,
-        &KAPPA,
-        identity,
-    );
+    let image = save_to_image(&[b"first", b"second"], PASSPHRASE, salt, 0, &KAPPA, identity);
     let mut broken = image.clone();
     let (a, len) = slot_range(identity(0));
     let (b, _) = slot_range(identity(1));
@@ -300,10 +292,7 @@ fn an_unprovisioned_container_is_named_rather_than_rejected_as_a_bad_passphrase(
         identity,
     )
     .unwrap_err();
-    assert!(
-        matches!(err, OpenError::Header(HeaderError::Unformatted)),
-        "{err}"
-    );
+    assert!(matches!(err, OpenError::Header(HeaderError::Unformatted)), "{err}");
     assert!(err.to_string().contains("provisioned"), "{err}");
 }
 
@@ -315,6 +304,7 @@ fn a_second_save_of_the_same_document_is_a_different_container() {
     let doc: [&[u8]; 1] = [b"the same text both times"];
     let a = save_to_image(&doc, PASSPHRASE, [0x91u8; SALT_BYTES], 0, &KAPPA, identity);
     let b = save_to_image(&doc, PASSPHRASE, [0x92u8; SALT_BYTES], 1, &KAPPA, identity);
+
 
     // Compare the payload slot, where the plaintext would show through if anything were reused.
     let (off, _) = slot_range(identity(0));
@@ -356,10 +346,7 @@ fn the_reader_agrees_with_the_handshake() {
     // The key sets must be the same, not merely both valid: this is the equality that was broken
     // when the handshake returned the fallback derivation.
     assert_eq!(via_handshake.keys().k_dem, via_reader.stratum.keys().k_dem);
-    assert_eq!(
-        via_handshake.keys().n_epoch,
-        via_reader.stratum.keys().n_epoch
-    );
+    assert_eq!(via_handshake.keys().n_epoch, via_reader.stratum.keys().n_epoch);
 }
 
 #[test]
