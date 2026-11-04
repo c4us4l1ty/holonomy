@@ -5,10 +5,10 @@
 //! did not exist.
 //!
 //! The stand-in pad is exercised honestly here: `pad_window_for_save` derives sector material from
-//! the permutation rather than reading a stick, and the tests below assert the two properties that
-//! make that a *stand-in* rather than a fake. First, the window is a function of `(salt, cursor)`
-//! only, so two saves at one cursor fold identically — which is what makes the second save's read
-//! legible. Second, it changes with the salt, which is what makes a save genuinely re-keyed.
+//! the permutation rather than reading a stick, and the tests below assert what makes that a
+//! *stand-in* rather than a fake. The window is a function of `(κ_USB, cursor)` — deliberately not
+//! of the salt, which lives inside the pad-covered region and so cannot key the pad that hides it —
+//! so it is reproducible for a reader holding the stick and different for anyone who is not.
 
 use super::*;
 use holonomy_core::layout::{slot_range, SALT_BYTES, SALT_SLOT_INDEX};
@@ -62,13 +62,11 @@ fn provision(path: &std::path::Path, salt: [u8; SALT_BYTES], cursor: u64) {
 }
 
 #[test]
-fn the_fold_does_not_move_the_salt_or_the_capsule() {
-    // The ordering constraint, made checkable. The salt is read from slot 1 and the pad window is
-    // keyed by it, so the fold must not *move* those bytes anywhere: what a reader finds in slot 1
-    // is the salt, folded with the window that same salt selects. If a future change folds in read
-    // order rather than in image order, the salt a reader recovers is not the salt that keyed the
-    // window and no container opens -- which is exactly the failure this pins down.
-    let salt = [0x77u8; SALT_BYTES];
+fn the_fold_is_applied_in_image_order() {
+    // The fold must be positional: byte `i` of the image is XORed with byte `i` of the window. A
+    // future change that folded in *sector read order* would put each 4 KiB block somewhere else in
+    // the image, and then the salt a reader recovers from slot 1 is not the salt the container was
+    // written with -- which is the failure mode that already cost this module two rounds.
     let image: Vec<u8> = (0..CONTAINER_BYTES).map(|i| (i % 253) as u8).collect();
     let window = pad(3);
 
@@ -287,7 +285,7 @@ fn a_container_written_under_one_stick_does_not_open_under_another() {
     provision(&path, [0x0Bu8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
 
-    let mut wrong = SaveContext {
+    let wrong = SaveContext {
         passphrase: &pass,
         kappa_usb: &OTHER_KAPPA,
         topology: Topology::UmbilicalUsb,
@@ -305,7 +303,6 @@ fn a_container_written_under_one_stick_does_not_open_under_another() {
     let ctx = ctx(&pass, 0);
     let mut file = ContainerFile::open(&path, false).expect("open");
     open_document(&mut file, &ctx).expect("the stick it was written with must open it");
-    wrong.cursor = 99;
     let _ = std::fs::remove_file(&path);
 }
 
