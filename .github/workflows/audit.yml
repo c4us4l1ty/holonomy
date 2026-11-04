@@ -39,6 +39,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --component rustfmt
+      # `cargo check` needs the crates registry, and a cold cache makes this the slowest job.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fmt-check-${{ hashFiles('**/Cargo.lock') }}
       - name: Format and commit
         run: |
           set -euo pipefail
@@ -51,6 +60,15 @@ jobs:
             echo "already formatted"
             exit 0
           fi
+          # The formatted tree must compile and pass its tests *before* it is pushed. This job used
+          # to format and push without building, and a push made with the default token does not
+          # trigger a workflow run -- so every formatting fix commit was a commit nothing had ever
+          # compiled. Two of them in this repository's history fixed a build error and were merged
+          # on the strength of the run that had *failed* against the unformatted tree.
+          #
+          # Cheap by comparison: the toolchain and cache are already here, and `cargo check` over the
+          # core crates is under two minutes.
+          cargo check --workspace --exclude holonomy-ui --all-targets
           git config user.name  "holonomy-ci"
           git config user.email "ci@holonomy.invalid"
           git add -A
@@ -58,6 +76,7 @@ jobs:
           git push origin "HEAD:refs/heads/$BRANCH" || {
             git fetch origin "$BRANCH"
             git rebase "origin/$BRANCH"
+            cargo check --workspace --exclude holonomy-ui --all-targets
             git push origin "HEAD:refs/heads/$BRANCH"
           }
       - name: Report formatting failures as annotations
