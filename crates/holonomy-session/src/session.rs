@@ -424,10 +424,7 @@ mod tests {
             "cursor 128 must alias cursor 0, which is exactly why 128 > the 54-save budget matters"
         );
         // And well inside the budget there is no aliasing, which is the property that is claimed.
-        assert_ne!(
-            s.plan_for_save(0),
-            s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE - 1)
-        );
+        assert_ne!(s.plan_for_save(0), s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE - 1));
     }
 
     #[test]
