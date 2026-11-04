@@ -65,8 +65,10 @@ $$
 
 Slot 0 carries the root capsule, slot 1 includes the epoch salt, and the remaining **2,046** slots
 are available for payload. The session layer reserves authentication data in each payload slot. The experimental Wordcraft bridge
-stores versioned JSON **inside** the encrypted payload and refuses unrecognized nonempty CLI data;
-it does not guarantee that Wordcraft's in-memory document or all intermediate copies are wiped.
+stores versioned JSON **inside** the encrypted payload and refuses unrecognized nonempty CLI data.
+Its frontend session tracks edits and avoids spending a cursor on an unchanged save; after any store
+failure it conservatively reports unsaved changes until recovery. Wordcraft's in-memory document,
+saved snapshot and intermediate copies are not guaranteed to be wiped.
 The file's fixed size does not hide its existence, access times, save frequency, or other external
 metadata. A fixed size or random-looking ciphertext alone is not a proof that revisions leak no
 information.
@@ -143,7 +145,7 @@ properties.
 | [`holonomy-runtime`](crates/holonomy-runtime) | Reaper and secret-arena primitives. | Workspace library; not wired into the CLI editor |
 | [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
 | [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
-| [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft document codec and session save bridge. | Experimental separate workspace; no editor UI |
+| [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft codec and frontend session with dirty-state and save handling. | Experimental separate workspace; no editor UI |
 | [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its

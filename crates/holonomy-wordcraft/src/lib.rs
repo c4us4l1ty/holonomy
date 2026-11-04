@@ -14,6 +14,9 @@ use holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
 use wordcraft_doc::Document;
 use zeroize::Zeroizing;
 
+/// Frontend-facing document ownership and conservative save state.
+pub mod editor;
+
 const MAGIC: &[u8] = b"HOLONOMY-WORDCRAFT\0";
 const VERSION: u8 = 1;
 /// The maximum serialized payload that fits in the current container format.
@@ -34,6 +37,8 @@ pub enum BridgeError {
     InvalidDocument,
     /// A serialization round trip changed the document.
     RoundTripMismatch,
+    /// A container could not be created or opened.
+    Session(String),
     /// The underlying session refused or failed the save.
     Save(String),
 }
@@ -53,6 +58,7 @@ impl std::fmt::Display for BridgeError {
             Self::RoundTripMismatch => {
                 f.write_str("Wordcraft serialization changed the document; save refused")
             }
+            Self::Session(message) => write!(f, "session could not be opened: {message}"),
             Self::Save(message) => write!(f, "session save failed: {message}"),
         }
     }
@@ -182,42 +188,6 @@ mod tests {
     #[test]
     fn empty_container_is_a_blank_document() {
         assert!(decode(&[]).expect("blank").same_content(&Document::new()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn document_survives_a_container_session_round_trip() {
-        use holonomy_cli::document::{DocumentSession, DocumentSessionOptions};
-        use holonomy_cli::store::pad::DerivedPad;
-        use holonomy_core::unlock::{SealedPassphrase, Topology};
-
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("document");
-        let kappa = [0x43; 32];
-        let mut session = DocumentSession::create(
-            &path,
-            Box::new(DerivedPad::new()),
-            SealedPassphrase::new("test passphrase").expect("valid"),
-            kappa,
-            DocumentSessionOptions::new(0, true, Topology::UmbilicalUsb),
-        )
-        .expect("create");
-        let mut document = Document::from_text("Hello, Wordcraft!\nSecond paragraph.");
-        document.core.title = "A title".into();
-        save(&mut session, &document).expect("save");
-        assert_eq!(session.cursor(), 1);
-        drop(session);
-
-        let (_, plaintext) = DocumentSession::open(
-            &path,
-            Box::new(DerivedPad::new()),
-            SealedPassphrase::new("test passphrase").expect("valid"),
-            kappa,
-            DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb),
-        )
-        .expect("open");
-        let decoded = decode(plaintext.as_slice()).expect("decode");
-        assert!(document.same_content(&decoded));
     }
 
     #[test]

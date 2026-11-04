@@ -1,24 +1,10 @@
 //! `holonomy` — the binary.
 //!
-//! The editor itself is `wordcraft`. This entry point does three things and hands over:
-//! parse arguments, initialise the container session (or report that there is none), and start the
-//! `wordcraft` UI. It is intentionally thin: everything worth testing is in [`holonomy_ui`] or in
-//! the crates below it, so the untested surface of the product is as small as it can be.
-//!
-//! # Current state
-//!
-//! This is the v5.1.0 **skeleton**, delivered with the spec audit rather than after it. The
-//! container round-trip, the reaper, the pad plan and every invariant in `docs/PRD-v5.1.0.md` are
-//! implemented and tested in the library crates, and CI runs those gates on every push. What is
-//! not yet wired is the `wordcraft` document <-> container bridge, for a narrower reason than the
-//! first draft of this note gave: the `wordcraft` dependency graph needs `crates.io` plus its
-//! `craft-*` git pins, and the sandbox this was built in has neither. That is a build-environment
-//! limitation, not an open design question — `docs/AUDIT-v5.1.0.md` §8 records it as deferred with
-//! that reason and no decision outstanding.
-//!
-//! Rather than stub a `wordcraft` integration that cannot be compiled or verified, `main` reports
-//! exactly that and exits. A binary that pretends to have the editor would be worse than one that
-//! says what is missing.
+//! This is an unfinished shell, not a running editor. An experimental Wordcraft
+//! document codec and session exist separately in `holonomy-wordcraft`, but they
+//! are not connected to this binary. The self-check covers selected invariants;
+//! it is not a security review or a test of the full user workflow.
+//! See the repository README for current limitations and recovery warnings.
 
 use std::process::ExitCode;
 
@@ -50,7 +36,7 @@ fn main() -> ExitCode {
 fn print_banner() {
     println!("holonomy {} (editor shell pending)", holonomy_core::VERSION);
     println!();
-    println!("This build carries the audited v5.1.0 core:");
+    println!("This prototype contains v5.1.0 core components:");
     println!("  * container geometry and the 65,536-byte capsule (holonomy-core)");
     println!("  * the 22-bit sector permutation and the 54-save pad budget (holonomy-core)");
     println!("  * deterministic KDF, CMT-4 committed AEAD, ML-KEM-1024 envelope (holonomy-crypto)");
@@ -58,9 +44,9 @@ fn print_banner() {
     println!("  * the zero-I/O PHY reaper and secret arenas (holonomy-runtime)");
     println!();
     println!("The wordcraft editor front end is not wired in this build. See");
-    println!("docs/AUDIT-v5.1.0.md §8 for what is deferred and why.");
+    println!("the repository README for current limitations.");
     println!();
-    println!("Run `holonomy --check` to verify the invariants on this machine.");
+    println!("Run `holonomy --check` for selected local invariant checks.");
 }
 
 /// Run the machine-checkable invariants, so a user can confirm the build rather than trust it.
@@ -133,7 +119,7 @@ fn self_check() -> ExitCode {
 
     println!();
     if ok {
-        println!("all invariants hold");
+        println!("selected checks passed; this is not a security audit");
         ExitCode::SUCCESS
     } else {
         println!("one or more invariants failed");
