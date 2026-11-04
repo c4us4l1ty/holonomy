@@ -44,8 +44,12 @@ fn provision(path: &std::path::Path, salt: [u8; SALT_BYTES], cursor: u64) {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let ctx = ctx(&pass, cursor);
     let mut file = ContainerFile::open(path, true).expect("open");
-    first_write(&mut file, &ctx, holonomy_session::SaltBytes::of_unknown_origin(salt))
-        .expect("first write");
+    first_write(
+        &mut file,
+        &ctx,
+        holonomy_session::SaltBytes::of_unknown_origin(salt),
+    )
+    .expect("first write");
 }
 
 #[test]
@@ -63,7 +67,11 @@ fn the_fold_does_not_move_the_salt_or_the_capsule() {
     fold(&mut folded, &pad);
     let (off, _) = slot_range(SALT_SLOT_INDEX);
     for i in 0..SALT_BYTES {
-        assert_eq!(folded[off + i], image[off + i] ^ pad[off + i], "byte {i} of slot 1");
+        assert_eq!(
+            folded[off + i],
+            image[off + i] ^ pad[off + i],
+            "byte {i} of slot 1"
+        );
     }
     // Slot 0 too: the capsule is covered by the pad and lives where the layout says.
     assert_eq!(folded[0], image[0] ^ pad[0]);
@@ -81,7 +89,8 @@ fn a_provisioned_container_opens_before_any_save() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
 
     let mut file = ContainerFile::open(&path, false).expect("open");
-    let (opened, document) = open_document(&mut file, &ctx(&pass, 0)).expect("a provisioned container must open");
+    let (opened, document) =
+        open_document(&mut file, &ctx(&pass, 0)).expect("a provisioned container must open");
     assert_eq!(document, b"", "provisioning writes an empty document");
     assert_eq!(opened.cursor(), 0);
     drop(file);
@@ -108,7 +117,8 @@ fn the_first_save_after_provisioning_succeeds() {
     let ctx = ctx(&pass, 1);
 
     let mut file = ContainerFile::open(&path, true).expect("open");
-    save(&mut file, &ctx, b"the first thing written by a user").expect("the first save must succeed");
+    save(&mut file, &ctx, b"the first thing written by a user")
+        .expect("the first save must succeed");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");
@@ -195,7 +205,10 @@ fn a_read_only_handle_cannot_save() {
     provision(&path, [0x14u8; SALT_BYTES], 0);
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     let mut file = ContainerFile::open(&path, false).expect("open");
-    assert!(!file.is_writable(), "opened read-only, so is_writable must say so");
+    assert!(
+        !file.is_writable(),
+        "opened read-only, so is_writable must say so"
+    );
     let err = save(&mut file, &ctx(&pass, 1), b"x").unwrap_err();
     assert!(err.contains("read-only"), "{err}");
     let _ = std::fs::remove_file(&path);
@@ -224,7 +237,10 @@ fn consecutive_cursors_read_disjoint_sectors() {
     for cursor in 0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE {
         for j in 0..PAD_SECTORS {
             let sector = sector_index(&[0x31u8; SALT_BYTES], cursor, j);
-            assert!(seen.insert(sector), "sector {sector} reused at save {cursor}");
+            assert!(
+                seen.insert(sector),
+                "sector {sector} reused at save {cursor}"
+            );
         }
     }
     assert_eq!(
@@ -289,7 +305,12 @@ fn a_second_save_replaces_the_first() {
 
     let mut file = ContainerFile::open(&path, true).expect("open");
     save(&mut file, &ctx(&pass, 1), b"the first document").expect("first");
-    save(&mut file, &ctx(&pass, 2), b"the second document, longer than the first").expect("second");
+    save(
+        &mut file,
+        &ctx(&pass, 2),
+        b"the second document, longer than the first",
+    )
+    .expect("second");
     drop(file);
 
     let mut file = ContainerFile::open(&path, false).expect("reopen");

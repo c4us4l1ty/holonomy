@@ -81,10 +81,7 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(writable).open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -260,14 +257,9 @@ pub fn save(
     // salt the container is written under, and the value the next reader finds in slot 1.
     let new_salt_bytes = *new_salt.as_bytes();
     let slots = split_payload(payload);
-    let sealed: SealedContainer = seal_container(
-        stratum,
-        &slots,
-        new_salt,
-        ctx.cursor,
-        ctx.kappa_usb,
-    )
-    .map_err(|e| e.to_string())?;
+    let sealed: SealedContainer =
+        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
+            .map_err(|e| e.to_string())?;
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
@@ -367,7 +359,8 @@ pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
         ));
     }
     let mut bytes = vec![0u8; CONTAINER_BYTES];
-    holonomy_crypto::rng::fill(&mut bytes).map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
+    holonomy_crypto::rng::fill(&mut bytes)
+        .map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
     std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
 
     let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
