@@ -39,14 +39,16 @@
 //! commitment, so a slot cannot be swapped, dropped or reordered without the tag failing. A Merkle
 //! tree would allow partial verification, which nothing needs — an opener reads every slot anyway.
 //!
-//! [`DIRECTORY_CAPACITY_SLOTS`] is that arithmetic and `a_full_container_fits` asserts both halves.
+//! The arithmetic is a `const _` assertion beside [`DIRECTORY_CAPACITY_SLOTS`]; the behaviour it
+//! implies — that a full index encodes and decodes, and one slot past the capacity is refused — is
+//! `a_full_container_fits`.
 
 use blake2::{Blake2b512, Digest};
 use holonomy_core::layout::{MAX_STRATA, PAYLOAD_SLOTS, SLOT_BYTES};
-pub use holonomy_crypto::commit::DIRECTORY_VERSION;
 #[cfg(test)]
 use holonomy_crypto::commit::NONCE_BYTES;
 use holonomy_crypto::commit::{CMT4_TAG_BYTES, DIRECTORY_PLAINTEXT_BYTES};
+pub use holonomy_crypto::commit::DIRECTORY_VERSION;
 
 use crate::seal::{SealError, SealedPayloadSlot};
 
@@ -69,6 +71,9 @@ pub const DIRECTORY_CAPACITY_SLOTS: usize =
     (DIRECTORY_PLAINTEXT_BYTES - HEADER_BYTES - LEDGER_TAG_BYTES) / LEN_BYTES;
 
 const _: () = assert!(DIRECTORY_CAPACITY_SLOTS >= PAYLOAD_SLOTS);
+// Why this is a hash list and not a commitment table: 2,046 slots x 36 bytes of (length, tag) is
+// 73,656 bytes against a 60,592-byte field. A compile-time fact, so it cannot drift.
+const _: () = assert!(PAYLOAD_SLOTS * (LEN_BYTES + CMT4_TAG_BYTES) > DIRECTORY_PLAINTEXT_BYTES);
 
 /// The immutable index one save writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,27 +304,27 @@ mod tests {
 
     #[test]
     fn a_full_container_fits() {
-        // The arithmetic that forced this design: a table of 2,046 x 36-byte commitments is 73,656
-        // bytes and does not fit in a 60,592-byte field. A hash list does.
-        assert!(DIRECTORY_CAPACITY_SLOTS >= PAYLOAD_SLOTS);
-        assert!(DIRECTORY_MIN_BYTES <= DIRECTORY_PLAINTEXT_BYTES);
-        assert!(
-            PAYLOAD_SLOTS * 36 > DIRECTORY_PLAINTEXT_BYTES,
-            "if a commitment table fitted, the hash list would be gratuitous"
-        );
-    }
-
-    #[test]
-    fn a_full_index_round_trips() {
+        // The behavioural half of the capacity claim: a ledger describing every payload slot the
+        // container addresses must encode into the field and decode back unchanged, and one slot
+        // past that capacity must be refused rather than wrapping or truncating.
+        //
+        // The arithmetic half -- that a 2,046-entry commitment table would overflow the field, which
+        // is why this is a hash list -- is a `const _` assertion above, because two constants
+        // compared at runtime is not a test anything can fail. Clippy caught that.
         let slots: Vec<_> = (0..PAYLOAD_SLOTS).map(|_| slot(64)).collect();
         let commits = commitments_of(&slots);
         let ledger = DirectoryLedger::new(2, 41, &slots);
-        let field = ledger.encode(&commits).expect("fits");
+        let field = ledger.encode(&commits).expect("a full index must fit");
         assert_eq!(field.len(), DIRECTORY_PLAINTEXT_BYTES);
         let back = DirectoryLedger::decode(&field, &commits).expect("round trip");
         assert_eq!(back, ledger);
         assert_eq!(back.slot_count(), PAYLOAD_SLOTS);
         assert_eq!(back.cursor, 41);
+
+        let over: Vec<_> = (0..=PAYLOAD_SLOTS).map(|_| slot(64)).collect();
+        assert!(DirectoryLedger::new(2, 0, &over)
+            .encode(&commitments_of(&over))
+            .is_err());
     }
 
     #[test]
@@ -425,9 +430,7 @@ mod tests {
         let s = vec![slot(64)];
         let commits = commitments_of(&s);
         for cursor in [0u64, 1, 53, 54, u64::MAX] {
-            let field = DirectoryLedger::new(3, cursor, &s)
-                .encode(&commits)
-                .unwrap();
+            let field = DirectoryLedger::new(3, cursor, &s).encode(&commits).unwrap();
             let back = DirectoryLedger::decode(&field, &commits).unwrap();
             assert_eq!(back.cursor, cursor);
             assert_eq!(back.stratum, 3);
