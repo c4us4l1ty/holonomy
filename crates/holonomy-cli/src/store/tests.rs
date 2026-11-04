@@ -543,8 +543,7 @@ fn the_device_pad_reads_zone_b_in_plan_order() {
     // fold is positional, so plan order is the property that matters and a byte count cannot show it.
     let cursor = 7u64;
     let path = synthetic_zone_b("devicepad-read", cursor, &OTHER_KAPPA);
-    let mut device =
-        DevicePad::open_relocated(&path, &OTHER_KAPPA, 0).expect("open the stand-in");
+    let mut device = DevicePad::open_relocated(&path, &OTHER_KAPPA, 0).expect("open the stand-in");
 
     assert!(!device.can_ratchet(), "opened read-only, so it must refuse");
     assert!(
