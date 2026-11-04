@@ -152,6 +152,9 @@ fn each_single_save_is_collision_free_and_covers_its_own_window() {
     for cursor in [0u64, 1, 26, 53] {
         let plan = PadPlan::for_save(&key(0x66), cursor);
         assert_eq!(plan.len(), PAD_SECTORS_PER_SAVE as usize);
-        assert!(plan.is_collision_free(), "save {cursor} plans a sector twice");
+        assert!(
+            plan.is_collision_free(),
+            "save {cursor} plans a sector twice"
+        );
     }
 }
