@@ -265,14 +265,18 @@ fn open(args: &[String]) -> ExitCode {
     }
 }
 
-fn usage_error(message: &str) -> ExitCode {
-    eprintln!("holonomy: {message}");
+/// `impl AsRef<str>` rather than `&str`: a `String` from `format!` and a `&'static str` literal are
+/// both call sites, and a plain `&str` forces every formatted one to be borrowed at the point of
+/// the call -- which reads as `&e` where `e: String` and then fails with "the size for values of
+/// type `str` cannot be known", an error that names the deref rather than the mismatch.
+fn usage_error(message: impl AsRef<str>) -> ExitCode {
+    eprintln!("holonomy: {}", message.as_ref());
     eprintln!("run `holonomy --help` for usage");
     ExitCode::from(2)
 }
 
-fn failure(message: &str) -> ExitCode {
-    eprintln!("holonomy: {message}");
+fn failure(message: impl AsRef<str>) -> ExitCode {
+    eprintln!("holonomy: {}", message.as_ref());
     ExitCode::FAILURE
 }
 

@@ -384,6 +384,67 @@ pub fn sector_index(
     Feistel22::provisioned(&k_perm).permute(Feistel22::logical_sector(cursor, j as u32))
 }
 
+/// Write the first container at `path`: full size, then one save of an empty document.
+///
+/// A container is never created empty-on-disk. A sparse file of zeros is indistinguishable from an
+/// unprovisioned device, and the reader says so rather than pretending to open it — so the file is
+/// filled with CSPRNG bytes first, exactly as an unformatted stick would be, and then given a real
+/// capsule, a real salt and a real fold.
+pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "{} already exists; provisioning will not overwrite a container",
+            path.display()
+        ));
+    }
+    let mut bytes = vec![0u8; CONTAINER_BYTES];
+    holonomy_crypto::rng::fill(&mut bytes)
+        .map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
+    std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
+
+    let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
+    first_write(&mut file, ctx, SaltBytes::fresh())
+}
+
+/// Seal one container under `salt`, fold its pad window over it, and write it.
+///
+/// This is what `save` does at its own steps 6–8, factored out because `provision` needs the same
+/// thing. Two copies of "how a container is written" is exactly the drift that made a save after
+/// provisioning impossible once already: the first version wrote an unpadded capsule while `save`
+/// undid a pad before opening, so the very next save reported "wrong passphrase" for a correct one.
+/// Every write goes through this function for that reason, and `save` folds with the same
+/// `pad_window_for_save` call.
+pub fn first_write(
+    file: &mut ContainerFile,
+    ctx: &SaveContext<'_>,
+    salt: SaltBytes,
+) -> Result<(), String> {
+    let salt_bytes = *salt.as_bytes();
+    let root =
+        holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), &salt_bytes, ctx.params)
+            .map_err(|e| format!("deriving the root secret: {e}"))?;
+    // The fallback set: the save path needs only `k_unwrap` and `n_epoch` from it, because the
+    // envelope supplies `K_DEM`. See `holonomy_session::open::tests::stratum_from_root`.
+    let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
+    let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
+    let layer = holonomy_core::unlock::ProtectionLayer {
+        pad: true,
+        pad_fresh: true,
+        post_quantum: true,
+    };
+    let stratum =
+        holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys);
+
+    let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
+        .map_err(|e| e.to_string())?;
+    let mut image = vec![0u8; CONTAINER_BYTES];
+    sealed
+        .encode_into(&mut image, identity_placement)
+        .map_err(|e| e.to_string())?;
+    fold(&mut image, &pad_window_for_save(ctx.kappa_usb, &salt_bytes, ctx.cursor));
+    file.write_image(&image).map_err(|e| e.to_string())
+}
+
 /// 4,096 bytes of deterministic material for a sector index.
 ///
 /// **This is not the pad.** The real pad is CSPRNG bytes written to Zone B at provisioning time and
