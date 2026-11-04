@@ -14,7 +14,7 @@
 use super::*;
 // The pad types are not re-exported from `store`: production reaches them as `store::pad::X`, and the
 // tests should name them the way production does, not through a shortcut the store does not offer.
-use super::pad::{DevicePad, DerivedPad};
+use super::pad::{DerivedPad, DevicePad, WINDOW_BYTES};
 use holonomy_core::layout::{slot_range, SALT_BYTES, SALT_SLOT_INDEX, ZONE_B_SECTORS};
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_crypto::ParamsClass;

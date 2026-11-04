@@ -17,14 +17,18 @@ use holonomy_core::budgets::{self, MIB};
 use holonomy_core::capsule::{CapsuleWire, ENCRYPTED_DIRECTORY_BYTES};
 use holonomy_core::feistel::{Feistel22, DOMAIN};
 use holonomy_core::layout::{
-    CONTAINER_BYTES, IO_ALIGN, PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SLOT_BYTES,
-    ZONE_B_SECTORS,
+    CONTAINER_BYTES, IO_ALIGN, PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SECTOR_BYTES,
+    SLOT_BYTES, ZONE_B_SECTORS,
 };
 use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_crypto::ParamsClass;
 use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
 
 mod store;
+
+/// The pad trait has to be in scope for its methods to be callable on a concrete `DevicePad`; a
+/// trait import that looks unused is the one that makes `device.can_ratchet()` compile.
+use store::pad::PadSource as _;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
