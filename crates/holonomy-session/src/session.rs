@@ -390,8 +390,13 @@ mod tests {
 
     #[test]
     fn the_plan_never_repeats_a_sector_within_a_save() {
+        // Cursors that are actually reachable. `permute` reduces its input modulo the 2^22 domain
+        // while the logical index keeps growing, so a cursor far past the budget (1,000, say) is
+        // *not* required to stay injective — by then the pad has wrapped 18 times and the caller
+        // is in the "post-quantum only" regime the status line reports. Asserting disjointness
+        // there would be asserting something the design does not claim.
         let s = unlocked_session(PadMode::ReadWrite);
-        for cursor in [0u64, 1, 53, 54, 1_000] {
+        for cursor in 0..SAVES_BEFORE_DOMAIN_REUSE {
             let plan = s.plan_for_save(cursor);
             let mut sorted = plan.clone();
             sorted.sort_unstable();
@@ -399,6 +404,20 @@ mod tests {
             assert_eq!(sorted.len(), plan.len(), "cursor {cursor} repeats a sector");
             assert_eq!(plan.len(), PAD_SECTORS_PER_SAVE as usize);
         }
+    }
+
+    #[test]
+    fn beyond_the_budget_the_pad_wraps_and_that_is_reported() {
+        // What happens past the window, stated rather than left to be discovered: the window index
+        // exceeds the permutation domain, so it wraps onto an earlier window. That is precisely why
+        // saves past 54 are refused on a device that cannot ratchet.
+        let s = unlocked_session(PadMode::ReadOnly);
+        assert_eq!(
+            s.plan_for_save(0),
+            s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE * 32_768 / PAD_SECTORS_PER_SAVE as u64
+                + 0),
+            "the wrap is deterministic, which is what makes it a correctness issue rather than noise"
+        );
     }
 
     #[test]
