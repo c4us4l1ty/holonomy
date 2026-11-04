@@ -543,28 +543,43 @@ pub fn ct_lengths_are_canonical(ct: &HybridCiphertext) -> bool {
 mod tests {
     use super::*;
 
-    /// A KEM that is a hash, not a lattice. Only valid for exercising the state machine.
-    struct FakeKem;
+    #[test]
+    fn the_real_kem_round_trips_through_a_capsule_shaped_wrap() {
+        // The one test that exercises ml-kem itself: keygen -> encapsulate -> wrap ->
+        // unwrap -> decapsulate, asserting both shared secrets agree. It also pins the seed
+        // serialisation, which is what makes the 3,216-byte field defensible.
+        let kem = MlKem1024X25519;
+        let (dk, ek) = kem.keygen();
+        let (ct, ss_sender) = kem.encapsulate(&ek).unwrap();
+        let k_unwrap = [0x31u8; 32];
+        let nonce = [0x32u8; XCHACHA_NONCE_BYTES];
 
-    impl HybridKem for FakeKem {
-        fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
-            (
-                HybridDecapsulationKey { ml_kem: [7u8; ML_KEM_1024_SEED_BYTES], x25519: [8u8; 32] },
-                HybridEncapsulationKey { ml_kem: vec![7u8; 1568], x25519: [8u8; 32] },
-            )
-        }
-        fn encapsulate(&self, _pk: &HybridEncapsulationKey) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
-            Ok((
-                HybridCiphertext { ml_kem: [9u8; ML_KEM_1024_CT_BYTES], x25519: [10u8; 32] },
-                SharedSecrets { pq: [11u8; 32], ecc: [12u8; 32] },
-            ))
-        }
-        fn decapsulate(&self, sk: &HybridDecapsulationKey, _ct: &HybridCiphertext) -> Result<SharedSecrets, EnvelopeError> {
-            if sk.ml_kem[0] == 0 {
-                return Err(EnvelopeError::KemRejected);
-            }
-            Ok(SharedSecrets { pq: [11u8; 32], ecc: [12u8; 32] })
-        }
+        let wrapped = wrap_stratum_key(&k_unwrap, &nonce, &dk.ml_kem, &dk.x25519);
+        assert_eq!(wrapped.len(), 3_216);
+
+        let recovered = unwrap_stratum_key(&k_unwrap, &nonce, &wrapped).unwrap();
+        let ss_receiver = kem.decapsulate(&recovered, &ct).unwrap();
+        assert_eq!(ss_sender.pq, ss_receiver.pq);
+        assert_eq!(ss_sender.ecc, ss_receiver.ecc);
+        assert_ne!(ss_sender.pq, [0u8; 32]);
+    }
+
+    #[test]
+    fn two_keygens_do_not_collide() {
+        let kem = MlKem1024X25519;
+        let (a, _) = kem.keygen();
+        let (b, _) = kem.keygen();
+        assert_ne!(a.ml_kem, b.ml_kem);
+        assert_ne!(a.x25519, b.x25519);
+    }
+
+    #[test]
+    fn decapsulation_key_debug_is_redacted() {
+        let kem = MlKem1024X25519;
+        let (dk, _) = kem.keygen();
+        let s = format!("{dk:?}");
+        assert!(!s.contains(&format!("{:02x}", dk.x25519[0])));
+        assert!(s.contains("redacted"));
     }
 
     #[test]

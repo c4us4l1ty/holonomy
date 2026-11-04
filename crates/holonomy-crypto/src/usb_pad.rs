@@ -136,9 +136,15 @@ pub enum PadError {
     /// The device is `O_RDONLY`, so it cannot be ratcheted.
     NotWritable,
     /// The 54-save window is exhausted and the mode cannot ratchet.
-    PadExhausted { cursor: u64 },
+    PadExhausted {
+        /// Saves already spent in this epoch.
+        cursor: u64,
+    },
     /// A ratchet reported a sector count other than 32,768.
-    WrongSectorCount { got: u32 },
+    WrongSectorCount {
+        /// Sectors the ratchet actually reported.
+        got: u32,
+    },
 }
 
 impl std::fmt::Display for PadError {
