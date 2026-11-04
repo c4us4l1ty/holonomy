@@ -86,6 +86,12 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Format and commit
         run: |
+          # Re-fetch before formatting. The checked-out ref can already be behind: two pushes in
+          # quick succession leave this job holding an older commit, and without the rebase the
+          # push below is rejected as non-fast-forward and the whole run fails on plumbing rather
+          # than on code.
+          git fetch origin "${{ github.ref_name }}"
+          git reset --hard "origin/${{ github.ref_name }}"
           cargo fmt --all
           if git diff --quiet; then
             echo "already formatted"
@@ -94,7 +100,8 @@ jobs:
             git config user.email "ci@holonomy.invalid"
             git add -A
             git commit -m "style: cargo fmt (automated, no manual edits)"
-            git push
+            # Retry once: another job or a human push may land between the fetch and the push.
+            git push || { git fetch origin "${{ github.ref_name }}"; git rebase "origin/${{ github.ref_name }}"; git push; }
           fi
   core-crates:
     name: core crates (no wordcraft)
