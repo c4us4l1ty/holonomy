@@ -384,8 +384,12 @@ pub fn save(
     //    used", and a caller that conflates the two reports freshness it does not have.
     let ratcheted = if pad.can_ratchet() {
         Some(
-            pad.ratchet(ctx.kappa_usb, old_cursor)
-                .map_err(|e| format!("ratcheting pad window {old_cursor}: {e}"))?,
+            pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
+                format!(
+                    "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
+                    ctx.cursor
+                )
+            })?,
         )
     } else {
         None
@@ -488,18 +492,26 @@ pub fn provision(
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
 ) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; provisioning will not overwrite a container",
-            path.display()
-        ));
-    }
+    // `create_new` atomically rejects existing paths, including symlinks. Checking
+    // `exists` before `write` would allow another process to replace the path in between.
+    let handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("creating {} (existing paths are never overwritten): {e}", path.display()))?;
+    let mut file = ContainerFile {
+        file: handle,
+        path: path.display().to_string(),
+        offset: 0,
+        writable: true,
+    };
     let mut bytes = vec![0u8; CONTAINER_BYTES];
     holonomy_crypto::rng::fill(&mut bytes)
         .map_err(|e| format!("the OS CSPRNG is unavailable: {e}"))?;
-    std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
-
-    let mut file = ContainerFile::open(path, true).map_err(|e| e.to_string())?;
+    file.write_image(&bytes)
+        .map_err(|e| format!("initializing {}: {e}", path.display()))?;
+    drop(bytes);
     first_write(&mut file, pad, ctx, SaltBytes::fresh())
 }
 

@@ -841,3 +841,14 @@ fn save_rejects_provisioning_cursor_without_changing_container() {
     assert_eq!(std::fs::read(&path).expect("read after"), before);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn provision_refuses_existing_path_without_overwriting_it() {
+    let path = tempfile("existing-provision");
+    std::fs::write(&path, b"preserve me").expect("seed");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let error = super::provision(&path, &mut source(), &ctx(&pass, 0)).unwrap_err();
+    assert!(error.contains("existing paths"));
+    assert_eq!(std::fs::read(&path).expect("read"), b"preserve me");
+    let _ = std::fs::remove_file(&path);
+}
