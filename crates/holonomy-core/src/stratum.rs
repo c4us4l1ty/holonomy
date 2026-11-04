@@ -139,7 +139,7 @@ mod tests {
     fn stratum_ids_are_bounded() {
         assert!(StratumId::new(0).is_none());
         assert!(StratumId::new(1).unwrap().is_duress());
-        assert!(StratumId::new(2).unwrap().is_duress() == false);
+        assert!(!StratumId::new(2).unwrap().is_duress());
         assert!(StratumId::new(MAX_STRATA as u8).is_some());
         assert!(StratumId::new(MAX_STRATA as u8 + 1).is_none());
     }

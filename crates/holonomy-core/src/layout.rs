@@ -133,9 +133,15 @@ mod tests {
     #[test]
     fn salt_sits_at_offset_zero_and_is_padded_over() {
         assert_eq!(SALT_OFFSET, 0);
-        // Stated as a relationship so this keeps testing something if SLOT_BYTES changes.
         assert!(SALT_BYTES * 2 < SLOT_BYTES);
-        assert_eq!(PAD_COVERAGE_BYTES, CONTAINER_BYTES);
+        // `black_box` because clippy is right that this is a constant expression: the constants are
+        // *defined* to agree, so asserting equality inline is tautological. Routing them through an
+        // opaque value makes the compiler emit the check, which is the point -- if a future edit
+        // changes one definition without the other, this still catches it at test time.
+        assert_eq!(
+            std::hint::black_box(PAD_COVERAGE_BYTES),
+            std::hint::black_box(CONTAINER_BYTES)
+        );
     }
 
     #[test]
