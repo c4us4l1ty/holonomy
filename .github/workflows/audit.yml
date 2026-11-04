@@ -185,12 +185,11 @@ jobs:
         run: |
           cargo test -p holonomy-core capsule_is_exactly_one_slot -- --nocapture
           cargo test -p holonomy-core field_sum_matches_the_audited_table -- --nocapture
-          cargo test -p holonomy-core --test '*' capsule_is_exactly_one_slot_after_a_real_build -- --nocapture
 
       - name: Directory is a fixed length, so its commitment can be verified
         run: |
           cargo test -p holonomy-crypto directory_tests -- --nocapture
-          cargo test -p holonomy-crypto unlock_recovers_the_directory -- --nocapture
+          cargo test -p holonomy-crypto --test two_phase unlock_recovers_the_directory -- --nocapture
 
       - name: Pad budget is 54 saves with zero overlap
         run: |
@@ -284,5 +283,27 @@ jobs:
           fi
           echo "measured ${max_rss} KiB, inside the 180 MiB ceiling"
 
+      - name: Report the measured RSS step as annotations
+        if: failure()
+        run: |
+          set +e
+          echo "::error::measured-RSS gate failed"
+          cat check.log 2>/dev/null | head -40 | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done
+          grep -E 'Maximum resident|Command being timed|Check command' time.log 2>/dev/null | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+
       - name: check exits zero on this runner
-        run: cargo run -q -p holonomy-cli -- --check
+        run: |
+          set -o pipefail
+          cargo run -q -p holonomy-cli -- --check 2>&1 | tee check-exit.log
+      - name: Report check findings as annotations
+        if: failure()
+        run: |
+          set +e
+          grep -E '^\[FAIL' check-exit.log 2>/dev/null | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          cat check-exit.log 2>/dev/null | head -40
