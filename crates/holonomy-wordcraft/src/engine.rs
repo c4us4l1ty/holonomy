@@ -62,7 +62,11 @@ impl EngineEditor {
     }
 
     fn run(&mut self, command: &str, params: &Value) -> Result<(), EditError> {
-        let result = self.engine.run(command, params).map(|_| ()).map_err(|_| EditError);
+        let result = self
+            .engine
+            .run(command, params)
+            .map(|_| ())
+            .map_err(|_| EditError);
         // Always resynchronize, including after a failed command. No file command
         // or arbitrary command ID is exposed by the public adapter.
         *self.editor.document_mut() = self.engine.doc.clone();
@@ -111,8 +115,13 @@ mod tests {
         let path = directory.path().join("document");
         let kappa = [0x45; 32];
         let session = EditorSession::create(
-            &path, Box::new(DerivedPad::new()), passphrase(), kappa, options(0, true),
-        ).expect("create");
+            &path,
+            Box::new(DerivedPad::new()),
+            passphrase(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
         let mut editor = EngineEditor::new(session);
         assert!(!editor.has_unsaved_changes());
         editor.insert_text("Hello from Wordcraft").expect("insert");
@@ -128,8 +137,13 @@ mod tests {
         assert_eq!(editor.cursor(), 1);
         drop(editor);
         let reopened = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), passphrase(), kappa, options(1, false),
-        ).expect("reopen");
+            &path,
+            Box::new(DerivedPad::new()),
+            passphrase(),
+            kappa,
+            options(1, false),
+        )
+        .expect("reopen");
         assert!(reopened.document().same_content(&edited));
     }
 }
