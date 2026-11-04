@@ -168,11 +168,25 @@ impl std::fmt::Display for SealError {
 
 impl std::error::Error for SealError {}
 
-/// Bytes of plaintext one payload slot holds: the slot minus the `Poly1305` tag.
+/// Bytes of plaintext one payload slot holds: the slot, minus the `Poly1305` tag, minus the `CMT-4`
+/// commitment.
 ///
-/// The `CMT-4` commitment lives beside the ciphertext rather than inside the block, so it does not
-/// come out of this budget.
-pub const PAYLOAD_PLAINTEXT_PER_SLOT: usize = SLOT_BYTES - POLY1305_TAG_BYTES;
+/// # The 32 bytes that used to be over-counted
+///
+/// This was `SLOT_BYTES - POLY1305_TAG_BYTES`, on the reasoning that "the `CMT-4` commitment lives
+/// beside the ciphertext rather than inside the block". It does not: [`SealedContainer::encode_into`]
+/// writes the commitment into the **last `CMT4_TAG_BYTES` of the slot**, after the ciphertext,
+/// because that is where a reader looks for it before it has a ledger to tell it the length. A
+/// plaintext of exactly this constant therefore sealed to a ciphertext that did not fit, and
+/// `encode_into` refused the whole save with `PayloadTooLarge` -- a full-size chunk of a real
+/// document could not be written, and the store's three-slot test is what found it.
+///
+/// [`crate::directory::DirectoryLedger::decode`] already used the correct bound
+/// (`SLOT_BYTES - CMT4_TAG_BYTES`, which is this constant plus the tag); the writer's constant was
+/// the odd one out.
+pub const PAYLOAD_PLAINTEXT_PER_SLOT: usize = SLOT_BYTES - POLY1305_TAG_BYTES - CMT4_TAG_BYTES;
+
+const _: () = assert!(PAYLOAD_PLAINTEXT_PER_SLOT + POLY1305_TAG_BYTES + CMT4_TAG_BYTES == SLOT_BYTES);
 
 /// Seal one save.
 ///
@@ -810,9 +824,30 @@ mod tests {
             ),
             "{err}"
         );
-        // Exactly at capacity is fine: the boundary is inclusive on the usable side.
+        // Exactly at capacity must be *writable*, not merely sealable.
+        //
+        // This assertion used to stop at `seal_container(...).is_ok()`, which passed while a
+        // full-size slot could not be encoded: the clash between the ciphertext and the commitment
+        // for the last `CMT4_TAG_BYTES` of the slot only surfaces in `encode_into`. Two halves of
+        // one claim, and only the half that could not fail was being tested.
         let exact = vec![0xABu8; PAYLOAD_PLAINTEXT_PER_SLOT];
-        assert!(seal_container(&s, &[&exact], salt(0x82), 0, &KAPPA).is_ok());
+        let sealed = seal_container(&s, &[&exact], salt(0x82), 0, &KAPPA).expect("seals");
+        let mut image = vec![0u8; CONTAINER_BYTES];
+        sealed
+            .encode_into(&mut image, identity)
+            .expect("a slot filled to capacity must still encode");
+        // And the ciphertext plus its commitment fill the slot exactly, with nothing overlapping.
+        let (off, len) = slot_range(identity(0));
+        let ct = sealed.slots[0].ciphertext.len();
+        assert_eq!(
+            ct + CMT4_TAG_BYTES,
+            len,
+            "ciphertext {} + commitment {} must be exactly one slot of {}",
+            ct,
+            CMT4_TAG_BYTES,
+            len
+        );
+        assert_eq!(&image[off + len - CMT4_TAG_BYTES..off + len], &sealed.slots[0].commitment[..]);
     }
 
     #[test]
