@@ -14,7 +14,8 @@
 Holonomy explores a rich-document workspace backed by a fixed-size encrypted container and a
 physical USB entropy reservoir. The **current deliverable is an experimental CLI**, not a word
 processor: it can provision, save, and open a byte-oriented document using a supplied passphrase,
-USB root share, and pad source. The Wordcraft document bridge is not wired into the workspace.
+USB root share, and pad source. An experimental Wordcraft document codec and session bridge lives
+in a separate workspace, but it is not connected to an editor window.
 
 This README describes **what exists and what is intended**, not a promise that the prototype is
 safe against a particular attacker. See the [v5.1 design](docs/PRD-v5.1.0.md),
@@ -63,7 +64,9 @@ $$
 $$
 
 Slot 0 carries the root capsule, slot 1 includes the epoch salt, and the remaining **2,046** slots
-are available for payload. The session layer reserves authentication data in each payload slot.
+are available for payload. The session layer reserves authentication data in each payload slot. The experimental Wordcraft bridge
+stores versioned JSON **inside** the encrypted payload and refuses unrecognized nonempty CLI data;
+it does not guarantee that Wordcraft's in-memory document or all intermediate copies are wiped.
 The file's fixed size does not hide its existence, access times, save frequency, or other external
 metadata. A fixed size or random-looking ciphertext alone is not a proof that revisions leak no
 information.
@@ -195,7 +198,7 @@ stick for you.
 
 ## Remaining work
 
-- Integrate and test the Wordcraft editor and document serialization with the container session.
+- Integrate the Wordcraft editor window with the document-session bridge; validate compatibility and migration of the experimental payload format.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
 - Complete and test crash recovery, cross-platform replacement, concurrent-save coordination, and durable pad-use/ratchet accounting.
 - Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
