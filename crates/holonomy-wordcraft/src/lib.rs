@@ -41,12 +41,18 @@ pub enum BridgeError {
 impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnrecognizedPayload => f.write_str("payload is not a Holonomy Wordcraft document"),
-            Self::UnsupportedVersion(version) => write!(f, "unsupported Wordcraft payload version {version}"),
+            Self::UnrecognizedPayload => {
+                f.write_str("payload is not a Holonomy Wordcraft document")
+            }
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported Wordcraft payload version {version}")
+            }
             Self::DocumentTooLarge => f.write_str("serialized document exceeds container capacity"),
             Self::Serialization => f.write_str("could not serialize the Wordcraft document"),
             Self::InvalidDocument => f.write_str("invalid Wordcraft document payload"),
-            Self::RoundTripMismatch => f.write_str("Wordcraft serialization changed the document; save refused"),
+            Self::RoundTripMismatch => {
+                f.write_str("Wordcraft serialization changed the document; save refused")
+            }
             Self::Save(message) => write!(f, "session save failed: {message}"),
         }
     }
@@ -64,7 +70,10 @@ impl Write for BoundedWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         if data.len() > self.limit.saturating_sub(self.bytes.len()) {
             self.exceeded = true;
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "document exceeds payload limit"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "document exceeds payload limit",
+            ));
         }
         self.bytes.extend_from_slice(data);
         Ok(data.len())
@@ -85,8 +94,12 @@ pub fn encode(document: &Document) -> Result<Zeroizing<Vec<u8>>, BridgeError> {
         limit: MAX_DOCUMENT_BYTES,
         exceeded: false,
     };
-    writer.write_all(MAGIC).map_err(|_| BridgeError::DocumentTooLarge)?;
-    writer.write_all(&[VERSION]).map_err(|_| BridgeError::DocumentTooLarge)?;
+    writer
+        .write_all(MAGIC)
+        .map_err(|_| BridgeError::DocumentTooLarge)?;
+    writer
+        .write_all(&[VERSION])
+        .map_err(|_| BridgeError::DocumentTooLarge)?;
     if serde_json::to_writer(&mut writer, document).is_err() {
         return Err(if writer.exceeded {
             BridgeError::DocumentTooLarge
@@ -111,7 +124,9 @@ pub fn decode(payload: &[u8]) -> Result<Document, BridgeError> {
     if payload.len() > MAX_DOCUMENT_BYTES {
         return Err(BridgeError::DocumentTooLarge);
     }
-    let suffix = payload.strip_prefix(MAGIC).ok_or(BridgeError::UnrecognizedPayload)?;
+    let suffix = payload
+        .strip_prefix(MAGIC)
+        .ok_or(BridgeError::UnrecognizedPayload)?;
     let (&version, json) = suffix.split_first().ok_or(BridgeError::InvalidDocument)?;
     if version != VERSION {
         return Err(BridgeError::UnsupportedVersion(version));
@@ -144,15 +159,24 @@ mod tests {
 
     #[test]
     fn invalid_and_unknown_payloads_are_not_guessed() {
-        assert!(matches!(decode(b"plain old CLI text"), Err(BridgeError::UnrecognizedPayload)));
+        assert!(matches!(
+            decode(b"plain old CLI text"),
+            Err(BridgeError::UnrecognizedPayload)
+        ));
         let mut unknown = MAGIC.to_vec();
         unknown.push(VERSION + 1);
-        assert!(matches!(decode(&unknown), Err(BridgeError::UnsupportedVersion(_))));
+        assert!(matches!(
+            decode(&unknown),
+            Err(BridgeError::UnsupportedVersion(_))
+        ));
         assert!(matches!(decode(MAGIC), Err(BridgeError::InvalidDocument)));
         let mut invalid = MAGIC.to_vec();
         invalid.push(VERSION);
         invalid.extend_from_slice(b"not json");
-        assert!(matches!(decode(&invalid), Err(BridgeError::InvalidDocument)));
+        assert!(matches!(
+            decode(&invalid),
+            Err(BridgeError::InvalidDocument)
+        ));
     }
 
     #[test]
@@ -198,7 +222,11 @@ mod tests {
 
     #[test]
     fn bounded_writer_refuses_overflow_without_appending() {
-        let mut writer = BoundedWriter { bytes: Zeroizing::new(Vec::new()), limit: 3, exceeded: false };
+        let mut writer = BoundedWriter {
+            bytes: Zeroizing::new(Vec::new()),
+            limit: 3,
+            exceeded: false,
+        };
         writer.write_all(b"abc").expect("fits");
         assert!(writer.write_all(b"d").is_err());
         assert!(writer.exceeded);
