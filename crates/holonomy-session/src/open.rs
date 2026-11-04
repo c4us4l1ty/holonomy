@@ -45,8 +45,8 @@ use holonomy_crypto::kdf::ParamsClass;
 use holonomy_crypto::unlock::{unlock_fixed, UnlockRequest};
 
 use crate::directory::{DirectoryError, DirectoryLedger};
-use crate::seal::{open_payload_slot, SealError, Zeroizing};
 use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
+use crate::seal::{open_payload_slot, SealError, Zeroizing};
 
 /// Everything needed to open a container. Borrowed, like [`UnlockRequest`], because none of it is
 /// secret except the passphrase and that is already sealed.
@@ -296,8 +296,8 @@ fn open_with_salt(
 /// Bounded here rather than left to [`DirectoryLedger::decode`], because this number is used to
 /// decide how much of the image to read before that function runs.
 fn slot_count_of(plaintext: &[u8; DIRECTORY_PLAINTEXT_BYTES]) -> Result<usize, OpenError> {
-    let count = u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]])
-        as usize;
+    let count =
+        u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]]) as usize;
     if count > PAYLOAD_SLOTS {
         return Err(OpenError::Directory(DirectoryError::TooManySlots {
             found: count,
