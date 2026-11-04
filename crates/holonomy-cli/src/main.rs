@@ -215,7 +215,11 @@ fn save(args: &[String]) -> ExitCode {
             );
             println!(
                 "  image digest {}",
-                report.digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                report
+                    .digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             );
             println!(
                 "  ratchet: {}",

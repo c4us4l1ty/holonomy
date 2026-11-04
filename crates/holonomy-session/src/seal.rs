@@ -186,7 +186,8 @@ impl std::error::Error for SealError {}
 /// the odd one out.
 pub const PAYLOAD_PLAINTEXT_PER_SLOT: usize = SLOT_BYTES - POLY1305_TAG_BYTES - CMT4_TAG_BYTES;
 
-const _: () = assert!(PAYLOAD_PLAINTEXT_PER_SLOT + POLY1305_TAG_BYTES + CMT4_TAG_BYTES == SLOT_BYTES);
+const _: () =
+    assert!(PAYLOAD_PLAINTEXT_PER_SLOT + POLY1305_TAG_BYTES + CMT4_TAG_BYTES == SLOT_BYTES);
 
 /// Seal one save.
 ///
@@ -847,7 +848,10 @@ mod tests {
             CMT4_TAG_BYTES,
             len
         );
-        assert_eq!(&image[off + len - CMT4_TAG_BYTES..off + len], &sealed.slots[0].commitment[..]);
+        assert_eq!(
+            &image[off + len - CMT4_TAG_BYTES..off + len],
+            &sealed.slots[0].commitment[..]
+        );
     }
 
     #[test]
