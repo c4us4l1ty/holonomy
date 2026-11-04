@@ -261,27 +261,29 @@ jobs:
         run: cargo test -p holonomy-core the_gate_is_two_sided -- --nocapture
 
       # The measured gate. This was a placeholder for as long as `holonomy` could not be built,
-      # which meant the project's headline memory claim had never been measured by anything. Now
-      # the binary exists and `--check` reads VmHWM from /proc/self/status, so this measures.
+      # which meant the project's headline memory claim had never been measured by anything.
+      #
+      # The measurement comes from the process itself: `--check` reads VmHWM from
+      # /proc/self/status, which is the kernel's own high-water mark and therefore does not depend
+      # on external timing tools existing on the runner. An earlier version shelled out to
+      # `/usr/bin/time -v`, which is not present everywhere and failed as `command not found` --
+      # a gate that dies on a missing tool is not measuring the product.
       - name: Measured peak RSS is inside the steady-state ceiling
         run: |
           set -o pipefail
-          /usr/bin/time -v cargo run -q -p holonomy-cli -- --check 2> time.log | tee check.log
-          echo "### --check output"
-          cat check.log
-          # `/usr/bin/time -v` reports the child's peak RSS in KiB.
-          max_rss=$(grep 'Maximum resident set size' time.log | grep -oE '[0-9]+')
-          echo "measured Maximum RSS: ${max_rss} KiB"
+          cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
+          measured=$(grep -oE 'peak RSS: [0-9]+ KiB' check.log | grep -oE '[0-9]+' | head -1)
+          if [ -z "$measured" ]; then
+            echo "::error::--check did not report a peak RSS measurement"
+            exit 1
+          fi
           ceiling=$((180 * 1024))
-          if [ -z "$max_rss" ]; then
-            echo "::error::could not read Maximum resident set size from /usr/bin/time"
+          echo "measured peak RSS: ${measured} KiB; ceiling ${ceiling} KiB (180 MiB)"
+          if [ "$measured" -gt "$ceiling" ]; then
+            echo "::error::measured ${measured} KiB exceeds the ${ceiling} KiB (180 MiB) ceiling"
             exit 1
           fi
-          if [ "$max_rss" -gt "$ceiling" ]; then
-            echo "::error::measured ${max_rss} KiB exceeds the ${ceiling} KiB (180 MiB) steady-state ceiling"
-            exit 1
-          fi
-          echo "measured ${max_rss} KiB, inside the 180 MiB ceiling"
+          echo "inside the ceiling"
 
       - name: Report the measured RSS step as annotations
         if: failure()
@@ -291,7 +293,7 @@ jobs:
           cat check.log 2>/dev/null | head -40 | while IFS= read -r line; do
             [ -n "$line" ] && echo "::error::$line"
           done
-          grep -E 'Maximum resident|Command being timed|Check command' time.log 2>/dev/null | while IFS= read -r line; do
+          grep -E 'peak RSS' check.log 2>/dev/null | while IFS= read -r line; do
             echo "::error::$line"
           done
 

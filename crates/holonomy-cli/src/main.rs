@@ -282,6 +282,14 @@ fn check() -> ExitCode {
     ));
 
     print!("{}", report.render());
+
+    // Exit code semantics, stated here because they are a product decision rather than an
+    // implementation detail:
+    //   0  every gate that could run passed. `degraded` and `deferred` do not fail: the first is a
+    //      property of the machine (no memfd_secret, no CAP_SYS_NICE) and the second is a property
+    //      of this build environment. Failing on either would make the exit code noise, and a noisy
+    //      security signal gets ignored.
+    //   1  something that should hold does not. That is always worth stopping for.
     if report.passed() {
         ExitCode::SUCCESS
     } else {
