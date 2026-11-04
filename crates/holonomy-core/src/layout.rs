@@ -54,6 +54,10 @@ pub const PAD_SECTORS_PER_SAVE: u32 = 32_768;
 /// 4 KiB sectors in USB Zone B (6.80 GiB of provisioning-time CSPRNG entropy).
 pub const ZONE_B_SECTORS: u32 = 1_782_579;
 
+/// USB logical sector size. Every pad figure is in these units; the old PRD's diagram mixed
+/// 512-byte LBAs with 4 KiB sectors on the same line and mislabelled a 16 MiB partition.
+pub const SECTOR_BYTES: usize = 4_096;
+
 /// How many consecutive saves read mutually disjoint pad sectors.
 ///
 /// `ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE = 54`. Epochs `0..=53` consume
@@ -82,7 +86,9 @@ const _: () = {
     assert!(CONTAINER_BYTES % SLOT_BYTES == 0);
     assert!(SLOT_BYTES % IO_ALIGN == 0);
     assert!(TOTAL_BLOCKS * SLOT_BYTES == CONTAINER_BYTES);
-    assert!(PAYLOAD_SLOTS as u64 * PAD_SECTORS_PER_SAVE as u64 == 134_152_192);
+    // One save of pad is exactly one container: 32,768 sectors x 4,096 bytes. That is the 1:1
+    // property the fold depends on, stated as an identity rather than as a comment.
+    assert!(PAD_SECTORS_PER_SAVE as u64 * SECTOR_BYTES == CONTAINER_BYTES as u64);
     assert!(SAVES_BEFORE_DOMAIN_REUSE == 54);
 };
 
