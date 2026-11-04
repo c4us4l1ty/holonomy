@@ -692,7 +692,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
       - name: Cache cargo
         uses: actions/cache@v4
@@ -703,6 +703,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
+      - name: Lint CLI
+        run: cargo clippy -p holonomy-cli --all-targets -- -D warnings
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail
