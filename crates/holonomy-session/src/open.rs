@@ -35,7 +35,9 @@
 //! version before the handshake — for the same reason the handshake does not.
 
 use holonomy_core::capsule::CapsuleWire;
-use holonomy_core::layout::{slot_range, PAYLOAD_SLOTS, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS};
+use holonomy_core::layout::{
+    slot_range, PAYLOAD_SLOTS, SALT_SLOT_INDEX, SLOT_BYTES, TOTAL_BLOCKS,
+};
 use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology, UnlockError};
 use holonomy_crypto::commit::{open_directory, CMT4_TAG_BYTES, DIRECTORY_PLAINTEXT_BYTES};
@@ -43,8 +45,8 @@ use holonomy_crypto::kdf::ParamsClass;
 use holonomy_crypto::unlock::{unlock_fixed, UnlockRequest};
 
 use crate::directory::{DirectoryError, DirectoryLedger};
-use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 use crate::seal::{open_payload_slot, SealError, Zeroizing};
+use crate::salt::{ContainerHeader, HeaderError, SaltBytes};
 
 /// Everything needed to open a container. Borrowed, like [`UnlockRequest`], because none of it is
 /// secret except the passphrase and that is already sealed.
@@ -245,7 +247,7 @@ fn open_with_salt(
     //    trusting an unauthenticated length. It cannot be avoided by reading the count from the
     //    commitments instead, because the commitments are exactly what the ledger's tag covers.
     let count = slot_count_of(&plaintext)?;
-    let commitments = read_commitments(req.image, placement, count);
+    let commitments = read_commitments(req.image, &placement, count);
     let directory = DirectoryLedger::decode(&plaintext, &commitments)?;
 
     // 5. The payload. AAD binds the stratum and logical slot index, so a slot that was moved to a
@@ -296,8 +298,8 @@ fn open_with_salt(
 /// Bounded here rather than left to [`DirectoryLedger::decode`], because this number is used to
 /// decide how much of the image to read before that function runs.
 fn slot_count_of(plaintext: &[u8; DIRECTORY_PLAINTEXT_BYTES]) -> Result<usize, OpenError> {
-    let count =
-        u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]]) as usize;
+    let count = u32::from_le_bytes([plaintext[12], plaintext[13], plaintext[14], plaintext[15]])
+        as usize;
     if count > PAYLOAD_SLOTS {
         return Err(OpenError::Directory(DirectoryError::TooManySlots {
             found: count,
@@ -313,7 +315,7 @@ fn slot_count_of(plaintext: &[u8; DIRECTORY_PLAINTEXT_BYTES]) -> Result<usize, O
 /// before the ledger is verified.
 fn read_commitments(
     image: &[u8],
-    placement: impl Fn(usize) -> usize,
+    placement: &dyn Fn(usize) -> usize,
     count: usize,
 ) -> Vec<[u8; CMT4_TAG_BYTES]> {
     let mut out = Vec::with_capacity(count);
