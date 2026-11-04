@@ -158,7 +158,7 @@ fn context<'a>(
 fn provision(args: &[String]) -> ExitCode {
     let flags = match parse_flags(args) {
         Ok(f) => f,
-        Err(e) => return usage_error(&e),
+        Err(e) => return usage_error(e),
     };
     let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
         Some(p) => p,
@@ -180,7 +180,7 @@ fn provision(args: &[String]) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Err(e) => failure(&e),
+        Err(e) => failure(e),
     }
 }
 
@@ -188,7 +188,7 @@ fn provision(args: &[String]) -> ExitCode {
 fn save(args: &[String]) -> ExitCode {
     let flags = match parse_flags(args) {
         Ok(f) => f,
-        Err(e) => return usage_error(&e),
+        Err(e) => return usage_error(e),
     };
     let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
         Some(p) => p,
@@ -198,13 +198,13 @@ fn save(args: &[String]) -> ExitCode {
     // second thing to get wrong; stdin is what an editor and a pipe both produce.
     let mut document = Vec::new();
     if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut document) {
-        return usage_error(&format!("reading the document from stdin: {e}"));
+        return usage_error(format!("reading the document from stdin: {e}"));
     }
 
     let ctx = context(&passphrase, &flags.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), true) {
         Ok(f) => f,
-        Err(e) => return usage_error(&format!("opening {}: {e}", flags.path)),
+        Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
     match store::save(&mut file, &ctx, &document) {
         Ok(report) => {
@@ -215,11 +215,7 @@ fn save(args: &[String]) -> ExitCode {
             );
             println!(
                 "  image digest {}",
-                report
-                    .digest
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
+                report.digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
             println!(
                 "  ratchet: {}",
@@ -230,7 +226,7 @@ fn save(args: &[String]) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Err(e) => failure(&e),
+        Err(e) => failure(e),
     }
 }
 
@@ -238,7 +234,7 @@ fn save(args: &[String]) -> ExitCode {
 fn open(args: &[String]) -> ExitCode {
     let flags = match parse_flags(args) {
         Ok(f) => f,
-        Err(e) => return usage_error(&e),
+        Err(e) => return usage_error(e),
     };
     let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
         Some(p) => p,
@@ -248,7 +244,7 @@ fn open(args: &[String]) -> ExitCode {
     let ctx = context(&passphrase, &flags.kappa, flags.cursor);
     let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
         Ok(f) => f,
-        Err(e) => return usage_error(&format!("opening {}: {e}", flags.path)),
+        Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
     match store::open_document(&mut file, &ctx) {
         Ok((opened, document)) => {
@@ -261,11 +257,11 @@ fn open(args: &[String]) -> ExitCode {
             );
             use std::io::Write;
             if let Err(e) = std::io::stdout().write_all(&document) {
-                return failure(&format!("writing the document to stdout: {e}"));
+                return failure(format!("writing the document to stdout: {e}"));
             }
             ExitCode::SUCCESS
         }
-        Err(e) => failure(&e),
+        Err(e) => failure(e),
     }
 }
 
