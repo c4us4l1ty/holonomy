@@ -26,7 +26,7 @@
 //! between "fails at L_1" and "fails at L_4" is a few AEAD verifications, which
 //! [`crate::stratum::MAX_STRATA`] bounds to a constant by always paying for all four.
 
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
 
 /// How many concentric strata a container may hold: `L_1` ..= `L_k`, `1 <= k <= 4`.
 pub const MAX_STRATA: usize = 4;
@@ -59,8 +59,14 @@ impl StratumId {
 /// A stratum's symmetric capability material, valid for one unlock.
 ///
 /// `K_unwrap` is what unwraps `SK_stratum` inside the root capsule; `K_DEM` is what encrypts the
-/// payload slots. Both are zeroized on drop, and neither is `Copy` or `Clone`.
-#[derive(Debug, Zeroize, ZeroizeOnDrop)]
+/// payload slots. Neither is `Copy` or `Clone`.
+///
+/// `#[zeroize(drop)]` generates the `Drop` impl, so dropping wipes the three arrays. That is a
+/// best-effort statement and not a guarantee: it cannot reach copies the compiler made, and it
+/// cannot reach pages the OS has already swapped. `holonomy-session::seal::Zeroizing` does the same
+/// for a document's plaintext, which is the one place plaintext sits in a heap allocation.
+#[derive(Debug, Zeroize)]
+#[zeroize(drop)]
 pub struct StratumKeys {
     /// Unwraps the wrapped decapsulation key in slot 0.
     pub k_unwrap: [u8; 32],
@@ -121,7 +127,7 @@ impl ActiveStratum {
         self.innermost
     }
 
-    /// The derived keys for this stratum, by reference only: [`StratumKeys`] is `ZeroizeOnDrop`
+    /// The derived keys for this stratum, by reference only: [`StratumKeys`] wipes on drop
     /// and not `Clone`, so no copy can escape.
     pub fn keys(&self) -> &StratumKeys {
         &self.keys

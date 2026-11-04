@@ -71,7 +71,7 @@ fn open_capsule(
     c: &StratumRootCapsuleV5,
     k_unwrap: &[u8; 32],
     kappa: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+) -> Result<[u8; DIR_CAPACITY], String> {
     let kem = MlKem1024X25519;
     let dk = unwrap_stratum_key(k_unwrap, &c.sk_unwrap_nonce, &c.wrapped_stratum_sk)
         .map_err(|e| format!("phase 1: {e}"))?;
@@ -115,6 +115,9 @@ fn unlock_recovers_the_directory() {
 
     let plain =
         open_capsule(&back, &k_unwrap, &kappa).expect("a correctly built capsule must open");
+    // Whole and padded, not trimmed: a zero-terminated read was wrong once the directory became an
+    // index whose real bytes include zeros.
+    assert_eq!(plain.len(), DIR_CAPACITY);
     assert_eq!(&plain[..directory.len()], directory);
 }
 

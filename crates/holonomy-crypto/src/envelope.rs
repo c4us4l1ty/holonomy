@@ -27,9 +27,12 @@
 //!   been built from the crates the PRD named. It is not needed either: the whole 64 KiB root
 //!   block is stream-whitened with `XChaCha20(K_whiten)`, so the on-disk bytes are uniform
 //!   regardless of what the ephemeral key looks like. The field is a plain `X25519` public key.
-//! * **No `SK_stratum` retention.** It is unwrapped, used, and dropped before `K_DEM` is returned.
-//!   Only `PK_stratum` survives, which is what lets a background save encapsulate without the
-//!   private key present.
+//! * **No long-lived `SK_stratum`.** [`create_envelope`] generates a keypair per save, encapsulates,
+//!   and drops the decapsulation key before it returns; the unlock path unwraps `SK_stratum`, uses
+//!   it to decapsulate, and drops it before `K_DEM` reaches the caller. What survives is
+//!   `K_unwrap`, which is derived from the passphrase and can be re-derived at any time, and the
+//!   *ciphertext*. That is what lets a background save encapsulate again without the private key:
+//!   it has `K_unwrap` and generates a fresh keypair, so it never needs the old one.
 
 use blake2::{Blake2b512, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -483,34 +486,54 @@ pub fn derive_dem_key(
     }
 }
 
-/// Derive the symmetric key set for a stratum that needs no KEM (the duress stratum's
-/// passphrase-only path), from the root secret alone.
+/// Derive a stratum's symmetric key set from the root secret alone, with no KEM round trip.
 ///
-/// This is the path that makes `P_1` invariant across saves: it depends only on
-/// `(passphrase, σ_epoch_of_the_snapshot)`, never on anything a save ratchets.
-pub fn derive_passphrase_only_keys(
+/// # What it must return, and the bug that used to live here
+///
+/// This is the key set the *unlock path* hands back. The capsule was unwrapped with a `K_unwrap`
+/// derived from `(root, index)` and nothing else — that is what makes the capsule locatable, and it
+/// is why `unlock_fixed` does not need `κ_USB` to unwrap `SK_stratum`. The returned keys must
+/// therefore equal the ones the capsule was built with, or the caller holds a key that cannot
+/// reopen what it just wrote.
+///
+/// An earlier version XORed `κ_USB` into both `k_dem` and `k_unwrap` on the way out. That was wrong
+/// twice over:
+///
+/// 1. **It made the writer produce unreadable containers.** A save that wrapped `SK_stratum` under
+///    `keys.k_unwrap` would seal it under a κ-mixed key, while the next unlock derives a κ-free
+///    `k_unwrap` to unwrap — so the capsule could never be opened again, and the failure would be
+///    reported as the coarse `Rejected` that means "wrong passphrase". No test caught it because
+///    nothing had ever written a capsule from the unlock path.
+/// 2. **It added nothing.** `κ_USB` is already a mandatory input to [`derive_dem_key`], which binds
+///    it with the shared secrets and both ciphertexts. The biparite property lives there, in the KEM
+///    path, not in a second and weaker mixing step over the fallback keys.
+///
+/// The name lost `_passphrase_only` for the same reason it lost the XOR: by the time this is called
+/// there is no passphrase in sight, and the old name invited exactly the confusion above.
+pub fn derive_stratum_keys(
     root: &RootSecret,
     stratum_index: u8,
     kappa_usb: &[u8; 32],
 ) -> StratumKeys {
+    // `κ_USB` is taken so the signature cannot drift from `derive_dem_key`, and used in the one
+    // place it does no harm: the nonce base. `N_epoch` is a public nonce prefix, not key material,
+    // and binding it to κ keeps two sticks under one passphrase from sharing a nonce stream.
     let ctx = [stratum_index, 0u8];
     let unwrap: Subkey = derive_subkey(root, labels::K_UNWRAP, &ctx);
     let dem: Subkey = derive_subkey(root, labels::K_DEM, &ctx);
     let nonce: Subkey = derive_subkey(root, labels::N_EPOCH, &ctx);
-    let mut k_dem = dem.0;
-    let mut k_unwrap = unwrap.0;
-    for i in 0..32 {
-        k_dem[i] ^= kappa_usb[i];
-        k_unwrap[i] ^= kappa_usb[i];
-    }
-    // `Subkey` is 32 bytes and an XChaCha nonce is 24, so exactly the first 24 are taken. Writing
-    // this as `[..XCHACHA_NONCE_BYTES]` rather than a literal keeps the two in step if either
-    // changes, and the `copy_from_slice` length check then fails loudly instead of truncating.
+
     let mut n_epoch = [0u8; XCHACHA_NONCE_BYTES];
+    // `Subkey` is 32 bytes and an XChaCha nonce 24, so exactly the first 24 are taken. Written via
+    // `copy_from_slice` so a change to either size fails loudly instead of truncating.
     n_epoch.copy_from_slice(&nonce.0[..XCHACHA_NONCE_BYTES]);
+    for (i, byte) in n_epoch.iter_mut().enumerate() {
+        *byte ^= kappa_usb[i];
+    }
+
     StratumKeys {
-        k_unwrap,
-        k_dem,
+        k_unwrap: unwrap.0,
+        k_dem: dem.0,
         n_epoch,
     }
 }
@@ -682,16 +705,44 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_only_keys_ignore_everything_a_save_ratchets() {
-        // The invariant that makes the duress passphrase open T_0..T_n.
+    fn fallback_keys_ignore_everything_a_save_ratchets() {
+        // The invariant that makes the duress passphrase open T_0..T_n: these keys depend on
+        // `(root, stratum)` and on nothing a save moves.
         let root = RootSecret([0x33; 64]);
-        let a = derive_passphrase_only_keys(&root, 1, &[0u8; 32]);
-        let b = derive_passphrase_only_keys(&root, 1, &[0u8; 32]);
+        let a = derive_stratum_keys(&root, 1, &[0u8; 32]);
+        let b = derive_stratum_keys(&root, 1, &[0u8; 32]);
         assert_eq!(a.k_dem, b.k_dem);
         assert_eq!(a.k_unwrap, b.k_unwrap);
         // Different stratum, different keys.
-        let c = derive_passphrase_only_keys(&root, 2, &[0u8; 32]);
+        let c = derive_stratum_keys(&root, 2, &[0u8; 32]);
         assert_ne!(a.k_dem, c.k_dem);
+    }
+
+    #[test]
+    fn the_fallback_keys_equal_the_ones_the_capsule_was_built_with() {
+        // The bug this exists to prevent: an earlier version XORed `κ_USB` into `k_unwrap` and
+        // `k_dem` here. The capsule is built with a κ-free `k_unwrap = derive_subkey(root, K_UNWRAP,
+        // [index, 0])`, so a writer using the returned keys would wrap `SK_stratum` under a key no
+        // reader could reproduce, and every container it wrote would be unopenable.
+        let root = RootSecret([0x44; 64]);
+        let index = 2u8;
+        let kappa = [0x99u8; 32];
+        let keys = derive_stratum_keys(&root, index, &kappa);
+
+        let expected = derive_subkey(&root, labels::K_UNWRAP, &[index, 0]).0;
+        assert_eq!(
+            keys.k_unwrap, expected,
+            "k_unwrap must be the value the phase-1 commitment is built over"
+        );
+        let expected_dem = derive_subkey(&root, labels::K_DEM, &[index, 0]).0;
+        assert_eq!(
+            keys.k_dem, expected_dem,
+            "k_dem must not be mixed with κ; derive_dem_key already binds κ"
+        );
+        // κ still reaches the key set, through the nonce base rather than through a key.
+        let other = derive_stratum_keys(&root, index, &[0x11u8; 32]);
+        assert_ne!(keys.n_epoch, other.n_epoch);
+        assert_eq!(keys.k_dem, other.k_dem);
     }
 
     #[test]

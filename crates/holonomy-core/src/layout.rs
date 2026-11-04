@@ -9,11 +9,25 @@
 //! The superseded PRD described the root node as living in "Physical Block 0 (Bytes 0..65,535)"
 //! *and* as "`Physical Block π_A(0)` located by the permutation". Both cannot hold. v5.1.0 picks
 //! exactly one: [`ROOT_SLOT_INDEX`] is a **fixed** physical block, and the permutation acts only
-//! on the 2,047 payload slots. This is not a cosmetic choice — it is forced by the key schedule.
-//! The container's first 64 bytes are [`SALT_OFFSET`]'s `σ_epoch`, and the permutation is keyed
-//! from `σ_epoch`, so an epoch-permuted root at `π(0)` could not be located without already
-//! holding the salt hidden inside it. That is the same circularity `holonomy-old` documented for
-//! its `Ω` offset, and it is why the 2,047 in `docs/PRD-v5.1.0.md` stays 2,047 rather than 2,048.
+//! on the payload slots. This is not a cosmetic choice — it is forced by the key schedule: the
+//! permutation is keyed from `σ_epoch`, so an epoch-permuted root at `π(0)` could not be located
+//! without already holding the salt hidden inside it. That is the same circularity `holonomy-old`
+//! documented for its `Ω` offset.
+//!
+//! # Three fixed residents, one permuted region
+//!
+//! ```text
+//!   slot 0        slot 1        slots 2 .. 2,047
+//!   root capsule  σ_epoch       permuted payload
+//!   65,536 B      64 B used     2,046 x 65,536 B
+//! ```
+//!
+//! The salt is **not** inside the root capsule. It was declared at offset 0, which is the first
+//! field of `StratumRootCapsuleV5` (`ct_ml_kem_1024`), so the two structures claimed the same 64
+//! bytes and writing either destroyed the other. Nothing caught it because no container had ever
+//! been written: the constant was only ever compared against itself. The geometry is now three
+//! ranges that must tile the file, asserted as `const _`, again at runtime by
+//! `the_salt_does_not_overlap_the_root_capsule`, and a third time by `holonomy --check`.
 
 /// Every container is exactly this many bytes. Never variable, never compressed.
 pub const CONTAINER_BYTES: usize = 134_217_728;
@@ -27,13 +41,33 @@ pub const TOTAL_BLOCKS: usize = 2_048;
 /// Physical block index of the stratum root node. Fixed, not permuted — see the module docs.
 pub const ROOT_SLOT_INDEX: usize = 0;
 
-/// Payload (document/media) slots addressed by the epoch permutation: blocks 1..=2,047.
-pub const PAYLOAD_SLOTS: usize = TOTAL_BLOCKS - 1;
+/// Payload (document/media) slots addressed by the epoch permutation: blocks 2..=2,047.
+///
+/// This was `TOTAL_BLOCKS - 1 = 2,047`, i.e. "everything except the root". Giving the salt its own
+/// slot makes the payload one slot smaller, and that is a correction rather than a regression: the
+/// PRD's `2,047` implicitly counted the root and the salt as one block, which they cannot be. The
+/// cost is 64 KiB of documented capacity; the alternative costs the container.
+pub const PAYLOAD_SLOTS: usize = TOTAL_BLOCKS - 2;
+
+/// First physical block of the permuted payload, i.e. the block after the salt.
+pub const PAYLOAD_SLOT_BASE: usize = SALT_SLOT_INDEX + 1;
 
 /// Byte offset of the 64-byte epochal salt that keys everything else.
 ///
 /// At a **fixed** offset, not at a derived one. See the module docs for the circularity argument.
-pub const SALT_OFFSET: usize = 0;
+///
+/// # Why this is 65,536 and not 0
+///
+/// Slot 0 *is* the root capsule: `StratumRootCapsuleV5` occupies `[0, 65,536)` and its first field
+/// is `ct_ml_kem_1024`. A salt at offset 0 would have been written into the first 64 bytes of that
+/// ciphertext — the two structures silently overwriting each other, leaving a container whose
+/// ML-KEM ciphertext had a 64-byte hole and whose salt was a fragment of ciphertext. The reader
+/// would have reported the coarse `Rejected` that means "wrong passphrase", with no hint of the
+/// cause, because nothing had ever written a container for the collision to happen in.
+pub const SALT_OFFSET: usize = SLOT_BYTES;
+
+/// Physical block index of the salt slot.
+pub const SALT_SLOT_INDEX: usize = SALT_OFFSET / SLOT_BYTES;
 
 /// Length of `σ_epoch`.
 pub const SALT_BYTES: usize = 64;
@@ -85,6 +119,14 @@ const _: () = {
     assert!(CONTAINER_BYTES.is_multiple_of(SLOT_BYTES));
     assert!(SLOT_BYTES.is_multiple_of(IO_ALIGN));
     assert!(TOTAL_BLOCKS * SLOT_BYTES == CONTAINER_BYTES);
+    // The three residents and the permuted region must tile the container exactly. This block
+    // exists because the failure it describes already happened: the salt and the root capsule
+    // claimed the same bytes and no assertion noticed.
+    assert!(ROOT_SLOT_INDEX == 0);
+    assert!(SALT_OFFSET >= (ROOT_SLOT_INDEX + 1) * SLOT_BYTES);
+    assert!(SALT_OFFSET + SALT_BYTES <= (SALT_SLOT_INDEX + 1) * SLOT_BYTES);
+    assert!(PAYLOAD_SLOT_BASE + PAYLOAD_SLOTS == TOTAL_BLOCKS);
+    assert!(PAYLOAD_SLOT_BASE == SALT_SLOT_INDEX + 1);
     // One save of pad is exactly one container: 32,768 sectors x 4,096 bytes. That is the 1:1
     // property the fold depends on, stated as an identity rather than as a comment.
     assert!(PAD_SECTORS_PER_SAVE as usize * SECTOR_BYTES == CONTAINER_BYTES);
@@ -113,7 +155,7 @@ mod tests {
     fn container_geometry_is_exact() {
         assert_eq!(TOTAL_BLOCKS * SLOT_BYTES, CONTAINER_BYTES);
         assert_eq!(CONTAINER_BYTES, 134_217_728);
-        assert_eq!(PAYLOAD_SLOTS, 2_047);
+        assert_eq!(PAYLOAD_SLOTS, 2_046);
         assert_eq!(slot_range(0), (0, 65_536));
         // Last block ends exactly at the end of the file: no slack, no truncation.
         let (off, len) = slot_range(TOTAL_BLOCKS - 1);
@@ -123,10 +165,38 @@ mod tests {
     #[test]
     fn root_block_is_fixed_and_permutation_covers_the_rest() {
         assert_eq!(ROOT_SLOT_INDEX, 0);
-        // Every payload slot is addressable and none aliases the root.
-        let first = ROOT_SLOT_INDEX + 1;
-        assert_eq!(first, 1);
-        assert_eq!(first + PAYLOAD_SLOTS - 1, TOTAL_BLOCKS - 1);
+        assert_eq!(SALT_SLOT_INDEX, 1);
+        assert_eq!(PAYLOAD_SLOT_BASE, 2);
+        // Every payload slot is addressable and none aliases the fixed residents.
+        assert_eq!(PAYLOAD_SLOT_BASE + PAYLOAD_SLOTS - 1, TOTAL_BLOCKS - 1);
+    }
+
+    #[test]
+    fn the_salt_does_not_overlap_the_root_capsule() {
+        // The defect this replaces: SALT_OFFSET was 0, and slot 0 is a 65,536-byte capsule whose
+        // first field is `ct_ml_kem_1024`. Stated as byte ranges that must be disjoint, because
+        // that is the form the mistake would have been caught in.
+        let (root_off, root_len) = slot_range(ROOT_SLOT_INDEX);
+        let salt = (SALT_OFFSET, SALT_OFFSET + SALT_BYTES);
+        assert!(
+            salt.0 >= root_off + root_len || salt.1 <= root_off,
+            "salt [{}, {}) overlaps the root capsule [{}, {})",
+            salt.0,
+            salt.1,
+            root_off,
+            root_off + root_len
+        );
+        // And it is inside its own slot, so a direct read of that slot contains it.
+        let (salt_off, salt_len) = slot_range(SALT_SLOT_INDEX);
+        assert!(salt.0 >= salt_off);
+        assert!(salt.1 <= salt_off + salt_len);
+        assert_eq!(salt_len, SLOT_BYTES);
+
+        // The residents tile the file with no gap and no overlap.
+        assert_eq!(root_off + root_len, salt.0);
+        let payload_off = PAYLOAD_SLOT_BASE * SLOT_BYTES;
+        assert_eq!(payload_off + PAYLOAD_SLOTS * SLOT_BYTES, CONTAINER_BYTES);
+        assert_eq!(payload_off, salt_off + salt_len);
     }
 
     #[test]
@@ -138,13 +208,15 @@ mod tests {
         //
         // What a runtime test can honestly do here is check that the salt is where the format says
         // it is, by round-tripping bytes through the real wire layout.
-        assert_eq!(SALT_OFFSET, 0);
+        assert_eq!(SALT_OFFSET, 65_536);
         let mut wire = [0xA5u8; SLOT_BYTES];
         let salt = [0x11u8; SALT_BYTES];
-        wire[SALT_OFFSET..SALT_OFFSET + SALT_BYTES].copy_from_slice(&salt);
-        assert_eq!(&wire[SALT_OFFSET..SALT_OFFSET + SALT_BYTES], &salt);
+        // Written at its offset *within its own slot*, which is how the store will do it.
+        let at = SALT_OFFSET - SALT_SLOT_INDEX * SLOT_BYTES;
+        wire[at..at + SALT_BYTES].copy_from_slice(&salt);
+        assert_eq!(&wire[at..at + SALT_BYTES], &salt);
         assert!(
-            wire[SALT_OFFSET + SALT_BYTES..].iter().all(|&b| b == 0xA5),
+            wire[at + SALT_BYTES..].iter().all(|&b| b == 0xA5),
             "the salt must not spill past its 64 bytes"
         );
     }

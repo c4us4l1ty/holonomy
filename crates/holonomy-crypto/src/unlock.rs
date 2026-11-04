@@ -28,7 +28,7 @@
 //!
 //! # Why the duress passphrase opens every historical snapshot
 //!
-//! [`derive_passphrase_only_keys`](crate::envelope::derive_passphrase_only_keys) depends only on
+//! [`derive_stratum_keys`](crate::envelope::derive_stratum_keys) depends only on
 //! `(root secret, stratum index, κ_USB)`. The root secret is `Argon2id(passphrase, σ_epoch)` and
 //! `σ_epoch` is per-save — so `P_1` against `T_k`'s salt derives `T_k`'s `L_1` key, whatever the
 //! save did to the primary stratum's keypair. That is the FR-7.2 invariant, and it is why the
@@ -37,13 +37,13 @@
 use holonomy_core::capsule::{
     CapsuleWire, ENCRYPTED_DIRECTORY_BYTES, SALT_BYTES, WRAPPED_SK_BYTES, XCHACHA_NONCE_BYTES,
 };
-use holonomy_core::stratum::{ActiveStratum, StratumId, StratumKeys, MAX_STRATA};
+use holonomy_core::stratum::{ActiveStratum, StratumId, MAX_STRATA};
 use holonomy_core::unlock::{ProtectionLayer, SealedPassphrase, Topology, UnlockError, Unlocked};
 
 use crate::commit::{cmt4_verify, open_directory};
 use crate::envelope::{
-    ct_lengths_are_canonical, derive_dem_key, derive_passphrase_only_keys, phase1_commitment,
-    phase2_commitment, unwrap_stratum_key, HybridCiphertext, HybridKem,
+    ct_lengths_are_canonical, derive_dem_key, phase1_commitment, phase2_commitment,
+    unwrap_stratum_key, HybridCiphertext, HybridKem,
 };
 use crate::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};
 
@@ -161,15 +161,35 @@ pub fn unlock_fixed(
         // (e') Open the directory. If the commitment matched this cannot fail except on a
         // serialisation change, so the error path is a `continue` and the caller still sees the
         // same coarse `Rejected`.
+        //
+        // Deliberately no checks on the *contents* here. The directory's length is a property of
+        // `DirectoryPlaintext` now, and interpreting the index — its version, its stratum, its slot
+        // count — belongs to the layer that owns the index format, not to the handshake. Reading the
+        // version here and answering `Rejected` would report "this container was written by a newer
+        // build" as "wrong passphrase", which is the one signal this function must never blur.
         if open_directory(&keys.k_dem, &capsule.directory_nonce, &directory).is_err() {
             continue;
         }
 
-        // (f) Commit. The directory that just verified was decrypted with `keys.k_dem`, so those
-        // are the stratum keys; `derive_passphrase_only_keys` is the equivalent derivation for the
-        // path that has no capsule wide enough to hold a KEM ciphertext (the sealed reservoir).
-        let _written_with = keys.k_dem;
-        let keys: StratumKeys = derive_passphrase_only_keys(&root, index, req.kappa_usb);
+        // (f) Commit. `keys` is the set `derive_dem_key` produced from the shared secrets, the
+        // ciphertexts, `K_unwrap` and `κ_USB` -- the same call `create_envelope` made when it built
+        // this capsule. It is what the directory was sealed with, so it is what the payload slots
+        // were sealed with, and it is what the caller must hold to open them again.
+        //
+        // # The bug this replaced
+        //
+        // This returned `derive_stratum_keys(&root, index, req.kappa_usb)` instead, on the reasoning
+        // that it was "the equivalent derivation". It is not equivalent: that is the *fallback* key
+        // set, derived from the root secret with no KEM round trip, and its `k_dem` has no
+        // relationship at all to the one the envelope produced. Every container written by the save
+        // path would have decrypted its directory here -- because the phase-2 commitment above uses
+        // the correct key -- and then been handed a key set that could not open a single payload
+        // slot. The failure would have surfaced as "the directory is intact and the document is
+        // corrupt", on the first real save, with a correct passphrase.
+        //
+        // Nothing caught it because nothing had ever read a payload slot back. `holonomy-session`'s
+        // `a_saved_container_reopens_to_the_bytes_that_went_in` is the test that does, and it fails
+        // against the old line.
 
         // The count is only known now: this loop is the first place the container could have
         // revealed it, and a stratum proves itself by opening, not by being announced. So the
@@ -285,8 +305,13 @@ mod tests {
         let nonce = [0x7Eu8; XCHACHA_NONCE_BYTES];
         let (ct, wrapped, keys) = create_envelope(&k_unwrap, &nonce, kappa, &kem).unwrap();
 
-        let directory = b"one stratum, no media".as_slice();
-        let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
+        // A directory begins with the format version, because it is an index rather than a string.
+        // The fixture used to seal a sentence, which was fine while `open_directory` trimmed at the
+        // first zero byte and wrong the moment the directory became something a reader parses.
+        let mut directory = [0u8; crate::commit::DIRECTORY_PLAINTEXT_BYTES];
+        directory[..2].copy_from_slice(&crate::commit::DIRECTORY_VERSION.to_le_bytes());
+        directory[2] = 1; // stratum
+        let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, &directory).unwrap();
         let (field, tag) = split_directory_ciphertext(&sealed);
         let reassembled = directory_ciphertext(&field, &tag);
 

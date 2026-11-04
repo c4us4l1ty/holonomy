@@ -58,6 +58,13 @@ pub const NONCE_BYTES: usize = 24;
 /// tens of bytes. The allowance is reservoir-sized.
 pub const DIRECTORY_PLAINTEXT_BYTES: usize = 60_592;
 
+/// Version of the directory format, as a `u16` at offset 0 of the plaintext.
+///
+/// Lives here, beside the field it describes, rather than in the crate that writes directories: an
+/// *opener* must reject a format it does not know before it has interpreted anything, and the
+/// opener is `unlock`, in this crate. The writer re-exports this rather than defining a second one.
+pub const DIRECTORY_VERSION: u16 = 1;
+
 /// Length of a sealed directory: plaintext plus tag. Equal to the capsule's field **plus** its tag
 /// field. The assertion below ties this to the numbers the layout uses, so a change in either place
 /// fails the build rather than a save.
@@ -171,20 +178,42 @@ pub fn seal_directory(
     Ok(sealed)
 }
 
+/// The decrypted directory, as a fixed-size array.
+///
+/// The length is a property of the type rather than of a runtime check. An earlier version returned
+/// a `Vec` and `unlock` compared its length against a constant — which cannot fail, because a
+/// fixed-length decrypt produces a fixed-length plaintext. A gate that cannot fail is worse than no
+/// gate: it reads like a check in review and does nothing in a test.
+pub type DirectoryPlaintext = [u8; DIRECTORY_PLAINTEXT_BYTES];
+
 /// Open a fixed-length directory field back into its plaintext.
 ///
-/// The returned slice is trimmed at the first zero byte, which is sound because the plaintext is a
-/// serialised directory whose first byte never differs across versions -- see
-/// [`DIRECTORY_PLAINTEXT_BYTES`]. Trimmed rather than returned whole so callers do not have to know
-/// the padding rule.
+/// Returns the **whole** [`DIRECTORY_PLAINTEXT_BYTES`], including the zero padding.
+///
+/// # Why it used to trim, and why that was wrong
+///
+/// This returned `take_while(|b| b != 0)`, on the reasoning that a caller should not have to know
+/// the padding rule. That reasoning holds for an arbitrary byte string and fails for what the
+/// directory has since become. A real directory is an *index*, and an index contains zeros in its
+/// ordinary course: a `u16` version of `1` is `01 00`, a cursor of `0` is eight zero bytes, a slot
+/// count below 256 contributes two more. Trimming at the first zero returned a **one-byte directory
+/// for every container this build would write**, and every layer above carried on as if it had a
+/// directory.
+///
+/// The general form is worth naming, because this field has now been the site of three mistakes:
+/// *a fixed-length field padded with zeros cannot also be a variable-length field terminated by
+/// zeros.* [`seal_directory`] pads to the full length precisely so that an observer cannot learn the
+/// document's size, and that padding is exactly what makes a zero terminator meaningless.
+///
+/// Returns [`DirectoryPlaintext`], so the length is a property of the type.
 pub fn open_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     sealed: &[u8; SEALED_DIRECTORY_BYTES],
-) -> Result<Vec<u8>, AeadError> {
+) -> Result<DirectoryPlaintext, AeadError> {
     let cipher = XChaCha20Poly1305::new(k_dem.into());
     let aad = directory_aad();
-    let padded = cipher
+    let plain = cipher
         .decrypt(
             XNonce::from_slice(nonce),
             Payload {
@@ -193,7 +222,12 @@ pub fn open_directory(
             },
         )
         .map_err(|_| AeadError::AuthenticationFailed)?;
-    Ok(padded.into_iter().take_while(|&b| b != 0).collect())
+    // An `XChaCha20-Poly1305` decrypt of `SEALED_DIRECTORY_BYTES` yields exactly the plaintext
+    // length, so this conversion cannot shorten anything. `try_into` rather than `copy_from_slice`
+    // so that if it ever *could*, this is an error rather than a silent truncation.
+    plain
+        .try_into()
+        .map_err(|_| AeadError::AuthenticationFailed)
 }
 
 /// AAD for the directory field: constant, and equal to the plaintext length.
@@ -357,7 +391,24 @@ mod directory_tests {
         // 60,608 splits into the capsule's 60,592-byte body field and its 16-byte tag field.
         assert_eq!(sealed.len(), SEALED_DIRECTORY_BYTES);
         assert_eq!(sealed.len(), 60_592 + 16);
-        assert_eq!(open_directory(&K, &N, &sealed).unwrap(), b"one stratum");
+        let plain = open_directory(&K, &N, &sealed).unwrap();
+        assert_eq!(plain.len(), DIRECTORY_PLAINTEXT_BYTES);
+        assert_eq!(&plain[..b"one stratum".len()], b"one stratum");
+        assert!(plain[b"one stratum".len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn directory_plaintext_is_returned_whole() {
+        // The regression this exists for. `open_directory` used to `take_while(|b| b != 0)`, which
+        // returns a *one-byte* directory for any real index because a little-endian version of 1 has
+        // a zero for its second byte. The assertion is on length, not content: content was never
+        // the problem.
+        let index = [0x01u8, 0x00, 0x02, 0x00, 0x2Au8, 0x00];
+        let sealed = seal_directory(&K, &N, &index).unwrap();
+        let plain = open_directory(&K, &N, &sealed).unwrap();
+        assert_eq!(plain.len(), DIRECTORY_PLAINTEXT_BYTES);
+        assert_eq!(&plain[..index.len()], &index);
+        assert_ne!(plain.len(), 1, "the old trimming behaviour");
     }
 
     #[test]
@@ -371,7 +422,9 @@ mod directory_tests {
     #[test]
     fn an_empty_directory_is_legal_and_round_trips() {
         let sealed = seal_directory(&K, &N, b"").unwrap();
-        assert_eq!(open_directory(&K, &N, &sealed).unwrap(), b"");
+        let plain = open_directory(&K, &N, &sealed).unwrap();
+        assert_eq!(plain.len(), DIRECTORY_PLAINTEXT_BYTES);
+        assert!(plain.iter().all(|&b| b == 0));
     }
 
     #[test]

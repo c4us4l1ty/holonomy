@@ -39,6 +39,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --component rustfmt
+      # `cargo check` needs the crates registry, and a cold cache makes this the slowest job.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fmt-check-${{ hashFiles('**/Cargo.lock') }}
       - name: Format and commit
         run: |
           set -euo pipefail
@@ -51,6 +60,15 @@ jobs:
             echo "already formatted"
             exit 0
           fi
+          # The formatted tree must compile and pass its tests *before* it is pushed. This job used
+          # to format and push without building, and a push made with the default token does not
+          # trigger a workflow run -- so every formatting fix commit was a commit nothing had ever
+          # compiled. Two of them in this repository's history fixed a build error and were merged
+          # on the strength of the run that had *failed* against the unformatted tree.
+          #
+          # Cheap by comparison: the toolchain and cache are already here, and `cargo check` over the
+          # core crates is under two minutes.
+          cargo check --workspace --exclude holonomy-ui --all-targets
           git config user.name  "holonomy-ci"
           git config user.email "ci@holonomy.invalid"
           git add -A
@@ -58,6 +76,7 @@ jobs:
           git push origin "HEAD:refs/heads/$BRANCH" || {
             git fetch origin "$BRANCH"
             git rebase "origin/$BRANCH"
+            cargo check --workspace --exclude holonomy-ui --all-targets
             git push origin "HEAD:refs/heads/$BRANCH"
           }
       - name: Report formatting failures as annotations
@@ -192,12 +211,12 @@ jobs:
 
       - name: Directory is a fixed length, so its commitment can be verified
         run: |
-          cargo test -p holonomy-crypto directory_tests -- --nocapture
+          cargo test -p holonomy-crypto --lib directory_plaintext_is_returned_whole -- --nocapture
           cargo test -p holonomy-crypto --test two_phase unlock_recovers_the_directory -- --nocapture
 
       - name: Pad budget is 54 saves with zero overlap
         run: |
-          cargo test -p holonomy-core never_collide -- --nocapture
+          cargo test -p holonomy-core consecutive_saves_never_collide_at_any_epoch -- --nocapture
           cargo test -p holonomy-core the_budget_is_a_pigeonhole_bound -- --nocapture
           cargo test -p holonomy-usb --test property -- --nocapture
           cargo test -p holonomy-session the_plan_over_a_full_budget_is_disjoint -- --nocapture
@@ -208,19 +227,38 @@ jobs:
           cargo test -p holonomy-usb sectors_that_fpe_20_could_never_reach_are_reached -- --nocapture
           cargo test -p holonomy-usb the_pad_budget_uses_more_than_half_the_drive -- --nocapture
 
+      - name: A container this build writes is a container it can read
+        # The round trip. Until this step existed, the writer and the reader had never been run
+        # against each other, which is how `seal_container` came to seal the payload under one key
+        # and the directory under another while every test passed.
+        run: |
+          cargo test -p holonomy-session a_saved_container_reopens_to_the_bytes_that_went_in -- --nocapture
+          cargo test -p holonomy-session the_permutation_is_actually_consulted -- --nocapture
+          cargo test -p holonomy-session the_payload_and_the_directory_are_sealed_under_one_key -- --nocapture
+          cargo test -p holonomy-session the_reader_agrees_with_the_handshake -- --nocapture
+          cargo test -p holonomy-session the_save_cursor_survives_a_round_trip -- --nocapture
+
+      - name: A damaged container is refused, and says which layer refused it
+        run: |
+          cargo test -p holonomy-session a_tampered_payload_slot_is_caught_by_its_commitment -- --nocapture
+          cargo test -p holonomy-session a_relocated_payload_slot_is_caught -- --nocapture
+          cargo test -p holonomy-session a_wrong_passphrase_is_rejected_and_says_nothing -- --nocapture
+          cargo test -p holonomy-session a_wrong_usb_share_is_rejected -- --nocapture
+          cargo test -p holonomy-session an_unprovisioned_container_is_named_rather_than_rejected_as_a_bad_passphrase -- --nocapture
+
       - name: A save is refused rather than silently downgraded
         run: |
           cargo test -p holonomy-session the_fifty_fifth_save_on_a_read_only_device_is_refused -- --nocapture
           cargo test -p holonomy-session a_partial_ratchet_is_refused_rather_than_counted -- --nocapture
           cargo test -p holonomy-session a_refused_save_does_not_advance_the_budget -- --nocapture
-          cargo test -p holonomy-crypto pad_budget -- --nocapture
+          cargo test -p holonomy-crypto --lib window_runs_out_exactly_at_fifty_four -- --nocapture
 
       - name: Statistical gates use the corrected constants
         run: |
           cargo test -p holonomy-core sigma_is_the_documented_number -- --nocapture
           cargo test -p holonomy-core old_tolerance_is_ten_sigma -- --nocapture
           cargo test -p holonomy-core barely_changed_snapshot_fails_on_the_run_gate -- --nocapture
-          cargo test -p holonomy-core a_one_percent_bias_is_caught -- --nocapture
+          cargo test -p holonomy-core a_one_percent_bias_is_caught_at_container_scale -- --nocapture
 
       - name: No environmental input reaches a key
         run: |
@@ -233,7 +271,7 @@ jobs:
 
       - name: Reaper wipes before it terminates, and never on a suspend signal
         run: |
-          cargo test -p holonomy-runtime thread_b_fires_and_wipes -- --nocapture
+          cargo test -p holonomy-runtime thread_b_fires_and_wipes_when_the_heartbeat_stops -- --nocapture
           cargo test -p holonomy-runtime the_wipe_runs_before_termination -- --nocapture
           cargo test -p holonomy-runtime a_long_gap_without_a_suspend_notification_is_a_yank -- --nocapture
           cargo test -p holonomy-runtime a_suspend_notification_suppresses_the_wipe -- --nocapture
