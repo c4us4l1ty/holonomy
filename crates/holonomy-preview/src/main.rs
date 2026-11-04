@@ -57,7 +57,9 @@ fn opted_in(args: &[String]) -> bool {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !opted_in(&args) {
-        eprintln!("{WARNING}\nTo deliberately launch this development preview: holonomy-preview {OPT_IN}");
+        eprintln!(
+            "{WARNING}\nTo deliberately launch this development preview: holonomy-preview {OPT_IN}"
+        );
         return ExitCode::FAILURE;
     }
     eprintln!("{WARNING}");
