@@ -87,7 +87,10 @@ impl SealedPassphrase {
     /// Returns `None` if the resulting byte sequence is empty or exceeds 255 bytes.
     pub fn new(passphrase: &str) -> Option<Self> {
         let normalised = Zeroizing::new(
-            passphrase.chars().flat_map(|c| c.to_lowercase()).collect::<String>(),
+            passphrase
+                .chars()
+                .flat_map(|c| c.to_lowercase())
+                .collect::<String>(),
         );
         let raw = normalised.as_bytes();
         if raw.is_empty() || raw.len() > 255 {

@@ -128,7 +128,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
                 .filter(|v| !v.starts_with("--"))
                 .ok_or_else(|| format!("{flag} needs a value"))?;
             match flag {
-                "--passphrase" if passphrase.is_none() => passphrase = Some(Zeroizing::new(value.clone())),
+                "--passphrase" if passphrase.is_none() => {
+                    passphrase = Some(Zeroizing::new(value.clone()))
+                }
                 "--kappa" if kappa.is_none() => kappa = Some(Zeroizing::new(parse_kappa(value)?)),
                 "--device" if device.is_none() => device = Some(value.clone()),
                 "--cursor" if cursor.is_none() => {
@@ -199,9 +201,8 @@ fn credentials_with_prompt(
 
 fn credentials(flags: &Flags, confirm: bool) -> Result<Credentials, String> {
     credentials_with_prompt(flags, confirm, |label| {
-        rpassword::prompt_password(label).map_err(|e| {
-            format!("cannot read credentials from the terminal: {e}")
-        })
+        rpassword::prompt_password(label)
+            .map_err(|e| format!("cannot read credentials from the terminal: {e}"))
     })
 }
 
@@ -249,12 +250,15 @@ fn context<'a>(
 /// `--device` means a real stick, read `O_DIRECT` wherever the kernel allows it. Without it the
 /// stand-in is used, and every caller says so in the same breath as the result, because a demo path
 /// that quietly looks like the real one is how a stand-in ships.
-fn pad_source(flags: &Flags, kappa: &[u8; 32], read_write: bool) -> Result<Box<dyn store::PadSource>, String> {
+fn pad_source(
+    flags: &Flags,
+    kappa: &[u8; 32],
+    read_write: bool,
+) -> Result<Box<dyn store::PadSource>, String> {
     match &flags.device {
         Some(path) => {
-            let device =
-                store::pad::DevicePad::open(std::path::Path::new(path), kappa, read_write)
-                    .map_err(|e| format!("opening the device {path}: {e}"))?;
+            let device = store::pad::DevicePad::open(std::path::Path::new(path), kappa, read_write)
+                .map_err(|e| format!("opening the device {path}: {e}"))?;
             if read_write && !device.can_ratchet() {
                 return Err(format!(
                     "{path} opened read-only; a save must be able to ratchet the pad, and a \
@@ -803,23 +807,41 @@ mod argument_tests {
     #[test]
     fn prompted_credentials_are_confirmed_and_fail_closed() {
         let flags = parse_flags(&["book".to_string()]).expect("no credentials in arguments");
-        let mut replies = vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32)].into_iter();
+        let mut replies =
+            vec!["secret".to_string(), "secret".to_string(), "ab".repeat(32)].into_iter();
         let credentials = credentials_with_prompt(&flags, true, |_| {
-            replies.next().ok_or_else(|| "unexpected prompt".to_string())
-        }).expect("matching confirmation and valid share");
+            replies
+                .next()
+                .ok_or_else(|| "unexpected prompt".to_string())
+        })
+        .expect("matching confirmation and valid share");
         assert_eq!(credentials.passphrase.as_bytes(), b"secret");
         assert_eq!(&*credentials.kappa, &[0xab; 32]);
         let mut mismatch = vec!["one".to_string(), "two".to_string()].into_iter();
         assert!(credentials_with_prompt(&flags, true, |_| {
-            mismatch.next().ok_or_else(|| "unexpected prompt".to_string())
-        }).is_err());
-        assert!(credentials_with_prompt(&flags, false, |_| Err("terminal unavailable".into())).is_err());
+            mismatch
+                .next()
+                .ok_or_else(|| "unexpected prompt".to_string())
+        })
+        .is_err());
+        assert!(
+            credentials_with_prompt(&flags, false, |_| Err("terminal unavailable".into())).is_err()
+        );
     }
 
     #[test]
     fn explicit_credentials_do_not_prompt() {
-        let flags = parse_flags(&["book".into(), "--passphrase".into(), "Secret".into(), "--kappa".into(), "ab".repeat(32)]).expect("arguments");
-        let credentials = credentials_with_prompt(&flags, true, |_| Err("unexpected prompt".into())).expect("explicit credentials");
+        let flags = parse_flags(&[
+            "book".into(),
+            "--passphrase".into(),
+            "Secret".into(),
+            "--kappa".into(),
+            "ab".repeat(32),
+        ])
+        .expect("arguments");
+        let credentials =
+            credentials_with_prompt(&flags, true, |_| Err("unexpected prompt".into()))
+                .expect("explicit credentials");
         assert_eq!(credentials.passphrase.as_bytes(), b"secret");
     }
 
