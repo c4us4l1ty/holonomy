@@ -31,7 +31,7 @@ those documents are historical and code and current CI results govern implementa
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
 | USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
-| Editor | Wordcraft integration is planned; `holonomy-ui` is a separate skeleton outside the workspace and its editor bridge is not operational. |
+| Editor | An experimental Wordcraft document codec and session bridge is in development. `holonomy-ui` remains a separate skeleton; no editor window is operational. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
@@ -140,6 +140,7 @@ properties.
 | [`holonomy-runtime`](crates/holonomy-runtime) | Reaper and secret-arena primitives. | Workspace library; not wired into the CLI editor |
 | [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
 | [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
+| [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft document codec and session save bridge. | Experimental separate workspace; no editor UI |
 | [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its
@@ -152,7 +153,7 @@ upstream repositories for attribution and their license terms.
 
 | Project | Role in Holonomy |
 | :--- | :--- |
-| [`storytold/wordcraft`](https://github.com/storytold/wordcraft) | Intended rich-document editor foundation; pinned in the UI skeleton, not linked into the current workspace binary. |
+| [`storytold/wordcraft`](https://github.com/storytold/wordcraft) | Document model used by the experimental codec and intended editor foundation; the UI is not linked into the current binary. |
 | [`RustCrypto/KEMs`](https://github.com/RustCrypto/KEMs) | `ml-kem`, used for the ML-KEM-1024 portion of the hybrid envelope. |
 | [`dalek-cryptography/curve25519-dalek`](https://github.com/dalek-cryptography/curve25519-dalek) | X25519 key agreement via `x25519-dalek`; no Elligator mapping is claimed. |
 | [`RustCrypto/AEADs`](https://github.com/RustCrypto/AEADs) and [`RustCrypto/hashes`](https://github.com/RustCrypto/hashes) | XChaCha20-Poly1305 and hash primitives used by the crypto layer. |
@@ -167,8 +168,9 @@ upstream library security does not validate Holonomy's composition or implementa
 
 ## Build and inspect
 
-Requirements: Rust **1.95 or later** and access to the dependency sources. The current workspace
-contains the CLI and five libraries; `holonomy-ui` is not a workspace member.
+Requirements: Rust **1.95 or later** and access to the dependency sources. The main workspace
+contains the CLI and five libraries; `holonomy-ui` and the experimental `holonomy-wordcraft`
+bridge are not members. The bridge uses the pinned Wordcraft document model in its own workspace.
 
 ```bash
 cargo build --release -p holonomy-cli
@@ -176,6 +178,8 @@ cargo build --release -p holonomy-cli
 ./target/release/holonomy --help
 ./target/release/holonomy --check
 cargo test --workspace
+# Experimental Wordcraft codec (separate workspace)
+cargo test --manifest-path crates/holonomy-wordcraft/Cargo.toml
 ```
 
 The audit workflow runs build, tests, lint, and focused CLI safety regressions. Use the
