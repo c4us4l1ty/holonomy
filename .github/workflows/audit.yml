@@ -590,29 +590,6 @@ jobs:
           done
           { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # One-off formatter for the isolated preview, removed after this run.
-  format-development-preview:
-    name: Format development preview
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref_name == 'arena/62cf8603-holonomy'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-      - run: rustup toolchain install stable --profile minimal --component rustfmt
-      - run: |
-          set -euo pipefail
-          cargo +stable fmt --manifest-path crates/holonomy-preview/Cargo.toml --all
-          if ! git diff --quiet; then
-            git config user.name holonomy-ci
-            git config user.email ci@holonomy.invalid
-            git add -u
-            git commit -m 'style: format scratch window preview'
-            git push origin HEAD:refs/heads/arena/62cf8603-holonomy
-          fi
-
   wordcraft-window-preview:
     name: Unencrypted Wordcraft window preview
     runs-on: ubuntu-latest
