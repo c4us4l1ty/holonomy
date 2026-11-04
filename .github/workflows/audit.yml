@@ -329,7 +329,7 @@ jobs:
           echo "::error::--check tally: ${tally:-<no tally line>}"
           # Failing gates first: they are the reason this step exists, and the annotation budget
           # runs out partway through the list.
-          grep -E '^\[failed' "$log" | head -4 | while IFS= read -r line; do
+          grep -Ei '^\[fail' "$log" | head -4 | while IFS= read -r line; do
             echo "::error::$line"
           done
           grep -E '^\[(degraded|deferred)' "$log" | head -4 | while IFS= read -r line; do
