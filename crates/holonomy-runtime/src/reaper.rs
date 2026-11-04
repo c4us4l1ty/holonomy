@@ -125,7 +125,9 @@ pub enum FireReason {
 }
 
 impl FireReason {
-    fn from_u8(v: u8) -> Self {
+    /// Decode the `AtomicU8` `fire_reason` slot. The encoding exists so Thread B can publish its
+    /// reason without a lock; this is the only reader.
+    pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::GapExceeded,
             2 => Self::Disconnected,

@@ -124,6 +124,18 @@ impl From<io::Error> for PadIoError {
 }
 
 /// The pad side of a container session.
+///
+/// `Debug` deliberately prints only the plan's length and the device path: a reader in a log line
+/// should not leak which sectors this session read.
+impl std::fmt::Debug for PadReader<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PadReader")
+            .field("device", &self.device.path())
+            .field("sectors", &self.plan.len())
+            .finish()
+    }
+}
+
 pub struct PadReader<'a> {
     device: &'a DirectFile,
     plan: PadPlan,
