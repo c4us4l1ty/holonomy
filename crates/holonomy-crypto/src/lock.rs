@@ -288,6 +288,26 @@ pub fn memfd_secret_available() -> bool {
     }
 }
 
+/// A one-line explanation of how the current rung was reached, for `--check`.
+pub fn describe_how() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if memfd_secret_available() {
+            "memfd_secret(2) gave a direct-map-excluded region"
+        } else {
+            "memfd_secret unavailable (kernel < 5.14 or seccomp); fell back to mlock + MADV_DONTDUMP"
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        "mlock on this platform; no MADV_DONTDUMP equivalent"
+    }
+    #[cfg(not(unix))]
+    {
+        "VirtualLock; still readable by a same-user process"
+    }
+}
+
 /// The best rung this process can reach, probed.
 pub fn probe_capability() -> LockCapability {
     if memfd_secret_available() {

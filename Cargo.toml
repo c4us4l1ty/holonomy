@@ -5,7 +5,8 @@ members = [
     "crates/holonomy-crypto",
     "crates/holonomy-usb",
     "crates/holonomy-runtime",
-    "crates/holonomy-ui",
+    "crates/holonomy-session",
+    "crates/holonomy-cli",
 ]
 
 # The scrapyard. `holonomy-old/` is ~142.5k lines at v3.0.0-SINGULARITY and is kept

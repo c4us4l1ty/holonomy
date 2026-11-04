@@ -1,0 +1,18 @@
+[package]
+name = "holonomy-session"
+description = "Session layer: pad accounting, save cadence, refusal rule and status line (no wordcraft)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Deliberately free of `wordcraft`. This crate holds the rules that decide whether a save is
+# allowed and what the user is told about it, and it must build wherever the core crates build.
+[dependencies]
+holonomy-core = { path = "../holonomy-core" }
+holonomy-crypto = { path = "../holonomy-crypto" }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"

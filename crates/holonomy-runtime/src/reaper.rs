@@ -425,6 +425,40 @@ fn blackout_before_terminate() -> bool {
     )
 }
 
+/// Ask what [`try_realtime`] *would* do, without doing it.
+///
+/// `try_realtime` calls `sched_setscheduler(0, ...)`, which applies to the calling thread. A
+/// diagnostic that called it would silently promote the whole CLI to `SCHED_FIFO` — a side effect
+/// a `--check` must never have. This probes the relevant capability instead: whether the process
+/// can raise its own priority, asked with `getpriority` and the `RLIMIT_RTPRIO` limit rather than by
+/// taking the privilege.
+#[cfg(target_os = "linux")]
+pub fn probe_sched_class() -> SchedClass {
+    // SAFETY: `getrlimit` writes into a POD struct we own.
+    let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_RTPRIO, &mut lim) };
+    if rc != 0 {
+        return SchedClass::Failed(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // RLIM_INFINITY is `!0` as rlim_t on Linux.
+    if lim.rlim_cur == libc::RLIM_INFINITY || lim.rlim_cur >= 99 {
+        // The capability is present; whether an unprivileged process may actually take it still
+        // depends on the security module, so say what is knowable and no more.
+        SchedClass::RealTime(99)
+    } else if lim.rlim_cur == 0 {
+        SchedClass::EpermFallback
+    } else {
+        // `SchedClass::RealTime` is a `u8` because the Linux priority range is 1..=99.
+        SchedClass::RealTime(lim.rlim_cur.min(99) as u8)
+    }
+}
+
+/// As above, for platforms where the mechanism is not implemented.
+#[cfg(not(target_os = "linux"))]
+pub fn probe_sched_class() -> SchedClass {
+    SchedClass::NotAttempted
+}
+
 #[cfg(unix)]
 fn try_realtime() -> SchedClass {
     // SAFETY: `sched_param` is a plain POD struct; the call reads it and returns a status.

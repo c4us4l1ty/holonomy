@@ -29,7 +29,7 @@
 //! profile, not an information-theoretic guarantee. Hence the budget accounting rather than a
 //! slogan.
 
-use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, ZONE_B_SECTORS};
+use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE};
 
 /// How the USB device was opened for this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +48,21 @@ impl PadMode {
 }
 
 /// Per-container pad accounting.
+///
+/// # One number, not two
+///
+/// Freshness is a pure function of `cursor`: how many saves have consumed pad *since the last
+/// successful ratchet*. An earlier version carried a separate `ratcheted_last_save: bool` flag
+/// alongside the cursor, and the two could disagree — a ratchet set the flag but left the cursor
+/// at 54, so `is_fresh()` returned `true` forever and the budget silently stopped being enforced.
+/// Removing the flag removes the class of bug: there is nothing to keep in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PadBudget {
-    /// Monotonic count of completed saves that consumed pad.
+    /// Saves completed since the last successful ratchet. Reset to 0 by
+    /// [`record_ratchet`](Self::record_ratchet).
     pub cursor: u64,
     /// Mode this session's device handle is in.
     pub mode: PadMode,
-    /// Whether a ratchet completed after the most recent save, which resets the window.
-    pub ratcheted_last_save: bool,
 }
 
 impl Default for PadBudget {
@@ -63,7 +70,6 @@ impl Default for PadBudget {
         Self {
             cursor: 0,
             mode: PadMode::ReadOnly,
-            ratcheted_last_save: false,
         }
     }
 }
@@ -74,7 +80,6 @@ impl PadBudget {
         Self {
             cursor: 0,
             mode: PadMode::ReadWrite,
-            ratcheted_last_save: false,
         }
     }
 
@@ -83,47 +88,55 @@ impl PadBudget {
         PAD_SECTORS_PER_SAVE
     }
 
-    /// The logical sector range for the current cursor, as `[start, end)` within Zone B's index
-    /// space before permutation.
-    pub fn logical_range(&self) -> (u32, u32) {
-        let start = ((self.cursor * PAD_SECTORS_PER_SAVE as u64) % ZONE_B_SECTORS as u64) as u32;
-        (start, start + PAD_SECTORS_PER_SAVE)
+    /// The logical sector range for the current cursor, as `[start, end)` **before** permutation.
+    ///
+    /// # Why this is `u64` and does not reduce
+    ///
+    /// The same defect that made the physical pad overlap (see [`holonomy_core::feistel::Feistel22::logical_sector`])
+    /// appeared here independently: the range was reduced modulo `ZONE_B_SECTORS`, so at cursor 54
+    /// — exactly where the budget ends — it wrapped to `[0, 32,768)` and reported a *fresh* window
+    /// over sectors that had already been spent. A caller reading this to decide whether a save is
+    /// safe would have been told the wrong thing at precisely the boundary it was written to guard.
+    ///
+    /// The range is now the unwrapped index range, and it is the caller's job to compare it against
+    /// [`SAVES_BEFORE_DOMAIN_REUSE`] rather than to trust a modular reduction.
+    pub fn logical_range(&self) -> (u64, u64) {
+        let start = self.cursor * PAD_SECTORS_PER_SAVE as u64;
+        (start, start + PAD_SECTORS_PER_SAVE as u64)
     }
 
     /// Whether every sector this save reads is untouched since the last ratchet.
-    ///
-    /// A ratchet resets the served window: after overwriting the sectors that were just spent,
-    /// the next save may reuse their *LBAs* with fresh contents, so the freshness clock restarts.
     pub fn is_fresh(&self) -> bool {
-        if self.ratcheted_last_save {
-            return true;
-        }
         self.cursor < SAVES_BEFORE_DOMAIN_REUSE
     }
 
     /// Saves remaining before fresh pad runs out, assuming no ratchet.
     pub fn remaining_fresh_saves(&self) -> u64 {
-        if self.ratcheted_last_save {
-            return SAVES_BEFORE_DOMAIN_REUSE;
-        }
         SAVES_BEFORE_DOMAIN_REUSE.saturating_sub(self.cursor)
     }
 
-    /// Record a completed save. Refuses to advance past the point where the mode cannot ratchet
-    /// *and* the pad is no longer fresh, because silently continuing would move the container
-    /// from "one-time pad backed" to "not" without telling anyone.
+    /// Record a completed save.
+    ///
+    /// Refuses to advance past the point where the mode cannot ratchet *and* the pad is no longer
+    /// fresh, because silently continuing would move the container from "one-time-pad backed" to
+    /// "not" without telling anyone — and it refuses **without mutating `self`**, so a caller that
+    /// handles the error and retries in a different mode is not already off by one.
     pub fn complete_save(&mut self) -> Result<(), PadError> {
-        let was_fresh = self.is_fresh();
-        self.cursor = self.cursor.wrapping_add(1);
-        if !was_fresh && !self.mode.can_ratchet() && !self.ratcheted_last_save {
+        if !self.is_fresh() && !self.mode.can_ratchet() {
             return Err(PadError::PadExhausted {
-                cursor: self.cursor,
+                cursor: self.cursor + 1,
             });
         }
+        self.cursor = self.cursor.saturating_add(1);
         Ok(())
     }
 
     /// Record that a ratchet of `spent` sectors completed successfully.
+    ///
+    /// A ratchet overwrites the sectors a save just read with fresh CSPRNG bytes, so the window
+    /// restarts: the next 54 saves are once again reading material that has never been used.
+    /// Resetting the cursor is what expresses that, and it is why `cursor` is "saves since the last
+    /// ratchet" rather than "saves ever".
     pub fn record_ratchet(&mut self, spent: u32) -> Result<(), PadError> {
         if !self.mode.can_ratchet() {
             return Err(PadError::NotWritable);
@@ -131,7 +144,7 @@ impl PadBudget {
         if spent != PAD_SECTORS_PER_SAVE {
             return Err(PadError::WrongSectorCount { got: spent });
         }
-        self.ratcheted_last_save = true;
+        self.cursor = 0;
         Ok(())
     }
 }
@@ -236,32 +249,113 @@ mod tests {
     }
 
     #[test]
-    fn ranges_advance_by_one_save_and_wrap_inside_zone_b() {
+    fn ranges_advance_by_one_save_and_do_not_wrap() {
         let mut b = PadBudget::fresh();
-        let (s0, e0) = b.logical_range();
-        assert_eq!((s0, e0), (0, 32_768));
+        assert_eq!(b.logical_range(), (0, 32_768));
         b.cursor = 1;
-        assert_eq!(b.logical_range().0, 32_768);
-        b.cursor = 54; // past the disjoint window
+        assert_eq!(b.logical_range(), (32_768, 65_536));
+        b.cursor = 54; // the first cursor past the disjoint window
         let (s, e) = b.logical_range();
-        // The range is expressed in logical (pre-permutation) index space, which is bounded by the
-        // FPE domain, not by Zone B. At cursor 54 it runs past the end of Zone B in *logical* space;
-        // the cycle-walk in `Feistel22::permute` is what folds it back inside. Asserting the range
-        // stayed inside Zone B here would be asserting the wrong thing.
-        assert!(s < ZONE_B_SECTORS);
-        assert!(e > s);
-        assert!(e <= holonomy_core::feistel::DOMAIN);
+        // The range is in logical (pre-permutation) index space, which is bounded by the FPE
+        // domain, not by Zone B; the cycle-walk folds it back inside. What this must *not* do is
+        // wrap: the previous version reduced modulo ZONE_B_SECTORS and reported `[0, 32,768)` at
+        // cursor 54, which is a fresh-looking window over sectors that had already been spent.
+        assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
+        assert_ne!(
+            s, 0,
+            "cursor 54 must not report the same window as cursor 0"
+        );
+        assert!(e <= holonomy_core::feistel::DOMAIN as u64);
     }
 
     #[test]
     fn writable_mode_does_not_refuse_past_the_window() {
-        // With a writable device the caller ratchets, so the save is allowed; freshness is
-        // carried by `ratcheted_last_save`, not by refusing the save.
+        // With a writable device the caller can ratchet, so the save is allowed; the contract is
+        // that the *caller* must ratchet to restore freshness, and `is_fresh` reports when.
         let mut b = PadBudget::fresh();
         b.mode = PadMode::ReadWrite;
         for _ in 0..54 {
             b.complete_save().unwrap();
         }
+        assert!(
+            !b.is_fresh(),
+            "54 saves exhaust the window whatever the mode"
+        );
         b.complete_save().expect("writable device may continue");
+        assert!(!b.is_fresh(), "continuing does not make stale pad fresh");
+    }
+
+    #[test]
+    fn a_ratchet_restarts_the_window() {
+        // The bug this catches: `record_ratchet` used to set a flag without resetting the cursor,
+        // so `is_fresh()` stayed true forever and the budget stopped being enforced after the
+        // first successful ratchet.
+        let mut b = PadBudget::fresh();
+        for _ in 0..54 {
+            b.complete_save().unwrap();
+        }
+        assert!(!b.is_fresh());
+        b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap();
+        assert_eq!(b.cursor, 0, "a ratchet restarts the window");
+        assert!(b.is_fresh());
+        assert_eq!(b.remaining_fresh_saves(), 54);
+    }
+
+    #[test]
+    fn repeated_ratchets_do_not_erode_the_budget() {
+        // 200 saves alternating with ratchets must never run out, and must never claim to be
+        // fresh when it is not.
+        let mut b = PadBudget::fresh();
+        for _ in 0..200 {
+            b.complete_save()
+                .expect("a ratcheting session never exhausts");
+            assert!(b.is_fresh(), "one save after a ratchet is always fresh");
+            b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap();
+        }
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn a_ratchet_with_the_wrong_sector_count_does_not_restart_the_window() {
+        // A partial ratchet is not a ratchet: resetting the cursor on a half-completed write
+        // would mark sectors fresh that still hold their old contents.
+        let mut b = PadBudget::fresh();
+        b.cursor = 10;
+        assert!(matches!(
+            b.record_ratchet(100),
+            Err(PadError::WrongSectorCount { got: 100 })
+        ));
+        assert_eq!(b.cursor, 10, "a failed ratchet must not reset the cursor");
+    }
+
+    #[test]
+    fn a_refused_save_does_not_advance_the_cursor() {
+        // `complete_save` used to increment and *then* return Err, so a caller that handled the
+        // error and retried in a writable mode started one save further along than it should.
+        let mut b = PadBudget::fresh();
+        b.mode = PadMode::ReadOnly;
+        b.cursor = SAVES_BEFORE_DOMAIN_REUSE;
+        let before = b.cursor;
+        assert!(b.complete_save().is_err());
+        assert_eq!(b.cursor, before, "a refused save must not consume budget");
+        // And the retry in a mode that can ratchet is then exactly one save, not two.
+        b.mode = PadMode::ReadWrite;
+        b.complete_save().unwrap();
+        assert_eq!(b.cursor, before + 1);
+    }
+
+    #[test]
+    fn the_logical_range_does_not_wrap_at_the_budget_boundary() {
+        // The second appearance of the modular-reduction bug in this codebase. At cursor 54 the
+        // range used to wrap to [0, 32768) -- a *fresh-looking* window over spent sectors.
+        let mut b = PadBudget::fresh();
+        b.cursor = 54;
+        let (s, e) = b.logical_range();
+        assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
+        assert_eq!(e - s, PAD_SECTORS_PER_SAVE as u64);
+        assert_ne!(
+            s, 0,
+            "cursor 54 must not report the window cursor 0 reported"
+        );
     }
 }
