@@ -17,8 +17,8 @@ use holonomy_core::budgets::{self, MIB};
 use holonomy_core::capsule::{CapsuleWire, ENCRYPTED_DIRECTORY_BYTES};
 use holonomy_core::feistel::{Feistel22, DOMAIN};
 use holonomy_core::layout::{
-    CONTAINER_BYTES, IO_ALIGN, PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SLOT_BYTES,
-    ZONE_B_SECTORS,
+    CONTAINER_BYTES, IO_ALIGN, PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SECTOR_BYTES,
+    SLOT_BYTES, ZONE_B_SECTORS,
 };
 use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_crypto::ParamsClass;
@@ -26,19 +26,49 @@ use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
 
 mod store;
 
+/// The pad trait has to be in scope for its methods to be callable on a concrete `DevicePad`; a
+/// trait import that looks unused is the one that makes `device.can_ratchet()` compile.
+use store::pad::PadSource as _;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|a| a == "--version" || a == "-V") {
+    // Only as the *first* argument. Matched anywhere, `holonomy save book --version` would print the
+    // version and never touch the container, which is a silent no-op on a command the user meant.
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
         version();
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
         help();
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--check") {
-        return check();
+        // `--check --device /dev/sdX` checks the stick as well. Anything else after `--check` is
+        // rejected rather than ignored: a typo that silently checked nothing is the one failure mode a
+        // health gate must not have.
+        let mut device: Option<String> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--check" => i += 1,
+                "--device" => match args.get(i + 1) {
+                    Some(d) => {
+                        device = Some(d.clone());
+                        i += 2;
+                    }
+                    None => return usage_error("--device needs a path"),
+                },
+                other if other.starts_with("--") => i += 1,
+                other => {
+                    return usage_error(format!(
+                        "--check does not take the argument '{other}'; pass a container path to a \
+                         verb instead"
+                    ))
+                }
+            }
+        }
+        return check(device.as_deref());
     }
 
     // The three verbs that touch a file. They come before the banner because they are the whole
@@ -67,6 +97,8 @@ struct Flags {
     passphrase: String,
     kappa: [u8; 32],
     cursor: u64,
+    /// The stick's Zone B, if one was named. `None` selects the stand-in pad, and the report says so.
+    device: Option<String>,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, String> {
@@ -74,6 +106,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut passphrase = None;
     let mut kappa: Option<[u8; 32]> = None;
     let mut cursor = 0u64;
+    let mut device: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -87,6 +120,18 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
                     .get(i + 1)
                     .ok_or_else(|| "--kappa needs 64 hex characters".to_string())?;
                 kappa = Some(parse_kappa(hex)?);
+                i += 2;
+            }
+            "--device" => {
+                device = Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| {
+                            "--device needs a path; pass the whole stick (e.g. /dev/sdX), not a \
+                             partition"
+                                .to_string()
+                        })?
+                        .clone(),
+                );
                 i += 2;
             }
             "--cursor" => {
@@ -117,6 +162,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
                 .to_string()
         })?,
         cursor,
+        device,
     })
 }
 
@@ -151,6 +197,29 @@ fn context<'a>(
     }
 }
 
+/// The pad source these flags select.
+///
+/// `--device` means a real stick, read `O_DIRECT` wherever the kernel allows it. Without it the
+/// stand-in is used, and every caller says so in the same breath as the result, because a demo path
+/// that quietly looks like the real one is how a stand-in ships.
+fn pad_source(flags: &Flags, read_write: bool) -> Result<Box<dyn store::PadSource>, String> {
+    match &flags.device {
+        Some(path) => {
+            let device =
+                store::pad::DevicePad::open(std::path::Path::new(path), &flags.kappa, read_write)
+                    .map_err(|e| format!("opening the device {path}: {e}"))?;
+            if read_write && !device.can_ratchet() {
+                return Err(format!(
+                    "{path} opened read-only; a save must be able to ratchet the pad, and a \
+                     read-only handle would leave the spent sectors reusable"
+                ));
+            }
+            Ok(Box::new(device))
+        }
+        None => Ok(Box::new(store::pad::DerivedPad::new())),
+    }
+}
+
 /// `holonomy provision <path> --passphrase P --kappa HEX [--cursor N]`
 ///
 /// Creates the container. The work is in `store::provision`; this function owns only the argument
@@ -166,7 +235,11 @@ fn provision(args: &[String]) -> ExitCode {
     };
 
     let ctx = context(&passphrase, &flags.kappa, flags.cursor);
-    match store::provision(std::path::Path::new(&flags.path), &ctx) {
+    let mut pad = match pad_source(&flags, true) {
+        Ok(p) => p,
+        Err(e) => return usage_error(e),
+    };
+    match store::provision(std::path::Path::new(&flags.path), pad.as_mut(), &ctx) {
         Ok(()) => {
             println!("provisioned {}", flags.path);
             println!(
@@ -174,6 +247,13 @@ fn provision(args: &[String]) -> ExitCode {
                 CONTAINER_BYTES
             );
             println!("  the container is written under its own pad window, as every save is");
+            println!("  pad: {}", pad.describe());
+            if !pad.can_ratchet() {
+                println!(
+                    "  note: this pad cannot ratchet, so its sector material is reproducible by \
+                     anyone holding --kappa; pass --device to write to a stick"
+                );
+            }
             println!(
                 "  the next save must be run with --cursor {}",
                 flags.cursor + 1
@@ -206,7 +286,11 @@ fn save(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    match store::save(&mut file, &ctx, &document) {
+    let mut pad = match pad_source(&flags, true) {
+        Ok(p) => p,
+        Err(e) => return usage_error(e),
+    };
+    match store::save(&mut file, pad.as_mut(), &ctx, &document) {
         Ok(report) => {
             println!("saved {}", flags.path);
             println!(
@@ -225,9 +309,10 @@ fn save(args: &[String]) -> ExitCode {
                 "  ratchet: {}",
                 match report.ratcheted {
                     Some(n) => format!("{n} sectors rewritten"),
-                    None => "not run — this build writes a file, not a stick".to_string(),
+                    None => "not run — the stand-in pad has no device to rewrite".to_string(),
                 }
             );
+            println!("  pad: {}", pad.describe());
             ExitCode::SUCCESS
         }
         Err(e) => failure(e),
@@ -250,7 +335,11 @@ fn open(args: &[String]) -> ExitCode {
         Ok(f) => f,
         Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
     };
-    match store::open_document(&mut file, &ctx) {
+    let mut pad = match pad_source(&flags, false) {
+        Ok(p) => p,
+        Err(e) => return usage_error(e),
+    };
+    match store::open_document(&mut file, pad.as_mut(), &ctx) {
         Ok((opened, document)) => {
             eprintln!(
                 "opened {}: stratum L_{}, {} slot(s), save cursor {}",
@@ -303,19 +392,25 @@ fn help() {
         "holonomy {}\n\
          \n\
          USAGE:\n\
-         \x20   holonomy --check      verify this machine against the documented invariants\n\
+         \x20   holonomy --check [--device D]  verify this machine against the documented invariants\n\
          \x20   holonomy --version    build and layout constants\n\
          \x20   holonomy --help       this text\n\
          \n\
          CONTAINERS:\n\
-         \x20   holonomy provision <path> --passphrase P --kappa HEX [--cursor N]\n\
-         \x20   holonomy save <path> --passphrase P --kappa HEX [--cursor N] < document\n\
-         \x20   holonomy open <path> --passphrase P --kappa HEX [--cursor N]\n\
+         \x20   holonomy provision <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
+         \x20   holonomy save <path> --passphrase P --kappa HEX [--cursor N] [--device D] < document\n\
+         \x20   holonomy open <path> --passphrase P --kappa HEX [--cursor N] [--device D]\n\
          \n\
          `--kappa` is the 32-byte USB root share, as 64 hex characters. It is required: this build\n\
          does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
          in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
          previous save recorded, and 0 for a container that has only been provisioned.\n\
+         \n\
+         `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
+         LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
+         instead, which makes the container a demo -- anyone holding `--kappa` can recompute the\n\
+         pad it was folded with, and it cannot ratchet. Every command reports which source it\n\
+         used.\n\
          \n
          \n\
          `--check` exits 0 if every gate that *can* run here passed. Findings are classified:\n\
@@ -347,12 +442,71 @@ fn banner() {
     println!("Run `holonomy --check` to verify this machine.");
 }
 
+/// Check a device path as a pad source: openable, large enough for Zone B, and readable.
+///
+/// Two things this deliberately does not do. It does not use `PadReader`, because that refuses a
+/// device under `ZONE_B_LBA_START + ZONE_B_SECTORS` sectors (7.3 GiB) and would turn a diagnostic
+/// into a crash on any smaller stick. And it does not trust `metadata().len()` on a block device: a
+/// partition or some device nodes report zero, so a zero is reported as unmeasurable rather than as
+/// too small.
+fn check_device(path: &str) -> CheckResult {
+    let mut device =
+        match store::pad::DevicePad::open(std::path::Path::new(path), &[0u8; 32], false) {
+            Ok(d) => d,
+            Err(e) => {
+                return CheckResult::failed(
+                    "USB device present and writable",
+                    format!("{path}: {e}"),
+                )
+            }
+        };
+
+    // Zone B runs from ZONE_B_LBA_START to the end of the pad reservoir.
+    let need = (store::pad::ZONE_B_LBA_START_SECTOR + ZONE_B_SECTORS as u64) * SECTOR_BYTES as u64;
+    let have = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            return CheckResult::failed(
+                "USB device present and writable",
+                format!("{path}: opened but cannot stat: {e}"),
+            )
+        }
+    };
+    let size_note = if have == 0 {
+        "size not reported by this device node; not treated as a failure".to_string()
+    } else if have < need {
+        return CheckResult::failed(
+            "USB device present and writable",
+            format!(
+                "{path} is {have} bytes; Zone B alone needs {need}. This stick cannot hold a \
+                 container's pad"
+            ),
+        );
+    } else {
+        format!("{have} bytes")
+    };
+
+    // A read of one real sector, because "the path opens" is not the claim: a write-blocked or
+    // half-yanked stick opens and then fails every transfer.
+    match device.window(&[0u8; 32], 0) {
+        Ok(window) => CheckResult::ok(
+            "USB device present and writable",
+            format!(
+                "{}, {size_note}, one pad window read ({} bytes in plan order)",
+                device.describe(),
+                window.byte_len()
+            ),
+        ),
+        Err(e) => CheckResult::failed("USB device present and writable", format!("{path}: {e}")),
+    }
+}
+
 /// Verify this machine and print every finding.
 ///
 /// Nothing here is read from a constant that was also used to build the thing being checked, except
 /// where the check *is* of a constant. The distinction matters: `capsule_is_one_slot` proves the
 /// type's size, while `direct_io` and `page_locking` prove something about the host.
-fn check() -> ExitCode {
+fn check(device: Option<&str>) -> ExitCode {
     let mut report = CheckReport::new();
 
     // ---- Build-level invariants. These are cheap and they catch a miscompile. ----
@@ -542,10 +696,15 @@ fn check() -> ExitCode {
         "requires a window; lives in holonomy-ui, which cannot be built where wordcraft's \
          craft-pdf dependency fails",
     ));
-    report.push(CheckResult::deferred(
-        "USB device present and writable",
-        "no --device argument given; pass one once the device path is known",
-    ));
+    match device {
+        Some(path) => report.push(check_device(path)),
+        None => report.push(CheckResult::deferred(
+            "USB device present and writable",
+            "no --device given, so the pad is the stand-in; pass --device /dev/sdX to check a stick. \
+             Deferred rather than ok because a machine with no stick has not shown the device path \
+             works",
+        )),
+    }
 
     print!("{}", report.render());
 

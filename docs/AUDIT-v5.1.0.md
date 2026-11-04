@@ -477,6 +477,35 @@ A test that has never run is a comment with punctuation.
   `target/usb-scratch/` because tmpfs rejects `O_DIRECT`. A CI runner's filesystem may not honour it
   either, so that test is marked as host-dependent in its own docs.
 
+### The device path, and what selects it
+
+`holonomy-cli` now has a `PadSource` trait with two implementations, and every write path takes one:
+
+| | what it reads | can ratchet | when selected |
+| :--- | :--- | :--- | :--- |
+| `DevicePad` | Zone B of a stick, `O_DIRECT` where the kernel allows it | yes, if opened `O_RDWR` | `--device /dev/sdX` |
+| `DerivedPad` | a hash of the sector permutation | **no** | the default, with no `--device` |
+
+This is a real change in what the binary can claim, and two of the claims are deliberately negative.
+Without `--device` the container is a **demo**: anyone holding `κ_USB` can recompute the pad it was
+folded with, so pad secrecy — the half of the threat model that requires a stick — is absent. And the
+stand-in refuses to ratchet rather than returning a zero count, because a save that reported
+`ratcheted: Some(0)` would be claiming freshness it does not have.
+
+The ratchet targets window `c-1`, not `c`. The image a save just wrote is folded with window `c`, so
+ratcheting `c` would destroy the pad that image needs and it would be unreadable the moment the write
+returned. What is spent is `c-1`: its container has been replaced. The ratchet also runs *after* the
+write, so a failed write leaves the previous container readable.
+
+The device read loop is shared with the test path, which is why the tests can exercise it at all: a
+real `PadReader` refuses any device shorter than 7.3 GiB, so `#[cfg(test)] DevicePad::open_relocated`
+moves Zone B to offset zero and the same plan is read off a sparse file. Nothing in a released build
+can select that.
+
+Still not here: `Zone A` is geometry only (`holonomy-usb/src/geometry.rs` has the constants; there is
+no AONT or RS(255,223) code), so `κ_USB` remains a `--kappa` argument. `identity_placement` is still
+the placement, so payload slots are written in order.
+
 ### Corrections to the spec that the code found, not the review
 
 Recorded here because each one changes what the documentation is allowed to say:
