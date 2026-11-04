@@ -270,8 +270,12 @@ jobs:
       # a gate that dies on a missing tool is not measuring the product.
       - name: Measured peak RSS is inside the steady-state ceiling
         run: |
-          set -o pipefail
-          cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
+          # This step measures; it does not police the exit code. `--check` exiting non-zero is the
+          # next step's job, because under `set -e` + `pipefail` a non-zero `cargo run | tee` aborts
+          # this whole script and the measurement never happens. Conflating "measure" with "assert"
+          # is what made this gate look like it was failing on its own parse.
+          cargo run -q -p holonomy-cli -- --check > check.log 2>&1 || true
+          cat check.log
           # `^` anchors the match to the start of the line, which is what keeps the budget figures
           # in the trailing "(budget 180 MiB ..., 440 MiB ...)" out of it. Do *not* anchor the end:
           # the line continues past the measurement, so `$` matches nothing at all and the gate
@@ -315,14 +319,15 @@ jobs:
       - name: Report check findings as annotations
         if: failure()
         run: |
-          set +e
-          # GitHub caps a step at about ten annotations and silently drops the rest. A whole report
-          # of `::error::` lines therefore loses its tail -- which, in a report that ends with the
-          # summary, is the part worth reading. So: one annotation that says what failed, and the
-          # entire report into the step summary, which has no such limit.
-          failed=$(grep -cE '^\[failed' check-exit.log 2>/dev/null || echo 0)
-          echo "::error::--check reported ${failed} failing gate(s); full report in the step summary"
-          grep -E '^\[failed' check-exit.log 2>/dev/null | head -5 | while IFS= read -r line; do
+          log=check-exit.log
+          [ -f "$log" ] || log=check.log
+          echo "### holonomy --check"
+          cat "$log"
+          # GitHub keeps about ten annotations per step and silently drops the rest, so annotate
+          # sparingly: the one-line tally, then each failing gate (there are never many).
+          tally=$(grep -E '^[0-9]+ ok, ' "$log" | tail -1)
+          echo "::error::--check tally: ${tally:-<no tally line>}"
+          grep -E '^\[(failed|deferred|degraded)' "$log" | head -6 | while IFS= read -r line; do
             echo "::error::$line"
           done
-          { echo '## holonomy --check'; echo '```'; cat check-exit.log 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## holonomy --check'; echo '```'; cat "$log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
