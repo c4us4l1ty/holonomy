@@ -137,7 +137,7 @@ properties.
 | [`holonomy-usb`](crates/holonomy-usb) | Device geometry, aligned I/O, sector plans, and ratchet operations. | Workspace library; physical-device provisioning incomplete |
 | [`holonomy-runtime`](crates/holonomy-runtime) | Reaper and secret-arena primitives. | Workspace library; not wired into the CLI editor |
 | [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
-| [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus a reusable experimental file-store library, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
+| [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
 | [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its

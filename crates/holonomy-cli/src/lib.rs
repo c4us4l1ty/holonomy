@@ -5,5 +5,7 @@
 
 #![deny(missing_docs)]
 
+/// Conservative document-session state for future frontends.
+pub mod document;
 /// Container and pad operations used by the command-line frontend.
 pub mod store;
