@@ -208,6 +208,25 @@ jobs:
           cargo test -p holonomy-usb sectors_that_fpe_20_could_never_reach_are_reached -- --nocapture
           cargo test -p holonomy-usb the_pad_budget_uses_more_than_half_the_drive -- --nocapture
 
+      - name: A container this build writes is a container it can read
+        # The round trip. Until this step existed, the writer and the reader had never been run
+        # against each other, which is how `seal_container` came to seal the payload under one key
+        # and the directory under another while every test passed.
+        run: |
+          cargo test -p holonomy-session a_saved_container_reopens_to_the_bytes_that_went_in -- --nocapture
+          cargo test -p holonomy-session the_permutation_is_actually_consulted -- --nocapture
+          cargo test -p holonomy-session the_payload_and_the_directory_are_sealed_under_one_key -- --nocapture
+          cargo test -p holonomy-session the_reader_agrees_with_the_handshake -- --nocapture
+          cargo test -p holonomy-session the_save_cursor_survives_a_round_trip -- --nocapture
+
+      - name: A damaged container is refused, and says which layer refused it
+        run: |
+          cargo test -p holonomy-session a_tampered_payload_slot_is_caught_by_its_commitment -- --nocapture
+          cargo test -p holonomy-session a_relocated_payload_slot_is_caught -- --nocapture
+          cargo test -p holonomy-session a_wrong_passphrase_is_rejected_and_says_nothing -- --nocapture
+          cargo test -p holonomy-session a_wrong_usb_share_is_rejected -- --nocapture
+          cargo test -p holonomy-session an_unprovisioned_container_is_named_rather_than_rejected_as_a_bad_passphrase -- --nocapture
+
       - name: A save is refused rather than silently downgraded
         run: |
           cargo test -p holonomy-session the_fifty_fifth_save_on_a_read_only_device_is_refused -- --nocapture

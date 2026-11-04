@@ -22,6 +22,7 @@
 
 pub mod check;
 pub mod directory;
+pub mod open;
 pub mod salt;
 pub mod seal;
 pub mod session;
@@ -29,6 +30,7 @@ pub mod status;
 
 pub use check::{CheckReport, CheckResult, Severity};
 pub use directory::{DirectoryError, DirectoryLedger};
+pub use open::{open_container, OpenError, OpenedContainer, ReaderRequest};
 pub use salt::{ContainerHeader, SaltBytes, SaltOrigin};
 pub use seal::{open_payload_slot, seal_container, SealError, SealedContainer, SealedPayloadSlot};
 pub use session::{SaveOutcome, Session, SessionError};

@@ -171,11 +171,25 @@ pub fn unlock_fixed(
             continue;
         }
 
-        // (f) Commit. The directory that just verified was decrypted with `keys.k_dem`, so those
-        // are the stratum keys; `derive_stratum_keys` is the equivalent derivation for the
-        // path that has no capsule wide enough to hold a KEM ciphertext (the sealed reservoir).
-        let _written_with = keys.k_dem;
-        let keys: StratumKeys = derive_stratum_keys(&root, index, req.kappa_usb);
+        // (f) Commit. `keys` is the set `derive_dem_key` produced from the shared secrets, the
+        // ciphertexts, `K_unwrap` and `κ_USB` -- the same call `create_envelope` made when it built
+        // this capsule. It is what the directory was sealed with, so it is what the payload slots
+        // were sealed with, and it is what the caller must hold to open them again.
+        //
+        // # The bug this replaced
+        //
+        // This returned `derive_stratum_keys(&root, index, req.kappa_usb)` instead, on the reasoning
+        // that it was "the equivalent derivation". It is not equivalent: that is the *fallback* key
+        // set, derived from the root secret with no KEM round trip, and its `k_dem` has no
+        // relationship at all to the one the envelope produced. Every container written by the save
+        // path would have decrypted its directory here -- because the phase-2 commitment above uses
+        // the correct key -- and then been handed a key set that could not open a single payload
+        // slot. The failure would have surfaced as "the directory is intact and the document is
+        // corrupt", on the first real save, with a correct passphrase.
+        //
+        // Nothing caught it because nothing had ever read a payload slot back. `holonomy-session`'s
+        // `a_saved_container_reopens_to_the_bytes_that_went_in` is the test that does, and it fails
+        // against the old line.
 
         // The count is only known now: this loop is the first place the container could have
         // revealed it, and a stratum proves itself by opening, not by being announced. So the

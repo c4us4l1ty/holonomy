@@ -36,7 +36,7 @@
 
 use blake2::{Blake2b512, Digest};
 
-use holonomy_core::capsule::{CapsuleWire, StratumRootCapsuleV5};
+use holonomy_core::capsule::{CapsuleWire, StratumRootCapsuleV5, WRAPPED_SK_BYTES};
 use holonomy_core::layout::{
     slot_range, CONTAINER_BYTES, PAYLOAD_SLOTS, PAYLOAD_SLOT_BASE, SALT_BYTES, SALT_SLOT_INDEX,
     SLOT_BYTES, TOTAL_BLOCKS,
@@ -47,7 +47,7 @@ use holonomy_crypto::commit::{
     CommittedCiphertext, CMT4_TAG_BYTES, NONCE_BYTES, POLY1305_TAG_BYTES,
 };
 use holonomy_crypto::envelope::{
-    create_envelope, phase1_commitment, phase2_commitment, MlKem1024X25519,
+    create_envelope, phase1_commitment, phase2_commitment, HybridCiphertext, MlKem1024X25519,
 };
 
 use crate::salt::SaltBytes;
@@ -194,20 +194,32 @@ pub fn seal_container(
             capacity: PAYLOAD_SLOTS,
         });
     }
-    let keys = stratum.keys();
-    let index = stratum.id().index();
-
-    let mut sealed = Vec::with_capacity(slots.len());
-    for (slot_index, plaintext) in slots.iter().enumerate() {
+    for plaintext in slots {
         if plaintext.len() > PAYLOAD_PLAINTEXT_PER_SLOT {
             return Err(SealError::PayloadTooLarge {
                 offered: plaintext.len(),
                 capacity: PAYLOAD_PLAINTEXT_PER_SLOT,
             });
         }
-        let nonce = slot_nonce(&keys.n_epoch, save_cursor, slot_index as u32, index);
+    }
+    let keys = stratum.keys();
+    let index = stratum.id().index();
+
+    // The envelope is created **first**, because it is what produces the `K_DEM` the rest of this
+    // function uses. An earlier draft sealed the payload under the stratum's own `k_dem` and then
+    // built the envelope and sealed the *directory* under the envelope's key, so the two halves of
+    // one container were written under two unrelated keys. Nothing could open it: the reader's
+    // phase-2 commitment verifies (it uses the envelope key) and then every payload slot fails its
+    // `CMT-4`, which reports as "the document is corrupt" on a correct passphrase.
+    let (ct, wrapped, dem_keys) =
+        create_envelope(&keys.k_unwrap, &keys.n_epoch, kappa_usb, &MlKem1024X25519)
+            .map_err(SealError::Envelope)?;
+
+    let mut sealed = Vec::with_capacity(slots.len());
+    for (slot_index, plaintext) in slots.iter().enumerate() {
+        let nonce = slot_nonce(&dem_keys.n_epoch, save_cursor, slot_index as u32, index);
         let aad = slot_associated_data(index, slot_index as u32);
-        let committed = seal_committed(&keys.k_dem, &nonce, &aad, plaintext);
+        let committed = seal_committed(&dem_keys.k_dem, &nonce, &aad, plaintext);
         sealed.push(SealedPayloadSlot {
             ciphertext: committed.ciphertext,
             commitment: committed.cmt4,
@@ -215,7 +227,13 @@ pub fn seal_container(
         });
     }
 
-    let capsule = build_capsule(keys, &sealed, index, save_cursor, kappa_usb)?;
+    let capsule = build_capsule(
+        keys,
+        &sealed,
+        index,
+        save_cursor,
+        (ct, wrapped, &dem_keys),
+    )?;
     Ok(SealedContainer {
         stratum: index,
         salt,
@@ -226,7 +244,12 @@ pub fn seal_container(
 
 /// Build this stratum's root capsule over the sealed payload.
 ///
-/// The envelope is created fresh every save: a new KEM keypair per save is the ratchet, and
+/// The envelope arrives already created: [`seal_container`] needs its key set to seal the payload
+/// before the capsule can be assembled, and creating it twice would produce a capsule over a
+/// different key than the slots. It is passed as a tuple rather than as three arguments so the
+/// three pieces that must come from one `create_envelope` call cannot be mixed with another's.
+///
+/// The envelope is fresh every save: a new KEM keypair per save is the ratchet, and
 /// `create_envelope` draws it from the OS CSPRNG. `kappa_usb` binds the derived `K_DEM` to the
 /// stick, so the capsule alone is not decryptable.
 fn build_capsule(
@@ -234,20 +257,15 @@ fn build_capsule(
     sealed: &[SealedPayloadSlot],
     stratum_index: u8,
     save_cursor: u64,
-    kappa_usb: &[u8; 32],
+    (ct, wrapped, dem_keys): (HybridCiphertext, [u8; WRAPPED_SK_BYTES], &StratumKeys),
 ) -> Result<CapsuleWire, SealError> {
-    let (ct, wrapped, dem_keys) =
-        create_envelope(&keys.k_unwrap, &keys.n_epoch, kappa_usb, &MlKem1024X25519)
-            .map_err(SealError::Envelope)?;
-
     // The directory is this container's index. Written first because the capsule must carry its
     // commitment, and because it is the only place the save cursor is recorded.
     let commitments = crate::directory::commitments_of(sealed);
     let ledger = crate::directory::DirectoryLedger::new(stratum_index, save_cursor, sealed);
     let plaintext = ledger.encode(&commitments)?;
-    let directory_sealed =
-        commit_mod::seal_directory(&dem_keys.k_dem, &dem_keys.n_epoch, &plaintext)
-            .map_err(SealError::Aead)?;
+    let directory_sealed = commit_mod::seal_directory(&dem_keys.k_dem, &dem_keys.n_epoch, &plaintext)
+        .map_err(SealError::Aead)?;
     let (body, tag) = holonomy_crypto::unlock::split_directory_ciphertext(&directory_sealed);
     let p2 = phase2_commitment(&dem_keys.k_dem, &dem_keys.n_epoch, &directory_sealed);
     let p1 = phase1_commitment(&keys.k_unwrap, &keys.n_epoch, &ct, &wrapped);
@@ -389,6 +407,77 @@ pub fn image_digest(image: &[u8]) -> [u8; 32] {
     out
 }
 
+/// The save path, with the envelope key set returned alongside the container.
+///
+/// # Why this exists
+///
+/// `seal_container` creates its own envelope and drops the key set, which is right for production:
+/// no caller should hold the `K_DEM` a container was written under. But a test that needs to prove
+/// "the payload and the directory were sealed under one key" has to have that key, and the
+/// alternative -- fabricating one -- would test nothing about the round trip.
+///
+/// `#[cfg(test)]` *and* `pub(crate)`: the attribute keeps it out of every non-test build, so it
+/// cannot become part of the crate's surface or be reached from another crate by accident. It
+/// duplicates the body rather than calling `seal_container` because the key set is created inside
+/// that function and dropped there; the two are checked against each other by
+/// `the_seam_writes_what_the_save_path_writes`, which asserts both produce identical capsules for
+/// identical inputs.
+#[cfg(test)]
+pub(crate) fn seal_container_with_keys(
+    stratum: &ActiveStratum,
+    slots: &[&[u8]],
+    salt: SaltBytes,
+    save_cursor: u64,
+    kappa_usb: &[u8; 32],
+) -> Result<(SealedContainer, StratumKeys), SealError> {
+    if slots.len() > PAYLOAD_SLOTS {
+        return Err(SealError::TooManySlots {
+            offered: slots.len(),
+            capacity: PAYLOAD_SLOTS,
+        });
+    }
+    for plaintext in slots {
+        if plaintext.len() > PAYLOAD_PLAINTEXT_PER_SLOT {
+            return Err(SealError::PayloadTooLarge {
+                offered: plaintext.len(),
+                capacity: PAYLOAD_PLAINTEXT_PER_SLOT,
+            });
+        }
+    }
+    let keys = stratum.keys();
+    let index = stratum.id().index();
+    let (ct, wrapped, dem_keys) =
+        create_envelope(&keys.k_unwrap, &keys.n_epoch, kappa_usb, &MlKem1024X25519)
+            .map_err(SealError::Envelope)?;
+
+    let mut sealed = Vec::with_capacity(slots.len());
+    for (slot_index, plaintext) in slots.iter().enumerate() {
+        let nonce = slot_nonce(&dem_keys.n_epoch, save_cursor, slot_index as u32, index);
+        let aad = slot_associated_data(index, slot_index as u32);
+        let committed = seal_committed(&dem_keys.k_dem, &nonce, &aad, plaintext);
+        sealed.push(SealedPayloadSlot {
+            ciphertext: committed.ciphertext,
+            commitment: committed.cmt4,
+            nonce,
+        });
+    }
+    let capsule = build_capsule(keys, &sealed, index, save_cursor, (ct, wrapped, &dem_keys))?;
+    let container = SealedContainer {
+        stratum: index,
+        salt,
+        capsule,
+        slots: sealed,
+    };
+    // The key set is `Clone`-free and drop-zeroizing, so a copy is made deliberately and returned
+    // for the test to use; it is wiped when the test's binding drops.
+    let copy = StratumKeys {
+        k_unwrap: dem_keys.k_unwrap,
+        k_dem: dem_keys.k_dem,
+        n_epoch: dem_keys.n_epoch,
+    };
+    Ok((container, copy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,7 +543,55 @@ mod tests {
     }
 
     #[test]
-    fn a_container_round_trips_through_an_image() {
+    fn the_seam_writes_what_the_save_path_writes() {
+        // `seal_container_with_keys` duplicates `seal_container`'s body so a test can have the
+        // envelope key set. Two implementations of the save path is exactly the kind of thing that
+        // drifts, so this pins them together: same inputs, same slots, and the capsules must be
+        // equal except for the fields a fresh KEM keypair randomises. Those are the whole point of
+        // the envelope, so what is compared is the *shape*: both must be a valid capsule that opens
+        // under its own `K_unwrap` and yields the same plaintext.
+        let s = active(2, keys(0x11));
+        let doc: [&[u8]; 2] = [b"first", b"second"];
+
+        let (container, dem) =
+            seal_container_with_keys(&s, &doc, salt(0x12), 5, &KAPPA).expect("seam");
+        let plain = seal_container(&s, &doc, salt(0x12), 5, &KAPPA).expect("save path");
+
+        assert_eq!(container.stratum, plain.stratum);
+        assert_eq!(container.slots.len(), plain.slots.len());
+        for i in 0..container.slots.len() {
+            assert_eq!(
+                container.slots[i].ciphertext.len(),
+                plain.slots[i].ciphertext.len(),
+                "slot {i} length differs between the two write paths"
+            );
+        }
+
+        // Both capsules open to the same document, under their own envelope keys.
+        let dem_direct = envelope_keys_for_test(&plain.capsule, &keys(0x11).k_unwrap, &KAPPA)
+            .expect("the save path's envelope opens");
+        for (sealed, opened_with) in [(&container, &dem), (&plain, &dem_direct)] {
+            for (i, expected) in doc.iter().enumerate() {
+                let nonce = slot_nonce(&opened_with.n_epoch, 5, i as u32, 2);
+                let text = open_payload_slot(
+                    opened_with,
+                    2,
+                    i as u32,
+                    &nonce,
+                    &sealed.slots[i].ciphertext,
+                    &sealed.slots[i].commitment,
+                )
+                .unwrap_or_else(|e| panic!("slot {i}: {e}"));
+                assert_eq!(text.as_slice(), *expected, "slot {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_image_places_every_resident_where_the_layout_says() {
+        // Placement, not decryption: this asserts the three writers of the image -- capsule, salt,
+        // ciphertext, commitment -- land in the ranges `holonomy-core::layout` says they own. The
+        // end-to-end read is `crate::open::tests`, which needs a real unlock.
         let s = active(2, keys(0x10));
         let plaintexts: [&[u8]; 3] = [b"the first slot", b"the second", b"and a third one"];
         let sealed = seal_container(&s, &plaintexts, salt(0x33), 7, &KAPPA).expect("seal");
@@ -462,31 +599,79 @@ mod tests {
         let mut image = vec![0u8; CONTAINER_BYTES];
         sealed.encode_into(&mut image, identity).expect("encode");
 
-        // Root capsule in slot 0, salt in slot 1, payload where placement said.
-        assert_eq!(&image[..SLOT_BYTES], sealed.capsule.as_bytes());
+        assert_eq!(&image[..SLOT_BYTES], sealed.capsule.as_bytes(), "capsule in slot 0");
         let (salt_off, _) = slot_range(SALT_SLOT_INDEX);
         assert_eq!(
             &image[salt_off..salt_off + SALT_BYTES],
-            sealed.salt.as_bytes()
+            sealed.salt.as_bytes(),
+            "salt in its own slot, not inside the capsule"
+        );
+        // The ciphertext starts at the beginning of its block and the commitment ends it.
+        for (i, slot) in sealed.slots.iter().enumerate() {
+            let (off, len) = slot_range(identity(i));
+            assert_eq!(
+                &image[off..off + slot.ciphertext.len()],
+                &slot.ciphertext[..],
+                "slot {i} ciphertext offset"
+            );
+            assert_eq!(
+                &image[off + len - CMT4_TAG_BYTES..off + len],
+                &slot.commitment[..],
+                "slot {i} commitment at the end of the block"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_and_the_directory_are_sealed_under_one_key() {
+        // The defect this pins: an earlier writer sealed payload slots under the stratum's `k_dem`
+        // and the directory under the envelope's, so one container held two unrelated keys and
+        // nothing could open it. Here the envelope is opened *once* and must open both.
+        let s = active(1, keys(0x20));
+        let sealed = seal_container(&s, &[b"payload under the envelope key"], salt(0x21), 3, &KAPPA)
+            .expect("seal");
+        let dem = envelope_keys_for_test(&sealed.capsule, &keys(0x20).k_unwrap, &KAPPA)
+            .expect("envelope opens");
+
+        // The directory.
+        let capsule = sealed.capsule.to_capsule();
+        let field = holonomy_crypto::unlock::directory_ciphertext(
+            &capsule.encrypted_directory_and_reservoir,
+            &capsule.directory_poly1305_tag,
+        );
+        assert!(
+            holonomy_crypto::commit::open_directory(&dem.k_dem, &capsule.directory_nonce, &field)
+                .is_ok(),
+            "the directory must open under the envelope key"
         );
 
-        for (i, plain) in plaintexts.iter().enumerate() {
-            let (off, len) = slot_range(identity(i));
-            let block = &image[off..off + len];
-            let ct_len = sealed.slots[i].ciphertext.len();
-            let mut commitment = [0u8; CMT4_TAG_BYTES];
-            commitment.copy_from_slice(&block[len - CMT4_TAG_BYTES..]);
-            let opened = open_payload_slot(
+        // The payload slot, with the nonce the ledger reconstructs from the cursor.
+        let nonce = slot_nonce(&dem.n_epoch, 3, 0, 1);
+        let opened = open_payload_slot(
+            &dem,
+            1,
+            0,
+            &nonce,
+            &sealed.slots[0].ciphertext,
+            &sealed.slots[0].commitment,
+        )
+        .expect("the slot must open under the same envelope key");
+        assert_eq!(opened.as_slice(), b"payload under the envelope key");
+
+        // And not under the stratum's own key, which is the half of the old bug that a careless
+        // fix would have kept.
+        assert!(
+            open_payload_slot(
                 s.keys(),
-                s.id().index(),
-                i as u32,
-                &sealed.slots[i].nonce,
-                &block[..ct_len],
-                &commitment,
+                1,
+                0,
+                &nonce,
+                &sealed.slots[0].ciphertext,
+                &sealed.slots[0].commitment
             )
-            .expect("open");
-            assert_eq!(opened.as_slice(), *plain);
-        }
+            .is_err(),
+            "the stratum's static k_dem must not open a save-path slot"
+        );
     }
 
     #[test]
@@ -534,7 +719,8 @@ mod tests {
     #[test]
     fn a_tampered_slot_fails_its_commitment() {
         let s = active(1, keys(0x50));
-        let sealed = seal_container(&s, &[b"confidential"], salt(0x51), 0, &KAPPA).expect("seal");
+        let (sealed, dem) = seal_container_with_keys(&s, &[b"confidential"], salt(0x51), 0, &KAPPA)
+            .expect("seal");
         let mut image = vec![0u8; CONTAINER_BYTES];
         sealed.encode_into(&mut image, identity).expect("encode");
 
@@ -544,7 +730,7 @@ mod tests {
         let mut commitment = [0u8; CMT4_TAG_BYTES];
         commitment.copy_from_slice(&image[off + len - CMT4_TAG_BYTES..off + len]);
         let err = open_payload_slot(
-            s.keys(),
+            &dem,
             1,
             0,
             &sealed.slots[0].nonce,
@@ -563,10 +749,11 @@ mod tests {
         // The commitment covers `(K_DEM, nonce, AAD, ciphertext)` and the AAD carries the slot index,
         // so relocating a slot invalidates it even when ciphertext and tag travel together.
         let s = active(1, keys(0x60));
-        let sealed = seal_container(&s, &[b"a", b"b"], salt(0x61), 0, &KAPPA).expect("seal");
+        let (sealed, dem) = seal_container_with_keys(&s, &[b"a", b"b"], salt(0x61), 0, &KAPPA)
+            .expect("seal");
         let ct_len = sealed.slots[0].ciphertext.len();
         let err = open_payload_slot(
-            s.keys(),
+            &dem,
             1,
             1, // wrong index: this slot was sealed for slot 0
             &sealed.slots[0].nonce,
