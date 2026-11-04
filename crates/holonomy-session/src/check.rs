@@ -151,6 +151,10 @@ impl CheckReport {
                 holonomy_core::budgets::STEADY_STATE_CEILING_BYTES / holonomy_core::budgets::MIB,
                 holonomy_core::budgets::UNLOCK_PEAK_CEILING_BYTES / holonomy_core::budgets::MIB,
             );
+        } else {
+            // Printing nothing is how a measurement quietly disappears from a report, and a
+            // report that omits what it could not measure reads as a clean bill of health.
+            let _ = writeln!(out, "peak RSS: not measured on this platform");
         }
         out
     }

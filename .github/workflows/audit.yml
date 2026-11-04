@@ -272,7 +272,9 @@ jobs:
         run: |
           set -o pipefail
           cargo run -q -p holonomy-cli -- --check 2>&1 | tee check.log
-          measured=$(grep -oE 'peak RSS: [0-9]+ KiB' check.log | grep -oE '[0-9]+' | head -1)
+          # Anchor on the end of the line: the same line carries "... (budget N MiB steady, ...)",
+          # so an unanchored pattern picks up whichever number the regex engine finds first.
+          measured=$(grep -oE '^peak RSS: [0-9]+ KiB$' check.log | grep -oE '[0-9]+')
           if [ -z "$measured" ]; then
             echo "::error::--check did not report a peak RSS measurement"
             exit 1
