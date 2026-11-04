@@ -488,8 +488,11 @@ pub fn derive_passphrase_only_keys(root: &RootSecret, stratum_index: u8, kappa_u
         k_dem[i] ^= kappa_usb[i];
         k_unwrap[i] ^= kappa_usb[i];
     }
+    // `Subkey` is 32 bytes and an XChaCha nonce is 24, so exactly the first 24 are taken. Writing
+    // this as `[..XCHACHA_NONCE_BYTES]` rather than a literal keeps the two in step if either
+    // changes, and the `copy_from_slice` length check then fails loudly instead of truncating.
     let mut n_epoch = [0u8; XCHACHA_NONCE_BYTES];
-    n_epoch[..24].copy_from_slice(&nonce.0);
+    n_epoch.copy_from_slice(&nonce.0[..XCHACHA_NONCE_BYTES]);
     StratumKeys { k_unwrap, k_dem, n_epoch }
 }
 
