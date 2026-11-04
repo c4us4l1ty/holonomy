@@ -81,7 +81,10 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(writable).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -247,7 +250,11 @@ pub fn save(
 
     // 4. The handshake over the old container. Its error is coarse, and this is where a wrong
     //    passphrase stops the save before a single byte is written.
-    let opened: OpenedContainer = open_container(
+    //
+    //    The returned container is deliberately *not* used below except as proof: its stratum holds
+    //    keys derived from the old save's KEM keypair, and sealing under those would produce a
+    //    capsule and a payload that disagree. See step 5.
+    let _opened: OpenedContainer = open_container(
         &ReaderRequest {
             image: &old_image,
             passphrase: ctx.passphrase,
@@ -260,15 +267,24 @@ pub fn save(
     )
     .map_err(|e: OpenError| e.to_string())?;
 
-    // 5-6. A new salt, then the new container under it.
-    let stratum: &ActiveStratum = &opened.stratum;
+    // 5-6. A new salt, and a stratum for the *new* container.
+    //
+    // The stratum the open returned cannot be reused here. `seal_container` generates a fresh KEM
+    // keypair per save and derives `K_DEM` from it, so a stratum from the old container carries
+    // keys derived from the old keypair: sealing with it writes payload slots under one key while
+    // the capsule in the same image is built over another. The result is a container nothing can
+    // read -- including the next `save` -- reported as a wrong passphrase.
+    //
+    // What a save needs from the old container is proof that the credential is right, and the
+    // cursor. The *keys* are re-derived from `(passphrase, new salt, κ)`, which is exactly what a
+    // reader does, and therefore the only derivation that can work.
     let new_salt = SaltBytes::fresh();
-    // The salt is moved into `seal_container` and zeroized there; nothing after this line needs it,
-    // because the pad window is keyed by the stick and the cursor rather than by the salt.
-    let slots = split_payload(payload);
-    let sealed: SealedContainer =
-        seal_container(stratum, &slots, new_salt, ctx.cursor, ctx.kappa_usb)
-            .map_err(|e| e.to_string())?;
+    let slot_bytes = split_payload(payload);
+    let sealed: SealedContainer = {
+        let stratum = stratum_for(ctx, &new_salt)?;
+        seal_container(&stratum, &slot_bytes, new_salt, ctx.cursor, ctx.kappa_usb)
+            .map_err(|e| e.to_string())?
+    };
 
     let mut image = vec![0u8; CONTAINER_BYTES];
     sealed
@@ -285,12 +301,12 @@ pub fn save(
     let digest = holonomy_session::seal::image_digest(&image);
     file.write_image(&image).map_err(|e| e.to_string())?;
 
-    let plaintext_bytes = slots.iter().map(|s| s.len()).sum();
+    let plaintext_bytes = slot_bytes.iter().map(|s| s.len()).sum();
     Ok(SaveReport {
         ratcheted: None,
         pad_sectors,
         plaintext_bytes,
-        slots: slots.len(),
+        slots: slot_bytes.len(),
         digest,
     })
 }
@@ -402,6 +418,34 @@ pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
     first_write(&mut file, ctx, SaltBytes::fresh())
 }
 
+/// The stratum `(passphrase, salt, κ_USB)` derives: one derivation, used by every write path.
+///
+/// This is the *fallback* key set — `derive_stratum_keys` — and that is correct here, and the reason
+/// is worth stating because getting it wrong is the defect this module has hit most often. A writer
+/// needs only two fields from the set: `k_unwrap` and `n_epoch`, the two values the capsule is keyed
+/// by. `K_DEM` is not taken from here at all; `seal_container` creates the envelope and derives it
+/// from the KEM round trip. So the fallback `k_dem` is ignored by the writer, while its `k_unwrap`
+/// is by construction the value the phase-1 commitment binds.
+///
+/// `holonomy-crypto`'s `the_fallback_keys_equal_the_ones_the_capsule_was_built_with` is where that
+/// equality is asserted.
+fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum, String> {
+    let root = holonomy_crypto::derive_root_secret(
+        ctx.passphrase.as_bytes(),
+        salt.as_bytes(),
+        ctx.params,
+    )
+    .map_err(|e| format!("deriving the root secret: {e}"))?;
+    let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
+    let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
+    let layer = holonomy_core::unlock::ProtectionLayer {
+        pad: true,
+        pad_fresh: true,
+        post_quantum: true,
+    };
+    Ok(holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys))
+}
+
 /// Seal one container under `salt`, fold its pad window over it, and write it.
 ///
 /// This is what `save` does at its own steps 6–8, factored out because `provision` needs the same
@@ -415,22 +459,7 @@ pub fn first_write(
     ctx: &SaveContext<'_>,
     salt: SaltBytes,
 ) -> Result<(), String> {
-    let salt_bytes = *salt.as_bytes();
-    let root =
-        holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), &salt_bytes, ctx.params)
-            .map_err(|e| format!("deriving the root secret: {e}"))?;
-    // The fallback set: the save path needs only `k_unwrap` and `n_epoch` from it, because the
-    // envelope supplies `K_DEM`. See `holonomy_session::open::tests::stratum_from_root`.
-    let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
-    let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
-    let layer = holonomy_core::unlock::ProtectionLayer {
-        pad: true,
-        pad_fresh: true,
-        post_quantum: true,
-    };
-    let stratum =
-        holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys);
-
+    let stratum = stratum_for(ctx, &salt)?;
     let sealed = seal_container(&stratum, &[&[]], salt, ctx.cursor, ctx.kappa_usb)
         .map_err(|e| e.to_string())?;
     let mut image = vec![0u8; CONTAINER_BYTES];
@@ -438,44 +467,6 @@ pub fn first_write(
         .encode_into(&mut image, identity_placement)
         .map_err(|e| e.to_string())?;
     fold(&mut image, &pad_window_for_save(ctx.kappa_usb, ctx.cursor));
-    file.write_image(&image).map_err(|e| e.to_string())
-}
-
-/// Write a container **without** the pad fold, for the store's tests only.
-///
-/// Exists so `the_store_round_trips_one_raw_save_without_the_pad` can separate "the seal/open path
-/// and the derived salt agree" from "the fold is symmetric". A test that could not remove one of
-/// two variables would only ever report that the pair is broken, which is where this defect spent
-/// several rounds.
-#[cfg(test)]
-pub(crate) fn first_write_unpadded_for_test(
-    file: &mut ContainerFile,
-    ctx: &SaveContext<'_>,
-    salt: [u8; SALT_BYTES],
-) -> Result<(), String> {
-    let root = holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), &salt, ctx.params)
-        .map_err(|e| format!("deriving the root secret: {e}"))?;
-    let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
-    let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
-    let layer = holonomy_core::unlock::ProtectionLayer {
-        pad: true,
-        pad_fresh: true,
-        post_quantum: true,
-    };
-    let stratum =
-        holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys);
-    let sealed = seal_container(
-        &stratum,
-        &[&[]],
-        SaltBytes::of_unknown_origin(salt),
-        ctx.cursor,
-        ctx.kappa_usb,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut image = vec![0u8; CONTAINER_BYTES];
-    sealed
-        .encode_into(&mut image, identity_placement)
-        .map_err(|e| e.to_string())?;
     file.write_image(&image).map_err(|e| e.to_string())
 }
 
