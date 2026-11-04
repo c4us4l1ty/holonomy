@@ -261,7 +261,10 @@ mod tests {
         // wrap: the previous version reduced modulo ZONE_B_SECTORS and reported `[0, 32,768)` at
         // cursor 54, which is a fresh-looking window over sectors that had already been spent.
         assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
-        assert_ne!(s, 0, "cursor 54 must not report the same window as cursor 0");
+        assert_ne!(
+            s, 0,
+            "cursor 54 must not report the same window as cursor 0"
+        );
         assert!(e <= holonomy_core::feistel::DOMAIN as u64);
     }
 
@@ -274,7 +277,10 @@ mod tests {
         for _ in 0..54 {
             b.complete_save().unwrap();
         }
-        assert!(!b.is_fresh(), "54 saves exhaust the window whatever the mode");
+        assert!(
+            !b.is_fresh(),
+            "54 saves exhaust the window whatever the mode"
+        );
         b.complete_save().expect("writable device may continue");
         assert!(!b.is_fresh(), "continuing does not make stale pad fresh");
     }
@@ -301,7 +307,8 @@ mod tests {
         // fresh when it is not.
         let mut b = PadBudget::fresh();
         for _ in 0..200 {
-            b.complete_save().expect("a ratcheting session never exhausts");
+            b.complete_save()
+                .expect("a ratcheting session never exhausts");
             assert!(b.is_fresh(), "one save after a ratchet is always fresh");
             b.record_ratchet(PAD_SECTORS_PER_SAVE).unwrap();
         }
@@ -346,6 +353,9 @@ mod tests {
         let (s, e) = b.logical_range();
         assert_eq!((s, e), (54 * 32_768, 55 * 32_768));
         assert_eq!(e - s, PAD_SECTORS_PER_SAVE as u64);
-        assert_ne!(s, 0, "cursor 54 must not report the window cursor 0 reported");
+        assert_ne!(
+            s, 0,
+            "cursor 54 must not report the window cursor 0 reported"
+        );
     }
 }
