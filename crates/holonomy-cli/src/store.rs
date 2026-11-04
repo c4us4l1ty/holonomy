@@ -499,7 +499,12 @@ pub fn provision(
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|e| format!("creating {} (existing paths are never overwritten): {e}", path.display()))?;
+        .map_err(|e| {
+            format!(
+                "creating {} (existing paths are never overwritten): {e}",
+                path.display()
+            )
+        })?;
     let mut file = ContainerFile {
         file: handle,
         path: path.display().to_string(),
