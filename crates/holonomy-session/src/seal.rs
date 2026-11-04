@@ -488,8 +488,8 @@ mod tests {
         )
         .expect("directory opens");
         // `open_directory` returns the fixed-length array, so no copy is needed to know its size.
-        let ledger = crate::directory::DirectoryLedger::decode(&plain, &[commitment])
-            .expect("decode");
+        let ledger =
+            crate::directory::DirectoryLedger::decode(&plain, &[commitment]).expect("decode");
         assert_eq!(ledger.cursor, 54);
         assert_eq!(ledger.stratum, 3);
         assert_eq!(ledger.slot_count(), 1);
@@ -516,7 +516,10 @@ mod tests {
             &commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -535,7 +538,10 @@ mod tests {
             &sealed.slots[0].commitment,
         )
         .unwrap_err();
-        assert!(matches!(err, SealError::Aead(AeadError::CommitmentMismatch)));
+        assert!(matches!(
+            err,
+            SealError::Aead(AeadError::CommitmentMismatch)
+        ));
     }
 
     #[test]
@@ -554,7 +560,10 @@ mod tests {
         // A colliding placement is refused rather than silently writing the same block twice.
         let two = seal_container(&s, &[b"x", b"y"], salt(0x72), 0, &KAPPA).expect("seal");
         let err = two.encode_into(&mut image, |_| 2).unwrap_err();
-        assert!(matches!(err, SealError::BadPlacement { slot: 1, .. }), "{err}");
+        assert!(
+            matches!(err, SealError::BadPlacement { slot: 1, .. }),
+            "{err}"
+        );
     }
 
     #[test]

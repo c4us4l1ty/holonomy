@@ -75,7 +75,8 @@ impl SaltBytes {
         // The only failure mode of `getrandom` is a kernel with no CSPRNG, in which case this
         // process must not continue holding a document at all. Panicking is the correct response:
         // a zero salt would key every container's permutation from a constant.
-        rng::fill(&mut bytes).expect("the OS CSPRNG must be available before any secret is created");
+        rng::fill(&mut bytes)
+            .expect("the OS CSPRNG must be available before any secret is created");
         Self {
             bytes,
             origin: SaltOrigin::SanctionedRead,
@@ -225,8 +226,9 @@ mod tests {
     use super::*;
     use holonomy_core::layout::TOTAL_BLOCKS;
 
-    fn device_with(salt: [u8; SALT_BYTES]) -> impl FnMut(usize, &mut [u8]) -> Result<(), std::io::Error>
-    {
+    fn device_with(
+        salt: [u8; SALT_BYTES],
+    ) -> impl FnMut(usize, &mut [u8]) -> Result<(), std::io::Error> {
         move |offset, buf| {
             assert_eq!(offset, SALT_OFFSET, "the reader must ask for the salt slot");
             let mut image = vec![0xA5u8; TOTAL_BLOCKS * SLOT_BYTES];
@@ -241,7 +243,10 @@ mod tests {
         // FR-4.2 as arithmetic. A salt outside the pad would be the one stable fingerprint in the
         // file, which is exactly what the format is built to avoid.
         let (offset, len, covered) = salt_layout();
-        assert!(covered, "salt at {offset}, {len} bytes, not covered by the pad");
+        assert!(
+            covered,
+            "salt at {offset}, {len} bytes, not covered by the pad"
+        );
         assert_eq!(offset, SLOT_BYTES);
     }
 
@@ -270,7 +275,10 @@ mod tests {
         // not hold, and 56 bytes of salt would be silently whatever was in its buffer.
         let mut slot = [0u8; 8];
         let err = ContainerHeader::open(device_with([1u8; SALT_BYTES]), &mut slot).unwrap_err();
-        assert!(matches!(err, HeaderError::BufferTooSmall { found: 8 }), "{err}");
+        assert!(
+            matches!(err, HeaderError::BufferTooSmall { found: 8 }),
+            "{err}"
+        );
     }
 
     #[test]
