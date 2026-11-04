@@ -1,9 +1,12 @@
 name: Audit
 
 # Runs the gates that make docs/PRD-v5.1.0.md §12 true, and the source audits that defend the
-# invariants v5.1.0 deleted. Deliberately separate from a `ci.yml` that would build holonomy-ui:
-# that one needs crates.io and wordcraft's pinned `craft-*` git dependencies, and these gates must
-# keep running even when that network is unavailable.
+# invariants v5.1.0 deleted.
+#
+# Deliberately split in two. The five non-`wordcraft` crates build anywhere; `holonomy-ui` needs
+# crates.io plus wordcraft's pinned `craft-*` git dependencies, and its graph transitively reaches
+# `craft-pdf`, which does not compile at the pinned rev. The gates that decide whether a container
+# is safe must not depend on that.
 on:
   push:
     branches: ["**"]
@@ -13,66 +16,18 @@ on:
 env:
   CARGO_TERM_COLOR: never
   RUSTFLAGS: "-D warnings"
+  PACKAGES: "-p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime -p holonomy-session -p holonomy-cli"
+
+# The crates that build without `wordcraft`. Kept as one list so a gate cannot quietly test a
+# subset of the product.
+#   PACKAGES = -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime
+#              -p holonomy-session -p holonomy-cli
 
 jobs:
-  # Can `holonomy-ui` link here at all? GitHub runners have crates.io and github.com, unlike the
-  # sandbox this workspace was authored in, so this is an exploratory job: it *generates the
-  # lockfile* (which the repository does not carry) and attempts a build, publishing diagnostics as
-  # annotations. It is allowed to fail while the answer is being established.
-  ui-probe:
-    name: holonomy-ui probe
-    runs-on: ubuntu-latest
-    needs: format
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install the toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-ui-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-ui-
-      - name: Fetch the dependency graph and generate Cargo.lock
-        run: |
-          set -o pipefail
-          cargo fetch 2>&1 | tee fetch.log | tail -40
-      - name: Report fetch errors as annotations
-        if: failure()
-        run: |
-          set +e
-          # `cargo fetch` failing is the most likely outcome and the most useful one: it says
-          # whether the blocker is crates.io, a git pin, or the MSRV.
-          tail -25 fetch.log 2>/dev/null | while IFS= read -r line; do
-            [ -n "$line" ] && echo "::error::$line"
-          done
-      - name: Build holonomy-ui
-        run: |
-          set -o pipefail
-          cargo build -p holonomy-ui --all-targets --message-format=short 2>&1 | tee ui.log
-      - name: Report compiler errors as annotations
-        if: failure()
-        run: |
-          set +e
-          grep -E '^(error|warning)(\[|:)' ui.log | head -60 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-      - name: Upload the lockfile attempt
-        uses: actions/upload-artifact@v4
-        with:
-          name: Cargo.lock
-          path: Cargo.lock
-          if-no-files-found: ignore
-
-  # rustfmt is deterministic and non-negotiable, so it should not be something a human has to
-  # round-trip through review. This job formats the tree and, if that changed anything, commits
-  # and pushes. The next run finds nothing to format, so it converges after one extra run.
+  # rustfmt is deterministic and non-negotiable, so it should not be something a human round-trips
+  # through review. This job formats and, if that changed anything, commits and pushes; the next
+  # run finds nothing to do. It needs a real branch (not a detached HEAD) and must re-fetch, because
+  # two pushes in quick succession otherwise leave it holding a stale commit whose push is rejected.
   format:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -87,23 +42,15 @@ jobs:
       - name: Format and commit
         run: |
           set -euo pipefail
-          # `actions/checkout` can leave a detached HEAD, in which case a bare `git push` fails with
-          # "you are not currently on a branch". Check out a real local branch tracking the remote,
-          # so both the commit and the push have a ref to attach to. Two pushes in quick succession
-          # also leave this job behind, hence the fetch-then-reset rather than a plain checkout.
           git fetch origin "$BRANCH"
           git checkout -B "$BRANCH" "origin/$BRANCH"
-
           cargo fmt --all
-
-          # `git diff` only reports tracked files; `status --porcelain` also catches a file that
-          # formatting would create. Formatting never creates files today, but a gate that silently
-          # ignores a class of change is the kind of gate this project keeps having to fix.
+          # `status --porcelain`, not `diff --quiet`: the latter ignores files formatting would
+          # create, which is a class of change this gate should not silently skip.
           if [ -z "$(git status --porcelain)" ]; then
             echo "already formatted"
             exit 0
           fi
-
           git config user.name  "holonomy-ci"
           git config user.email "ci@holonomy.invalid"
           git add -A
@@ -117,8 +64,6 @@ jobs:
         if: failure()
         run: |
           set +e
-          # This job has no log channel the author can reach, so every diagnostic has to come back
-          # as an annotation or it may as well not exist.
           echo "::error::rustfmt gate failed"
           cargo fmt --all -- --check 2>&1 | head -30 | while IFS= read -r line; do
             [ -n "$line" ] && echo "::error::fmt: $line"
@@ -127,103 +72,6 @@ jobs:
             echo "::error::dirty: $line"
           done
 
-  ui-probe:
-    name: holonomy-ui probe
-    runs-on: ubuntu-latest
-    needs: format
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install the toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-ui-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-ui-
-      - name: Fetch the dependency graph and generate Cargo.lock
-        run: |
-          set -o pipefail
-          cargo fetch 2>&1 | tee fetch.log | tail -40
-      - name: Report fetch errors as annotations
-        if: failure()
-        run: |
-          set +e
-          # `cargo fetch` failing is the most likely outcome and the most useful one: it says
-          # whether the blocker is crates.io, a git pin, or the MSRV.
-          tail -25 fetch.log 2>/dev/null | while IFS= read -r line; do
-            [ -n "$line" ] && echo "::error::$line"
-          done
-      - name: Build holonomy-ui
-        run: |
-          set -o pipefail
-          cargo build -p holonomy-ui --all-targets --message-format=short 2>&1 | tee ui.log
-      - name: Report compiler errors as annotations
-        if: failure()
-        run: |
-          set +e
-          grep -E '^(error|warning)(\[|:)' ui.log | head -60 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-      - name: Upload the lockfile attempt
-        uses: actions/upload-artifact@v4
-        with:
-          name: Cargo.lock
-          path: Cargo.lock
-          if-no-files-found: ignore
-
-  # rustfmt is deterministic and non-negotiable, so it should not be something a human has to
-  # round-trip through review. This job formats the tree and, if that changed anything, commits
-  # and pushes. The next run finds nothing to format, so it converges after one extra run.
-  format:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
-      - run: rustup toolchain install stable --profile minimal --component rustfmt
-      - name: Format and commit
-        run: |
-          # Re-fetch before formatting. The checked-out ref can already be behind: two pushes in
-          # quick succession leave this job holding an older commit, and without the rebase the
-          # push below is rejected as non-fast-forward and the whole run fails on plumbing rather
-          # than on code.
-          git fetch origin "${{ github.ref_name }}"
-          git reset --hard "origin/${{ github.ref_name }}"
-          cargo fmt --all
-          if git diff --quiet; then
-            echo "already formatted"
-          else
-            git config user.name  "holonomy-ci"
-            git config user.email "ci@holonomy.invalid"
-            git add -A
-            git commit -m "style: cargo fmt (automated, no manual edits)"
-            # Retry once: another job or a human push may land between the fetch and the push.
-            git push || { git fetch origin "${{ github.ref_name }}"; git rebase "origin/${{ github.ref_name }}"; git push; }
-      - name: Report formatting failures as annotations
-        if: failure()
-        run: |
-          set +e
-          # This job has no log channel the author can reach, so everything diagnostic has to come
-          # back as an annotation or it may as well not exist.
-          echo "::error::rustfmt gate failed; see the diff below"
-          cargo fmt --all -- --check 2>&1 | head -30 | while IFS= read -r line; do
-            [ -n "$line" ] && echo "::error::$line"
-          done
-          git status --porcelain | head -10 | while IFS= read -r line; do
-            echo "::error::dirty: $line"
-          done
-          fi
   core-crates:
     name: core crates (no wordcraft)
     runs-on: ubuntu-latest
@@ -249,37 +97,34 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       # `--message-format=short` keeps each diagnostic on one line with `file:line:col: error: ...`,
-      # which is what the annotation step below turns into a check annotation. That matters here
-      # because GitHub's raw job logs live on a blob host this project's CI author cannot reach;
-      # annotations come back through api.github.com instead.
-      - name: Build the four core crates
+      # which is what the annotation step below turns into a check annotation. That matters because
+      # GitHub's raw job logs live on a blob host this project's CI author cannot reach; annotations
+      # come back through api.github.com instead.
+      - name: Build
         run: |
           set -o pipefail
-          cargo build -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
-            --all-targets --message-format=short 2>&1 | tee build.log
+          cargo build ${{ env.PACKAGES }} --all-targets --message-format=short 2>&1 | tee build.log
 
       - name: Report compiler errors as annotations
         if: failure()
         run: |
           set +e
-          echo "### build diagnostics (first 60 error lines)"
           grep -E ': (error|warning)(\[[A-Z0-9]+\])?:' build.log | head -60 | while IFS= read -r line; do
             echo "::error::$line"
           done
-          echo "### context (last 80 lines of the build)"
+          echo "### context (last 80 lines)"
           tail -80 build.log
 
-      - name: Test the four core crates
+      - name: Test
         run: |
           set -o pipefail
-          cargo test -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
-            --message-format=short 2>&1 | tee test.log
+          cargo test ${{ env.PACKAGES }} --message-format=short 2>&1 | tee test.log
 
       - name: Report test failures as annotations
         if: failure()
         run: |
           set +e
-          grep -E "^(error|failures:|test .* FAILED)|panicked at" test.log | head -60 | while IFS= read -r line; do
+          grep -E "^(error|failures:)|panicked at|test result: FAILED" test.log | head -60 | while IFS= read -r line; do
             echo "::error::$line"
           done
           grep -E "^---- .* stdout ----$" -A 12 test.log | head -200
@@ -287,8 +132,7 @@ jobs:
       - name: Clippy
         run: |
           set -o pipefail
-          cargo clippy -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime \
-            --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.log
+          cargo clippy ${{ env.PACKAGES }} --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.log
 
       - name: Report clippy findings as annotations
         if: failure()
@@ -313,6 +157,11 @@ jobs:
             echo "::error::$line"
           done
 
+      # The binary is a gate in its own right: it must build and run before the memory job can
+      # measure anything, and `--version` is the cheapest proof that the workspace links.
+      - name: The binary runs
+        run: cargo run -q -p holonomy-cli -- --version
+
   invariants:
     name: invariant gates
     runs-on: ubuntu-latest
@@ -330,39 +179,61 @@ jobs:
       - run: rustup toolchain install stable --profile minimal && rustup default stable
 
       # The compile-time assertions in holonomy-core are the deliverable for FR-4.3. A build is the
-      # proof, so this job's only content is "does the assertion hold".
-      - name: Capsule is exactly 65,536 bytes (compile-time)
+      # proof, so this job's content is "does the assertion hold", one claim per step so a failure
+      # names the claim it broke.
+      - name: Capsule is exactly 65,536 bytes
         run: |
           cargo test -p holonomy-core capsule_is_exactly_one_slot -- --nocapture
           cargo test -p holonomy-core field_sum_matches_the_audited_table -- --nocapture
+          cargo test -p holonomy-core --test '*' capsule_is_exactly_one_slot_after_a_real_build -- --nocapture
+
+      - name: Directory is a fixed length, so its commitment can be verified
+        run: |
+          cargo test -p holonomy-crypto directory_tests -- --nocapture
+          cargo test -p holonomy-crypto unlock_recovers_the_directory -- --nocapture
 
       - name: Pad budget is 54 saves with zero overlap
         run: |
-          cargo test -p holonomy-core zero_overlap_across_fifty_four_saves -- --nocapture
-          cargo test -p holonomy-usb plans_for_consecutive_saves_are_disjoint -- --nocapture
+          cargo test -p holonomy-core never_collide -- --nocapture
+          cargo test -p holonomy-core the_budget_is_a_pigeonhole_bound -- --nocapture
           cargo test -p holonomy-usb --test property -- --nocapture
+          cargo test -p holonomy-session the_plan_over_a_full_budget_is_disjoint -- --nocapture
 
-      - name: FPE-22 reaches the whole of Zone B
+      - name: FPE-22 reaches the sectors FPE-20 excluded
         run: |
           cargo test -p holonomy-core full_zone_b_is_reachable -- --nocapture
           cargo test -p holonomy-usb sectors_that_fpe_20_could_never_reach_are_reached -- --nocapture
           cargo test -p holonomy-usb the_pad_budget_uses_more_than_half_the_drive -- --nocapture
+
+      - name: A save is refused rather than silently downgraded
+        run: |
+          cargo test -p holonomy-session the_fifty_fifth_save_on_a_read_only_device_is_refused -- --nocapture
+          cargo test -p holonomy-session a_partial_ratchet_is_refused_rather_than_counted -- --nocapture
+          cargo test -p holonomy-session a_refused_save_does_not_advance_the_budget -- --nocapture
+          cargo test -p holonomy-crypto pad_budget -- --nocapture
 
       - name: Statistical gates use the corrected constants
         run: |
           cargo test -p holonomy-core sigma_is_the_documented_number -- --nocapture
           cargo test -p holonomy-core old_tolerance_is_ten_sigma -- --nocapture
           cargo test -p holonomy-core barely_changed_snapshot_fails_on_the_run_gate -- --nocapture
+          cargo test -p holonomy-core a_one_percent_bias_is_caught -- --nocapture
 
       - name: No environmental input reaches a key
         run: |
           cargo test -p holonomy-crypto no_environmental_input_enters_a_key -- --nocapture
           cargo test -p holonomy-crypto no_branchless_decoy_selection -- --nocapture
 
-      - name: Reaper fires, wipes, and reports its scheduler class
+      # The duress requirement, against a real ten-save history rather than a described one.
+      - name: The duress passphrase opens every historical snapshot
+        run: cargo test -p holonomy-crypto --test duress_history -- --nocapture
+
+      - name: Reaper wipes before it terminates, and never on a suspend signal
         run: |
           cargo test -p holonomy-runtime thread_b_fires_and_wipes -- --nocapture
-          cargo test -p holonomy-runtime suspend_is_not_confused_with_a_yank -- --nocapture
+          cargo test -p holonomy-runtime the_wipe_runs_before_termination -- --nocapture
+          cargo test -p holonomy-runtime a_long_gap_without_a_suspend_notification_is_a_yank -- --nocapture
+          cargo test -p holonomy-runtime a_suspend_notification_suppresses_the_wipe -- --nocapture
           cargo test -p holonomy-runtime it_reports_what_it_measures -- --nocapture
 
   memory:
@@ -384,11 +255,34 @@ jobs:
       - name: Documented envelope fits a 2 GiB host
         run: cargo test -p holonomy-core envelope_holds_on_the_legacy_host -- --nocapture
 
-      - name: The old 16.60 MiB claim is rejected
-        run: cargo test -p holonomy-core old_claim_is_rejected_as_too_large -- --nocapture
+      - name: The old 16.60 MiB claim is rejected as an understatement
+        run: cargo test -p holonomy-core old_claim_is_rejected_as_an_understatement -- --nocapture
 
-      # The real gate: measure, don't assert. Placeholder until holonomy-ui is buildable in CI;
-      # when it is, replace with `/usr/bin/time -v ./target/release/holonomy --check` and assert
-      # Maximum resident set size <= 180 MiB steady / 440 MiB peak via budgets::check_against_envelope.
-      - name: Measured RSS gate (deferred until the editor links)
-        run: 'echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"'
+      - name: The gate is two-sided
+        run: cargo test -p holonomy-core the_gate_is_two_sided -- --nocapture
+
+      # The measured gate. This was a placeholder for as long as `holonomy` could not be built,
+      # which meant the project's headline memory claim had never been measured by anything. Now
+      # the binary exists and `--check` reads VmHWM from /proc/self/status, so this measures.
+      - name: Measured peak RSS is inside the steady-state ceiling
+        run: |
+          set -o pipefail
+          /usr/bin/time -v cargo run -q -p holonomy-cli -- --check 2> time.log | tee check.log
+          echo "### --check output"
+          cat check.log
+          # `/usr/bin/time -v` reports the child's peak RSS in KiB.
+          max_rss=$(grep 'Maximum resident set size' time.log | grep -oE '[0-9]+')
+          echo "measured Maximum RSS: ${max_rss} KiB"
+          ceiling=$((180 * 1024))
+          if [ -z "$max_rss" ]; then
+            echo "::error::could not read Maximum resident set size from /usr/bin/time"
+            exit 1
+          fi
+          if [ "$max_rss" -gt "$ceiling" ]; then
+            echo "::error::measured ${max_rss} KiB exceeds the ${ceiling} KiB (180 MiB) steady-state ceiling"
+            exit 1
+          fi
+          echo "measured ${max_rss} KiB, inside the 180 MiB ceiling"
+
+      - name: check exits zero on this runner
+        run: cargo run -q -p holonomy-cli -- --check
