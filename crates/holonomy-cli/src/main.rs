@@ -21,7 +21,10 @@ use holonomy_core::layout::{
     ZONE_B_SECTORS,
 };
 use holonomy_crypto::lock::{self, LockCapability};
+use holonomy_crypto::ParamsClass;
 use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
+
+mod store;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,9 +41,247 @@ fn main() -> ExitCode {
         return check();
     }
 
+    // The three verbs that touch a file. They come before the banner because they are the whole
+    // program for anyone who is not opening a window.
+    if let Some(rest) = args.strip_prefix(&["save".to_string()][..]) {
+        return save(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["open".to_string()][..]) {
+        return open(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["provision".to_string()][..]) {
+        return provision(rest);
+    }
+
     // Everything else needs the editor.
     banner();
     ExitCode::SUCCESS
+}
+
+/// Parsed flags shared by `save`, `open` and `provision`.
+///
+/// Hand-rolled rather than a dependency: the whole surface is four flags, and a CLI parsing crate in
+/// a binary whose job is to be auditable is a crate somebody has to audit.
+struct Flags {
+    path: String,
+    passphrase: String,
+    kappa: [u8; 32],
+    cursor: u64,
+}
+
+fn parse_flags(args: &[String]) -> Result<Flags, String> {
+    let mut path = None;
+    let mut passphrase = None;
+    let mut kappa: Option<[u8; 32]> = None;
+    let mut cursor = 0u64;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--passphrase" => {
+                passphrase = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--kappa" => {
+                let hex = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--kappa needs 64 hex characters".to_string())?;
+                kappa = Some(parse_kappa(hex)?);
+                i += 2;
+            }
+            "--cursor" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--cursor needs a number".to_string())?;
+                cursor = v
+                    .parse()
+                    .map_err(|_| format!("--cursor '{v}' is not a number"))?;
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag '{other}'"));
+            }
+            other => {
+                path = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    Ok(Flags {
+        path: path.ok_or_else(|| "a container path is required".to_string())?,
+        passphrase: passphrase.ok_or_else(|| "--passphrase is required".to_string())?,
+        kappa: kappa.ok_or_else(|| {
+            "--kappa is required: the USB root share is half the key, and this build does not read \
+             Zone A yet"
+                .to_string()
+        })?,
+        cursor,
+    })
+}
+
+/// Decode 64 hex characters into the 32-byte USB root share.
+fn parse_kappa(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 {
+        return Err(format!(
+            "--kappa must be 64 hex characters (32 bytes); got {}",
+            hex.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let pair = &hex[i * 2..i * 2 + 2];
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| format!("--kappa has a non-hex byte '{pair}' at position {i}"))?;
+    }
+    Ok(out)
+}
+
+fn context<'a>(
+    passphrase: &'a holonomy_core::unlock::SealedPassphrase,
+    kappa: &'a [u8; 32],
+    cursor: u64,
+) -> store::SaveContext<'a> {
+    store::SaveContext {
+        passphrase,
+        kappa_usb: kappa,
+        topology: holonomy_core::unlock::Topology::UmbilicalUsb,
+        params: ParamsClass::Legacy,
+        cursor,
+    }
+}
+
+/// `holonomy provision <path> --passphrase P --kappa HEX [--cursor N]`
+///
+/// Creates the container. The work is in `store::provision`; this function owns only the argument
+/// handling and the reporting, so there is one implementation of "what the first save does".
+fn provision(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return usage_error(e),
+    };
+    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
+        Some(p) => p,
+        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    };
+
+    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    match store::provision(std::path::Path::new(&flags.path), &ctx) {
+        Ok(()) => {
+            println!("provisioned {}", flags.path);
+            println!(
+                "  {} bytes, one stratum, an empty document",
+                CONTAINER_BYTES
+            );
+            println!("  the container is written under its own pad window, as every save is");
+            println!(
+                "  the next save must be run with --cursor {}",
+                flags.cursor + 1
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => failure(e),
+    }
+}
+
+/// `holonomy save <path> --passphrase P --kappa HEX [--cursor N] < file`
+fn save(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return usage_error(e),
+    };
+    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
+        Some(p) => p,
+        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    };
+    // The document comes from stdin. A path argument would be a second way to name a secret and a
+    // second thing to get wrong; stdin is what an editor and a pipe both produce.
+    let mut document = Vec::new();
+    if let Err(e) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut document) {
+        return usage_error(format!("reading the document from stdin: {e}"));
+    }
+
+    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), true) {
+        Ok(f) => f,
+        Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
+    };
+    match store::save(&mut file, &ctx, &document) {
+        Ok(report) => {
+            println!("saved {}", flags.path);
+            println!(
+                "  {} bytes of document in {} slot(s), {} pad sectors folded",
+                report.plaintext_bytes, report.slots, report.pad_sectors
+            );
+            println!(
+                "  image digest {}",
+                report
+                    .digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            println!(
+                "  ratchet: {}",
+                match report.ratcheted {
+                    Some(n) => format!("{n} sectors rewritten"),
+                    None => "not run — this build writes a file, not a stick".to_string(),
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => failure(e),
+    }
+}
+
+/// `holonomy open <path> --passphrase P --kappa HEX [--cursor N]`
+fn open(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(f) => f,
+        Err(e) => return usage_error(e),
+    };
+    let passphrase = match holonomy_core::unlock::SealedPassphrase::new(&flags.passphrase) {
+        Some(p) => p,
+        None => return usage_error("the passphrase must be 1..=255 bytes after normalisation"),
+    };
+
+    let ctx = context(&passphrase, &flags.kappa, flags.cursor);
+    let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
+        Ok(f) => f,
+        Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
+    };
+    match store::open_document(&mut file, &ctx) {
+        Ok((opened, document)) => {
+            eprintln!(
+                "opened {}: stratum L_{}, {} slot(s), save cursor {}",
+                flags.path,
+                opened.stratum.id().index(),
+                opened.directory.slot_count(),
+                opened.cursor()
+            );
+            use std::io::Write;
+            if let Err(e) = std::io::stdout().write_all(&document) {
+                return failure(format!("writing the document to stdout: {e}"));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => failure(e),
+    }
+}
+
+/// `impl AsRef<str>` rather than `&str`: a `String` from `format!` and a `&'static str` literal are
+/// both call sites, and a plain `&str` forces every formatted one to be borrowed at the point of
+/// the call -- which reads as `&e` where `e: String` and then fails with "the size for values of
+/// type `str` cannot be known", an error that names the deref rather than the mismatch.
+fn usage_error(message: impl AsRef<str>) -> ExitCode {
+    eprintln!("holonomy: {}", message.as_ref());
+    eprintln!("run `holonomy --help` for usage");
+    ExitCode::from(2)
+}
+
+fn failure(message: impl AsRef<str>) -> ExitCode {
+    eprintln!("holonomy: {}", message.as_ref());
+    ExitCode::FAILURE
 }
 
 fn version() {
@@ -65,6 +306,17 @@ fn help() {
          \x20   holonomy --check      verify this machine against the documented invariants\n\
          \x20   holonomy --version    build and layout constants\n\
          \x20   holonomy --help       this text\n\
+         \n\
+         CONTAINERS:\n\
+         \x20   holonomy provision <path> --passphrase P --kappa HEX [--cursor N]\n\
+         \x20   holonomy save <path> --passphrase P --kappa HEX [--cursor N] < document\n\
+         \x20   holonomy open <path> --passphrase P --kappa HEX [--cursor N]\n\
+         \n\
+         `--kappa` is the 32-byte USB root share, as 64 hex characters. It is required: this build\n\
+         does not read Zone A yet, so the half of the key that lives on the stick has to be handed\n\
+         in. `--cursor` is the save counter that selects the pad window; it must be the number the\n\
+         previous save recorded, and 0 for a container that has only been provisioned.\n\
+         \n
          \n\
          `--check` exits 0 if every gate that *can* run here passed. Findings are classified:\n\
          \x20   ok        measured and correct\n\
