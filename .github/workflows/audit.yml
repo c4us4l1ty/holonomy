@@ -1,0 +1,106 @@
+name: Audit
+
+# Runs the gates that make docs/PRD-v5.1.0.md §12 true, and the source audits that defend the
+# invariants v5.1.0 deleted. Deliberately separate from a `ci.yml` that would build holonomy-ui:
+# that one needs crates.io and wordcraft's pinned `craft-*` git dependencies, and these gates must
+# keep running even when that network is unavailable.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  core-crates:
+    name: core crates (no wordcraft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      # `holonomy-ui` is excluded here: it depends on wordcraft, which needs crates.io and the
+      # craft-libs git pins. Everything security-relevant is in the other four crates and must
+      # build and test with nothing but the upstream RustCrypto + dalek + libc + getrandom set.
+      - name: Build the four core crates
+        run: |
+          cargo build -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime --all-targets
+
+      - name: Test the four core crates
+        run: |
+          cargo test -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime
+
+      - name: Clippy
+        run: |
+          cargo clippy -p holonomy-core -p holonomy-crypto -p holonomy-usb -p holonomy-runtime --all-targets -- -D warnings
+
+      - name: Formatting
+        run: cargo fmt --check
+
+  invariants:
+    name: invariant gates
+    runs-on: ubuntu-latest
+    needs: core-crates
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # The compile-time assertions in holonomy-core are the deliverable for FR-4.3. A build is the
+      # proof, so this job's only content is "does the assertion hold".
+      - name: Capsule is exactly 65,536 bytes (compile-time)
+        run: |
+          cargo test -p holonomy-core capsule_is_exactly_one_slot -- --nocapture
+          cargo test -p holonomy-core field_sum_matches_the_audited_table -- --nocapture
+
+      - name: Pad budget is 54 saves with zero overlap
+        run: |
+          cargo test -p holonomy-core zero_overlap_across_fifty_four_saves -- --nocapture
+          cargo test -p holonomy-usb plans_for_consecutive_saves_are_disjoint -- --nocapture
+
+      - name: FPE-22 reaches the whole of Zone B
+        run: cargo test -p holonomy-core full_zone_b_is_reachable -- --nocapture
+
+      - name: Statistical gates use the corrected constants
+        run: |
+          cargo test -p holonomy-core sigma_is_the_documented_number -- --nocapture
+          cargo test -p holonomy-core old_tolerance_is_ten_sigma -- --nocapture
+          cargo test -p holonomy-core barely_changed_snapshot_fails_on_the_run_gate -- --nocapture
+
+      - name: No environmental input reaches a key
+        run: |
+          cargo test -p holonomy-crypto no_environmental_input_enters_a_key -- --nocapture
+          cargo test -p holonomy-crypto no_branchless_decoy_selection -- --nocapture
+
+      - name: Reaper fires, wipes, and reports its scheduler class
+        run: |
+          cargo test -p holonomy-runtime thread_b_fires_and_wipes -- --nocapture
+          cargo test -p holonomy-runtime suspend_is_not_confused_with_a_yank -- --nocapture
+          cargo test -p holonomy-runtime it_reports_what_it_measures -- --nocapture
+
+  memory:
+    name: memory envelope
+    runs-on: ubuntu-latest
+    needs: core-crates
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Documented envelope fits a 2 GiB host
+        run: cargo test -p holonomy-core envelope_holds_on_the_legacy_host -- --nocapture
+
+      - name: The old 16.60 MiB claim is rejected
+        run: cargo test -p holonomy-core old_claim_is_rejected_as_too_large -- --nocapture
+
+      # The real gate: measure, don't assert. Placeholder until holonomy-ui is buildable in CI;
+      # when it is, replace with `/usr/bin/time -v ./target/release/holonomy --check` and assert
+      # Maximum resident set size <= 180 MiB steady / 440 MiB peak via budgets::check_against_envelope.
+      - name: Measured RSS gate (deferred until the editor links)
+        run: echo "deferred: needs holonomy-ui, which needs crates.io + craft-libs"

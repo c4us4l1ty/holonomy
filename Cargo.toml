@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/holonomy-core",
+    "crates/holonomy-crypto",
+    "crates/holonomy-usb",
+    "crates/holonomy-runtime",
+    "crates/holonomy-ui",
+]
+
+# The scrapyard. `holonomy-old/` is ~142.5k lines at v3.0.0-SINGULARITY and is kept
+# READ-ONLY as a reference for small, self-contained low-level helpers: 4096-byte O_DIRECT
+# alignment rules, the Argon2id/VDF wrapper shape, and the per-OS lock syscalls. Nothing in
+# this workspace depends on it, and it is excluded so it keeps resolving against its own
+# lockfile instead of ours. Do not delete it; do not build on it.
+exclude = ["holonomy-old"]
+
+[workspace.package]
+version = "5.1.0"
+edition = "2021"
+# wordcraft pins rust-version = 1.95 and uses edition 2024 internally. We stay on edition
+# 2021 for our own crates (nothing here needs 2024) but must meet its MSRV to depend on it.
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+repository = "https://github.com/c4us4l1ty/holonomy"
+
+[workspace.dependencies]
+# --- wordcraft, pinned -------------------------------------------------------------
+# Not `wordcraft-core`: that package does not exist. Upstream is a workspace of
+# geom/doc/fonts/layout/render/ui-egui (+ formats/pdf/docx/engine). We take the six the
+# PRD's §9 row intended, and pin the whole set to one rev so nothing resolves twice.
+#
+# `gix` fetches from github.com, which is the transport this environment allows; the git
+# selectors are also produced in Cargo.lock so a mirror rebuild stays reproducible.
+wordcraft-geom = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-fonts = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-layout = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+
+# --- cryptography -------------------------------------------------------------------
+# 0.3.4 (2026-10-31) is the current line and already contains the reduction hardening the
+# old PRD asked us to implement: it depends on `ctutils` 0.4.5 and its changelog ships
+# "Harden reduction using newly-hardened ctutils" (#409) plus hardened equality and
+# zeroization (#414/#415). Pinning 0.2, as the superseded PRD did, would ship *before* that.
+ml-kem = { version = "0.3.4", default-features = false, features = ["alloc", "zeroize"] }
+# No `elligator` feature exists for X25519/Montgomery in dalek (only ristretto/elligator.rs),
+# and none is needed: the full 64 KiB XChaCha20(K_whiten) stream whitens the root block, so a
+# uniform-looking ephemeral key buys nothing. Plain X25519.
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
+blake2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.6", default-features = false }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+# --- platform -----------------------------------------------------------------------
+libc = "0.2"
+
+# --- dev ----------------------------------------------------------------------------
+hex = "0.4"
+
+# Release shape. `panic = "abort"` is a size and attack-surface choice, not unwinding;
+# nothing here relies on unwinding for control flow.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true
+
+# `cargo test` needs unwinding, and the guard-page/tripwire assertions run under dev.
+[profile.dev]
+opt-level = 0
+overflow-checks = true

@@ -1,0 +1,545 @@
+//! The two-phase post-quantum key envelope (`ML-KEM-1024` + `X25519`), and [`StratumKeys`]
+//! derivation from it.
+//!
+//! # Why two phases
+//!
+//! The superseded PRD's `v4.0.0` deadlocked at slot `π(0)`: the root capsule held the ciphertext
+//! that unlocked the root capsule. v5 separated the two secrets that were being conflated:
+//!
+//! ```text
+//!   passphrase + σ_epoch ──Argon2id──> root secret ──> K_perm, K_whiten, K_unwrap
+//!                                                          │
+//!   slot 0: unwhiten with K_whiten ─────────────────────────┘
+//!           unwrap SK_stratum with K_unwrap        <-- phase 1 (symmetric, no KEM yet)
+//!           decapsulate (ct_ml_kem_1024, ct_x25519) with SK_stratum  <-- phase 2
+//!           K_DEM = BLAKE2b("DEM" ‖ ss_pq ‖ ss_ecc ‖ ct_pq ‖ ct_ecc ‖ κ)  <-- use
+//! ```
+//!
+//! The invariant that makes it non-circular: **`K_unwrap` comes from the passphrase, never from
+//! the capsule.** Everything inside slot 0 that unlocks slot 0 is derived before slot 0 is read.
+//! `tests/two_phase.rs` asserts it by unlocking with a `K_unwrap` computed from a known passphrase
+//! and a capsule whose contents are deliberately garbage.
+//!
+//! # What is deliberately absent
+//!
+//! * **No `Elligator2`.** There is no Elligator2 for Montgomery/X25519 in
+//!   `curve25519-dalek` (only `ristretto/elligator.rs`), so `ct_x25519_elligator` could not have
+//!   been built from the crates the PRD named. It is not needed either: the whole 64 KiB root
+//!   block is stream-whitened with `XChaCha20(K_whiten)`, so the on-disk bytes are uniform
+//!   regardless of what the ephemeral key looks like. The field is a plain `X25519` public key.
+//! * **No `SK_stratum` retention.** It is unwrapped, used, and dropped before `K_DEM` is returned.
+//!   Only `PK_stratum` survives, which is what lets a background save encapsulate without the
+//!   private key present.
+
+use blake2::{Blake2b512, Digest};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use holonomy_core::capsule::{
+    ML_KEM_1024_CT_BYTES, ML_KEM_1024_SK_BYTES, POLY1305_TAG_BYTES, WRAPPED_SK_BYTES,
+    X25519_SK_BYTES, XCHACHA_NONCE_BYTES,
+};
+use holonomy_core::stratum::StratumKeys;
+use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::commit::{cmt4_tag, cmt4_verify, CMT4_TAG_BYTES};
+use crate::kdf::{derive_subkey, labels, RootSecret, Subkey};
+
+/// A hybrid KEM keypair, encoded at the sizes the capsule layout expects.
+///
+/// The decapsulation half is `Zeroize`d on drop and deliberately not `Clone`: a second copy of a
+/// private key is a second thing to leak.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct HybridDecapsulationKey {
+    /// `ML-KEM-1024` decapsulation key, 3,168 bytes expanded.
+    ml_kem: [u8; ML_KEM_1024_SK_BYTES],
+    /// `X25519` static secret.
+    x25519: [u8; X25519_SK_BYTES],
+}
+
+/// The public half.
+#[derive(Clone)]
+pub struct HybridEncapsulationKey {
+    /// `ML-KEM-1024` encapsulation key.
+    pub ml_kem: Vec<u8>,
+    /// `X25519` public key.
+    pub x25519: [u8; X25519_SK_BYTES],
+}
+
+/// A ciphertext pair.
+#[derive(Clone)]
+pub struct HybridCiphertext {
+    /// FIPS 203 ciphertext, exactly 1,568 bytes.
+    pub ml_kem: [u8; ML_KEM_1024_CT_BYTES],
+    /// Ephemeral `X25519` public key.
+    pub x25519: [u8; X25519_SK_BYTES],
+}
+
+/// The 64 bytes of shared secret the combiner consumes.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SharedSecrets {
+    /// `ML-KEM` shared secret.
+    pub pq: [u8; 32],
+    /// `X25519` shared secret.
+    pub ecc: [u8; 32],
+}
+
+/// Failure of an envelope operation. Coarse on purpose — a decryption oracle needs detail, and
+/// nothing here provides any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeError {
+    /// Unwrapping `SK_stratum` failed (wrong `K_unwrap`, damaged capsule).
+    UnwrapFailed,
+    /// The phase-1 CMT-4 commitment did not match.
+    Phase1CommitmentMismatch,
+    /// The phase-2 CMT-4 commitment did not match.
+    Phase2CommitmentMismatch,
+    /// The KEM rejected the key or ciphertext.
+    KemRejected,
+    /// An encoded length did not match the capsule schema.
+    BadLength,
+}
+
+impl std::fmt::Display for EnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnwrapFailed => f.write_str("could not unwrap the stratum secret key"),
+            Self::Phase1CommitmentMismatch => f.write_str("phase-1 commitment mismatch"),
+            Self::Phase2CommitmentMismatch => f.write_str("phase-2 commitment mismatch"),
+            Self::KemRejected => f.write_str("KEM rejected the key or ciphertext"),
+            Self::BadLength => f.write_str("encoded length does not match the capsule schema"),
+        }
+    }
+}
+
+impl std::error::Error for EnvelopeError {}
+
+/// Wrap `SK_stratum` under `K_unwrap`.
+///
+/// Output is exactly [`holonomy_core::capsule::WRAPPED_SK_BYTES`] (3,216): `3,168 + 32` bytes of
+/// ciphertext plus the 16-byte Poly1305 tag. The nonce is the capsule's sibling
+/// `sk_unwrap_nonce`, not part of the output — which is the correction to the old layout's
+/// double-counted field.
+pub fn wrap_stratum_key(
+    k_unwrap: &[u8; 32],
+    nonce: &[u8; XCHACHA_NONCE_BYTES],
+    dk: &[u8; ML_KEM_1024_SK_BYTES],
+    x_sk: &[u8; X25519_SK_BYTES],
+) -> [u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES] {
+    let mut plain = [0u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES];
+    plain[..ML_KEM_1024_SK_BYTES].copy_from_slice(dk);
+    plain[ML_KEM_1024_SK_BYTES..].copy_from_slice(x_sk);
+
+    let cipher = XChaCha20Poly1305::new_from_slice(k_unwrap).expect("32-byte key");
+    let sealed = cipher
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: &plain,
+                aad: b"HOLONOMY_V51_SK_WRAP",
+            },
+        )
+        .expect("bounded buffer");
+    plain.zeroize();
+
+    let mut out = [0u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES];
+    out.copy_from_slice(&sealed);
+    out
+}
+
+/// Unwrap `SK_stratum`, returning the two secret halves. Caller must drop them immediately.
+pub fn unwrap_stratum_key(
+    k_unwrap: &[u8; 32],
+    nonce: &[u8; XCHACHA_NONCE_BYTES],
+    wrapped: &[u8; ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES],
+) -> Result<HybridDecapsulationKey, EnvelopeError> {
+    let cipher = XChaCha20Poly1305::new_from_slice(k_unwrap).map_err(|_| EnvelopeError::UnwrapFailed)?;
+    let mut plain = cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: wrapped,
+                aad: b"HOLONOMY_V51_SK_WRAP",
+            },
+        )
+        .map_err(|_| EnvelopeError::UnwrapFailed)?;
+    if plain.len() != ML_KEM_1024_SK_BYTES + X25519_SK_BYTES {
+        plain.zeroize();
+        return Err(EnvelopeError::BadLength);
+    }
+    let mut dk = [0u8; ML_KEM_1024_SK_BYTES];
+    let mut x = [0u8; X25519_SK_BYTES];
+    dk.copy_from_slice(&plain[..ML_KEM_1024_SK_BYTES]);
+    x.copy_from_slice(&plain[ML_KEM_1024_SK_BYTES..]);
+    plain.zeroize();
+    Ok(HybridDecapsulationKey { ml_kem: dk, x25519: x })
+}
+
+/// Everything a save needs to write a root capsule's phase 1, without the secret key ever leaving
+/// this module.
+///
+/// This is the save-path API. It exists specifically so no caller — and no test — has to be handed
+/// `SK_stratum` to build a capsule: the keypair is generated, wrapped and dropped inside one call,
+/// and what comes back is public ciphertext plus the already-derived [`StratumKeys`].
+///
+/// Returns `(ct, wrapped_stratum_sk, keys)`. The caller supplies the `sk_unwrap_nonce` it will
+/// store in the capsule, and `κ_USB`.
+pub fn create_envelope(
+    k_unwrap: &[u8; 32],
+    sk_unwrap_nonce: &[u8; XCHACHA_NONCE_BYTES],
+    kappa_usb: &[u8; 32],
+    kem: &dyn HybridKem,
+) -> Result<
+    (
+        HybridCiphertext,
+        [u8; WRAPPED_SK_BYTES],
+        StratumKeys,
+    ),
+    EnvelopeError,
+> {
+    let (dk, ek) = kem.keygen();
+    let (ct, ss) = kem.encapsulate(&ek)?;
+    // The wrapped blob needs the two secret halves once; `wrap_stratum_key` takes them as slices.
+    let wrapped = wrap_stratum_key_exported(k_unwrap, sk_unwrap_nonce, &dk)?;
+    let keys = derive_dem_key(&ss, &ct, k_unwrap, kappa_usb);
+    Ok((ct, wrapped, keys))
+}
+
+/// Wrap an already-generated keypair. Private to this module plus the accessor below, so a caller
+/// cannot obtain `SK_stratum` bytes to pass here.
+fn wrap_stratum_key_exported(
+    k_unwrap: &[u8; 32],
+    nonce: &[u8; XCHACHA_NONCE_BYTES],
+    dk: &HybridDecapsulationKey,
+) -> Result<[u8; WRAPPED_SK_BYTES], EnvelopeError> {
+    Ok(wrap_stratum_key(k_unwrap, nonce, &dk.ml_kem, &dk.x25519))
+}
+
+/// Phase-1 commitment: binds the ephemeral ciphertexts and the wrapped key together.
+pub fn phase1_commitment(
+    k_unwrap: &[u8; 32],
+    nonce: &[u8; XCHACHA_NONCE_BYTES],
+    ct: &HybridCiphertext,
+    wrapped: &[u8],
+) -> [u8; CMT4_TAG_BYTES] {
+    let mut ad = Vec::with_capacity(64 + wrapped.len());
+    ad.extend_from_slice(nonce);
+    ad.extend_from_slice(&ct.ml_kem);
+    ad.extend_from_slice(&ct.x25519);
+    cmt4_tag(k_unwrap, nonce, &ad, wrapped)
+}
+
+/// Phase-2 commitment: binds the encrypted directory to `K_DEM`.
+pub fn phase2_commitment(
+    k_dem: &[u8; 32],
+    nonce: &[u8; XCHACHA_NONCE_BYTES],
+    directory_ciphertext: &[u8],
+) -> [u8; CMT4_TAG_BYTES] {
+    cmt4_tag(k_dem, nonce, b"HOLONOMY_V51_DIRECTORY", directory_ciphertext)
+}
+
+/// The KEM operations the envelope needs, behind a trait.
+///
+/// One implementation, [`MlKem1024X25519`], and a fake in the tests. The trait exists so the
+/// two-phase state machine and its preconditions can be tested exhaustively on any host, while
+/// the real lattice arithmetic is exercised in `tests/envelope.rs` where the dependency is
+/// actually linked.
+pub trait HybridKem {
+    /// Generate a fresh keypair. Uses the OS CSPRNG; not deterministic, and not required to be —
+    /// keypair generation happens at save time, and a save that reproduced its own ephemeral keys
+    /// would be a bug.
+    fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey);
+
+    /// Encapsulate.
+    fn encapsulate(&self, pk: &HybridEncapsulationKey) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError>;
+
+    /// Decapsulate.
+    fn decapsulate(
+        &self,
+        sk: &HybridDecapsulationKey,
+        ct: &HybridCiphertext,
+    ) -> Result<SharedSecrets, EnvelopeError>;
+}
+
+/// The real thing: `ml-kem` 0.3.4 (`MlKem1024`) hybridised with `x25519-dalek` 2.0.
+///
+/// The combiner is a plain concatenation-then-hash rather than an RFC 9180-style DHKEM, which is
+/// acceptable here because both secrets are raw and both ciphertexts are bound into the
+/// derivation — see [`derive_dem_key`]. It is *not* a general-purpose combiner and must not be
+/// reused outside this envelope.
+pub struct MlKem1024X25519;
+
+impl HybridKem for MlKem1024X25519 {
+    fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
+        use ml_kem::kem::{Generate, Kem, KeyExport};
+        use ml_kem::MlKem1024;
+
+        let (dk, ek) = MlKem1024::generate_keypair();
+        let mut x_bytes = [0u8; 32];
+        crate::rng::fill(&mut x_bytes).expect("OS CSPRNG unavailable");
+        let x_sk = StaticSecret::from(x_bytes);
+        let x_pk = PublicKey::from(&x_sk);
+
+        let ml_sk_raw = dk.to_bytes();
+        let mut ml_sk = [0u8; ML_KEM_1024_SK_BYTES];
+        ml_sk.copy_from_slice(&ml_sk_raw);
+
+        (
+            HybridDecapsulationKey { ml_kem: ml_sk, x25519: x_bytes },
+            HybridEncapsulationKey {
+                ml_kem: ek.to_bytes().to_vec(),
+                x25519: x_pk.to_bytes(),
+            },
+        )
+    }
+
+    fn encapsulate(
+        &self,
+        pk: &HybridEncapsulationKey,
+    ) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
+        use ml_kem::kem::{Encapsulate, Kem};
+        use ml_kem::kem::KeyExport;
+        use ml_kem::MlKem1024;
+
+        let ek = <MlKem1024 as Kem>::EncapsulationKey::try_from(pk.ml_kem.as_slice())
+            .map_err(|_| EnvelopeError::KemRejected)?;
+        let (ct, ss) = ek.encapsulate();
+        let mut pq = [0u8; 32];
+        pq.copy_from_slice(&ss);
+
+        // Ephemeral ECDH: a fresh scalar per encapsulation, discarded immediately.
+        let mut eph_bytes = [0u8; 32];
+        crate::rng::fill(&mut eph_bytes).expect("OS CSPRNG unavailable");
+        let eph = StaticSecret::from(eph_bytes);
+        let eph_pk = PublicKey::from(&eph);
+        let peer = PublicKey::from(pk.x25519);
+        let ecc = eph.diffie_hellman(&peer).to_bytes();
+
+        let mut ct_ml = [0u8; ML_KEM_1024_CT_BYTES];
+        ct_ml.copy_from_slice(&ct);
+        Ok((
+            HybridCiphertext { ml_kem: ct_ml, x25519: eph_pk.to_bytes() },
+            SharedSecrets { pq, ecc },
+        ))
+    }
+
+    fn decapsulate(
+        &self,
+        sk: &HybridDecapsulationKey,
+        ct: &HybridCiphertext,
+    ) -> Result<SharedSecrets, EnvelopeError> {
+        use ml_kem::kem::{Decapsulate, Kem, TryKeyInit};
+        use ml_kem::MlKem1024;
+
+        let dk = <MlKem1024 as Kem>::DecapsulationKey::new_from_slice(&sk.ml_kem)
+            .map_err(|_| EnvelopeError::KemRejected)?;
+        let ml_ct = ml_kem::Ciphertext::<MlKem1024>::try_from(ct.ml_kem.as_slice())
+            .map_err(|_| EnvelopeError::KemRejected)?;
+        let ss = dk.decapsulate(&ml_ct);
+        let mut pq = [0u8; 32];
+        pq.copy_from_slice(&ss);
+
+        let x_sk = StaticSecret::from(sk.x25519);
+        let peer = PublicKey::from(ct.x25519);
+        let ecc = x_sk.diffie_hellman(&peer).to_bytes();
+
+        Ok(SharedSecrets { pq, ecc })
+    }
+}
+
+/// `K_DEM ‖ N_epoch` from the two shared secrets, both ciphertexts, `K_unwrap` and `κ`.
+///
+/// Binds the ciphertexts so a re-encapsulation under the same keypair yields a different `K_DEM`,
+/// and binds `K_unwrap` so a capsule is not valid under a second passphrase.
+pub fn derive_dem_key(
+    ss: &SharedSecrets,
+    ct: &HybridCiphertext,
+    k_unwrap: &[u8; 32],
+    kappa_usb: &[u8; 32],
+) -> StratumKeys {
+    let mut h = Blake2b512::new();
+    h.update(b"HOLONOMY_V51_DEM");
+    h.update([0u8]);
+    h.update(ss.pq);
+    h.update(ss.ecc);
+    h.update(ct.ml_kem);
+    h.update(ct.x25519);
+    h.update(k_unwrap);
+    h.update(kappa_usb);
+    let digest = h.finalize();
+
+    let mut k_dem = [0u8; 32];
+    let mut n_epoch = [0u8; XCHACHA_NONCE_BYTES];
+    k_dem.copy_from_slice(&digest[..32]);
+    n_epoch.copy_from_slice(&digest[32..32 + XCHACHA_NONCE_BYTES]);
+
+    StratumKeys {
+        k_unwrap: *k_unwrap,
+        k_dem,
+        n_epoch,
+    }
+}
+
+/// Derive the symmetric key set for a stratum that needs no KEM (the duress stratum's
+/// passphrase-only path), from the root secret alone.
+///
+/// This is the path that makes `P_1` invariant across saves: it depends only on
+/// `(passphrase, σ_epoch_of_the_snapshot)`, never on anything a save ratchets.
+pub fn derive_passphrase_only_keys(root: &RootSecret, stratum_index: u8, kappa_usb: &[u8; 32]) -> StratumKeys {
+    let ctx = [stratum_index, 0u8];
+    let unwrap: Subkey = derive_subkey(root, labels::K_UNWRAP, &ctx);
+    let dem: Subkey = derive_subkey(root, labels::K_DEM, &ctx);
+    let nonce: Subkey = derive_subkey(root, labels::N_EPOCH, &ctx);
+    let mut k_dem = dem.0;
+    let mut k_unwrap = unwrap.0;
+    for i in 0..32 {
+        k_dem[i] ^= kappa_usb[i];
+        k_unwrap[i] ^= kappa_usb[i];
+    }
+    let mut n_epoch = [0u8; XCHACHA_NONCE_BYTES];
+    n_epoch[..24].copy_from_slice(&nonce.0);
+    StratumKeys { k_unwrap, k_dem, n_epoch }
+}
+
+/// Verify both phase commitments. Separate function so the caller cannot skip one by accident.
+pub fn verify_phase_commitments(
+    expected_p1: &[u8; CMT4_TAG_BYTES],
+    actual_p1: &[u8; CMT4_TAG_BYTES],
+    expected_p2: &[u8; CMT4_TAG_BYTES],
+    actual_p2: &[u8; CMT4_TAG_BYTES],
+) -> Result<(), EnvelopeError> {
+    if !cmt4_verify(expected_p1, actual_p1) {
+        return Err(EnvelopeError::Phase1CommitmentMismatch);
+    }
+    if !cmt4_verify(expected_p2, actual_p2) {
+        return Err(EnvelopeError::Phase2CommitmentMismatch);
+    }
+    Ok(())
+}
+
+/// Length check for a pair read out of a capsule, before any crypto touches it.
+pub fn ct_lengths_are_canonical(ct: &HybridCiphertext) -> bool {
+    ct.ml_kem.len() == ML_KEM_1024_CT_BYTES && ct.x25519.len() == X25519_SK_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A KEM that is a hash, not a lattice. Only valid for exercising the state machine.
+    struct FakeKem;
+
+    impl HybridKem for FakeKem {
+        fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
+            (
+                HybridDecapsulationKey { ml_kem: [7u8; ML_KEM_1024_SK_BYTES], x25519: [8u8; 32] },
+                HybridEncapsulationKey { ml_kem: vec![7u8; 1568], x25519: [8u8; 32] },
+            )
+        }
+        fn encapsulate(&self, _pk: &HybridEncapsulationKey) -> Result<(HybridCiphertext, SharedSecrets), EnvelopeError> {
+            Ok((
+                HybridCiphertext { ml_kem: [9u8; ML_KEM_1024_CT_BYTES], x25519: [10u8; 32] },
+                SharedSecrets { pq: [11u8; 32], ecc: [12u8; 32] },
+            ))
+        }
+        fn decapsulate(&self, sk: &HybridDecapsulationKey, _ct: &HybridCiphertext) -> Result<SharedSecrets, EnvelopeError> {
+            if sk.ml_kem[0] == 0 {
+                return Err(EnvelopeError::KemRejected);
+            }
+            Ok(SharedSecrets { pq: [11u8; 32], ecc: [12u8; 32] })
+        }
+    }
+
+    #[test]
+    fn wrap_is_exactly_the_documented_size() {
+        let wrapped = wrap_stratum_key(&[1u8; 32], &[2u8; 24], &[3u8; 3168], &[4u8; 32]);
+        assert_eq!(wrapped.len(), 3_216);
+        assert_eq!(wrapped.len(), ML_KEM_1024_SK_BYTES + X25519_SK_BYTES + POLY1305_TAG_BYTES);
+    }
+
+    #[test]
+    fn wrap_unwrap_round_trip() {
+        let k = [1u8; 32];
+        let n = [2u8; 24];
+        let dk = [3u8; 3168];
+        let xs = [4u8; 32];
+        let w = wrap_stratum_key(&k, &n, &dk, &xs);
+        let out = unwrap_stratum_key(&k, &n, &w).unwrap();
+        assert_eq!(out.ml_kem, dk);
+        assert_eq!(out.x25519, xs);
+    }
+
+    #[test]
+    fn wrong_k_unwrap_cannot_open_the_wrap() {
+        let n = [2u8; 24];
+        let w = wrap_stratum_key(&[1u8; 32], &n, &[3u8; 3168], &[4u8; 32]);
+        assert_eq!(
+            unwrap_stratum_key(&[9u8; 32], &n, &w).unwrap_err(),
+            EnvelopeError::UnwrapFailed
+        );
+    }
+
+    #[test]
+    fn phase1_commitment_binds_every_input() {
+        let k = [1u8; 32];
+        let n = [2u8; 24];
+        let ct = HybridCiphertext { ml_kem: [3u8; 1568], x25519: [4u8; 32] };
+        let w = [5u8; 3216];
+        let base = phase1_commitment(&k, &n, &ct, &w);
+
+        let mut ct2 = ct.clone();
+        ct2.x25519[0] ^= 1;
+        assert_ne!(base, phase1_commitment(&k, &n, &ct2, &w));
+
+        let mut w2 = w;
+        w2[0] ^= 1;
+        assert_ne!(base, phase1_commitment(&k, &n, &ct, &w2));
+        assert_ne!(base, phase1_commitment(&[6u8; 32], &n, &ct, &w));
+    }
+
+    #[test]
+    fn dem_key_is_deterministic_and_binds_its_inputs() {
+        let ss = SharedSecrets { pq: [1u8; 32], ecc: [2u8; 32] };
+        let ct = HybridCiphertext { ml_kem: [3u8; 1568], x25519: [4u8; 32] };
+        let a = derive_dem_key(&ss, &ct, &[5u8; 32], &[6u8; 32]);
+        let b = derive_dem_key(&ss, &ct, &[5u8; 32], &[6u8; 32]);
+        assert_eq!(a.k_dem, b.k_dem);
+        assert_eq!(a.n_epoch, b.n_epoch);
+        // A different κ (different USB) gives a different key: this is the bipartite binding.
+        let c = derive_dem_key(&ss, &ct, &[5u8; 32], &[7u8; 32]);
+        assert_ne!(a.k_dem, c.k_dem);
+    }
+
+    #[test]
+    fn passphrase_only_keys_ignore_everything_a_save_ratchets() {
+        // The invariant that makes the duress passphrase open T_0..T_n.
+        let root = RootSecret([0x33; 64]);
+        let a = derive_passphrase_only_keys(&root, 1, &[0u8; 32]);
+        let b = derive_passphrase_only_keys(&root, 1, &[0u8; 32]);
+        assert_eq!(a.k_dem, b.k_dem);
+        assert_eq!(a.k_unwrap, b.k_unwrap);
+        // Different stratum, different keys.
+        let c = derive_passphrase_only_keys(&root, 2, &[0u8; 32]);
+        assert_ne!(a.k_dem, c.k_dem);
+    }
+
+    #[test]
+    fn phase_verification_reports_which_phase_failed() {
+        let z = [0u8; 32];
+        assert!(verify_phase_commitments(&z, &z, &z, &z).is_ok());
+        assert_eq!(
+            verify_phase_commitments(&z, &[1u8; 32], &z, &z).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
+        assert_eq!(
+            verify_phase_commitments(&z, &z, &z, &[1u8; 32]).unwrap_err(),
+            EnvelopeError::Phase2CommitmentMismatch
+        );
+    }
+
+    #[test]
+    fn length_check() {
+        let ok = HybridCiphertext { ml_kem: [0u8; 1568], x25519: [0u8; 32] };
+        assert!(ct_lengths_are_canonical(&ok));
+    }
+}

@@ -1,0 +1,63 @@
+Holonomy
+Copyright 2026 The Holonomy Authors
+
+This product is dual-licensed under the Apache License, Version 2.0 and the MIT
+License. See LICENSE-APACHE and LICENSE-MIT.
+
+Third-party components
+======================
+
+This product depends on, and links against, the following upstream projects.
+Their licences apply to their own code, and this NOTICE exists to record the
+attribution the Apache-2.0 and MIT terms require.
+
+  wordcraft  https://github.com/storytold/wordcraft
+    Copyright the WordCraft contributors.
+    Licensed under MIT OR Apache-2.0.
+    Used as the document editor: wordcraft-geom, wordcraft-doc,
+    wordcraft-fonts, wordcraft-layout, wordcraft-render (vello_cpu) and
+    wordcraft-ui-egui. Pinned at rev 08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0
+    (v0.15.1).
+    Its licence texts are reproduced in this repository as
+    licenses/wordcraft-LICENSE-MIT and licenses/wordcraft-LICENSE-APACHE if
+    present; otherwise obtain them from the upstream repository.
+
+  craft-libs  https://github.com/storytold/craft-libs
+    Copyright the WordCraft contributors.
+    Licensed under MIT OR Apache-2.0.
+    Transitive: craft-ui, craft-i18n, craft-window, craft-pdf, craft-proof,
+    craft-font-store, craft-font-catalog.
+
+  RustCrypto: ml-kem  https://github.com/RustCrypto/KEMs
+    Copyright the RustCrypto Developers.
+    Licensed under Apache-2.0 OR MIT.
+    Used for NIST FIPS 203 ML-KEM-1024. The upstream README states that this
+    implementation has not been independently audited; that statement is
+    carried forward to docs/PRD-v5.1.0.md section 13.
+
+  RustCrypto: chacha20poly1305, blake2, sha3, argon2, zeroize
+    https://github.com/RustCrypto/AEADs
+    https://github.com/RustCrypto/hashes
+    https://github.com/RustCrypto/password-hashes
+    https://github.com/RustCrypto/utils
+    Copyright the RustCrypto Developers.
+    Licensed under Apache-2.0 OR MIT.
+
+  curve25519-dalek / x25519-dalek
+    https://github.com/dalek-cryptography/curve25519-dalek
+    Copyright the curve25519-dalek contributors.
+    Licensed under BSD-3-Clause.
+
+  libc, getrandom
+    Licensed under MIT OR Apache-2.0.
+
+  egui, egui_extras, vello_cpu, skrifa, harfrust, wuff, image
+    Licensed under MIT OR Apache-2.0 (vello_cpu: Apache-2.0 OR MIT).
+
+Prior art
+=========
+
+holonomy-old/ in this repository is the previous generation of this product,
+retained read-only as a reference. It is not a dependency of any crate here.
+One module (the O_DIRECT alignment rules in crates/holonomy-usb/src/io.rs) was
+rewritten from it; no other code was taken.

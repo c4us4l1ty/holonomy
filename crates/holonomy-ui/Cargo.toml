@@ -1,0 +1,47 @@
+[package]
+name = "holonomy-ui"
+description = "Holonomy's shell over wordcraft: document open/save, unlock and the editor front end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The binary is the deliverable; the library exists so the shell's logic (save cadence, pad
+# budget reporting, capture-exclusion claims) can be tested without a window.
+[lib]
+name = "holonomy_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "holonomy"
+path = "src/main.rs"
+
+[dependencies]
+holonomy-core = { path = "../holonomy-core" }
+holonomy-crypto = { path = "../holonomy-crypto" }
+holonomy-usb = { path = "../holonomy-usb" }
+holonomy-runtime = { path = "../holonomy-runtime" }
+
+# wordcraft, pinned to 0.15.1. These are the *actual* package names: there is no
+# `wordcraft-core`, and `wordcraft-render` is the vello_cpu rasteriser, which is the CPU path
+# v5.1.0 uses now that the PRD's ban on egui and on heap allocation is dropped.
+wordcraft-geom = { workspace = true }
+wordcraft-doc = { workspace = true }
+wordcraft-fonts = { workspace = true }
+wordcraft-layout = { workspace = true }
+wordcraft-render = { workspace = true }
+wordcraft-ui-egui = { workspace = true }
+
+libc = { workspace = true }
+
+# Windows-only import for `SetWindowDisplayAffinity`; macOS uses `NSWindow.sharingType`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSWindow", "NSResponder"] }
+
+[lints.rust]
+missing_docs = "deny"
