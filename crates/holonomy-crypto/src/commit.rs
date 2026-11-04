@@ -178,6 +178,14 @@ pub fn seal_directory(
     Ok(sealed)
 }
 
+/// The decrypted directory, as a fixed-size array.
+///
+/// The length is a property of the type rather than of a runtime check. An earlier version returned
+/// a `Vec` and `unlock` compared its length against a constant — which cannot fail, because a
+/// fixed-length decrypt produces a fixed-length plaintext. A gate that cannot fail is worse than no
+/// gate: it reads like a check in review and does nothing in a test.
+pub type DirectoryPlaintext = [u8; DIRECTORY_PLAINTEXT_BYTES];
+
 /// Open a fixed-length directory field back into its plaintext.
 ///
 /// Returns the **whole** [`DIRECTORY_PLAINTEXT_BYTES`], including the zero padding.
@@ -196,14 +204,8 @@ pub fn seal_directory(
 /// *a fixed-length field padded with zeros cannot also be a variable-length field terminated by
 /// zeros.* [`seal_directory`] pads to the full length precisely so that an observer cannot learn the
 /// document's size, and that padding is exactly what makes a zero terminator meaningless.
-/// The decrypted directory, as a fixed-size array.
 ///
-/// The length is a property of the type rather than of a runtime check. The previous version
-/// returned a `Vec` and `unlock` compared its length against a constant — which cannot fail, because
-/// a fixed-length decrypt produces a fixed-length plaintext. A gate that cannot fail is worse than
-/// no gate: it reads like a check in review and does nothing in a test.
-pub type DirectoryPlaintext = [u8; DIRECTORY_PLAINTEXT_BYTES];
-
+/// Returns [`DirectoryPlaintext`], so the length is a property of the type.
 pub fn open_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
