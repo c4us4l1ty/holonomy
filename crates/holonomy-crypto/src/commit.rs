@@ -39,18 +39,33 @@ pub const POLY1305_TAG_BYTES: usize = 16;
 /// Length of an XChaCha20 nonce.
 pub const NONCE_BYTES: usize = 24;
 
-/// Plaintext budget of the directory, and therefore the exact ciphertext length before the tag.
+/// Plaintext budget of the directory.
 ///
-/// `60,592` bytes of field minus the 16-byte Poly1305 tag: `XChaCha20-Poly1305` output is
-/// `plaintext + 16`, so the plaintext has to be exactly this for the field to be exactly full.
-/// A serialised directory is a varint count, one entry per stratum, and a reservoir descriptor --
-/// tens of bytes at most -- so this is a reservoir-sized allowance, not a directory-sized one.
-pub const DIRECTORY_PLAINTEXT_BYTES: usize = 60_576;
+/// # Deriving it, rather than picking it
+///
+/// The capsule allots `ENCRYPTED_DIRECTORY_BYTES = 60,592` bytes to the ciphertext **body** and a
+/// separate 16 bytes to the Poly1305 tag, for 60,608 total. `XChaCha20-Poly1305` output is
+/// `plaintext + 16`, and that output is what gets split into body-and-tag. So
+///
+/// ```text
+///   plaintext + 16 = 60,608      ⇒      plaintext = 60,592
+/// ```
+///
+/// which is the field size, not the field size minus the tag. Subtracting the tag here as well
+/// double-counts it and leaves 16 bytes of the field permanently unused -- a mistake worth
+/// recording because the constant is named `..._DIRECTORY_BYTES` and reads like the body length.
+/// A serialised directory is a varint count, one entry per stratum and a reservoir descriptor:
+/// tens of bytes. The allowance is reservoir-sized.
+pub const DIRECTORY_PLAINTEXT_BYTES: usize = 60_592;
 
-/// Ciphertext length of a sealed directory, tag included. Equal to the capsule field.
-pub const ENCRYPTED_FIELD_LEN: usize = DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES;
+/// Length of a sealed directory: plaintext plus tag. Equal to the capsule's field **plus** its tag
+/// field. The assertion below ties this to the numbers the layout uses, so a change in either place
+/// fails the build rather than a save.
+pub const SEALED_DIRECTORY_BYTES: usize = DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES;
 
-const _: () = assert!(DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES == 60_592);
+const _: () = assert!(DIRECTORY_PLAINTEXT_BYTES == 60_592);
+const _: () = assert!(SEALED_DIRECTORY_BYTES == 60_608);
+const _: () = assert!(SEALED_DIRECTORY_BYTES == 60_592 + 16);
 
 /// `CMT-4` commitment over `(key, nonce, associated data, ciphertext)`.
 ///
@@ -128,7 +143,7 @@ pub fn seal_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     plaintext: &[u8],
-) -> Result<[u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES], AeadError> {
+) -> Result<[u8; SEALED_DIRECTORY_BYTES], AeadError> {
     let mut padded = [0u8; DIRECTORY_PLAINTEXT_BYTES];
     if plaintext.len() > DIRECTORY_PLAINTEXT_BYTES {
         return Err(AeadError::TooLarge {
@@ -146,9 +161,9 @@ pub fn seal_directory(
             Payload { msg: &padded, aad: &aad },
         )
         .map_err(|_| AeadError::AuthenticationFailed)?;
-    assert_eq!(out.len(), DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES);
+    assert_eq!(out.len(), SEALED_DIRECTORY_BYTES);
 
-    let mut sealed = [0u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES];
+    let mut sealed = [0u8; SEALED_DIRECTORY_BYTES];
     sealed.copy_from_slice(&out);
     Ok(sealed)
 }
@@ -162,7 +177,7 @@ pub fn seal_directory(
 pub fn open_directory(
     k_dem: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
-    sealed: &[u8; DIRECTORY_PLAINTEXT_BYTES + POLY1305_TAG_BYTES],
+    sealed: &[u8; SEALED_DIRECTORY_BYTES],
 ) -> Result<Vec<u8>, AeadError> {
     let cipher = XChaCha20Poly1305::new(k_dem.into());
     let aad = directory_aad();
@@ -326,9 +341,18 @@ mod directory_tests {
     #[test]
     fn a_short_directory_still_produces_the_full_field() {
         let sealed = seal_directory(&K, &N, b"one stratum").unwrap();
-        assert_eq!(sealed.len(), ENCRYPTED_FIELD_LEN);
-        assert_eq!(sealed.len(), 60_592);
+        // 60,608 splits into the capsule's 60,592-byte body field and its 16-byte tag field.
+        assert_eq!(sealed.len(), SEALED_DIRECTORY_BYTES);
+        assert_eq!(sealed.len(), 60_592 + 16);
         assert_eq!(open_directory(&K, &N, &sealed).unwrap(), b"one stratum");
+    }
+
+    #[test]
+    fn the_plaintext_budget_is_the_field_size_not_the_field_minus_the_tag() {
+        // The off-by-16 this constant used to have. Stated as a test so it cannot come back.
+        assert_eq!(DIRECTORY_PLAINTEXT_BYTES, 60_592);
+        assert_ne!(DIRECTORY_PLAINTEXT_BYTES, 60_592 - POLY1305_TAG_BYTES);
+        assert!(seal_directory(&K, &N, &vec![0u8; DIRECTORY_PLAINTEXT_BYTES]).is_ok());
     }
 
     #[test]

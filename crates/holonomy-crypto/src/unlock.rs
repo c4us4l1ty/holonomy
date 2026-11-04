@@ -273,8 +273,7 @@ mod tests {
 
         let directory = b"one stratum, no media".as_slice();
         let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
-        let field = split_directory_ciphertext(&sealed).0;
-        let tag = split_directory_ciphertext(&sealed).1;
+        let (field, tag) = split_directory_ciphertext(&sealed);
         let reassembled = directory_ciphertext(&field, &tag);
 
         let p1 = phase1_commitment(&k_unwrap, &nonce, &ct, &wrapped);
@@ -371,7 +370,7 @@ mod tests {
 
     #[test]
     fn directory_split_round_trips() {
-        let sealed = vec![0xAAu8; ENCRYPTED_DIRECTORY_BYTES + 16];
+        let sealed = [0xAAu8; ENCRYPTED_DIRECTORY_BYTES + 16];
         let (field, tag) = split_directory_ciphertext(&sealed);
         assert_eq!(&field[..], &sealed[..ENCRYPTED_DIRECTORY_BYTES]);
         assert_eq!(tag, [0xAAu8; 16]);
@@ -380,9 +379,16 @@ mod tests {
 
     #[test]
     fn directory_split_is_exactly_the_slot_budget() {
-        // The 60,592 + 16 split, stated as a property of the helpers rather than as a comment.
-        let sealed = vec![0u8; ENCRYPTED_DIRECTORY_BYTES + 16];
+        // The 60,592 + 16 split, stated as a property of the helpers rather than as a comment,
+        // and tied to the AEAD's own idea of how long a sealed directory is.
+        let sealed = [0u8; ENCRYPTED_DIRECTORY_BYTES + 16];
         let (field, tag) = split_directory_ciphertext(&sealed);
-        assert_eq!(field.len() + tag.len(), 60_608);
+        assert_eq!(field.len(), 60_592);
+        assert_eq!(tag.len(), 16);
+        assert_eq!(
+            field.len() + tag.len(),
+            crate::commit::SEALED_DIRECTORY_BYTES,
+            "the capsule's two directory fields must equal what the AEAD produces"
+        );
     }
 }

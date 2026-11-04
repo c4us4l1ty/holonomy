@@ -34,19 +34,16 @@ fn build_capsule(
     assert_eq!(
         sealed.len(),
         DIR_CAPACITY + 16,
-        "the fixed-length seal must fill the field exactly"
+        "the fixed-length seal must fill the field plus its tag exactly"
     );
-    let mut field = [0u8; DIR_CAPACITY];
-    let mut poly = [0u8; 16];
-    field.copy_from_slice(&sealed[..DIR_CAPACITY]);
-    poly.copy_from_slice(&sealed[DIR_CAPACITY..]);
-    let reassembled_len = field.len() + poly.len();
-    let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed[..]);
-    assert_eq!(reassembled_len, sealed.len());
+    let p2 = phase2_commitment(&keys.k_dem, &keys.n_epoch, &sealed);
 
     // The capsule stores the ciphertext in the big field and the Poly1305 tag separately, which is
     // how the 60,592 + 16 layout is meant to be used: the tag is *not* duplicated inside the field.
-    let enc = field;
+    let mut enc = [0u8; DIR_CAPACITY];
+    let mut poly = [0u8; 16];
+    enc.copy_from_slice(&sealed[..DIR_CAPACITY]);
+    poly.copy_from_slice(&sealed[DIR_CAPACITY..]);
 
     StratumRootCapsuleV5 {
         ct_ml_kem_1024: ct.ml_kem,
