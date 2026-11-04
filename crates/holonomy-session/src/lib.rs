@@ -21,10 +21,16 @@
 //! cannot be compiled.*
 
 pub mod check;
+pub mod directory;
+pub mod salt;
+pub mod seal;
 pub mod session;
 pub mod status;
 
 pub use check::{CheckReport, CheckResult, Severity};
+pub use directory::{DirectoryError, DirectoryLedger};
+pub use salt::{ContainerHeader, SaltBytes, SaltOrigin};
+pub use seal::{open_payload_slot, seal_container, SealError, SealedContainer, SealedPayloadSlot};
 pub use session::{SaveOutcome, Session, SessionError};
 pub use status::StatusLine;
 

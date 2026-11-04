@@ -12,6 +12,9 @@ publish.workspace = true
 [dependencies]
 holonomy-core = { path = "../holonomy-core" }
 holonomy-crypto = { path = "../holonomy-crypto" }
+# For the directory ledger's tag. BLAKE2b is already in the crypto crate's graph; taking it directly
+# rather than re-exporting it keeps "what the crypto crate exports" out of this crate's hands.
+blake2 = { workspace = true }
 
 [lints.rust]
 missing_docs = "deny"
