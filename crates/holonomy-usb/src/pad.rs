@@ -94,7 +94,12 @@ pub enum PadIoError {
     /// The device returned an error. Often the first sign of a yank.
     Io(io::Error),
     /// The device is shorter than Zone B requires.
-    DeviceTooSmall { needed: u64, found: u64 },
+    DeviceTooSmall {
+        /// Bytes Zone B needs.
+        needed: u64,
+        /// Bytes the device reports.
+        found: u64,
+    },
     /// A ratchet was attempted on a read-only handle.
     ReadOnly,
     /// The plan was internally inconsistent; a bug, not a hardware condition.
@@ -123,11 +128,9 @@ impl From<io::Error> for PadIoError {
     }
 }
 
-/// The pad side of a container session.
-///
-/// `Debug` deliberately prints only the plan's length and the device path: a reader in a log line
-/// should not leak which sectors this session read.
 impl std::fmt::Debug for PadReader<'_> {
+    // Prints only the plan's length and the device path: a reader in a log line should not leak
+    // which sectors this session read.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PadReader")
             .field("device", &self.device.path())
@@ -136,6 +139,7 @@ impl std::fmt::Debug for PadReader<'_> {
     }
 }
 
+/// The pad side of a container session.
 pub struct PadReader<'a> {
     device: &'a DirectFile,
     plan: PadPlan,
