@@ -470,7 +470,8 @@ pub fn open_document(
     if opened.cursor() != ctx.cursor {
         return Err(format!(
             "container cursor {} does not match requested cursor {}; refusing to open",
-            opened.cursor(), ctx.cursor
+            opened.cursor(),
+            ctx.cursor
         ));
     }
     let document = opened.payload_bytes();
