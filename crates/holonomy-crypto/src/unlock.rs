@@ -162,19 +162,12 @@ pub fn unlock_fixed(
         // serialisation change, so the error path is a `continue` and the caller still sees the
         // same coarse `Rejected`.
         //
-        // The length is part of the check, because `open_directory` returns the whole fixed-length
-        // plaintext: a directory that is not exactly that length cannot be one this format wrote.
-        // Before that, a trimming reader would return a short "directory" and every layer above it
-        // would carry on.
-        let Ok(plain) = open_directory(&keys.k_dem, &capsule.directory_nonce, &directory) else {
-            continue;
-        };
-        if plain.len() != crate::commit::DIRECTORY_PLAINTEXT_BYTES {
-            continue;
-        }
-        // And the version, which is the only part of the index an unlock needs. A container written
-        // by a later format is refused here rather than mis-parsed further down.
-        if u16::from_le_bytes([plain[0], plain[1]]) != crate::commit::DIRECTORY_VERSION {
+        // Deliberately no checks on the *contents* here. The directory's length is a property of
+        // `DirectoryPlaintext` now, and interpreting the index — its version, its stratum, its slot
+        // count — belongs to the layer that owns the index format, not to the handshake. Reading the
+        // version here and answering `Rejected` would report "this container was written by a newer
+        // build" as "wrong passphrase", which is the one signal this function must never blur.
+        if open_directory(&keys.k_dem, &capsule.directory_nonce, &directory).is_err() {
             continue;
         }
 
@@ -298,8 +291,13 @@ mod tests {
         let nonce = [0x7Eu8; XCHACHA_NONCE_BYTES];
         let (ct, wrapped, keys) = create_envelope(&k_unwrap, &nonce, kappa, &kem).unwrap();
 
-        let directory = b"one stratum, no media".as_slice();
-        let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, directory).unwrap();
+        // A directory begins with the format version, because it is an index rather than a string.
+        // The fixture used to seal a sentence, which was fine while `open_directory` trimmed at the
+        // first zero byte and wrong the moment the directory became something a reader parses.
+        let mut directory = [0u8; crate::commit::DIRECTORY_PLAINTEXT_BYTES];
+        directory[..2].copy_from_slice(&crate::commit::DIRECTORY_VERSION.to_le_bytes());
+        directory[2] = 1; // stratum
+        let sealed = seal_directory(&keys.k_dem, &keys.n_epoch, &directory).unwrap();
         let (field, tag) = split_directory_ciphertext(&sealed);
         let reassembled = directory_ciphertext(&field, &tag);
 
