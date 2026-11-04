@@ -13,7 +13,6 @@
 
 use std::process::ExitCode;
 
-use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_core::budgets::{self, MIB};
 use holonomy_core::capsule::{CapsuleWire, ENCRYPTED_DIRECTORY_BYTES};
 use holonomy_core::feistel::{Feistel22, DOMAIN};
@@ -21,6 +20,7 @@ use holonomy_core::layout::{
     CONTAINER_BYTES, IO_ALIGN, PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SLOT_BYTES,
     ZONE_B_SECTORS,
 };
+use holonomy_crypto::lock::{self, LockCapability};
 use holonomy_session::check::{peak_rss_bytes, CheckReport, CheckResult};
 
 fn main() -> ExitCode {
@@ -76,7 +76,10 @@ fn help() {
 }
 
 fn banner() {
-    println!("holonomy {} — the editor front end is not in this binary.", holonomy_core::VERSION);
+    println!(
+        "holonomy {} — the editor front end is not in this binary.",
+        holonomy_core::VERSION
+    );
     println!();
     println!("This build carries the audited v5.1.0 session layer:");
     println!("  * container geometry and the 65,536-byte capsule      (holonomy-core)");
@@ -105,7 +108,10 @@ fn check() -> ExitCode {
     report.push(if capsule_size == SLOT_BYTES {
         CheckResult::ok(
             "capsule is exactly one slot",
-            format!("{capsule_size} bytes, aligned to {}", std::mem::align_of::<CapsuleWire>()),
+            format!(
+                "{capsule_size} bytes, aligned to {}",
+                std::mem::align_of::<CapsuleWire>()
+            ),
         )
     } else {
         CheckResult::failed(
@@ -124,14 +130,22 @@ fn check() -> ExitCode {
         )
     });
 
-    report.push(if CONTAINER_BYTES.is_multiple_of(SLOT_BYTES) && CONTAINER_BYTES == 134_217_728 {
-        CheckResult::ok(
-            "container is a whole number of slots",
-            format!("{CONTAINER_BYTES} bytes = {} slots", CONTAINER_BYTES / SLOT_BYTES),
-        )
-    } else {
-        CheckResult::failed("container is a whole number of slots", format!("{CONTAINER_BYTES}"))
-    });
+    report.push(
+        if CONTAINER_BYTES.is_multiple_of(SLOT_BYTES) && CONTAINER_BYTES == 134_217_728 {
+            CheckResult::ok(
+                "container is a whole number of slots",
+                format!(
+                    "{CONTAINER_BYTES} bytes = {} slots",
+                    CONTAINER_BYTES / SLOT_BYTES
+                ),
+            )
+        } else {
+            CheckResult::failed(
+                "container is a whole number of slots",
+                format!("{CONTAINER_BYTES}"),
+            )
+        },
+    );
 
     let dir_bytes = ENCRYPTED_DIRECTORY_BYTES + 16;
     report.push(if dir_bytes == 60_608 {
@@ -154,17 +168,21 @@ fn check() -> ExitCode {
             }
         }
     }
-    report.push(if collisions == 0 && seen.len() as u64 == SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as u64 {
-        CheckResult::ok(
-            "54 saves read disjoint pad",
-            format!("{} distinct sectors, 0 collisions", seen.len()),
-        )
-    } else {
-        CheckResult::failed(
-            "54 saves read disjoint pad",
-            format!("{} distinct sectors, {collisions} collisions", seen.len()),
-        )
-    });
+    report.push(
+        if collisions == 0
+            && seen.len() as u64 == SAVES_BEFORE_DOMAIN_REUSE * PAD_SECTORS_PER_SAVE as u64
+        {
+            CheckResult::ok(
+                "54 saves read disjoint pad",
+                format!("{} distinct sectors, 0 collisions", seen.len()),
+            )
+        } else {
+            CheckResult::failed(
+                "54 saves read disjoint pad",
+                format!("{} distinct sectors, {collisions} collisions", seen.len()),
+            )
+        },
+    );
 
     let above = seen.iter().filter(|&&s| s >= (1 << 20)).count();
     report.push(if above > 0 {
@@ -212,17 +230,19 @@ fn check() -> ExitCode {
         ),
     });
 
-    report.push(match std::panic::catch_unwind(holonomy_runtime::reaper::probe_sched_class) {
-        Ok(class) => {
-            let name = class.describe();
-            if class.is_real_time() {
-                CheckResult::ok("reaper priority", name.to_string())
-            } else {
-                CheckResult::degraded("reaper priority", name.to_string())
+    report.push(
+        match std::panic::catch_unwind(holonomy_runtime::reaper::probe_sched_class) {
+            Ok(class) => {
+                let name = class.describe();
+                if class.is_real_time() {
+                    CheckResult::ok("reaper priority", name.to_string())
+                } else {
+                    CheckResult::degraded("reaper priority", name.to_string())
+                }
             }
-        }
-        Err(_) => CheckResult::deferred("reaper priority", "probe panicked"),
-    });
+            Err(_) => CheckResult::deferred("reaper priority", "probe panicked"),
+        },
+    );
 
     // ---- Memory. The gate that used to be a placeholder. ----
     match peak_rss_bytes() {
@@ -268,4 +288,3 @@ fn check() -> ExitCode {
         ExitCode::FAILURE
     }
 }
-
