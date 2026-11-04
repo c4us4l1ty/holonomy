@@ -81,10 +81,7 @@ pub struct ContainerFile {
 impl ContainerFile {
     /// Open an existing container file for reading, and for writing if `writable`.
     pub fn open(path: &Path, writable: bool) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(writable).open(path)?;
         let offset = 0;
         Ok(Self {
             file,
@@ -430,12 +427,9 @@ pub fn provision(path: &Path, ctx: &SaveContext<'_>) -> Result<(), String> {
 /// `holonomy-crypto`'s `the_fallback_keys_equal_the_ones_the_capsule_was_built_with` is where that
 /// equality is asserted.
 fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum, String> {
-    let root = holonomy_crypto::derive_root_secret(
-        ctx.passphrase.as_bytes(),
-        salt.as_bytes(),
-        ctx.params,
-    )
-    .map_err(|e| format!("deriving the root secret: {e}"))?;
+    let root =
+        holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), salt.as_bytes(), ctx.params)
+            .map_err(|e| format!("deriving the root secret: {e}"))?;
     let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
     let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
     let layer = holonomy_core::unlock::ProtectionLayer {
