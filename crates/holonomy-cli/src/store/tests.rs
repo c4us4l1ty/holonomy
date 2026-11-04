@@ -935,9 +935,14 @@ fn staged_replacement_updates_file_and_open_handle() {
     assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
     let mut byte = [0u8; 1];
     file.file.seek(SeekFrom::Start(0)).expect("seek");
-    file.file.read_exact(&mut byte).expect("read from updated handle");
+    file.file
+        .read_exact(&mut byte)
+        .expect("read from updated handle");
     assert_eq!(byte, [0x5a]);
-    assert_eq!(std::fs::metadata(&path).expect("metadata").len(), CONTAINER_BYTES as u64);
+    assert_eq!(
+        std::fs::metadata(&path).expect("metadata").len(),
+        CONTAINER_BYTES as u64
+    );
     drop(file);
     let _ = std::fs::remove_file(&path);
 }
@@ -952,7 +957,9 @@ fn staged_replacement_refuses_changed_path() {
     std::fs::rename(&path, &moved).expect("move original");
     std::fs::write(&path, b"replacement").expect("replace path");
     let image = vec![0u8; CONTAINER_BYTES];
-    let err = file.replace_image(&image).expect_err("stale handle must be refused");
+    let err = file
+        .replace_image(&image)
+        .expect_err("stale handle must be refused");
     assert!(err.to_string().contains("same regular file"), "{err}");
     assert_eq!(std::fs::read(&path).expect("new file"), b"replacement");
     assert_eq!(std::fs::read(&moved).expect("old file"), b"original");

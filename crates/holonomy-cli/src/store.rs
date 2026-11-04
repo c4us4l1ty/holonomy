@@ -183,10 +183,16 @@ impl ContainerFile {
         use std::os::unix::fs::MetadataExt;
 
         if !self.writable {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "container is read-only"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "container is read-only",
+            ));
         }
         if self.offset != 0 || image.len() != CONTAINER_BYTES {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "replacement requires one whole container at offset zero"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement requires one whole container at offset zero",
+            ));
         }
         let original = self.file.metadata()?;
         let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
@@ -196,17 +202,31 @@ impl ContainerFile {
         {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
         }
-        let parent = self.filesystem_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let mut staged = tempfile::Builder::new().prefix(".holonomy-save-").tempfile_in(parent)?;
-        staged.as_file_mut().set_permissions(original.permissions())?;
+        let parent = self
+            .filesystem_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut staged = tempfile::Builder::new()
+            .prefix(".holonomy-save-")
+            .tempfile_in(parent)?;
+        staged
+            .as_file_mut()
+            .set_permissions(original.permissions())?;
         staged.as_file_mut().write_all(image)?;
         staged.as_file().sync_all()?;
 
         // Catch stale handles before replacement. This does not close the race with a
         // concurrent writer between the check and rename; callers must serialize saves.
         let current = std::fs::symlink_metadata(&self.filesystem_path)?;
-        if !current.file_type().is_file() || current.dev() != original.dev() || current.ino() != original.ino() {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "container path changed while saving; refusing to replace it"));
+        if !current.file_type().is_file()
+            || current.dev() != original.dev()
+            || current.ino() != original.ino()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "container path changed while saving; refusing to replace it",
+            ));
         }
         let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
         self.file = new_file;
@@ -218,7 +238,13 @@ impl ContainerFile {
     /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
     #[cfg(not(unix))]
     pub fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("safe container replacement for {} is not implemented on this platform", self.filesystem_path.display())))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "safe container replacement for {} is not implemented on this platform",
+                self.filesystem_path.display()
+            ),
+        ))
     }
 }
 
