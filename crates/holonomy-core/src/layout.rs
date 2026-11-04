@@ -83,8 +83,8 @@ pub const PAD_COVERAGE_BYTES: usize = CONTAINER_BYTES;
 /// Sanity: the container is an integral number of aligned slots. In a `const` block so a passing
 /// assertion does not leave a dead item behind.
 const _: () = {
-    assert!(CONTAINER_BYTES % SLOT_BYTES == 0);
-    assert!(SLOT_BYTES % IO_ALIGN == 0);
+    assert!(CONTAINER_BYTES.is_multiple_of(SLOT_BYTES));
+    assert!(SLOT_BYTES.is_multiple_of(IO_ALIGN));
     assert!(TOTAL_BLOCKS * SLOT_BYTES == CONTAINER_BYTES);
     // One save of pad is exactly one container: 32,768 sectors x 4,096 bytes. That is the 1:1
     // property the fold depends on, stated as an identity rather than as a comment.
@@ -103,7 +103,7 @@ pub const fn slot_range(index: usize) -> (usize, usize) {
 
 /// Whether `len` bytes at `offset` satisfy the direct-I/O alignment rule.
 pub const fn is_direct_io_aligned(offset: u64, len: usize) -> bool {
-    offset % IO_ALIGN as u64 == 0 && len % IO_ALIGN == 0
+    offset.is_multiple_of(IO_ALIGN as u64) && len.is_multiple_of(IO_ALIGN)
 }
 
 #[cfg(test)]

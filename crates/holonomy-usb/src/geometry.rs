@@ -53,8 +53,8 @@ pub const ZONE_D_BYTES: u64 = 4 * 1024 * 1024;
 /// Fixed overhead before Zone B gets the rest.
 pub const OVERHEAD_BYTES: u64 = P1_BYTES + ZONE_A_BYTES + ZONE_C_BYTES + ZONE_D_BYTES;
 
-const _: () = assert!(P1_BYTES % SECTOR_BYTES == 0);
-const _: () = assert!(ZONE_A_BYTES % SECTOR_BYTES == 0);
+const _: () = assert!(P1_BYTES.is_multiple_of(SECTOR_BYTES));
+const _: () = assert!(ZONE_A_BYTES.is_multiple_of(SECTOR_BYTES));
 const _: () = assert!(OVERHEAD_BYTES < DEVICE_BYTES);
 
 /// The derived layout of one device.

@@ -127,7 +127,7 @@ const _: () = {
             == CAPSULE_BYTES
     );
     assert!(CAPSULE_BYTES == SLOT_BYTES);
-    assert!(SLOT_BYTES % IO_ALIGN == 0);
+    assert!(SLOT_BYTES.is_multiple_of(IO_ALIGN));
     assert!(size_of::<StratumRootCapsuleV5>() == SLOT_BYTES);
 };
 

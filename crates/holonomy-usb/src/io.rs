@@ -54,7 +54,7 @@ impl AlignedBuf {
     pub fn new(len: usize) -> Self {
         assert!(len > 0, "AlignedBuf must not be empty");
         assert!(
-            len % IO_ALIGN == 0,
+            len.is_multiple_of(IO_ALIGN),
             "AlignedBuf length {len} is not a multiple of {IO_ALIGN}"
         );
         let layout = Layout::from_size_align(len, IO_ALIGN)
@@ -101,7 +101,7 @@ impl AlignedBuf {
 
     /// Whether the address really is aligned. Cheap enough to assert in tests and in debug builds.
     pub fn is_aligned(&self) -> bool {
-        (self.ptr as usize) % IO_ALIGN == 0
+        (self.ptr as usize).is_multiple_of(IO_ALIGN)
     }
 
     /// Volatile zero-fill. See `holonomy_runtime::scrub` for why volatile matters.
