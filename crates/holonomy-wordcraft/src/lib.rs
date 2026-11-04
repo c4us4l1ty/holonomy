@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 
 /// Frontend-facing document ownership and conservative save state.
 pub mod editor;
+/// Limited Wordcraft editing commands bound to a container session.
+pub mod engine;
 
 const MAGIC: &[u8] = b"HOLONOMY-WORDCRAFT\0";
 const VERSION: u8 = 1;
