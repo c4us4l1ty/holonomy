@@ -60,6 +60,10 @@ jobs:
             echo "already formatted"
             exit 0
           fi
+          # Committing a lock file that is not in the repository would make this job's commit the
+          # first one to contain it, which is a dependency-resolution decision and not a formatting
+          # fix. Tests, though, generate one -- so it is restored rather than committed.
+          rm -f Cargo.lock
           # The formatted tree must compile and pass its tests *before* it is pushed. This job used
           # to format and push without building, and a push made with the default token does not
           # trigger a workflow run -- so every formatting fix commit was a commit nothing had ever
@@ -181,6 +185,17 @@ jobs:
 
       # The binary is a gate in its own right: it must build and run before the memory job can
       # measure anything, and `--version` is the cheapest proof that the workspace links.
+      - name: The store writes a container and reads it back
+        # The first gate in this project that runs `holonomy save` and `holonomy open` against a real
+        # file. A binary that "runs" is not a binary that saves.
+        run: |
+          cargo test -p holonomy-cli --bin holonomy a_document_survives_a_save_and_a_reopen -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy a_multi_slot_document_reassembles_in_order -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy the_wrong_passphrase_fails_before_a_byte_is_written -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy a_second_save_replaces_the_first -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy consecutive_cursors_read_disjoint_sectors -- --nocapture
+          cargo test -p holonomy-cli --bin holonomy the_store_and_the_usb_crate_choose_the_same_sectors -- --nocapture
+
       - name: The binary runs
         run: cargo run -q -p holonomy-cli -- --version
 

@@ -16,10 +16,16 @@ path = "src/main.rs"
 
 [dependencies]
 holonomy-core = { path = "../holonomy-core" }
+# Only for the pad-plan comparison in the store's tests, but a dev-dependency on a path crate is
+# still a dependency graph edge: it is declared here rather than under `[dev-dependencies]` so the
+# same feature resolution is used. `holonomy-usb` has no `wordcraft` in its graph either.
+holonomy-usb = { path = "../holonomy-usb" }
 holonomy-crypto = { path = "../holonomy-crypto" }
 holonomy-session = { path = "../holonomy-session" }
 holonomy-runtime = { path = "../holonomy-runtime" }
 libc = { workspace = true }
+# The store's stand-in pad material, and the image digest it reports alongside a save.
+blake2 = { workspace = true }
 
 [lints.rust]
 missing_docs = "deny"
