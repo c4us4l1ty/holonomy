@@ -239,10 +239,12 @@ pub fn save(
         ));
     }
 
-    let capacity = holonomy_core::layout::PAYLOAD_SLOTS
-        * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+    let capacity =
+        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
     if payload.len() > capacity {
-        return Err(format!("document exceeds the {capacity}-byte container payload limit"));
+        return Err(format!(
+            "document exceeds the {capacity}-byte container payload limit"
+        ));
     }
 
     // Cursor zero is the provisioning window, not a valid successor. Reusing it would
