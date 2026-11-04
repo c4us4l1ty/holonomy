@@ -28,8 +28,8 @@ use holonomy_core::stratum::ActiveStratum;
 use holonomy_core::unlock::{SealedPassphrase, Topology, UnlockError};
 use holonomy_crypto::commit::seal_directory;
 use holonomy_crypto::envelope::{
-    create_envelope, phase1_commitment, phase2_commitment, HybridCiphertext, HybridDecapsulationKey,
-    HybridEncapsulationKey, HybridKem, SharedSecrets,
+    create_envelope, phase1_commitment, phase2_commitment, HybridCiphertext,
+    HybridDecapsulationKey, HybridEncapsulationKey, HybridKem, SharedSecrets,
 };
 use holonomy_crypto::kdf::{derive_root_secret, derive_subkey, labels, ParamsClass};
 use holonomy_crypto::unlock::{
@@ -127,7 +127,11 @@ fn build_snapshot(
     }
 }
 
-fn unlock(snapshot: &Snapshot, passphrase: &str, kappa: &[u8; 32]) -> Result<ActiveStratum, UnlockError> {
+fn unlock(
+    snapshot: &Snapshot,
+    passphrase: &str,
+    kappa: &[u8; 32],
+) -> Result<ActiveStratum, UnlockError> {
     let sealed = SealedPassphrase::new(passphrase).expect("passphrase is length-legal");
     let req = UnlockRequest {
         passphrase: &sealed,
@@ -149,7 +153,9 @@ fn history(kappa: &[u8; 32]) -> Vec<Snapshot> {
             let mut salt = [0u8; SALT_BYTES];
             let s = holonomy_core::duress::splitmix64(0xC0FFEE ^ cursor);
             for (i, chunk) in salt.chunks_mut(8).enumerate() {
-                chunk.copy_from_slice(&holonomy_core::duress::splitmix64(s ^ i as u64).to_le_bytes());
+                chunk.copy_from_slice(
+                    &holonomy_core::duress::splitmix64(s ^ i as u64).to_le_bytes(),
+                );
             }
             // The directory grows with the cursor, the way a real one would.
             let directory = format!("merkle root at save {cursor}").into_bytes();
@@ -165,8 +171,17 @@ fn the_duress_passphrase_opens_every_snapshot() {
     for snap in &snaps {
         let active = unlock(snap, DURESS, &kappa)
             .unwrap_or_else(|e| panic!("P_1 must open T_{}: {e}", snap.cursor));
-        assert_eq!(active.id().index(), 1, "T_{} opened the wrong stratum", snap.cursor);
-        assert!(active.is_duress(), "T_{} did not report a duress unlock", snap.cursor);
+        assert_eq!(
+            active.id().index(),
+            1,
+            "T_{} opened the wrong stratum",
+            snap.cursor
+        );
+        assert!(
+            active.is_duress(),
+            "T_{} did not report a duress unlock",
+            snap.cursor
+        );
     }
 }
 
