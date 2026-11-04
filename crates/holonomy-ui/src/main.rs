@@ -9,11 +9,12 @@
 //!
 //! This is the v5.1.0 **skeleton**, delivered with the spec audit rather than after it. The
 //! container round-trip, the reaper, the pad plan and every invariant in `docs/PRD-v5.1.0.md` are
-//! implemented and tested in the library crates. What is not yet wired is the `wordcraft` document
-//! <-> container bridge, which is blocked on the two questions at the bottom of
-//! `docs/AUDIT-v5.1.0.md` (§7): the `wordcraft` dependency graph needs `crates.io` (unreachable
-//! from the sandbox where this was written) and its `craft-ui`/`craft-libs` git pins, and the
-//! bridge's shape depends on whether the user wants wordcraft vendored or tracked.
+//! implemented and tested in the library crates, and CI runs those gates on every push. What is
+//! not yet wired is the `wordcraft` document <-> container bridge, for a narrower reason than the
+//! first draft of this note gave: the `wordcraft` dependency graph needs `crates.io` plus its
+//! `craft-*` git pins, and the sandbox this was built in has neither. That is a build-environment
+//! limitation, not an open design question — `docs/AUDIT-v5.1.0.md` §8 records it as deferred with
+//! that reason and no decision outstanding.
 //!
 //! Rather than stub a `wordcraft` integration that cannot be compiled or verified, `main` reports
 //! exactly that and exits. A binary that pretends to have the editor would be worse than one that
@@ -57,7 +58,7 @@ fn print_banner() {
     println!("  * the zero-I/O PHY reaper and secret arenas (holonomy-runtime)");
     println!();
     println!("The wordcraft editor front end is not wired in this build. See");
-    println!("docs/AUDIT-v5.1.0.md §7 for what is blocking it.");
+    println!("docs/AUDIT-v5.1.0.md §8 for what is deferred and why.");
     println!();
     println!("Run `holonomy --check` to verify the invariants on this machine.");
 }

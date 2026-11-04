@@ -3,23 +3,29 @@
 Scope: the clean workspace at `v5.1.0`, audited against the checklist in the brief. `holonomy-old/`
 is a read-only scrapyard and is **not** a dependency of anything here.
 
-**Honest status up front:** this audit was produced in an environment with **no Rust toolchain and
-no route to `crates.io`**. `github.com`, `api.github.com` and `codeload.github.com` were reachable,
-which is how every upstream claim below was verified; `static.crates.io` and
-`files.pythonhosted.org` were not, so no `cargo build`, `cargo test` or `cargo tree` was run. Every
-numeric claim was therefore re-derived arithmetically or re-checked against the upstream repository,
-and the two gates that need a compiler are marked **Deferred** and given the exact command that
-will settle them.
+**How this document was produced, and what changed.** The first version was written with no Rust
+toolchain and no route to `crates.io`: every numeric claim was re-derived arithmetically or checked
+against the upstream repository, and the compiler gates were marked *Deferred*.
+
+That is no longer the state. Four of the five crates are built and tested by GitHub Actions on every
+push, and the results were not flattering. **Six claims in this document were false as written**,
+and the tests that were supposed to defend them were either wrong, unfalsifiable, or passing on a
+fixture with a 77-bit constant prefix. The sections below now report what the gates established
+rather than what the design intended; §8 collects the corrections and the remaining deferrals.
+
+The one gate still deferred is `holonomy-ui`, which needs `crates.io` plus `wordcraft`'s pinned
+`craft-*` git dependencies. Everything that depends on it — the measured-RSS gate, the `wordcraft`
+symbol checks in §1 — is marked as unverified rather than asserted.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |
 | 1 | Clean crate footprint & `wordcraft` integration | **Pass on footprint; integration deferred** (§1) |
 | 2 | `StratumRootCapsuleV5` exact 65,536-byte alignment | **Pass** — compile-time asserts + tests (§2) |
 | 3 | Dependency & cryptography resolution | **Pass on pins; two corrections to the brief** (§3) |
-| 4 | USB 22-bit Feistel & sector ratchet | **Pass** — 0% overlap over 54 saves proven (§4) |
-| 5 | Deterministic keystream & single-stratum duress | **Pass** (§5) |
-| 6 | Zero-I/O reaper & per-OS memory lock | **Pass** (§6) |
-| 7 | Statistical indistinguishability | **Pass, with a caveat about +3.5σ** (§7) |
+| 4 | USB 22-bit Feistel & sector ratchet | **Pass** — after fixing two overlap bugs (§4) |
+| 5 | Deterministic keystream & single-stratum duress | **Pass** — including a real 10-save history (§5) |
+| 6 | Zero-I/O reaper & per-OS memory lock | **Pass** — after fixing a wipe bypass (§6) |
+| 7 | Statistical indistinguishability | **Pass** — constants right, implementation rebuilt (§7) |
 
 ---
 
