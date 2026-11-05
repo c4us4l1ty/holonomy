@@ -31,7 +31,7 @@ impl EditorSession {
     /// atomic. Options must be writable and have cursor zero.
     pub fn create(
         path: &Path,
-        pad: Box<dyn PadSource>,
+        pad: Box<dyn PadSource + Send>,
         passphrase: SealedPassphrase,
         kappa: [u8; 32],
         options: DocumentSessionOptions,
@@ -48,7 +48,7 @@ impl EditorSession {
     /// empty payload of a newly provisioned container opens as a blank document.
     pub fn open(
         path: &Path,
-        pad: Box<dyn PadSource>,
+        pad: Box<dyn PadSource + Send>,
         passphrase: SealedPassphrase,
         kappa: [u8; 32],
         options: DocumentSessionOptions,

@@ -211,8 +211,10 @@ A different, restricted **plain-text demo container editor** has no Wordcraft fi
 It refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
 uses the deterministic demo pad, **not** a physical USB key; it is not for sensitive or valuable
 data. Container creation is not crash-atomic; track the displayed cursor to reopen and do not save
-concurrently. This prototype can block the window during saves and does not guarantee plaintext
-is wiped from Wordcraft, egui, the clipboard, or operating-system memory. Unix saves only.
+concurrently. Saves run on a worker; editing and closing are paused until the operation finishes.
+Forced termination or power loss can still leave the container or pad needing recovery. This
+prototype does not guarantee plaintext is wiped from Wordcraft, egui, the clipboard, or
+operating-system memory. Unix saves only.
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container

@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{mpsc, Arc, Mutex};
 
 use eframe::egui;
 use holonomy_cli::document::{DocumentSessionOptions, DocumentSessionState};
@@ -102,8 +103,22 @@ fn plain_text(doc: &Document) -> Result<Zeroizing<String>, &'static str> {
     Ok(text)
 }
 
+enum SaveOutcome {
+    Saved(bool),
+    Failed(String),
+    Interrupted,
+}
+
+struct PendingSave {
+    session: Arc<Mutex<Option<EditorSession>>>,
+    receiver: mpsc::Receiver<SaveOutcome>,
+}
+
 struct DemoEditor {
-    session: EditorSession,
+    session: Option<EditorSession>,
+    pending: Option<PendingSave>,
+    cursor: u64,
+    recovery_blocked: bool,
     text: Zeroizing<String>,
     text_unrepresentable: bool,
     close_confirmation: bool,
@@ -114,13 +129,17 @@ struct DemoEditor {
 impl DemoEditor {
     fn new(session: EditorSession) -> Result<Self, &'static str> {
         let text = plain_text(session.document())?;
+        let cursor = session.cursor();
         Ok(Self {
-            session,
+            session: Some(session),
+            pending: None,
+            cursor,
+            recovery_blocked: false,
             text,
             text_unrepresentable: false,
             close_confirmation: false,
             allow_close: false,
-            status: "Ready. Saves may block the window while the container is written.".into(),
+            status: "Ready. Record the cursor after each save.".into(),
         })
     }
 
@@ -130,44 +149,139 @@ impl DemoEditor {
         // silently modified version of the text the user sees.
         self.text_unrepresentable = document.plain_text(StoryRef::Body) != *self.text;
         if !self.text_unrepresentable {
-            *self.session.document_mut() = document;
+            if let Some(session) = &mut self.session {
+                *session.document_mut() = document;
+            }
         }
+    }
+
+    fn needs_recovery(&self) -> bool {
+        self.recovery_blocked
+            || self.session.as_ref().is_some_and(|session| {
+                session.state() == DocumentSessionState::RecoveryRequired
+            })
     }
 
     fn dirty(&self) -> bool {
-        self.text_unrepresentable || self.session.has_unsaved_changes()
+        self.pending.is_some()
+            || self.needs_recovery()
+            || self.text_unrepresentable
+            || self.session.as_ref().is_some_and(EditorSession::has_unsaved_changes)
     }
 
-    fn save(&mut self) {
-        if self.text_unrepresentable {
-            self.status =
-                "Text contains line endings this demo cannot preserve; nothing was saved.".into();
+    fn save(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() || self.needs_recovery() {
             return;
         }
-        match self.session.save() {
-            Ok(Some(_)) => {
-                self.status = format!(
-                    "Saved at cursor {}. Record this cursor for reopening.",
-                    self.session.cursor()
-                )
+        if self.text_unrepresentable {
+            self.status = "Text cannot be represented exactly; nothing was saved.".into();
+            return;
+        }
+        let Some(session) = self.session.take() else {
+            self.recovery_blocked = true;
+            self.status = "Session unavailable; recovery required.".into();
+            return;
+        };
+        if !session.has_unsaved_changes() {
+            self.session = Some(session);
+            self.status = "No changes; no cursor was spent.".into();
+            return;
+        }
+        let slot = Arc::new(Mutex::new(Some(session)));
+        let worker_slot = Arc::clone(&slot);
+        let (sender, receiver) = mpsc::channel();
+        let wake = ctx.clone();
+        let spawned = std::thread::Builder::new().name("holonomy-save".into()).spawn(move || {
+            // Hold no mutex during I/O. A panic leaves the disk state uncertain,
+            // even if the session object can be returned to the UI.
+            let session = worker_slot.lock().ok().and_then(|mut slot| slot.take());
+            let outcome = if let Some(mut session) = session {
+                let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.save()));
+                let result = match saved {
+                    Ok(Ok(report)) => SaveOutcome::Saved(report.is_some()),
+                    Ok(Err(error)) => SaveOutcome::Failed(error.to_string()),
+                    Err(_) => SaveOutcome::Interrupted,
+                };
+                if let Ok(mut slot) = worker_slot.lock() {
+                    *slot = Some(session);
+                    result
+                } else {
+                    SaveOutcome::Interrupted
+                }
+            } else {
+                SaveOutcome::Interrupted
+            };
+            let _ = sender.send(outcome);
+            wake.request_repaint();
+        });
+        match spawned {
+            Ok(_) => {
+                self.pending = Some(PendingSave { session: slot, receiver });
+                self.status = "Saving in the background; editing and closing are paused.".into();
             }
-            Ok(None) => self.status = "No changes; no cursor was spent.".into(),
-            Err(error) => self.status = format!("Save failed: {error}"),
+            Err(error) => {
+                self.session = slot.lock().ok().and_then(|mut slot| slot.take());
+                if self.session.is_some() {
+                    self.status = format!("Could not start save worker; nothing was written: {error}");
+                } else {
+                    self.recovery_blocked = true;
+                    self.status = "Save worker failed to start and session is unavailable; recovery required.".into();
+                }
+            }
+        }
+    }
+
+    fn finish_save(&mut self, outcome: SaveOutcome) {
+        let Some(pending) = self.pending.take() else { return };
+        self.session = pending.session.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(session) = &self.session {
+            self.cursor = session.cursor();
+        } else {
+            self.recovery_blocked = true;
+        }
+        match outcome {
+            SaveOutcome::Saved(true) if !self.recovery_blocked => {
+                self.status = format!("Saved at cursor {}. Record this cursor for reopening.", self.cursor);
+            }
+            SaveOutcome::Saved(false) if !self.recovery_blocked => {
+                self.status = "No changes; no cursor was spent.".into();
+            }
+            SaveOutcome::Failed(error) if !self.recovery_blocked => {
+                self.status = format!("Save failed: {error}");
+            }
+            _ => {
+                self.recovery_blocked = true;
+                self.status = "Save worker was interrupted; container or pad may have changed. Recovery required.".into();
+            }
+        }
+    }
+
+    fn poll_save(&mut self) {
+        let outcome = self.pending.as_ref().and_then(|pending| match pending.receiver.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(SaveOutcome::Interrupted),
+        });
+        if let Some(outcome) = outcome {
+            self.finish_save(outcome);
         }
     }
 }
 
 impl eframe::App for DemoEditor {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_save();
         if ctx.input(|input| input.key_pressed(egui::Key::Q) && input.modifiers.command) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if ctx.input(|input| input.viewport().close_requested())
-            && !self.allow_close
-            && self.dirty()
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.close_confirmation = true;
+        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
+            if self.pending.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.status = "Save in progress. Please wait before closing.".into();
+            } else if self.dirty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.close_confirmation = true;
+            }
         }
     }
 
@@ -178,14 +292,14 @@ impl eframe::App for DemoEditor {
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let recovery = self.session.state() == DocumentSessionState::RecoveryRequired;
-                if ui.add_enabled(!recovery, egui::Button::new("Save to demo container")).clicked() {
-                    self.save();
+                let can_save = self.pending.is_none() && !self.needs_recovery();
+                if ui.add_enabled(can_save, egui::Button::new("Save to demo container")).clicked() {
+                    self.save(ui.ctx());
                 }
-                ui.label(format!("Cursor: {} · {}", self.session.cursor(), if self.dirty() { "Unsaved or recovery required" } else { "Saved" }));
+                ui.label(format!("Cursor: {} · {}", self.cursor, if self.dirty() { "Unsaved, saving or recovery required" } else { "Saved" }));
             });
             ui.label(&self.status);
-            if self.session.state() == DocumentSessionState::RecoveryRequired {
+            if self.needs_recovery() {
                 ui.colored_label(egui::Color32::RED, "Recovery required: the container or pad may have changed. Further saves are blocked; inspect and recover before reopening.");
             }
             if self.text_unrepresentable {
@@ -193,10 +307,13 @@ impl eframe::App for DemoEditor {
             }
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            let response = ui.add_sized(
-                ui.available_size(),
-                egui::TextEdit::multiline(&mut *self.text).desired_width(f32::INFINITY),
-            );
+            let enabled = self.pending.is_none() && self.session.is_some();
+            let response = ui.add_enabled_ui(enabled, |ui| {
+                ui.add_sized(
+                    ui.available_size(),
+                    egui::TextEdit::multiline(&mut *self.text).desired_width(f32::INFINITY),
+                )
+            }).inner;
             if response.changed() {
                 self.sync_text();
             }
@@ -307,15 +424,37 @@ mod tests {
         *editor.text = "hello\nworld".into();
         editor.sync_text();
         assert!(editor.dirty());
-        editor.save();
+        let ctx = egui::Context::default();
+        editor.save(&ctx);
+        assert!(editor.pending.is_some());
+        assert!(editor.dirty());
+        // A second request cannot start a concurrent save.
+        editor.save(&ctx);
+        let outcome = editor.pending.as_ref().expect("pending").receiver
+            .recv_timeout(std::time::Duration::from_secs(180)).expect("save finished");
+        editor.finish_save(outcome);
         assert!(!editor.dirty());
-        assert_eq!(editor.session.cursor(), 1);
+        assert_eq!(editor.cursor, 1);
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
         *editor.text = "cannot preserve\r\n".into();
         editor.sync_text();
         assert!(editor.text_unrepresentable);
-        editor.save();
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
         assert!(editor.dirty());
-        assert_eq!(editor.session.cursor(), 1);
+        assert_eq!(editor.cursor, 1);
+        *editor.text = "hello\nworld".into();
+        editor.sync_text();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let slot = Arc::new(Mutex::new(editor.session.take()));
+        editor.pending = Some(PendingSave { session: slot, receiver });
+        editor.poll_save();
+        assert!(editor.needs_recovery());
+        assert!(editor.dirty());
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
         drop(editor);
         let session = EditorSession::open(
             &path,

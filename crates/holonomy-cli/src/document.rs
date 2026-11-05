@@ -55,10 +55,12 @@ pub enum DocumentSessionState {
 ///
 /// This type does not retain the document itself. The returned plaintext buffer is
 /// wiped on drop, but callers must manage any copies they make. The session is not
-/// safe for concurrent writers or shared-pad accounting across containers.
+/// safe for concurrent writers or shared-pad accounting across containers. The
+/// pad source must be transferable to a worker thread (`Send`); this does not
+/// make the session safe for simultaneous use from multiple threads.
 pub struct DocumentSession {
     file: ContainerFile,
-    pad: Box<dyn PadSource>,
+    pad: Box<dyn PadSource + Send>,
     passphrase: SealedPassphrase,
     kappa: Zeroizing<[u8; 32]>,
     options: DocumentSessionOptions,
@@ -74,7 +76,7 @@ impl DocumentSession {
     /// handled here, and a reused pad cannot be detected by this method.
     pub fn create(
         path: &Path,
-        mut pad: Box<dyn PadSource>,
+        mut pad: Box<dyn PadSource + Send>,
         passphrase: SealedPassphrase,
         kappa: [u8; 32],
         options: DocumentSessionOptions,
@@ -115,7 +117,7 @@ impl DocumentSession {
     /// container's authenticated cursor is checked by the underlying store.
     pub fn open(
         path: &Path,
-        mut pad: Box<dyn PadSource>,
+        mut pad: Box<dyn PadSource + Send>,
         passphrase: SealedPassphrase,
         kappa: [u8; 32],
         options: DocumentSessionOptions,
