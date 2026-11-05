@@ -448,6 +448,7 @@ fn save_lock_path(container: &Path) -> PathBuf {
 /// Non-Unix builds refuse saves before this type could matter; it exists so signatures are
 /// uniform across platforms.
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub(crate) struct SaveLock(());
 
 /// An advisory exclusive lock held for the duration of one save.
@@ -521,6 +522,7 @@ pub(crate) fn save_if_unchanged_locked(
     save_inner(file, pad, ctx, payload, Some(opened_digest), Some(lock))
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn save_inner(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
