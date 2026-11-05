@@ -467,7 +467,10 @@ fn verify(args: &[String]) -> ExitCode {
     };
     match store::verify_candidate(&mut file, pad.as_mut(), &ctx) {
         Ok(()) => {
-            println!("Candidate authenticated at cursor {}. No document bytes were printed.", flags.cursor);
+            println!(
+                "Candidate authenticated at cursor {}. No document bytes were printed.",
+                flags.cursor
+            );
             println!("Pad source: {}", pad.describe());
             println!("This does not verify document format, pad freshness, durability, rollback history, or complete recovery.");
             ExitCode::SUCCESS

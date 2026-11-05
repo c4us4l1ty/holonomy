@@ -29,29 +29,76 @@ fn verify_checks_candidate_without_printing_or_modifying_plaintext() {
     let secret = "synthetic verification test document";
     let credentials = ["--passphrase", "ci test passphrase", "--kappa", &root];
 
-    let create = Command::new(binary).arg("provision").arg(&path).args(credentials).output().expect("provision command");
-    assert!(create.status.success(), "provision failed: {}", String::from_utf8_lossy(&create.stderr));
+    let create = Command::new(binary)
+        .arg("provision")
+        .arg(&path)
+        .args(credentials)
+        .output()
+        .expect("provision command");
+    assert!(
+        create.status.success(),
+        "provision failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
     let mut save = Command::new(binary)
-        .arg("save").arg(&path).args(credentials).args(["--cursor", "1"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("save command");
-    save.stdin.take().expect("stdin").write_all(secret.as_bytes()).expect("write input");
+        .arg("save")
+        .arg(&path)
+        .args(credentials)
+        .args(["--cursor", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("save command");
+    save.stdin
+        .take()
+        .expect("stdin")
+        .write_all(secret.as_bytes())
+        .expect("write input");
     let saved = save.wait_with_output().expect("save finished");
-    assert!(saved.status.success(), "save failed: {}", String::from_utf8_lossy(&saved.stderr));
+    assert!(
+        saved.status.success(),
+        "save failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
     let before = digest(&path);
-    let verify = Command::new(binary).arg("verify").arg(&path).args(credentials).args(["--cursor", "1"]).output().expect("verify command");
-    assert!(verify.status.success(), "verify failed: {}", String::from_utf8_lossy(&verify.stderr));
+    let verify = Command::new(binary)
+        .arg("verify")
+        .arg(&path)
+        .args(credentials)
+        .args(["--cursor", "1"])
+        .output()
+        .expect("verify command");
+    assert!(
+        verify.status.success(),
+        "verify failed: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
     let stdout = String::from_utf8(verify.stdout).expect("UTF-8 report");
     assert!(stdout.contains("Candidate authenticated at cursor 1"));
     assert!(stdout.contains("does not verify document format"));
     assert!(!stdout.contains(secret));
     assert!(!String::from_utf8_lossy(&verify.stderr).contains(secret));
-    assert_eq!(digest(&path), before, "verification must not modify container bytes");
+    assert_eq!(
+        digest(&path),
+        before,
+        "verification must not modify container bytes"
+    );
 
-    let missing = Command::new(binary).arg("verify").arg(&path).output().expect("missing cursor");
+    let missing = Command::new(binary)
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .expect("missing cursor");
     assert_eq!(missing.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("explicit --cursor"));
-    let wrong = Command::new(binary).arg("verify").arg(&path).args(credentials).args(["--cursor", "0"]).output().expect("wrong cursor");
+    let wrong = Command::new(binary)
+        .arg("verify")
+        .arg(&path)
+        .args(credentials)
+        .args(["--cursor", "0"])
+        .output()
+        .expect("wrong cursor");
     assert!(!wrong.status.success());
     assert!(!String::from_utf8_lossy(&wrong.stdout).contains(secret));
     assert_eq!(digest(&path), before);
