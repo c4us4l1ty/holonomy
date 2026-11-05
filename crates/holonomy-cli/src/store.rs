@@ -834,19 +834,25 @@ pub fn provision(
 ///
 /// `holonomy-crypto`'s `the_fallback_keys_equal_the_ones_the_capsule_was_built_with` is where that
 /// equality is asserted.
+/// The protection layer a store write attaches to its stratum.
+///
+/// The store knows it folded a pad; it does not know whether any sector was reused on another
+/// device, in a snapshot, or after a rollback, so freshness is `None` rather than a claim.
+pub(crate) fn protection_layer() -> holonomy_core::unlock::ProtectionLayer {
+    holonomy_core::unlock::ProtectionLayer {
+        pad: true,
+        pad_fresh: None,
+        post_quantum: true,
+    }
+}
+
 fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum, String> {
     let root =
         holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), salt.as_bytes(), ctx.params)
             .map_err(|e| format!("deriving the root secret: {e}"))?;
     let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
     let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
-    // This layer records what the store knows, and the store does not establish pad freshness:
-    // it sees a container and a pad source, not a sector history across devices or rollbacks.
-    let layer = holonomy_core::unlock::ProtectionLayer {
-        pad: true,
-        pad_fresh: None,
-        post_quantum: true,
-    };
+    let layer = protection_layer();
     Ok(holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys))
 }
 

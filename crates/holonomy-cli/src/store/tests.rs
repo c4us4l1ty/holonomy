@@ -1285,17 +1285,8 @@ fn ratchet_count_must_match_the_full_window() {
 /// the sealing path must say "unknown" rather than claim a fresh pad on its behalf.
 #[test]
 fn the_store_layer_does_not_claim_pad_freshness() {
-    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal passphrase");
-    let salt = [0x2Bu8; holonomy_core::layout::SALT_BYTES];
-    let ctx = SaveContext {
-        passphrase: &pass,
-        kappa_usb: &KAPPA,
-        topology: Topology::UmbilicalUsb,
-        params: ParamsClass::Test,
-        // Unused by `stratum_for`; present because the context is shared with `save`.
-        cursor: 0,
-    };
-    let layer = stratum_for(&ctx, &salt).expect("stratum").protection();
+    let layer = protection_layer();
+    assert_eq!(layer.pad, true);
     assert_eq!(layer.pad_fresh, None);
     assert!(!layer.describe().contains("fresh sectors"));
     assert!(!layer.describe().contains("reused"));
