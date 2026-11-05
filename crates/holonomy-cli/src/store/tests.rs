@@ -1325,7 +1325,11 @@ fn a_second_save_is_refused_while_a_save_is_running() {
         .expect_err("a held lock must refuse the save");
     assert!(error.contains("another Holonomy save holds"), "{error}");
     assert!(error.contains("nothing was written"), "{error}");
-    assert_eq!(std::fs::read(&path).expect("read"), before, "container changed");
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        before,
+        "container changed"
+    );
 
     drop(lock);
     save(&mut file, &mut source(), &ctx, b"after the lock").expect("save after release");
