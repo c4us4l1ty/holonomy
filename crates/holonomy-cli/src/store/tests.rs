@@ -1286,7 +1286,7 @@ fn ratchet_count_must_match_the_full_window() {
 #[test]
 fn the_store_layer_does_not_claim_pad_freshness() {
     let layer = protection_layer();
-    assert_eq!(layer.pad, true);
+    assert!(layer.pad);
     assert_eq!(layer.pad_fresh, None);
     assert!(!layer.describe().contains("fresh sectors"));
     assert!(!layer.describe().contains("reused"));
