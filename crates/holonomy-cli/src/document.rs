@@ -251,7 +251,9 @@ mod tests {
             fn can_ratchet(&self) -> bool {
                 panic!("preflight must not access pad")
             }
-            fn describe(&self) -> String { "test pad".into() }
+            fn describe(&self) -> String {
+                "test pad".into()
+            }
         }
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("container");
@@ -264,18 +266,31 @@ mod tests {
             options: options(0, true),
             state: DocumentSessionState::Ready,
         };
-        let capacity = holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+        let capacity = holonomy_core::layout::PAYLOAD_SLOTS
+            * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
         let oversized = vec![0u8; capacity + 1];
-        assert!(session.save(&oversized).expect_err("size refused").contains("payload limit"));
+        assert!(session
+            .save(&oversized)
+            .expect_err("size refused")
+            .contains("payload limit"));
         assert_eq!(session.state(), DocumentSessionState::Ready);
         assert_eq!(session.cursor(), 0);
         drop(oversized);
         session.options.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
-        assert!(session.save(b"edit").expect_err("cursor refused").contains("pad reuse"));
+        assert!(session
+            .save(b"edit")
+            .expect_err("cursor refused")
+            .contains("pad reuse"));
         assert_eq!(session.state(), DocumentSessionState::Ready);
-        assert_eq!(session.cursor(), holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1);
+        assert_eq!(
+            session.cursor(),
+            holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1
+        );
         session.options.cursor = u64::MAX;
-        assert!(session.save(b"edit").expect_err("overflow refused").contains("overflow"));
+        assert!(session
+            .save(b"edit")
+            .expect_err("overflow refused")
+            .contains("overflow"));
         assert_eq!(session.state(), DocumentSessionState::Ready);
         assert_eq!(std::fs::read(&path).expect("read sentinel"), b"untouched");
     }

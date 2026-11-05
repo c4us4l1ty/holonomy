@@ -245,7 +245,9 @@ impl DemoEditor {
             return;
         }
         if self.cursor_limit_reached() {
-            self.status = "Cursor limit reached: no save attempted. This demo cannot migrate to a fresh pad.".into();
+            self.status =
+                "Cursor limit reached: no save attempted. This demo cannot migrate to a fresh pad."
+                    .into();
             return;
         }
         let Some(session) = self.session.take() else {
