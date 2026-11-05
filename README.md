@@ -235,6 +235,10 @@ Read-only inspection authenticates and decodes the candidate at the supplied cur
 repair a container or pad, establish pad freshness, or prove recovery is complete. It uses the
 same demo pad and plaintext-memory limitations. The OS may still update file-access metadata.
 
+The file store requires a standalone file of exactly 134,217,728 bytes. It refuses shorter or
+longer files rather than interpreting an embedded image or discarding trailing data on save.
+Size checks do not serialize concurrent writers; concurrent modification is still unsafe.
+
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
 `save` needs the **next** cursor. Keep track of it externally. An omitted `--device` selects the

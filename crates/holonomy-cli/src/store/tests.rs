@@ -974,3 +974,77 @@ fn staged_replacement_refuses_changed_path() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&moved);
 }
+
+#[cfg(unix)]
+#[test]
+fn standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing() {
+    struct NeverReadPad;
+    impl PadSource for NeverReadPad {
+        fn window(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            panic!("invalid file size must be rejected before reading the pad")
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("invalid file size must never ratchet")
+        }
+        fn can_ratchet(&self) -> bool { true }
+        fn describe(&self) -> String { "test pad".into() }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    let mut original = std::fs::File::create(&path).expect("create");
+    original.set_len(CONTAINER_BYTES as u64).expect("size");
+    original.seek(SeekFrom::Start(0)).expect("seek");
+    original.write_all(b"prefix").expect("prefix");
+    original.seek(SeekFrom::End(0)).expect("seek");
+    original.write_all(b"trailing data").expect("suffix");
+    drop(original);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let error = file.read_image().expect_err("oversized file rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("extra data"));
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"new data")
+        .expect_err("save must not truncate a larger file");
+    assert!(error.contains("extra data"), "{error}");
+    let image = vec![0u8; CONTAINER_BYTES];
+    let error = file.replace_image(&image).expect_err("replacement refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    drop(file);
+    let mut original = std::fs::File::open(&path).expect("open original");
+    assert_eq!(original.metadata().expect("metadata").len(), CONTAINER_BYTES as u64 + 13);
+    let mut prefix = [0u8; 6];
+    original.read_exact(&mut prefix).expect("prefix");
+    assert_eq!(&prefix, b"prefix");
+    original.seek(SeekFrom::Start(CONTAINER_BYTES as u64)).expect("seek");
+    let mut suffix = [0u8; 13];
+    original.read_exact(&mut suffix).expect("suffix");
+    assert_eq!(&suffix, b"trailing data");
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_container_refuses_growth_before_replacement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    let original = std::fs::File::create(&path).expect("create");
+    original.set_len(CONTAINER_BYTES as u64).expect("size");
+    drop(original);
+    let mut container = ContainerFile::open(&path, true).expect("open");
+    let mut other = std::fs::OpenOptions::new().append(true).open(&path).expect("append");
+    other.write_all(b"external data").expect("append data");
+    let image = vec![0u8; CONTAINER_BYTES];
+    assert_eq!(container.replace_image(&image).expect_err("refuse growth").kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::metadata(&path).expect("metadata").len(), CONTAINER_BYTES as u64 + 13);
+}
+
+#[test]
+fn standalone_container_rejects_truncation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("short");
+    std::fs::write(&path, b"short").expect("write");
+    let mut file = ContainerFile::open(&path, false).expect("open");
+    let error = file.read_image().expect_err("short file rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert_eq!(std::fs::read(&path).expect("read"), b"short");
+}
