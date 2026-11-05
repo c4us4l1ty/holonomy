@@ -515,7 +515,7 @@ mod tests {
         let id = StratumId::new(index).expect("index in range");
         let layer = ProtectionLayer {
             pad: true,
-            pad_fresh: true,
+            pad_fresh: Some(true),
             post_quantum: true,
         };
         Unlocked::new(id, Topology::UmbilicalUsb, id, layer).into_active(keys)

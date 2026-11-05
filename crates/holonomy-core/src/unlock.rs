@@ -49,8 +49,10 @@ pub enum Topology {
 pub struct ProtectionLayer {
     /// Whether a live one-time pad was folded over this snapshot.
     pub pad: bool,
-    /// Whether the pad was fresh (no sector reused from an earlier save).
-    pub pad_fresh: bool,
+    /// `Some(true)` when the accounting proves no sector was reused, `Some(false)` when reuse is
+    /// known, `None` when this layer does not establish freshness at all. A bool cannot carry the
+    /// third state, and `false` would be a definite claim of reuse.
+    pub pad_fresh: Option<bool>,
     /// The post-quantum layer is always present for the confidential payload.
     pub post_quantum: bool,
 }
@@ -59,9 +61,12 @@ impl ProtectionLayer {
     /// The honest description of a save, including the case the fine print is about.
     pub fn describe(&self) -> &'static str {
         match (self.pad, self.pad_fresh) {
-            (true, true) => "one-time pad (fresh sectors) + ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4",
-            (true, false) => {
+            (true, Some(true)) => "one-time pad (fresh sectors) + ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4",
+            (true, Some(false)) => {
                 "pad sectors reused (past the 54-save budget) + ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4"
+            }
+            (true, None) => {
+                "one-time pad (freshness not established by this layer) + ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4"
             }
             (false, _) => "no pad (write-blocked or no USB) + ML-KEM-1024/X25519/XChaCha20-Poly1305 CMT-4",
         }
@@ -246,22 +251,31 @@ mod tests {
     fn protection_language_is_honest_about_pad_reuse() {
         let fresh = ProtectionLayer {
             pad: true,
-            pad_fresh: true,
+            pad_fresh: Some(true),
             post_quantum: true,
         };
-        assert!(fresh.describe().contains("fresh"));
+        assert!(fresh.describe().contains("fresh sectors"));
         let stale = ProtectionLayer {
             pad: true,
-            pad_fresh: false,
+            pad_fresh: Some(false),
             post_quantum: true,
         };
         assert!(stale.describe().contains("reused"));
         assert!(stale.describe().contains("54-save"));
         let none = ProtectionLayer {
             pad: false,
-            pad_fresh: false,
+            pad_fresh: Some(false),
             post_quantum: true,
         };
         assert!(none.describe().starts_with("no pad"));
+        // Unestablished freshness must read as neither fresh nor reused.
+        let unknown = ProtectionLayer {
+            pad: true,
+            pad_fresh: None,
+            post_quantum: true,
+        };
+        assert!(unknown.describe().contains("not established"));
+        assert!(!unknown.describe().contains("fresh sectors"));
+        assert!(!unknown.describe().contains("reused"));
     }
 }

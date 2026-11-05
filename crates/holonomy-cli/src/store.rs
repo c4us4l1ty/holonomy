@@ -535,7 +535,7 @@ fn save_inner(
             kappa_usb: ctx.kappa_usb,
             topology: ctx.topology,
             params: ctx.params,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         epoch_placement(&old_salt),
     )
@@ -684,7 +684,7 @@ fn open_authenticated(
             kappa_usb: ctx.kappa_usb,
             topology: ctx.topology,
             params: ctx.params,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         epoch_placement(&file_salt),
     )
@@ -840,9 +840,11 @@ fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum,
             .map_err(|e| format!("deriving the root secret: {e}"))?;
     let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
     let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
+    // This layer records what the store knows, and the store does not establish pad freshness:
+    // it sees a container and a pad source, not a sector history across devices or rollbacks.
     let layer = holonomy_core::unlock::ProtectionLayer {
         pad: true,
-        pad_fresh: true,
+        pad_fresh: None,
         post_quantum: true,
     };
     Ok(holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys))

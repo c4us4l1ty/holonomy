@@ -160,10 +160,13 @@ impl Session {
     }
 
     /// What protects the container right now, as reported rather than assumed.
+    ///
+    /// `pad_fresh` here is the budget's view, not device evidence: it does not prove that no
+    /// sector was reused on another device, in a snapshot, or after a rollback.
     pub fn protection(&self) -> ProtectionLayer {
         ProtectionLayer {
             pad: true,
-            pad_fresh: self.budget.is_fresh(),
+            pad_fresh: Some(self.budget.is_fresh()),
             post_quantum: true,
         }
     }
@@ -275,7 +278,7 @@ mod tests {
             id,
             ProtectionLayer {
                 pad: true,
-                pad_fresh: true,
+                pad_fresh: Some(true),
                 post_quantum: true,
             },
         )
@@ -291,7 +294,7 @@ mod tests {
             SaveOutcome::ConsumedFreshPad { remaining } => assert_eq!(remaining, 53),
             other => panic!("expected a fresh-pad save, got {other:?}"),
         }
-        assert!(s.protection().pad_fresh);
+        assert_eq!(s.protection().pad_fresh, Some(true));
     }
 
     #[test]
@@ -309,7 +312,7 @@ mod tests {
             SaveOutcome::Refused(SessionError::PadExhausted { cursor: 54 })
         ));
         assert!(
-            !s.protection().pad_fresh,
+            s.protection().pad_fresh != Some(true),
             "and the status line must admit it"
         );
     }
@@ -332,8 +335,9 @@ mod tests {
             let outcome = s.save(Some(PAD_SECTORS_PER_SAVE));
             assert!(outcome.committed(), "writable save {i} refused");
         }
-        assert!(
+        assert_eq!(
             s.protection().pad_fresh,
+            Some(true),
             "a ratcheting session is always pad-backed"
         );
     }
