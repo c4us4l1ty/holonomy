@@ -241,9 +241,11 @@ same demo pad and plaintext-memory limitations. The OS may still update file-acc
 
 The file store requires a standalone file of exactly 134,217,728 bytes. It refuses shorter or
 longer files rather than interpreting an embedded image or discarding trailing data on save.
-Before replacing an image, a save also compares the original encrypted bytes against the image
-it read; it refuses a detected change rather than overwriting it. This is best-effort detection,
-not a lock: modification can race the check or affect pad state, so concurrent writers remain unsafe.
+An editor session records the encrypted image it opened or last saved, and refuses to save if a
+later read differs. Before replacement, the store also compares the original encrypted bytes against
+the image it read. These are best-effort change detectors, not locks: changes may not appear in the
+GUI until a save is attempted, modification can race a check, and pad state is not coordinated.
+Concurrent writers remain unsafe.
 Even a refused replacement may have staged an encrypted image; do not retry after a failed save
 without investigating the container and pad state.
 

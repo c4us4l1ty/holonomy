@@ -64,6 +64,7 @@ pub struct DocumentSession {
     passphrase: SealedPassphrase,
     kappa: Zeroizing<[u8; 32]>,
     options: DocumentSessionOptions,
+    last_image_digest: [u8; 32],
     state: DocumentSessionState,
 }
 
@@ -132,7 +133,8 @@ impl DocumentSession {
             params: options.params,
             cursor: options.cursor,
         };
-        let (_, document) = store::open_document(&mut file, pad.as_mut(), &context)?;
+        let (_, document, last_image_digest) =
+            store::open_document_with_digest(&mut file, pad.as_mut(), &context)?;
         Ok((
             Self {
                 file,
@@ -140,6 +142,7 @@ impl DocumentSession {
                 passphrase,
                 kappa,
                 options,
+                last_image_digest,
                 state: DocumentSessionState::Ready,
             },
             document,
@@ -189,9 +192,16 @@ impl DocumentSession {
             params: self.options.params,
             cursor,
         };
-        match store::save(&mut self.file, self.pad.as_mut(), &context, document) {
+        match store::save_if_unchanged(
+            &mut self.file,
+            self.pad.as_mut(),
+            &context,
+            document,
+            &self.last_image_digest,
+        ) {
             Ok(report) => {
                 self.options.cursor = cursor;
+                self.last_image_digest = report.digest;
                 Ok(report)
             }
             Err(error) => {
@@ -264,6 +274,7 @@ mod tests {
             passphrase: SealedPassphrase::new("test").expect("passphrase"),
             kappa: Zeroizing::new([0; 32]),
             options: options(0, true),
+            last_image_digest: [0; 32],
             state: DocumentSessionState::Ready,
         };
         let capacity = holonomy_core::layout::PAYLOAD_SLOTS
@@ -293,6 +304,80 @@ mod tests {
             .contains("overflow"));
         assert_eq!(session.state(), DocumentSessionState::Ready);
         assert_eq!(std::fs::read(&path).expect("read sentinel"), b"untouched");
+    }
+
+    #[test]
+    fn session_refuses_image_changed_since_open_before_pad_access() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use std::os::unix::fs::MetadataExt;
+
+        struct CountingPad { inner: DerivedPad, reads: Arc<AtomicUsize> }
+        impl PadSource for CountingPad {
+            fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<PadWindow, String> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                self.inner.window(kappa, cursor)
+            }
+            fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+                panic!("changed snapshot must not be ratcheted")
+            }
+            fn can_ratchet(&self) -> bool { false }
+            fn describe(&self) -> String { "counting demo pad".into() }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("first");
+        let other_path = dir.path().join("second");
+        let kappa = [0x51; 32];
+        let pass = || SealedPassphrase::new("test passphrase").expect("passphrase");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut session = DocumentSession::create(
+            &path,
+            Box::new(CountingPad { inner: DerivedPad::new(), reads: Arc::clone(&reads) }),
+            pass(), kappa, options(0, true),
+        ).expect("create first");
+        let other = DocumentSession::create(
+            &other_path, Box::new(DerivedPad::new()), pass(), kappa, options(0, true),
+        ).expect("create another valid cursor-zero image");
+        let other_digest = other.last_image_digest;
+        assert_ne!(session.last_image_digest, other_digest);
+        drop(other);
+        let inode = std::fs::metadata(&path).expect("metadata").ino();
+        let mut src = std::fs::File::open(&other_path).expect("open second");
+        let mut dest = std::fs::OpenOptions::new().write(true).open(&path).expect("open first");
+        assert_eq!(std::io::copy(&mut src, &mut dest).expect("copy"), holonomy_core::layout::CONTAINER_BYTES as u64);
+        dest.sync_all().expect("sync");
+        drop(dest);
+        assert_eq!(std::fs::metadata(&path).expect("metadata").ino(), inode);
+        let before_reads = reads.load(Ordering::SeqCst);
+        let error = session.save(b"my edited document").expect_err("changed image refused");
+        assert!(error.contains("changed since this session"), "{error}");
+        assert_eq!(reads.load(Ordering::SeqCst), before_reads, "do not read or ratchet pad");
+        assert_eq!(session.state(), DocumentSessionState::RecoveryRequired);
+        assert_eq!(session.cursor(), 0);
+        assert!(session.save(b"retry").is_err());
+        let mut image = ContainerFile::open(&path, false).expect("inspect");
+        assert_eq!(holonomy_session::seal::image_digest(&image.read_image().expect("read")), other_digest);
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
+    }
+
+    #[test]
+    fn session_updates_baseline_after_each_successful_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("document");
+        let kappa = [0x52; 32];
+        let pass = || SealedPassphrase::new("test passphrase").expect("passphrase");
+        let mut session = DocumentSession::create(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(0, true),
+        ).expect("create");
+        let first = session.save(b"first").expect("first save");
+        assert_eq!(session.last_image_digest, first.digest);
+        let second = session.save(b"second").expect("second save");
+        assert_eq!(session.last_image_digest, second.digest);
+        assert_eq!(session.cursor(), 2);
+        drop(session);
+        let (_, document) = DocumentSession::open(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(2, false),
+        ).expect("reopen");
+        assert_eq!(document.as_slice(), b"second");
     }
 
     #[test]

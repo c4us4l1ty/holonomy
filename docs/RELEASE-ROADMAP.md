@@ -12,7 +12,9 @@ irreplaceable data.
   subsequent sync or ratchet fails; reopening alone is not a repair protocol.
 - Establish durable, rollback-aware pad-use accounting across containers, copies,
   machines and concurrent writers. Define locking and identity rules that remain
-  correct across file replacement and aliases. Do not count cursor slots as fresh pads.
+  correct across file replacement and aliases. Existing digest and file-identity checks
+  only detect some changes; they do not close the race or coordinate pad use. Do not
+  count cursor slots as fresh pads.
 - Provide an operator recovery workflow, including non-destructive inspection, clear
   diagnosis, safe choices, and tests for crashes, torn writes, failed syncs, device
   removal and backups. The current demo's read-only inspection is only a preliminary

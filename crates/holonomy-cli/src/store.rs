@@ -222,6 +222,23 @@ impl ContainerFile {
         Ok(digest)
     }
 
+    /// Reject symlinks or a path no longer naming the file this handle opened.
+    /// This check is not atomic with later I/O or replacement.
+    #[cfg(unix)]
+    fn validate_open_path(&self) -> std::io::Result<std::fs::Metadata> {
+        use std::os::unix::fs::MetadataExt;
+
+        let original = self.file.metadata()?;
+        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !path_metadata.file_type().is_file()
+            || original.dev() != path_metadata.dev()
+            || original.ino() != path_metadata.ino()
+        {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
+        }
+        Ok(original)
+    }
+
     /// Stage a complete encrypted image beside the original and replace it on Unix.
     ///
     /// A successful return means the staged file and its containing directory were synced.
@@ -248,14 +265,7 @@ impl ContainerFile {
                 "replacement requires one whole container at offset zero",
             ));
         }
-        let original = self.file.metadata()?;
-        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
-        if !path_metadata.file_type().is_file()
-            || original.dev() != path_metadata.dev()
-            || original.ino() != path_metadata.ino()
-        {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
-        }
+        let original = self.validate_open_path()?;
         if original.len() != CONTAINER_BYTES as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -417,6 +427,27 @@ pub fn save(
     ctx: &SaveContext<'_>,
     payload: &[u8],
 ) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, None)
+}
+
+/// Save only if the image still matches the snapshot authenticated by the session.
+pub(crate) fn save_if_unchanged(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: &[u8; 32],
+) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, Some(opened_digest))
+}
+
+fn save_inner(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: Option<&[u8; 32]>,
+) -> Result<SaveReport, String> {
     if !file.is_writable() {
         return Err(format!(
             "{} was opened read-only; a save needs a writable handle",
@@ -430,9 +461,17 @@ pub fn save(
     // sectors, do not enter a window that can overlap the first 54 windows.
     validate_save_cursor(ctx.cursor)?;
 
+    // Refuse a known stale handle before consulting the pad or staging an image.
+    // This is not atomic with the read or the later replacement.
+    #[cfg(unix)]
+    file.validate_open_path().map_err(|e| e.to_string())?;
+
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
     let expected_old_digest = holonomy_session::seal::image_digest(&old_image);
+    if opened_digest.is_some_and(|opened| opened != &expected_old_digest) {
+        return Err("container image changed since this session opened or last saved; no save was attempted. Inspect and recover before continuing".into());
+    }
 
     //    The salt cannot be read yet. It lives in slot 1, which is *inside* the pad-covered region, so
     //    every byte of it on disk is folded. Reading it here and checking for zeros -- which this used
@@ -659,6 +698,18 @@ pub fn open_document(
     let opened = open_authenticated(file, pad, ctx, None)?;
     let document = opened.payload_bytes();
     Ok((opened, document))
+}
+
+/// Open a session and retain a fingerprint of the same folded bytes that were authenticated.
+pub(crate) fn open_document_with_digest(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing, [u8; 32]), String> {
+    let mut digest = [0u8; 32];
+    let opened = open_authenticated(file, pad, ctx, Some(&mut digest))?;
+    let document = opened.payload_bytes();
+    Ok((opened, document, digest))
 }
 
 /// Authenticate and read a candidate container without returning its plaintext.
