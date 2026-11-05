@@ -25,7 +25,9 @@ the fingerprint is hidden during a save or after an uncertain failure. It is not
 persisted across restarts or proof of authenticity or durability.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
-read-only, disables editing and saving, and displays a prominent mode indicator. Successful
-authentication and decoding confirm only that the supplied candidate can be opened with
+read-only, disables editing and saving, and displays a prominent mode indicator. Rich documents
+can be shown only as a potentially incomplete plain-text body preview; formatting, images, tables,
+headers, footers and other content may be missing. The editor still refuses to edit rich documents.
+Successful authentication and decoding confirm only that the supplied candidate can be opened with
 that demo pad and cursor. They do not repair anything or establish pad freshness, disk
 durability, or complete recovery. Reading can update OS file-access metadata.

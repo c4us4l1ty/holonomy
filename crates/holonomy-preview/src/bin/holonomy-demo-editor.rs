@@ -1,7 +1,8 @@
 //! A restricted, plain-text, demo-pad container editor. Not a security product.
 //!
 //! Unlike the scratch preview, this binary does not use Wordcraft's file menus,
-//! exporters or recovery. It deliberately refuses rich Wordcraft documents.
+//! exporters or recovery. Editing refuses rich Wordcraft documents; read-only
+//! inspection offers only a potentially incomplete plain-text body preview.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -119,6 +120,16 @@ fn plain_text(doc: &Document) -> Result<Zeroizing<String>, &'static str> {
     Ok(text)
 }
 
+/// Editable sessions require an exact round trip. Read-only inspection may
+/// show a lossy body-text preview because it cannot modify or save the source.
+fn display_text(doc: &Document, writable: bool) -> Result<Zeroizing<String>, &'static str> {
+    if writable {
+        plain_text(doc)
+    } else {
+        Ok(Zeroizing::new(doc.plain_text(StoryRef::Body)))
+    }
+}
+
 enum SaveOutcome {
     Saved(Option<SaveReport>),
     Failed(String),
@@ -154,9 +165,9 @@ struct DemoEditor {
 
 impl DemoEditor {
     fn new(session: EditorSession) -> Result<Self, &'static str> {
-        let text = plain_text(session.document())?;
-        let cursor = session.cursor();
         let writable = session.is_writable();
+        let text = display_text(session.document(), writable)?;
+        let cursor = session.cursor();
         Ok(Self {
             session: Some(session),
             pending: None,
@@ -390,9 +401,11 @@ impl eframe::App for DemoEditor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("warning").show(ui, |ui| {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), WARNING);
-            ui.label("Plain-text documents only. No Wordcraft file, export or print menus. ASCII passphrase case variants are equivalent.");
-            if !self.writable {
-                ui.strong("READ-ONLY INSPECTION — editing and saving are disabled.");
+            if self.writable {
+                ui.label("Plain-text editing only. No Wordcraft file, export or print menus. ASCII passphrase case variants are equivalent.");
+            } else {
+                ui.strong("READ-ONLY BODY-TEXT PREVIEW — editing and saving are disabled.");
+                ui.label("This is not the full document: formatting, images, tables, headers, footers, and other content may be missing. No file, export or print menus. ASCII passphrase case variants are equivalent.");
             }
         });
         egui::Panel::bottom("status").show(ui, |ui| {
@@ -560,7 +573,57 @@ mod tests {
             paragraph.runs[0].props.bold = Some(true);
         }
         assert!(plain_text(&formatted).is_err());
+        assert!(display_text(&formatted, true).is_err());
+        let original = formatted.clone();
+        assert_eq!(display_text(&formatted, false).expect("preview").as_str(), "hello");
+        assert!(formatted.same_content(&original));
+        assert_eq!(display_text(&doc, false).expect("preview").as_str(), "hello\nworld");
         assert_eq!(plain_text(&Document::new()).expect("blank").as_str(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rich_document_is_previewed_read_only_and_refused_for_editing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rich-document");
+        let options = |cursor, writable| DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb);
+        let pass = || SealedPassphrase::new("test passphrase").expect("valid");
+        let kappa = [0x48; 32];
+        let mut session = EditorSession::create(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(0, true),
+        ).expect("create");
+        *session.document_mut() = Document::from_text("rich body");
+        session.document_mut().core.title = "important metadata".into();
+        if let wordcraft_doc::Block::Para(paragraph) = std::sync::Arc::make_mut(&mut session.document_mut().body[0]) {
+            paragraph.runs[0].props.bold = Some(true);
+        }
+        let original = session.document().clone();
+        assert!(session.save().expect("save rich document").is_some());
+        drop(session);
+
+        let inspection = EditorSession::open(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, false),
+        ).expect("open for inspection");
+        let mut editor = DemoEditor::new(inspection).expect("read-only body preview");
+        assert!(!editor.writable);
+        assert_eq!(editor.text.as_str(), "rich body");
+        assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
+        *editor.text = "attempted replacement".into();
+        editor.sync_text();
+        editor.save(&egui::Context::default());
+        assert!(editor.pending.is_none());
+        assert!(editor.status.contains("saving is disabled"));
+        assert!(editor.session.as_ref().expect("session").document().same_content(&original));
+        drop(editor);
+
+        let writable = EditorSession::open(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, true),
+        ).expect("open writable");
+        assert!(DemoEditor::new(writable).is_err(), "rich content must not enter text editing");
+        let reopened = EditorSession::open(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, false),
+        ).expect("reopen");
+        assert!(reopened.document().same_content(&original));
     }
 
     #[cfg(unix)]

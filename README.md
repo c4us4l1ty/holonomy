@@ -211,7 +211,7 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml -- --unencrypted-sc
 ```
 
 A different, restricted **plain-text demo container editor** has no Wordcraft file/export menus.
-It refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
+Editing refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
 uses the deterministic demo pad, **not** a physical USB key; it is not for sensitive or valuable
 data. Container creation is not crash-atomic; track the displayed cursor to reopen and do not save
 concurrently. Saves run on a worker; editing and closing are paused until the operation finishes.
@@ -235,8 +235,11 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-inspect /path/to/demo-container 1
 ```
 
-Read-only inspection authenticates and decodes the candidate at the supplied cursor; it does not
-repair a container or pad, establish pad freshness, or prove recovery is complete. It uses the
+Read-only inspection authenticates and decodes the candidate at the supplied cursor. It can display
+a plain-text body preview of a rich document, but the preview may omit formatting, images, tables,
+headers, footers and other content; it is not the complete document. Editing and saving remain
+disabled. Inspection does not repair a container or pad, establish pad freshness, or prove recovery
+is complete. It uses the
 same demo pad and plaintext-memory limitations. The OS may still update file-access metadata.
 
 The file store requires a standalone file of exactly 134,217,728 bytes. It refuses shorter or
