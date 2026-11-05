@@ -414,7 +414,34 @@ mod tests {
             holonomy_session::seal::image_digest(&image.read_image().expect("read")),
             other_digest
         );
-        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
+        // The save took the advisory lock, so its sidecar exists next to the two containers.
+        // It carries coordination state only: it is empty and holds no key material.
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "document".to_string(),
+                "document.holonomy-lock".to_string(),
+                "second".to_string()
+            ]
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("document.holonomy-lock"))
+                .expect("lock metadata")
+                .len(),
+            0,
+            "the save lock must not record document bytes"
+        );
     }
 
     #[test]
