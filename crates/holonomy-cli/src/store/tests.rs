@@ -986,8 +986,12 @@ fn standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing() {
         fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
             panic!("invalid file size must never ratchet")
         }
-        fn can_ratchet(&self) -> bool { true }
-        fn describe(&self) -> String { "test pad".into() }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
     }
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1012,11 +1016,16 @@ fn standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     drop(file);
     let mut original = std::fs::File::open(&path).expect("open original");
-    assert_eq!(original.metadata().expect("metadata").len(), CONTAINER_BYTES as u64 + 13);
+    assert_eq!(
+        original.metadata().expect("metadata").len(),
+        CONTAINER_BYTES as u64 + 13
+    );
     let mut prefix = [0u8; 6];
     original.read_exact(&mut prefix).expect("prefix");
     assert_eq!(&prefix, b"prefix");
-    original.seek(SeekFrom::Start(CONTAINER_BYTES as u64)).expect("seek");
+    original
+        .seek(SeekFrom::Start(CONTAINER_BYTES as u64))
+        .expect("seek");
     let mut suffix = [0u8; 13];
     original.read_exact(&mut suffix).expect("suffix");
     assert_eq!(&suffix, b"trailing data");
@@ -1031,11 +1040,23 @@ fn standalone_container_refuses_growth_before_replacement() {
     original.set_len(CONTAINER_BYTES as u64).expect("size");
     drop(original);
     let mut container = ContainerFile::open(&path, true).expect("open");
-    let mut other = std::fs::OpenOptions::new().append(true).open(&path).expect("append");
+    let mut other = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
     other.write_all(b"external data").expect("append data");
     let image = vec![0u8; CONTAINER_BYTES];
-    assert_eq!(container.replace_image(&image).expect_err("refuse growth").kind(), std::io::ErrorKind::InvalidData);
-    assert_eq!(std::fs::metadata(&path).expect("metadata").len(), CONTAINER_BYTES as u64 + 13);
+    assert_eq!(
+        container
+            .replace_image(&image)
+            .expect_err("refuse growth")
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        std::fs::metadata(&path).expect("metadata").len(),
+        CONTAINER_BYTES as u64 + 13
+    );
 }
 
 #[test]
