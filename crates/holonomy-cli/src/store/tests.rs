@@ -1013,7 +1013,9 @@ fn standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing() {
         .expect_err("save must not truncate a larger file");
     assert!(error.contains("extra data"), "{error}");
     let image = vec![0u8; CONTAINER_BYTES];
-    let error = file.replace_image(&image, &[0; 32]).expect_err("replacement refused");
+    let error = file
+        .replace_image(&image, &[0; 32])
+        .expect_err("replacement refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     drop(file);
     let mut original = std::fs::File::open(&path).expect("open original");
@@ -1159,12 +1161,18 @@ fn save_refuses_same_size_original_change_without_ratchet() {
             if !self.mutated {
                 // The store has already read its old image. Simulate a separate
                 // process changing one byte without changing the file size.
-                let mut file = OpenOptions::new().read(true).write(true).open(&self.path).unwrap();
-                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64)).unwrap();
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.path)
+                    .unwrap();
+                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+                    .unwrap();
                 let mut byte = [0u8; 1];
                 file.read_exact(&mut byte).unwrap();
                 byte[0] ^= 1;
-                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64)).unwrap();
+                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+                    .unwrap();
                 file.write_all(&byte).unwrap();
                 file.sync_all().unwrap();
                 self.mutated = true;
@@ -1174,15 +1182,21 @@ fn save_refuses_same_size_original_change_without_ratchet() {
         fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
             panic!("a refused replacement must not ratchet")
         }
-        fn can_ratchet(&self) -> bool { true }
-        fn describe(&self) -> String { "mutating test pad".into() }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "mutating test pad".into()
+        }
     }
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("container");
     provision(&path, [0x27u8; SALT_BYTES], 0);
     let old_ino = std::fs::metadata(&path).expect("metadata").ino();
     let mut original = File::open(&path).expect("open original");
-    original.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64)).expect("seek");
+    original
+        .seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+        .expect("seek");
     let mut byte = [0u8; 1];
     original.read_exact(&mut byte).expect("read");
     let expected_byte = byte[0] ^ 1;
@@ -1190,15 +1204,25 @@ fn save_refuses_same_size_original_change_without_ratchet() {
 
     let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
     let mut file = ContainerFile::open(&path, true).expect("open");
-    let mut pad = MutatingPad { inner: source(), path: path.clone(), mutated: false };
+    let mut pad = MutatingPad {
+        inner: source(),
+        path: path.clone(),
+        mutated: false,
+    };
     let error = save(&mut file, &mut pad, &ctx(&pass, 1), b"new document")
         .expect_err("changed original must not be overwritten");
     assert!(error.contains("contents changed while saving"), "{error}");
     assert!(pad.mutated);
     assert_eq!(std::fs::metadata(&path).expect("metadata").ino(), old_ino);
     let mut after = File::open(&path).expect("open original");
-    after.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64)).expect("seek");
+    after
+        .seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+        .expect("seek");
     after.read_exact(&mut byte).expect("read");
     assert_eq!(byte[0], expected_byte);
-    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1, "staged file cleaned up");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("list").count(),
+        1,
+        "staged file cleaned up"
+    );
 }

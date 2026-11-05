@@ -229,7 +229,11 @@ impl ContainerFile {
     /// compares the old image again before replacement, but does not serialize writers,
     /// close the check-to-rename race, or guarantee storage hardware honors flushes.
     #[cfg(unix)]
-    pub(crate) fn replace_image(&mut self, image: &[u8], expected_old_digest: &[u8; 32]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(
+        &mut self,
+        image: &[u8],
+        expected_old_digest: &[u8; 32],
+    ) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         if !self.writable {
@@ -308,7 +312,11 @@ impl ContainerFile {
 
     /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
     #[cfg(not(unix))]
-    pub(crate) fn replace_image(&mut self, _image: &[u8], _expected_old_digest: &[u8; 32]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(
+        &mut self,
+        _image: &[u8],
+        _expected_old_digest: &[u8; 32],
+    ) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
