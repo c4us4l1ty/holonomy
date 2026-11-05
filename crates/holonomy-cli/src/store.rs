@@ -431,7 +431,63 @@ pub fn save(
     ctx: &SaveContext<'_>,
     payload: &[u8],
 ) -> Result<SaveReport, String> {
-    save_inner(file, pad, ctx, payload, None)
+    save_inner(file, pad, ctx, payload, None, None)
+}
+
+/// The sidecar path that serializes saves of one container.
+#[cfg(unix)]
+fn save_lock_path(container: &Path) -> PathBuf {
+    let mut name = container
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".holonomy-lock");
+    container.with_file_name(name)
+}
+
+/// Non-Unix builds refuse saves before this type could matter; it exists so signatures are
+/// uniform across platforms.
+#[cfg(not(unix))]
+pub(crate) struct SaveLock(());
+
+/// An advisory exclusive lock held for the duration of one save.
+///
+/// It narrows the window between reading the image and replacing it: a second Holonomy save of
+/// the same path fails instead of interleaving its read, replacement and ratchet. It does not
+/// close the race with a program that ignores the lock, and it is keyed by path, so a rename, a
+/// hard link or another spelling of the same file defeats it. The sidecar file is created next to
+/// the container, stays empty, and holds no key material.
+#[cfg(unix)]
+pub(crate) struct SaveLock {
+    _file: File,
+}
+
+#[cfg(unix)]
+impl SaveLock {
+    pub(crate) fn acquire(container: impl AsRef<Path>) -> std::io::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+
+        let lock_path = save_lock_path(container.as_ref());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        // SAFETY: `file` owns a live descriptor for as long as `Self` holds it, and `flock`
+        // only takes the integer.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "another Holonomy save holds {}: {error}; nothing was written to the container, retry after that save finishes or inspect it first",
+                    lock_path.display()
+                ),
+            ));
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 /// Save only if the image still matches the snapshot authenticated by the session.
@@ -442,7 +498,23 @@ pub(crate) fn save_if_unchanged(
     payload: &[u8],
     opened_digest: &[u8; 32],
 ) -> Result<SaveReport, String> {
-    save_inner(file, pad, ctx, payload, Some(opened_digest))
+    save_inner(file, pad, ctx, payload, Some(opened_digest), None)
+}
+
+/// Save while a caller-held [`SaveLock`] covers the whole operation.
+///
+/// A session acquires the lock before it enters the store so that a contended save is refused
+/// with the session still usable; passing the lock in avoids taking it twice.
+#[cfg(unix)]
+pub(crate) fn save_if_unchanged_locked(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: &[u8; 32],
+    lock: &SaveLock,
+) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, Some(opened_digest), Some(lock))
 }
 
 fn save_inner(
@@ -451,6 +523,7 @@ fn save_inner(
     ctx: &SaveContext<'_>,
     payload: &[u8],
     opened_digest: Option<&[u8; 32]>,
+    held_lock: Option<&SaveLock>,
 ) -> Result<SaveReport, String> {
     if !file.is_writable() {
         return Err(format!(
@@ -469,6 +542,15 @@ fn save_inner(
     // This is not atomic with the read or the later replacement.
     #[cfg(unix)]
     file.validate_open_path().map_err(|e| e.to_string())?;
+
+    // Serialize Holonomy saves of this path across the read, the replacement, the read-back and
+    // the ratchet. Best effort by design: it cannot stop a writer that ignores the lock. A caller
+    // that already acquired it (a session, so contention is a preflight refusal) passes it in.
+    #[cfg(unix)]
+    let _save_lock = match held_lock {
+        Some(_) => None,
+        None => Some(SaveLock::acquire(file.path()).map_err(|e| e.to_string())?),
+    };
 
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;

@@ -192,13 +192,35 @@ impl DocumentSession {
             params: self.options.params,
             cursor,
         };
-        match store::save_if_unchanged(
+        // Take the store's save lock here, so contention is a refusal that writes nothing and
+        // leaves the session usable, instead of a failure discovered mid-save.
+        #[cfg(unix)]
+        let lock = match store::SaveLock::acquire(self.file.path()) {
+            Ok(lock) => lock,
+            Err(error) => {
+                return Err(format!(
+                    "save refused before any read or write; the session is still usable: {error}"
+                ));
+            }
+        };
+        #[cfg(unix)]
+        let outcome = store::save_if_unchanged_locked(
             &mut self.file,
             self.pad.as_mut(),
             &context,
             document,
             &self.last_image_digest,
-        ) {
+            &lock,
+        );
+        #[cfg(not(unix))]
+        let outcome = store::save_if_unchanged(
+            &mut self.file,
+            self.pad.as_mut(),
+            &context,
+            document,
+            &self.last_image_digest,
+        );
+        match outcome {
             Ok(report) => {
                 self.options.cursor = cursor;
                 self.last_image_digest = report.digest;
@@ -441,6 +463,36 @@ mod tests {
             assert!(result.is_err());
             assert!(!path.exists());
         }
+    }
+
+    #[test]
+    fn a_concurrent_save_is_refused_without_requiring_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("container");
+        let kappa = [0x54; 32];
+        let pass = || SealedPassphrase::new("test passphrase").expect("passphrase");
+        let mut session = DocumentSession::create(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
+
+        let lock = crate::store::SaveLock::acquire(&path).expect("take the save lock");
+        let error = session
+            .save(b"blocked by the lock")
+            .expect_err("a held lock must refuse the save");
+        assert!(error.contains("session is still usable"), "{error}");
+        assert!(error.contains("another Holonomy save holds"), "{error}");
+        assert_eq!(session.state(), DocumentSessionState::Ready);
+        assert_eq!(session.cursor(), 0);
+
+        drop(lock);
+        session.save(b"allowed after release").expect("save");
+        assert_eq!(session.cursor(), 1);
+        assert_eq!(session.state(), DocumentSessionState::Ready);
     }
 
     #[test]

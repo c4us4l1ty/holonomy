@@ -1307,3 +1307,55 @@ fn save_reports_unestablished_pad_freshness() {
     assert!(report.protection.describe().contains("not established"));
     let _ = std::fs::remove_file(&path);
 }
+
+/// Two saves of one path must not interleave. The lock is advisory, keyed by path, and held only
+/// for the save.
+#[cfg(unix)]
+#[test]
+fn a_second_save_is_refused_while_a_save_is_running() {
+    let path = tempfile("save-lock");
+    provision(&path, [0x17u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let before = std::fs::read(&path).expect("read");
+
+    let lock = SaveLock::acquire(&path).expect("first lock");
+    let error = save(&mut file, &mut source(), &ctx, b"contended")
+        .expect_err("a held lock must refuse the save");
+    assert!(error.contains("another Holonomy save holds"), "{error}");
+    assert!(error.contains("nothing was written"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("read"), before, "container changed");
+
+    drop(lock);
+    save(&mut file, &mut source(), &ctx, b"after the lock").expect("save after release");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(save_lock_path(&path));
+}
+
+/// A caller that already holds the lock must not deadlock against itself.
+#[cfg(unix)]
+#[test]
+fn a_caller_held_lock_lets_its_own_save_proceed() {
+    let path = tempfile("save-lock-held");
+    provision(&path, [0x18u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let digest = {
+        let mut reader = ContainerFile::open(&path, false).expect("open for digest");
+        holonomy_session::seal::image_digest(&reader.read_image().expect("read image"))
+    };
+    let lock = SaveLock::acquire(&path).expect("lock");
+    save_if_unchanged_locked(
+        &mut file,
+        &mut source(),
+        &ctx,
+        b"the caller already locked this path",
+        &digest,
+        &lock,
+    )
+    .expect("a held lock belongs to this save");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(save_lock_path(&path));
+}
