@@ -720,7 +720,10 @@ mod tests {
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
         assert_eq!(editor.last_ratchet_report, Some(None));
-        assert!(status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report).contains("not attempted"));
+        assert!(
+            status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report)
+                .contains("not attempted")
+        );
         let fingerprint = editor
             .last_saved_digest
             .expect("save returned an image fingerprint");
@@ -788,7 +791,10 @@ mod tests {
         );
         assert_eq!(editor.session_status().remaining_cursor_saves, None);
         assert_eq!(editor.last_saved_digest, Some(fingerprint));
-        assert!(status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report).contains("uncertain"));
+        assert!(
+            status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report)
+                .contains("uncertain")
+        );
         let fingerprint_hex = fingerprint
             .iter()
             .map(|byte| format!("{byte:02x}"))

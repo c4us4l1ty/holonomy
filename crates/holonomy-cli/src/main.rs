@@ -375,7 +375,8 @@ fn save(args: &[String]) -> ExitCode {
             println!(
                 "  ratchet: {}",
                 match report.ratcheted {
-                    Some(n) => format!("source reports {n} sectors rewritten; not independently verified"),
+                    Some(n) =>
+                        format!("source reports {n} sectors rewritten; not independently verified"),
                     None => "not run — the stand-in pad has no device to rewrite".to_string(),
                 }
             );
