@@ -176,3 +176,32 @@ mod fingerprint_tests {
         assert!(fingerprint_label(SavePhase::Saved, None).contains("Not recorded"));
     }
 }
+
+/// A last-save result is not a statement about a pending or uncertain image.
+pub(super) fn ratchet_label(phase: SavePhase, last_result: Option<Option<u32>>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving; the result is not yet confirmed.".into(),
+        SavePhase::RecoveryRequired => "Unavailable: the last save and pad state are uncertain; recovery is required.".into(),
+        _ => match last_result {
+            None => "No save result recorded in this session.".into(),
+            Some(None) => "Ratchet not attempted for the last save; pad freshness is not verified.".into(),
+            Some(Some(count)) => format!("The source reported {count} sectors ratcheted for the last save. This is not independent verification of device writes or pad freshness."),
+        },
+    }
+}
+
+#[cfg(test)]
+mod ratchet_tests {
+    use super::*;
+
+    #[test]
+    fn ratchet_status_uses_save_result_and_hides_uncertainty() {
+        assert!(ratchet_label(SavePhase::Saved, None).contains("No save result"));
+        assert!(ratchet_label(SavePhase::Saved, Some(None)).contains("not attempted"));
+        let reported = ratchet_label(SavePhase::Saved, Some(Some(32768)));
+        assert!(reported.contains("reported 32768"));
+        assert!(reported.contains("not independent verification"));
+        assert!(!ratchet_label(SavePhase::Saving, Some(Some(32768))).contains("32768"));
+        assert!(ratchet_label(SavePhase::RecoveryRequired, Some(None)).contains("uncertain"));
+    }
+}

@@ -444,6 +444,44 @@ mod tests {
     }
 
     #[test]
+    fn partial_ratchet_requires_recovery_after_replacement() {
+        struct PartialRatchet(DerivedPad);
+        impl PadSource for PartialRatchet {
+            fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<PadWindow, String> {
+                self.0.window(kappa, cursor)
+            }
+            fn ratchet(&mut self, _kappa: &[u8; 32], cursor: u64) -> Result<u32, String> {
+                assert_eq!(cursor, 0, "only the previous window can be ratcheted");
+                Ok(holonomy_core::layout::PAD_SECTORS_PER_SAVE - 1)
+            }
+            fn can_ratchet(&self) -> bool { true }
+            fn describe(&self) -> String { "partial test ratchet".into() }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("container");
+        let kappa = [0x53; 32];
+        let pass = || SealedPassphrase::new("test passphrase").expect("passphrase");
+        let mut session = DocumentSession::create(
+            &path, Box::new(PartialRatchet(DerivedPad::new())), pass(), kappa, options(0, true),
+        ).expect("create");
+        let error = session.save(b"new document").expect_err("partial ratchet must fail");
+        assert!(error.contains("container was written with cursor 1"), "{error}");
+        assert!(error.contains("32767 of 32768"), "{error}");
+        assert!(error.contains("Do not retry"), "{error}");
+        assert_eq!(session.state(), DocumentSessionState::RecoveryRequired);
+        assert_eq!(session.cursor(), 0, "only the last confirmed cursor is retained");
+        assert!(session.save(b"retry").is_err());
+        drop(session);
+        // The injected pad does not actually change sectors; this proves the image
+        // was replaced, not that a real partially ratcheted device is recoverable.
+        let (reopened, document) = DocumentSession::open(
+            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, false),
+        ).expect("test image was written at cursor one");
+        assert_eq!(reopened.cursor(), 1);
+        assert_eq!(document.as_slice(), b"new document");
+    }
+
+    #[test]
     fn failed_ratchet_requires_recovery_even_after_image_was_replaced() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("container");

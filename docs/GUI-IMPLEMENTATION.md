@@ -22,7 +22,9 @@ process or power failure can still require manual recovery. The status panel doe
 itself provide any of the protections it describes. After a successful save, it shows
 the save report's unkeyed image fingerprint for comparison with `holonomy verify`;
 the fingerprint is hidden during a save or after an uncertain failure. It is not
-persisted across restarts or proof of authenticity or durability.
+persisted across restarts or proof of authenticity or durability. The last-save ratchet
+result is likewise reported only from a successful save and hidden while the image or
+pad is uncertain; a reported count is not independent proof of device writes or freshness.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
 read-only, disables editing and saving, and displays a prominent mode indicator. Rich documents

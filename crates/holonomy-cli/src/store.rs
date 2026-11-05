@@ -373,7 +373,8 @@ pub struct SaveContext<'a> {
 /// The result of a save, as the caller should report it.
 #[derive(Debug)]
 pub struct SaveReport {
-    /// Sectors the ratchet rewrote, or `None` on a read-only handle.
+    /// Sector count reported by the pad source, or `None` when no ratchet was attempted.
+    /// A full reported count is not independent verification of device writes or freshness.
     pub ratcheted: Option<u32>,
     /// Sectors the fold consumed.
     pub pad_sectors: usize,
@@ -611,14 +612,14 @@ fn save_inner(
     //    That is the difference between "this pad is fresh" and "this is the pad the last save
     //    used", and a caller that conflates the two reports freshness it does not have.
     let ratcheted = if pad.can_ratchet() {
-        Some(
-            pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
-                format!(
-                    "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
-                    ctx.cursor
-                )
-            })?,
-        )
+        let count = pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
+            format!(
+                "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
+                ctx.cursor
+            )
+        })?;
+        validate_ratchet_count(count, old_cursor, ctx.cursor)?;
+        Some(count)
     } else {
         None
     };
@@ -631,6 +632,17 @@ fn save_inner(
         slots: slot_bytes.len(),
         digest,
     })
+}
+
+/// A short or impossible count is an uncertain, post-replacement failure. A
+/// full count remains only the source's report, not proof of fresh pad history.
+fn validate_ratchet_count(count: u32, old_cursor: u64, new_cursor: u64) -> Result<(), String> {
+    if count != PAD_SECTORS_PER_SAVE {
+        return Err(format!(
+            "container was written with cursor {new_cursor}, but ratcheting old pad window {old_cursor} reported {count} of {PAD_SECTORS_PER_SAVE} sectors; pad state may be partially changed. Do not retry this save with the old cursor; inspect the new container and pad before continuing"
+        ));
+    }
+    Ok(())
 }
 
 fn open_authenticated(

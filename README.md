@@ -32,7 +32,7 @@ those documents are historical and code and current CI results govern implementa
 | :--- | :--- |
 | Container and cryptographic primitives | Implemented in the core, crypto, session, USB, and CLI crates; still requires independent review. |
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
-| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
+| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. Partial or invalid ratchet counts after replacement require recovery; a full count is only the source's report, not independent proof of fresh pad. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
@@ -225,7 +225,9 @@ no fresh-pad migration path. Use Ctrl+S (Command+S on macOS) to save.
 After a successful save, the session status panel shows its unkeyed image fingerprint for comparison
 with `holonomy verify`. It is hidden while saving or when recovery is required, and it is not
 recorded across restarts. It is not an authenticity or durability proof; sharing it can correlate
-container copies. See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
+container copies. The panel also shows whether the last successful save attempted a ratchet; the
+reported count does not independently establish device writes or freshness. See
+[GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container

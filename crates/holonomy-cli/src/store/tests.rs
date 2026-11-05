@@ -1268,3 +1268,15 @@ fn save_refuses_changed_path_before_pad_access() {
     assert_eq!(std::fs::read(&moved).expect("old path"), b"original");
     assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
 }
+
+#[test]
+fn ratchet_count_must_match_the_full_window() {
+    let expected = PAD_SECTORS_PER_SAVE;
+    assert!(validate_ratchet_count(expected, 7, 8).is_ok());
+    for count in [0, 1, expected - 1, expected + 1, u32::MAX] {
+        let error = validate_ratchet_count(count, 7, 8).expect_err("invalid count");
+        assert!(error.contains("cursor 8"), "{error}");
+        assert!(error.contains("window 7"), "{error}");
+        assert!(error.contains("Do not retry"), "{error}");
+    }
+}
