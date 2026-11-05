@@ -274,7 +274,9 @@ mod tests {
         doc.core.title = "important metadata".into();
         assert!(plain_text(&doc).is_err());
         let mut formatted = Document::from_text("hello");
-        if let wordcraft_doc::Block::Para(paragraph) = std::sync::Arc::make_mut(&mut formatted.body[0]) {
+        if let wordcraft_doc::Block::Para(paragraph) =
+            std::sync::Arc::make_mut(&mut formatted.body[0])
+        {
             paragraph.runs[0].props.bold = Some(true);
         }
         assert!(plain_text(&formatted).is_err());
