@@ -76,13 +76,16 @@ fn main() -> ExitCode {
         return check(device.as_deref());
     }
 
-    // The three verbs that touch a file. They come before the banner because they are the whole
+    // The container verbs that touch a file. They come before the banner because they are the whole
     // program for anyone who is not opening a window.
     if let Some(rest) = args.strip_prefix(&["save".to_string()][..]) {
         return save(rest);
     }
     if let Some(rest) = args.strip_prefix(&["open".to_string()][..]) {
         return open(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["verify".to_string()][..]) {
+        return verify(rest);
     }
     if let Some(rest) = args.strip_prefix(&["provision".to_string()][..]) {
         return provision(rest);
@@ -96,7 +99,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parsed flags shared by `save`, `open` and `provision`.
+/// Parsed flags shared by `save`, `open`, `verify` and `provision`.
 ///
 /// Hand-rolled rather than a dependency: the whole surface is four flags, and a CLI parsing crate in
 /// a binary whose job is to be auditable is a crate somebody has to audit.
@@ -105,6 +108,7 @@ struct Flags {
     passphrase: Option<Zeroizing<String>>,
     kappa: Option<Zeroizing<[u8; 32]>>,
     cursor: u64,
+    cursor_explicit: bool,
     /// The stick's Zone B, if one was named. `None` selects the stand-in pad, and the report says so.
     device: Option<String>,
 }
@@ -157,6 +161,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
         passphrase,
         kappa,
         cursor: cursor.unwrap_or(0),
+        cursor_explicit: cursor.is_some(),
         device,
     })
 }
@@ -440,6 +445,37 @@ fn open(args: &[String]) -> ExitCode {
     }
 }
 
+/// Authenticate a single candidate without writing the document to stdout.
+fn verify(args: &[String]) -> ExitCode {
+    let flags = match parse_flags(args) {
+        Ok(flags) if flags.cursor_explicit => flags,
+        Ok(_) => return usage_error("verify requires an explicit --cursor"),
+        Err(e) => return usage_error(e),
+    };
+    let credentials = match credentials(&flags, false) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
+    };
+    let ctx = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
+    let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
+        Ok(file) => file,
+        Err(e) => return usage_error(format!("opening {}: {e}", flags.path)),
+    };
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
+        Ok(pad) => pad,
+        Err(e) => return usage_error(e),
+    };
+    match store::verify_candidate(&mut file, pad.as_mut(), &ctx) {
+        Ok(()) => {
+            println!("Candidate authenticated at cursor {}. No document bytes were printed.", flags.cursor);
+            println!("Pad source: {}", pad.describe());
+            println!("This does not verify document format, pad freshness, durability, rollback history, or complete recovery.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => failure(e),
+    }
+}
+
 /// `impl AsRef<str>` rather than `&str`: a `String` from `format!` and a `&'static str` literal are
 /// both call sites, and a plain `&str` forces every formatted one to be borrowed at the point of
 /// the call -- which reads as `&e` where `e: String` and then fails with "the size for values of
@@ -482,6 +518,7 @@ fn help() {
          \x20   holonomy provision <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \x20   holonomy save <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D] < document\n\
          \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
+         \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -491,6 +528,8 @@ fn help() {
          `--cursor` is the save counter that selects the pad window; it must be the number the\n\
          previous container recorded for open; for save use that cursor plus one.\n\
          Provision uses 0; saves refuse cursor 54 or higher until pad history is tracked.\n\
+         Verify reads and authenticates a candidate without printing document bytes; it does not\n\
+         repair the container or verify freshness, rollback history, or application document format.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\

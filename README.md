@@ -240,6 +240,12 @@ The file store requires a standalone file of exactly 134,217,728 bytes. It refus
 longer files rather than interpreting an embedded image or discarding trailing data on save.
 Size checks do not serialize concurrent writers; concurrent modification is still unsafe.
 
+To authenticate a single candidate without printing its document bytes, use
+`holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
+command opens the file and selected pad read-only and does not ratchet. It does decrypt into memory
+and does not verify application document format, freshness, rollback history, or recovery. The OS
+may update access metadata. Omit `--device` only for the deterministic demo pad.
+
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
 `save` needs the **next** cursor. Keep track of it externally. An omitted `--device` selects the

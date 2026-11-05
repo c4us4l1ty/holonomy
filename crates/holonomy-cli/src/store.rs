@@ -536,12 +536,11 @@ pub fn save(
     })
 }
 
-/// Open `file` and return the document it holds.
-pub fn open_document(
+fn open_authenticated(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
-) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
+) -> Result<OpenedContainer, String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
@@ -584,8 +583,34 @@ pub fn open_document(
             ctx.cursor
         ));
     }
+    Ok(opened)
+}
+
+/// Open `file` and return the document it holds.
+pub fn open_document(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
+    let opened = open_authenticated(file, pad, ctx)?;
     let document = opened.payload_bytes();
     Ok((opened, document))
+}
+
+/// Authenticate and read a candidate container without returning its plaintext.
+///
+/// This performs the same container and payload authentication as [`open_document`],
+/// then drops the plaintext. It does not write or ratchet the supplied pad. Successful
+/// authentication does not verify application-level document decoding, pad freshness,
+/// rollback history, durability, or recovery. Plaintext and copies may still exist in
+/// process and operating-system memory. File access metadata may change.
+pub fn verify_candidate(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(), String> {
+    let _opened = open_authenticated(file, pad, ctx)?;
+    Ok(())
 }
 
 /// The `j`-th physical sector of save `cursor`.

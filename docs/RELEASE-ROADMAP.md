@@ -16,7 +16,9 @@ irreplaceable data.
 - Provide an operator recovery workflow, including non-destructive inspection, clear
   diagnosis, safe choices, and tests for crashes, torn writes, failed syncs, device
   removal and backups. The current demo's read-only inspection is only a preliminary
-  tool for checking an authenticated candidate; it cannot complete recovery.
+  tool for checking an authenticated candidate; it cannot complete recovery. The CLI
+  `verify` command authenticates one candidate without printing document bytes, but does
+  not inspect its application format or pad history.
 - Specify and implement safe USB provisioning, root-share storage, device identity and
   destruction behavior. Test real hardware and supported operating-system paths.
 - Specify versioned credentials and migrations; legacy passphrase mapping lowercases
