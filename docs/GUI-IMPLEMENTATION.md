@@ -25,6 +25,10 @@ the fingerprint is hidden during a save or after an uncertain failure. It is not
 persisted across restarts or proof of authenticity or durability. The last-save ratchet
 result is likewise reported only from a successful save and hidden while the image or
 pad is uncertain; a reported count is not independent proof of device writes or freshness.
+Protection reporting distinguishes *fresh*, *reused* and *not established*; the container
+store reports *not established* because it sees one image and one pad source, not sector
+history across devices, snapshots or rollbacks. The limited demo does not surface
+`ProtectionLayer` at all.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
 read-only, disables editing and saving, and displays a prominent mode indicator. Rich documents
