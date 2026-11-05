@@ -76,6 +76,7 @@ fn verify_checks_candidate_without_printing_or_modifying_plaintext() {
     );
     let stdout = String::from_utf8(verify.stdout).expect("UTF-8 report");
     assert!(stdout.contains("Candidate authenticated at cursor 1"));
+    assert!(stdout.contains("unused image bytes are not checked"));
     assert!(stdout.contains("does not verify document format"));
     assert!(!stdout.contains(secret));
     assert!(!String::from_utf8_lossy(&verify.stderr).contains(secret));

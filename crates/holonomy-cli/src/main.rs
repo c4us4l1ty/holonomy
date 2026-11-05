@@ -471,6 +471,7 @@ fn verify(args: &[String]) -> ExitCode {
                 "Candidate authenticated at cursor {}. No document bytes were printed.",
                 flags.cursor
             );
+            println!("Only the directory and declared payload are authenticated; unused image bytes are not checked.");
             println!("Pad source: {}", pad.describe());
             println!("This does not verify document format, pad freshness, durability, rollback history, or complete recovery.");
             ExitCode::SUCCESS

@@ -600,8 +600,9 @@ pub fn open_document(
 /// Authenticate and read a candidate container without returning its plaintext.
 ///
 /// This performs the same container and payload authentication as [`open_document`],
-/// then drops the plaintext. It does not write or ratchet the supplied pad. Successful
-/// authentication does not verify application-level document decoding, pad freshness,
+/// then drops the plaintext. Only the authenticated directory and its declared payload
+/// slots are checked, not all unused image bytes. It does not write or ratchet the pad.
+/// Successful authentication does not verify application-level document decoding, pad freshness,
 /// rollback history, durability, or recovery. Plaintext and copies may still exist in
 /// process and operating-system memory. File access metadata may change.
 pub fn verify_candidate(
