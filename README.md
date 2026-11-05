@@ -241,7 +241,9 @@ same demo pad and plaintext-memory limitations. The OS may still update file-acc
 
 The file store requires a standalone file of exactly 134,217,728 bytes. It refuses shorter or
 longer files rather than interpreting an embedded image or discarding trailing data on save.
-Size checks do not serialize concurrent writers; concurrent modification is still unsafe.
+Before replacing an image, a save also compares the original encrypted bytes against the image
+it read; it refuses a detected change rather than overwriting it. This is best-effort detection,
+not a lock: modification can race the check or affect pad state, so concurrent writers remain unsafe.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The

@@ -188,13 +188,48 @@ impl ContainerFile {
         self.file.sync_all()
     }
 
+    /// Hash the folded image on the open handle without allocating another image.
+    /// This is only a best-effort change detector, not a lock or atomic snapshot.
+    #[cfg(unix)]
+    fn folded_digest(&mut self) -> std::io::Result<[u8; 32]> {
+        use blake2::{Blake2b512, Digest};
+
+        if self.file.metadata()?.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while checking the original image",
+            ));
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut hash = Blake2b512::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut remaining = CONTAINER_BYTES;
+        while remaining > 0 {
+            let len = remaining.min(buf.len());
+            self.file.read_exact(&mut buf[..len])?;
+            hash.update(&buf[..len]);
+            remaining -= len;
+        }
+        if self.file.metadata()?.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while checking the original image",
+            ));
+        }
+        let result = hash.finalize();
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&result[..32]);
+        Ok(digest)
+    }
+
     /// Stage a complete encrypted image beside the original and replace it on Unix.
     ///
     /// A successful return means the staged file and its containing directory were synced.
     /// A directory-sync error can occur *after* replacement, and is reported as such. This
-    /// does not serialize concurrent writers or guarantee storage hardware honors flushes.
+    /// compares the old image again before replacement, but does not serialize writers,
+    /// close the check-to-rename race, or guarantee storage hardware honors flushes.
     #[cfg(unix)]
-    pub(crate) fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(&mut self, image: &[u8], expected_old_digest: &[u8; 32]) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         if !self.writable {
@@ -237,6 +272,15 @@ impl ContainerFile {
         staged.as_file_mut().write_all(image)?;
         staged.as_file().sync_all()?;
 
+        // Detect in-place changes to the image read earlier, including changes of
+        // the same length. A writer can still race this check or modify a pad: this
+        // is not a substitute for coordinating writers and pad accounting.
+        if self.folded_digest()? != *expected_old_digest {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "container contents changed while saving; replacement refused",
+            ));
+        }
         // Catch stale handles before replacement. This does not close the race with a
         // concurrent writer between the check and rename; callers must serialize saves.
         let current = std::fs::symlink_metadata(&self.filesystem_path)?;
@@ -264,7 +308,7 @@ impl ContainerFile {
 
     /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
     #[cfg(not(unix))]
-    pub(crate) fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(&mut self, _image: &[u8], _expected_old_digest: &[u8; 32]) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
@@ -379,6 +423,7 @@ pub fn save(
 
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
+    let expected_old_digest = holonomy_session::seal::image_digest(&old_image);
 
     //    The salt cannot be read yet. It lives in slot 1, which is *inside* the pad-covered region, so
     //    every byte of it on disk is folded. Reading it here and checking for zeros -- which this used
@@ -492,7 +537,7 @@ pub fn save(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
-    file.replace_image(&image)
+    file.replace_image(&image, &expected_old_digest)
         .map_err(|e| format!("saving cursor {}: {e}", ctx.cursor))?;
 
     // 9. Ratchet window `c-1`, *after* the container is on the device.
