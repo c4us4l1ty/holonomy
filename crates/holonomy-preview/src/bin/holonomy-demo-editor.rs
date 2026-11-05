@@ -611,18 +611,29 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
-        let fingerprint = editor.last_saved_digest.expect("save returned an image fingerprint");
-        let mut file = holonomy_cli::store::ContainerFile::open(&path, false).expect("open for verification");
+        let fingerprint = editor
+            .last_saved_digest
+            .expect("save returned an image fingerprint");
+        let mut file =
+            holonomy_cli::store::ContainerFile::open(&path, false).expect("open for verification");
         let mut pad = DerivedPad::new();
         let passphrase = pass();
         let context = holonomy_cli::store::SaveContext {
             passphrase: &passphrase,
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
-            params: holonomy_cli::document::DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb).params(),
+            params: holonomy_cli::document::DocumentSessionOptions::new(
+                1,
+                false,
+                Topology::UmbilicalUsb,
+            )
+            .params(),
             cursor: 1,
         };
-        assert_eq!(holonomy_cli::store::verify_candidate(&mut file, &mut pad, &context).expect("verify"), fingerprint);
+        assert_eq!(
+            holonomy_cli::store::verify_candidate(&mut file, &mut pad, &context).expect("verify"),
+            fingerprint
+        );
         // Exercise the frontend limit without doing 52 expensive saves. The actual
         // session's cursor remains 1; the guard must not start any worker.
         editor.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
@@ -667,8 +678,15 @@ mod tests {
         );
         assert_eq!(editor.session_status().remaining_cursor_saves, None);
         assert_eq!(editor.last_saved_digest, Some(fingerprint));
-        let fingerprint_hex = fingerprint.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        assert!(!status::fingerprint_label(editor.session_status().phase, editor.last_saved_digest).contains(&fingerprint_hex));
+        let fingerprint_hex = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(!status::fingerprint_label(
+            editor.session_status().phase,
+            editor.last_saved_digest
+        )
+        .contains(&fingerprint_hex));
         assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);
         assert!(editor.pending.is_none());
