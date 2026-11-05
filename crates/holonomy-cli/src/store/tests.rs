@@ -1069,3 +1069,70 @@ fn standalone_container_rejects_truncation() {
     assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     assert_eq!(std::fs::read(&path).expect("read"), b"short");
 }
+
+#[cfg(unix)]
+#[test]
+fn verify_reports_snapshot_digest_and_rejects_tampered_payload() {
+    struct NoRatchet(DerivedPad);
+    impl PadSource for NoRatchet {
+        fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<pad::PadWindow, String> {
+            self.0.window(kappa, cursor)
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("verification must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            panic!("verification must not request write capability")
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
+    }
+    fn flip(path: &Path, offset: usize) {
+        let mut file = OpenOptions::new().read(true).write(true).open(path).expect("open");
+        file.seek(SeekFrom::Start(offset as u64)).expect("seek");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).expect("read");
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(offset as u64)).expect("rewind");
+        file.write_all(&byte).expect("write");
+        file.sync_all().expect("sync");
+    }
+
+    let path = tempfile("verify-tamper");
+    provision(&path, [0x23u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let mut writer = ContainerFile::open(&path, true).expect("open writer");
+    let report = save(&mut writer, &mut source(), &ctx(&pass, 1), b"document").expect("save");
+    drop(writer);
+    let mut reader = ContainerFile::open(&path, false).expect("open reader");
+    let original = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("verify");
+    assert_eq!(original, report.digest);
+
+    // Recover the save's salt only in the test to identify occupied versus unused
+    // physical slots. The production verifier does not expose it.
+    let mut image = reader.read_image().expect("read image");
+    let mut pad = source();
+    let window = pad.window(&KAPPA, 1).expect("window");
+    fold(&mut image, window.as_slice());
+    let (salt_offset, _) = slot_range(SALT_SLOT_INDEX);
+    let mut salt = [0u8; SALT_BYTES];
+    salt.copy_from_slice(&image[salt_offset..salt_offset + SALT_BYTES]);
+    drop(image);
+    drop(window);
+    let placement = epoch_placement(&salt);
+    let used = placement(0);
+    let unused = placement(1);
+    assert_ne!(used, unused);
+
+    // Unused bytes are not covered by payload authentication, but the unkeyed
+    // fingerprint must still change. It is not a proof that the change is benign.
+    flip(&path, slot_range(unused).0);
+    let changed = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("unused bytes are not authenticated");
+    assert_ne!(changed, original);
+    // A declared payload byte is authenticated and cannot be accepted after corruption.
+    flip(&path, slot_range(used).0);
+    assert!(verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).is_err());
+    drop(reader);
+    std::fs::remove_file(path).expect("cleanup");
+}

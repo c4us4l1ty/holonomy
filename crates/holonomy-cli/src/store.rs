@@ -540,8 +540,14 @@ fn open_authenticated(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
+    image_digest: Option<&mut [u8; 32]>,
 ) -> Result<OpenedContainer, String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
+    // Fingerprint the folded bytes actually read, before the pad is undone. This
+    // is an unkeyed comparison aid, not authentication of the whole image.
+    if let Some(digest) = image_digest {
+        *digest = holonomy_session::seal::image_digest(&image);
+    }
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
     // window the container was written under, and that is enough -- see `PadSource`.
@@ -592,7 +598,7 @@ pub fn open_document(
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
 ) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
-    let opened = open_authenticated(file, pad, ctx)?;
+    let opened = open_authenticated(file, pad, ctx, None)?;
     let document = opened.payload_bytes();
     Ok((opened, document))
 }
@@ -602,6 +608,9 @@ pub fn open_document(
 /// This performs the same container and payload authentication as [`open_document`],
 /// then drops the plaintext. Only the authenticated directory and its declared payload
 /// slots are checked, not all unused image bytes. It does not write or ratchet the pad.
+/// On success returns the unkeyed image digest of the folded bytes read, calculated
+/// identically to [`SaveReport::digest`]. It is a comparison aid, not an authentication
+/// tag or proof of durability; concurrent modification can make it a mixed snapshot.
 /// Successful authentication does not verify application-level document decoding, pad freshness,
 /// rollback history, durability, or recovery. Plaintext and copies may still exist in
 /// process and operating-system memory. File access metadata may change.
@@ -609,9 +618,10 @@ pub fn verify_candidate(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
-) -> Result<(), String> {
-    let _opened = open_authenticated(file, pad, ctx)?;
-    Ok(())
+) -> Result<[u8; 32], String> {
+    let mut digest = [0u8; 32];
+    let _opened = open_authenticated(file, pad, ctx, Some(&mut digest))?;
+    Ok(digest)
 }
 
 /// The `j`-th physical sector of save `cursor`.

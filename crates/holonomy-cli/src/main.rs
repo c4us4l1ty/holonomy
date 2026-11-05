@@ -466,10 +466,14 @@ fn verify(args: &[String]) -> ExitCode {
         Err(e) => return usage_error(e),
     };
     match store::verify_candidate(&mut file, pad.as_mut(), &ctx) {
-        Ok(()) => {
+        Ok(digest) => {
             println!(
                 "Candidate authenticated at cursor {}. No document bytes were printed.",
                 flags.cursor
+            );
+            println!(
+                "image digest {} (unkeyed fingerprint of the bytes read; not a durability or authenticity proof)",
+                digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
             println!("Only the directory and declared payload are authenticated; unused image bytes are not checked.");
             println!("Pad source: {}", pad.describe());

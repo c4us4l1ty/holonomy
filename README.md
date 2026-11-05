@@ -245,7 +245,9 @@ To authenticate a single candidate without printing its document bytes, use
 command opens the file and selected pad read-only and does not ratchet. It does decrypt into memory
 and does not verify application document format, freshness, rollback history, or recovery. Only
 the directory and declared payload are authenticated, not unused image bytes. The OS may update
-access metadata. Omit `--device` only for the deterministic demo pad.
+access metadata. Its unkeyed encrypted-image fingerprint can be compared with a save report, but
+is not an authenticity or durability proof; concurrent changes may yield a mixed snapshot. Sharing
+it may correlate copies of a container. Omit `--device` only for the deterministic demo pad.
 
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
