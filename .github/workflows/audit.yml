@@ -669,6 +669,39 @@ jobs:
             fi
             exit 1
           fi
+      - name: Smoke-test read-only demo inspection
+        run: |
+          set -euo pipefail
+          binary="$PWD/crates/holonomy-preview/target/debug/holonomy-demo-editor"
+          container="$RUNNER_TEMP/holonomy-demo-container"
+          log="$RUNNER_TEMP/holonomy-demo-inspect.log"
+          before=$(sha256sum "$container" | cut -d ' ' -f 1)
+          if ! xvfb-run -a bash -c '
+            set -euo pipefail
+            binary="$1"; log="$2"; container="$3"
+            expect .github/scripts/demo-gui-smoke.exp "$binary" "$container" inspect > "$log" 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true" EXIT
+            timeout 240s xdotool search --sync --onlyvisible --name "Holonomy.*EXPERIMENTAL TEXT DEMO.*READ ONLY" > "$log.windows"
+            window=$(head -n 1 "$log.windows")
+            xdotool windowfocus --sync "$window"
+            xdotool key ctrl+s
+            xdotool key ctrl+q
+            timeout 60s tail --pid="$pid" -f /dev/null
+            wait "$pid"
+            trap - EXIT
+          ' _ "$binary" "$log" "$container"; then
+            echo "::error::read-only inspection did not open and close successfully"
+            if [ -f "$log" ]; then
+              tail -30 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
+            exit 1
+          fi
+          after=$(sha256sum "$container" | cut -d ' ' -f 1)
+          if [ "$before" != "$after" ]; then
+            echo "::error::read-only inspection changed the container"
+            exit 1
+          fi
       - name: Lint preview
         run: |
           set -o pipefail
@@ -762,3 +795,24 @@ jobs:
             echo "$output"
             echo "$output" | grep -qE 'test result: ok\. [1-9]' || { echo "::error::no test matched $test"; exit 1; }
           done
+
+  temporary-preview-formatter:
+    name: Temporary preview formatter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Format and push
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          cargo +stable fmt --manifest-path crates/holonomy-preview/Cargo.toml --all
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add crates/holonomy-preview
+            git commit -m 'Format read-only inspection'
+            git push origin HEAD:${{ github.ref_name }}
+          fi

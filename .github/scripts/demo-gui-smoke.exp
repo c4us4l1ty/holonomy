@@ -4,27 +4,36 @@
 set timeout 300
 set binary [lindex $argv 0]
 set container [lindex $argv 1]
+set mode [lindex $argv 2]
 set share [string repeat "11" 32]
-spawn -noecho $binary --demo-create $container
+if {$mode eq "inspect"} {
+    spawn -noecho $binary --demo-inspect $container 0
+} else {
+    spawn -noecho $binary --demo-create $container
+}
 expect {
     "Passphrase: " { send -- "ci demo password\r" }
     timeout { puts stderr "passphrase prompt timed out"; exit 1 }
     eof { puts stderr "application exited before passphrase prompt"; exit 1 }
 }
-expect {
-    "Confirm: " { send -- "ci demo password\r" }
-    timeout { puts stderr "passphrase confirmation timed out"; exit 1 }
-    eof { puts stderr "application exited before passphrase confirmation"; exit 1 }
+if {$mode ne "inspect"} {
+    expect {
+        "Confirm: " { send -- "ci demo password\r" }
+        timeout { puts stderr "passphrase confirmation timed out"; exit 1 }
+        eof { puts stderr "application exited before passphrase confirmation"; exit 1 }
+    }
 }
 expect {
     "Demo root share (64 hex characters): " { send -- "$share\r" }
     timeout { puts stderr "root-share prompt timed out"; exit 1 }
     eof { puts stderr "application exited before root-share prompt"; exit 1 }
 }
-expect {
-    "Confirm: " { send -- "$share\r" }
-    timeout { puts stderr "root-share confirmation timed out"; exit 1 }
-    eof { puts stderr "application exited before root-share confirmation"; exit 1 }
+if {$mode ne "inspect"} {
+    expect {
+        "Confirm: " { send -- "$share\r" }
+        timeout { puts stderr "root-share confirmation timed out"; exit 1 }
+        eof { puts stderr "application exited before root-share confirmation"; exit 1 }
+    }
 }
 expect {
     eof {}

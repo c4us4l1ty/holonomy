@@ -20,3 +20,9 @@ confirmed cursor may be stale while a save is in progress or after an uncertain 
 the panel does not report it as the current on-disk cursor in those states. An interrupted
 process or power failure can still require manual recovery. The status panel does not
 itself provide any of the protections it describes.
+
+The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
+read-only, disables editing and saving, and displays a prominent mode indicator. Successful
+authentication and decoding confirm only that the supplied candidate can be opened with
+that demo pad and cursor. They do not repair anything or establish pad freshness, disk
+durability, or complete recovery. Reading can update OS file-access metadata.

@@ -227,7 +227,13 @@ See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container
 # Later, pass the cursor displayed after the last save:
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-open /path/to/demo-container 1
+# Inspect a candidate image without enabling editing or saving:
+cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-inspect /path/to/demo-container 1
 ```
+
+Read-only inspection authenticates and decodes the candidate at the supplied cursor; it does not
+repair a container or pad, establish pad freshness, or prove recovery is complete. It uses the
+same demo pad and plaintext-memory limitations. The OS may still update file-access metadata.
 
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
@@ -237,6 +243,8 @@ experimental device path at a disk containing valuable data. This tool does not 
 stick for you.
 
 ## Remaining work
+
+See the [release roadmap](docs/RELEASE-ROADMAP.md) for dependencies and completion gates.
 
 - Integrate the Wordcraft editor window with the document-session bridge; validate compatibility and migration of the experimental payload format.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.

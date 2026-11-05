@@ -25,6 +25,7 @@ const WARNING: &str = "EXPERIMENTAL DEMO — deterministic stand-in pad, no phys
 enum Launch {
     Create(PathBuf),
     Open(PathBuf, u64),
+    Inspect(PathBuf, u64),
 }
 
 fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
@@ -32,14 +33,19 @@ fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
         [action, path] if action == "--demo-create" => {
             Ok(Launch::Create(PathBuf::from(path.as_os_str())))
         }
-        [action, path, cursor] if action == "--demo-open" => {
+        [action, path, cursor] if action == "--demo-open" || action == "--demo-inspect" => {
             let cursor = cursor
                 .to_str()
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or("cursor must be an unsigned integer")?;
-            Ok(Launch::Open(PathBuf::from(path.as_os_str()), cursor))
+            let path = PathBuf::from(path.as_os_str());
+            if action == "--demo-inspect" {
+                Ok(Launch::Inspect(path, cursor))
+            } else {
+                Ok(Launch::Open(path, cursor))
+            }
         }
-        _ => Err("use --demo-create PATH or --demo-open PATH CURSOR"),
+        _ => Err("use --demo-create PATH, --demo-open PATH CURSOR, or --demo-inspect PATH CURSOR"),
     }
 }
 
@@ -86,12 +92,17 @@ fn open_session(launch: &Launch) -> Result<EditorSession, String> {
     let share = secret("Demo root share (64 hex characters): ", creating)?;
     let kappa = Zeroizing::new(parse_kappa(&share).map_err(str::to_owned)?);
     let passphrase = SealedPassphrase::new(&pass).ok_or("invalid passphrase length")?;
-    let options = |cursor| DocumentSessionOptions::new(cursor, true, Topology::UmbilicalUsb);
+    let options = |cursor, writable| {
+        DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb)
+    };
     let pad = Box::new(DerivedPad::new());
     match launch {
-        Launch::Create(path) => EditorSession::create(path, pad, passphrase, *kappa, options(0)),
+        Launch::Create(path) => EditorSession::create(path, pad, passphrase, *kappa, options(0, true)),
         Launch::Open(path, cursor) => {
-            EditorSession::open(path, pad, passphrase, *kappa, options(*cursor))
+            EditorSession::open(path, pad, passphrase, *kappa, options(*cursor, true))
+        }
+        Launch::Inspect(path, cursor) => {
+            EditorSession::open(path, pad, passphrase, *kappa, options(*cursor, false))
         }
     }
     .map_err(|e| e.to_string())
@@ -128,6 +139,7 @@ struct DemoEditor {
     session: Option<EditorSession>,
     pending: Option<PendingSave>,
     cursor: u64,
+    writable: bool,
     recovery_blocked: bool,
     text: Zeroizing<String>,
     text_unrepresentable: bool,
@@ -141,21 +153,30 @@ impl DemoEditor {
     fn new(session: EditorSession) -> Result<Self, &'static str> {
         let text = plain_text(session.document())?;
         let cursor = session.cursor();
+        let writable = session.is_writable();
         Ok(Self {
             session: Some(session),
             pending: None,
             cursor,
+            writable,
             recovery_blocked: false,
             text,
             text_unrepresentable: false,
             close_confirmation: false,
             show_session_status: false,
             allow_close: false,
-            status: "Ready. Record the cursor after each save.".into(),
+            status: if writable {
+                "Ready. Record the cursor after each save."
+            } else {
+                "Read-only inspection. This does not verify pad freshness or complete recovery."
+            }.into(),
         })
     }
 
     fn sync_text(&mut self) {
+        if !self.writable {
+            return;
+        }
         let document = Document::from_text(&self.text);
         // Wordcraft strips trailing CR characters from lines. Never save a
         // silently modified version of the text the user sees.
@@ -206,6 +227,10 @@ impl DemoEditor {
     }
 
     fn save(&mut self, ctx: &egui::Context) {
+        if !self.writable {
+            self.status = "Read-only inspection: saving is disabled.".into();
+            return;
+        }
         if self.pending.is_some() || self.needs_recovery() {
             return;
         }
@@ -350,14 +375,21 @@ impl eframe::App for DemoEditor {
         egui::Panel::top("warning").show(ui, |ui| {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), WARNING);
             ui.label("Plain-text documents only. No Wordcraft file, export or print menus. ASCII passphrase case variants are equivalent.");
+            if !self.writable {
+                ui.strong("READ-ONLY INSPECTION — editing and saving are disabled.");
+            }
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let can_save = self.pending.is_none() && !self.needs_recovery();
+                let can_save = self.writable && self.pending.is_none() && !self.needs_recovery();
                 if ui.add_enabled(can_save, egui::Button::new("Save to demo container")).clicked() {
                     self.save(ui.ctx());
                 }
-                ui.label(self.session_status().phase.label());
+                if self.writable {
+                    ui.label(self.session_status().phase.label());
+                } else {
+                    ui.label("Read-only");
+                }
                 if ui.button("Session status").clicked() {
                     self.show_session_status = true;
                 }
@@ -378,7 +410,9 @@ impl eframe::App for DemoEditor {
                 .add_enabled_ui(enabled, |ui| {
                     ui.add_sized(
                         ui.available_size(),
-                        egui::TextEdit::multiline(&mut *self.text).desired_width(f32::INFINITY),
+                        egui::TextEdit::multiline(&mut *self.text)
+                            .desired_width(f32::INFINITY)
+                            .interactive(self.writable),
                     )
                 })
                 .inner;
@@ -388,10 +422,15 @@ impl eframe::App for DemoEditor {
         });
         if self.show_session_status {
             let snapshot = self.session_status();
+            let writable = self.writable;
             egui::Window::new("Session status")
                 .open(&mut self.show_session_status)
                 .show(ui.ctx(), |ui| {
-                    ui.strong(snapshot.phase.label());
+                    if writable {
+                        ui.strong(snapshot.phase.label());
+                    } else {
+                        ui.strong("Read-only inspection");
+                    }
                     ui.label(snapshot.cursor_label());
                     ui.separator();
                     ui.strong("Protection layer");
@@ -428,8 +467,13 @@ impl eframe::App for DemoEditor {
 fn run(launch: &Launch) -> Result<(), String> {
     let session = open_session(launch)?;
     let editor = DemoEditor::new(session).map_err(str::to_owned)?;
+    let title = if editor.writable {
+        "Holonomy — EXPERIMENTAL TEXT DEMO"
+    } else {
+        "Holonomy — EXPERIMENTAL TEXT DEMO — READ ONLY"
+    };
     eframe::run_native(
-        "Holonomy — EXPERIMENTAL TEXT DEMO",
+        title,
         eframe::NativeOptions::default(),
         Box::new(move |_| Ok(Box::new(editor))),
     )
@@ -468,6 +512,11 @@ mod tests {
             parse_args(&["--demo-open".into(), "demo".into(), "1".into()]),
             Ok(Launch::Open(_, 1))
         ));
+        assert!(matches!(
+            parse_args(&["--demo-inspect".into(), "demo".into(), "1".into()]),
+            Ok(Launch::Inspect(_, 1))
+        ));
+        assert!(parse_args(&["--demo-inspect".into(), "demo".into(), "-1".into()]).is_err());
         assert!(parse_args(&["--demo-open".into(), "demo".into(), "-1".into()]).is_err());
         assert!(parse_args(&["--demo-create".into(), "demo".into(), "extra".into()]).is_err());
         assert_eq!(parse_kappa(&"aB".repeat(32)).expect("hex"), [0xab; 32]);
@@ -580,6 +629,38 @@ mod tests {
             DemoEditor::new(session).expect("plain").text.as_str(),
             "hello\nworld"
         );
+        let session = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb),
+        )
+        .expect("open read-only");
+        let mut inspector = DemoEditor::new(session).expect("plain");
+        assert!(!inspector.writable);
+        assert_eq!(inspector.text.as_str(), "hello\nworld");
+        assert_eq!(inspector.close_disposition(), CloseDisposition::Allow);
+        *inspector.text = "attempted edit".into();
+        inspector.sync_text();
+        assert_eq!(
+            plain_text(inspector.session.as_ref().expect("session").document()).expect("plain").as_str(),
+            "hello\nworld"
+        );
+        inspector.save(&ctx);
+        assert!(inspector.pending.is_none());
+        assert_eq!(inspector.cursor, 1);
+        assert!(inspector.status.contains("saving is disabled"));
+        drop(inspector);
+        let reopened = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb),
+        )
+        .expect("image remains readable");
+        assert_eq!(plain_text(reopened.document()).expect("plain").as_str(), "hello\nworld");
     }
 
     #[cfg(unix)]
