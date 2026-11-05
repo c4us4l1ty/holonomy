@@ -35,8 +35,11 @@ irreplaceable data.
   version upgrades. Provide accessible, responsive save, close, error and recovery UX.
 - Report actual per-save protection, verified pad budget and recovery state. Integrate
   platform capture exclusion, actual memory-locking coverage and watchdog priority,
-  with honest unavailable/failure states. The demo status panel reports limitations,
-  not deployed protection.
+  with honest unavailable/failure states. The demo now shows the protection layer the
+  store attaches to each save — with pad freshness stated as *not established* — plus the
+  source-reported ratchet count. It does not yet report a verified pad budget, capture
+  exclusion, memory-locking coverage or watchdog priority; the status panel reports
+  limitations, not deployed protection.
 
 ## 3. Validate supported platforms and operational security
 

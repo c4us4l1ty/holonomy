@@ -27,8 +27,10 @@ result is likewise reported only from a successful save and hidden while the ima
 pad is uncertain; a reported count is not independent proof of device writes or freshness.
 Protection reporting distinguishes *fresh*, *reused* and *not established*; the container
 store reports *not established* because it sees one image and one pad source, not sector
-history across devices, snapshots or rollbacks. The limited demo does not surface
-`ProtectionLayer` at all.
+history across devices, snapshots or rollbacks. The demo surfaces the layer attached to
+the last successful save (with freshness *not established*) and hides it while the save
+or pad state is uncertain; capture exclusion, memory-locking coverage and watchdog
+priority are still reported only as unavailable.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
 read-only, disables editing and saving, and displays a prominent mode indicator. Rich documents

@@ -225,8 +225,9 @@ no fresh-pad migration path. Use Ctrl+S (Command+S on macOS) to save.
 After a successful save, the session status panel shows its unkeyed image fingerprint for comparison
 with `holonomy verify`. It is hidden while saving or when recovery is required, and it is not
 recorded across restarts. It is not an authenticity or durability proof; sharing it can correlate
-container copies. The panel also shows whether the last successful save attempted a ratchet; the
-reported count does not independently establish device writes or freshness. See
+container copies. The panel also shows the protection layer attached to the last successful save and
+whether a ratchet was attempted. The store reports pad freshness as *not established*,
+and a reported ratchet count does not independently establish device writes. See
 [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash
