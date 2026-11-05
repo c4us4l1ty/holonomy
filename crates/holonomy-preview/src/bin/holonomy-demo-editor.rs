@@ -559,7 +559,10 @@ mod tests {
         editor.poll_save();
         assert!(editor.needs_recovery());
         assert!(editor.dirty());
-        assert_eq!(editor.session_status().phase, status::SavePhase::RecoveryRequired);
+        assert_eq!(
+            editor.session_status().phase,
+            status::SavePhase::RecoveryRequired
+        );
         assert_eq!(editor.session_status().remaining_cursor_saves, None);
         assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);

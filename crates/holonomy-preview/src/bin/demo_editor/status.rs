@@ -36,7 +36,13 @@ pub(super) struct SessionStatus {
 }
 
 impl SessionStatus {
-    pub(super) fn new(cursor: u64, saving: bool, recovery: bool, invalid: bool, dirty: bool) -> Self {
+    pub(super) fn new(
+        cursor: u64,
+        saving: bool,
+        recovery: bool,
+        invalid: bool,
+        dirty: bool,
+    ) -> Self {
         let phase = if recovery {
             SavePhase::RecoveryRequired
         } else if saving {
@@ -51,9 +57,15 @@ impl SessionStatus {
         let remaining_cursor_saves = if saving || recovery {
             None
         } else {
-            SAVES_BEFORE_DOMAIN_REUSE.saturating_sub(1).checked_sub(cursor)
+            SAVES_BEFORE_DOMAIN_REUSE
+                .saturating_sub(1)
+                .checked_sub(cursor)
         };
-        Self { phase, last_confirmed_cursor: cursor, remaining_cursor_saves }
+        Self {
+            phase,
+            last_confirmed_cursor: cursor,
+            remaining_cursor_saves,
+        }
     }
 
     pub(super) fn cursor_label(self) -> String {
@@ -69,7 +81,8 @@ impl SessionStatus {
 pub(super) const PROTECTION: &str = "Experimental encrypted container with a deterministic demo pad; no physical USB protection and no one-time-pad claim.";
 pub(super) const PAD_FRESHNESS: &str = "Not verified. The demo pad is deterministic and cannot be ratcheted; cursor counts are not durable pad-use accounting.";
 pub(super) const MEMORY: &str = "Editor-wide memory locking and dump exclusion have not been verified; plaintext may remain in memory, swap, or copies.";
-pub(super) const WATCHDOG: &str = "Not running; no reaper priority or disconnect wipe is active in this demo.";
+pub(super) const WATCHDOG: &str =
+    "Not running; no reaper priority or disconnect wipe is active in this demo.";
 
 pub(super) fn capture() -> &'static str {
     if cfg!(target_os = "linux") {
@@ -91,8 +104,14 @@ mod tests {
         assert!(blank.cursor_label().contains("not a freshness guarantee"));
         assert!(PAD_FRESHNESS.contains("Not verified"));
         assert!(PAD_FRESHNESS.contains("deterministic"));
-        assert_eq!(SessionStatus::new(53, false, false, false, false).remaining_cursor_saves, Some(0));
-        assert_eq!(SessionStatus::new(54, false, false, false, false).remaining_cursor_saves, None);
+        assert_eq!(
+            SessionStatus::new(53, false, false, false, false).remaining_cursor_saves,
+            Some(0)
+        );
+        assert_eq!(
+            SessionStatus::new(54, false, false, false, false).remaining_cursor_saves,
+            None
+        );
     }
 
     #[test]
@@ -105,8 +124,14 @@ mod tests {
         assert_eq!(recovery.phase, SavePhase::RecoveryRequired);
         assert_eq!(recovery.remaining_cursor_saves, None);
         assert!(recovery.cursor_label().contains("unknown"));
-        assert_eq!(SessionStatus::new(0, false, false, true, true).phase, SavePhase::Unrepresentable);
-        assert_eq!(SessionStatus::new(0, false, false, false, true).phase, SavePhase::Modified);
+        assert_eq!(
+            SessionStatus::new(0, false, false, true, true).phase,
+            SavePhase::Unrepresentable
+        );
+        assert_eq!(
+            SessionStatus::new(0, false, false, false, true).phase,
+            SavePhase::Modified
+        );
     }
 
     #[test]
