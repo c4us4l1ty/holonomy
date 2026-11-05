@@ -1243,8 +1243,12 @@ fn save_refuses_changed_path_before_pad_access() {
         fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
             panic!("stale path must not ratchet")
         }
-        fn can_ratchet(&self) -> bool { true }
-        fn describe(&self) -> String { "test pad".into() }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
     }
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("container");
@@ -1254,9 +1258,13 @@ fn save_refuses_changed_path_before_pad_access() {
     std::fs::rename(&path, &moved).expect("move original");
     std::fs::write(&path, b"new path contents").expect("replacement");
     let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
-    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"edit").expect_err("stale handle refused");
+    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"edit")
+        .expect_err("stale handle refused");
     assert!(error.contains("same regular file"), "{error}");
-    assert_eq!(std::fs::read(&path).expect("new path"), b"new path contents");
+    assert_eq!(
+        std::fs::read(&path).expect("new path"),
+        b"new path contents"
+    );
     assert_eq!(std::fs::read(&moved).expect("old path"), b"original");
     assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
 }
