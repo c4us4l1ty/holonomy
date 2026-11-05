@@ -205,3 +205,35 @@ mod ratchet_tests {
         assert!(ratchet_label(SavePhase::RecoveryRequired, Some(None)).contains("uncertain"));
     }
 }
+
+/// What the last successful save says protected it, hidden while the answer is not trustworthy.
+pub(super) fn protection_label(phase: SavePhase, last: Option<&str>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving.".into(),
+        SavePhase::RecoveryRequired => {
+            "Unavailable: the last save and pad state are uncertain.".into()
+        }
+        _ => match last {
+            None => "No save result recorded in this session.".into(),
+            Some(description) => format!(
+                "{description}. This is the layer attached by the container store, which cannot \
+                 establish pad freshness."
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+
+    #[test]
+    fn protection_status_comes_from_the_save_and_hides_uncertainty() {
+        assert!(protection_label(SavePhase::Saved, None).contains("No save result"));
+        let text = protection_label(SavePhase::Saved, Some("one-time pad (freshness not established by this layer) + ML-KEM"));
+        assert!(text.contains("one-time pad"));
+        assert!(text.contains("cannot establish pad freshness"));
+        assert!(!protection_label(SavePhase::Saving, Some("one-time pad")).contains("one-time"));
+        assert!(protection_label(SavePhase::RecoveryRequired, None).contains("uncertain"));
+    }
+}

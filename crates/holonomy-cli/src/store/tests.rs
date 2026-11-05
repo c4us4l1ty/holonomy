@@ -1292,3 +1292,18 @@ fn the_store_layer_does_not_claim_pad_freshness() {
     assert!(!layer.describe().contains("reused"));
     assert!(layer.describe().contains("not established"));
 }
+
+/// The report a caller gets back must not carry a freshness claim the store cannot support.
+#[test]
+fn save_reports_unestablished_pad_freshness() {
+    let path = tempfile("freshness-report");
+    provision(&path, [0x13u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let report = save(&mut file, &mut source(), &ctx, b"a report").expect("save");
+    assert_eq!(report.protection.pad_fresh, None);
+    assert!(!report.protection.describe().contains("fresh sectors"));
+    assert!(report.protection.describe().contains("not established"));
+    let _ = std::fs::remove_file(&path);
+}

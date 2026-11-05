@@ -384,6 +384,9 @@ pub struct SaveReport {
     pub slots: usize,
     /// Digest of the image as written, for the caller to compare against what it later reads.
     pub digest: [u8; 32],
+    /// The protection layer attached to this write. Its `pad_fresh` is `None`: the store folds a
+    /// pad but cannot establish that no sector was reused elsewhere.
+    pub protection: holonomy_core::unlock::ProtectionLayer,
 }
 
 /// Refuse wraparound until there is durable accounting of the pad's history.
@@ -651,6 +654,7 @@ fn save_inner(
         plaintext_bytes,
         slots: slot_bytes.len(),
         digest,
+        protection: protection_layer(),
     })
 }
 

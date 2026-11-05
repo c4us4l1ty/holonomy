@@ -154,6 +154,7 @@ struct DemoEditor {
     cursor: u64,
     last_saved_digest: Option<[u8; 32]>,
     last_ratchet_report: Option<Option<u32>>,
+    last_protection: Option<String>,
     writable: bool,
     recovery_blocked: bool,
     text: Zeroizing<String>,
@@ -175,6 +176,7 @@ impl DemoEditor {
             cursor,
             last_saved_digest: None,
             last_ratchet_report: None,
+            last_protection: None,
             writable,
             recovery_blocked: false,
             text,
@@ -341,6 +343,7 @@ impl DemoEditor {
             SaveOutcome::Saved(Some(report)) if !self.recovery_blocked => {
                 self.last_saved_digest = Some(report.digest);
                 self.last_ratchet_report = Some(report.ratcheted);
+                self.last_protection = Some(report.protection.describe().to_string());
                 self.status = format!(
                     "Saved at cursor {}. Record this cursor for reopening.",
                     self.cursor
@@ -460,6 +463,8 @@ impl eframe::App for DemoEditor {
             let snapshot = self.session_status();
             let fingerprint = status::fingerprint_label(snapshot.phase, self.last_saved_digest);
             let ratchet = status::ratchet_label(snapshot.phase, self.last_ratchet_report);
+            let protection =
+                status::protection_label(snapshot.phase, self.last_protection.as_deref());
             let writable = self.writable;
             egui::Window::new("Session status")
                 .open(&mut self.show_session_status)
@@ -479,6 +484,8 @@ impl eframe::App for DemoEditor {
                     ui.label(status::PAD_FRESHNESS);
                     ui.strong("Last-save ratchet result");
                     ui.label(ratchet);
+                    ui.strong("Last-save protection layer");
+                    ui.label(protection);
                     ui.strong("Screen capture");
                     ui.label(status::capture());
                     ui.strong("Memory locking");
@@ -692,6 +699,7 @@ mod tests {
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(53));
         assert_eq!(editor.last_saved_digest, None);
         assert_eq!(editor.last_ratchet_report, None);
+        assert_eq!(editor.last_protection, None);
         assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
         *editor.text = "hello\nworld".into();
         editor.sync_text();
@@ -720,6 +728,12 @@ mod tests {
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
         assert_eq!(editor.last_ratchet_report, Some(None));
+        let protection = editor
+            .last_protection
+            .clone()
+            .expect("save reports protection");
+        assert!(protection.contains("not established"), "{protection}");
+        assert!(!protection.contains("fresh sectors"), "{protection}");
         assert!(
             status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report)
                 .contains("not attempted")
