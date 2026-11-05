@@ -230,7 +230,10 @@ mod protection_tests {
     #[test]
     fn protection_status_comes_from_the_save_and_hides_uncertainty() {
         assert!(protection_label(SavePhase::Saved, None).contains("No save result"));
-        let text = protection_label(SavePhase::Saved, Some("one-time pad (freshness not established by this layer) + ML-KEM"));
+        let text = protection_label(
+            SavePhase::Saved,
+            Some("one-time pad (freshness not established by this layer) + ML-KEM"),
+        );
         assert!(text.contains("one-time pad"));
         assert!(text.contains("cannot establish pad freshness"));
         assert!(!protection_label(SavePhase::Saving, Some("one-time pad")).contains("one-time"));
