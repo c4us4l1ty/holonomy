@@ -92,12 +92,13 @@ fn open_session(launch: &Launch) -> Result<EditorSession, String> {
     let share = secret("Demo root share (64 hex characters): ", creating)?;
     let kappa = Zeroizing::new(parse_kappa(&share).map_err(str::to_owned)?);
     let passphrase = SealedPassphrase::new(&pass).ok_or("invalid passphrase length")?;
-    let options = |cursor, writable| {
-        DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb)
-    };
+    let options =
+        |cursor, writable| DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb);
     let pad = Box::new(DerivedPad::new());
     match launch {
-        Launch::Create(path) => EditorSession::create(path, pad, passphrase, *kappa, options(0, true)),
+        Launch::Create(path) => {
+            EditorSession::create(path, pad, passphrase, *kappa, options(0, true))
+        }
         Launch::Open(path, cursor) => {
             EditorSession::open(path, pad, passphrase, *kappa, options(*cursor, true))
         }
@@ -169,7 +170,8 @@ impl DemoEditor {
                 "Ready. Record the cursor after each save."
             } else {
                 "Read-only inspection. This does not verify pad freshness or complete recovery."
-            }.into(),
+            }
+            .into(),
         })
     }
 
@@ -644,7 +646,9 @@ mod tests {
         *inspector.text = "attempted edit".into();
         inspector.sync_text();
         assert_eq!(
-            plain_text(inspector.session.as_ref().expect("session").document()).expect("plain").as_str(),
+            plain_text(inspector.session.as_ref().expect("session").document())
+                .expect("plain")
+                .as_str(),
             "hello\nworld"
         );
         inspector.save(&ctx);
@@ -660,7 +664,10 @@ mod tests {
             DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb),
         )
         .expect("image remains readable");
-        assert_eq!(plain_text(reopened.document()).expect("plain").as_str(), "hello\nworld");
+        assert_eq!(
+            plain_text(reopened.document()).expect("plain").as_str(),
+            "hello\nworld"
+        );
     }
 
     #[cfg(unix)]
