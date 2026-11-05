@@ -159,6 +159,9 @@ impl DemoEditor {
 
 impl eframe::App for DemoEditor {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Q) && input.modifiers.command) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if ctx.input(|input| input.viewport().close_requested())
             && !self.allow_close
             && self.dirty()

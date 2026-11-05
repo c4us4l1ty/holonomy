@@ -657,7 +657,9 @@ jobs:
             trap "kill $pid 2>/dev/null || true" EXIT
             timeout 240s xdotool search --sync --onlyvisible --name "Holonomy.*EXPERIMENTAL TEXT DEMO" > "$log.windows"
             window=$(head -n 1 "$log.windows")
-            xdotool windowclose "$window"
+            xdotool windowfocus --sync "$window"
+            xdotool key ctrl+q
+            timeout 60s tail --pid="$pid" -f /dev/null
             wait "$pid"
             trap - EXIT
           ' _ "$binary" "$log" "$container"; then
