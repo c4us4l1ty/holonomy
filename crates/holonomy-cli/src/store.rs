@@ -593,6 +593,26 @@ fn save_inner(
         )
     })?;
 
+    // 8b. Read the replacement back *before* the ratchet destroys the old window.
+    //
+    //     The digest was computed over the bytes handed to `replace_image`; this compares them with
+    //     the bytes this process can read back. It catches a replacement that wrote a different or
+    //     truncated image, which would otherwise be discovered only after ratcheting had made the
+    //     old window unreadable. It is not a durability guarantee -- the read may be served from
+    //     cache -- and it says nothing about media corruption later.
+    let readback = file.folded_digest().map_err(|e| {
+        format!(
+            "container was written with cursor {}; reading the replacement back failed: {e}. Do not retry with the old cursor and do not ratchet; inspect the container first",
+            ctx.cursor
+        )
+    })?;
+    if readback != digest {
+        return Err(format!(
+            "container was written with cursor {}, but the replacement reads back with a different digest; the old pad window has not been ratcheted. Do not retry with the old cursor; inspect the container before continuing",
+            ctx.cursor
+        ));
+    }
+
     // 9. Ratchet window `c-1`, *after* the container is on the device.
     //
     //    Two decisions in one line, and this tree has had both wrong.
