@@ -131,9 +131,9 @@ impl ContainerFile {
 
     /// Read the container image.
     ///
-    /// A file shorter than one container is an error rather than a short read: a partial file is
-    /// what a yanked stick leaves behind, and treating it as a container would mean reporting
-    /// "wrong passphrase" for a truncated copy.
+    /// A standalone file must contain exactly one container. A partial file is an error rather
+    /// than a short read, and extra bytes are refused rather than silently discarded on save.
+    /// Embedded containers and trailing metadata are not supported by this file store.
     pub fn read_image(&mut self) -> std::io::Result<Vec<u8>> {
         let len = self.file.metadata()?.len();
         if len < CONTAINER_BYTES as u64 + self.offset {
@@ -145,9 +145,24 @@ impl ContainerFile {
                 ),
             ));
         }
+        if len > CONTAINER_BYTES as u64 + self.offset {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} is {} bytes; a standalone container must be exactly {} bytes; extra data will not be discarded",
+                    self.path, len, CONTAINER_BYTES
+                ),
+            ));
+        }
         let mut image = vec![0u8; CONTAINER_BYTES];
         self.file.seek(SeekFrom::Start(self.offset))?;
         self.file.read_exact(&mut image)?;
+        if self.file.metadata()?.len() != len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while reading; the image is not a reliable snapshot",
+            ));
+        }
         Ok(image)
     }
 
@@ -202,6 +217,12 @@ impl ContainerFile {
         {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
         }
+        if original.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed or is not exactly one standalone image; replacement refused",
+            ));
+        }
         let parent = self
             .filesystem_path
             .parent()
@@ -226,6 +247,12 @@ impl ContainerFile {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "container path changed while saving; refusing to replace it",
+            ));
+        }
+        if current.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while saving; replacement refused",
             ));
         }
         let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;

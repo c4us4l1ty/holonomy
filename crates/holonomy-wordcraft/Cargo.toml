@@ -1,0 +1,32 @@
+[workspace]
+
+[package]
+name = "holonomy-wordcraft"
+description = "Experimental Wordcraft document codec for Holonomy containers"
+version = "5.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+holonomy-cli = { path = "../holonomy-cli" }
+holonomy-core = { path = "../holonomy-core" }
+holonomy-session = { path = "../holonomy-session" }
+wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+# Payload v1 requires this serializer's canonical byte representation.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+# Cargo does not inherit a dependency's workspace patches. The pinned Wordcraft
+# engine requires its fork of krilla for the PDF dependency to compile.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }

@@ -1,0 +1,46 @@
+[workspace]
+
+[package]
+name = "holonomy-preview"
+description = "Unencrypted scratch-only Wordcraft window for Holonomy integration development"
+version = "5.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+default-run = "holonomy-preview"
+
+[dependencies]
+holonomy-wordcraft = { path = "../holonomy-wordcraft" }
+holonomy-cli = { path = "../holonomy-cli" }
+holonomy-core = { path = "../holonomy-core" }
+zeroize = "1.8"
+rpassword = "7.3"
+wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+# A dependency's Cargo workspace patches do not propagate to the consuming root.
+# These reproduce the pinned Wordcraft workspace's required krilla and egui forks.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dev-dependencies]
+tempfile = "3"

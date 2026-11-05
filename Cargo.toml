@@ -14,7 +14,7 @@ members = [
 # alignment rules, the Argon2id/VDF wrapper shape, and the per-OS lock syscalls. Nothing in
 # this workspace depends on it, and it is excluded so it keeps resolving against its own
 # lockfile instead of ours. Do not delete it; do not build on it.
-exclude = ["holonomy-old"]
+exclude = ["holonomy-old", "crates/holonomy-wordcraft", "crates/holonomy-preview"]
 
 [workspace.package]
 version = "5.1.0"
