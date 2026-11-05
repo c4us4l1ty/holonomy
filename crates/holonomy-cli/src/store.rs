@@ -491,6 +491,10 @@ impl SaveLock {
 }
 
 /// Save only if the image still matches the snapshot authenticated by the session.
+///
+/// Non-Unix only: it exists so the session compiles where saves are refused anyway. On Unix the
+/// session calls [`save_if_unchanged_locked`] with the lock it acquired first.
+#[cfg(not(unix))]
 pub(crate) fn save_if_unchanged(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
