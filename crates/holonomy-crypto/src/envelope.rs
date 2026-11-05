@@ -627,10 +627,21 @@ mod tests {
         // two-character check failed whenever the random byte was 0xca, because "Decapsulation"
         // contains "ca". A one-in-256 flake is still a flake.
         let x25519_hex: String = dk.x25519.iter().map(|b| format!("{b:02x}")).collect();
-        let kem_hex: String = dk.ml_kem.iter().take(32).map(|b| format!("{b:02x}")).collect();
+        let kem_hex: String = dk
+            .ml_kem
+            .iter()
+            .take(32)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let lowered = s.to_lowercase();
-        assert!(!lowered.contains(&x25519_hex), "debug output leaks the X25519 secret");
-        assert!(!lowered.contains(&kem_hex), "debug output leaks the ML-KEM secret");
+        assert!(
+            !lowered.contains(&x25519_hex),
+            "debug output leaks the X25519 secret"
+        );
+        assert!(
+            !lowered.contains(&kem_hex),
+            "debug output leaks the ML-KEM secret"
+        );
         assert!(s.contains("redacted"));
     }
 
