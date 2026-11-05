@@ -81,8 +81,7 @@ fn open_session(launch: &Launch) -> Result<EditorSession, String> {
     let pass = secret("Passphrase: ", creating)?;
     let share = secret("Demo root share (64 hex characters): ", creating)?;
     let kappa = Zeroizing::new(parse_kappa(&share).map_err(str::to_owned)?);
-    let passphrase =
-        SealedPassphrase::new(&pass).map_err(|e| format!("invalid passphrase: {e}"))?;
+    let passphrase = SealedPassphrase::new(&pass).ok_or("invalid passphrase length")?;
     let options = |cursor| DocumentSessionOptions::new(cursor, true, Topology::UmbilicalUsb);
     let pad = Box::new(DerivedPad::new());
     match launch {
