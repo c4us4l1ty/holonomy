@@ -109,6 +109,13 @@ enum SaveOutcome {
     Interrupted,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CloseDisposition {
+    Allow,
+    Confirm,
+    WaitForSave,
+}
+
 struct PendingSave {
     session: Arc<Mutex<Option<EditorSession>>>,
     receiver: mpsc::Receiver<SaveOutcome>,
@@ -171,6 +178,16 @@ impl DemoEditor {
                 .session
                 .as_ref()
                 .is_some_and(EditorSession::has_unsaved_changes)
+    }
+
+    fn close_disposition(&self) -> CloseDisposition {
+        if self.pending.is_some() {
+            CloseDisposition::WaitForSave
+        } else if !self.allow_close && self.dirty() {
+            CloseDisposition::Confirm
+        } else {
+            CloseDisposition::Allow
+        }
     }
 
     fn save(&mut self, ctx: &egui::Context) {
@@ -293,13 +310,18 @@ impl eframe::App for DemoEditor {
         if ctx.input(|input| input.key_pressed(egui::Key::Q) && input.modifiers.command) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
-            if self.pending.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.status = "Save in progress. Please wait before closing.".into();
-            } else if self.dirty() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.close_confirmation = true;
+        if ctx.input(|input| input.viewport().close_requested()) {
+            match self.close_disposition() {
+                CloseDisposition::WaitForSave => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.allow_close = false;
+                    self.status = "Save in progress. Please wait before closing.".into();
+                }
+                CloseDisposition::Confirm => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.close_confirmation = true;
+                }
+                CloseDisposition::Allow => {}
             }
         }
     }
@@ -348,7 +370,7 @@ impl eframe::App for DemoEditor {
                         if ui.button("Keep editing").clicked() {
                             self.close_confirmation = false;
                         }
-                        if ui.button("Discard and close").clicked() {
+                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Discard and close")).clicked() {
                             self.allow_close = true;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
@@ -442,13 +464,18 @@ mod tests {
         .expect("create");
         let mut editor = DemoEditor::new(session).expect("plain");
         assert!(!editor.dirty());
+        assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
         *editor.text = "hello\nworld".into();
         editor.sync_text();
         assert!(editor.dirty());
+        assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         let ctx = egui::Context::default();
         editor.save(&ctx);
         assert!(editor.pending.is_some());
         assert!(editor.dirty());
+        editor.allow_close = true;
+        assert_eq!(editor.close_disposition(), CloseDisposition::WaitForSave);
+        editor.allow_close = false;
         // A second request cannot start a concurrent save.
         editor.save(&ctx);
         let outcome = editor
@@ -482,6 +509,7 @@ mod tests {
         editor.poll_save();
         assert!(editor.needs_recovery());
         assert!(editor.dirty());
+        assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);
         assert!(editor.pending.is_none());
         drop(editor);
