@@ -1239,7 +1239,10 @@ fn save_refuses_same_size_original_change_without_ratchet() {
     names.sort();
     assert_eq!(
         names,
-        vec!["container".to_string(), "container.holonomy-lock".to_string()],
+        vec![
+            "container".to_string(),
+            "container.holonomy-lock".to_string()
+        ],
         "staged file cleaned up"
     );
 }
