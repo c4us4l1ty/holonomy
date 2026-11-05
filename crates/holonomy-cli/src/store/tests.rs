@@ -1212,6 +1212,11 @@ fn save_refuses_same_size_original_change_without_ratchet() {
     let error = save(&mut file, &mut pad, &ctx(&pass, 1), b"new document")
         .expect_err("changed original must not be overwritten");
     assert!(error.contains("contents changed while saving"), "{error}");
+    assert!(
+        error.contains("staged encrypted image may have been written"),
+        "{error}"
+    );
+    assert!(error.contains("Do not retry"), "{error}");
     assert!(pad.mutated);
     assert_eq!(std::fs::metadata(&path).expect("metadata").ino(), old_ino);
     let mut after = File::open(&path).expect("open original");

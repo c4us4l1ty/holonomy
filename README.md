@@ -244,6 +244,8 @@ longer files rather than interpreting an embedded image or discarding trailing d
 Before replacing an image, a save also compares the original encrypted bytes against the image
 it read; it refuses a detected change rather than overwriting it. This is best-effort detection,
 not a lock: modification can race the check or affect pad state, so concurrent writers remain unsafe.
+Even a refused replacement may have staged an encrypted image; do not retry after a failed save
+without investigating the container and pad state.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The

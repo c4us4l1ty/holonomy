@@ -546,8 +546,12 @@ pub fn save(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
-    file.replace_image(&image, &expected_old_digest)
-        .map_err(|e| format!("saving cursor {}: {e}", ctx.cursor))?;
+    file.replace_image(&image, &expected_old_digest).map_err(|e| {
+        format!(
+            "saving cursor {}: {e}; a staged encrypted image may have been written. Do not retry until the container and pad state have been inspected; the cursor may be spent",
+            ctx.cursor
+        )
+    })?;
 
     // 9. Ratchet window `c-1`, *after* the container is on the device.
     //
