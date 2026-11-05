@@ -598,7 +598,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev xvfb xauth libgl1-mesa-dri libxkbcommon-x11-0
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev xvfb xauth xdotool libgl1-mesa-dri libxkbcommon-x11-0
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -639,6 +639,34 @@ jobs:
             tail -30 preview-window.log | while IFS= read -r line; do
               echo "::error::$line"
             done
+            exit 1
+          fi
+      - name: Smoke-test demo container window
+        run: |
+          set -euo pipefail
+          binary="$PWD/crates/holonomy-preview/target/debug/holonomy-demo-editor"
+          log="$RUNNER_TEMP/holonomy-demo-window.log"
+          container="$RUNNER_TEMP/holonomy-demo-container"
+          # Synthetic credentials only. `script` supplies the terminal required by
+          # hidden prompts; xdotool waits for a mapped window rather than a delay.
+          if ! xvfb-run -a bash -c '
+            set -euo pipefail
+            binary="$1"; log="$2"; container="$3"
+            share=$(printf "11%.0s" {1..32})
+            printf "%s\n" "ci demo password" "ci demo password" "$share" "$share" |
+              script -q -e -c "$binary --demo-create $container" /dev/null > "$log" 2>&1 &
+            pid=$!
+            trap '''kill "$pid" 2>/dev/null || true''' EXIT
+            timeout 180s xdotool search --sync --onlyvisible --name "Holonomy.*EXPERIMENTAL TEXT DEMO" > "$log.windows"
+            window=$(head -n 1 "$log.windows")
+            xdotool windowclose "$window"
+            wait "$pid"
+            trap - EXIT
+          ' _ "$binary" "$log" "$container"; then
+            echo "::error::demo container window did not open and close successfully"
+            if [ -f "$log" ]; then
+              tail -30 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
             exit 1
           fi
       - name: Lint preview
