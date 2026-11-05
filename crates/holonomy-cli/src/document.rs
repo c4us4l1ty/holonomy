@@ -430,13 +430,13 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "document".to_string(),
-                "document.holonomy-lock".to_string(),
+                "first".to_string(),
+                "first.holonomy-lock".to_string(),
                 "second".to_string()
             ]
         );
         assert_eq!(
-            std::fs::metadata(dir.path().join("document.holonomy-lock"))
+            std::fs::metadata(dir.path().join("first.holonomy-lock"))
                 .expect("lock metadata")
                 .len(),
             0,

@@ -1225,9 +1225,21 @@ fn save_refuses_same_size_original_change_without_ratchet() {
         .expect("seek");
     after.read_exact(&mut byte).expect("read");
     assert_eq!(byte[0], expected_byte);
+    // The container and the save lock's empty sidecar; no staged `*` file survives the refusal.
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
     assert_eq!(
-        std::fs::read_dir(dir.path()).expect("list").count(),
-        1,
+        names,
+        vec!["container".to_string(), "container.holonomy-lock".to_string()],
         "staged file cleaned up"
     );
 }
