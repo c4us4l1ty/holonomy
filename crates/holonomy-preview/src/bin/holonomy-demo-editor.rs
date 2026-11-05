@@ -273,6 +273,11 @@ mod tests {
         assert_eq!(plain_text(&doc).expect("plain").as_str(), "hello\nworld");
         doc.core.title = "important metadata".into();
         assert!(plain_text(&doc).is_err());
+        let mut formatted = Document::from_text("hello");
+        if let wordcraft_doc::Block::Para(paragraph) = std::sync::Arc::make_mut(&mut formatted.body[0]) {
+            paragraph.runs[0].props.bold = Some(true);
+        }
+        assert!(plain_text(&formatted).is_err());
         assert_eq!(plain_text(&Document::new()).expect("blank").as_str(), "");
     }
 
