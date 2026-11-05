@@ -273,7 +273,10 @@ mod unknown_freshness_tests {
         assert!(!text.contains("fresh saves left"), "{text}");
         assert!(!text.contains("PAD SPENT"), "{text}");
         assert!(!line.is_healthy());
-        assert!(line.problems().iter().any(|p| p.contains("not established")));
+        assert!(line
+            .problems()
+            .iter()
+            .any(|p| p.contains("not established")));
         assert_eq!(line.past_window_by(), 0);
     }
 }
