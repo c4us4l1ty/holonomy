@@ -15,7 +15,8 @@ holonomy-core = { path = "../holonomy-core" }
 holonomy-session = { path = "../holonomy-session" }
 wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# Payload v1 requires this serializer's canonical byte representation.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
 zeroize = "1.8"
 
 [dev-dependencies]

@@ -68,6 +68,9 @@ $$
 Slot 0 carries the root capsule, slot 1 includes the epoch salt, and the remaining **2,046** slots
 are available for payload. The session layer reserves authentication data in each payload slot. The experimental Wordcraft bridge
 stores versioned JSON **inside** the encrypted payload and refuses unrecognized nonempty CLI data.
+The experimental version 1 reader also rejects unknown fields and noncanonical JSON rather than
+silently losing data; this may reject files produced by different serializers or future versions.
+Keep original files, and do not assume this prototype has a migration path.
 Its frontend session tracks edits and avoids spending a cursor on an unchanged save; after any store
 failure it conservatively reports unsaved changes until recovery. Wordcraft's in-memory document,
 saved snapshot, undo history and intermediate copies are not guaranteed to be wiped. The engine

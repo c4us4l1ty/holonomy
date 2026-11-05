@@ -37,6 +37,8 @@ pub enum BridgeError {
     Serialization,
     /// The payload is not a valid serialized Wordcraft document.
     InvalidDocument,
+    /// A valid JSON payload contains an unsupported or noncanonical representation.
+    UnsupportedRepresentation,
     /// A serialization round trip changed the document.
     RoundTripMismatch,
     /// A container could not be created or opened.
@@ -57,6 +59,9 @@ impl std::fmt::Display for BridgeError {
             Self::DocumentTooLarge => f.write_str("serialized document exceeds container capacity"),
             Self::Serialization => f.write_str("could not serialize the Wordcraft document"),
             Self::InvalidDocument => f.write_str("invalid Wordcraft document payload"),
+            Self::UnsupportedRepresentation => f.write_str(
+                "Wordcraft payload contains unsupported or noncanonical data; open refused to avoid data loss",
+            ),
             Self::RoundTripMismatch => {
                 f.write_str("Wordcraft serialization changed the document; save refused")
             }
@@ -85,6 +90,30 @@ impl Write for BoundedWriter {
         }
         self.bytes.extend_from_slice(data);
         Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+// Compare serialization against the input without allocating another complete
+// JSON document. Any ignored field or normalized representation must fail closed.
+struct MatchingWriter<'a> {
+    expected: &'a [u8],
+    offset: usize,
+}
+
+impl Write for MatchingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let end = self.offset.checked_add(bytes.len()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "serialized payload differs")
+        })?;
+        if self.expected.get(self.offset..end) != Some(bytes) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "serialized payload differs"));
+        }
+        self.offset = end;
+        Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -125,6 +154,10 @@ pub fn encode(document: &Document) -> Result<Zeroizing<Vec<u8>>, BridgeError> {
 /// Decode a Wordcraft payload. An empty provisioned container is a blank document.
 ///
 /// Other legacy CLI payloads are rejected rather than guessed or silently converted.
+/// Version 1 accepts only the canonical JSON emitted by the pinned serializer;
+/// unknown fields or alternate representations are rejected, not discarded.
+/// This strict experimental format needs an explicit compatibility policy before
+/// changing the serializer or the pinned Wordcraft document model.
 pub fn decode(payload: &[u8]) -> Result<Document, BridgeError> {
     if payload.is_empty() {
         return Ok(Document::new());
@@ -139,7 +172,12 @@ pub fn decode(payload: &[u8]) -> Result<Document, BridgeError> {
     if version != VERSION {
         return Err(BridgeError::UnsupportedVersion(version));
     }
-    serde_json::from_slice(json).map_err(|_| BridgeError::InvalidDocument)
+    let document: Document = serde_json::from_slice(json).map_err(|_| BridgeError::InvalidDocument)?;
+    let mut writer = MatchingWriter { expected: json, offset: 0 };
+    if serde_json::to_writer(&mut writer, &document).is_err() || writer.offset != json.len() {
+        return Err(BridgeError::UnsupportedRepresentation);
+    }
+    Ok(document)
 }
 
 /// Serialize and save a Wordcraft document using the session's next cursor.
@@ -185,6 +223,25 @@ mod tests {
             decode(&invalid),
             Err(BridgeError::InvalidDocument)
         ));
+    }
+
+    #[test]
+    fn unknown_fields_and_noncanonical_json_are_refused() {
+        let encoded = encode(&Document::from_text("hello")).expect("encode");
+        let json = std::str::from_utf8(&encoded[MAGIC.len() + 1..]).expect("json");
+        let payload = |json: &str| {
+            let mut bytes = MAGIC.to_vec();
+            bytes.push(VERSION);
+            bytes.extend_from_slice(json.as_bytes());
+            bytes
+        };
+        let root_unknown = format!("{},\"futureField\":true}}", &json[..json.len() - 1]);
+        assert!(matches!(decode(&payload(&root_unknown)), Err(BridgeError::UnsupportedRepresentation)));
+        let needle = "\"text\":\"hello\"";
+        assert!(json.contains(needle));
+        let nested_unknown = json.replacen(needle, "\"text\":\"hello\",\"futureField\":true", 1);
+        assert!(matches!(decode(&payload(&nested_unknown)), Err(BridgeError::UnsupportedRepresentation)));
+        assert!(matches!(decode(&payload(&format!("{json} "))), Err(BridgeError::UnsupportedRepresentation)));
     }
 
     #[test]
