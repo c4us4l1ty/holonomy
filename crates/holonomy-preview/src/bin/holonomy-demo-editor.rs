@@ -575,9 +575,15 @@ mod tests {
         assert!(plain_text(&formatted).is_err());
         assert!(display_text(&formatted, true).is_err());
         let original = formatted.clone();
-        assert_eq!(display_text(&formatted, false).expect("preview").as_str(), "hello");
+        assert_eq!(
+            display_text(&formatted, false).expect("preview").as_str(),
+            "hello"
+        );
         assert!(formatted.same_content(&original));
-        assert_eq!(display_text(&doc, false).expect("preview").as_str(), "hello\nworld");
+        assert_eq!(
+            display_text(&doc, false).expect("preview").as_str(),
+            "hello\nworld"
+        );
         assert_eq!(plain_text(&Document::new()).expect("blank").as_str(), "");
     }
 
@@ -586,15 +592,24 @@ mod tests {
     fn rich_document_is_previewed_read_only_and_refused_for_editing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("rich-document");
-        let options = |cursor, writable| DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb);
+        let options = |cursor, writable| {
+            DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb)
+        };
         let pass = || SealedPassphrase::new("test passphrase").expect("valid");
         let kappa = [0x48; 32];
         let mut session = EditorSession::create(
-            &path, Box::new(DerivedPad::new()), pass(), kappa, options(0, true),
-        ).expect("create");
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
         *session.document_mut() = Document::from_text("rich body");
         session.document_mut().core.title = "important metadata".into();
-        if let wordcraft_doc::Block::Para(paragraph) = std::sync::Arc::make_mut(&mut session.document_mut().body[0]) {
+        if let wordcraft_doc::Block::Para(paragraph) =
+            std::sync::Arc::make_mut(&mut session.document_mut().body[0])
+        {
             paragraph.runs[0].props.bold = Some(true);
         }
         let original = session.document().clone();
@@ -602,8 +617,13 @@ mod tests {
         drop(session);
 
         let inspection = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, false),
-        ).expect("open for inspection");
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, false),
+        )
+        .expect("open for inspection");
         let mut editor = DemoEditor::new(inspection).expect("read-only body preview");
         assert!(!editor.writable);
         assert_eq!(editor.text.as_str(), "rich body");
@@ -613,16 +633,34 @@ mod tests {
         editor.save(&egui::Context::default());
         assert!(editor.pending.is_none());
         assert!(editor.status.contains("saving is disabled"));
-        assert!(editor.session.as_ref().expect("session").document().same_content(&original));
+        assert!(editor
+            .session
+            .as_ref()
+            .expect("session")
+            .document()
+            .same_content(&original));
         drop(editor);
 
         let writable = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, true),
-        ).expect("open writable");
-        assert!(DemoEditor::new(writable).is_err(), "rich content must not enter text editing");
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, true),
+        )
+        .expect("open writable");
+        assert!(
+            DemoEditor::new(writable).is_err(),
+            "rich content must not enter text editing"
+        );
         let reopened = EditorSession::open(
-            &path, Box::new(DerivedPad::new()), pass(), kappa, options(1, false),
-        ).expect("reopen");
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, false),
+        )
+        .expect("reopen");
         assert!(reopened.document().same_content(&original));
     }
 
