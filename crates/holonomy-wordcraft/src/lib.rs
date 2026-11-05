@@ -110,7 +110,10 @@ impl Write for MatchingWriter<'_> {
             io::Error::new(io::ErrorKind::InvalidData, "serialized payload differs")
         })?;
         if self.expected.get(self.offset..end) != Some(bytes) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "serialized payload differs"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "serialized payload differs",
+            ));
         }
         self.offset = end;
         Ok(bytes.len())
@@ -172,8 +175,12 @@ pub fn decode(payload: &[u8]) -> Result<Document, BridgeError> {
     if version != VERSION {
         return Err(BridgeError::UnsupportedVersion(version));
     }
-    let document: Document = serde_json::from_slice(json).map_err(|_| BridgeError::InvalidDocument)?;
-    let mut writer = MatchingWriter { expected: json, offset: 0 };
+    let document: Document =
+        serde_json::from_slice(json).map_err(|_| BridgeError::InvalidDocument)?;
+    let mut writer = MatchingWriter {
+        expected: json,
+        offset: 0,
+    };
     if serde_json::to_writer(&mut writer, &document).is_err() || writer.offset != json.len() {
         return Err(BridgeError::UnsupportedRepresentation);
     }
@@ -236,12 +243,21 @@ mod tests {
             bytes
         };
         let root_unknown = format!("{},\"futureField\":true}}", &json[..json.len() - 1]);
-        assert!(matches!(decode(&payload(&root_unknown)), Err(BridgeError::UnsupportedRepresentation)));
+        assert!(matches!(
+            decode(&payload(&root_unknown)),
+            Err(BridgeError::UnsupportedRepresentation)
+        ));
         let needle = "\"text\":\"hello\"";
         assert!(json.contains(needle));
         let nested_unknown = json.replacen(needle, "\"text\":\"hello\",\"futureField\":true", 1);
-        assert!(matches!(decode(&payload(&nested_unknown)), Err(BridgeError::UnsupportedRepresentation)));
-        assert!(matches!(decode(&payload(&format!("{json} "))), Err(BridgeError::UnsupportedRepresentation)));
+        assert!(matches!(
+            decode(&payload(&nested_unknown)),
+            Err(BridgeError::UnsupportedRepresentation)
+        ));
+        assert!(matches!(
+            decode(&payload(&format!("{json} "))),
+            Err(BridgeError::UnsupportedRepresentation)
+        ));
     }
 
     #[test]
