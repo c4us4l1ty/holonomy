@@ -526,4 +526,73 @@ mod tests {
             "hello\nworld"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_background_ratchet_requires_recovery_after_replacement() {
+        use holonomy_cli::store::pad::{PadSource, PadWindow};
+
+        struct FailedRatchet(DerivedPad);
+        impl PadSource for FailedRatchet {
+            fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<PadWindow, String> {
+                self.0.window(kappa, cursor)
+            }
+            fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+                Err("injected ratchet failure".into())
+            }
+            fn can_ratchet(&self) -> bool {
+                true
+            }
+            fn describe(&self) -> String {
+                "test pad".into()
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("document");
+        let options = |cursor| DocumentSessionOptions::new(cursor, true, Topology::UmbilicalUsb);
+        let pass = || SealedPassphrase::new("test passphrase").expect("valid");
+        let kappa = [0x47; 32];
+        let session = EditorSession::create(
+            &path,
+            Box::new(FailedRatchet(DerivedPad::new())),
+            pass(),
+            kappa,
+            options(0),
+        )
+        .expect("create");
+        let mut editor = DemoEditor::new(session).expect("plain");
+        *editor.text = "new image".into();
+        editor.sync_text();
+        let ctx = egui::Context::default();
+        editor.save(&ctx);
+        let outcome = editor
+            .pending
+            .as_ref()
+            .expect("pending")
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(180))
+            .expect("save finished");
+        editor.finish_save(outcome);
+        assert!(editor.needs_recovery());
+        assert!(editor.dirty());
+        assert_eq!(editor.cursor, 0);
+        assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
+        drop(editor);
+
+        let session = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1),
+        )
+        .expect("new image was written before the ratchet failed");
+        assert_eq!(
+            DemoEditor::new(session).expect("plain").text.as_str(),
+            "new image"
+        );
+    }
 }
