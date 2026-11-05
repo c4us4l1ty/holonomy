@@ -36,13 +36,15 @@ those documents are historical and code and current CI results govern implementa
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. This is not a complete recovery protocol; provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
-ownership, ACLs, extended attributes, hard links, or other filesystem metadata. The path check is
-not a lock: do not save the same container concurrently. Provisioning is not crash-atomic. Always
-keep independently tested backups together with the pad material needed to open them.
+ownership, ACLs, extended attributes, hard links, or other filesystem metadata. Saves take an
+advisory lock on a `*.holonomy-lock` sidecar, which refuses a second Holonomy save but cannot stop
+a program that ignores it or one that reaches the same inode by another path; it is coordination,
+not a guarantee. Provisioning is not crash-atomic. Always keep independently tested backups
+together with the pad material needed to open them.
 
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
 facilities. Omit `--passphrase` and `--kappa` to use hidden terminal prompts instead. The legacy
@@ -277,7 +279,7 @@ See the [release roadmap](docs/RELEASE-ROADMAP.md) for dependencies and completi
 
 - Integrate the Wordcraft editor window with the document-session bridge; validate compatibility and migration of the experimental payload format.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
-- Complete and test crash recovery, cross-platform replacement, concurrent-save coordination, and durable pad-use/ratchet accounting.
+- Complete and test crash recovery, cross-platform replacement, locking that covers writers outside Holonomy, and durable pad-use/ratchet accounting.
 - Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
 - Measure resource use and latency under real workloads, and obtain independent cryptographic and security review.
 
