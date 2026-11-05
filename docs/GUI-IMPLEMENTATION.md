@@ -19,7 +19,10 @@ saved, modified, unrepresentable text, saving and recovery-required states. The 
 confirmed cursor may be stale while a save is in progress or after an uncertain failure;
 the panel does not report it as the current on-disk cursor in those states. An interrupted
 process or power failure can still require manual recovery. The status panel does not
-itself provide any of the protections it describes.
+itself provide any of the protections it describes. After a successful save, it shows
+the save report's unkeyed image fingerprint for comparison with `holonomy verify`;
+the fingerprint is hidden during a save or after an uncertain failure. It is not
+persisted across restarts or proof of authenticity or durability.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
 read-only, disables editing and saving, and displays a prominent mode indicator. Successful

@@ -11,6 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use eframe::egui;
 use holonomy_cli::document::{DocumentSessionOptions, DocumentSessionState};
 use holonomy_cli::store::pad::DerivedPad;
+use holonomy_cli::store::SaveReport;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_wordcraft::editor::EditorSession;
 use wordcraft_doc::{Document, StoryRef};
@@ -119,7 +120,7 @@ fn plain_text(doc: &Document) -> Result<Zeroizing<String>, &'static str> {
 }
 
 enum SaveOutcome {
-    Saved(bool),
+    Saved(Option<SaveReport>),
     Failed(String),
     Interrupted,
 }
@@ -140,6 +141,7 @@ struct DemoEditor {
     session: Option<EditorSession>,
     pending: Option<PendingSave>,
     cursor: u64,
+    last_saved_digest: Option<[u8; 32]>,
     writable: bool,
     recovery_blocked: bool,
     text: Zeroizing<String>,
@@ -159,6 +161,7 @@ impl DemoEditor {
             session: Some(session),
             pending: None,
             cursor,
+            last_saved_digest: None,
             writable,
             recovery_blocked: false,
             text,
@@ -274,7 +277,7 @@ impl DemoEditor {
                     let saved =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.save()));
                     let result = match saved {
-                        Ok(Ok(report)) => SaveOutcome::Saved(report.is_some()),
+                        Ok(Ok(report)) => SaveOutcome::Saved(report),
                         Ok(Err(error)) => SaveOutcome::Failed(error.to_string()),
                         Err(_) => SaveOutcome::Interrupted,
                     };
@@ -322,13 +325,14 @@ impl DemoEditor {
             self.recovery_blocked = true;
         }
         match outcome {
-            SaveOutcome::Saved(true) if !self.recovery_blocked => {
+            SaveOutcome::Saved(Some(report)) if !self.recovery_blocked => {
+                self.last_saved_digest = Some(report.digest);
                 self.status = format!(
                     "Saved at cursor {}. Record this cursor for reopening.",
                     self.cursor
                 );
             }
-            SaveOutcome::Saved(false) if !self.recovery_blocked => {
+            SaveOutcome::Saved(None) if !self.recovery_blocked => {
                 self.status = "No changes; no cursor was spent.".into();
             }
             SaveOutcome::Failed(error) if !self.recovery_blocked => {
@@ -438,6 +442,7 @@ impl eframe::App for DemoEditor {
         });
         if self.show_session_status {
             let snapshot = self.session_status();
+            let fingerprint = status::fingerprint_label(snapshot.phase, self.last_saved_digest);
             let writable = self.writable;
             egui::Window::new("Session status")
                 .open(&mut self.show_session_status)
@@ -448,6 +453,8 @@ impl eframe::App for DemoEditor {
                         ui.strong("Read-only inspection");
                     }
                     ui.label(snapshot.cursor_label());
+                    ui.strong("Last-save image fingerprint");
+                    ui.add(egui::Label::new(fingerprint).selectable(true));
                     ui.separator();
                     ui.strong("Protection layer");
                     ui.label(status::PROTECTION);
@@ -576,6 +583,7 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.session_status().phase, status::SavePhase::Saved);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(53));
+        assert_eq!(editor.last_saved_digest, None);
         assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
         *editor.text = "hello\nworld".into();
         editor.sync_text();
@@ -603,6 +611,18 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
+        let fingerprint = editor.last_saved_digest.expect("save returned an image fingerprint");
+        let mut file = holonomy_cli::store::ContainerFile::open(&path, false).expect("open for verification");
+        let mut pad = DerivedPad::new();
+        let passphrase = pass();
+        let context = holonomy_cli::store::SaveContext {
+            passphrase: &passphrase,
+            kappa_usb: &kappa,
+            topology: Topology::UmbilicalUsb,
+            params: holonomy_cli::document::DocumentSessionOptions::new(1, false, Topology::UmbilicalUsb).params(),
+            cursor: 1,
+        };
+        assert_eq!(holonomy_cli::store::verify_candidate(&mut file, &mut pad, &context).expect("verify"), fingerprint);
         // Exercise the frontend limit without doing 52 expensive saves. The actual
         // session's cursor remains 1; the guard must not start any worker.
         editor.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
@@ -646,6 +666,9 @@ mod tests {
             status::SavePhase::RecoveryRequired
         );
         assert_eq!(editor.session_status().remaining_cursor_saves, None);
+        assert_eq!(editor.last_saved_digest, Some(fingerprint));
+        let fingerprint_hex = fingerprint.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert!(!status::fingerprint_label(editor.session_status().phase, editor.last_saved_digest).contains(&fingerprint_hex));
         assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);
         assert!(editor.pending.is_none());

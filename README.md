@@ -222,7 +222,10 @@ memory, and watchdog limitations. Its remaining-save count is only the local cur
 a count of verified fresh pads; during a save or after an uncertain failure the current on-disk
 cursor is not confirmed. At the cursor limit the demo disables editing and saving because it has
 no fresh-pad migration path. Use Ctrl+S (Command+S on macOS) to save.
-See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
+After a successful save, the session status panel shows its unkeyed image fingerprint for comparison
+with `holonomy verify`. It is hidden while saving or when recovery is required, and it is not
+recorded across restarts. It is not an authenticity or durability proof; sharing it can correlate
+container copies. See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container

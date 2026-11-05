@@ -142,3 +142,37 @@ mod tests {
         assert!(capture().contains("may show"));
     }
 }
+
+/// Display only the last successful save's fingerprint, never as proof of the
+/// current image while a save may have changed it or recovery is required.
+pub(super) fn fingerprint_label(phase: SavePhase, digest: Option<[u8; 32]>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving; the image may be changing.".into(),
+        SavePhase::RecoveryRequired => "Unavailable: the current image is uncertain and requires recovery.".into(),
+        _ => match digest {
+            Some(digest) => {
+                let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+                format!("Last successful save: {hex}\nUnkeyed fingerprint of the saved image; not a durability or authenticity proof. Sharing it may correlate container copies.")
+            }
+            None => "Not recorded in this session. Opening or creating a container does not record a save fingerprint.".into(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_hidden_when_disk_state_is_uncertain() {
+        let digest = [0xabu8; 32];
+        let hex = "ab".repeat(32);
+        let saved = fingerprint_label(SavePhase::Saved, Some(digest));
+        assert!(saved.contains(&hex));
+        assert!(saved.contains("not a durability or authenticity proof"));
+        assert!(fingerprint_label(SavePhase::Modified, Some(digest)).contains(&hex));
+        assert!(!fingerprint_label(SavePhase::Saving, Some(digest)).contains(&hex));
+        assert!(!fingerprint_label(SavePhase::RecoveryRequired, Some(digest)).contains(&hex));
+        assert!(fingerprint_label(SavePhase::Saved, None).contains("Not recorded"));
+    }
+}
