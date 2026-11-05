@@ -1089,7 +1089,11 @@ fn verify_reports_snapshot_digest_and_rejects_tampered_payload() {
         }
     }
     fn flip(path: &Path, offset: usize) {
-        let mut file = OpenOptions::new().read(true).write(true).open(path).expect("open");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open");
         file.seek(SeekFrom::Start(offset as u64)).expect("seek");
         let mut byte = [0u8; 1];
         file.read_exact(&mut byte).expect("read");
@@ -1106,7 +1110,8 @@ fn verify_reports_snapshot_digest_and_rejects_tampered_payload() {
     let report = save(&mut writer, &mut source(), &ctx(&pass, 1), b"document").expect("save");
     drop(writer);
     let mut reader = ContainerFile::open(&path, false).expect("open reader");
-    let original = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("verify");
+    let original =
+        verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("verify");
     assert_eq!(original, report.digest);
 
     // Recover the save's salt only in the test to identify occupied versus unused
@@ -1128,7 +1133,8 @@ fn verify_reports_snapshot_digest_and_rejects_tampered_payload() {
     // Unused bytes are not covered by payload authentication, but the unkeyed
     // fingerprint must still change. It is not a proof that the change is benign.
     flip(&path, slot_range(unused).0);
-    let changed = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("unused bytes are not authenticated");
+    let changed = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1))
+        .expect("unused bytes are not authenticated");
     assert_ne!(changed, original);
     // A declared payload byte is authenticated and cannot be accepted after corruption.
     flip(&path, slot_range(used).0);

@@ -76,7 +76,10 @@ fn verify_checks_candidate_without_printing_or_modifying_plaintext() {
     );
     let stdout = String::from_utf8(verify.stdout).expect("UTF-8 report");
     let save_stdout = String::from_utf8(saved.stdout).expect("UTF-8 save report");
-    let saved_digest = save_stdout.lines().find_map(|line| line.trim().strip_prefix("image digest ")).expect("save digest");
+    let saved_digest = save_stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("image digest "))
+        .expect("save digest");
     assert_eq!(saved_digest.len(), 64);
     assert!(stdout.contains(&format!("image digest {saved_digest} ")));
     assert!(stdout.contains("not a durability or authenticity proof"));
