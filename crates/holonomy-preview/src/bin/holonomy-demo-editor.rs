@@ -16,6 +16,9 @@ use holonomy_wordcraft::editor::EditorSession;
 use wordcraft_doc::{Document, StoryRef};
 use zeroize::Zeroizing;
 
+#[path = "demo_editor/status.rs"]
+mod status;
+
 const WARNING: &str = "EXPERIMENTAL DEMO — deterministic stand-in pad, no physical USB protection. Do not use sensitive or irreplaceable data. Clipboard and memory may expose plaintext.";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -129,6 +132,7 @@ struct DemoEditor {
     text: Zeroizing<String>,
     text_unrepresentable: bool,
     close_confirmation: bool,
+    show_session_status: bool,
     allow_close: bool,
     status: String,
 }
@@ -145,6 +149,7 @@ impl DemoEditor {
             text,
             text_unrepresentable: false,
             close_confirmation: false,
+            show_session_status: false,
             allow_close: false,
             status: "Ready. Record the cursor after each save.".into(),
         })
@@ -178,6 +183,16 @@ impl DemoEditor {
                 .session
                 .as_ref()
                 .is_some_and(EditorSession::has_unsaved_changes)
+    }
+
+    fn session_status(&self) -> status::SessionStatus {
+        status::SessionStatus::new(
+            self.cursor,
+            self.pending.is_some(),
+            self.needs_recovery(),
+            self.text_unrepresentable,
+            self.dirty(),
+        )
     }
 
     fn close_disposition(&self) -> CloseDisposition {
@@ -307,6 +322,11 @@ impl DemoEditor {
 impl eframe::App for DemoEditor {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_save();
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
+            && !self.close_confirmation
+        {
+            self.save(ctx);
+        }
         if ctx.input(|input| input.key_pressed(egui::Key::Q) && input.modifiers.command) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -337,8 +357,13 @@ impl eframe::App for DemoEditor {
                 if ui.add_enabled(can_save, egui::Button::new("Save to demo container")).clicked() {
                     self.save(ui.ctx());
                 }
-                ui.label(format!("Cursor: {} · {}", self.cursor, if self.dirty() { "Unsaved, saving or recovery required" } else { "Saved" }));
+                ui.label(self.session_status().phase.label());
+                if ui.button("Session status").clicked() {
+                    self.show_session_status = true;
+                }
             });
+            ui.label(self.session_status().cursor_label());
+            ui.label("Demo pad · Capture exclusion not active · Memory not verified · Watchdog not running");
             ui.label(&self.status);
             if self.needs_recovery() {
                 ui.colored_label(egui::Color32::RED, "Recovery required: the container or pad may have changed. Further saves are blocked; inspect and recover before reopening.");
@@ -361,6 +386,26 @@ impl eframe::App for DemoEditor {
                 self.sync_text();
             }
         });
+        if self.show_session_status {
+            let snapshot = self.session_status();
+            egui::Window::new("Session status")
+                .open(&mut self.show_session_status)
+                .show(ui.ctx(), |ui| {
+                    ui.strong(snapshot.phase.label());
+                    ui.label(snapshot.cursor_label());
+                    ui.separator();
+                    ui.strong("Protection layer");
+                    ui.label(status::PROTECTION);
+                    ui.strong("Pad freshness and accounting");
+                    ui.label(status::PAD_FRESHNESS);
+                    ui.strong("Screen capture");
+                    ui.label(status::capture());
+                    ui.strong("Memory locking");
+                    ui.label(status::MEMORY);
+                    ui.strong("Watchdog and priority");
+                    ui.label(status::WATCHDOG);
+                });
+        }
         if self.close_confirmation {
             egui::Window::new("Unsaved changes or recovery required")
                 .collapsible(false)
@@ -464,6 +509,8 @@ mod tests {
         .expect("create");
         let mut editor = DemoEditor::new(session).expect("plain");
         assert!(!editor.dirty());
+        assert_eq!(editor.session_status().phase, status::SavePhase::Saved);
+        assert_eq!(editor.session_status().remaining_cursor_saves, Some(53));
         assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
         *editor.text = "hello\nworld".into();
         editor.sync_text();
@@ -473,6 +520,8 @@ mod tests {
         editor.save(&ctx);
         assert!(editor.pending.is_some());
         assert!(editor.dirty());
+        assert_eq!(editor.session_status().phase, status::SavePhase::Saving);
+        assert_eq!(editor.session_status().remaining_cursor_saves, None);
         editor.allow_close = true;
         assert_eq!(editor.close_disposition(), CloseDisposition::WaitForSave);
         editor.allow_close = false;
@@ -488,6 +537,7 @@ mod tests {
         editor.finish_save(outcome);
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
+        assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
         editor.save(&ctx);
         assert!(editor.pending.is_none());
         *editor.text = "cannot preserve\r\n".into();
@@ -509,6 +559,8 @@ mod tests {
         editor.poll_save();
         assert!(editor.needs_recovery());
         assert!(editor.dirty());
+        assert_eq!(editor.session_status().phase, status::SavePhase::RecoveryRequired);
+        assert_eq!(editor.session_status().remaining_cursor_saves, None);
         assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);
         assert!(editor.pending.is_none());

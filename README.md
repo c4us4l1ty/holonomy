@@ -217,7 +217,11 @@ data. Container creation is not crash-atomic; track the displayed cursor to reop
 concurrently. Saves run on a worker; editing and closing are paused until the operation finishes.
 Forced termination or power loss can still leave the container or pad needing recovery. This
 prototype does not guarantee plaintext is wiped from Wordcraft, egui, the clipboard, or
-operating-system memory. Unix saves only.
+operating-system memory. Unix saves only. The session status panel reports the demo pad, capture,
+memory, and watchdog limitations. Its remaining-save count is only the local cursor limit, **not**
+a count of verified fresh pads; during a save or after an uncertain failure the current on-disk
+cursor is not confirmed. Use Ctrl+S (Command+S on macOS) to save.
+See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container
