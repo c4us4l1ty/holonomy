@@ -158,8 +158,9 @@ impl DocumentSession {
 
     /// Replace the document using the next cursor.
     ///
-    /// On any store failure, the session enters `RecoveryRequired`, even if the
-    /// failure happened before writing. The store can also fail after replacement
+    /// Preflight rejection for a read-only session, an oversized document or an invalid
+    /// next cursor performs no store I/O and leaves the session ready. On any store
+    /// failure, the session enters `RecoveryRequired`, even if it happened before writing. The store can also fail after replacement
     /// or during ratcheting; do not assume that the old cursor is still current.
     pub fn save(&mut self, document: &[u8]) -> Result<SaveReport, String> {
         if self.state != DocumentSessionState::Ready {
@@ -176,6 +177,11 @@ impl DocumentSession {
             .cursor
             .checked_add(1)
             .ok_or("save cursor overflow")?;
+        // These deterministic checks cannot write the image or ratchet the pad.
+        // Keep the session usable if they reject a save. Once the store is entered,
+        // any error remains conservatively recovery-required.
+        store::validate_payload_size(document.len())?;
+        store::validate_save_cursor(cursor)?;
         let context = SaveContext {
             passphrase: &self.passphrase,
             kappa_usb: &self.kappa,
@@ -230,6 +236,48 @@ mod tests {
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
         }
+    }
+
+    #[test]
+    fn preflight_rejections_do_not_touch_file_or_require_recovery() {
+        struct NeverReadPad;
+        impl PadSource for NeverReadPad {
+            fn window(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<PadWindow, String> {
+                panic!("preflight must not read pad")
+            }
+            fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+                panic!("preflight must not ratchet")
+            }
+            fn can_ratchet(&self) -> bool {
+                panic!("preflight must not access pad")
+            }
+            fn describe(&self) -> String { "test pad".into() }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("container");
+        std::fs::write(&path, b"untouched").expect("create sentinel");
+        let mut session = DocumentSession {
+            file: ContainerFile::open(&path, true).expect("open"),
+            pad: Box::new(NeverReadPad),
+            passphrase: SealedPassphrase::new("test").expect("passphrase"),
+            kappa: Zeroizing::new([0; 32]),
+            options: options(0, true),
+            state: DocumentSessionState::Ready,
+        };
+        let capacity = holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+        let oversized = vec![0u8; capacity + 1];
+        assert!(session.save(&oversized).expect_err("size refused").contains("payload limit"));
+        assert_eq!(session.state(), DocumentSessionState::Ready);
+        assert_eq!(session.cursor(), 0);
+        drop(oversized);
+        session.options.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
+        assert!(session.save(b"edit").expect_err("cursor refused").contains("pad reuse"));
+        assert_eq!(session.state(), DocumentSessionState::Ready);
+        assert_eq!(session.cursor(), holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1);
+        session.options.cursor = u64::MAX;
+        assert!(session.save(b"edit").expect_err("overflow refused").contains("overflow"));
+        assert_eq!(session.state(), DocumentSessionState::Ready);
+        assert_eq!(std::fs::read(&path).expect("read sentinel"), b"untouched");
     }
 
     #[test]

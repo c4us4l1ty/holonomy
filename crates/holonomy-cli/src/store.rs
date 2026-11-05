@@ -323,7 +323,7 @@ pub struct SaveReport {
 }
 
 /// Refuse wraparound until there is durable accounting of the pad's history.
-fn validate_save_cursor(cursor: u64) -> Result<(), String> {
+pub(crate) fn validate_save_cursor(cursor: u64) -> Result<(), String> {
     let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
     if cursor == 0 {
         return Err(
@@ -334,6 +334,18 @@ fn validate_save_cursor(cursor: u64) -> Result<(), String> {
         return Err(format!(
             "save cursor {cursor} would enter the pad reuse window (starting at {limit}); \
              saving is disabled until durable pad accounting and recovery are implemented"
+        ));
+    }
+    Ok(())
+}
+
+/// Reject oversized payloads before any container or pad I/O.
+pub(crate) fn validate_payload_size(len: usize) -> Result<(), String> {
+    let capacity =
+        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+    if len > capacity {
+        return Err(format!(
+            "document exceeds the {capacity}-byte container payload limit"
         ));
     }
     Ok(())
@@ -359,13 +371,7 @@ pub fn save(
         ));
     }
 
-    let capacity =
-        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
-    if payload.len() > capacity {
-        return Err(format!(
-            "document exceeds the {capacity}-byte container payload limit"
-        ));
-    }
+    validate_payload_size(payload.len())?;
 
     // Provisioning uses window zero. Until we can prove the history of refreshed
     // sectors, do not enter a window that can overlap the first 54 windows.

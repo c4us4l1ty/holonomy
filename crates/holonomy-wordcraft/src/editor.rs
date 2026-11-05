@@ -107,8 +107,9 @@ impl EditorSession {
 
     /// Save changes, returning `None` without spending a cursor when unchanged.
     ///
-    /// Any underlying save failure requires recovery, even if the user later
-    /// undoes their edits. Serialization errors do not attempt a container write.
+    /// A failure after entering the store requires recovery, even if the user
+    /// later undoes their edits. Serialization and preflight errors do not attempt
+    /// a container write and leave the session ready.
     pub fn save(&mut self) -> Result<Option<SaveReport>, BridgeError> {
         if self.state() != DocumentSessionState::Ready {
             return Err(BridgeError::Save(

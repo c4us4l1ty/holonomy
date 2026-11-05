@@ -220,7 +220,8 @@ prototype does not guarantee plaintext is wiped from Wordcraft, egui, the clipbo
 operating-system memory. Unix saves only. The session status panel reports the demo pad, capture,
 memory, and watchdog limitations. Its remaining-save count is only the local cursor limit, **not**
 a count of verified fresh pads; during a save or after an uncertain failure the current on-disk
-cursor is not confirmed. Use Ctrl+S (Command+S on macOS) to save.
+cursor is not confirmed. At the cursor limit the demo disables editing and saving because it has
+no fresh-pad migration path. Use Ctrl+S (Command+S on macOS) to save.
 See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash

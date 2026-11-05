@@ -218,6 +218,10 @@ impl DemoEditor {
         )
     }
 
+    fn cursor_limit_reached(&self) -> bool {
+        self.cursor >= holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE.saturating_sub(1)
+    }
+
     fn close_disposition(&self) -> CloseDisposition {
         if self.pending.is_some() {
             CloseDisposition::WaitForSave
@@ -238,6 +242,10 @@ impl DemoEditor {
         }
         if self.text_unrepresentable {
             self.status = "Text cannot be represented exactly; nothing was saved.".into();
+            return;
+        }
+        if self.cursor_limit_reached() {
+            self.status = "Cursor limit reached: no save attempted. This demo cannot migrate to a fresh pad.".into();
             return;
         }
         let Some(session) = self.session.take() else {
@@ -383,7 +391,7 @@ impl eframe::App for DemoEditor {
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let can_save = self.writable && self.pending.is_none() && !self.needs_recovery();
+                let can_save = self.writable && self.pending.is_none() && !self.needs_recovery() && !self.cursor_limit_reached();
                 if ui.add_enabled(can_save, egui::Button::new("Save to demo container")).clicked() {
                     self.save(ui.ctx());
                 }
@@ -399,6 +407,9 @@ impl eframe::App for DemoEditor {
             ui.label(self.session_status().cursor_label());
             ui.label("Demo pad · Capture exclusion not active · Memory not verified · Watchdog not running");
             ui.label(&self.status);
+            if self.writable && self.cursor_limit_reached() && !self.needs_recovery() && self.pending.is_none() {
+                ui.colored_label(egui::Color32::RED, "Cursor limit reached. Editing and saving are disabled; this demo has no fresh-pad migration.");
+            }
             if self.needs_recovery() {
                 ui.colored_label(egui::Color32::RED, "Recovery required: the container or pad may have changed. Further saves are blocked; inspect and recover before reopening.");
             }
@@ -408,13 +419,14 @@ impl eframe::App for DemoEditor {
         });
         egui::CentralPanel::default().show(ui, |ui| {
             let enabled = self.pending.is_none() && self.session.is_some();
+            let editable = self.writable && !self.cursor_limit_reached();
             let response = ui
                 .add_enabled_ui(enabled, |ui| {
                     ui.add_sized(
                         ui.available_size(),
                         egui::TextEdit::multiline(&mut *self.text)
                             .desired_width(f32::INFINITY)
-                            .interactive(self.writable),
+                            .interactive(editable),
                     )
                 })
                 .inner;
@@ -589,6 +601,23 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
+        // Exercise the frontend limit without doing 52 expensive saves. The actual
+        // session's cursor remains 1; the guard must not start any worker.
+        editor.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
+        assert!(editor.cursor_limit_reached());
+        *editor.text = "unsaved test change".into();
+        editor.sync_text();
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
+        assert!(editor.dirty());
+        assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
+        assert!(!editor.needs_recovery());
+        assert!(editor.status.contains("no save attempted"));
+        editor.cursor = 1;
+        *editor.text = "hello\nworld".into();
+        editor.sync_text();
+        assert!(!editor.cursor_limit_reached());
+        assert!(!editor.dirty());
         editor.save(&ctx);
         assert!(editor.pending.is_none());
         *editor.text = "cannot preserve\r\n".into();
