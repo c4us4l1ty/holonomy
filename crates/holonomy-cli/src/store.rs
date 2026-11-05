@@ -266,10 +266,11 @@ impl ContainerFile {
             .filesystem_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let mut staged = tempfile::Builder::new()
             .prefix(".holonomy-save-")
-            .tempfile_in(parent)?;
+            .tempfile_in(&parent)?;
         staged
             .as_file_mut()
             .set_permissions(original.permissions())?;
@@ -305,7 +306,7 @@ impl ContainerFile {
         }
         let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
         self.file = new_file;
-        File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| {
+        File::open(&parent).and_then(|dir| dir.sync_all()).map_err(|e| {
             std::io::Error::new(e.kind(), format!("container replacement occurred, but directory sync failed; durability is uncertain and pad ratcheting was not started: {e}"))
         })
     }
