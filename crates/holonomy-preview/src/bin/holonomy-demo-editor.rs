@@ -25,9 +25,13 @@ enum Launch {
 
 fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
     match args {
-        [action, path] if action == "--demo-create" => Ok(Launch::Create(PathBuf::from(path.as_os_str()))),
+        [action, path] if action == "--demo-create" => {
+            Ok(Launch::Create(PathBuf::from(path.as_os_str())))
+        }
         [action, path, cursor] if action == "--demo-open" => {
-            let cursor = cursor.to_str().and_then(|value| value.parse::<u64>().ok())
+            let cursor = cursor
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
                 .ok_or("cursor must be an unsigned integer")?;
             Ok(Launch::Open(PathBuf::from(path.as_os_str()), cursor))
         }
@@ -54,9 +58,13 @@ fn parse_kappa(hex: &str) -> Result<[u8; 32], &'static str> {
 }
 
 fn secret(prompt: &str, confirm: bool) -> Result<Zeroizing<String>, String> {
-    let value = Zeroizing::new(rpassword::prompt_password(prompt).map_err(|e| format!("prompt failed: {e}"))?);
+    let value = Zeroizing::new(
+        rpassword::prompt_password(prompt).map_err(|e| format!("prompt failed: {e}"))?,
+    );
     if confirm {
-        let again = Zeroizing::new(rpassword::prompt_password("Confirm: ").map_err(|e| format!("prompt failed: {e}"))?);
+        let again = Zeroizing::new(
+            rpassword::prompt_password("Confirm: ").map_err(|e| format!("prompt failed: {e}"))?,
+        );
         if *value != *again {
             return Err("confirmation did not match".into());
         }
@@ -67,16 +75,21 @@ fn secret(prompt: &str, confirm: bool) -> Result<Zeroizing<String>, String> {
 fn open_session(launch: &Launch) -> Result<EditorSession, String> {
     let creating = matches!(launch, Launch::Create(_));
     eprintln!("{WARNING}");
-    eprintln!("The legacy passphrase mapping lowercases input; ASCII case variants are equivalent.");
+    eprintln!(
+        "The legacy passphrase mapping lowercases input; ASCII case variants are equivalent."
+    );
     let pass = secret("Passphrase: ", creating)?;
     let share = secret("Demo root share (64 hex characters): ", creating)?;
     let kappa = Zeroizing::new(parse_kappa(&share).map_err(str::to_owned)?);
-    let passphrase = SealedPassphrase::new(&pass).map_err(|e| format!("invalid passphrase: {e}"))?;
+    let passphrase =
+        SealedPassphrase::new(&pass).map_err(|e| format!("invalid passphrase: {e}"))?;
     let options = |cursor| DocumentSessionOptions::new(cursor, true, Topology::UmbilicalUsb);
     let pad = Box::new(DerivedPad::new());
     match launch {
         Launch::Create(path) => EditorSession::create(path, pad, passphrase, *kappa, options(0)),
-        Launch::Open(path, cursor) => EditorSession::open(path, pad, passphrase, *kappa, options(*cursor)),
+        Launch::Open(path, cursor) => {
+            EditorSession::open(path, pad, passphrase, *kappa, options(*cursor))
+        }
     }
     .map_err(|e| e.to_string())
 }
@@ -102,8 +115,14 @@ struct DemoEditor {
 impl DemoEditor {
     fn new(session: EditorSession) -> Result<Self, &'static str> {
         let text = plain_text(session.document())?;
-        Ok(Self { session, text, text_unrepresentable: false, close_confirmation: false,
-            allow_close: false, status: "Ready. Saves may block the window while the container is written.".into() })
+        Ok(Self {
+            session,
+            text,
+            text_unrepresentable: false,
+            close_confirmation: false,
+            allow_close: false,
+            status: "Ready. Saves may block the window while the container is written.".into(),
+        })
     }
 
     fn sync_text(&mut self) {
@@ -122,11 +141,17 @@ impl DemoEditor {
 
     fn save(&mut self) {
         if self.text_unrepresentable {
-            self.status = "Text contains line endings this demo cannot preserve; nothing was saved.".into();
+            self.status =
+                "Text contains line endings this demo cannot preserve; nothing was saved.".into();
             return;
         }
         match self.session.save() {
-            Ok(Some(_)) => self.status = format!("Saved at cursor {}. Record this cursor for reopening.", self.session.cursor()),
+            Ok(Some(_)) => {
+                self.status = format!(
+                    "Saved at cursor {}. Record this cursor for reopening.",
+                    self.session.cursor()
+                )
+            }
             Ok(None) => self.status = "No changes; no cursor was spent.".into(),
             Err(error) => self.status = format!("Save failed: {error}"),
         }
@@ -135,7 +160,10 @@ impl DemoEditor {
 
 impl eframe::App for DemoEditor {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close && self.dirty() {
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.allow_close
+            && self.dirty()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_confirmation = true;
         }
@@ -163,7 +191,10 @@ impl eframe::App for DemoEditor {
             }
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            let response = ui.add_sized(ui.available_size(), egui::TextEdit::multiline(&mut *self.text).desired_width(f32::INFINITY));
+            let response = ui.add_sized(
+                ui.available_size(),
+                egui::TextEdit::multiline(&mut *self.text).desired_width(f32::INFINITY),
+            );
             if response.changed() {
                 self.sync_text();
             }
@@ -194,7 +225,8 @@ fn run(launch: &Launch) -> Result<(), String> {
         "Holonomy — EXPERIMENTAL TEXT DEMO",
         eframe::NativeOptions::default(),
         Box::new(move |_| Ok(Box::new(editor))),
-    ).map_err(|e| format!("could not start the demo window: {e}"))
+    )
+    .map_err(|e| format!("could not start the demo window: {e}"))
 }
 
 fn main() -> ExitCode {
@@ -221,8 +253,14 @@ mod tests {
 
     #[test]
     fn arguments_and_root_share_are_checked() {
-        assert!(matches!(parse_args(&["--demo-create".into(), "demo".into()]), Ok(Launch::Create(_))));
-        assert!(matches!(parse_args(&["--demo-open".into(), "demo".into(), "1".into()]), Ok(Launch::Open(_, 1))));
+        assert!(matches!(
+            parse_args(&["--demo-create".into(), "demo".into()]),
+            Ok(Launch::Create(_))
+        ));
+        assert!(matches!(
+            parse_args(&["--demo-open".into(), "demo".into(), "1".into()]),
+            Ok(Launch::Open(_, 1))
+        ));
         assert!(parse_args(&["--demo-open".into(), "demo".into(), "-1".into()]).is_err());
         assert!(parse_args(&["--demo-create".into(), "demo".into(), "extra".into()]).is_err());
         assert_eq!(parse_kappa(&"aB".repeat(32)).expect("hex"), [0xab; 32]);
@@ -247,7 +285,14 @@ mod tests {
         let options = |cursor| DocumentSessionOptions::new(cursor, true, Topology::UmbilicalUsb);
         let pass = || SealedPassphrase::new("test passphrase").expect("valid");
         let kappa = [0x46; 32];
-        let session = EditorSession::create(&path, Box::new(DerivedPad::new()), pass(), kappa, options(0)).expect("create");
+        let session = EditorSession::create(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(0),
+        )
+        .expect("create");
         let mut editor = DemoEditor::new(session).expect("plain");
         assert!(!editor.dirty());
         *editor.text = "hello\nworld".into();
@@ -263,7 +308,17 @@ mod tests {
         assert!(editor.dirty());
         assert_eq!(editor.session.cursor(), 1);
         drop(editor);
-        let session = EditorSession::open(&path, Box::new(DerivedPad::new()), pass(), kappa, options(1)).expect("open");
-        assert_eq!(DemoEditor::new(session).expect("plain").text.as_str(), "hello\nworld");
+        let session = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1),
+        )
+        .expect("open");
+        assert_eq!(
+            DemoEditor::new(session).expect("plain").text.as_str(),
+            "hello\nworld"
+        );
     }
 }
