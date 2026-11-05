@@ -19,10 +19,23 @@ saved, modified, unrepresentable text, saving and recovery-required states. The 
 confirmed cursor may be stale while a save is in progress or after an uncertain failure;
 the panel does not report it as the current on-disk cursor in those states. An interrupted
 process or power failure can still require manual recovery. The status panel does not
-itself provide any of the protections it describes.
+itself provide any of the protections it describes. After a successful save, it shows
+the save report's unkeyed image fingerprint for comparison with `holonomy verify`;
+the fingerprint is hidden during a save or after an uncertain failure. It is not
+persisted across restarts or proof of authenticity or durability. The last-save ratchet
+result is likewise reported only from a successful save and hidden while the image or
+pad is uncertain; a reported count is not independent proof of device writes or freshness.
+Protection reporting distinguishes *fresh*, *reused* and *not established*; the container
+store reports *not established* because it sees one image and one pad source, not sector
+history across devices, snapshots or rollbacks. The demo surfaces the layer attached to
+the last successful save (with freshness *not established*) and hides it while the save
+or pad state is uncertain; capture exclusion, memory-locking coverage and watchdog
+priority are still reported only as unavailable.
 
 The restricted demo also offers `--demo-inspect PATH CURSOR`: it opens the container
-read-only, disables editing and saving, and displays a prominent mode indicator. Successful
-authentication and decoding confirm only that the supplied candidate can be opened with
+read-only, disables editing and saving, and displays a prominent mode indicator. Rich documents
+can be shown only as a potentially incomplete plain-text body preview; formatting, images, tables,
+headers, footers and other content may be missing. The editor still refuses to edit rich documents.
+Successful authentication and decoding confirm only that the supplied candidate can be opened with
 that demo pad and cursor. They do not repair anything or establish pad freshness, disk
 durability, or complete recovery. Reading can update OS file-access metadata.

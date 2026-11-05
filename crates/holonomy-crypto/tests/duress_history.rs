@@ -140,7 +140,7 @@ fn unlock(
         kappa_usb: kappa,
         topology: Topology::UmbilicalUsb,
         params: ParamsClass::Test,
-        pad_fresh: true,
+        pad_fresh: None,
     };
     unlock_fixed(&req, &DemoKem)
 }
@@ -205,7 +205,7 @@ fn the_duress_keys_are_scoped_to_their_own_snapshot() {
                 kappa_usb: &kappa,
                 topology: Topology::UmbilicalUsb,
                 params: ParamsClass::Test,
-                pad_fresh: true,
+                pad_fresh: None,
             };
             assert!(
                 matches!(unlock_fixed(&req, &DemoKem), Err(UnlockError::Rejected)),

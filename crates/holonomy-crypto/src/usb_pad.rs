@@ -8,7 +8,7 @@
 //!
 //! So [`PadBudget`] tracks two facts per container: the **monotonic save cursor**, and whether the
 //! cursor is still inside the disjoint window. When it is not, [`PadBudget::layer`] reports
-//! `pad_fresh: false` and [`holonomy_core::unlock::ProtectionLayer::describe`] says so in the UI.
+//! `pad_fresh: Some(false)` and [`holonomy_core::unlock::ProtectionLayer::describe`] says so in the UI.
 //! That is the correction to the old PRD's "True Shannon One-Time Pad security" claim: past the
 //! budget, the confidential payload is protected by `ML-KEM-1024` + `X25519` +
 //! `XChaCha20-Poly1305` with `CMT-4`, which is a strong claim, and *not* by the pad, which is a

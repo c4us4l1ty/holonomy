@@ -59,8 +59,9 @@ pub struct ReaderRequest<'a> {
     pub topology: Topology,
     /// `Argon2id` parameters. [`ParamsClass::Test`] is for CI only.
     pub params: ParamsClass,
-    /// Whether this session's pad is fresh, reported through `ProtectionLayer`.
-    pub pad_fresh: bool,
+    /// Pad freshness reported through `ProtectionLayer`. `None` means this caller does not
+    /// establish it; the request still opens, because freshness is never an unlock precondition.
+    pub pad_fresh: Option<bool>,
 }
 
 /// What an open produced.

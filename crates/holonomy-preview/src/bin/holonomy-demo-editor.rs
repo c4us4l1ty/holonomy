@@ -1,7 +1,8 @@
 //! A restricted, plain-text, demo-pad container editor. Not a security product.
 //!
 //! Unlike the scratch preview, this binary does not use Wordcraft's file menus,
-//! exporters or recovery. It deliberately refuses rich Wordcraft documents.
+//! exporters or recovery. Editing refuses rich Wordcraft documents; read-only
+//! inspection offers only a potentially incomplete plain-text body preview.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use eframe::egui;
 use holonomy_cli::document::{DocumentSessionOptions, DocumentSessionState};
 use holonomy_cli::store::pad::DerivedPad;
+use holonomy_cli::store::SaveReport;
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_wordcraft::editor::EditorSession;
 use wordcraft_doc::{Document, StoryRef};
@@ -118,8 +120,18 @@ fn plain_text(doc: &Document) -> Result<Zeroizing<String>, &'static str> {
     Ok(text)
 }
 
+/// Editable sessions require an exact round trip. Read-only inspection may
+/// show a lossy body-text preview because it cannot modify or save the source.
+fn display_text(doc: &Document, writable: bool) -> Result<Zeroizing<String>, &'static str> {
+    if writable {
+        plain_text(doc)
+    } else {
+        Ok(Zeroizing::new(doc.plain_text(StoryRef::Body)))
+    }
+}
+
 enum SaveOutcome {
-    Saved(bool),
+    Saved(Option<SaveReport>),
     Failed(String),
     Interrupted,
 }
@@ -140,6 +152,9 @@ struct DemoEditor {
     session: Option<EditorSession>,
     pending: Option<PendingSave>,
     cursor: u64,
+    last_saved_digest: Option<[u8; 32]>,
+    last_ratchet_report: Option<Option<u32>>,
+    last_protection: Option<String>,
     writable: bool,
     recovery_blocked: bool,
     text: Zeroizing<String>,
@@ -152,13 +167,16 @@ struct DemoEditor {
 
 impl DemoEditor {
     fn new(session: EditorSession) -> Result<Self, &'static str> {
-        let text = plain_text(session.document())?;
-        let cursor = session.cursor();
         let writable = session.is_writable();
+        let text = display_text(session.document(), writable)?;
+        let cursor = session.cursor();
         Ok(Self {
             session: Some(session),
             pending: None,
             cursor,
+            last_saved_digest: None,
+            last_ratchet_report: None,
+            last_protection: None,
             writable,
             recovery_blocked: false,
             text,
@@ -218,6 +236,10 @@ impl DemoEditor {
         )
     }
 
+    fn cursor_limit_reached(&self) -> bool {
+        self.cursor >= holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE.saturating_sub(1)
+    }
+
     fn close_disposition(&self) -> CloseDisposition {
         if self.pending.is_some() {
             CloseDisposition::WaitForSave
@@ -238,6 +260,12 @@ impl DemoEditor {
         }
         if self.text_unrepresentable {
             self.status = "Text cannot be represented exactly; nothing was saved.".into();
+            return;
+        }
+        if self.cursor_limit_reached() {
+            self.status =
+                "Cursor limit reached: no save attempted. This demo cannot migrate to a fresh pad."
+                    .into();
             return;
         }
         let Some(session) = self.session.take() else {
@@ -264,7 +292,7 @@ impl DemoEditor {
                     let saved =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.save()));
                     let result = match saved {
-                        Ok(Ok(report)) => SaveOutcome::Saved(report.is_some()),
+                        Ok(Ok(report)) => SaveOutcome::Saved(report),
                         Ok(Err(error)) => SaveOutcome::Failed(error.to_string()),
                         Err(_) => SaveOutcome::Interrupted,
                     };
@@ -312,13 +340,16 @@ impl DemoEditor {
             self.recovery_blocked = true;
         }
         match outcome {
-            SaveOutcome::Saved(true) if !self.recovery_blocked => {
+            SaveOutcome::Saved(Some(report)) if !self.recovery_blocked => {
+                self.last_saved_digest = Some(report.digest);
+                self.last_ratchet_report = Some(report.ratcheted);
+                self.last_protection = Some(report.protection.describe().to_string());
                 self.status = format!(
                     "Saved at cursor {}. Record this cursor for reopening.",
                     self.cursor
                 );
             }
-            SaveOutcome::Saved(false) if !self.recovery_blocked => {
+            SaveOutcome::Saved(None) if !self.recovery_blocked => {
                 self.status = "No changes; no cursor was spent.".into();
             }
             SaveOutcome::Failed(error) if !self.recovery_blocked => {
@@ -376,14 +407,16 @@ impl eframe::App for DemoEditor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("warning").show(ui, |ui| {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), WARNING);
-            ui.label("Plain-text documents only. No Wordcraft file, export or print menus. ASCII passphrase case variants are equivalent.");
-            if !self.writable {
-                ui.strong("READ-ONLY INSPECTION — editing and saving are disabled.");
+            if self.writable {
+                ui.label("Plain-text editing only. No Wordcraft file, export or print menus. ASCII passphrase case variants are equivalent.");
+            } else {
+                ui.strong("READ-ONLY BODY-TEXT PREVIEW — editing and saving are disabled.");
+                ui.label("This is not the full document: formatting, images, tables, headers, footers, and other content may be missing. No file, export or print menus. ASCII passphrase case variants are equivalent.");
             }
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let can_save = self.writable && self.pending.is_none() && !self.needs_recovery();
+                let can_save = self.writable && self.pending.is_none() && !self.needs_recovery() && !self.cursor_limit_reached();
                 if ui.add_enabled(can_save, egui::Button::new("Save to demo container")).clicked() {
                     self.save(ui.ctx());
                 }
@@ -399,6 +432,9 @@ impl eframe::App for DemoEditor {
             ui.label(self.session_status().cursor_label());
             ui.label("Demo pad · Capture exclusion not active · Memory not verified · Watchdog not running");
             ui.label(&self.status);
+            if self.writable && self.cursor_limit_reached() && !self.needs_recovery() && self.pending.is_none() {
+                ui.colored_label(egui::Color32::RED, "Cursor limit reached. Editing and saving are disabled; this demo has no fresh-pad migration.");
+            }
             if self.needs_recovery() {
                 ui.colored_label(egui::Color32::RED, "Recovery required: the container or pad may have changed. Further saves are blocked; inspect and recover before reopening.");
             }
@@ -408,13 +444,14 @@ impl eframe::App for DemoEditor {
         });
         egui::CentralPanel::default().show(ui, |ui| {
             let enabled = self.pending.is_none() && self.session.is_some();
+            let editable = self.writable && !self.cursor_limit_reached();
             let response = ui
                 .add_enabled_ui(enabled, |ui| {
                     ui.add_sized(
                         ui.available_size(),
                         egui::TextEdit::multiline(&mut *self.text)
                             .desired_width(f32::INFINITY)
-                            .interactive(self.writable),
+                            .interactive(editable),
                     )
                 })
                 .inner;
@@ -424,6 +461,10 @@ impl eframe::App for DemoEditor {
         });
         if self.show_session_status {
             let snapshot = self.session_status();
+            let fingerprint = status::fingerprint_label(snapshot.phase, self.last_saved_digest);
+            let ratchet = status::ratchet_label(snapshot.phase, self.last_ratchet_report);
+            let protection =
+                status::protection_label(snapshot.phase, self.last_protection.as_deref());
             let writable = self.writable;
             egui::Window::new("Session status")
                 .open(&mut self.show_session_status)
@@ -434,11 +475,17 @@ impl eframe::App for DemoEditor {
                         ui.strong("Read-only inspection");
                     }
                     ui.label(snapshot.cursor_label());
+                    ui.strong("Last-save image fingerprint");
+                    ui.add(egui::Label::new(fingerprint).selectable(true));
                     ui.separator();
                     ui.strong("Protection layer");
                     ui.label(status::PROTECTION);
                     ui.strong("Pad freshness and accounting");
                     ui.label(status::PAD_FRESHNESS);
+                    ui.strong("Last-save ratchet result");
+                    ui.label(ratchet);
+                    ui.strong("Last-save protection layer");
+                    ui.label(protection);
                     ui.strong("Screen capture");
                     ui.label(status::capture());
                     ui.strong("Memory locking");
@@ -539,7 +586,95 @@ mod tests {
             paragraph.runs[0].props.bold = Some(true);
         }
         assert!(plain_text(&formatted).is_err());
+        assert!(display_text(&formatted, true).is_err());
+        let original = formatted.clone();
+        assert_eq!(
+            display_text(&formatted, false).expect("preview").as_str(),
+            "hello"
+        );
+        assert!(formatted.same_content(&original));
+        assert_eq!(
+            display_text(&doc, false).expect("preview").as_str(),
+            "hello\nworld"
+        );
         assert_eq!(plain_text(&Document::new()).expect("blank").as_str(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rich_document_is_previewed_read_only_and_refused_for_editing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rich-document");
+        let options = |cursor, writable| {
+            DocumentSessionOptions::new(cursor, writable, Topology::UmbilicalUsb)
+        };
+        let pass = || SealedPassphrase::new("test passphrase").expect("valid");
+        let kappa = [0x48; 32];
+        let mut session = EditorSession::create(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(0, true),
+        )
+        .expect("create");
+        *session.document_mut() = Document::from_text("rich body");
+        session.document_mut().core.title = "important metadata".into();
+        if let wordcraft_doc::Block::Para(paragraph) =
+            std::sync::Arc::make_mut(&mut session.document_mut().body[0])
+        {
+            paragraph.runs[0].props.bold = Some(true);
+        }
+        let original = session.document().clone();
+        assert!(session.save().expect("save rich document").is_some());
+        drop(session);
+
+        let inspection = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, false),
+        )
+        .expect("open for inspection");
+        let mut editor = DemoEditor::new(inspection).expect("read-only body preview");
+        assert!(!editor.writable);
+        assert_eq!(editor.text.as_str(), "rich body");
+        assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
+        *editor.text = "attempted replacement".into();
+        editor.sync_text();
+        editor.save(&egui::Context::default());
+        assert!(editor.pending.is_none());
+        assert!(editor.status.contains("saving is disabled"));
+        assert!(editor
+            .session
+            .as_ref()
+            .expect("session")
+            .document()
+            .same_content(&original));
+        drop(editor);
+
+        let writable = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, true),
+        )
+        .expect("open writable");
+        assert!(
+            DemoEditor::new(writable).is_err(),
+            "rich content must not enter text editing"
+        );
+        let reopened = EditorSession::open(
+            &path,
+            Box::new(DerivedPad::new()),
+            pass(),
+            kappa,
+            options(1, false),
+        )
+        .expect("reopen");
+        assert!(reopened.document().same_content(&original));
     }
 
     #[cfg(unix)]
@@ -562,6 +697,9 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.session_status().phase, status::SavePhase::Saved);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(53));
+        assert_eq!(editor.last_saved_digest, None);
+        assert_eq!(editor.last_ratchet_report, None);
+        assert_eq!(editor.last_protection, None);
         assert_eq!(editor.close_disposition(), CloseDisposition::Allow);
         *editor.text = "hello\nworld".into();
         editor.sync_text();
@@ -589,6 +727,57 @@ mod tests {
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
         assert_eq!(editor.session_status().remaining_cursor_saves, Some(52));
+        assert_eq!(editor.last_ratchet_report, Some(None));
+        let protection = editor
+            .last_protection
+            .clone()
+            .expect("save reports protection");
+        assert!(protection.contains("not established"), "{protection}");
+        assert!(!protection.contains("fresh sectors"), "{protection}");
+        assert!(
+            status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report)
+                .contains("not attempted")
+        );
+        let fingerprint = editor
+            .last_saved_digest
+            .expect("save returned an image fingerprint");
+        let mut file =
+            holonomy_cli::store::ContainerFile::open(&path, false).expect("open for verification");
+        let mut pad = DerivedPad::new();
+        let passphrase = pass();
+        let context = holonomy_cli::store::SaveContext {
+            passphrase: &passphrase,
+            kappa_usb: &kappa,
+            topology: Topology::UmbilicalUsb,
+            params: holonomy_cli::document::DocumentSessionOptions::new(
+                1,
+                false,
+                Topology::UmbilicalUsb,
+            )
+            .params(),
+            cursor: 1,
+        };
+        assert_eq!(
+            holonomy_cli::store::verify_candidate(&mut file, &mut pad, &context).expect("verify"),
+            fingerprint
+        );
+        // Exercise the frontend limit without doing 52 expensive saves. The actual
+        // session's cursor remains 1; the guard must not start any worker.
+        editor.cursor = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE - 1;
+        assert!(editor.cursor_limit_reached());
+        *editor.text = "unsaved test change".into();
+        editor.sync_text();
+        editor.save(&ctx);
+        assert!(editor.pending.is_none());
+        assert!(editor.dirty());
+        assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
+        assert!(!editor.needs_recovery());
+        assert!(editor.status.contains("no save attempted"));
+        editor.cursor = 1;
+        *editor.text = "hello\nworld".into();
+        editor.sync_text();
+        assert!(!editor.cursor_limit_reached());
+        assert!(!editor.dirty());
         editor.save(&ctx);
         assert!(editor.pending.is_none());
         *editor.text = "cannot preserve\r\n".into();
@@ -615,6 +804,20 @@ mod tests {
             status::SavePhase::RecoveryRequired
         );
         assert_eq!(editor.session_status().remaining_cursor_saves, None);
+        assert_eq!(editor.last_saved_digest, Some(fingerprint));
+        assert!(
+            status::ratchet_label(editor.session_status().phase, editor.last_ratchet_report)
+                .contains("uncertain")
+        );
+        let fingerprint_hex = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(!status::fingerprint_label(
+            editor.session_status().phase,
+            editor.last_saved_digest
+        )
+        .contains(&fingerprint_hex));
         assert_eq!(editor.close_disposition(), CloseDisposition::Confirm);
         editor.save(&ctx);
         assert!(editor.pending.is_none());

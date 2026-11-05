@@ -71,7 +71,7 @@ fn stratum_from_root(
     let id = StratumId::new(index).unwrap();
     let layer = ProtectionLayer {
         pad: true,
-        pad_fresh: true,
+        pad_fresh: Some(true),
         post_quantum: true,
     };
     Unlocked::new(id, Topology::UmbilicalUsb, id, layer).into_active(keys)
@@ -113,7 +113,7 @@ fn open(
             kappa_usb: kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         },
         placement,
     )
@@ -270,7 +270,7 @@ fn a_truncated_image_is_refused_before_anything_is_read() {
             kappa_usb: &KAPPA,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         },
         identity,
     )
@@ -297,7 +297,7 @@ fn an_unprovisioned_container_is_named_rather_than_rejected_as_a_bad_passphrase(
             kappa_usb: &KAPPA,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         },
         identity,
     )
@@ -349,7 +349,7 @@ fn the_reader_agrees_with_the_handshake() {
         kappa_usb: &KAPPA,
         topology: Topology::UmbilicalUsb,
         params: ParamsClass::Test,
-        pad_fresh: true,
+        pad_fresh: Some(true),
     };
     let via_handshake = unlock_fixed(&req, &holonomy_crypto::MlKem1024X25519).expect("handshake");
     let via_reader = open(&image, PASSPHRASE, &KAPPA, identity).expect("reader");

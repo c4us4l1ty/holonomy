@@ -137,7 +137,7 @@ fn the_store_round_trips_one_raw_save_without_the_pad() {
             kappa_usb: &KAPPA,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         // The container was written by `first_write_unpadded_for_test`, which now uses the epoch
         // permutation keyed by the salt it was given, so the reader must use the same one.
@@ -451,7 +451,7 @@ fn the_fold_does_not_move_the_salt_or_the_capsule() {
             kappa_usb: &KAPPA,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         // The permutation is a function of the salt, and slot 1 of the unfolded image is the salt.
         epoch_placement(&{
@@ -936,7 +936,8 @@ fn staged_replacement_updates_file_and_open_handle() {
     drop(original);
     let mut file = ContainerFile::open(&path, true).expect("open");
     let image = vec![0x5au8; CONTAINER_BYTES];
-    file.replace_image(&image).expect("replace");
+    let expected = file.folded_digest().expect("original digest");
+    file.replace_image(&image, &expected).expect("replace");
     let metadata = std::fs::metadata(&path).expect("new metadata");
     assert_ne!(old_ino, metadata.ino());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
@@ -965,7 +966,7 @@ fn staged_replacement_refuses_changed_path() {
     std::fs::write(&path, b"replacement").expect("replace path");
     let image = vec![0u8; CONTAINER_BYTES];
     let err = file
-        .replace_image(&image)
+        .replace_image(&image, &[0; 32])
         .expect_err("stale handle must be refused");
     assert!(err.to_string().contains("same regular file"), "{err}");
     assert_eq!(std::fs::read(&path).expect("new file"), b"replacement");
@@ -1012,7 +1013,9 @@ fn standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing() {
         .expect_err("save must not truncate a larger file");
     assert!(error.contains("extra data"), "{error}");
     let image = vec![0u8; CONTAINER_BYTES];
-    let error = file.replace_image(&image).expect_err("replacement refused");
+    let error = file
+        .replace_image(&image, &[0; 32])
+        .expect_err("replacement refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     drop(file);
     let mut original = std::fs::File::open(&path).expect("open original");
@@ -1048,7 +1051,7 @@ fn standalone_container_refuses_growth_before_replacement() {
     let image = vec![0u8; CONTAINER_BYTES];
     assert_eq!(
         container
-            .replace_image(&image)
+            .replace_image(&image, &[0; 32])
             .expect_err("refuse growth")
             .kind(),
         std::io::ErrorKind::InvalidData
@@ -1068,4 +1071,310 @@ fn standalone_container_rejects_truncation() {
     let error = file.read_image().expect_err("short file rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     assert_eq!(std::fs::read(&path).expect("read"), b"short");
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_reports_snapshot_digest_and_rejects_tampered_payload() {
+    struct NoRatchet(DerivedPad);
+    impl PadSource for NoRatchet {
+        fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<pad::PadWindow, String> {
+            self.0.window(kappa, cursor)
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("verification must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            panic!("verification must not request write capability")
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
+    }
+    fn flip(path: &Path, offset: usize) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open");
+        file.seek(SeekFrom::Start(offset as u64)).expect("seek");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).expect("read");
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(offset as u64)).expect("rewind");
+        file.write_all(&byte).expect("write");
+        file.sync_all().expect("sync");
+    }
+
+    let path = tempfile("verify-tamper");
+    provision(&path, [0x23u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let mut writer = ContainerFile::open(&path, true).expect("open writer");
+    let report = save(&mut writer, &mut source(), &ctx(&pass, 1), b"document").expect("save");
+    drop(writer);
+    let mut reader = ContainerFile::open(&path, false).expect("open reader");
+    let original =
+        verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).expect("verify");
+    assert_eq!(original, report.digest);
+
+    // Recover the save's salt only in the test to identify occupied versus unused
+    // physical slots. The production verifier does not expose it.
+    let mut image = reader.read_image().expect("read image");
+    let mut pad = source();
+    let window = pad.window(&KAPPA, 1).expect("window");
+    fold(&mut image, window.as_slice());
+    let (salt_offset, _) = slot_range(SALT_SLOT_INDEX);
+    let mut salt = [0u8; SALT_BYTES];
+    salt.copy_from_slice(&image[salt_offset..salt_offset + SALT_BYTES]);
+    drop(image);
+    drop(window);
+    let placement = epoch_placement(&salt);
+    let used = placement(0);
+    let unused = placement(1);
+    assert_ne!(used, unused);
+
+    // Unused bytes are not covered by payload authentication, but the unkeyed
+    // fingerprint must still change. It is not a proof that the change is benign.
+    flip(&path, slot_range(unused).0);
+    let changed = verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1))
+        .expect("unused bytes are not authenticated");
+    assert_ne!(changed, original);
+    // A declared payload byte is authenticated and cannot be accepted after corruption.
+    flip(&path, slot_range(used).0);
+    assert!(verify_candidate(&mut reader, &mut NoRatchet(source()), &ctx(&pass, 1)).is_err());
+    drop(reader);
+    std::fs::remove_file(path).expect("cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_refuses_same_size_original_change_without_ratchet() {
+    use std::os::unix::fs::MetadataExt;
+
+    struct MutatingPad {
+        inner: DerivedPad,
+        path: PathBuf,
+        mutated: bool,
+    }
+    impl PadSource for MutatingPad {
+        fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<pad::PadWindow, String> {
+            if !self.mutated {
+                // The store has already read its old image. Simulate a separate
+                // process changing one byte without changing the file size.
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.path)
+                    .unwrap();
+                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+                    .unwrap();
+                let mut byte = [0u8; 1];
+                file.read_exact(&mut byte).unwrap();
+                byte[0] ^= 1;
+                file.seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+                    .unwrap();
+                file.write_all(&byte).unwrap();
+                file.sync_all().unwrap();
+                self.mutated = true;
+            }
+            self.inner.window(kappa, cursor)
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("a refused replacement must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "mutating test pad".into()
+        }
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    provision(&path, [0x27u8; SALT_BYTES], 0);
+    let old_ino = std::fs::metadata(&path).expect("metadata").ino();
+    let mut original = File::open(&path).expect("open original");
+    original
+        .seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+        .expect("seek");
+    let mut byte = [0u8; 1];
+    original.read_exact(&mut byte).expect("read");
+    let expected_byte = byte[0] ^ 1;
+    drop(original);
+
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let mut pad = MutatingPad {
+        inner: source(),
+        path: path.clone(),
+        mutated: false,
+    };
+    let error = save(&mut file, &mut pad, &ctx(&pass, 1), b"new document")
+        .expect_err("changed original must not be overwritten");
+    assert!(error.contains("contents changed while saving"), "{error}");
+    assert!(
+        error.contains("staged encrypted image may have been written"),
+        "{error}"
+    );
+    assert!(error.contains("Do not retry"), "{error}");
+    assert!(pad.mutated);
+    assert_eq!(std::fs::metadata(&path).expect("metadata").ino(), old_ino);
+    let mut after = File::open(&path).expect("open original");
+    after
+        .seek(SeekFrom::Start((CONTAINER_BYTES - 1) as u64))
+        .expect("seek");
+    after.read_exact(&mut byte).expect("read");
+    assert_eq!(byte[0], expected_byte);
+    // The container and the save lock's empty sidecar; no staged `*` file survives the refusal.
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "container".to_string(),
+            "container.holonomy-lock".to_string()
+        ],
+        "staged file cleaned up"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_refuses_changed_path_before_pad_access() {
+    struct NeverReadPad;
+    impl PadSource for NeverReadPad {
+        fn window(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            panic!("stale path must be rejected before pad access")
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("stale path must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    let moved = dir.path().join("moved");
+    std::fs::write(&path, b"original").expect("create");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    std::fs::rename(&path, &moved).expect("move original");
+    std::fs::write(&path, b"new path contents").expect("replacement");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"edit")
+        .expect_err("stale handle refused");
+    assert!(error.contains("same regular file"), "{error}");
+    assert_eq!(
+        std::fs::read(&path).expect("new path"),
+        b"new path contents"
+    );
+    assert_eq!(std::fs::read(&moved).expect("old path"), b"original");
+    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
+}
+
+#[test]
+fn ratchet_count_must_match_the_full_window() {
+    let expected = PAD_SECTORS_PER_SAVE;
+    assert!(validate_ratchet_count(expected, 7, 8).is_ok());
+    for count in [0, 1, expected - 1, expected + 1, u32::MAX] {
+        let error = validate_ratchet_count(count, 7, 8).expect_err("invalid count");
+        assert!(error.contains("cursor 8"), "{error}");
+        assert!(error.contains("window 7"), "{error}");
+        assert!(error.contains("Do not retry"), "{error}");
+    }
+}
+
+/// The store reports what it knows. It never establishes pad freshness, so the layer it hands to
+/// the sealing path must say "unknown" rather than claim a fresh pad on its behalf.
+#[test]
+fn the_store_layer_does_not_claim_pad_freshness() {
+    let layer = protection_layer();
+    assert!(layer.pad);
+    assert_eq!(layer.pad_fresh, None);
+    assert!(!layer.describe().contains("fresh sectors"));
+    assert!(!layer.describe().contains("reused"));
+    assert!(layer.describe().contains("not established"));
+}
+
+/// The report a caller gets back must not carry a freshness claim the store cannot support.
+#[test]
+fn save_reports_unestablished_pad_freshness() {
+    let path = tempfile("freshness-report");
+    provision(&path, [0x13u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let report = save(&mut file, &mut source(), &ctx, b"a report").expect("save");
+    assert_eq!(report.protection.pad_fresh, None);
+    assert!(!report.protection.describe().contains("fresh sectors"));
+    assert!(report.protection.describe().contains("not established"));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Two saves of one path must not interleave. The lock is advisory, keyed by path, and held only
+/// for the save.
+#[cfg(unix)]
+#[test]
+fn a_second_save_is_refused_while_a_save_is_running() {
+    let path = tempfile("save-lock");
+    provision(&path, [0x17u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let before = std::fs::read(&path).expect("read");
+
+    let lock = SaveLock::acquire(&path).expect("first lock");
+    let error = save(&mut file, &mut source(), &ctx, b"contended")
+        .expect_err("a held lock must refuse the save");
+    assert!(error.contains("another Holonomy save holds"), "{error}");
+    assert!(error.contains("nothing was written"), "{error}");
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        before,
+        "container changed"
+    );
+
+    drop(lock);
+    save(&mut file, &mut source(), &ctx, b"after the lock").expect("save after release");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(save_lock_path(&path));
+}
+
+/// A caller that already holds the lock must not deadlock against itself.
+#[cfg(unix)]
+#[test]
+fn a_caller_held_lock_lets_its_own_save_proceed() {
+    let path = tempfile("save-lock-held");
+    provision(&path, [0x18u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let ctx = ctx(&pass, 1);
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    let digest = {
+        let mut reader = ContainerFile::open(&path, false).expect("open for digest");
+        holonomy_session::seal::image_digest(&reader.read_image().expect("read image"))
+    };
+    let lock = SaveLock::acquire(&path).expect("lock");
+    save_if_unchanged_locked(
+        &mut file,
+        &mut source(),
+        &ctx,
+        b"the caller already locked this path",
+        &digest,
+        &lock,
+    )
+    .expect("a held lock belongs to this save");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(save_lock_path(&path));
 }

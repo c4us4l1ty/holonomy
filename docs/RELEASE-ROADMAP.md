@@ -12,11 +12,15 @@ irreplaceable data.
   subsequent sync or ratchet fails; reopening alone is not a repair protocol.
 - Establish durable, rollback-aware pad-use accounting across containers, copies,
   machines and concurrent writers. Define locking and identity rules that remain
-  correct across file replacement and aliases. Do not count cursor slots as fresh pads.
+  correct across file replacement and aliases. Existing digest and file-identity checks
+  only detect some changes; they do not close the race or coordinate pad use. Do not
+  count cursor slots as fresh pads.
 - Provide an operator recovery workflow, including non-destructive inspection, clear
   diagnosis, safe choices, and tests for crashes, torn writes, failed syncs, device
   removal and backups. The current demo's read-only inspection is only a preliminary
-  tool for checking an authenticated candidate; it cannot complete recovery.
+  tool for checking an authenticated candidate; it cannot complete recovery. The CLI
+  `verify` command authenticates one candidate without printing document bytes, but does
+  not inspect its application format or pad history.
 - Specify and implement safe USB provisioning, root-share storage, device identity and
   destruction behavior. Test real hardware and supported operating-system paths.
 - Specify versioned credentials and migrations; legacy passphrase mapping lowercases
@@ -31,14 +35,18 @@ irreplaceable data.
   version upgrades. Provide accessible, responsive save, close, error and recovery UX.
 - Report actual per-save protection, verified pad budget and recovery state. Integrate
   platform capture exclusion, actual memory-locking coverage and watchdog priority,
-  with honest unavailable/failure states. The demo status panel reports limitations,
-  not deployed protection.
+  with honest unavailable/failure states. The demo now shows the protection layer the
+  store attaches to each save — with pad freshness stated as *not established* — plus the
+  source-reported ratchet count. It does not yet report a verified pad budget, capture
+  exclusion, memory-locking coverage or watchdog priority; the status panel reports
+  limitations, not deployed protection.
 
 ## 3. Validate supported platforms and operational security
 
 - Complete platform-specific durable file replacement, locking, hardware I/O,
   suspend/disconnect notifications, capture handling and memory protection; document
-  platform-specific limitations. Current saves are Unix-only and are not concurrency-safe.
+  platform-specific limitations. Current saves are Unix-only and take only an advisory,
+  path-keyed lock; writers that ignore it, or reach the inode by another path, still race.
 - Measure memory, UI responsiveness, watchdog timing and failure behavior under realistic
   workloads and constrained hardware. The PRD's resource figures are not measurements of
   the finished product.

@@ -63,9 +63,10 @@ pub struct UnlockRequest<'a> {
     pub topology: Topology,
     /// Which `Argon2id` parameter class to use. [`ParamsClass::Test`] is for CI only.
     pub params: ParamsClass,
-    /// Whether this session has a fresh pad plan. Reported in [`ProtectionLayer::pad_fresh`];
-    /// never a precondition of unlocking, because a save that ran out of pad still opens.
-    pub pad_fresh: bool,
+    /// Pad freshness to report in [`ProtectionLayer::pad_fresh`]: `None` when the caller does not
+    /// establish it. Never a precondition of unlocking, because a save that ran out of pad still
+    /// opens.
+    pub pad_fresh: Option<bool>,
 }
 
 /// Try every stratum index in `1..=4` and return the one that verified, as the single live
@@ -102,7 +103,8 @@ pub fn unlock_fixed(
     );
 
     // Reported, not assumed. `pad_fresh` is a property of the pad accounting and is set by the
-    // caller that consumed a plan; `post_quantum` is true because CT_ML-KEM is present and
+    // caller that consumed a plan -- `None` when that accounting is not available here, which the
+    // store's own unlocks do not have; `post_quantum` is true because CT_ML-KEM is present and
     // canonical-length, which `ct_lengths_are_canonical` has just confirmed.
     let layer = ProtectionLayer {
         pad: true,
@@ -345,7 +347,7 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         };
         let active = unlock_fixed(&req, &DemoKem).expect("the matching passphrase must open");
         assert_eq!(active.id().index(), 1);
@@ -366,7 +368,7 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         };
         assert!(matches!(
             unlock_fixed(&req, &DemoKem),
@@ -388,7 +390,7 @@ mod tests {
             kappa_usb: &[2u8; 32],
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         };
         assert!(matches!(
             unlock_fixed(&req, &DemoKem),
@@ -408,7 +410,7 @@ mod tests {
             kappa_usb: &kappa,
             topology: Topology::UmbilicalUsb,
             params: ParamsClass::Test,
-            pad_fresh: true,
+            pad_fresh: Some(true),
         };
         assert!(matches!(
             unlock_fixed(&req, &DemoKem),

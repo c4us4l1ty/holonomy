@@ -188,13 +188,69 @@ impl ContainerFile {
         self.file.sync_all()
     }
 
+    /// Hash the folded image on the open handle without allocating another image.
+    /// This is only a best-effort change detector, not a lock or atomic snapshot.
+    #[cfg(unix)]
+    fn folded_digest(&mut self) -> std::io::Result<[u8; 32]> {
+        use blake2::{Blake2b512, Digest};
+
+        if self.file.metadata()?.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while checking the original image",
+            ));
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut hash = Blake2b512::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut remaining = CONTAINER_BYTES;
+        while remaining > 0 {
+            let len = remaining.min(buf.len());
+            self.file.read_exact(&mut buf[..len])?;
+            hash.update(&buf[..len]);
+            remaining -= len;
+        }
+        if self.file.metadata()?.len() != CONTAINER_BYTES as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "container size changed while checking the original image",
+            ));
+        }
+        let result = hash.finalize();
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&result[..32]);
+        Ok(digest)
+    }
+
+    /// Reject symlinks or a path no longer naming the file this handle opened.
+    /// This check is not atomic with later I/O or replacement.
+    #[cfg(unix)]
+    fn validate_open_path(&self) -> std::io::Result<std::fs::Metadata> {
+        use std::os::unix::fs::MetadataExt;
+
+        let original = self.file.metadata()?;
+        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
+        if !path_metadata.file_type().is_file()
+            || original.dev() != path_metadata.dev()
+            || original.ino() != path_metadata.ino()
+        {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
+        }
+        Ok(original)
+    }
+
     /// Stage a complete encrypted image beside the original and replace it on Unix.
     ///
     /// A successful return means the staged file and its containing directory were synced.
     /// A directory-sync error can occur *after* replacement, and is reported as such. This
-    /// does not serialize concurrent writers or guarantee storage hardware honors flushes.
+    /// compares the old image again before replacement, but does not serialize writers,
+    /// close the check-to-rename race, or guarantee storage hardware honors flushes.
     #[cfg(unix)]
-    pub(crate) fn replace_image(&mut self, image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(
+        &mut self,
+        image: &[u8],
+        expected_old_digest: &[u8; 32],
+    ) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         if !self.writable {
@@ -209,14 +265,7 @@ impl ContainerFile {
                 "replacement requires one whole container at offset zero",
             ));
         }
-        let original = self.file.metadata()?;
-        let path_metadata = std::fs::symlink_metadata(&self.filesystem_path)?;
-        if !path_metadata.file_type().is_file()
-            || original.dev() != path_metadata.dev()
-            || original.ino() != path_metadata.ino()
-        {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path must be the same regular file that was opened; symlinks and changed paths are refused"));
-        }
+        let original = self.validate_open_path()?;
         if original.len() != CONTAINER_BYTES as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -227,16 +276,26 @@ impl ContainerFile {
             .filesystem_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let mut staged = tempfile::Builder::new()
             .prefix(".holonomy-save-")
-            .tempfile_in(parent)?;
+            .tempfile_in(&parent)?;
         staged
             .as_file_mut()
             .set_permissions(original.permissions())?;
         staged.as_file_mut().write_all(image)?;
         staged.as_file().sync_all()?;
 
+        // Detect in-place changes to the image read earlier, including changes of
+        // the same length. A writer can still race this check or modify a pad: this
+        // is not a substitute for coordinating writers and pad accounting.
+        if self.folded_digest()? != *expected_old_digest {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "container contents changed while saving; replacement refused",
+            ));
+        }
         // Catch stale handles before replacement. This does not close the race with a
         // concurrent writer between the check and rename; callers must serialize saves.
         let current = std::fs::symlink_metadata(&self.filesystem_path)?;
@@ -257,14 +316,18 @@ impl ContainerFile {
         }
         let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
         self.file = new_file;
-        File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| {
+        File::open(&parent).and_then(|dir| dir.sync_all()).map_err(|e| {
             std::io::Error::new(e.kind(), format!("container replacement occurred, but directory sync failed; durability is uncertain and pad ratcheting was not started: {e}"))
         })
     }
 
     /// Non-Unix saves are refused until atomic replacement and directory durability are implemented.
     #[cfg(not(unix))]
-    pub(crate) fn replace_image(&mut self, _image: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn replace_image(
+        &mut self,
+        _image: &[u8],
+        _expected_old_digest: &[u8; 32],
+    ) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
@@ -310,7 +373,8 @@ pub struct SaveContext<'a> {
 /// The result of a save, as the caller should report it.
 #[derive(Debug)]
 pub struct SaveReport {
-    /// Sectors the ratchet rewrote, or `None` on a read-only handle.
+    /// Sector count reported by the pad source, or `None` when no ratchet was attempted.
+    /// A full reported count is not independent verification of device writes or freshness.
     pub ratcheted: Option<u32>,
     /// Sectors the fold consumed.
     pub pad_sectors: usize,
@@ -320,10 +384,13 @@ pub struct SaveReport {
     pub slots: usize,
     /// Digest of the image as written, for the caller to compare against what it later reads.
     pub digest: [u8; 32],
+    /// The protection layer attached to this write. Its `pad_fresh` is `None`: the store folds a
+    /// pad but cannot establish that no sector was reused elsewhere.
+    pub protection: holonomy_core::unlock::ProtectionLayer,
 }
 
 /// Refuse wraparound until there is durable accounting of the pad's history.
-fn validate_save_cursor(cursor: u64) -> Result<(), String> {
+pub(crate) fn validate_save_cursor(cursor: u64) -> Result<(), String> {
     let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
     if cursor == 0 {
         return Err(
@@ -334,6 +401,18 @@ fn validate_save_cursor(cursor: u64) -> Result<(), String> {
         return Err(format!(
             "save cursor {cursor} would enter the pad reuse window (starting at {limit}); \
              saving is disabled until durable pad accounting and recovery are implemented"
+        ));
+    }
+    Ok(())
+}
+
+/// Reject oversized payloads before any container or pad I/O.
+pub(crate) fn validate_payload_size(len: usize) -> Result<(), String> {
+    let capacity =
+        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
+    if len > capacity {
+        return Err(format!(
+            "document exceeds the {capacity}-byte container payload limit"
         ));
     }
     Ok(())
@@ -352,6 +431,106 @@ pub fn save(
     ctx: &SaveContext<'_>,
     payload: &[u8],
 ) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, None, None)
+}
+
+/// The sidecar path that serializes saves of one container.
+#[cfg(unix)]
+fn save_lock_path(container: &Path) -> PathBuf {
+    let mut name = container
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".holonomy-lock");
+    container.with_file_name(name)
+}
+
+/// Non-Unix builds refuse saves before this type could matter; it exists so signatures are
+/// uniform across platforms.
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub(crate) struct SaveLock(());
+
+/// An advisory exclusive lock held for the duration of one save.
+///
+/// It narrows the window between reading the image and replacing it: a second Holonomy save of
+/// the same path fails instead of interleaving its read, replacement and ratchet. It does not
+/// close the race with a program that ignores the lock, and it is keyed by path, so a rename, a
+/// hard link or another spelling of the same file defeats it. The sidecar file is created next to
+/// the container, stays empty, and holds no key material.
+#[cfg(unix)]
+pub(crate) struct SaveLock {
+    _file: File,
+}
+
+#[cfg(unix)]
+impl SaveLock {
+    pub(crate) fn acquire(container: impl AsRef<Path>) -> std::io::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+
+        let lock_path = save_lock_path(container.as_ref());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        // SAFETY: `file` owns a live descriptor for as long as `Self` holds it, and `flock`
+        // only takes the integer.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "another Holonomy save holds {}: {error}; nothing was written to the container, retry after that save finishes or inspect it first",
+                    lock_path.display()
+                ),
+            ));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+/// Save only if the image still matches the snapshot authenticated by the session.
+///
+/// Non-Unix only: it exists so the session compiles where saves are refused anyway. On Unix the
+/// session calls [`save_if_unchanged_locked`] with the lock it acquired first.
+#[cfg(not(unix))]
+pub(crate) fn save_if_unchanged(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: &[u8; 32],
+) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, Some(opened_digest), None)
+}
+
+/// Save while a caller-held [`SaveLock`] covers the whole operation.
+///
+/// A session acquires the lock before it enters the store so that a contended save is refused
+/// with the session still usable; passing the lock in avoids taking it twice.
+#[cfg(unix)]
+pub(crate) fn save_if_unchanged_locked(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: &[u8; 32],
+    lock: &SaveLock,
+) -> Result<SaveReport, String> {
+    save_inner(file, pad, ctx, payload, Some(opened_digest), Some(lock))
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn save_inner(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+    payload: &[u8],
+    opened_digest: Option<&[u8; 32]>,
+    held_lock: Option<&SaveLock>,
+) -> Result<SaveReport, String> {
     if !file.is_writable() {
         return Err(format!(
             "{} was opened read-only; a save needs a writable handle",
@@ -359,20 +538,32 @@ pub fn save(
         ));
     }
 
-    let capacity =
-        holonomy_core::layout::PAYLOAD_SLOTS * holonomy_session::seal::PAYLOAD_PLAINTEXT_PER_SLOT;
-    if payload.len() > capacity {
-        return Err(format!(
-            "document exceeds the {capacity}-byte container payload limit"
-        ));
-    }
+    validate_payload_size(payload.len())?;
 
     // Provisioning uses window zero. Until we can prove the history of refreshed
     // sectors, do not enter a window that can overlap the first 54 windows.
     validate_save_cursor(ctx.cursor)?;
 
+    // Refuse a known stale handle before consulting the pad or staging an image.
+    // This is not atomic with the read or the later replacement.
+    #[cfg(unix)]
+    file.validate_open_path().map_err(|e| e.to_string())?;
+
+    // Serialize Holonomy saves of this path across the read, the replacement, the read-back and
+    // the ratchet. Best effort by design: it cannot stop a writer that ignores the lock. A caller
+    // that already acquired it (a session, so contention is a preflight refusal) passes it in.
+    #[cfg(unix)]
+    let _save_lock = match held_lock {
+        Some(_) => None,
+        None => Some(SaveLock::acquire(file.path()).map_err(|e| e.to_string())?),
+    };
+
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
+    let expected_old_digest = holonomy_session::seal::image_digest(&old_image);
+    if opened_digest.is_some_and(|opened| opened != &expected_old_digest) {
+        return Err("container image changed since this session opened or last saved; no save was attempted. Inspect and recover before continuing".into());
+    }
 
     //    The salt cannot be read yet. It lives in slot 1, which is *inside* the pad-covered region, so
     //    every byte of it on disk is folded. Reading it here and checking for zeros -- which this used
@@ -435,7 +626,7 @@ pub fn save(
             kappa_usb: ctx.kappa_usb,
             topology: ctx.topology,
             params: ctx.params,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         epoch_placement(&old_salt),
     )
@@ -486,8 +677,32 @@ pub fn save(
         .map_err(|e| format!("reading pad window {}: {e}", ctx.cursor))?;
     fold(&mut image, new_pad.as_slice());
     let digest = holonomy_session::seal::image_digest(&image);
-    file.replace_image(&image)
-        .map_err(|e| format!("saving cursor {}: {e}", ctx.cursor))?;
+    file.replace_image(&image, &expected_old_digest).map_err(|e| {
+        format!(
+            "saving cursor {}: {e}; a staged encrypted image may have been written. Do not retry until the container and pad state have been inspected; the cursor may be spent",
+            ctx.cursor
+        )
+    })?;
+
+    // 8b. Read the replacement back *before* the ratchet destroys the old window.
+    //
+    //     The digest was computed over the bytes handed to `replace_image`; this compares them with
+    //     the bytes this process can read back. It catches a replacement that wrote a different or
+    //     truncated image, which would otherwise be discovered only after ratcheting had made the
+    //     old window unreadable. It is not a durability guarantee -- the read may be served from
+    //     cache -- and it says nothing about media corruption later.
+    let readback = file.folded_digest().map_err(|e| {
+        format!(
+            "container was written with cursor {}; reading the replacement back failed: {e}. Do not retry with the old cursor and do not ratchet; inspect the container first",
+            ctx.cursor
+        )
+    })?;
+    if readback != digest {
+        return Err(format!(
+            "container was written with cursor {}, but the replacement reads back with a different digest; the old pad window has not been ratcheted. Do not retry with the old cursor; inspect the container before continuing",
+            ctx.cursor
+        ));
+    }
 
     // 9. Ratchet window `c-1`, *after* the container is on the device.
     //
@@ -508,14 +723,14 @@ pub fn save(
     //    That is the difference between "this pad is fresh" and "this is the pad the last save
     //    used", and a caller that conflates the two reports freshness it does not have.
     let ratcheted = if pad.can_ratchet() {
-        Some(
-            pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
-                format!(
-                    "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
-                    ctx.cursor
-                )
-            })?,
-        )
+        let count = pad.ratchet(ctx.kappa_usb, old_cursor).map_err(|e| {
+            format!(
+                "container was written with cursor {}; ratcheting old pad window {old_cursor} failed: {e}. Do not retry this save with the old cursor; check the new container and pad before continuing",
+                ctx.cursor
+            )
+        })?;
+        validate_ratchet_count(count, old_cursor, ctx.cursor)?;
+        Some(count)
     } else {
         None
     };
@@ -527,16 +742,33 @@ pub fn save(
         plaintext_bytes,
         slots: slot_bytes.len(),
         digest,
+        protection: protection_layer(),
     })
 }
 
-/// Open `file` and return the document it holds.
-pub fn open_document(
+/// A short or impossible count is an uncertain, post-replacement failure. A
+/// full count remains only the source's report, not proof of fresh pad history.
+fn validate_ratchet_count(count: u32, old_cursor: u64, new_cursor: u64) -> Result<(), String> {
+    if count != PAD_SECTORS_PER_SAVE {
+        return Err(format!(
+            "container was written with cursor {new_cursor}, but ratcheting old pad window {old_cursor} reported {count} of {PAD_SECTORS_PER_SAVE} sectors; pad state may be partially changed. Do not retry this save with the old cursor; inspect the new container and pad before continuing"
+        ));
+    }
+    Ok(())
+}
+
+fn open_authenticated(
     file: &mut ContainerFile,
     pad: &mut dyn PadSource,
     ctx: &SaveContext<'_>,
-) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
+    image_digest: Option<&mut [u8; 32]>,
+) -> Result<OpenedContainer, String> {
     let mut image = file.read_image().map_err(|e| e.to_string())?;
+    // Fingerprint the folded bytes actually read, before the pad is undone. This
+    // is an unkeyed comparison aid, not authentication of the whole image.
+    if let Some(digest) = image_digest {
+        *digest = holonomy_session::seal::image_digest(&image);
+    }
     // The salt is deliberately *not* read here to build the window: it is inside the pad-covered
     // region, so reading it before unfolding would read folded bytes. `ctx.cursor` says which
     // window the container was written under, and that is enough -- see `PadSource`.
@@ -564,7 +796,7 @@ pub fn open_document(
             kappa_usb: ctx.kappa_usb,
             topology: ctx.topology,
             params: ctx.params,
-            pad_fresh: true,
+            pad_fresh: None,
         },
         epoch_placement(&file_salt),
     )
@@ -578,8 +810,51 @@ pub fn open_document(
             ctx.cursor
         ));
     }
+    Ok(opened)
+}
+
+/// Open `file` and return the document it holds.
+pub fn open_document(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing), String> {
+    let opened = open_authenticated(file, pad, ctx, None)?;
     let document = opened.payload_bytes();
     Ok((opened, document))
+}
+
+/// Open a session and retain a fingerprint of the same folded bytes that were authenticated.
+pub(crate) fn open_document_with_digest(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<(OpenedContainer, holonomy_session::seal::Zeroizing, [u8; 32]), String> {
+    let mut digest = [0u8; 32];
+    let opened = open_authenticated(file, pad, ctx, Some(&mut digest))?;
+    let document = opened.payload_bytes();
+    Ok((opened, document, digest))
+}
+
+/// Authenticate and read a candidate container without returning its plaintext.
+///
+/// This performs the same container and payload authentication as [`open_document`],
+/// then drops the plaintext. Only the authenticated directory and its declared payload
+/// slots are checked, not all unused image bytes. It does not write or ratchet the pad.
+/// On success returns the unkeyed image digest of the folded bytes read, calculated
+/// identically to [`SaveReport::digest`]. It is a comparison aid, not an authentication
+/// tag or proof of durability; concurrent modification can make it a mixed snapshot.
+/// Successful authentication does not verify application-level document decoding, pad freshness,
+/// rollback history, durability, or recovery. Plaintext and copies may still exist in
+/// process and operating-system memory. File access metadata may change.
+pub fn verify_candidate(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    ctx: &SaveContext<'_>,
+) -> Result<[u8; 32], String> {
+    let mut digest = [0u8; 32];
+    let _opened = open_authenticated(file, pad, ctx, Some(&mut digest))?;
+    Ok(digest)
 }
 
 /// The `j`-th physical sector of save `cursor`.
@@ -671,17 +946,25 @@ pub fn provision(
 ///
 /// `holonomy-crypto`'s `the_fallback_keys_equal_the_ones_the_capsule_was_built_with` is where that
 /// equality is asserted.
+/// The protection layer a store write attaches to its stratum.
+///
+/// The store knows it folded a pad; it does not know whether any sector was reused on another
+/// device, in a snapshot, or after a rollback, so freshness is `None` rather than a claim.
+pub(crate) fn protection_layer() -> holonomy_core::unlock::ProtectionLayer {
+    holonomy_core::unlock::ProtectionLayer {
+        pad: true,
+        pad_fresh: None,
+        post_quantum: true,
+    }
+}
+
 fn stratum_for(ctx: &SaveContext<'_>, salt: &SaltBytes) -> Result<ActiveStratum, String> {
     let root =
         holonomy_crypto::derive_root_secret(ctx.passphrase.as_bytes(), salt.as_bytes(), ctx.params)
             .map_err(|e| format!("deriving the root secret: {e}"))?;
     let keys = holonomy_crypto::envelope::derive_stratum_keys(&root, 1, ctx.kappa_usb);
     let id = holonomy_core::stratum::StratumId::new(1).ok_or("stratum 1 is out of range")?;
-    let layer = holonomy_core::unlock::ProtectionLayer {
-        pad: true,
-        pad_fresh: true,
-        post_quantum: true,
-    };
+    let layer = protection_layer();
     Ok(holonomy_core::unlock::Unlocked::new(id, ctx.topology, id, layer).into_active(keys))
 }
 

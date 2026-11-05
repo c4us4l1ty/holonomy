@@ -142,3 +142,101 @@ mod tests {
         assert!(capture().contains("may show"));
     }
 }
+
+/// Display only the last successful save's fingerprint, never as proof of the
+/// current image while a save may have changed it or recovery is required.
+pub(super) fn fingerprint_label(phase: SavePhase, digest: Option<[u8; 32]>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving; the image may be changing.".into(),
+        SavePhase::RecoveryRequired => "Unavailable: the current image is uncertain and requires recovery.".into(),
+        _ => match digest {
+            Some(digest) => {
+                let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+                format!("Last successful save: {hex}\nUnkeyed fingerprint of the saved image; not a durability or authenticity proof. Sharing it may correlate container copies.")
+            }
+            None => "Not recorded in this session. Opening or creating a container does not record a save fingerprint.".into(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_hidden_when_disk_state_is_uncertain() {
+        let digest = [0xabu8; 32];
+        let hex = "ab".repeat(32);
+        let saved = fingerprint_label(SavePhase::Saved, Some(digest));
+        assert!(saved.contains(&hex));
+        assert!(saved.contains("not a durability or authenticity proof"));
+        assert!(fingerprint_label(SavePhase::Modified, Some(digest)).contains(&hex));
+        assert!(!fingerprint_label(SavePhase::Saving, Some(digest)).contains(&hex));
+        assert!(!fingerprint_label(SavePhase::RecoveryRequired, Some(digest)).contains(&hex));
+        assert!(fingerprint_label(SavePhase::Saved, None).contains("Not recorded"));
+    }
+}
+
+/// A last-save result is not a statement about a pending or uncertain image.
+pub(super) fn ratchet_label(phase: SavePhase, last_result: Option<Option<u32>>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving; the result is not yet confirmed.".into(),
+        SavePhase::RecoveryRequired => "Unavailable: the last save and pad state are uncertain; recovery is required.".into(),
+        _ => match last_result {
+            None => "No save result recorded in this session.".into(),
+            Some(None) => "Ratchet not attempted for the last save; pad freshness is not verified.".into(),
+            Some(Some(count)) => format!("The source reported {count} sectors ratcheted for the last save. This is not independent verification of device writes or pad freshness."),
+        },
+    }
+}
+
+#[cfg(test)]
+mod ratchet_tests {
+    use super::*;
+
+    #[test]
+    fn ratchet_status_uses_save_result_and_hides_uncertainty() {
+        assert!(ratchet_label(SavePhase::Saved, None).contains("No save result"));
+        assert!(ratchet_label(SavePhase::Saved, Some(None)).contains("not attempted"));
+        let reported = ratchet_label(SavePhase::Saved, Some(Some(32768)));
+        assert!(reported.contains("reported 32768"));
+        assert!(reported.contains("not independent verification"));
+        assert!(!ratchet_label(SavePhase::Saving, Some(Some(32768))).contains("32768"));
+        assert!(ratchet_label(SavePhase::RecoveryRequired, Some(None)).contains("uncertain"));
+    }
+}
+
+/// What the last successful save says protected it, hidden while the answer is not trustworthy.
+pub(super) fn protection_label(phase: SavePhase, last: Option<&str>) -> String {
+    match phase {
+        SavePhase::Saving => "Unavailable while saving.".into(),
+        SavePhase::RecoveryRequired => {
+            "Unavailable: the last save and pad state are uncertain.".into()
+        }
+        _ => match last {
+            None => "No save result recorded in this session.".into(),
+            Some(description) => format!(
+                "{description}. This is the layer attached by the container store, which cannot \
+                 establish pad freshness."
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+
+    #[test]
+    fn protection_status_comes_from_the_save_and_hides_uncertainty() {
+        assert!(protection_label(SavePhase::Saved, None).contains("No save result"));
+        let text = protection_label(
+            SavePhase::Saved,
+            Some("one-time pad (freshness not established by this layer) + ML-KEM"),
+        );
+        assert!(text.contains("one-time pad"));
+        assert!(text.contains("cannot establish pad freshness"));
+        assert!(!protection_label(SavePhase::Saving, Some("one-time pad")).contains("one-time"));
+        assert!(protection_label(SavePhase::RecoveryRequired, None).contains("uncertain"));
+    }
+}

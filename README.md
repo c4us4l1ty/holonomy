@@ -32,17 +32,19 @@ those documents are historical and code and current CI results govern implementa
 | :--- | :--- |
 | Container and cryptographic primitives | Implemented in the core, crypto, session, USB, and CLI crates; still requires independent review. |
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
-| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
+| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. Partial or invalid ratchet counts after replacement require recovery; a full count is only the source's report, not independent proof of fresh pad. Reporters carry pad freshness as *fresh*, *reused*, or *not established* — the store itself never claims the first two.. A save reads the replacement image back and compares its digest before ratcheting, so a torn or substituted replacement is refused while the old pad window is still intact. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. This is not a complete recovery protocol; provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
-ownership, ACLs, extended attributes, hard links, or other filesystem metadata. The path check is
-not a lock: do not save the same container concurrently. Provisioning is not crash-atomic. Always
-keep independently tested backups together with the pad material needed to open them.
+ownership, ACLs, extended attributes, hard links, or other filesystem metadata. Saves take an
+advisory lock on a `*.holonomy-lock` sidecar, which refuses a second Holonomy save but cannot stop
+a program that ignores it or one that reaches the same inode by another path; it is coordination,
+not a guarantee. Provisioning is not crash-atomic. Always keep independently tested backups
+together with the pad material needed to open them.
 
 Command-line secrets can be exposed through process listings, shell history, logs, and other host
 facilities. Omit `--passphrase` and `--kappa` to use hidden terminal prompts instead. The legacy
@@ -211,7 +213,7 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml -- --unencrypted-sc
 ```
 
 A different, restricted **plain-text demo container editor** has no Wordcraft file/export menus.
-It refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
+Editing refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
 uses the deterministic demo pad, **not** a physical USB key; it is not for sensitive or valuable
 data. Container creation is not crash-atomic; track the displayed cursor to reopen and do not save
 concurrently. Saves run on a worker; editing and closing are paused until the operation finishes.
@@ -220,8 +222,15 @@ prototype does not guarantee plaintext is wiped from Wordcraft, egui, the clipbo
 operating-system memory. Unix saves only. The session status panel reports the demo pad, capture,
 memory, and watchdog limitations. Its remaining-save count is only the local cursor limit, **not**
 a count of verified fresh pads; during a save or after an uncertain failure the current on-disk
-cursor is not confirmed. Use Ctrl+S (Command+S on macOS) to save.
-See [GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
+cursor is not confirmed. At the cursor limit the demo disables editing and saving because it has
+no fresh-pad migration path. Use Ctrl+S (Command+S on macOS) to save.
+After a successful save, the session status panel shows its unkeyed image fingerprint for comparison
+with `holonomy verify`. It is hidden while saving or when recovery is required, and it is not
+recorded across restarts. It is not an authenticity or durability proof; sharing it can correlate
+container copies. The panel also shows the protection layer attached to the last successful save and
+whether a ratchet was attempted. The store reports pad freshness as *not established*,
+and a reported ratchet count does not independently establish device writes. See
+[GUI implementation status](docs/GUI-IMPLEMENTATION.md) for the PRD gaps.
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container
@@ -231,13 +240,31 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-inspect /path/to/demo-container 1
 ```
 
-Read-only inspection authenticates and decodes the candidate at the supplied cursor; it does not
-repair a container or pad, establish pad freshness, or prove recovery is complete. It uses the
+Read-only inspection authenticates and decodes the candidate at the supplied cursor. It can display
+a plain-text body preview of a rich document, but the preview may omit formatting, images, tables,
+headers, footers and other content; it is not the complete document. Editing and saving remain
+disabled. Inspection does not repair a container or pad, establish pad freshness, or prove recovery
+is complete. It uses the
 same demo pad and plaintext-memory limitations. The OS may still update file-access metadata.
 
 The file store requires a standalone file of exactly 134,217,728 bytes. It refuses shorter or
 longer files rather than interpreting an embedded image or discarding trailing data on save.
-Size checks do not serialize concurrent writers; concurrent modification is still unsafe.
+An editor session records the encrypted image it opened or last saved, and refuses to save if a
+later read differs. Before replacement, the store also compares the original encrypted bytes against
+the image it read. These are best-effort change detectors, not locks: changes may not appear in the
+GUI until a save is attempted, modification can race a check, and pad state is not coordinated.
+Concurrent writers remain unsafe.
+Even a refused replacement may have staged an encrypted image; do not retry after a failed save
+without investigating the container and pad state.
+
+To authenticate a single candidate without printing its document bytes, use
+`holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
+command opens the file and selected pad read-only and does not ratchet. It does decrypt into memory
+and does not verify application document format, freshness, rollback history, or recovery. Only
+the directory and declared payload are authenticated, not unused image bytes. The OS may update
+access metadata. Its unkeyed encrypted-image fingerprint can be compared with a save report, but
+is not an authenticity or durability proof; concurrent changes may yield a mixed snapshot. Sharing
+it may correlate copies of a container. Omit `--device` only for the deterministic demo pad.
 
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's
 cursor is 0; `open` needs the cursor used to write the image and
@@ -252,7 +279,7 @@ See the [release roadmap](docs/RELEASE-ROADMAP.md) for dependencies and completi
 
 - Integrate the Wordcraft editor window with the document-session bridge; validate compatibility and migration of the experimental payload format.
 - Implement safe USB initialization and root-share storage/retrieval, and test real devices and OS paths.
-- Complete and test crash recovery, cross-platform replacement, concurrent-save coordination, and durable pad-use/ratchet accounting.
+- Complete and test crash recovery, cross-platform replacement, locking that covers writers outside Holonomy, and durable pad-use/ratchet accounting.
 - Introduce a versioned, case-sensitive passphrase scheme with migration; integrate memory, watchdog, suspend, and capture protections.
 - Measure resource use and latency under real workloads, and obtain independent cryptographic and security review.
 

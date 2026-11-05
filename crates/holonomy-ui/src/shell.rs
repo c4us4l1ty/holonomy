@@ -220,7 +220,7 @@ impl Session {
 
         let protection = ProtectionLayer {
             pad: true,
-            pad_fresh: fresh || self.config.usb_writable,
+            pad_fresh: Some(fresh || self.config.usb_writable),
             post_quantum: true,
         };
 
@@ -310,7 +310,7 @@ mod tests {
         for _ in 0..60 {
             let out = s.save(delta(10), None).unwrap();
             assert!(out.ratcheted);
-            assert!(out.protection.pad_fresh);
+            assert_eq!(out.protection.pad_fresh, Some(true));
         }
         assert_eq!(s.remaining_fresh_saves(), 54);
     }

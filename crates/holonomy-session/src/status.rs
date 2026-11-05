@@ -64,10 +64,15 @@ impl StatusLine {
     pub fn render(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
 
-        if self.protection.pad_fresh {
+        if self.protection.pad_fresh == Some(true) {
             parts.push(format!(
                 "one-time pad: {} of {SAVES_BEFORE_DOMAIN_REUSE} fresh saves left",
                 self.fresh_saves_remaining
+            ));
+        } else if self.protection.pad_fresh.is_none() {
+            parts.push(format!(
+                "pad freshness not established by this session; {SAVES_BEFORE_DOMAIN_REUSE}-save \
+                 accounting is not evidence that no sector was reused"
             ));
         } else if self.device_writable {
             parts.push(
@@ -110,7 +115,7 @@ impl StatusLine {
 
     /// How many saves past the 54-save window this container is, or 0.
     pub fn past_window_by(&self) -> u64 {
-        if self.protection.pad_fresh {
+        if self.protection.pad_fresh != Some(false) {
             0
         } else {
             SAVES_BEFORE_DOMAIN_REUSE
@@ -122,7 +127,7 @@ impl StatusLine {
     /// Whether every claim the line makes is a *good* state. Used by `--check` to decide the exit
     /// code; never used to hide a field, because a hidden field is a claim the user cannot audit.
     pub fn is_healthy(&self) -> bool {
-        self.protection.pad_fresh
+        self.protection.pad_fresh == Some(true)
             && self.capture.is_safe()
             && self.lock >= LockCapability::ResidentNoDump
     }
@@ -130,8 +135,10 @@ impl StatusLine {
     /// The clauses that are not healthy, for the check report.
     pub fn problems(&self) -> Vec<String> {
         let mut v = Vec::new();
-        if !self.protection.pad_fresh {
-            v.push("pad window exhausted".to_string());
+        match self.protection.pad_fresh {
+            Some(true) => {}
+            Some(false) => v.push("pad window exhausted".to_string()),
+            None => v.push("pad freshness not established".to_string()),
         }
         if !self.capture.is_safe() {
             v.push(self.capture.describe().to_string());
@@ -152,7 +159,7 @@ mod tests {
         StatusLine {
             protection: ProtectionLayer {
                 pad: true,
-                pad_fresh: true,
+                pad_fresh: Some(true),
                 post_quantum: true,
             },
             fresh_saves_remaining: 30,
@@ -177,7 +184,7 @@ mod tests {
     #[test]
     fn an_exhausted_pad_is_stated_as_a_downgrade_not_a_number() {
         let mut s = healthy();
-        s.protection.pad_fresh = false;
+        s.protection.pad_fresh = Some(false);
         s.fresh_saves_remaining = 0;
         let text = s.render();
         assert!(text.contains("PAD SPENT"), "{text}");
@@ -189,7 +196,7 @@ mod tests {
     #[test]
     fn a_writable_device_gets_a_different_message_from_a_blocked_one() {
         let mut spent = healthy();
-        spent.protection.pad_fresh = false;
+        spent.protection.pad_fresh = Some(false);
         spent.fresh_saves_remaining = 0;
 
         let mut writable = spent.clone();
@@ -234,8 +241,42 @@ mod tests {
         // `past_window_by` exists only for the message; reporting 0 past the window would read as
         // "you are at the boundary" when the budget is already gone.
         let mut s = healthy();
-        s.protection.pad_fresh = false;
+        s.protection.pad_fresh = Some(false);
         s.fresh_saves_remaining = 0;
         assert!(s.past_window_by() >= 1);
+    }
+}
+
+#[cfg(test)]
+mod unknown_freshness_tests {
+    use super::*;
+    use holonomy_core::unlock::ProtectionLayer;
+
+    /// A caller that cannot establish freshness must not get the fresh-pad sentence, and must not
+    /// be told a definite reuse story either.
+    #[test]
+    fn unknown_freshness_is_stated_as_unknown() {
+        let line = StatusLine {
+            protection: ProtectionLayer {
+                pad: true,
+                pad_fresh: None,
+                post_quantum: true,
+            },
+            fresh_saves_remaining: 54,
+            device_writable: false,
+            lock: LockCapability::DirectMapExcluded,
+            capture: CaptureState::Excluded,
+            realtime: true,
+        };
+        let text = line.render();
+        assert!(text.contains("freshness not established"), "{text}");
+        assert!(!text.contains("fresh saves left"), "{text}");
+        assert!(!text.contains("PAD SPENT"), "{text}");
+        assert!(!line.is_healthy());
+        assert!(line
+            .problems()
+            .iter()
+            .any(|p| p.contains("not established")));
+        assert_eq!(line.past_window_by(), 0);
     }
 }
