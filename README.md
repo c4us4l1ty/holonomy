@@ -12,11 +12,12 @@
 > provisioning, and end-to-end protections are incomplete.
 
 Holonomy explores a rich-document workspace backed by a fixed-size encrypted container and a
-physical USB entropy reservoir. The **current deliverable is an experimental CLI**, not a word
-processor: it can provision, save, and open a byte-oriented document using a supplied passphrase,
-USB root share, and pad source. An experimental Wordcraft codec, editing-engine adapter and
+physical USB entropy reservoir. The current deliverables include an experimental CLI and a
+plain-text demo editor, not a finished word processor. The CLI can provision, save, and open a
+byte-oriented document using a supplied passphrase, USB root share, and pad source. An experimental Wordcraft codec, editing-engine adapter and
 session bridge live in a separate workspace, but they are not connected to an editor window. A separate scratch-only
-window preview does not use containers or provide encryption.
+window preview does not use containers or provide encryption. A separate restricted text-only
+demo window uses containers with a deterministic stand-in pad, not physical USB protection.
 
 This README describes **what exists and what is intended**, not a promise that the prototype is
 safe against a particular attacker. See the [v5.1 design](docs/PRD-v5.1.0.md),
@@ -33,7 +34,7 @@ those documents are historical and code and current CI results govern implementa
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
 | USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
-| Editor | An experimental Wordcraft document codec and limited editing-engine adapter exist, plus a separate unencrypted scratch-window preview. The window is **not** connected to Holonomy containers. |
+| Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory. This is not a complete recovery protocol; concurrent saves, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
@@ -204,6 +205,19 @@ a graphical desktop, native windowing libraries, and the pinned upstream git dep
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml -- --unencrypted-scratch-preview
+```
+
+A different, restricted **plain-text demo container editor** has no Wordcraft file/export menus.
+It refuses rich documents that it cannot preserve and asks for credentials in the terminal. It
+uses the deterministic demo pad, **not** a physical USB key; it is not for sensitive or valuable
+data. Container creation is not crash-atomic; track the displayed cursor to reopen and do not save
+concurrently. This prototype can block the window during saves and does not guarantee plaintext
+is wiped from Wordcraft, egui, the clipboard, or operating-system memory. Unix saves only.
+
+```bash
+cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create /path/to/new-demo-container
+# Later, pass the cursor displayed after the last save:
+cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-open /path/to/demo-container 1
 ```
 
 For experimental CLI usage, `--help` documents the arguments and hidden credential prompts. The provisioned image's

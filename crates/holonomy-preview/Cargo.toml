@@ -8,8 +8,14 @@ edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 publish = false
+default-run = "holonomy-preview"
 
 [dependencies]
+holonomy-wordcraft = { path = "../holonomy-wordcraft" }
+holonomy-cli = { path = "../holonomy-cli" }
+holonomy-core = { path = "../holonomy-core" }
+zeroize = "1.8"
+rpassword = "7.3"
 wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
@@ -35,3 +41,6 @@ winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dev-dependencies]
+tempfile = "3"
