@@ -656,7 +656,7 @@ jobs:
             printf "%s\n" "ci demo password" "ci demo password" "$share" "$share" |
               script -q -e -c "$binary --demo-create $container" /dev/null > "$log" 2>&1 &
             pid=$!
-            trap '''kill "$pid" 2>/dev/null || true''' EXIT
+            trap "kill $pid 2>/dev/null || true" EXIT
             timeout 180s xdotool search --sync --onlyvisible --name "Holonomy.*EXPERIMENTAL TEXT DEMO" > "$log.windows"
             window=$(head -n 1 "$log.windows")
             xdotool windowclose "$window"
