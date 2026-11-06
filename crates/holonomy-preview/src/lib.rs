@@ -300,19 +300,21 @@ mod tests {
     /// The input boundary: viewing survives, everything that could edit or copy does not.
     #[test]
     fn input_filter_keeps_viewing_and_drops_editing() {
-        let mut raw = egui::RawInput::default();
-        raw.events = vec![
-            egui::Event::Text("secret".into()),
-            key(egui::Key::S, egui::Modifiers::CTRL),
-            egui::Event::Paste("pasted".into()),
-            egui::Event::Copy,
-            egui::Event::Cut,
-            click(),
-            egui::Event::PointerMoved(egui::pos2(10.0, 20.0)),
-            wheel(),
-            egui::Event::Zoom(1.1),
-            egui::Event::WindowFocused(true),
-        ];
+        let mut raw = egui::RawInput {
+            events: vec![
+                egui::Event::Text("secret".into()),
+                key(egui::Key::S, egui::Modifiers::CTRL),
+                egui::Event::Paste("pasted".into()),
+                egui::Event::Copy,
+                egui::Event::Cut,
+                click(),
+                egui::Event::PointerMoved(egui::pos2(10.0, 20.0)),
+                wheel(),
+                egui::Event::Zoom(1.1),
+                egui::Event::WindowFocused(true),
+            ],
+            ..Default::default()
+        };
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
         assert_eq!(
@@ -335,8 +337,10 @@ mod tests {
     #[test]
     fn quit_chord_is_handled_by_the_filter_only() {
         for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::COMMAND] {
-            let mut raw = egui::RawInput::default();
-            raw.events = vec![key(egui::Key::Q, modifiers)];
+            let mut raw = egui::RawInput {
+                events: vec![key(egui::Key::Q, modifiers)],
+                ..Default::default()
+            };
             let outcome = filter_events(&mut raw);
             assert!(outcome.quit_requested);
             assert_eq!(outcome.dropped, 1);
@@ -344,8 +348,10 @@ mod tests {
         }
 
         // Q on its own is typing, not quitting, and is still dropped.
-        let mut raw = egui::RawInput::default();
-        raw.events = vec![key(egui::Key::Q, egui::Modifiers::NONE)];
+        let mut raw = egui::RawInput {
+            events: vec![key(egui::Key::Q, egui::Modifiers::NONE)],
+            ..Default::default()
+        };
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
         assert!(raw.events.is_empty());
