@@ -685,13 +685,11 @@ fn report_staged_copies(
         }
         let association = match copy.origin {
             store::RemnantOrigin::Bound { .. } => match current_origin.as_ref() {
-                Some(Ok(origin)) => {
-                    store::remnant_association_with_origin(
-                        container_path,
-                        &copy.path,
-                        Some(origin),
-                    )
-                },
+                Some(Ok(origin)) => store::remnant_association_with_origin(
+                    container_path,
+                    &copy.path,
+                    Some(origin),
+                ),
                 Some(Err(error)) => {
                     println!("  Skipped while checking origin: {error}");
                     continue;
