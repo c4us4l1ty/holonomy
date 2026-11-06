@@ -122,3 +122,181 @@ fn recover_refuses_an_explicit_cursor() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("use verify"));
 }
+
+/// Provision a container, save one document at `cursor`, and return its path and bytes.
+fn saved_container(dir: &tempfile::TempDir, cursor: &str) -> (std::path::PathBuf, Vec<u8>) {
+    let path = dir.path().join("container");
+    let provision = Command::new(binary())
+        .arg("provision")
+        .arg(&path)
+        .args(credentials())
+        .output()
+        .expect("provision");
+    assert!(
+        provision.status.success(),
+        "provision failed: {}",
+        String::from_utf8_lossy(&provision.stderr)
+    );
+
+    let mut save = Command::new(binary())
+        .arg("save")
+        .arg(&path)
+        .args(credentials())
+        .args(["--cursor", cursor])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("save");
+    save.stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"a document for staged copies")
+        .expect("write document");
+    let saved = save.wait_with_output().expect("save finished");
+    assert!(
+        saved.status.success(),
+        "save failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let bytes = std::fs::read(&path).expect("read container");
+    (path, bytes)
+}
+
+/// `--remnants` tests a staged copy with the same cursor scan, and still writes nothing.
+#[test]
+fn recover_tests_staged_copies_only_when_asked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, before) = saved_container(&dir, "1");
+    let staged = dir.path().join(".holonomy-save-crashed");
+    std::fs::copy(&path, &staged).expect("stage a copy");
+    let staged_before = std::fs::read(&staged).expect("read staged copy");
+
+    let without = Command::new(binary())
+        .arg("recover")
+        .arg(&path)
+        .args(credentials())
+        .output()
+        .expect("recover");
+    assert!(without.status.success());
+    let plain = String::from_utf8_lossy(&without.stdout);
+    assert!(
+        !plain.contains("Staged copy"),
+        "the scan must be opt-in: {plain}"
+    );
+    assert!(
+        !plain.contains(".holonomy-save-crashed"),
+        "an unasked-for scan must not name leftovers: {plain}"
+    );
+
+    let output = Command::new(binary())
+        .arg("recover")
+        .arg(&path)
+        .args(credentials())
+        .arg("--remnants")
+        .output()
+        .expect("recover");
+    assert!(
+        output.status.success(),
+        "recover failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Staged copy"), "{text}");
+    assert!(text.contains(".holonomy-save-crashed"), "{text}");
+    assert_eq!(
+        text.matches("Cursor 1 authenticates").count(),
+        2,
+        "the container and the staged copy both need cursor 1: {text}"
+    );
+    assert!(text.contains("candidate, not a choice"), "{text}");
+    assert!(text.contains("Nothing was written or ratcheted"), "{text}");
+    assert_eq!(
+        std::fs::read(&path).expect("read container again"),
+        before,
+        "--remnants must leave the container byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&staged).expect("read staged copy again"),
+        staged_before,
+        "--remnants must leave the staged copy byte-identical"
+    );
+}
+
+/// A leftover that is not a whole image is reported as cut short, not treated as an error.
+#[test]
+fn recover_reports_a_staged_copy_that_was_cut_short() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, before) = saved_container(&dir, "1");
+    let staged = dir.path().join(".holonomy-save-cut-short");
+    std::fs::write(&staged, vec![0x5au8; 4096]).expect("write a torn copy");
+
+    let output = Command::new(binary())
+        .arg("recover")
+        .arg(&path)
+        .args(credentials())
+        .arg("--remnants")
+        .output()
+        .expect("recover");
+    assert!(
+        output.status.success(),
+        "a torn leftover must not fail the scan: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains(".holonomy-save-cut-short"), "{text}");
+    assert!(text.contains("Not a whole image"), "{text}");
+    assert!(
+        text.contains("Cursor 1 authenticates"),
+        "the container still answers: {text}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read container again"),
+        before,
+        "reporting a torn leftover must not write the container"
+    );
+    assert_eq!(
+        std::fs::read(&staged).expect("read the leftover"),
+        vec![0x5au8; 4096]
+    );
+}
+
+/// A staged copy that opens while the container does not is a candidate, and the exit code says so.
+#[test]
+fn recover_reports_a_candidate_when_only_a_staged_copy_opens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, before) = saved_container(&dir, "1");
+    let staged = dir.path().join(".holonomy-save-crashed");
+    std::fs::copy(&path, &staged).expect("stage a copy");
+    std::fs::write(&path, vec![0u8; before.len()]).expect("damage the container");
+
+    let output = Command::new(binary())
+        .arg("recover")
+        .arg(&path)
+        .args(credentials())
+        .arg("--remnants")
+        .output()
+        .expect("recover");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the container's failure is still a failure"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("Staged copy"), "{stdout}");
+    assert!(
+        stdout.contains("Cursor 1 authenticates"),
+        "the staged copy should still open: {stdout}"
+    );
+    assert!(
+        stderr.contains("A staged copy opened while the container did not"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("not a repair"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&staged).expect("read the staged copy"),
+        before,
+        "the candidate must be left exactly as it was"
+    );
+}

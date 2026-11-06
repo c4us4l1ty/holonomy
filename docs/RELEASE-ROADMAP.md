@@ -25,7 +25,9 @@ irreplaceable data.
   not inspect its application format or pad history. `remnants` reports staged leftovers
   and `recover` finds the cursor an image needs without writing, but neither repairs an
   image, reconciles a partially ratcheted pad, or decides which of several copies is
-  newest.
+  newest. `recover --remnants` tests each staged copy as a candidate, yet choosing one,
+  promoting it into place and accounting for the pad it spent remain manual and
+  unimplemented.
 - Specify and implement safe USB provisioning, root-share storage, device identity and
   destruction behavior. Test real hardware and supported operating-system paths.
 - Specify versioned credentials and migrations; legacy passphrase mapping lowercases
