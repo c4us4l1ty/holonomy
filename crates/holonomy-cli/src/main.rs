@@ -647,7 +647,8 @@ fn report_staged_copies(
     scan_all: bool,
     limit: u64,
 ) -> bool {
-    let (staged, truncated) = match store::find_save_remnants(std::path::Path::new(container)) {
+    let container_path = std::path::Path::new(container);
+    let (staged, truncated) = match store::find_save_remnants(container_path) {
         Ok(found) => found,
         Err(error) => {
             eprintln!("Staged copies beside {container} could not be listed: {error}");
@@ -674,10 +675,8 @@ fn report_staged_copies(
             );
             continue;
         }
-        let mut file = match store::open_save_remnant_beside(
-            std::path::Path::new(container),
-            &copy.path,
-        ) {
+        let open_result = store::open_save_remnant_beside(container_path, &copy.path);
+        let mut file = match open_result {
             Ok(file) => file,
             Err(error) => {
                 println!("  Skipped: {error}");
