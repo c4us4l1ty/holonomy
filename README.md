@@ -257,6 +257,14 @@ Concurrent writers remain unsafe.
 Even a refused replacement may have staged an encrypted image; do not retry after a failed save
 without investigating the container and pad state.
 
+If you no longer know which cursor an image needs (the usual state after a crash),
+`holonomy recover /path/to/container` tries every cursor a save may legally have written (0 to 53)
+and reports the ones that open, with the same unkeyed digest `holonomy verify` prints. It is
+read-only: no write, no ratchet, no document bytes printed. Each cursor costs one read of the image
+and one key derivation, so a scan can take a while, and it stops at the first hit unless `--all` is
+passed. A hit proves the image opens with those credentials at that cursor; it does not prove the
+image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair.
+
 A save that dies between staging its image and renaming it leaves a `.holonomy-save-*` file next to
 the container. `holonomy remnants /path/to/container` lists those files with their sizes and unkeyed
 digests, needs no credentials, and decrypts nothing. It is a directory report, not a recovery

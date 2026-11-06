@@ -937,6 +937,84 @@ pub fn verify_candidate(
     Ok(digest)
 }
 
+/// A cursor that opened the image during a scan.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CursorHit {
+    /// The cursor that authenticated the directory and declared payload.
+    pub cursor: u64,
+    /// The same unkeyed encrypted-image digest `verify` prints.
+    pub digest: [u8; 32],
+}
+
+/// What a cursor scan found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CursorScan {
+    /// Every cursor that authenticated, in the order tried.
+    pub hits: Vec<CursorHit>,
+    /// How many cursors were tried before stopping.
+    pub attempts: u64,
+    /// The last refusal, kept because "nothing opened" is not a diagnosis on its own.
+    pub last_error: Option<String>,
+}
+
+/// Try every cursor a save may legitimately have written, and report the ones that open.
+///
+/// This is the recovery question a crash leaves behind -- *which* cursor does this image need? --
+/// answered without guessing and without writing. It is strictly read-only: no ratchet, no image
+/// write, no cursor accounting change. Each attempt unfolds the image with that cursor's pad
+/// window and runs a full unlock, so a scan costs one image read and one key derivation per cursor;
+/// the range is bounded by [`SAVES_BEFORE_DOMAIN_REUSE`] because saves refuse cursors beyond it.
+///
+/// What it cannot do is stated where it is used: a hit proves the image opens with these
+/// credentials at that cursor, not that the image is fresh, undamaged, the newest copy, or that no
+/// other copy exists.
+pub fn scan_cursors(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    template: &SaveContext<'_>,
+    stop_at_first: bool,
+) -> CursorScan {
+    scan_cursor_range(
+        file,
+        pad,
+        template,
+        0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE,
+        stop_at_first,
+    )
+}
+
+/// The scan itself, with the range named so tests do not have to read the whole legal range to
+/// prove the loop and the early stop. Production always passes the full legal range above.
+fn scan_cursor_range(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    template: &SaveContext<'_>,
+    range: std::ops::Range<u64>,
+    stop_at_first: bool,
+) -> CursorScan {
+    let mut scan = CursorScan::default();
+    for cursor in range {
+        let ctx = SaveContext {
+            passphrase: template.passphrase,
+            kappa_usb: template.kappa_usb,
+            topology: template.topology,
+            params: template.params,
+            cursor,
+        };
+        scan.attempts += 1;
+        match verify_candidate(file, pad, &ctx) {
+            Ok(digest) => {
+                scan.hits.push(CursorHit { cursor, digest });
+                if stop_at_first {
+                    break;
+                }
+            }
+            Err(error) => scan.last_error = Some(error),
+        }
+    }
+    scan
+}
+
 /// The `j`-th physical sector of save `cursor`.
 ///
 /// The permutation key is `BLAKE2b("HOLONOMY_V51_K_PERM" ‖ κ_USB)` — derived from the stick alone, so

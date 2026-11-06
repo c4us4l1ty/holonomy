@@ -93,6 +93,9 @@ fn main() -> ExitCode {
     if let Some(rest) = args.strip_prefix(&["remnants".to_string()][..]) {
         return remnants(rest);
     }
+    if let Some(rest) = args.strip_prefix(&["recover".to_string()][..]) {
+        return recover(rest);
+    }
 
     if args.is_empty() {
         banner();
@@ -488,6 +491,107 @@ fn verify(args: &[String]) -> ExitCode {
     }
 }
 
+/// `holonomy recover <path> [--all]`: find the cursor that opens a container, read-only.
+///
+/// A crash can leave a user holding an image and no record of which cursor wrote it. Guessing is
+/// unsafe; `verify` only tests the cursor the caller already believes. This verb tries every cursor
+/// a save may legally have written and reports the ones that authenticate. It writes nothing, does
+/// not ratchet, and prints no document bytes.
+fn recover(args: &[String]) -> ExitCode {
+    let mut scan_all = false;
+    let mut remaining: Vec<String> = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg == "--all" {
+            if scan_all {
+                return usage_error("--all may only be specified once");
+            }
+            scan_all = true;
+        } else {
+            remaining.push(arg.clone());
+        }
+    }
+    let flags = match parse_flags(&remaining) {
+        Ok(flags) => flags,
+        Err(error) => return usage_error(error),
+    };
+    if flags.cursor_explicit {
+        return usage_error(
+            "recover tries the cursor range itself; use verify to test one cursor you already trust",
+        );
+    }
+    let credentials = match credentials(&flags, false) {
+        Ok(credentials) => credentials,
+        Err(error) => return usage_error(error),
+    };
+    let mut file = match store::ContainerFile::open(std::path::Path::new(&flags.path), false) {
+        Ok(file) => file,
+        Err(error) => return usage_error(format!("opening {}: {error}", flags.path)),
+    };
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
+        Ok(pad) => pad,
+        Err(error) => return usage_error(error),
+    };
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    eprintln!(
+        "Trying cursors 0 to {} against {}. Read-only: nothing is written and the pad is not ratcheted.",
+        limit - 1,
+        flags.path
+    );
+    eprintln!(
+        "Each cursor costs one read of the image and one key derivation, so this can take a while."
+    );
+
+    let scan = store::scan_cursors(
+        &mut file,
+        pad.as_mut(),
+        &context(&credentials.passphrase, &credentials.kappa, 0),
+        !scan_all,
+    );
+
+    if scan.hits.is_empty() {
+        eprintln!(
+            "No cursor from 0 to {} authenticates this image.",
+            limit - 1
+        );
+        if let Some(error) = &scan.last_error {
+            eprintln!("Last refusal: {error}");
+        }
+        eprintln!(
+            "Check the passphrase, the root share, the device path, and whether the image is \
+             damaged or truncated. This does not prove the container is unrecoverable; it proves \
+             it did not open with these credentials in that range."
+        );
+        return ExitCode::FAILURE;
+    }
+
+    for hit in &scan.hits {
+        println!(
+            "Cursor {} authenticates. Unkeyed image digest {}",
+            hit.cursor,
+            hit.digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+    }
+    if !scan_all {
+        println!(
+            "Stopped at the first cursor that opened after {} attempt(s); pass --all to test the \
+             whole range for aliasing.",
+            scan.attempts
+        );
+    } else {
+        println!(
+            "Tried all {} cursors. More than one hit means this image, pad and credentials do not \
+             identify a single save; treat that as a fault, not a choice.",
+            scan.attempts
+        );
+    }
+    println!("Pad source: {}", pad.describe());
+    println!(
+        "Nothing was written or ratcheted. A hit proves the image opens at that cursor -- not \
+         that it is fresh, undamaged, the newest copy, or the only copy."
+    );
+    ExitCode::SUCCESS
+}
+
 /// `holonomy remnants <path>`: report staged images a crashed save left behind.
 ///
 /// Deliberately needs no credentials. A user who has just lost power to a machine should be able
@@ -610,6 +714,7 @@ fn help() {
          \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
          \x20   holonomy remnants <path>  report staged images a crashed save left behind (no credentials)\n\
+         \x20   holonomy recover <path> [--all]  find the cursor that opens a container, read-only\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -623,6 +728,9 @@ fn help() {
          repair the container or verify freshness, rollback history, or application document format.\n\
          Remnants lists `.holonomy-save-*` files next to a container and never decrypts them; it is a\n\
          directory report, not a recovery procedure.\n\
+         Recover tries every cursor a save may have written (0 to 53) and reports the ones that open,\n\
+         without writing or ratcheting. It is read-only diagnosis, not a repair: a hit does not make\n\
+         the image fresh, undamaged, or the newest copy.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
