@@ -555,6 +555,8 @@ fn remnants(args: &[String]) -> ExitCode {
     println!("would have written. Remnants hold encrypted document bytes and occupy full-container");
     println!("space; delete one only after deciding it is not the copy you need. Nothing above");
     println!("decrypts, repairs or ratchets anything.");
+    ExitCode::SUCCESS
+}
 
 /// `impl AsRef<str>` rather than `&str`: a `String` from `format!` and a `&'static str` literal are
 /// both call sites, and a plain `&str` forces every formatted one to be borrowed at the point of
