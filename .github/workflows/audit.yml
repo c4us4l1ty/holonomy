@@ -844,7 +844,7 @@ jobs:
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail
-          for test in partial_ratchet_requires_recovery_after_replacement ratchet_count_must_match_the_full_window save_reports_unestablished_pad_freshness the_store_layer_does_not_claim_pad_freshness a_second_save_is_refused_while_a_save_is_running a_caller_held_lock_lets_its_own_save_proceed a_concurrent_save_is_refused_without_requiring_recovery remnants_reports_staged_images_without_asking_for_credentials remnants_reports_an_empty_directory_plainly remnants_rejects_flags_and_extra_paths recover_finds_the_cursor_of_a_container_without_writing_it recover_reports_a_failure_instead_of_a_cursor recover_refuses_an_explicit_cursor session_refuses_image_changed_since_open_before_pad_access session_updates_baseline_after_each_successful_save save_refuses_changed_path_before_pad_access save_refuses_same_size_original_change_without_ratchet verify_reports_snapshot_digest_and_rejects_tampered_payload verify_checks_candidate_without_printing_or_modifying_plaintext preflight_rejections_do_not_touch_file_or_require_recovery standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing standalone_container_refuses_growth_before_replacement standalone_container_rejects_truncation external_document_sessions_use_production_kdf_profile create_rejects_invalid_options_without_creating_a_file failed_ratchet_requires_recovery_even_after_image_was_replaced external_store_api_is_available_without_the_binary staged_replacement_updates_file_and_open_handle staged_replacement_refuses_changed_path prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
+          for test in partial_ratchet_requires_recovery_after_replacement ratchet_count_must_match_the_full_window save_reports_unestablished_pad_freshness the_store_layer_does_not_claim_pad_freshness a_second_save_is_refused_while_a_save_is_running a_caller_held_lock_lets_its_own_save_proceed a_concurrent_save_is_refused_without_requiring_recovery remnants_reports_staged_images_without_asking_for_credentials remnants_reports_an_empty_directory_plainly remnants_rejects_flags_and_extra_paths recover_finds_the_cursor_of_a_container_without_writing_it recover_reports_a_failure_instead_of_a_cursor recover_refuses_an_explicit_cursor recover_tests_staged_copies_only_when_asked recover_reports_a_staged_copy_that_was_cut_short recover_reports_a_candidate_when_only_a_staged_copy_opens session_refuses_image_changed_since_open_before_pad_access session_updates_baseline_after_each_successful_save save_refuses_changed_path_before_pad_access save_refuses_same_size_original_change_without_ratchet verify_reports_snapshot_digest_and_rejects_tampered_payload verify_checks_candidate_without_printing_or_modifying_plaintext preflight_rejections_do_not_touch_file_or_require_recovery standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing standalone_container_refuses_growth_before_replacement standalone_container_rejects_truncation external_document_sessions_use_production_kdf_profile create_rejects_invalid_options_without_creating_a_file failed_ratchet_requires_recovery_even_after_image_was_replaced external_store_api_is_available_without_the_binary staged_replacement_updates_file_and_open_handle staged_replacement_refuses_changed_path prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
             # Annotations survive when the job log is not downloadable, and a failing gate is
             # useless if its reason cannot be seen from the run page.
             output=$(cargo test -p holonomy-cli "$test" -- --nocapture 2>&1) || {
@@ -855,3 +855,26 @@ jobs:
             echo "$output"
             echo "$output" | grep -qE 'test result: ok\. [1-9]' || { echo "::error::no test matched $test"; exit 1; }
           done
+
+  temporary-workspace-formatter:
+    name: Temporary workspace formatter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Format and push
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          cargo +stable fmt --all
+          cargo +stable fmt --manifest-path crates/holonomy-preview/Cargo.toml --all
+          cargo +stable fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add crates/holonomy-cli crates/holonomy-core crates/holonomy-crypto crates/holonomy-session crates/holonomy-ui crates/holonomy-preview crates/holonomy-wordcraft
+            git commit -m 'Format the staged copy scan'
+            git push origin HEAD:${{ github.ref_name }}
+          fi

@@ -497,17 +497,41 @@ fn verify(args: &[String]) -> ExitCode {
 /// unsafe; `verify` only tests the cursor the caller already believes. This verb tries every cursor
 /// a save may legally have written and reports the ones that authenticate. It writes nothing, does
 /// not ratchet, and prints no document bytes.
+/// Lowercase hex, so digests print the way `verify` prints them.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `holonomy recover <path> [--all] [--remnants]`: find the cursor an image needs, read-only.
+///
+/// The question a crash leaves behind is *which* cursor this image was folded with, and guessing it
+/// is how a recovery turns into a second incident. So every cursor a save may legally have written
+/// is tried, and the answer is a report. Nothing here writes: the container is opened read-only,
+/// the image is only read, and the pad is never ratcheted -- a scan that repaired anything would be
+/// making the decision the user has not made yet.
+///
+/// `--remnants` extends the same scan to the `.holonomy-save-*` copies a crashed save left behind,
+/// because after a crash the newest image may be the one that never finished its rename. Testing
+/// them is the whole claim: it does not rank them, rename one into place, or reconcile the pad.
 fn recover(args: &[String]) -> ExitCode {
     let mut scan_all = false;
+    let mut test_remnants = false;
     let mut remaining: Vec<String> = Vec::with_capacity(args.len());
     for arg in args {
-        if arg == "--all" {
-            if scan_all {
-                return usage_error("--all may only be specified once");
+        match arg.as_str() {
+            "--all" => {
+                if scan_all {
+                    return usage_error("--all may only be specified once");
+                }
+                scan_all = true;
             }
-            scan_all = true;
-        } else {
-            remaining.push(arg.clone());
+            "--remnants" => {
+                if test_remnants {
+                    return usage_error("--remnants may only be specified once");
+                }
+                test_remnants = true;
+            }
+            _ => remaining.push(arg.clone()),
         }
     }
     let flags = match parse_flags(&remaining) {
@@ -548,7 +572,29 @@ fn recover(args: &[String]) -> ExitCode {
         !scan_all,
     );
 
-    if scan.hits.is_empty() {
+    let opened = !scan.hits.is_empty();
+    if opened {
+        for hit in &scan.hits {
+            println!(
+                "Cursor {} authenticates. Unkeyed image digest {}",
+                hit.cursor,
+                hex(&hit.digest)
+            );
+        }
+        if scan_all {
+            println!(
+                "Tried all {} cursors. More than one hit means this image, pad and credentials do not \
+                 identify a single save; treat that as a fault, not a choice.",
+                scan.attempts
+            );
+        } else {
+            println!(
+                "Stopped at the first cursor that opened after {} attempt(s); pass --all to test the \
+                 whole range for aliasing.",
+                scan.attempts
+            );
+        }
+    } else {
         eprintln!(
             "No cursor from 0 to {} authenticates this image.",
             limit - 1
@@ -561,38 +607,109 @@ fn recover(args: &[String]) -> ExitCode {
              damaged or truncated. This does not prove the container is unrecoverable; it proves \
              it did not open with these credentials in that range."
         );
-        return ExitCode::FAILURE;
     }
 
-    for hit in &scan.hits {
-        println!(
-            "Cursor {} authenticates. Unkeyed image digest {}",
-            hit.cursor,
-            hit.digest
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-    }
-    if !scan_all {
-        println!(
-            "Stopped at the first cursor that opened after {} attempt(s); pass --all to test the \
-             whole range for aliasing.",
-            scan.attempts
-        );
-    } else {
-        println!(
-            "Tried all {} cursors. More than one hit means this image, pad and credentials do not \
-             identify a single save; treat that as a fault, not a choice.",
-            scan.attempts
-        );
-    }
+    let staged_opened = test_remnants
+        && report_staged_copies(&flags.path, pad.as_mut(), &credentials, scan_all, limit);
+
     println!("Pad source: {}", pad.describe());
     println!(
         "Nothing was written or ratcheted. A hit proves the image opens at that cursor -- not \
          that it is fresh, undamaged, the newest copy, or the only copy."
     );
-    ExitCode::SUCCESS
+    if opened {
+        return ExitCode::SUCCESS;
+    }
+    if staged_opened {
+        eprintln!(
+            "A staged copy opened while the container did not. That makes it a candidate for a \
+             manual repair, not a repair: this command chose nothing and wrote nothing."
+        );
+    }
+    ExitCode::FAILURE
+}
+
+/// Test every staged `.holonomy-save-*` copy beside `container` with the same credentials, window
+/// and read-only discipline, and report which cursors open each one.
+///
+/// Returns whether any copy opened, so the caller can say that a candidate exists without implying
+/// the container is fixed. A copy that is not a whole image is reported as cut short instead of
+/// failing the scan, and one that cannot be opened at all is reported and skipped: a short or
+/// unreadable leftover is a fact about a crash, not an error in the command.
+fn report_staged_copies(
+    container: &str,
+    pad: &mut dyn store::PadSource,
+    credentials: &Credentials,
+    scan_all: bool,
+    limit: u64,
+) -> bool {
+    let (staged, truncated) = match store::find_save_remnants(std::path::Path::new(container)) {
+        Ok(found) => found,
+        Err(error) => {
+            eprintln!("Staged copies beside {container} could not be listed: {error}");
+            return false;
+        }
+    };
+    if staged.is_empty() {
+        println!("No staged copies beside {container}.");
+        return false;
+    }
+    println!(
+        "Testing {} staged cop{} with the same credentials and pad window; nothing is ratcheted.",
+        staged.len(),
+        if staged.len() == 1 { "y" } else { "ies" }
+    );
+    let mut any_opened = false;
+    for copy in &staged {
+        println!("Staged copy {} ({} bytes)", copy.path.display(), copy.len);
+        if copy.len != CONTAINER_BYTES as u64 {
+            println!(
+                "  Not a whole image ({} of {} bytes), so its save was cut short and no cursor can \
+                 open it.",
+                copy.len, CONTAINER_BYTES
+            );
+            continue;
+        }
+        let mut file = match store::ContainerFile::open(&copy.path, false) {
+            Ok(file) => file,
+            Err(error) => {
+                println!("  Skipped: {error}");
+                continue;
+            }
+        };
+        let scan = store::scan_cursors(
+            &mut file,
+            pad,
+            &context(&credentials.passphrase, &credentials.kappa, 0),
+            !scan_all,
+        );
+        if scan.hits.is_empty() {
+            println!(
+                "  No cursor from 0 to {} authenticates this copy.",
+                limit - 1
+            );
+            continue;
+        }
+        for hit in &scan.hits {
+            println!(
+                "  Cursor {} authenticates. Unkeyed image digest {}",
+                hit.cursor,
+                hex(&hit.digest)
+            );
+        }
+        any_opened = true;
+    }
+    if truncated {
+        println!(
+            "Only the first {} staged copies were tested.",
+            staged.len()
+        );
+    }
+    println!(
+        "A staged copy that opens is a candidate, not a choice: this does not say which copy is \
+         newest, does not put one in place, and does not prove the copy is durable."
+    );
+    any_opened
 }
 
 /// `holonomy remnants <path>`: report staged images a crashed save left behind.
@@ -662,14 +779,18 @@ fn remnants(args: &[String]) -> ExitCode {
     println!();
     println!("    holonomy verify {} --cursor N", path.display());
     println!();
+    println!("To test the remnants as candidates without being told which cursor each needs:");
+    println!();
+    println!("    holonomy recover {} --remnants", path.display());
+    println!();
     println!(
-        "To test a remnant as a candidate, point the same verb at it with the cursor that save"
+        "That scan reports which cursor opens each copy and writes nothing, but it does not rank"
     );
     println!(
-        "would have written. Remnants hold encrypted document bytes and occupy full-container"
+        "the copies or rename one into place. Remnants hold encrypted document bytes and occupy"
     );
-    println!("space; delete one only after deciding it is not the copy you need. Nothing above");
-    println!("decrypts, repairs or ratchets anything.");
+    println!("full-container space; delete one only after deciding it is not the copy you need.");
+    println!("Nothing above decrypts, repairs or ratchets anything.");
     ExitCode::SUCCESS
 }
 
@@ -717,7 +838,7 @@ fn help() {
          \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
          \x20   holonomy remnants <path>  report staged images a crashed save left behind (no credentials)\n\
-         \x20   holonomy recover <path> [--all]  find the cursor that opens a container, read-only\n\
+         \x20   holonomy recover <path> [--all] [--remnants]  find the cursor that opens a container\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -732,8 +853,9 @@ fn help() {
          Remnants lists `.holonomy-save-*` files next to a container and never decrypts them; it is a\n\
          directory report, not a recovery procedure.\n\
          Recover tries every cursor a save may have written (0 to 53) and reports the ones that open,\n\
-         without writing or ratcheting. It is read-only diagnosis, not a repair: a hit does not make\n\
-         the image fresh, undamaged, or the newest copy.\n\
+         without writing or ratcheting. --remnants tests each `.holonomy-save-*` copy beside the\n\
+         container the same way. It is read-only diagnosis, not a repair: a hit does not make the\n\
+         image fresh, undamaged, the newest copy, or the only copy, and nothing is renamed into place.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\

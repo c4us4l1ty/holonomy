@@ -263,7 +263,11 @@ and reports the ones that open, with the same unkeyed digest `holonomy verify` p
 read-only: no write, no ratchet, no document bytes printed. Each cursor costs one read of the image
 and one key derivation, so a scan can take a while, and it stops at the first hit unless `--all` is
 passed. A hit proves the image opens with those credentials at that cursor; it does not prove the
-image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair.
+image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair. `--remnants`
+runs the same scan over each `.holonomy-save-*` copy beside the container, because after a crash the
+newest image may be the one that never finished its rename; it reports which cursor opens each copy,
+says plainly when a leftover is not a whole image, and still ranks nothing, renames nothing and
+repairs nothing.
 
 A save that dies between staging its image and renaming it leaves a `.holonomy-save-*` file next to
 the container. `holonomy remnants /path/to/container` lists those files with their sizes and unkeyed
