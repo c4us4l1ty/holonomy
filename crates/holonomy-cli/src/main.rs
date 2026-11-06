@@ -700,10 +700,7 @@ fn report_staged_copies(
         any_opened = true;
     }
     if truncated {
-        println!(
-            "Only the first {} staged copies were tested.",
-            staged.len()
-        );
+        println!("Only the first {} staged copies were tested.", staged.len());
     }
     println!(
         "A staged copy that opens is a candidate, not a choice: this does not say which copy is \

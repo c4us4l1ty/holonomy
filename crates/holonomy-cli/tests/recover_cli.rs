@@ -255,7 +255,10 @@ fn recover_reports_a_staged_copy_that_was_cut_short() {
         before,
         "reporting a torn leftover must not write the container"
     );
-    assert_eq!(std::fs::read(&staged).expect("read the leftover"), vec![0x5au8; 4096]);
+    assert_eq!(
+        std::fs::read(&staged).expect("read the leftover"),
+        vec![0x5au8; 4096]
+    );
 }
 
 /// A staged copy that opens while the container does not is a candidate, and the exit code says so.
