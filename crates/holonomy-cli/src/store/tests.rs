@@ -1461,7 +1461,11 @@ fn remnant_reporting_is_bounded() {
         .filter_map(|remnant| remnant.path.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), found.len(), "every remnant path must have a filename");
+    assert_eq!(
+        names.len(),
+        found.len(),
+        "every remnant path must have a filename"
+    );
     let expected: Vec<_> = (0..MAX_REMNANTS_REPORTED)
         .map(|index| format!(".holonomy-save-{index:03}"))
         .collect();
