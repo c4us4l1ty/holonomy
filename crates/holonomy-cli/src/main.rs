@@ -808,12 +808,7 @@ fn recover_copy(args: &[String]) -> ExitCode {
     };
     let requested_source = match std::fs::canonicalize(&remnant) {
         Ok(path) => path,
-        Err(error) => {
-            return failure(format!(
-                "resolving remnant {}: {error}",
-                remnant.display()
-            ));
-        }
+        Err(error) => return failure(format!("resolving remnant {}: {error}", remnant.display())),
     };
     let is_listed_remnant = staged.iter().any(|candidate| {
         std::fs::canonicalize(&candidate.path)
