@@ -1492,8 +1492,10 @@ fn explicit_remnant_membership_is_not_limited_by_the_report_cap() {
     assert_eq!(reported.len(), MAX_REMNANTS_REPORTED);
     assert!(!reported.iter().any(|entry| entry.path == beyond_report));
     assert!(is_save_remnant_beside(&container, &beyond_report).expect("direct check"));
-    assert!(!is_save_remnant_beside(&container, &dir.path().join("ordinary-copy"))
-        .expect("ordinary file check"));
+    let ordinary_copy = dir.path().join("ordinary-copy");
+    let ordinary_is_remnant =
+        is_save_remnant_beside(&container, &ordinary_copy).expect("ordinary file check");
+    assert!(!ordinary_is_remnant);
 }
 
 /// The reported digest is the same unkeyed fingerprint the store reports for a container image.
