@@ -258,7 +258,10 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         !text.contains("recover me"),
         "plaintext must not be printed: {text}"
     );
-    assert_eq!(std::fs::read(&recovered).expect("read recovered copy"), before);
+    assert_eq!(
+        std::fs::read(&recovered).expect("read recovered copy"),
+        before
+    );
     assert_eq!(std::fs::read(&path).expect("read original"), before);
     assert_eq!(std::fs::read(&staged).expect("read remnant"), staged_before);
 

@@ -772,16 +772,21 @@ jobs:
           set -o pipefail
           cargo clippy --manifest-path crates/holonomy-preview/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee preview-clippy.log
       - name: Check preview formatting
-        run: cargo fmt --manifest-path crates/holonomy-preview/Cargo.toml --all -- --check
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path crates/holonomy-preview/Cargo.toml --all -- --check 2>&1 | tee preview-fmt.log
       - name: Annotate preview failures
         if: failure()
         run: |
           set +e
-          for log in preview-test.log preview-build.log preview-clippy.log; do
+          for log in preview-test.log preview-build.log preview-clippy.log preview-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"
             done
+            if [ "$log" = preview-fmt.log ]; then
+              head -100 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
             grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
               echo "::error::$line"
             done
@@ -815,16 +820,21 @@ jobs:
           set -o pipefail
           cargo clippy --manifest-path crates/holonomy-wordcraft/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee bridge-clippy.log
       - name: Check bridge formatting
-        run: cargo fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all -- --check
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all -- --check 2>&1 | tee bridge-fmt.log
       - name: Annotate bridge failures
         if: failure()
         run: |
           set +e
-          for log in bridge-test.log bridge-clippy.log; do
+          for log in bridge-test.log bridge-clippy.log bridge-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"
             done
+            if [ "$log" = bridge-fmt.log ]; then
+              head -100 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
             grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
               echo "::error::$line"
             done
