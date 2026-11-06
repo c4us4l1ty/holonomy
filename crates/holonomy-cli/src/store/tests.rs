@@ -1520,7 +1520,10 @@ fn a_failed_scan_reports_the_last_refusal() {
     let mut file = ContainerFile::open(&path, false).expect("open");
     let scan = scan_cursor_range(&mut file, &mut source(), &ctx(&wrong, 0), 0..4, true);
     assert!(scan.hits.is_empty(), "{scan:?}");
-    assert_eq!(scan.attempts, 1);
+    assert_eq!(
+        scan.attempts, 4,
+        "the early stop ends a scan that found something; a scan that opens nothing walks the range"
+    );
     assert!(
         scan.last_error.is_some(),
         "the refusal must be kept for the report"
