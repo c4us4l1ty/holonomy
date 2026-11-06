@@ -61,7 +61,6 @@ const _: () = {
 /// crate wants that to be a visible act rather than an accidental one.
 pub struct Feistel22 {
     round_keys: [u32; ROUNDS as usize],
-    epoch: u64,
 }
 
 /// Expand a 32-byte permutation key into six round keys plus nothing else.
@@ -123,7 +122,7 @@ impl Feistel22 {
         for (i, k) in round_keys.iter_mut().enumerate() {
             *k ^= (e.rotate_left((i as u32) * 5)).wrapping_mul(0x9E37_79B9);
         }
-        Self { round_keys, epoch }
+        Self { round_keys }
     }
 
     /// The raw 6-round permutation on `[0, 2^22)`. A bijection, before cycle-walking.
