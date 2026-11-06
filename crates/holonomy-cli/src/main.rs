@@ -504,10 +504,7 @@ fn remnants(args: &[String]) -> ExitCode {
     };
 
     if found.is_empty() {
-        println!(
-            "No interrupted-save remnants next to {}.",
-            path.display()
-        );
+        println!("No interrupted-save remnants next to {}.", path.display());
         println!(
             "A remnant only appears when a save dies between staging its image and renaming it \
              into place."
@@ -527,7 +524,10 @@ fn remnants(args: &[String]) -> ExitCode {
         match store::path_digest(&remnant.path) {
             Ok(digest) => println!(
                 "    unkeyed digest {} (fingerprint only; not authenticity or durability)",
-                digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             ),
             Err(error) => println!("    could not read it for a digest: {error}"),
         }
@@ -546,13 +546,21 @@ fn remnants(args: &[String]) -> ExitCode {
     }
     println!();
     println!("A remnant is the encrypted image of a save that never finished its rename, so the");
-    println!("container itself is expected to hold the previous save -- unless another writer or an");
-    println!("earlier failure broke that expectation. Verify the container before trusting either:");
+    println!(
+        "container itself is expected to hold the previous save -- unless another writer or an"
+    );
+    println!(
+        "earlier failure broke that expectation. Verify the container before trusting either:"
+    );
     println!();
     println!("    holonomy verify {} --cursor N", path.display());
     println!();
-    println!("To test a remnant as a candidate, point the same verb at it with the cursor that save");
-    println!("would have written. Remnants hold encrypted document bytes and occupy full-container");
+    println!(
+        "To test a remnant as a candidate, point the same verb at it with the cursor that save"
+    );
+    println!(
+        "would have written. Remnants hold encrypted document bytes and occupy full-container"
+    );
     println!("space; delete one only after deciding it is not the copy you need. Nothing above");
     println!("decrypts, repairs or ratchets anything.");
     ExitCode::SUCCESS

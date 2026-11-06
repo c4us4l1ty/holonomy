@@ -1406,7 +1406,10 @@ fn remnants_are_reported_from_the_container_directory_only() {
         .collect();
     assert_eq!(
         names,
-        vec![".holonomy-save-aaa".to_string(), ".holonomy-save-bbb".to_string()],
+        vec![
+            ".holonomy-save-aaa".to_string(),
+            ".holonomy-save-bbb".to_string()
+        ],
         "sorted, and only the staged prefix"
     );
     assert_eq!(found[0].len, 4);
@@ -1425,8 +1428,7 @@ fn remnants_do_not_follow_symlinks() {
     std::fs::write(&container, b"placeholder").expect("container");
     let target = dir.path().join("elsewhere");
     std::fs::write(&target, b"not a remnant").expect("target");
-    std::os::unix::fs::symlink(&target, dir.path().join(".holonomy-save-link"))
-        .expect("symlink");
+    std::os::unix::fs::symlink(&target, dir.path().join(".holonomy-save-link")).expect("symlink");
     let (found, _) = find_save_remnants(&container).expect("scan");
     assert!(found.is_empty(), "{found:?}");
 }

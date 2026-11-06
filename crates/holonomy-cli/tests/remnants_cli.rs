@@ -25,10 +25,7 @@ fn remnants_reports_staged_images_without_asking_for_credentials() {
     let payload = b"staged encrypted image";
     std::fs::write(&staged, payload).expect("staged image");
 
-    let output = run(&[
-        std::ffi::OsStr::new("remnants"),
-        container.as_os_str(),
-    ]);
+    let output = run(&[std::ffi::OsStr::new("remnants"), container.as_os_str()]);
     assert!(
         output.status.success(),
         "remnants failed: {}",
@@ -59,10 +56,7 @@ fn remnants_reports_an_empty_directory_plainly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let container = dir.path().join("book");
     std::fs::write(&container, vec![0u8; 32]).expect("container");
-    let output = run(&[
-        std::ffi::OsStr::new("remnants"),
-        container.as_os_str(),
-    ]);
+    let output = run(&[std::ffi::OsStr::new("remnants"), container.as_os_str()]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("No interrupted-save remnants"), "{text}");
