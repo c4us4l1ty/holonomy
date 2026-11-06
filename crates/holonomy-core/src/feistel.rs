@@ -408,8 +408,8 @@ mod tests {
         );
         let f = Feistel22::new(&k(0x33), 3);
         let mut above = 0;
-        for j in 0..200_000u32 {
-            if f.permute(Feistel22::logical_sector(0, j)) >= (1 << 20) {
+        for logical in 0..200_000u64 {
+            if f.permute(logical) >= (1 << 20) {
                 above += 1;
             }
         }
