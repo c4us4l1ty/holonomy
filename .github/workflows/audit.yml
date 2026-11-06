@@ -805,26 +805,3 @@ jobs:
             echo "$output"
             echo "$output" | grep -qE 'test result: ok\. [1-9]' || { echo "::error::no test matched $test"; exit 1; }
           done
-
-  temporary-workspace-formatter:
-    name: Temporary workspace formatter
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-      - name: Format and push
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
-          cargo +stable fmt --all
-          cargo +stable fmt --manifest-path crates/holonomy-preview/Cargo.toml --all
-          cargo +stable fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all
-          if ! git diff --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add crates/holonomy-cli crates/holonomy-core crates/holonomy-crypto crates/holonomy-session crates/holonomy-ui crates/holonomy-preview crates/holonomy-wordcraft
-            git commit -m 'Format the read-only Wordcraft view'
-            git push origin HEAD:${{ github.ref_name }}
-          fi
