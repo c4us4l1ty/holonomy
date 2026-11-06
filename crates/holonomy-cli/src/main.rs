@@ -793,10 +793,9 @@ fn recover_copy(args: &[String]) -> ExitCode {
     // or the twenty-first real remnant could become impossible to copy just because it was omitted
     // from `recover --remnants`. On Unix, the helper uses O_NOFOLLOW and keeps the validated file
     // handle for the rest of recovery; other platforms still need equivalent no-follow support.
-    let mut source = match store::open_save_remnant_beside(
-        std::path::Path::new(&flags.path),
-        &remnant,
-    ) {
+    let container_path = std::path::Path::new(&flags.path);
+    let source_result = store::open_save_remnant_beside(container_path, &remnant);
+    let mut source = match source_result {
         Ok(file) => file,
         Err(error) => {
             return failure(format!(
