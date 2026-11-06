@@ -284,20 +284,12 @@ mod tests {
 
         assert!(services.printers.is_none(), "no printer discovery");
         assert!(services.print_native.is_none(), "no print submission");
-        assert_eq!(
-            (services.clipboard_text.expect("clipboard text"))(),
-            None
-        );
-        assert_eq!(
-            (services.clipboard_html.expect("clipboard html"))(),
-            None
-        );
+        assert_eq!((services.clipboard_text.expect("clipboard text"))(), None);
+        assert_eq!((services.clipboard_html.expect("clipboard html"))(), None);
         assert_eq!(services.clipboard_rtf.expect("clipboard rtf")(), None);
         assert!((services.clipboard_formats.expect("formats"))().is_empty());
         assert!(!(services.set_clipboard_html.expect("set html"))(
-            "<b>x</b>",
-            "x",
-            ""
+            "<b>x</b>", "x", ""
         ));
         assert_eq!(
             services.animations_enabled.expect("animations")(),
@@ -323,7 +315,10 @@ mod tests {
         ];
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
-        assert_eq!(outcome.dropped, 6, "keys, text, paste, copy, cut and clicks");
+        assert_eq!(
+            outcome.dropped, 6,
+            "keys, text, paste, copy, cut and clicks"
+        );
         assert_eq!(
             raw.events,
             vec![
@@ -359,10 +354,7 @@ mod tests {
     #[test]
     fn kappa_accepts_exactly_sixty_four_hex_characters() {
         assert_eq!(parse_kappa(&"11".repeat(32)).expect("valid"), [0x11u8; 32]);
-        assert_eq!(
-            parse_kappa(&"Aa".repeat(32)).expect("valid"),
-            [0xAAu8; 32]
-        );
+        assert_eq!(parse_kappa(&"Aa".repeat(32)).expect("valid"), [0xAAu8; 32]);
         assert!(parse_kappa(&"11".repeat(31)).is_err());
         assert!(parse_kappa(&"zz".repeat(32)).is_err());
         assert!(parse_kappa("0").is_err());

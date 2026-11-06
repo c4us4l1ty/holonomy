@@ -20,8 +20,8 @@ use std::process::ExitCode;
 
 use eframe::egui;
 use holonomy_preview::{
-    filter_events, open_read_only, prompt_credentials, read_only_services, ViewInput, READ_ONLY_LIMITS,
-    READ_ONLY_RULE,
+    filter_events, open_read_only, prompt_credentials, read_only_services, ViewInput,
+    READ_ONLY_LIMITS, READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
 use wordcraft_engine::Session;
@@ -81,7 +81,10 @@ impl eframe::App for ReadOnlyWindow {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        let ViewInput { quit_requested, dropped } = filter_events(raw);
+        let ViewInput {
+            quit_requested,
+            dropped,
+        } = filter_events(raw);
         self.dropped_events = self.dropped_events.saturating_add(dropped);
         if quit_requested {
             self.quit = true;
