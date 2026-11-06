@@ -706,6 +706,54 @@ jobs:
             echo "::error::read-only inspection changed the container"
             exit 1
           fi
+      - name: Decode a container through the read-only Wordcraft path
+        run: |
+          set -euo pipefail
+          binary="$PWD/crates/holonomy-preview/target/debug/holonomy-rich-view"
+          container="$RUNNER_TEMP/holonomy-demo-container"
+          log="$RUNNER_TEMP/holonomy-rich-inspect.log"
+          before=$(sha256sum "$container" | cut -d ' ' -f 1)
+          # Synthetic credentials only; the demo container is an empty document at cursor 0.
+          if ! expect .github/scripts/demo-gui-smoke.exp "$binary" "$container" rich-inspect > "$log" 2>&1; then
+            echo "::error::the read-only Wordcraft decode failed"
+            tail -30 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+          cat "$log"
+          for expected in "Wordcraft document decoded" "READ-ONLY VIEW" "no container byte was written"; do
+            if ! grep -qF "$expected" "$log"; then
+              echo "::error::read-only decode output is missing: $expected"
+              exit 1
+            fi
+          done
+          after=$(sha256sum "$container" | cut -d ' ' -f 1)
+          if [ "$before" != "$after" ]; then
+            echo "::error::the read-only decode changed the container"
+            exit 1
+          fi
+      - name: Smoke-test the read-only Wordcraft window
+        run: |
+          set -euo pipefail
+          binary="$PWD/crates/holonomy-preview/target/debug/holonomy-rich-view"
+          container="$RUNNER_TEMP/holonomy-demo-container"
+          log="$RUNNER_TEMP/holonomy-rich-window.log"
+          set +e
+          timeout 40s xvfb-run -a expect .github/scripts/demo-gui-smoke.exp "$binary" "$container" view > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+          # 124 means the window was still up when the timeout fired, which is what this proves:
+          # credentials were accepted, the container decoded and the renderer kept running.
+          if [ "$status" -ne 124 ]; then
+            echo "::error::the read-only Wordcraft window exited early (status $status)"
+            tail -30 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+          if ! grep -qF "READ-ONLY VIEW" "$log"; then
+            tail -40 "$log" | while IFS= read -r line; do echo "::error::log: $line"; done
+            echo "::error::the read-only window did not report its read-only rule"
+            exit 1
+          fi
       - name: Lint preview
         run: |
           set -o pipefail

@@ -8,6 +8,12 @@ set mode [lindex $argv 2]
 set share [string repeat "11" 32]
 if {$mode eq "inspect"} {
     spawn -noecho $binary --demo-inspect $container 0
+} elseif {$mode eq "rich-inspect"} {
+    # The read-only Wordcraft viewer, decoding without a window.
+    spawn -noecho $binary --inspect-only $container 0
+} elseif {$mode eq "view"} {
+    # The read-only Wordcraft viewer with a window.
+    spawn -noecho $binary --view $container 0
 } else {
     spawn -noecho $binary --demo-create $container
 }
@@ -16,7 +22,7 @@ expect {
     timeout { puts stderr "passphrase prompt timed out"; exit 1 }
     eof { puts stderr "application exited before passphrase prompt"; exit 1 }
 }
-if {$mode ne "inspect"} {
+if {$mode ne "inspect" && $mode ne "rich-inspect" && $mode ne "view"} {
     expect {
         "Confirm: " { send -- "ci demo password\r" }
         timeout { puts stderr "passphrase confirmation timed out"; exit 1 }
@@ -28,7 +34,7 @@ expect {
     timeout { puts stderr "root-share prompt timed out"; exit 1 }
     eof { puts stderr "application exited before root-share prompt"; exit 1 }
 }
-if {$mode ne "inspect"} {
+if {$mode ne "inspect" && $mode ne "rich-inspect" && $mode ne "view"} {
     expect {
         "Confirm: " { send -- "$share\r" }
         timeout { puts stderr "root-share confirmation timed out"; exit 1 }
