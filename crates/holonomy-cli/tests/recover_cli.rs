@@ -223,6 +223,98 @@ fn recover_tests_staged_copies_only_when_asked() {
     );
 }
 
+/// A verified staged candidate can be copied to a new path without changing either source.
+#[test]
+fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, before) = saved_container(&dir, "1");
+    let staged = dir.path().join(".holonomy-save-recovery-candidate");
+    std::fs::copy(&path, &staged).expect("stage a copy");
+    let staged_before = std::fs::read(&staged).expect("read staged copy");
+    let recovered = dir.path().join("recovered-container");
+
+    let output = Command::new(binary())
+        .arg("recover-copy")
+        .arg(&path)
+        .args(["--remnant"])
+        .arg(&staged)
+        .args(["--cursor", "1", "--output"])
+        .arg(&recovered)
+        .args(credentials())
+        .output()
+        .expect("recover-copy");
+    assert!(
+        output.status.success(),
+        "recover-copy failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Verified staged image copied"), "{text}");
+    assert!(
+        text.contains("original container and staged image were not modified"),
+        "{text}"
+    );
+    assert!(!text.contains("recover me"), "plaintext must not be printed: {text}");
+    assert_eq!(std::fs::read(&recovered).expect("read recovered copy"), before);
+    assert_eq!(std::fs::read(&path).expect("read original"), before);
+    assert_eq!(std::fs::read(&staged).expect("read remnant"), staged_before);
+
+    let verify = Command::new(binary())
+        .arg("verify")
+        .arg(&recovered)
+        .args(["--cursor", "1"])
+        .args(credentials())
+        .output()
+        .expect("verify copied image");
+    assert!(
+        verify.status.success(),
+        "the copy must remain independently openable: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let original_destination = b"never overwrite me";
+    std::fs::write(&dir.path().join("already-exists"), original_destination)
+        .expect("create existing destination");
+    let refused = Command::new(binary())
+        .arg("recover-copy")
+        .arg(&path)
+        .args(["--remnant"])
+        .arg(&staged)
+        .args(["--cursor", "1", "--output"])
+        .arg(dir.path().join("already-exists"))
+        .args(credentials())
+        .output()
+        .expect("recover-copy to existing destination");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("refusing to overwrite existing destination")
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("already-exists"))
+            .expect("read existing destination"),
+        original_destination
+    );
+
+    let unrelated = dir.path().join("ordinary-copy");
+    std::fs::copy(&path, &unrelated).expect("create an unlisted copy");
+    let refused = Command::new(binary())
+        .arg("recover-copy")
+        .arg(&path)
+        .args(["--remnant"])
+        .arg(&unrelated)
+        .args(["--cursor", "1", "--output"])
+        .arg(dir.path().join("must-not-exist"))
+        .args(credentials())
+        .output()
+        .expect("recover-copy from an unlisted image");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("run recover --remnants first")
+    );
+    assert!(!dir.path().join("must-not-exist").exists());
+}
+
 /// A leftover that is not a whole image is reported as cut short, not treated as an error.
 #[test]
 fn recover_reports_a_staged_copy_that_was_cut_short() {

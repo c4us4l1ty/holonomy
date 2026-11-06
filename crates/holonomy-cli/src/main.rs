@@ -1,7 +1,8 @@
 //! `holonomy` — the binary.
 //!
 //! Report the build, verify this machine, and act on containers: `provision`, `save`, `open`,
-//! `verify` and `remnants`. The editor front end, once it links, is started from here.
+//! `verify`, `remnants`, `recover` and `recover-copy`. The editor front end, once it links, is
+//! started from here.
 //!
 //! # Why `--check` lives here and not in `holonomy-ui`
 //!
@@ -11,6 +12,7 @@
 //! likely to need it. So the binary depends on the core crates plus `holonomy-session`, and the
 //! editor becomes a front end that this binary starts once its graph builds.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use zeroize::Zeroizing;
@@ -95,6 +97,9 @@ fn main() -> ExitCode {
     }
     if let Some(rest) = args.strip_prefix(&["recover".to_string()][..]) {
         return recover(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["recover-copy".to_string()][..]) {
+        return recover_copy(rest);
     }
 
     if args.is_empty() {
@@ -709,6 +714,219 @@ fn report_staged_copies(
     any_opened
 }
 
+/// Copy a verified staged image to a new path without replacing either source.
+///
+/// This is a limited recovery aid, not a repair: the explicit cursor must authenticate the staged
+/// image, the destination must not exist, and neither the original container nor the staged image
+/// is modified. It does not reconcile or prove the pad's ratchet history.
+fn recover_copy(args: &[String]) -> ExitCode {
+    let mut remnant = None;
+    let mut output = None;
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--remnant" | "--output" => {
+                let flag = args[i].as_str();
+                let Some(value) = args.get(i + 1).filter(|value| !value.starts_with("--")) else {
+                    return usage_error(format!("{flag} needs one path"));
+                };
+                let slot = if flag == "--remnant" {
+                    &mut remnant
+                } else {
+                    &mut output
+                };
+                if slot.replace(value.clone()).is_some() {
+                    return usage_error(format!("{flag} may only be specified once"));
+                }
+                i += 2;
+            }
+            _ => {
+                remaining.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    let remnant = match remnant {
+        Some(path) => std::path::PathBuf::from(path),
+        None => return usage_error("recover-copy requires --remnant PATH"),
+    };
+    let output = match output {
+        Some(path) => std::path::PathBuf::from(path),
+        None => return usage_error("recover-copy requires --output NEW_PATH"),
+    };
+    let flags = match parse_flags(&remaining) {
+        Ok(flags) => flags,
+        Err(error) => return usage_error(error),
+    };
+    if !flags.cursor_explicit {
+        return usage_error(
+            "recover-copy requires --cursor N from a successful recover scan",
+        );
+    }
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    if flags.cursor >= limit {
+        return usage_error(format!("--cursor must be between 0 and {}", limit - 1));
+    }
+
+    // Do these filesystem refusals before prompting or reading pad material. The final
+    // persist_noclobber below closes the race with a destination created after this check.
+    match std::fs::symlink_metadata(&output) {
+        Ok(_) => {
+            return failure(format!(
+                "refusing to overwrite existing destination {}",
+                output.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return failure(format!(
+                "checking destination {}: {error}",
+                output.display()
+            ));
+        }
+    }
+    let source_metadata = match std::fs::symlink_metadata(&remnant) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return failure("the selected remnant is not a regular file"),
+        Err(error) => {
+            return failure(format!(
+                "checking remnant {}: {error}",
+                remnant.display()
+            ));
+        }
+    };
+    if source_metadata.len() != CONTAINER_BYTES as u64 {
+        return failure(format!(
+            "the selected remnant is {} bytes, not a whole {}-byte container image",
+            source_metadata.len(), CONTAINER_BYTES
+        ));
+    }
+
+    let staged = match store::find_save_remnants(std::path::Path::new(&flags.path)) {
+        Ok((staged, _)) => staged,
+        Err(error) => {
+            return failure(format!(
+                "listing staged images beside {}: {error}",
+                flags.path
+            ));
+        }
+    };
+    let requested_source = match std::fs::canonicalize(&remnant) {
+        Ok(path) => path,
+        Err(error) => {
+            return failure(format!(
+                "resolving remnant {}: {error}",
+                remnant.display()
+            ));
+        }
+    };
+    let is_listed_remnant = staged.iter().any(|candidate| {
+        std::fs::canonicalize(&candidate.path)
+            .is_ok_and(|candidate_path| candidate_path == requested_source)
+    });
+    if !is_listed_remnant {
+        return failure(format!(
+            "{} is not one of the staged .holonomy-save-* files beside {}; run recover --remnants first",
+            remnant.display(), flags.path
+        ));
+    }
+
+    let credentials = match credentials(&flags, false) {
+        Ok(credentials) => credentials,
+        Err(error) => return usage_error(error),
+    };
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
+        Ok(pad) => pad,
+        Err(error) => return usage_error(error),
+    };
+    let mut source = match store::ContainerFile::open(&remnant, false) {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "opening staged image {}: {error}",
+                remnant.display()
+            ));
+        }
+    };
+    let context = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
+    let digest = match store::verify_candidate(&mut source, pad.as_mut(), &context) {
+        Ok(digest) => digest,
+        Err(error) => {
+            return failure(format!(
+                "staged image did not authenticate at cursor {}: {error}",
+                flags.cursor
+            ));
+        }
+    };
+    let image = match source.read_image() {
+        Ok(image) => image,
+        Err(error) => {
+            return failure(format!(
+                "reading the verified staged image again: {error}"
+            ));
+        }
+    };
+    if holonomy_session::seal::image_digest(&image) != digest {
+        return failure("the staged image changed after verification; no copy was made");
+    }
+
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut staged_output = match tempfile::Builder::new()
+        .prefix(".holonomy-save-recovery-")
+        .tempfile_in(parent)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "staging recovered copy beside {}: {error}",
+                output.display()
+            ));
+        }
+    };
+    if let Err(error) = staged_output.as_file_mut().write_all(&image) {
+        return failure(format!("writing staged recovered copy: {error}"));
+    }
+    if let Err(error) = staged_output.as_file().sync_all() {
+        return failure(format!("syncing staged recovered copy: {error}"));
+    }
+    let copied_file = match staged_output.persist_noclobber(&output) {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "installing recovered copy at {} without overwriting: {}",
+                output.display(),
+                error.error
+            ));
+        }
+    };
+    drop(copied_file);
+
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        return failure(format!(
+            "recovered copy was created at {}, but syncing its directory failed; durability is uncertain: {error}",
+            output.display()
+        ));
+    }
+
+    println!("Verified staged image copied to {}", output.display());
+    println!("Authenticated cursor: {}", flags.cursor);
+    println!("Unkeyed image digest: {}", hex(&digest));
+    println!("Pad source: {}", pad.describe());
+    println!(
+        "The original container and staged image were not modified; the pad was not written or ratcheted."
+    );
+    println!(
+        "This copy does not establish which image is newest, pad freshness, ratchet history, or complete recovery."
+    );
+    ExitCode::SUCCESS
+}
+
 /// `holonomy remnants <path>`: report staged images a crashed save left behind.
 ///
 /// Deliberately needs no credentials. A user who has just lost power to a machine should be able
@@ -836,6 +1054,7 @@ fn help() {
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
          \x20   holonomy remnants <path>  report staged images a crashed save left behind (no credentials)\n\
          \x20   holonomy recover <path> [--all] [--remnants]  find the cursor that opens a container\n\
+         \x20   holonomy recover-copy <path> --remnant R --cursor N --output NEW  copy a verified staged image\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -853,7 +1072,10 @@ fn help() {
          without writing or ratcheting. --remnants tests each `.holonomy-save-*` copy beside the\n\
          container the same way. It is read-only diagnosis, not a repair: a hit does not make the\n\
          image fresh, undamaged, the newest copy, or the only copy, and nothing is renamed into place.\n\
-         \n\
+         Recover-copy requires an explicit cursor and one listed staged remnant. It authenticates that\n\
+         image, then writes a separate new copy only if the destination does not exist. The original\n\
+         and remnant are left unchanged; the pad is not written. This does not choose the newest image,\n\
+         reconcile a ratchet, or complete recovery.\n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
          instead, which makes the container a demo -- anyone holding `--kappa` can recompute the\n\

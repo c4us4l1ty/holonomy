@@ -36,7 +36,7 @@ those documents are historical and code and current CI results govern implementa
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. A read-only Wordcraft window (`holonomy-rich-view`) renders a container document with all persistence hooks refusing and all editing input dropped. The unencrypted scratch preview remains unconnected to containers. Nothing here edits a rich container document yet. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. A crashed save's staged file can be listed with `holonomy remnants`, and an image whose cursor is unknown can be probed read-only with `holonomy recover`. Neither repairs anything. This is not a complete recovery protocol; automated recovery, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. `holonomy remnants` lists staged files; `holonomy recover` scans cursors; `holonomy recover-copy` can copy one authenticated remnant to a new path without replacing either source. This is not a complete recovery protocol: it does not choose the newest copy, repair the original, or reconcile pad state. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
@@ -265,9 +265,18 @@ and one key derivation, so a scan can take a while, and it stops at the first hi
 passed. A hit proves the image opens with those credentials at that cursor; it does not prove the
 image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair. `--remnants`
 runs the same scan over each `.holonomy-save-*` copy beside the container, because after a crash the
-newest image may be the one that never finished its rename; it reports which cursor opens each copy,
-says plainly when a leftover is not a whole image, and still ranks nothing, renames nothing and
-repairs nothing.
+newest image may be the one that never finished its rename; it reports which cursor opens each copy
+and says plainly when a leftover is not a whole image. It still ranks nothing and changes nothing.
+
+If a staged copy authenticates and you want to preserve it without replacing the current file, use
+`holonomy recover-copy /path/to/container --remnant /path/to/.holonomy-save-… --cursor N --output /path/to/new-copy`.
+Choose the remnant and cursor reported by `recover --remnants`. The command re-authenticates that
+specific candidate and creates a separate copy only when the destination does not already exist.
+It prints the unkeyed image digest for comparison; that digest is not proof of authenticity or
+durability and can correlate identical copies. The source remnant and current container are left
+unchanged; the pad is not written or ratcheted. This preserves a candidate; it does not promote it,
+identify the newest image, reconcile pad history, or complete recovery. Do not overwrite or delete
+the originals while deciding what to do.
 
 A save that dies between staging its image and renaming it leaves a `.holonomy-save-*` file next to
 the container. `holonomy remnants /path/to/container` lists those files with their sizes and unkeyed
