@@ -1,7 +1,7 @@
 //! `holonomy` — the binary.
 //!
-//! Three jobs and no more: report the build, verify this machine, and (once the editor front end
-//! links) hand over to it.
+//! Report the build, verify this machine, and act on containers: `provision`, `save`, `open`,
+//! `verify` and `remnants`. The editor front end, once it links, is started from here.
 //!
 //! # Why `--check` lives here and not in `holonomy-ui`
 //!
