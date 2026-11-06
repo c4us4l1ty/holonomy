@@ -787,12 +787,7 @@ fn recover_copy(args: &[String]) -> ExitCode {
     let source_metadata = match std::fs::symlink_metadata(&remnant) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => return failure("the selected remnant is not a regular file"),
-        Err(error) => {
-            return failure(format!(
-                "checking remnant {}: {error}",
-                remnant.display()
-            ));
-        }
+        Err(error) => return failure(format!("checking remnant {}: {error}", remnant.display())),
     };
     if source_metadata.len() != CONTAINER_BYTES as u64 {
         return failure(format!(
