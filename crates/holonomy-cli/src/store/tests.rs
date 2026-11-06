@@ -1478,7 +1478,8 @@ fn remnant_association_checks_file_identity_and_full_old_image_digest() {
     let dir = tempfile::tempdir().expect("tempdir");
     let container = dir.path().join("book");
     let file = File::create(&container).expect("create sparse container");
-    file.set_len(CONTAINER_BYTES as u64).expect("size container");
+    file.set_len(CONTAINER_BYTES as u64)
+        .expect("size container");
     drop(file);
     let metadata = std::fs::metadata(&container).expect("container metadata");
     let origin = current_container_origin(&container).expect("current container origin");
