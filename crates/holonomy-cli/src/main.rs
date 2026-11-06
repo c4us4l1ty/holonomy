@@ -850,11 +850,7 @@ fn recover_copy(args: &[String]) -> ExitCode {
     };
     let image = match source.read_image() {
         Ok(image) => image,
-        Err(error) => {
-            return failure(format!(
-                "reading the verified staged image again: {error}"
-            ));
-        }
+        Err(error) => return failure(format!("reading the verified staged image again: {error}")),
     };
     if holonomy_session::seal::image_digest(&image) != digest {
         return failure("the staged image changed after verification; no copy was made");

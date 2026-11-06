@@ -46,7 +46,7 @@ jobs:
       - name: Report formatting differences
         if: failure()
         run: |
-          head -60 rustfmt.log | while IFS= read -r line; do
+          head -160 rustfmt.log | while IFS= read -r line; do
             echo "::error::$line"
           done
 
