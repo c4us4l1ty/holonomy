@@ -1162,7 +1162,7 @@ fn help() {
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
          \x20   holonomy remnants <path>  list regular files matching staged-image names (no credentials)\n\
          \x20   holonomy recover <path> [--all] [--remnants]  find the cursor that opens a container\n\
-         \x20   holonomy recover-copy <path> --remnant R --cursor N --output NEW [--allow-unbound]  copy a verified staged image\n\
+         \x20   holonomy recover-copy <path> --remnant R --cursor N --output NEW [--allow-unbound]  copy a candidate image\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -1177,8 +1177,8 @@ fn help() {
          Remnants lists `.holonomy-save-*` files next to a container and never decrypts them; it is a\n\
          directory report, not a recovery procedure.\n\
          Recover tries every cursor a save may have written (0 to 53) and reports the ones that open,\n\
-         without writing or ratcheting. --remnants tests each `.holonomy-save-*` copy beside the\n\
-         container the same way. It is read-only diagnosis, not a repair: a hit does not make the\n\
+         without writing or ratcheting. --remnants tests up to 20 regular matching files beside the\n\
+         container in filename order. It is read-only diagnosis, not a repair: a hit does not make the\n\
          image fresh, undamaged, the newest copy, or the only copy, and nothing is renamed into place.\n\
          Recover-copy requires an explicit cursor and a regular `.holonomy-save-*` sibling. New\n\
          staged names include the original Unix device/inode and old image digest; this detects many\n\
