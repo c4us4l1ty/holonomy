@@ -94,15 +94,12 @@ pub const SECTOR_BYTES: usize = 4_096;
 
 /// How many consecutive saves read mutually disjoint pad sectors.
 ///
-/// `ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE = 54`. Epochs `0..=53` consume
-/// `[0, 1_769_472)` and are pairwise disjoint; epoch 54 is the first that wraps past the end of
-/// Zone B and begins reusing pad material.
-///
-/// This is the number the fine print is about. It is a *budget*, not a guarantee: after 54 saves
-/// without a ratchet, pad reuse is real, and the confidential payload is protected from then on
-/// by the post-quantum layer (`ML-KEM-1024` + `X25519` + `XChaCha20-Poly1305` with `CMT-4`
-/// commitment) rather than by the pad. [`crate::feistel`] and the USB crate both read this
-/// constant so the statement cannot drift from the code.
+/// `ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE = 54`. Cursors `0..=53` produce 54 pairwise-disjoint
+/// windows spanning `[0, 1_769_472)` in logical-index space. Cursor 54 cannot fit a further
+/// complete 32,768-sector window in Zone B; checked planning APIs reject it rather than silently
+/// reusing sectors. This is a geometry-derived no-reuse budget, not proof that a physical device
+/// or its snapshots have not reused data. [`crate::feistel`] and the USB crate both read this
+/// constant so the limit cannot drift from the code.
 pub const SAVES_BEFORE_DOMAIN_REUSE: u64 = (ZONE_B_SECTORS / PAD_SECTORS_PER_SAVE) as u64;
 
 /// Bytes of the container that are *not* under the pad: none.

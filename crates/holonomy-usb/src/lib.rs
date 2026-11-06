@@ -19,8 +19,9 @@
 //!
 //! # The honest statement about the pad
 //!
-//! See [`holonomy_crypto::usb_pad`]. This crate reads and ratchets; it does not claim that the pad
-//! is an information-theoretic one-time pad past save 54.
+//! See [`holonomy_crypto::usb_pad`]. This crate reads and ratchets; it does not prove device
+//! freshness, erase old flash translations, reconcile external snapshots, or establish an
+//! information-theoretic one-time-pad guarantee.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]

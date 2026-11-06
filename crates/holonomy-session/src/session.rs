@@ -46,6 +46,13 @@ pub enum SessionError {
     },
     /// A save was requested with no stratum unlocked.
     Locked,
+    /// A pad plan cursor is outside the geometric no-reuse window.
+    InvalidPlanCursor {
+        /// Cursor requested by the caller.
+        cursor: u64,
+        /// First rejected cursor (exclusive upper bound for valid cursors).
+        limit: u64,
+    },
 }
 
 impl From<PadError> for SessionError {
@@ -76,6 +83,10 @@ impl std::fmt::Display for SessionError {
                 "ratchet reported {got} of {PAD_SECTORS_PER_SAVE} sectors; the pad was not refreshed"
             ),
             Self::Locked => f.write_str("no stratum is unlocked"),
+            Self::InvalidPlanCursor { cursor, limit } => write!(
+                f,
+                "pad plan cursor {cursor} is outside the valid no-reuse range 0..{limit}"
+            ),
         }
     }
 }
@@ -230,12 +241,20 @@ impl Session {
 
     /// The physical sector indices this save would read, in read order.
     ///
-    /// Exposed so the check binary and the tests can verify disjointness without a device.
-    pub fn plan_for_save(&self, cursor: u64) -> Vec<u32> {
+    /// Exposed so the check binary and the tests can verify disjointness without a device. Cursors
+    /// outside the no-reuse budget are refused; callers cannot use this helper to silently wrap the
+    /// mapping and reconsume spent sectors.
+    pub fn plan_for_save(&self, cursor: u64) -> Result<Vec<u32>, SessionError> {
+        if cursor >= SAVES_BEFORE_DOMAIN_REUSE {
+            return Err(SessionError::InvalidPlanCursor {
+                cursor,
+                limit: SAVES_BEFORE_DOMAIN_REUSE,
+            });
+        }
         let f = Feistel22::provisioned(&self.k_perm);
-        (0..PAD_SECTORS_PER_SAVE)
+        Ok((0..PAD_SECTORS_PER_SAVE)
             .map(|j| f.permute(Feistel22::logical_sector(cursor, j)))
-            .collect()
+            .collect())
     }
 
     /// Drop the stratum and zero the pad accounting. The reaper calls this after wiping.
@@ -394,14 +413,11 @@ mod tests {
 
     #[test]
     fn the_plan_never_repeats_a_sector_within_a_save() {
-        // Cursors that are actually reachable. `permute` reduces its input modulo the 2^22 domain
-        // while the logical index keeps growing, so a cursor far past the budget (1,000, say) is
-        // *not* required to stay injective — by then the pad has wrapped 18 times and the caller
-        // is in the "post-quantum only" regime the status line reports. Asserting disjointness
-        // there would be asserting something the design does not claim.
+        // Only cursors inside the geometric no-reuse budget are valid. `plan_for_save` rejects
+        // later cursors rather than reducing them modulo a domain and aliasing an earlier window.
         let s = unlocked_session(PadMode::ReadWrite);
         for cursor in 0..SAVES_BEFORE_DOMAIN_REUSE {
-            let plan = s.plan_for_save(cursor);
+            let plan = s.plan_for_save(cursor).expect("cursor is within the budget");
             let mut sorted = plan.clone();
             sorted.sort_unstable();
             sorted.dedup();
@@ -411,27 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn beyond_the_budget_the_pad_wraps_and_that_is_reported() {
-        // What happens past the window, stated rather than left to be discovered: the window index
-        // exceeds the permutation domain, so it wraps onto an earlier window. That is precisely why
-        // saves past 54 are refused on a device that cannot ratchet.
-        //
-        // The wrap point is arithmetic, not policy: the permutation domain is 2^22 and a save
-        // consumes 2^15 sectors, so cursor 2^22/2^15 = 128 is the first cursor whose logical
-        // indices reduce onto cursor 0's. Asserting it pins the number rather than describing it.
+    fn plans_past_the_geometric_budget_are_refused() {
         let s = unlocked_session(PadMode::ReadOnly);
-        let domain_cursor = holonomy_core::feistel::DOMAIN as u64 / PAD_SECTORS_PER_SAVE as u64;
-        assert_eq!(domain_cursor, 128);
-        assert_eq!(
-            s.plan_for_save(0),
-            s.plan_for_save(domain_cursor),
-            "cursor 128 must alias cursor 0, which is exactly why 128 > the 54-save budget matters"
-        );
-        // And well inside the budget there is no aliasing, which is the property that is claimed.
-        assert_ne!(
-            s.plan_for_save(0),
-            s.plan_for_save(SAVES_BEFORE_DOMAIN_REUSE - 1)
-        );
+        for cursor in [SAVES_BEFORE_DOMAIN_REUSE, 128, u64::MAX] {
+            assert!(matches!(
+                s.plan_for_save(cursor),
+                Err(SessionError::InvalidPlanCursor { cursor: rejected, limit })
+                    if rejected == cursor && limit == SAVES_BEFORE_DOMAIN_REUSE
+            ));
+        }
+        let first = s.plan_for_save(0).expect("first save is within budget");
+        let last = s
+            .plan_for_save(SAVES_BEFORE_DOMAIN_REUSE - 1)
+            .expect("last save is within budget");
+        assert_ne!(first, last);
     }
 
     #[test]
@@ -439,7 +448,10 @@ mod tests {
         let s = unlocked_session(PadMode::ReadWrite);
         let mut seen = std::collections::HashSet::new();
         for cursor in 0..SAVES_BEFORE_DOMAIN_REUSE {
-            for lba in s.plan_for_save(cursor) {
+            for lba in s
+                .plan_for_save(cursor)
+                .expect("cursor is within the budget")
+            {
                 assert!(seen.insert(lba), "overlap at cursor {cursor}");
             }
         }

@@ -44,7 +44,7 @@ fn key(seed: u8) -> [u8; 32] {
 fn full_history(k_perm: &[u8; 32]) -> HashSet<u32> {
     let mut seen = HashSet::with_capacity(54 * PAD_SECTORS_PER_SAVE as usize);
     for cursor in 0..SAVES_BEFORE_DOMAIN_REUSE {
-        let plan = PadPlan::for_save(k_perm, cursor);
+        let plan = PadPlan::for_save(k_perm, cursor).expect("history cursor is within budget");
         for &lba in plan.lbas() {
             assert!(
                 seen.insert(lba),
@@ -138,11 +138,11 @@ fn plans_are_deterministic_for_a_key_and_reproducible() {
     // A save that crashed mid-read has to be able to rebuild the same plan, so the mapping may not
     // depend on anything but (k_perm, cursor).
     let k = key(0x55);
-    let a = PadPlan::for_save(&k, 7);
-    let b = PadPlan::for_save(&k, 7);
+    let a = PadPlan::for_save(&k, 7).expect("cursor is within budget");
+    let b = PadPlan::for_save(&k, 7).expect("cursor is within budget");
     assert_eq!(a.lbas(), b.lbas());
     // And a different cursor gives a different sector set, or the cursor is not doing anything.
-    let c = PadPlan::for_save(&k, 8);
+    let c = PadPlan::for_save(&k, 8).expect("cursor is within budget");
     assert_ne!(a.lbas(), c.lbas());
 }
 
@@ -151,7 +151,7 @@ fn each_single_save_is_collision_free_and_covers_its_own_window() {
     // The per-save half. A plan with a duplicate would read one sector twice and leave another
     // unread, which weakens the fold without failing anything visible.
     for cursor in [0u64, 1, 26, 53] {
-        let plan = PadPlan::for_save(&key(0x66), cursor);
+        let plan = PadPlan::for_save(&key(0x66), cursor).expect("cursor is within budget");
         assert_eq!(plan.len(), PAD_SECTORS_PER_SAVE as usize);
         assert!(
             plan.is_collision_free(),

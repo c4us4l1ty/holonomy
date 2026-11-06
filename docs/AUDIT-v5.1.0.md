@@ -35,7 +35,7 @@ symbol checks in §1 — is marked as unverified rather than asserted.
 
 ```text
 crates/
-  holonomy-core      geometry · capsule · FPE-22 · duress · stats · budgets   (~1,400 lines)
+  holonomy-core      geometry · capsule · sector permutation · duress · stats · budgets   (~1,400 lines)
   holonomy-crypto    KDF · CMT-4 AEAD · PQ envelope · pad budget · locking    (~1,300 lines)
   holonomy-usb       device geometry · O_DIRECT I/O · pad plan · ratchet      (~800 lines)
   holonomy-runtime   zero-I/O reaper · secret arenas                          (~700 lines)
@@ -228,16 +228,26 @@ which is why the count stays 2,047 rather than 2,048.
 | requirement | implementation | proof |
 | :--- | :--- | :--- |
 | 11-bit halves, `2^22 = 4,194,304 ≥ 1,782,579` | `HALF_BITS = 11`, `DOMAIN = 1 << 22` | `const _: () = assert!(DOMAIN >= ZONE_B_SECTORS)` |
-| cycle-walked so 100% of Zone B is reachable | `permute()` walks until `< ZONE_B_SECTORS` | `full_zone_b_is_reachable` asserts >35% of samples land above `2^20`, which `FPE-20` could never produce |
-| bijective | 6-round balanced Feistel | `block_permutation_is_injective_across_a_large_slice` — 1,048,576 distinct outputs |
-| 0.000% overlap across 54 saves | monotonic cursor × 32,768, unwrapped | `fifty_four_saves_never_touch_the_same_sector` over **four independent keys**: 1,769,472 distinct LBAs each |
+| every Zone B sector is reachable from the valid input set | Feistel block permutation plus cycle-walking from inputs inside Zone B | the mathematical argument is the Feistel bijection and cycle-walk restriction; the test checks broad reach, not exhaustive coverage |
+| block permutation is bijective | six-round balanced Feistel structure | a 1,048,576-input regression test checks distinct outputs; structure, not this sample, supplies the proof |
+| no overlap across 54 valid save cursors | cursor ranges are disjoint and the same bijection maps each range | four-key integration samples are regression checks; the no-overlap proof is injectivity plus the geometry bound |
 | `O_RDONLY` on unlock/view | `Access::ReadOnly`, `write_exact_at` returns `PermissionDenied` | `readonly_device_refuses_writes` |
 | async ratchet when `O_RDWR` on save | `PadReader::ratchet` writes fresh CSPRNG per sector, then `fdatasync` | `read_only_handle_cannot_ratchet`; `writable_session_keeps_going_past_the_budget_by_ratcheting` |
 
+**Cycle-walk domain and bound (current source).** `permute` now rejects a logical index outside
+Zone B instead of reducing it modulo `2^22`; `logical_sector` uses checked arithmetic, and the USB
+pad planner plus session planner refuse cursors at or beyond the 54-window budget. From an in-range
+start, the Feistel orbit includes that start and must return to it within at most `DOMAIN` steps.
+The former 256-step cap and its `10^-90` assertion were not justified by the average: `2.35` is
+only an ideal-random-permutation estimate. The current code uses the finite-orbit bound. The
+custom Feistel remains unreviewed for pseudorandomness, so no access-pattern confidentiality claim
+is made.
+
 **The round function was also fixed.** The superseded version was
 `(right * 0x9E3779B9 ^ k ^ round).rotate_left(5) & 0x3FF` — one multiply masked back down to 10
-bits, which is nearly affine in `right`. The new one takes the **high** 11 bits of a full 32-bit
-ARX mix, so every input bit reaches every output bit within a couple of rounds.
+bits, which is nearly affine in `right`. The current code takes the **high** 11 bits of a 32-bit
+ARX-style mix. That describes the implementation only; it is not a proof of pseudorandomness or
+access-pattern secrecy.
 
 **On "0.000% overlap" — and the two bugs that made the claim false.** The property *is* a property
 of the cursor arithmetic: `cursor × 32,768 + j` is disjoint across `cursor ∈ 0..=53`, and a

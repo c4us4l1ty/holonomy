@@ -10,21 +10,22 @@
 //! # Where the pad comes from
 //!
 //! Zone B starts at LBA [`ZONE_B_LBA_START`] and holds [`ZONE_B_SECTORS`] 4 KiB sectors. A save
-//! derives 32,768 logical indices from its monotonic cursor, maps each through the `FPE-22`
+//! derives 32,768 logical indices from its monotonic cursor, maps each through the custom 22-bit
 //! permutation in `holonomy-core`, and reads that LBA. Because the permutation is a bijection and
 //! the cursor ranges are disjoint, no two sectors in one save overlap, and no two saves overlap
 //! before the 54-save budget runs out.
 //!
 //! # Why the read order is shuffled
 //!
-//! A save issues 32,768 random reads. Sequential order would be faster and is deliberately not
-//! used: the LBA sequence is the only observable that ties a save to a physical location pattern,
-//! and reading in permutation order makes an on-bus trace of one save look like random access.
+//! A save reads 32,768 sectors in the deterministic permutation order. Sequential order would be
+//! faster, but the permutation changes the order and locations used across keys. This is not a
+//! cryptographic access-pattern guarantee: `holonomy-core::feistel` explicitly disclaims that
+//! property, so deployments must not treat the order as concealment from a bus observer.
 
 use std::io;
 
 use holonomy_core::feistel::Feistel22;
-use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, ZONE_B_SECTORS};
+use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, ZONE_B_SECTORS};
 
 use crate::io::{Access, AlignedBuf, DirectFile};
 
@@ -49,7 +50,7 @@ pub struct PadPlan {
 
 impl PadPlan {
     /// Build the plan for `cursor` (the monotonic save counter) under a **provisioning**
-    /// permutation.
+    /// permutation. Rejects cursors at or beyond the geometrically proven no-reuse budget.
     ///
     /// # One permutation for the life of the epoch, not one per save
     ///
@@ -65,18 +66,23 @@ impl PadPlan {
     /// property holds exactly. `k_perm` is therefore provisioned once (mixed with the container's
     /// salt) and `cursor` selects the window rather than the key.
     ///
-    /// The consequence, stated honestly: `π` is fixed for the container's lifetime, so an
-    /// adversary who obtains `κ_USB` and observes *which* LBAs a save reads learns that save's
-    /// window index -- i.e. its cursor, which is already in the root capsule in plaintext. The
-    /// permutation is a sector-index scrambler that stops a passive bus trace from revealing the
-    /// pad's physical layout, not a pseudonym that hides the save count.
-    pub fn for_save(k_perm: &[u8; 32], cursor: u64) -> Self {
+    /// The consequence, stated honestly: `π` is fixed for the container's lifetime. This custom
+    /// permutation is not reviewed for pseudorandomness, so the code makes no claim that it hides
+    /// physical pad locations or save patterns from a bus observer. It is used here for injective
+    /// placement only; deployments needing access-pattern confidentiality need a reviewed design.
+    pub fn for_save(k_perm: &[u8; 32], cursor: u64) -> Result<Self, PadIoError> {
+        if cursor >= SAVES_BEFORE_DOMAIN_REUSE {
+            return Err(PadIoError::InvalidCursor {
+                cursor,
+                limit: SAVES_BEFORE_DOMAIN_REUSE,
+            });
+        }
         let feistel = Feistel22::provisioned(k_perm);
         let mut lbas = Vec::with_capacity(PAD_SECTORS_PER_SAVE as usize);
         for j in 0..PAD_SECTORS_PER_SAVE {
             lbas.push(feistel.permute(Feistel22::logical_sector(cursor, j)));
         }
-        Self { lbas }
+        Ok(Self { lbas })
     }
 
     /// Sectors in this plan: always 32,768.
@@ -123,6 +129,13 @@ pub enum PadIoError {
     },
     /// A ratchet was attempted on a read-only handle.
     ReadOnly,
+    /// The requested cursor is outside the geometric no-reuse window.
+    InvalidCursor {
+        /// Cursor requested by the caller.
+        cursor: u64,
+        /// First rejected cursor (exclusive upper bound for valid cursors).
+        limit: u64,
+    },
     /// The plan was internally inconsistent; a bug, not a hardware condition.
     BadPlan(&'static str),
 }
@@ -136,6 +149,10 @@ impl std::fmt::Display for PadIoError {
                 "device has {found} bytes, Zone B needs at least {needed}"
             ),
             Self::ReadOnly => f.write_str("ratchet attempted on a read-only handle"),
+            Self::InvalidCursor { cursor, limit } => write!(
+                f,
+                "pad cursor {cursor} is outside the valid no-reuse range 0..{limit}"
+            ),
             Self::BadPlan(why) => write!(f, "bad pad plan: {why}"),
         }
     }
@@ -173,7 +190,7 @@ impl<'a> PadReader<'a> {
     /// issuing a single read, so a truncated image fails with a clear message instead of 32,768
     /// identical `EIO`s.
     pub fn new(device: &'a DirectFile, k_perm: &[u8; 32], cursor: u64) -> Result<Self, PadIoError> {
-        let plan = PadPlan::for_save(k_perm, cursor);
+        let plan = PadPlan::for_save(k_perm, cursor)?;
         if !plan.is_collision_free() {
             return Err(PadIoError::BadPlan(
                 "plan contains a repeated or out-of-range sector",
@@ -224,10 +241,9 @@ impl<'a> PadReader<'a> {
     /// This is the ratchet. It requires `O_RDWR`; on a read-only handle it fails before touching
     /// anything, so a write-blocked session cannot half-ratchet.
     ///
-    /// The writes are issued in ascending LBA order rather than permutation order. That looks
-    /// inconsistent with the read order and is deliberate: reads are shuffled to hide the access
-    /// pattern from the bus, while writes are a maintenance operation whose existence is already
-    /// observable from the write itself, and ascending order is what lets the FTL coalesce.
+    /// The writes are issued in ascending LBA order rather than permutation order. This keeps the
+    /// maintenance write order predictable for the FTL. The read permutation is not a reviewed
+    /// access-pattern defense, so no concealment claim is made for either order.
     pub fn ratchet(&self) -> Result<u32, PadIoError> {
         if self.device.access() != Access::ReadWrite {
             return Err(PadIoError::ReadOnly);
@@ -267,7 +283,7 @@ mod tests {
 
     #[test]
     fn plan_has_exactly_one_save_of_sectors() {
-        let p = PadPlan::for_save(&k(), 0);
+        let p = PadPlan::for_save(&k(), 0).expect("cursor zero is within the no-reuse budget");
         assert_eq!(p.len(), PAD_SECTORS_PER_SAVE as usize);
         assert!(p.is_collision_free());
     }
@@ -276,7 +292,8 @@ mod tests {
     fn plans_for_consecutive_saves_are_disjoint() {
         let mut seen = std::collections::HashSet::new();
         for cursor in 0..54u64 {
-            let p = PadPlan::for_save(&k(), cursor);
+            let p = PadPlan::for_save(&k(), cursor)
+                .expect("test cursor is within the no-reuse budget");
             for &lba in p.lbas() {
                 assert!(seen.insert(lba), "LBA {lba} reused at save {cursor}");
             }
@@ -285,16 +302,24 @@ mod tests {
     }
 
     #[test]
-    fn plan_sectors_stay_inside_zone_b() {
-        for cursor in [0u64, 1, 53, 54, 200] {
-            let p = PadPlan::for_save(&k(), cursor);
+    fn plan_enforces_the_no_reuse_cursor_budget() {
+        for cursor in [0u64, 1, 53] {
+            let p = PadPlan::for_save(&k(), cursor).expect("cursor is within budget");
             assert!(p.lbas().iter().all(|&l| l < ZONE_B_SECTORS));
         }
+        assert!(matches!(
+            PadPlan::for_save(&k(), 54),
+            Err(PadIoError::InvalidCursor { cursor: 54, limit: 54 })
+        ));
+        assert!(matches!(
+            PadPlan::for_save(&k(), 200),
+            Err(PadIoError::InvalidCursor { cursor: 200, limit: 54 })
+        ));
     }
 
     #[test]
     fn offsets_are_sector_aligned_and_inside_the_device() {
-        let p = PadPlan::for_save(&k(), 3);
+        let p = PadPlan::for_save(&k(), 3).expect("cursor is within budget");
         let needed = (ZONE_B_LBA_START + ZONE_B_SECTORS as u64) * SECTOR_BYTES;
         for i in 0..p.len() {
             let off = p.byte_offset(i);
@@ -352,7 +377,7 @@ mod tests {
         // test, so build the reader over a device that is nominally too small by lying about
         // nothing — instead assert the guard directly.
         assert_eq!(dev.access(), Access::ReadOnly);
-        let plan = PadPlan::for_save(&k(), 0);
+        let plan = PadPlan::for_save(&k(), 0).expect("cursor is within budget");
         let reader = PadReader { device: &dev, plan };
         assert!(matches!(reader.ratchet(), Err(PadIoError::ReadOnly)));
         let _ = std::fs::remove_file(&path);

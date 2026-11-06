@@ -111,11 +111,17 @@ $$
 \left\lfloor\frac{1{,}782{,}579}{32{,}768}\right\rfloor = 54.
 $$
 
-A fixed, keyed 22-bit Feistel-based sector permutation maps logical window positions into Zone B.
-With one unchanged permutation, windows 0–53 cover disjoint logical positions; window 54 begins
-to overlap previously used positions. This is a **capacity calculation**, not a guarantee that
-physical media were provisioned with secret independent entropy or that the CLI prevents reuse.
-The CLI refuses save cursors 54 and above even on writable devices until it can verify pad history.
+A fixed, keyed, custom 22-bit Feistel permutation maps logical window positions into Zone B.
+It is not a reviewed pseudorandom permutation and provides no access-pattern concealment guarantee;
+the relied-on property is injective placement for valid inputs. Cycle-walking starts inside Zone B
+and therefore returns within at most `2^22` steps. The often-quoted ~2.35 steps is only an
+ideal-random-permutation average, not a latency or security bound.
+
+With one unchanged permutation, windows 0–53 cover disjoint logical positions. Only 13,107 Zone B
+sectors remain afterward, fewer than one full window; any complete next window would reuse at least
+19,661 sectors. This is a **capacity calculation**, not evidence that physical media were provisioned
+with secret independent entropy or that the CLI can verify device history. Checked planning and save
+paths reject cursor 54 and above; they do not detect a reused stick, another container, or rollback.
 This does not detect a reused stick, another container, or rollback to an older snapshot. The writable
 device path attempts to refresh the previous window after writing the new image; a
 ratchet failure can occur **after** the container was changed. The current window must not be
@@ -266,16 +272,27 @@ passed. A hit proves the image opens with those credentials at that cursor; it d
 image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair. `--remnants`
 runs the same scan over each `.holonomy-save-*` copy beside the container, because after a crash the
 newest image may be the one that never finished its rename; it reports which cursor opens each copy
-and says plainly when a leftover is not a whole image. It still ranks nothing and changes nothing.
+and says plainly when a leftover is not a whole image. It tests at most the 20 lexicographically
+first matching regular files and reports truncation; this cap bounds expensive cursor scans, not the
+directory enumeration. `recover-copy` checks an explicitly selected sibling directly, so the display
+cap does not block copying it. The `.holonomy-save-*` prefix is shared by containers in one directory
+and does not prove which container produced a file. A candidate that opens proves only that the
+format's authenticated structures and declared payload open with those credentials and cursor;
+unused image bytes, source provenance, freshness and recency are not thereby authenticated. To scan
+one specific candidate beyond the listing cap, run `recover` on that candidate path.
 
 If a staged copy authenticates and you want to preserve it without replacing the current file, use
 `holonomy recover-copy /path/to/container --remnant /path/to/.holonomy-save-… --cursor N --output /path/to/new-copy`.
-Choose the remnant and cursor reported by `recover --remnants`. The command re-authenticates that
-specific candidate and creates a separate copy only when the destination does not already exist.
-It prints the unkeyed image digest for comparison; that digest is not proof of authenticity or
-durability and can correlate identical copies. The source remnant and current container are left
-unchanged; the pad is not written or ratcheted. This preserves a candidate; it does not promote it,
-identify the newest image, reconcile pad history, or complete recovery. Do not overwrite or delete
+Choose the remnant and cursor reported by `recover --remnants`, or run `recover` on a specific
+candidate path if the listing was truncated. The command re-authenticates that candidate and creates
+a separate copy only when the destination does not already exist. It syncs the staged file and, on
+Unix, the containing directory; it then reads the installed file back and compares its full-image
+byte digest with the candidate before reporting success. These checks catch ordinary write and
+read-back errors, not hardware that lies about flushes. The printed unkeyed digest is for comparison,
+not proof of authenticity or durability, and can correlate identical copies. Neither container nor remnant contents are written;
+filesystem access metadata may change, and the pad is not written or ratcheted. This preserves a
+candidate; it does not promote it, identify the newest image, reconcile pad history, or complete
+recovery. Do not overwrite or delete
 the originals while deciding what to do.
 
 A save that dies between staging its image and renaming it leaves a `.holonomy-save-*` file next to

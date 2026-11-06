@@ -9,7 +9,7 @@
 //! | omitted | size |
 //! | :--- | ---: |
 //! | the `mlock`ed 128 MiB `.wavefunction` container (it must be resident to be folded/decrypted) | 128 MiB |
-//! | the 128 MiB USB pad, or 32,768 random 4 KiB sector reads per save | 128 MiB |
+//! | the 128 MiB USB pad, or 32,768 permuted 4 KiB sector reads per save | 128 MiB |
 //! | the `Argon2id` arena, `m = 262,144 KiB` | 256 MiB |
 //!
 //! `16.60 MiB` was off by a factor of 16 in steady state and 33 at the unlock peak. That is not a

@@ -231,6 +231,31 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
     let staged = dir.path().join(".holonomy-save-recovery-candidate");
     std::fs::copy(&path, &staged).expect("stage a copy");
     let staged_before = std::fs::read(&staged).expect("read staged copy");
+    // More than the 20-entry diagnostic cap, with lexically earlier names: explicit copy must
+    // still validate this selected candidate without requiring it to appear in the report.
+    for index in 0..21 {
+        std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"short")
+            .expect("add earlier diagnostic entries");
+    }
+    let listing = Command::new(binary())
+        .arg("recover")
+        .arg(&path)
+        .args(credentials())
+        .arg("--remnants")
+        .output()
+        .expect("bounded remnant listing");
+    assert!(listing.status.success());
+    let listing_text = String::from_utf8_lossy(&listing.stdout);
+    let truncation_note = "Only the first 20 staged copies by filename were tested; more exist.";
+    assert!(
+        listing_text.contains(truncation_note),
+        "{listing_text}"
+    );
+    assert!(
+        !listing_text.contains(".holonomy-save-recovery-candidate"),
+        "the 21st lexical remnant should be beyond the display cap: {listing_text}"
+    );
+
     let recovered = dir.path().join("recovered-container");
 
     let output = Command::new(binary())
@@ -249,9 +274,9 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("Verified staged image copied"), "{text}");
+    assert!(text.contains("Verified staged image copied and read back at"), "{text}");
     assert!(
-        text.contains("original container and staged image were not modified"),
+        text.contains("Container and remnant contents were not written"),
         "{text}"
     );
     assert!(
@@ -311,9 +336,8 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         .output()
         .expect("recover-copy from an unlisted image");
     assert_eq!(refused.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("run recover --remnants first")
-    );
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(refused_stderr.contains("selected path is not a regular .holonomy-save-* sibling"));
     assert!(!dir.path().join("must-not-exist").exists());
 }
 

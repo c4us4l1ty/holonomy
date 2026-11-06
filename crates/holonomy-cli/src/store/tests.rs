@@ -384,7 +384,8 @@ fn the_store_and_the_usb_crate_choose_the_same_sectors() {
     let k_perm = k_perm_key(&KAPPA);
 
     for cursor in [0u64, 1, 27, 53] {
-        let plan = holonomy_usb::pad::PadPlan::for_save(&k_perm, cursor);
+        let plan = holonomy_usb::pad::PadPlan::for_save(&k_perm, cursor)
+            .expect("test cursor is within the no-reuse budget");
         assert_eq!(plan.len(), PAD_SECTORS);
         for (j, &lba) in plan.lbas().iter().enumerate() {
             assert_eq!(
@@ -1431,6 +1432,15 @@ fn remnants_do_not_follow_symlinks() {
     std::os::unix::fs::symlink(&target, dir.path().join(".holonomy-save-link")).expect("symlink");
     let (found, _) = find_save_remnants(&container).expect("scan");
     assert!(found.is_empty(), "{found:?}");
+    assert!(
+        !is_save_remnant_beside(&container, &dir.path().join(".holonomy-save-link"))
+            .expect("direct symlink check"),
+        "an explicit recovery path must not follow the planted symlink"
+    );
+    assert!(
+        open_save_remnant_beside(&container, &dir.path().join(".holonomy-save-link")).is_err(),
+        "opening the selected remnant must reject a symlink"
+    );
 }
 
 /// The listing is bounded, and the caller is told when it stopped early.
@@ -1439,26 +1449,64 @@ fn remnant_reporting_is_bounded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let container = dir.path().join("book");
     std::fs::write(&container, b"placeholder").expect("container");
-    for index in 0..(MAX_REMNANTS_REPORTED + 3) {
+    for index in (0..(MAX_REMNANTS_REPORTED + 3)).rev() {
         std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
             .expect("remnant");
     }
     let (found, truncated) = find_save_remnants(&container).expect("scan");
     assert_eq!(found.len(), MAX_REMNANTS_REPORTED);
     assert!(truncated, "the report must say it was truncated");
+    let names: Vec<_> = found
+        .iter()
+        .map(|remnant| remnant.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    let expected: Vec<_> = (0..MAX_REMNANTS_REPORTED)
+        .map(|index| format!(".holonomy-save-{index:03}"))
+        .collect();
+    assert_eq!(names, expected, "the bounded result must be stable by name");
+}
+
+/// A display cap must not make an explicitly selected valid remnant inaccessible.
+#[test]
+fn explicit_remnant_membership_is_not_limited_by_the_report_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    std::fs::write(&container, b"placeholder").expect("container");
+    for index in 0..(MAX_REMNANTS_REPORTED + 1) {
+        std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
+            .expect("remnant");
+    }
+    let beyond_report = dir.path().join(format!(
+        ".holonomy-save-{:03}",
+        MAX_REMNANTS_REPORTED + 1
+    ));
+    std::fs::write(&beyond_report, b"selected").expect("selected remnant");
+
+    let (reported, truncated) = find_save_remnants(&container).expect("bounded scan");
+    assert!(truncated);
+    assert_eq!(reported.len(), MAX_REMNANTS_REPORTED);
+    assert!(!reported.iter().any(|entry| entry.path == beyond_report));
+    assert!(is_save_remnant_beside(&container, &beyond_report).expect("direct check"));
+    assert!(!is_save_remnant_beside(&container, &dir.path().join("ordinary-copy"))
+        .expect("ordinary file check"));
 }
 
 /// The reported digest is the same unkeyed fingerprint the store reports for a container image.
 #[test]
 fn remnant_digest_matches_the_container_fingerprint() {
+    use std::io::{Seek, SeekFrom};
+
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("image");
     let bytes: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(&path, &bytes).expect("write");
-    assert_eq!(
-        path_digest(&path).expect("digest"),
-        holonomy_session::seal::image_digest(&bytes)
-    );
+    let expected = holonomy_session::seal::image_digest(&bytes);
+    assert_eq!(path_digest(&path).expect("path digest"), expected);
+
+    let mut file = File::open(&path).expect("open for streaming digest");
+    file.seek(SeekFrom::Start(13)).expect("set nonzero offset");
+    assert_eq!(file_digest(&mut file).expect("file digest"), expected);
+    assert_eq!(file.stream_position().expect("current offset"), 13);
 }
 
 /// The recovery question after a crash: which cursor does this image need? A scan answers it,

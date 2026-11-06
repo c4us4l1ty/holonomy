@@ -77,7 +77,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use holonomy_core::layout::{
-    slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX, SECTOR_BYTES,
+    slot_range, CONTAINER_BYTES, PAD_SECTORS_PER_SAVE, SALT_BYTES, SALT_SLOT_INDEX,
+    SAVES_BEFORE_DOMAIN_REUSE, SECTOR_BYTES,
 };
 use holonomy_core::stratum::ActiveStratum;
 
@@ -398,9 +399,102 @@ pub struct SaveRemnant {
     pub len: u64,
 }
 
-/// How many remnants a scan reports. A directory with thousands of matching names must not flood
-/// a terminal, and the caller is told when the list was truncated.
+/// How many remnants a scan reports. The scan returns the lexicographically first entries, not
+/// whichever files the filesystem happened to enumerate first; an explicit candidate check is not
+/// limited by this display cap.
 pub const MAX_REMNANTS_REPORTED: usize = 20;
+
+fn remnant_directory(container: &Path) -> PathBuf {
+    if container.is_dir() {
+        container.to_path_buf()
+    } else {
+        container
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    }
+}
+
+/// Check whether `candidate` is a regular `.holonomy-save-*` sibling of `container`.
+///
+/// This is a namespace check, not cryptographic provenance: staged names are shared by every
+/// container in one directory. Authentication still has to succeed before copying the bytes.
+pub fn is_save_remnant_beside(container: &Path, candidate: &Path) -> std::io::Result<bool> {
+    let directory = remnant_directory(container);
+    let candidate_directory = candidate
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if std::fs::canonicalize(&directory)? != std::fs::canonicalize(candidate_directory)? {
+        return Ok(false);
+    }
+    let Some(name) = candidate.file_name() else {
+        return Ok(false);
+    };
+    if !name.as_encoded_bytes().starts_with(b".holonomy-save-") {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(candidate) {
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Open an explicitly selected remnant and keep using that handle for verification and copying.
+/// On Unix, `O_NOFOLLOW` plus descriptor/path identity checks closes the final-component
+/// check-then-open race. Other platforms still need their own no-follow implementation. The prefix
+/// remains a shared namespace and does not bind the remnant to one container.
+pub fn open_save_remnant_beside(
+    container: &Path,
+    candidate: &Path,
+) -> std::io::Result<ContainerFile> {
+    if !is_save_remnant_beside(container, candidate)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "selected path is not a regular .holonomy-save-* sibling",
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options.open(candidate)?;
+    let opened = file.metadata()?;
+    let path_metadata = std::fs::symlink_metadata(candidate)?;
+    if !opened.file_type().is_file()
+        || !path_metadata.file_type().is_file()
+        || opened.len() != CONTAINER_BYTES as u64
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "selected remnant is not a whole regular container image",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != path_metadata.dev() || opened.ino() != path_metadata.ino() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "selected remnant changed while it was being opened",
+            ));
+        }
+    }
+
+    Ok(ContainerFile {
+        file,
+        path: candidate.display().to_string(),
+        filesystem_path: candidate.to_path_buf(),
+        offset: 0,
+        writable: false,
+    })
+}
 
 /// Find `.holonomy-save-*` staged images next to `container`, or inside it when it is a directory.
 ///
@@ -410,40 +504,46 @@ pub const MAX_REMNANTS_REPORTED: usize = 20;
 /// earlier failure or a full disk can break the expectation that the container holds the previous
 /// save. This is a directory listing, not a recovery protocol, and it decrypts nothing.
 ///
-/// The second element is true when the scan stopped at [`MAX_REMNANTS_REPORTED`].
+/// The scan examines all matching regular files to choose a stable lexicographic prefix, while
+/// retaining at most [`MAX_REMNANTS_REPORTED`] paths. The second element is true iff more matched.
 pub fn find_save_remnants(container: &Path) -> std::io::Result<(Vec<SaveRemnant>, bool)> {
-    let directory = if container.is_dir() {
-        container
-    } else {
-        match container.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        }
-    };
+    let directory = remnant_directory(container);
     let mut found = Vec::new();
     let mut truncated = false;
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !name.starts_with(".holonomy-save-") {
+        if !name.as_encoded_bytes().starts_with(b".holonomy-save-") {
             continue;
         }
-        // `symlink_metadata`: a planted symlink is reported as what it is, never followed.
-        let metadata = std::fs::symlink_metadata(entry.path())?;
+        // `symlink_metadata`: a planted symlink is reported as what it is, never followed. A
+        // concurrently removed candidate is not a directory-scan failure; it simply no longer exists.
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         if !metadata.file_type().is_file() {
             continue;
         }
+        let candidate = SaveRemnant {
+            path,
+            len: metadata.len(),
+        };
+        let index = found.partition_point(|existing: &SaveRemnant| {
+            existing.path.cmp(&candidate.path).is_lt()
+        });
         if found.len() == MAX_REMNANTS_REPORTED {
             truncated = true;
-            break;
+            if index < MAX_REMNANTS_REPORTED {
+                found.insert(index, candidate);
+                found.pop();
+            }
+        } else {
+            found.insert(index, candidate);
         }
-        found.push(SaveRemnant {
-            path: entry.path(),
-            len: metadata.len(),
-        });
     }
-    found.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((found, truncated))
 }
 
@@ -452,21 +552,35 @@ pub fn find_save_remnants(container: &Path) -> std::io::Result<(Vec<SaveRemnant>
 /// Reported so a user can compare a remnant with a container, and nothing more: it is not
 /// authenticity, and it correlates equal files.
 pub fn path_digest(path: &Path) -> std::io::Result<[u8; 32]> {
+    file_digest(&mut File::open(path)?)
+}
+
+/// Unkeyed digest of an open file's complete contents, restoring its starting offset afterward.
+pub fn file_digest(file: &mut File) -> std::io::Result<[u8; 32]> {
     use blake2::{Blake2b512, Digest};
 
-    let mut file = File::open(path)?;
-    let mut hash = Blake2b512::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    let start = file.stream_position()?;
+    file.seek(SeekFrom::Start(0))?;
+    let result: std::io::Result<[u8; 32]> = (|| {
+        let mut hash = Blake2b512::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hash.update(&buffer[..read]);
         }
-        hash.update(&buffer[..read]);
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&hash.finalize()[..32]);
+        Ok(digest)
+    })();
+    let restore = file.seek(SeekFrom::Start(start));
+    match (result, restore) {
+        (Ok(digest), Ok(_)) => Ok(digest),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
     }
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&hash.finalize()[..32]);
-    Ok(digest)
 }
 
 /// Refuse wraparound until there is durable accounting of the pad's history.
@@ -1042,7 +1156,9 @@ fn scan_cursor_range(
 ///
 /// The consequence, stated plainly: the pad is a property of the stick, not of the file. Losing the
 /// stick loses the pad, and the file alone yields nothing legible.
-pub fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
+pub(crate) fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
+    assert!(cursor < SAVES_BEFORE_DOMAIN_REUSE, "pad cursor exceeds the no-reuse budget");
+    assert!(j < PAD_SECTORS_PER_SAVE as usize, "pad slot is out of range");
     use holonomy_core::feistel::Feistel22;
     Feistel22::provisioned(&pad::k_perm_key(kappa_usb))
         .permute(Feistel22::logical_sector(cursor, j as u32))
