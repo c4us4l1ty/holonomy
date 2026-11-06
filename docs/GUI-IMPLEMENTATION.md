@@ -39,3 +39,44 @@ headers, footers and other content may be missing. The editor still refuses to e
 Successful authentication and decoding confirm only that the supplied candidate can be opened with
 that demo pad and cursor. They do not repair anything or establish pad freshness, disk
 durability, or complete recovery. Reading can update OS file-access metadata.
+
+## Read-only Wordcraft rendering of a container
+
+`crates/holonomy-preview/src/bin/holonomy-rich-view.rs` is the first path where the real
+Wordcraft renderer draws a real container document. It is one-way by construction, not by
+configuration:
+
+```text
+holonomy-rich-view --view PATH CURSOR          # a window
+holonomy-rich-view --inspect-only PATH CURSOR  # decode and report, no window
+```
+
+The container is opened with `writable = false`, the decoded document is cloned, and the
+container handle is dropped before the window is built. Wordcraft is given
+`Session::new(document)`, so the engine has no path, no recovery state and no writable
+handle; the dirty flag it reports is ignored because nothing can be saved.
+
+Two boundaries stand between the renderer and the host:
+
+1. **Services.** Every host hook that could write, export or read the clipboard is replaced
+   in `read_only_services()` — file dialogs answer "cancelled", `download`, `host_save`,
+   `print` and `make_default_app` return an error naming the read-only view, clipboard
+   reads answer `None` and clipboard writes report failure. Printer discovery and
+   submission are absent. This is deliberate: a missing hook can make Wordcraft fall back
+   to another destination, so every persistence hook is present and refuses.
+2. **Input filtering.** `filter_events()` keeps pointer motion, wheel scrolling, pinch zoom
+   and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit and every pointer
+   button are dropped before Wordcraft sees the frame, so no ribbon button, context menu or
+   shortcut can reach a command. `Ctrl+Q` is the one chord the host itself honours, because
+   a keyboard-inert window still has to close.
+
+Neither boundary is a sandbox and neither is a claim about Wordcraft's internals. The
+decoded document is plaintext in the process, the renderer allocates further copies, and
+the OS, swap and core dumps can expose them. Capture exclusion, memory locking and the
+reaper are still not integrated, so the window's own banner says what it is: read-only,
+not protected.
+
+What this does **not** yet provide: editing a container, saving from Wordcraft, rich
+formatting beyond what Wordcraft's own renderer draws from the decoded payload, physical
+USB pad, or any recovery. The demo's restricted text editor remains the only writable
+container editor, and it still refuses rich documents.

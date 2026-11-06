@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     fn args(values: &[&str]) -> Vec<OsString> {
-        values.iter().map(OsString::from).collect()
+        values.iter().map(|value| OsString::from(*value)).collect()
     }
 
     #[test]

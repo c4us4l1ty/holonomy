@@ -34,7 +34,7 @@ those documents are historical and code and current CI results govern implementa
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
 | USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. Partial or invalid ratchet counts after replacement require recovery; a full count is only the source's report, not independent proof of fresh pad. Reporters carry pad freshness as *fresh*, *reused*, or *not established* — the store itself never claims the first two.. A save reads the replacement image back and compares its digest before ratcheting, so a torn or substituted replacement is refused while the old pad window is still intact. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
-| Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
+| Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. A read-only Wordcraft window (`holonomy-rich-view`) renders a container document with all persistence hooks refusing and all editing input dropped. The unencrypted scratch preview remains unconnected to containers. Nothing here edits a rich container document yet. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. A crashed save's staged file can be listed with `holonomy remnants`. This is not a complete recovery protocol; automated recovery, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
@@ -262,6 +262,14 @@ the container. `holonomy remnants /path/to/container` lists those files with the
 digests, needs no credentials, and decrypts nothing. It is a directory report, not a recovery
 procedure: it cannot tell you whether the container is readable, and a listing does not make a
 rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
+
+A read-only Wordcraft window can render a container's document without offering any way to change
+or export it: `holonomy-rich-view --view /path/to/container CURSOR`, or
+`--inspect-only` to decode and report without a window. Hidden prompts supply the same credentials;
+the pad is the deterministic demo stand-in. The window drops every key, text, paste, copy and click
+event before the editor sees it, and every host hook that could save, print, download or write the
+clipboard refuses. Press Ctrl+Q to close. The decoding itself performs no write and no ratchet, but
+the document is plaintext in memory, so this is a viewing aid, not a protected reader.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
