@@ -1482,10 +1482,12 @@ fn explicit_remnant_membership_is_not_limited_by_the_report_cap() {
         std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
             .expect("remnant");
     }
-    let beyond_report = dir.path().join(format!(
-        ".holonomy-save-{:03}",
-        MAX_REMNANTS_REPORTED + 1
-    ));
+    let beyond_report = dir
+        .path()
+        .join(format!(
+            ".holonomy-save-{:03}",
+            MAX_REMNANTS_REPORTED + 1
+        ));
     std::fs::write(&beyond_report, b"selected").expect("selected remnant");
 
     let (reported, truncated) = find_save_remnants(&container).expect("bounded scan");
