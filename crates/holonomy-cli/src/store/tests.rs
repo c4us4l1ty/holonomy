@@ -1460,3 +1460,73 @@ fn remnant_digest_matches_the_container_fingerprint() {
         holonomy_session::seal::image_digest(&bytes)
     );
 }
+
+/// The recovery question after a crash: which cursor does this image need? A scan answers it,
+/// reports the same fingerprint `verify` does, and changes nothing.
+#[test]
+fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
+    let path = tempfile("cursor-scan");
+    provision(&path, [0x31u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    for cursor in [1u64, 2] {
+        let mut file = ContainerFile::open(&path, true).expect("open");
+        save(
+            &mut file,
+            &mut source(),
+            &ctx(&pass, cursor),
+            b"a scanned document",
+        )
+        .expect("save");
+    }
+    let before = std::fs::read(&path).expect("read container");
+
+    let mut file = ContainerFile::open(&path, false).expect("open read-only");
+    let scan = scan_cursor_range(&mut file, &mut source(), &ctx(&pass, 0), 0..4, true);
+    assert_eq!(scan.hits.len(), 1, "{scan:?}");
+    assert_eq!(scan.hits[0].cursor, 2);
+    assert_eq!(scan.attempts, 3, "cursors 0, 1 and 2");
+    assert_eq!(
+        scan.hits[0].digest,
+        holonomy_session::seal::image_digest(&before),
+        "the reported fingerprint must be the one verify reports for this image"
+    );
+    drop(file);
+    assert_eq!(
+        std::fs::read(&path).expect("read container again"),
+        before,
+        "a scan must not write the container"
+    );
+
+    // Without the early stop the whole range is tried, and still only one cursor opens.
+    let mut file = ContainerFile::open(&path, false).expect("open read-only");
+    let wide = scan_cursor_range(&mut file, &mut source(), &ctx(&pass, 0), 0..4, false);
+    assert_eq!(wide.hits.len(), 1, "{wide:?}");
+    assert_eq!(wide.hits[0].cursor, 2);
+    assert_eq!(wide.attempts, 4, "every cursor in the range was tried");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A scan that opens nothing keeps the last refusal, because "no cursor worked" is not a diagnosis.
+#[test]
+fn a_failed_scan_reports_the_last_refusal() {
+    let path = tempfile("cursor-scan-failure");
+    provision(&path, [0x32u8; SALT_BYTES], 0);
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+    save(&mut file, &mut source(), &ctx(&pass, 1), b"document").expect("save");
+    drop(file);
+
+    let wrong = SealedPassphrase::new("not the passphrase").expect("legal");
+    let mut file = ContainerFile::open(&path, false).expect("open");
+    let scan = scan_cursor_range(&mut file, &mut source(), &ctx(&wrong, 0), 0..4, true);
+    assert!(scan.hits.is_empty(), "{scan:?}");
+    assert_eq!(
+        scan.attempts, 4,
+        "the early stop ends a scan that found something; a scan that opens nothing walks the range"
+    );
+    assert!(
+        scan.last_error.is_some(),
+        "the refusal must be kept for the report"
+    );
+    let _ = std::fs::remove_file(&path);
+}
