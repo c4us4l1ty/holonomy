@@ -447,7 +447,6 @@ fn open(args: &[String]) -> ExitCode {
                 opened.directory.slot_count(),
                 opened.cursor()
             );
-            use std::io::Write;
             if let Err(e) = std::io::stdout().write_all(document.as_slice()) {
                 return failure(format!("writing the document to stdout: {e}"));
             }

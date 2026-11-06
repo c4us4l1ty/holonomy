@@ -290,11 +290,9 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         String::from_utf8_lossy(&refused.stderr)
             .contains("refusing to overwrite existing destination")
     );
-    assert_eq!(
-        std::fs::read(dir.path().join("already-exists"))
-            .expect("read existing destination"),
-        original_destination
-    );
+    let existing = std::fs::read(dir.path().join("already-exists"))
+        .expect("read existing destination");
+    assert_eq!(existing.as_slice(), original_destination);
 
     let unrelated = dir.path().join("ordinary-copy");
     std::fs::copy(&path, &unrelated).expect("create an unlisted copy");

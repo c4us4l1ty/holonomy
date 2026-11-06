@@ -37,7 +37,18 @@ jobs:
       - name: Install rustfmt
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
-        run: cargo +stable fmt --all -- --check
+        run: |
+          set -o pipefail
+          cargo +stable fmt --all -- --check 2>&1 | tee rustfmt.log
+
+      # Runner logs are not reachable from the Agent environment; surface the formatter output
+      # as check annotations so a failed format gate can be corrected without guessing.
+      - name: Report formatting differences
+        if: failure()
+        run: |
+          head -60 rustfmt.log | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
   core-crates:
     name: core crates (no wordcraft)
@@ -838,7 +849,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Lint CLI
-        run: cargo clippy -p holonomy-cli --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy -p holonomy-cli --all-targets --message-format=short -- -D warnings 2>&1 | tee cli-clippy.log
+      - name: Report CLI lint findings as annotations
+        if: failure()
+        run: |
+          grep -E ': (error|warning)(\[[A-Z0-9]+\])?:' cli-clippy.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
       - name: Test redacted document buffer
         run: cargo test -p holonomy-session --lib a_saved_container_reopens_to_the_bytes_that_went_in
       - name: Run focused CLI safety tests
