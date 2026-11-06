@@ -9,12 +9,14 @@ irreplaceable data.
 
 - Design and test a crash-consistent creation, replacement and pad-ratchet protocol,
   with explicit outcomes at every failure point. A replacement can succeed before a
-  subsequent sync or ratchet fails; reopening alone is not a repair protocol.
+  subsequent sync or ratchet fails; reopening alone is not a repair protocol. A listing
+  verb now reports staged `.holonomy-save-*` leftovers without decrypting them, but
+  automated recovery and reconciliation are still missing.
 - Establish durable, rollback-aware pad-use accounting across containers, copies,
-  machines and concurrent writers. Define locking and identity rules that remain
-  correct across file replacement and aliases. Existing digest and file-identity checks
-  only detect some changes; they do not close the race or coordinate pad use. Do not
-  count cursor slots as fresh pads.
+  machines and concurrent writers, with identity rules that remain correct across file
+  replacement and aliases. Existing digest, lock and file-identity checks only detect
+  some changes; they do not close the race or coordinate pad use. Do not count cursor
+  slots as fresh pads.
 - Provide an operator recovery workflow, including non-destructive inspection, clear
   diagnosis, safe choices, and tests for crashes, torn writes, failed syncs, device
   removal and backups. The current demo's read-only inspection is only a preliminary

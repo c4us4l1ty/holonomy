@@ -36,7 +36,7 @@ those documents are historical and code and current CI results govern implementa
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The full Wordcraft window is a separate unencrypted scratch preview and is **not** connected to containers. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. This is not a complete recovery protocol; provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. A crashed save's staged file can be listed with `holonomy remnants`. This is not a complete recovery protocol; automated recovery, provisioning, hardware failures, and USB pad state still need work. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
@@ -256,6 +256,12 @@ GUI until a save is attempted, modification can race a check, and pad state is n
 Concurrent writers remain unsafe.
 Even a refused replacement may have staged an encrypted image; do not retry after a failed save
 without investigating the container and pad state.
+
+A save that dies between staging its image and renaming it leaves a `.holonomy-save-*` file next to
+the container. `holonomy remnants /path/to/container` lists those files with their sizes and unkeyed
+digests, needs no credentials, and decrypts nothing. It is a directory report, not a recovery
+procedure: it cannot tell you whether the container is readable, and a listing does not make a
+rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
