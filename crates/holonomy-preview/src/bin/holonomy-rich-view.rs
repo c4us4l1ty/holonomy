@@ -119,6 +119,8 @@ fn main() -> ExitCode {
 
 /// Decode without a window, print what was found, and exit. Writes nothing.
 fn inspect_only(path: &std::path::Path, cursor: u64) -> ExitCode {
+    eprintln!("{READ_ONLY_RULE}");
+    eprintln!("{READ_ONLY_LIMITS}");
     let (passphrase, kappa) = match prompt_credentials(false) {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -148,6 +150,10 @@ fn inspect_only(path: &std::path::Path, cursor: u64) -> ExitCode {
 }
 
 fn view(path: &std::path::Path, cursor: u64) -> ExitCode {
+    // Said before any prompt touches the terminal, so a wrapper can see the mode even if the
+    // window never opens.
+    eprintln!("{READ_ONLY_RULE}");
+    eprintln!("{READ_ONLY_LIMITS}");
     let (passphrase, kappa) = match prompt_credentials(false) {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -162,8 +168,6 @@ fn view(path: &std::path::Path, cursor: u64) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("{READ_ONLY_RULE}");
-    eprintln!("{READ_ONLY_LIMITS}");
     let options = eframe::NativeOptions::default();
     match eframe::run_native(
         TITLE,

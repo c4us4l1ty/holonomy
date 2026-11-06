@@ -750,6 +750,7 @@ jobs:
             exit 1
           fi
           if ! grep -qF "READ-ONLY VIEW" "$log"; then
+            tail -40 "$log" | while IFS= read -r line; do echo "::error::log: $line"; done
             echo "::error::the read-only window did not report its read-only rule"
             exit 1
           fi
