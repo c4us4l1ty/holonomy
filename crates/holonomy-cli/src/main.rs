@@ -792,7 +792,8 @@ fn recover_copy(args: &[String]) -> ExitCode {
     if source_metadata.len() != CONTAINER_BYTES as u64 {
         return failure(format!(
             "the selected remnant is {} bytes, not a whole {}-byte container image",
-            source_metadata.len(), CONTAINER_BYTES
+            source_metadata.len(),
+            CONTAINER_BYTES
         ));
     }
 
