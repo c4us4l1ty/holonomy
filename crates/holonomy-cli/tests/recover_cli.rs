@@ -226,6 +226,8 @@ fn recover_tests_staged_copies_only_when_asked() {
 /// A verified staged candidate can be copied to a new path without changing either source.
 #[test]
 fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
+    use std::os::unix::fs::MetadataExt;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let (path, before) = saved_container(&dir, "1");
     let staged = dir.path().join(".holonomy-save-recovery-candidate");
@@ -255,6 +257,33 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         !listing_text.contains(".holonomy-save-recovery-candidate"),
         "the 21st lexical remnant should be beyond the display cap: {listing_text}"
     );
+
+    let container_metadata = std::fs::metadata(&path).expect("container metadata");
+    let mismatched_origin = dir.path().join(format!(
+        ".holonomy-save-v2-{:016x}-{:016x}-{}-testnonce",
+        container_metadata.dev(),
+        container_metadata.ino(),
+        "0".repeat(64)
+    ));
+    std::fs::hard_link(&path, &mismatched_origin)
+        .expect("link a deliberately mismatched candidate");
+    let mismatched_destination = dir.path().join("mismatched-origin-must-not-copy");
+    let mismatched = Command::new(binary())
+        .arg("recover-copy")
+        .arg(&path)
+        .args(["--remnant"])
+        .arg(&mismatched_origin)
+        .args(["--cursor", "1", "--output"])
+        .arg(&mismatched_destination)
+        .output()
+        .expect("recover-copy with mismatched origin marker");
+    assert_eq!(mismatched.status.code(), Some(1));
+    let mismatched_stderr = String::from_utf8_lossy(&mismatched.stderr);
+    assert!(
+        mismatched_stderr.contains("origin does not match this container"),
+        "{mismatched_stderr}"
+    );
+    assert!(!mismatched_destination.exists());
 
     let unbound_destination = dir.path().join("unbound-must-be-opted-in");
     let unbound_refused = Command::new(binary())

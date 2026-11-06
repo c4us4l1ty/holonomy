@@ -670,7 +670,11 @@ fn report_staged_copies(
         .then(|| store::current_container_origin(container_path));
     let mut any_opened = false;
     for copy in &staged {
-        println!("Candidate file {} ({} bytes)", copy.path.display(), copy.len);
+        println!(
+            "Candidate file {} ({} bytes)",
+            copy.path.display(),
+            copy.len
+        );
         if copy.len != CONTAINER_BYTES as u64 {
             println!(
                 "  Not a whole image ({} of {} bytes); no cursor can authenticate it; the \
