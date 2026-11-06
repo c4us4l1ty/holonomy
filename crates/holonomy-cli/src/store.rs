@@ -1155,8 +1155,9 @@ fn scan_cursor_range(
 /// its documented job of keying the KDF, and not this one.
 ///
 /// The consequence, stated plainly: the pad is a property of the stick, not of the file. Losing the
-/// stick loses the pad, and the file alone yields nothing legible.
-pub(crate) fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
+/// stick loses the pad, and the file alone yields nothing legible. Panics if `cursor` is outside
+/// `0..SAVES_BEFORE_DOMAIN_REUSE` or `j` is not a slot in one save.
+pub fn sector_index(kappa_usb: &[u8; 32], cursor: u64, j: usize) -> u32 {
     assert!(cursor < SAVES_BEFORE_DOMAIN_REUSE, "pad cursor exceeds the no-reuse budget");
     assert!(j < PAD_SECTORS_PER_SAVE as usize, "pad slot is out of range");
     use holonomy_core::feistel::Feistel22;
