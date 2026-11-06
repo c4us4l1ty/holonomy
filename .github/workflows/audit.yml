@@ -632,7 +632,8 @@ jobs:
       - name: Build and test preview
         run: |
           set -o pipefail
-          cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-test.log
+          # These tests perform full-container crypto and fsyncs; avoid starving their save workers.
+          cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short -- --test-threads=2 2>&1 | tee preview-test.log
           cargo build --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-build.log
       - name: Smoke-test the scratch window on a virtual display
         run: |
