@@ -389,6 +389,86 @@ pub struct SaveReport {
     pub protection: holonomy_core::unlock::ProtectionLayer,
 }
 
+/// A staged image left behind by a save that never completed its rename.
+#[derive(Debug)]
+pub struct SaveRemnant {
+    /// The staged path, inside the container's directory.
+    pub path: PathBuf,
+    /// Size on disk. A complete image is [`CONTAINER_BYTES`]; anything else is a torn stage.
+    pub len: u64,
+}
+
+/// How many remnants a scan reports. A directory with thousands of matching names must not flood
+/// a terminal, and the caller is told when the list was truncated.
+pub const MAX_REMNANTS_REPORTED: usize = 20;
+
+/// Find `.holonomy-save-*` staged images next to `container`, or inside it when it is a directory.
+///
+/// A save stages its image under that prefix and renames it into place, so a surviving file with
+/// the prefix means a save did not complete its rename -- it was killed, or the process died
+/// between writing and renaming. That does *not* prove the container is intact: another writer, an
+/// earlier failure or a full disk can break the expectation that the container holds the previous
+/// save. This is a directory listing, not a recovery protocol, and it decrypts nothing.
+///
+/// The second element is true when the scan stopped at [`MAX_REMNANTS_REPORTED`].
+pub fn find_save_remnants(container: &Path) -> std::io::Result<(Vec<SaveRemnant>, bool)> {
+    let directory = if container.is_dir() {
+        container
+    } else {
+        match container.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        }
+    };
+    let mut found = Vec::new();
+    let mut truncated = false;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(".holonomy-save-") {
+            continue;
+        }
+        // `symlink_metadata`: a planted symlink is reported as what it is, never followed.
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        if found.len() == MAX_REMNANTS_REPORTED {
+            truncated = true;
+            break;
+        }
+        found.push(SaveRemnant {
+            path: entry.path(),
+            len: metadata.len(),
+        });
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((found, truncated))
+}
+
+/// Unkeyed digest of a file's bytes, streamed in fixed-size chunks.
+///
+/// Reported so a user can compare a remnant with a container, and nothing more: it is not
+/// authenticity, and it correlates equal files.
+pub fn path_digest(path: &Path) -> std::io::Result<[u8; 32]> {
+    use blake2::{Blake2b512, Digest};
+
+    let mut file = File::open(path)?;
+    let mut hash = Blake2b512::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&hash.finalize()[..32]);
+    Ok(digest)
+}
+
 /// Refuse wraparound until there is durable accounting of the pad's history.
 pub(crate) fn validate_save_cursor(cursor: u64) -> Result<(), String> {
     let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;

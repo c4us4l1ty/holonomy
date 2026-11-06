@@ -1,7 +1,7 @@
 //! `holonomy` — the binary.
 //!
-//! Three jobs and no more: report the build, verify this machine, and (once the editor front end
-//! links) hand over to it.
+//! Report the build, verify this machine, and act on containers: `provision`, `save`, `open`,
+//! `verify` and `remnants`. The editor front end, once it links, is started from here.
 //!
 //! # Why `--check` lives here and not in `holonomy-ui`
 //!
@@ -89,6 +89,9 @@ fn main() -> ExitCode {
     }
     if let Some(rest) = args.strip_prefix(&["provision".to_string()][..]) {
         return provision(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["remnants".to_string()][..]) {
+        return remnants(rest);
     }
 
     if args.is_empty() {
@@ -485,6 +488,84 @@ fn verify(args: &[String]) -> ExitCode {
     }
 }
 
+/// `holonomy remnants <path>`: report staged images a crashed save left behind.
+///
+/// Deliberately needs no credentials. A user who has just lost power to a machine should be able
+/// to ask "what is lying around?" without first proving they can open the container, and the scan
+/// reads a directory listing plus file sizes -- never a capsule, a pad or a document.
+fn remnants(args: &[String]) -> ExitCode {
+    let path = match args {
+        [path] if !path.starts_with("--") => std::path::PathBuf::from(path),
+        _ => return usage_error("remnants takes exactly one container path and no flags"),
+    };
+    let (found, truncated) = match store::find_save_remnants(&path) {
+        Ok(found) => found,
+        Err(error) => return failure(format!("scanning for interrupted saves: {error}")),
+    };
+
+    if found.is_empty() {
+        println!("No interrupted-save remnants next to {}.", path.display());
+        println!(
+            "A remnant only appears when a save dies between staging its image and renaming it \
+             into place."
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    println!(
+        "{} interrupted-save remnant{} next to {}:",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        path.display()
+    );
+    for remnant in &found {
+        println!("  {}", remnant.path.display());
+        println!("    {} bytes", remnant.len);
+        match store::path_digest(&remnant.path) {
+            Ok(digest) => println!(
+                "    unkeyed digest {} (fingerprint only; not authenticity or durability)",
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+            Err(error) => println!("    could not read it for a digest: {error}"),
+        }
+        if remnant.len != CONTAINER_BYTES as u64 {
+            println!(
+                "    not a full container image: {} of {} bytes, so its save was cut short",
+                remnant.len, CONTAINER_BYTES
+            );
+        }
+    }
+    if truncated {
+        println!(
+            "Only the first {} are listed; the directory holds more matching names.",
+            store::MAX_REMNANTS_REPORTED
+        );
+    }
+    println!();
+    println!("A remnant is the encrypted image of a save that never finished its rename, so the");
+    println!(
+        "container itself is expected to hold the previous save -- unless another writer or an"
+    );
+    println!(
+        "earlier failure broke that expectation. Verify the container before trusting either:"
+    );
+    println!();
+    println!("    holonomy verify {} --cursor N", path.display());
+    println!();
+    println!(
+        "To test a remnant as a candidate, point the same verb at it with the cursor that save"
+    );
+    println!(
+        "would have written. Remnants hold encrypted document bytes and occupy full-container"
+    );
+    println!("space; delete one only after deciding it is not the copy you need. Nothing above");
+    println!("decrypts, repairs or ratchets anything.");
+    ExitCode::SUCCESS
+}
+
 /// `impl AsRef<str>` rather than `&str`: a `String` from `format!` and a `&'static str` literal are
 /// both call sites, and a plain `&str` forces every formatted one to be borrowed at the point of
 /// the call -- which reads as `&e` where `e: String` and then fails with "the size for values of
@@ -528,6 +609,7 @@ fn help() {
          \x20   holonomy save <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D] < document\n\
          \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
+         \x20   holonomy remnants <path>  report staged images a crashed save left behind (no credentials)\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -539,6 +621,8 @@ fn help() {
          Provision uses 0; saves refuse cursor 54 or higher until pad history is tracked.\n\
          Verify reads and authenticates a candidate without printing document bytes; it does not\n\
          repair the container or verify freshness, rollback history, or application document format.\n\
+         Remnants lists `.holonomy-save-*` files next to a container and never decrypts them; it is a\n\
+         directory report, not a recovery procedure.\n\
          \n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\

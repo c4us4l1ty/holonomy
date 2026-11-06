@@ -1378,3 +1378,85 @@ fn a_caller_held_lock_lets_its_own_save_proceed() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(save_lock_path(&path));
 }
+
+/// A remnant report is a directory listing: it must find the staged prefix, report each file once,
+/// and stay quiet about everything else in the directory.
+#[test]
+fn remnants_are_reported_from_the_container_directory_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    std::fs::write(&container, b"placeholder").expect("container");
+    std::fs::write(dir.path().join("book.holonomy-lock"), b"").expect("lock sidecar");
+    std::fs::write(dir.path().join(".holonomy-save-bbb"), vec![0u8; 10]).expect("remnant b");
+    std::fs::write(dir.path().join(".holonomy-save-aaa"), vec![0u8; 4]).expect("remnant a");
+    std::fs::write(dir.path().join("notes.txt"), b"unrelated").expect("unrelated");
+
+    let (found, truncated) = find_save_remnants(&container).expect("scan");
+    assert!(!truncated);
+    let names: Vec<String> = found
+        .iter()
+        .map(|remnant| {
+            remnant
+                .path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ".holonomy-save-aaa".to_string(),
+            ".holonomy-save-bbb".to_string()
+        ],
+        "sorted, and only the staged prefix"
+    );
+    assert_eq!(found[0].len, 4);
+    assert_eq!(found[1].len, 10);
+
+    // Pointing at the directory itself answers the same question.
+    assert_eq!(find_save_remnants(dir.path()).expect("scan dir").0.len(), 2);
+}
+
+/// A planted symlink is not a remnant: the scan must not follow it.
+#[cfg(unix)]
+#[test]
+fn remnants_do_not_follow_symlinks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    std::fs::write(&container, b"placeholder").expect("container");
+    let target = dir.path().join("elsewhere");
+    std::fs::write(&target, b"not a remnant").expect("target");
+    std::os::unix::fs::symlink(&target, dir.path().join(".holonomy-save-link")).expect("symlink");
+    let (found, _) = find_save_remnants(&container).expect("scan");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// The listing is bounded, and the caller is told when it stopped early.
+#[test]
+fn remnant_reporting_is_bounded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    std::fs::write(&container, b"placeholder").expect("container");
+    for index in 0..(MAX_REMNANTS_REPORTED + 3) {
+        std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
+            .expect("remnant");
+    }
+    let (found, truncated) = find_save_remnants(&container).expect("scan");
+    assert_eq!(found.len(), MAX_REMNANTS_REPORTED);
+    assert!(truncated, "the report must say it was truncated");
+}
+
+/// The reported digest is the same unkeyed fingerprint the store reports for a container image.
+#[test]
+fn remnant_digest_matches_the_container_fingerprint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("image");
+    let bytes: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&path, &bytes).expect("write");
+    assert_eq!(
+        path_digest(&path).expect("digest"),
+        holonomy_session::seal::image_digest(&bytes)
+    );
+}
