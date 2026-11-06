@@ -279,8 +279,9 @@ impl ContainerFile {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."))
             .to_path_buf();
+        let stage_prefix = remnant_v2_prefix(original.dev(), original.ino(), expected_old_digest);
         let mut staged = tempfile::Builder::new()
-            .prefix(".holonomy-save-")
+            .prefix(&stage_prefix)
             .tempfile_in(&parent)?;
         staged
             .as_file_mut()
@@ -390,19 +391,109 @@ pub struct SaveReport {
     pub protection: holonomy_core::unlock::ProtectionLayer,
 }
 
-/// A staged image left behind by a save that never completed its rename.
+/// Origin information encoded in a staged-image filename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemnantOrigin {
+    /// New-format marker identifying the original file object and exact old image bytes.
+    Bound {
+        /// Unix device number of the original container.
+        device: u64,
+        /// Unix inode number of the original container.
+        inode: u64,
+        /// Digest of the complete old container image before the staged save.
+        old_digest: [u8; 32],
+    },
+    /// Legacy `.holonomy-save-*` name with no origin marker.
+    LegacyUnbound,
+    /// Name claims the new format but its marker is malformed; do not downgrade it to legacy.
+    MalformedBound,
+}
+
+/// Whether a remnant's encoded origin corresponds to the currently named container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemnantAssociation {
+    /// The original container identity and pre-save bytes match this path now.
+    BoundToCurrentContainer,
+    /// A legacy name contains no association evidence; explicit operator choice is required.
+    LegacyUnbound,
+    /// A new-format origin marker is valid but does not match this container's current identity/state.
+    DoesNotMatch,
+    /// The name claims a binding marker but cannot be parsed safely.
+    MalformedBinding,
+}
+
+/// A regular file matching the staging-name prefix; the name alone does not prove its origin.
 #[derive(Debug)]
 pub struct SaveRemnant {
     /// The staged path, inside the container's directory.
     pub path: PathBuf,
-    /// Size on disk. A complete image is [`CONTAINER_BYTES`]; anything else is a torn stage.
+    /// Size on disk. A complete image is [`CONTAINER_BYTES`]; any other size is incomplete, but does not establish why.
     pub len: u64,
+    /// Filename-encoded origin evidence. It is not authenticated and can be forged by a directory writer.
+    pub origin: RemnantOrigin,
 }
 
 /// How many remnants a scan reports. The scan returns the lexicographically first entries, not
 /// whichever files the filesystem happened to enumerate first; an explicit candidate check is not
 /// limited by this display cap.
 pub const MAX_REMNANTS_REPORTED: usize = 20;
+
+#[cfg(unix)]
+fn remnant_v2_prefix(device: u64, inode: u64, old_digest: &[u8; 32]) -> String {
+    let digest = old_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(".holonomy-save-v2-{device:016x}-{inode:016x}-{digest}-")
+}
+
+fn parse_remnant_origin(path: &Path) -> RemnantOrigin {
+    let Some(os_name) = path.file_name() else {
+        return RemnantOrigin::LegacyUnbound;
+    };
+    if !os_name.as_encoded_bytes().starts_with(b".holonomy-save-v2") {
+        return RemnantOrigin::LegacyUnbound;
+    }
+    let Some(name) = os_name.to_str() else {
+        return RemnantOrigin::MalformedBound;
+    };
+    let Some(encoded) = name.strip_prefix(".holonomy-save-v2-") else {
+        return RemnantOrigin::MalformedBound;
+    };
+    let mut fields = encoded.splitn(4, '-');
+    let (Some(device), Some(inode), Some(digest), Some(nonce)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return RemnantOrigin::MalformedBound;
+    };
+    if device.len() != 16 || inode.len() != 16 || nonce.is_empty() {
+        return RemnantOrigin::MalformedBound;
+    }
+    let (Ok(device), Ok(inode), Some(old_digest)) = (
+        u64::from_str_radix(device, 16),
+        u64::from_str_radix(inode, 16),
+        parse_digest_hex(digest),
+    ) else {
+        return RemnantOrigin::MalformedBound;
+    };
+    RemnantOrigin::Bound {
+        device,
+        inode,
+        old_digest,
+    }
+}
+
+fn parse_digest_hex(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let byte = std::str::from_utf8(pair).ok()?;
+        digest[index] = u8::from_str_radix(byte, 16).ok()?;
+    }
+    Some(digest)
+}
 
 fn remnant_directory(container: &Path) -> PathBuf {
     if container.is_dir() {
@@ -418,8 +509,8 @@ fn remnant_directory(container: &Path) -> PathBuf {
 
 /// Check whether `candidate` is a regular `.holonomy-save-*` sibling of `container`.
 ///
-/// This is a namespace check, not cryptographic provenance: staged names are shared by every
-/// container in one directory. Authentication still has to succeed before copying the bytes.
+/// This checks only the directory, name prefix, and regular-file type; it does not evaluate the
+/// name's origin marker or authenticate file contents. Call [`remnant_association`] separately.
 pub fn is_save_remnant_beside(container: &Path, candidate: &Path) -> std::io::Result<bool> {
     let directory = remnant_directory(container);
     let candidate_directory = candidate
@@ -442,10 +533,145 @@ pub fn is_save_remnant_beside(container: &Path, candidate: &Path) -> std::io::Re
     }
 }
 
+/// Stable identity and complete-image fingerprint for one currently opened container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerOrigin {
+    device: u64,
+    inode: u64,
+    image_digest: [u8; 32],
+}
+
+/// Read the identity and full-image digest used to check v2 remnant markers.
+pub fn current_container_origin(path: &Path) -> std::io::Result<ContainerOrigin> {
+    #[cfg(unix)]
+    {
+        let (device, inode, image_digest) = container_origin_unix(path)?;
+        Ok(ContainerOrigin {
+            device,
+            inode,
+            image_digest,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "v2 remnant origin checks require Unix device/inode metadata",
+        ))
+    }
+}
+
+/// Compare a staged remnant's encoded origin with the current container.
+///
+/// New-format names bind to the old container's Unix device/inode and complete-image digest. This
+/// is operational provenance, not a MAC: anyone who can create files in the directory can forge
+/// the name. Legacy names remain explicitly classed as unbound.
+pub fn remnant_association(
+    container: &Path,
+    candidate: &Path,
+) -> std::io::Result<RemnantAssociation> {
+    if !is_save_remnant_beside(container, candidate)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "selected path is not a regular .holonomy-save-* sibling",
+        ));
+    }
+    let current_origin = match parse_remnant_origin(candidate) {
+        RemnantOrigin::Bound { .. } => Some(current_container_origin(container)?),
+        RemnantOrigin::LegacyUnbound | RemnantOrigin::MalformedBound => None,
+    };
+    remnant_association_with_origin(container, candidate, current_origin.as_ref())
+}
+
+/// Evaluate a candidate using a container origin already computed for a batch.
+///
+/// Passing no origin is sufficient for legacy or malformed names. A valid v2 marker requires
+/// `current_origin`; callers scanning several candidates should compute it once and reuse it.
+pub fn remnant_association_with_origin(
+    container: &Path,
+    candidate: &Path,
+    current_origin: Option<&ContainerOrigin>,
+) -> std::io::Result<RemnantAssociation> {
+    if !is_save_remnant_beside(container, candidate)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "selected path is not a regular .holonomy-save-* sibling",
+        ));
+    }
+    match parse_remnant_origin(candidate) {
+        RemnantOrigin::LegacyUnbound => Ok(RemnantAssociation::LegacyUnbound),
+        RemnantOrigin::MalformedBound => Ok(RemnantAssociation::MalformedBinding),
+        RemnantOrigin::Bound {
+            device,
+            inode,
+            old_digest,
+        } => {
+            let Some(current_origin) = current_origin else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "current container origin was not computed",
+                ));
+            };
+            if (device, inode, old_digest)
+                == (
+                    current_origin.device,
+                    current_origin.inode,
+                    current_origin.image_digest,
+                )
+            {
+                Ok(RemnantAssociation::BoundToCurrentContainer)
+            } else {
+                Ok(RemnantAssociation::DoesNotMatch)
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn container_origin_unix(path: &Path) -> std::io::Result<(u64, u64, [u8; 32])> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let opened = file.metadata()?;
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    if !opened.file_type().is_file()
+        || !path_metadata.file_type().is_file()
+        || opened.dev() != path_metadata.dev()
+        || opened.ino() != path_metadata.ino()
+        || opened.len() != CONTAINER_BYTES as u64
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "container path is not a stable whole regular file",
+        ));
+    }
+    let opened_modified = opened.modified()?;
+    let digest = file_digest(&mut file)?;
+    let after = file.metadata()?;
+    let after_modified = after.modified()?;
+    let path_after = std::fs::symlink_metadata(path)?;
+    if after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+        || after.len() != opened.len()
+        || after_modified != opened_modified
+        || !path_after.file_type().is_file()
+        || path_after.dev() != opened.dev()
+        || path_after.ino() != opened.ino()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "container changed while its remnant association was checked",
+        ));
+    }
+    Ok((opened.dev(), opened.ino(), digest))
+}
+
 /// Open an explicitly selected remnant and keep using that handle for verification and copying.
 /// On Unix, `O_NOFOLLOW` plus descriptor/path identity checks closes the final-component
-/// check-then-open race. Other platforms still need their own no-follow implementation. The prefix
-/// remains a shared namespace and does not bind the remnant to one container.
+/// check-then-open race. Other platforms still need their own no-follow implementation. This
+/// function validates only the selected path and handle; callers must separately evaluate
+/// [`remnant_association`] and authenticate the staged image.
 pub fn open_save_remnant_beside(
     container: &Path,
     candidate: &Path,
@@ -498,11 +724,11 @@ pub fn open_save_remnant_beside(
 
 /// Find `.holonomy-save-*` staged images next to `container`, or inside it when it is a directory.
 ///
-/// A save stages its image under that prefix and renames it into place, so a surviving file with
-/// the prefix means a save did not complete its rename -- it was killed, or the process died
-/// between writing and renaming. That does *not* prove the container is intact: another writer, an
-/// earlier failure or a full disk can break the expectation that the container holds the previous
-/// save. This is a directory listing, not a recovery protocol, and it decrypts nothing.
+/// Saves use that prefix for a temporary staged image, so a surviving matching file can be a
+/// crash remnant. The name alone does not prove it came from a save: files can be copied or planted,
+/// and even v2 origin markers are forgeable. Nor does a matching name prove the container is intact;
+/// another writer or an earlier failure can change it. This is a directory listing, not a recovery
+/// protocol, and it decrypts nothing.
 ///
 /// The scan examines all matching regular files to choose a stable lexicographic prefix, while
 /// retaining at most [`MAX_REMNANTS_REPORTED`] paths. The second element is true iff more matched.
@@ -528,6 +754,7 @@ pub fn find_save_remnants(container: &Path) -> std::io::Result<(Vec<SaveRemnant>
             continue;
         }
         let candidate = SaveRemnant {
+            origin: parse_remnant_origin(&path),
             path,
             len: metadata.len(),
         };

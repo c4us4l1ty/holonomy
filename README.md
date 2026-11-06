@@ -36,7 +36,7 @@ those documents are historical and code and current CI results govern implementa
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
 | Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. A read-only Wordcraft window (`holonomy-rich-view`) renders a container document with all persistence hooks refusing and all editing input dropped. The unencrypted scratch preview remains unconnected to containers. Nothing here edits a rich container document yet. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
-| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. `holonomy remnants` lists staged files; `holonomy recover` scans cursors; `holonomy recover-copy` can copy one authenticated remnant to a new path without replacing either source. This is not a complete recovery protocol: it does not choose the newest copy, repair the original, or reconcile pad state. Non-Unix saves are currently refused. |
+| Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. New staged names carry a forgeable device/inode plus prior-image digest marker; legacy names remain unbound and require `recover-copy --allow-unbound`. `holonomy remnants` lists staged files; `holonomy recover` scans cursors; `holonomy recover-copy` can copy one authenticated remnant to a new path without replacing either source. This is not a complete recovery protocol: it does not choose the newest copy, repair the original, or reconcile pad state. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
@@ -270,26 +270,36 @@ read-only: no write, no ratchet, no document bytes printed. Each cursor costs on
 and one key derivation, so a scan can take a while, and it stops at the first hit unless `--all` is
 passed. A hit proves the image opens with those credentials at that cursor; it does not prove the
 image is fresh, undamaged, the newest copy, or the only copy, and it is not a repair. `--remnants`
-runs the same scan over each `.holonomy-save-*` copy beside the container, because after a crash the
-newest image may be the one that never finished its rename; it reports which cursor opens each copy
-and says plainly when a leftover is not a whole image. It tests at most the 20 lexicographically
-first matching regular files and reports truncation; this cap bounds expensive cursor scans, not the
-directory enumeration. `recover-copy` checks an explicitly selected sibling directly, so the display
-cap does not block copying it. The `.holonomy-save-*` prefix is shared by containers in one directory
-and does not prove which container produced a file. A candidate that opens proves only that the
-format's authenticated structures and declared payload open with those credentials and cursor;
-unused image bytes, source provenance, freshness and recency are not thereby authenticated. To scan
+runs the same scan over each regular `.holonomy-save-*` file beside the container. A genuine staged
+image may be the newest image after a crash, but the name alone does not prove that any candidate
+came from a save; the command reports which cursor opens each candidate and when its size is not a
+whole image. It tests at most the 20 lexicographically first matching regular files and reports
+truncation; this cap bounds expensive cursor scans, not the directory enumeration. `recover-copy`
+checks an explicitly selected sibling directly, so the display cap does not block copying it. A
+candidate that opens proves only that the format's authenticated
+structures and declared payload open with those credentials and cursor; unused image bytes,
+freshness and recency are not thereby authenticated. The filename's optional origin marker is only
+operational provenance, not cryptographic authentication, as described below. To scan
 one specific candidate beyond the listing cap, run `recover` on that candidate path.
+
+Newly staged `.holonomy-save-v2-*` names encode the original container's Unix device/inode and a
+32-byte unkeyed digest over the complete pre-save image. This catches common wrong-container selections and detects a
+container replaced or changed in place. It is only unauthenticated provenance metadata: a writer of
+the directory can forge it, and it proves neither who created the remnant nor freshness or recency.
+The check is not atomic with later reads or authentication; concurrent writers remain unsafe.
+Older `.holonomy-save-*` names have no such association and are reported as legacy/unbound.
 
 If a staged copy authenticates and you want to preserve it without replacing the current file, use
 `holonomy recover-copy /path/to/container --remnant /path/to/.holonomy-save-… --cursor N --output /path/to/new-copy`.
-Choose the remnant and cursor reported by `recover --remnants`, or run `recover` on a specific
-candidate path if the listing was truncated. The command re-authenticates that candidate and creates
-a separate copy only when the destination does not already exist. It syncs the staged file and, on
-Unix, the containing directory; it then reads the installed file back and compares its full-image
-byte digest with the candidate before reporting success. These checks catch ordinary write and
-read-back errors, not hardware that lies about flushes. The printed unkeyed digest is for comparison,
-not proof of authenticity or durability, and can correlate identical copies. Neither container nor remnant contents are written;
+Legacy/unbound candidates additionally require `--allow-unbound`, an explicit acknowledgement that
+the name cannot associate them with this container. Choose the remnant and cursor reported by
+`recover --remnants`, or run `recover` on a specific candidate path if the listing was truncated.
+The command re-authenticates that candidate and creates a separate copy only when the destination
+does not already exist. It syncs the staged file and, on Unix, the containing directory; it then
+reads the installed file back and compares its full-image byte digest with the candidate before
+reporting success. These checks catch ordinary write and read-back errors, not hardware that lies
+about flushes. The printed unkeyed digest is for comparison, not proof of authenticity or durability,
+and can correlate identical copies. Neither container nor remnant contents are written;
 filesystem access metadata may change, and the pad is not written or ratcheted. This preserves a
 candidate; it does not promote it, identify the newest image, reconcile pad history, or complete
 recovery. Do not overwrite or delete

@@ -1443,6 +1443,87 @@ fn remnants_do_not_follow_symlinks() {
     );
 }
 
+/// New-format origin names parse strictly, while pre-v2 names remain explicitly unbound.
+#[cfg(unix)]
+#[test]
+fn remnant_origin_names_distinguish_legacy_from_malformed_v2() {
+    let digest = [0xA5; 32];
+    let name = format!("{}nonce", remnant_v2_prefix(7, 11, &digest));
+    let path = std::path::Path::new(&name);
+    assert_eq!(
+        parse_remnant_origin(path),
+        RemnantOrigin::Bound {
+            device: 7,
+            inode: 11,
+            old_digest: digest,
+        }
+    );
+    assert_eq!(
+        parse_remnant_origin(std::path::Path::new(".holonomy-save-old")),
+        RemnantOrigin::LegacyUnbound
+    );
+    assert_eq!(
+        parse_remnant_origin(std::path::Path::new(".holonomy-save-v2-broken")),
+        RemnantOrigin::MalformedBound
+    );
+}
+
+/// A v2 origin matches only the same Unix file object with its original complete image bytes.
+#[cfg(unix)]
+#[test]
+fn remnant_association_checks_file_identity_and_full_old_image_digest() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    let file = File::create(&container).expect("create sparse container");
+    file.set_len(CONTAINER_BYTES as u64).expect("size container");
+    drop(file);
+    let metadata = std::fs::metadata(&container).expect("container metadata");
+    let origin = current_container_origin(&container).expect("current container origin");
+    let bound = dir.path().join(format!(
+        "{}nonce",
+        remnant_v2_prefix(metadata.dev(), metadata.ino(), &origin.image_digest)
+    ));
+    std::fs::write(&bound, b"staged image").expect("bound remnant");
+    assert_eq!(
+        remnant_association_with_origin(&container, &bound, Some(&origin))
+            .expect("matching association"),
+        RemnantAssociation::BoundToCurrentContainer
+    );
+
+    let wrong_identity = dir.path().join(format!(
+        "{}nonce",
+        remnant_v2_prefix(metadata.dev() ^ 1, metadata.ino(), &origin.image_digest)
+    ));
+    std::fs::write(&wrong_identity, b"staged image").expect("wrong-identity remnant");
+    assert_eq!(
+        remnant_association_with_origin(&container, &wrong_identity, Some(&origin))
+            .expect("identity mismatch"),
+        RemnantAssociation::DoesNotMatch
+    );
+
+    let mut changed = OpenOptions::new()
+        .write(true)
+        .open(&container)
+        .expect("open container to mutate");
+    changed.seek(SeekFrom::Start(0)).expect("seek");
+    changed.write_all(&[1]).expect("change old image in place");
+    changed.sync_all().expect("sync mutation");
+    assert_eq!(
+        remnant_association(&container, &bound).expect("changed association"),
+        RemnantAssociation::DoesNotMatch
+    );
+
+    let legacy = dir.path().join(".holonomy-save-legacy");
+    std::fs::write(&legacy, b"legacy staged image").expect("legacy remnant");
+    assert_eq!(
+        remnant_association(&container, &legacy).expect("legacy association"),
+        RemnantAssociation::LegacyUnbound
+    );
+}
+
 /// The listing is bounded, and the caller is told when it stopped early.
 #[test]
 fn remnant_reporting_is_bounded() {

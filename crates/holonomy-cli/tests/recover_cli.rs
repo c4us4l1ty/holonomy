@@ -181,7 +181,7 @@ fn recover_tests_staged_copies_only_when_asked() {
     assert!(without.status.success());
     let plain = String::from_utf8_lossy(&without.stdout);
     assert!(
-        !plain.contains("Staged copy"),
+        !plain.contains("Candidate file"),
         "the scan must be opt-in: {plain}"
     );
     assert!(
@@ -202,7 +202,7 @@ fn recover_tests_staged_copies_only_when_asked() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("Staged copy"), "{text}");
+    assert!(text.contains("Candidate file"), "{text}");
     assert!(text.contains(".holonomy-save-crashed"), "{text}");
     assert_eq!(
         text.matches("Cursor 1 authenticates").count(),
@@ -246,7 +246,7 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         .expect("bounded remnant listing");
     assert!(listing.status.success());
     let listing_text = String::from_utf8_lossy(&listing.stdout);
-    let truncation_note = "Only the first 20 staged copies by filename were tested; more exist.";
+    let truncation_note = "Only the first 20 matching files by filename were tested; more exist.";
     assert!(
         listing_text.contains(truncation_note),
         "{listing_text}"
@@ -256,6 +256,21 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         "the 21st lexical remnant should be beyond the display cap: {listing_text}"
     );
 
+    let unbound_destination = dir.path().join("unbound-must-be-opted-in");
+    let unbound_refused = Command::new(binary())
+        .arg("recover-copy")
+        .arg(&path)
+        .args(["--remnant"])
+        .arg(&staged)
+        .args(["--cursor", "1", "--output"])
+        .arg(&unbound_destination)
+        .output()
+        .expect("recover-copy without legacy opt-in");
+    assert_eq!(unbound_refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unbound_refused.stderr)
+        .contains("legacy remnant is unbound to this container"));
+    assert!(!unbound_destination.exists());
+
     let recovered = dir.path().join("recovered-container");
 
     let output = Command::new(binary())
@@ -263,7 +278,7 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         .arg(&path)
         .args(["--remnant"])
         .arg(&staged)
-        .args(["--cursor", "1", "--output"])
+        .args(["--cursor", "1", "--allow-unbound", "--output"])
         .arg(&recovered)
         .args(credentials())
         .output()
@@ -341,13 +356,13 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
     assert!(!dir.path().join("must-not-exist").exists());
 }
 
-/// A leftover that is not a whole image is reported as cut short, not treated as an error.
+/// An incomplete leftover is reported without guessing why it is incomplete or failing the scan.
 #[test]
-fn recover_reports_a_staged_copy_that_was_cut_short() {
+fn recover_reports_an_incomplete_staged_copy_without_failing_the_scan() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (path, before) = saved_container(&dir, "1");
-    let staged = dir.path().join(".holonomy-save-cut-short");
-    std::fs::write(&staged, vec![0x5au8; 4096]).expect("write a torn copy");
+    let staged = dir.path().join(".holonomy-save-incomplete");
+    std::fs::write(&staged, vec![0x5au8; 4096]).expect("write a short remnant");
 
     let output = Command::new(binary())
         .arg("recover")
@@ -358,11 +373,11 @@ fn recover_reports_a_staged_copy_that_was_cut_short() {
         .expect("recover");
     assert!(
         output.status.success(),
-        "a torn leftover must not fail the scan: {}",
+        "an incomplete leftover must not fail the scan: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains(".holonomy-save-cut-short"), "{text}");
+    assert!(text.contains(".holonomy-save-incomplete"), "{text}");
     assert!(text.contains("Not a whole image"), "{text}");
     assert!(
         text.contains("Cursor 1 authenticates"),
@@ -402,7 +417,7 @@ fn recover_reports_a_candidate_when_only_a_staged_copy_opens() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains("Staged copy"), "{stdout}");
+    assert!(stdout.contains("Candidate file"), "{stdout}");
     assert!(
         stdout.contains("Cursor 1 authenticates"),
         "the staged copy should still open: {stdout}"
