@@ -103,7 +103,7 @@ impl eframe::App for ReadOnlyWindow {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<OsString> = std::env::args().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let launch = match parse_args(&args) {
         Ok(launch) => launch,
         Err(error) => {
