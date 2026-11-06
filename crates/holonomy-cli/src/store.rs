@@ -531,9 +531,8 @@ pub fn find_save_remnants(container: &Path) -> std::io::Result<(Vec<SaveRemnant>
             path,
             len: metadata.len(),
         };
-        let index = found.partition_point(|existing: &SaveRemnant| {
-            existing.path.cmp(&candidate.path).is_lt()
-        });
+        let index = found
+            .partition_point(|existing: &SaveRemnant| existing.path.cmp(&candidate.path).is_lt());
         if found.len() == MAX_REMNANTS_REPORTED {
             truncated = true;
             if index < MAX_REMNANTS_REPORTED {
