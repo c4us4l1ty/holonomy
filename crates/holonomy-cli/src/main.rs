@@ -760,9 +760,7 @@ fn recover_copy(args: &[String]) -> ExitCode {
         Err(error) => return usage_error(error),
     };
     if !flags.cursor_explicit {
-        return usage_error(
-            "recover-copy requires --cursor N from a successful recover scan",
-        );
+        return usage_error("recover-copy requires --cursor N from a successful recover scan");
     }
     let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
     if flags.cursor >= limit {

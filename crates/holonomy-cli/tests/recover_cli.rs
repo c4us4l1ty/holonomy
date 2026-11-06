@@ -273,7 +273,7 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
     );
 
     let original_destination = b"never overwrite me";
-    std::fs::write(&dir.path().join("already-exists"), original_destination)
+    std::fs::write(dir.path().join("already-exists"), original_destination)
         .expect("create existing destination");
     let refused = Command::new(binary())
         .arg("recover-copy")
