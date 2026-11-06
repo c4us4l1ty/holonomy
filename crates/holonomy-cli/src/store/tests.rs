@@ -1470,8 +1470,13 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("legal");
     for cursor in [1u64, 2] {
         let mut file = ContainerFile::open(&path, true).expect("open");
-        save(&mut file, &mut source(), &ctx(&pass, cursor), b"a scanned document")
-            .expect("save");
+        save(
+            &mut file,
+            &mut source(),
+            &ctx(&pass, cursor),
+            b"a scanned document",
+        )
+        .expect("save");
     }
     let before = std::fs::read(&path).expect("read container");
 

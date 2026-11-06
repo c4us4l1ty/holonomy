@@ -101,7 +101,10 @@ fn recover_reports_a_failure_instead_of_a_cursor() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("No cursor from 0 to 53"), "{stderr}");
     assert!(stderr.contains("Last refusal"), "{stderr}");
-    assert!(stderr.contains("does not prove the container is unrecoverable"), "{stderr}");
+    assert!(
+        stderr.contains("does not prove the container is unrecoverable"),
+        "{stderr}"
+    );
 }
 
 #[test]

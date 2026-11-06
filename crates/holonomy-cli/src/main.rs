@@ -568,7 +568,10 @@ fn recover(args: &[String]) -> ExitCode {
         println!(
             "Cursor {} authenticates. Unkeyed image digest {}",
             hit.cursor,
-            hit.digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            hit.digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         );
     }
     if !scan_all {
