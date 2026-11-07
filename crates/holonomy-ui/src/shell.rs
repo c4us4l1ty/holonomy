@@ -49,7 +49,12 @@ pub enum SessionError {
     /// A prior save failure left the on-disk state uncertain; this session must be reopened.
     RecoveryRequired,
     /// A completed save did not advance exactly one cursor from the last confirmed state.
-    UnexpectedCursor { expected: u64, actual: u64 },
+    UnexpectedCursor {
+        /// The next cursor after the last confirmed save.
+        expected: u64,
+        /// The cursor reported by the document session.
+        actual: u64,
+    },
     /// The cursor cannot advance beyond the integer range.
     CursorExhausted,
 }
