@@ -106,7 +106,9 @@ impl eframe::App for ReadOnlyWindow {
             if self.return_to_open_enabled {
                 ui.label("Press Ctrl/Cmd+O to return to the open screen, or Ctrl/Cmd+Q to close.");
             } else {
-                ui.label("Press Ctrl/Cmd+Q to close. The window ignores every other key and click.");
+                ui.label(
+                    "Press Ctrl/Cmd+Q to close. The window ignores every other key and click.",
+                );
             }
         });
         self.app.ui(ui);
