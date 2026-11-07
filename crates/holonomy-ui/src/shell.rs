@@ -117,7 +117,9 @@ impl Session {
             return Err(SessionError::RecoveryRequired);
         }
         let previous = self.cursor.ok_or(SessionError::RecoveryRequired)?;
-        let expected = previous.checked_add(1).ok_or(SessionError::CursorExhausted)?;
+        let expected = previous
+            .checked_add(1)
+            .ok_or(SessionError::CursorExhausted)?;
         if cursor != expected {
             return Err(SessionError::UnexpectedCursor {
                 expected,
