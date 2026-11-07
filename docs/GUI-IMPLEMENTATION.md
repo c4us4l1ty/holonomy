@@ -4,16 +4,17 @@ The historical [PRD](PRD-v5.1.0.md) §11 is the interface target, not a descript
 of a finished or security-reviewed product. The current windows are separate prototypes;
 neither is suitable for sensitive or irreplaceable data.
 
-`crates/holonomy-ui` now has its own build/test workspace, a read-only Wordcraft container viewer,
-and a status projection that consumes an actual store `SaveReport`. The viewer uses the preview
-crate's tested read-only boundary and deterministic demo pad. It no longer simulates a save cadence
-or infers fresh pad from an `O_RDWR` handle. The status code is not wired into a writable editor
-workflow. A reported ratchet count is not independent proof of persistent device writes, and the
-store still reports pad freshness as *not established*.
+`crates/holonomy-ui` now has its own build/test workspace, an interactive read-only Wordcraft
+container viewer, and a status projection that consumes an actual store `SaveReport`. The viewer
+uses the preview crate's tested read-only boundary and deterministic demo pad. Its GUI masks
+credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. The
+status code is not wired into a writable editor workflow. A reported ratchet count is not
+independent proof of persistent device writes, and the store still reports pad freshness as *not
+established*.
 
 | PRD interface goal | Current state | Work still needed |
 | --- | --- | --- |
-| Native Wordcraft editor | An opt-in, unencrypted scratch window and a read-only Wordcraft viewer over a demo-pad container exist. The restricted writable container editor is plain text only; no editable Wordcraft container UI exists. | Integrate writable Wordcraft only after controlling and testing every open, save-as, export, print, clipboard, drag/drop, autosave and recovery route that can expose plaintext. Preserve formatting and make data-loss behavior explicit. |
+| Native Wordcraft editor | An opt-in, unencrypted scratch window and an interactive read-only Wordcraft viewer over a demo-pad container exist. The restricted writable container editor is plain text only; no editable Wordcraft container UI exists. | Integrate writable Wordcraft only after controlling and testing every open, save-as, export, print, clipboard, drag/drop, autosave and recovery route that can expose plaintext. Preserve formatting and make data-loss behavior explicit. |
 | Protection layer per save | The demo status identifies its deterministic pad and experimental container. | Report the actual source and result of each save in a real session, including ratchet and failure states; never infer physical USB or fresh-pad protection from a cursor. |
 | Fresh-pad saves remaining | The demo reports only cursor slots up to the configured boundary. It does not track pad freshness or history. A pending or uncertain save hides the remaining count. | Implement durable, rollback-aware pad-use and ratchet accounting and recovery before presenting a verified fresh-pad budget. |
 | Capture exclusion | Not attempted in the demo; the document can be captured. Linux has no portable window capture exclusion. | Integrate platform-specific attempts where available and report their actual result and limitations. |
@@ -50,13 +51,14 @@ durability, or complete recovery. Reading can update OS file-access metadata.
 ## Read-only Wordcraft rendering of a container
 
 `crates/holonomy-preview/src/bin/holonomy-rich-view.rs` was the first path where the real
-Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes the
-same read-only modes from the standalone UI package; it is one-way by construction, not by
-configuration:
+Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes an
+interactive open screen as well as CLI modes from the standalone UI package. The window is
+one-way by construction, not by configuration:
 
 ```text
-holonomy --view PATH CURSOR          # a window
-holonomy --inspect-only PATH CURSOR  # decode and report, no window
+holonomy                                  # open the interactive screen
+holonomy --view PATH CURSOR               # hidden terminal credential prompts + window
+holonomy --inspect-only PATH CURSOR       # hidden prompts + decode/report, no window
 ```
 
 The container is opened with `writable = false`, the decoded document is cloned, and the

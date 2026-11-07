@@ -801,7 +801,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev libxkbcommon-x11-0
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev libxkbcommon-x11-0 xvfb xauth libgl1-mesa-dri
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -825,6 +825,22 @@ jobs:
           cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --help 2>&1 | tee ui-help.log
           grep -qF -- '--view PATH CURSOR' ui-help.log
           grep -qF 'demo pad' ui-help.log
+          grep -qF 'interactive read-only open screen' ui-help.log
+      - name: Smoke-test the interactive open screen
+        run: |
+          set -euo pipefail
+          binary="$PWD/crates/holonomy-ui/target/debug/holonomy"
+          set +e
+          timeout 25s xvfb-run -a "$binary" > ui-window.log 2>&1
+          status=$?
+          set -e
+          cat ui-window.log
+          if [ "$status" -ne 124 ]; then
+            echo "::error::interactive open screen exited before the smoke-test timeout (status $status)"
+            exit 1
+          fi
+          grep -qF 'DEMO PAD' ui-window.log
+          grep -qF 'READ-ONLY VIEW' ui-window.log
       - name: Lint UI shell
         run: |
           set -o pipefail
@@ -837,7 +853,7 @@ jobs:
         if: failure()
         run: |
           set +e
-          for log in ui-test.log ui-help.log ui-clippy.log ui-fmt.log; do
+          for log in ui-test.log ui-help.log ui-window.log ui-clippy.log ui-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"

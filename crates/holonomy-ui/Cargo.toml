@@ -41,6 +41,7 @@ wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08a
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 
 libc = "0.2"
+zeroize = "1.8"
 
 # Windows-only import for `SetWindowDisplayAffinity`; macOS uses `NSWindow.sharingType`.
 [target.'cfg(windows)'.dependencies]

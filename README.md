@@ -207,6 +207,8 @@ cargo test --workspace
 cargo test --manifest-path crates/holonomy-wordcraft/Cargo.toml
 # Experimental UI (separate workspace)
 cargo test --manifest-path crates/holonomy-ui/Cargo.toml
+# Interactive read-only open screen (graphical desktop required)
+cargo run --manifest-path crates/holonomy-ui/Cargo.toml
 cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --view /path/to/container CURSOR
 # Headless decode/report without opening a window
 cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --inspect-only /path/to/container CURSOR
@@ -321,13 +323,15 @@ procedure: it cannot tell you whether the container is readable, and a listing d
 rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
 
 A read-only Wordcraft window can render a container's document without offering any way to change
-or export it. The standalone UI binary offers `--view PATH CURSOR` and `--inspect-only PATH CURSOR`;
-the preview alias `holonomy-rich-view` has the same modes. Hidden prompts supply credentials, and
-both paths use the deterministic demo pad, not physical USB. The window drops every key, text,
-paste, copy and click event before the editor sees it, and every host hook that could save, print,
-download or write the clipboard refuses. Press Ctrl+Q to close. Decoding performs no write and no
-ratchet, but the document is plaintext in memory and capture exclusion, editor-wide memory locking,
-and the watchdog are not integrated. This is a viewing aid, not a protected reader.
+or export it. The standalone UI binary opens an interactive screen with no arguments, or accepts
+`--view PATH CURSOR` and `--inspect-only PATH CURSOR`; the preview alias `holonomy-rich-view` has
+the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
+credentials visually but does not guarantee that all UI allocations are locked or wiped. Every
+mode uses the deterministic demo pad, not physical USB. The renderer drops editing input and every
+host hook that could save, print, download or write the clipboard refuses. Press Ctrl+Q to close.
+Decoding performs no write and no ratchet, but the document is plaintext in memory and capture
+exclusion, editor-wide memory locking, and the watchdog are not integrated. This is a viewing aid,
+not a protected reader.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
