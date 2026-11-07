@@ -793,6 +793,57 @@ jobs:
             done
           done
 
+  holonomy-ui-shell:
+    name: Holonomy UI status shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev libxkbcommon-x11-0
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/holonomy-ui/target
+          key: ${{ runner.os }}-ui-shell-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-ui-shell-
+      - name: Test UI shell
+        run: |
+          set -o pipefail
+          cargo test --manifest-path crates/holonomy-ui/Cargo.toml --all-targets --message-format=short 2>&1 | tee ui-test.log
+      - name: Lint UI shell
+        run: |
+          set -o pipefail
+          cargo clippy --manifest-path crates/holonomy-ui/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee ui-clippy.log
+      - name: Check UI formatting
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path crates/holonomy-ui/Cargo.toml --all -- --check 2>&1 | tee ui-fmt.log
+      - name: Annotate UI shell failures
+        if: failure()
+        run: |
+          set +e
+          for log in ui-test.log ui-clippy.log ui-fmt.log; do
+            [ -f "$log" ] || continue
+            grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            if [ "$log" = ui-fmt.log ]; then
+              head -100 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
+            grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          done
+
   wordcraft-bridge:
     name: Wordcraft document bridge
     runs-on: ubuntu-latest

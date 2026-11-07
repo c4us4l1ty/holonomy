@@ -4,6 +4,12 @@ The historical [PRD](PRD-v5.1.0.md) §11 is the interface target, not a descript
 of a finished or security-reviewed product. The current windows are separate prototypes;
 neither is suitable for sensitive or irreplaceable data.
 
+`crates/holonomy-ui` now has its own build/test workspace and a status projection that consumes
+an actual store `SaveReport`. It no longer simulates a save cadence or infers fresh pad from an
+`O_RDWR` handle. This status code is not wired into a window or a real editor workflow; the
+`holonomy` binary there is still a placeholder. A reported ratchet count is not independent proof
+of persistent device writes, and the store still reports pad freshness as *not established*.
+
 | PRD interface goal | Current state | Work still needed |
 | --- | --- | --- |
 | Native Wordcraft editor | An opt-in, unencrypted Wordcraft scratch window exists. The demo-container editor is restricted to plain text and is not the full Wordcraft UI. | Integrate the Wordcraft window with the container session only after controlling and testing all open, save-as, export, print, clipboard, drag/drop and recovery paths that can expose plaintext. Preserve formatting and make data-loss behavior explicit. |

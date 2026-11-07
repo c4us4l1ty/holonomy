@@ -1,14 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["."]
+
 [package]
 name = "holonomy-ui"
-description = "Holonomy's shell over wordcraft: document open/save, unlock and the editor front end"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+description = "Holonomy's unfinished Wordcraft shell and save-status projection"
+version = "5.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+repository = "https://github.com/c4us4l1ty/holonomy"
 
-# The binary is the deliverable; the library exists so the shell's logic (save cadence, pad
-# budget reporting, capture-exclusion claims) can be tested without a window.
+# The binary is the deliverable; the library exists so save-status projection and capture
+# reporting can be tested without a window.
 [lib]
 name = "holonomy_ui"
 path = "src/lib.rs"
@@ -19,21 +24,20 @@ path = "src/main.rs"
 
 [dependencies]
 holonomy-core = { path = "../holonomy-core" }
+holonomy-cli = { path = "../holonomy-cli" }
 holonomy-crypto = { path = "../holonomy-crypto" }
 holonomy-usb = { path = "../holonomy-usb" }
 holonomy-runtime = { path = "../holonomy-runtime" }
 
-# wordcraft, pinned to 0.15.1. These are the *actual* package names: there is no
-# `wordcraft-core`, and `wordcraft-render` is the vello_cpu rasteriser, which is the CPU path
-# v5.1.0 uses now that the PRD's ban on egui and on heap allocation is dropped.
-wordcraft-geom = { workspace = true }
-wordcraft-doc = { workspace = true }
-wordcraft-fonts = { workspace = true }
-wordcraft-layout = { workspace = true }
-wordcraft-render = { workspace = true }
-wordcraft-ui-egui = { workspace = true }
+# Wordcraft 0.15.1, pinned to the same revision as the bridge and preview workspaces.
+wordcraft-geom = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-fonts = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-layout = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 
-libc = { workspace = true }
+libc = "0.2"
 
 # Windows-only import for `SetWindowDisplayAffinity`; macOS uses `NSWindow.sharingType`.
 [target.'cfg(windows)'.dependencies]
@@ -42,6 +46,23 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSWindow", "NSResponder"] }
+
+# The pinned Wordcraft workspace's patches must be repeated in each standalone workspace.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
 
 [lints.rust]
 missing_docs = "deny"

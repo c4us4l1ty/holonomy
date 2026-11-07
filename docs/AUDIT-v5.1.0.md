@@ -13,9 +13,16 @@ and the tests that were supposed to defend them were either wrong, unfalsifiable
 fixture with a 77-bit constant prefix. The sections below now report what the gates established
 rather than what the design intended; §8 collects the corrections and the remaining deferrals.
 
-The one gate still deferred is `holonomy-ui`, which needs `crates.io` plus `wordcraft`'s pinned
-`craft-*` git dependencies. Everything that depends on it — the measured-RSS gate, the `wordcraft`
-symbol checks in §1 — is marked as unverified rather than asserted.
+The one gate still deferred at the time of this audit was `holonomy-ui`, which needed `crates.io`
+plus `wordcraft`'s pinned `craft-*` git dependencies. Everything that depended on it — the measured-RSS
+gate and the `wordcraft` symbol checks in §1 — was marked unverified rather than asserted.
+
+**Update, 2026-11-07:** `holonomy-ui` now has a standalone manifest and a dedicated CI job for its
+status shell. The old simulated save-cadence model has been replaced by a projection of an actual
+`SaveReport`, so the shell no longer derives pad freshness from an `O_RDWR` handle. This does not
+wire Wordcraft into the UI binary or complete the deferred editor integration; the new CI result
+must be checked on the commit that contains this update. The historical test counts and gate
+statements below refer to the earlier audit baseline, not the current branch.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |

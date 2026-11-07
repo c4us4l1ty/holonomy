@@ -162,7 +162,7 @@ properties.
 | [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
 | [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft codec, frontend session, and limited editing-engine adapter. | Experimental separate workspace; no editor UI |
 | [`holonomy-preview`](crates/holonomy-preview) | Explicitly unencrypted Wordcraft scratch-window integration preview. | Separate workspace; **never use sensitive data** |
-| [`holonomy-ui`](crates/holonomy-ui) | Intended Wordcraft shell and capture-reporting code. | Outside workspace; unfinished |
+| [`holonomy-ui`](crates/holonomy-ui) | Capture-reporting helpers and projection of actual container save reports. | Standalone workspace; binary remains a placeholder; no editor integration |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its
 aligned direct-I/O rules informed the current USB I/O module.
@@ -191,8 +191,9 @@ upstream library security does not validate Holonomy's composition or implementa
 
 Requirements: Rust **1.95 or later** and access to the dependency sources. The main workspace
 contains the CLI and five libraries; `holonomy-ui`, `holonomy-preview`, and the experimental
-`holonomy-wordcraft` bridge are not members. The bridge uses the pinned Wordcraft document model and engine in its own
-workspace. Its manifest repeats Wordcraft's pinned `krilla` patch because Cargo does not inherit
+`holonomy-wordcraft` bridge are separate workspaces. The UI has a separate manifest so its
+Wordcraft dependencies stay out of the core workspace; its binary remains unfinished. The bridge
+and UI manifests repeat Wordcraft's pinned dependency patches because Cargo does not inherit
 patches from dependency workspaces.
 
 ```bash
@@ -203,6 +204,8 @@ cargo build --release -p holonomy-cli
 cargo test --workspace
 # Experimental Wordcraft codec (separate workspace)
 cargo test --manifest-path crates/holonomy-wordcraft/Cargo.toml
+# UI status shell (separate workspace; still not a connected editor)
+cargo test --manifest-path crates/holonomy-ui/Cargo.toml
 ```
 
 The audit workflow runs build, tests, lint, and focused CLI safety regressions. Use the
