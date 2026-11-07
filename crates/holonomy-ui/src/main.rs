@@ -143,14 +143,16 @@ impl OpenForm {
 
     fn show(&mut self, ui: &mut egui::Ui, opening: bool) -> bool {
         ui.heading("Open a container for read-only viewing");
-        ui.label("Container path");
-        ui.text_edit_singleline(&mut self.path);
-        ui.label("Cursor used to write this image");
-        ui.text_edit_singleline(&mut self.cursor);
-        ui.label("Legacy passphrase (ASCII case variants are equivalent)");
-        ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
-        ui.label("Demo root share (exactly 64 hexadecimal characters)");
-        ui.add(egui::TextEdit::singleline(&mut self.root_share).password(true));
+        ui.add_enabled_ui(!opening, |ui| {
+            ui.label("Container path");
+            ui.text_edit_singleline(&mut self.path);
+            ui.label("Cursor used to write this image");
+            ui.text_edit_singleline(&mut self.cursor);
+            ui.label("Legacy passphrase (ASCII case variants are equivalent)");
+            ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
+            ui.label("Demo root share (exactly 64 hexadecimal characters)");
+            ui.add(egui::TextEdit::singleline(&mut self.root_share).password(true));
+        });
         ui.label(
             "Credentials are only visually masked; clipboard, swap, crash dumps, and UI allocations may expose them.",
         );
