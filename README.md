@@ -32,9 +32,9 @@ those documents are historical and code and current CI results govern implementa
 | :--- | :--- |
 | Container and cryptographic primitives | Implemented in the core, crypto, session, USB, and CLI crates; still requires independent review. |
 | CLI container round trip | Experimental `provision`, `save`, and `open` commands; credentials can be entered at a hidden terminal prompt. |
-| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. Partial or invalid ratchet counts after replacement require recovery; a full count is only the source's report, not independent proof of fresh pad. Reporters carry pad freshness as *fresh*, *reused*, or *not established* — the store itself never claims the first two.. A save reads the replacement image back and compares its digest before ratcheting, so a torn or substituted replacement is refused while the old pad window is still intact. |
+| USB pad | A device-backed Zone B reader and ratchet exist; without `--device`, a **deterministic demo pad** is used instead. Partial or invalid ratchet counts after replacement require recovery; a full count is only the source's report, not independent proof of fresh pad. Reporters carry pad freshness as *fresh*, *reused*, or *not established* — the store itself never claims the first two. A save reads the replacement image back and compares its digest before ratcheting, so a torn or substituted replacement is refused while the old pad window is still intact. |
 | USB provisioning / Zone A | Not implemented end to end. The CLI does not extract the root share from the device or initialize its entropy reservoir. |
-| Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. A read-only Wordcraft window (`holonomy-rich-view`) renders a container document with all persistence hooks refusing and all editing input dropped. The unencrypted scratch preview remains unconnected to containers. Nothing here edits a rich container document yet. |
+| Editor | A restricted plain-text demo window uses the container session and deterministic demo pad. The `holonomy-ui` binary and `holonomy-rich-view` preview alias can render a container in read-only Wordcraft mode, with persistence hooks refusing and editing input dropped. The unencrypted scratch preview remains unconnected to containers. Nothing here edits a rich container document yet. |
 | Reaper and capture protection | Library-level components exist; they are **not integrated into a running editor session**. No end-to-end wipe-latency guarantee is made. |
 | Crash recovery | Unix saves stage and sync a replacement before renaming it, then sync the parent directory, read the replacement back before ratcheting, and hold an advisory save lock. New staged names carry a forgeable device/inode plus prior-image digest marker; legacy names remain unbound and require `recover-copy --allow-unbound`. `holonomy remnants` lists regular files matching staged-image names; `holonomy recover` scans cursors; `holonomy recover-copy` can copy one candidate that opens at the supplied cursor to a new path without replacing either source. This is not a complete recovery protocol: it does not choose the newest copy, repair the original, or reconcile pad state. Non-Unix saves are currently refused. |
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
@@ -161,8 +161,8 @@ properties.
 | [`holonomy-session`](crates/holonomy-session) | Container sealing/opening, directories, session status, and checks. | Workspace library |
 | [`holonomy-cli`](crates/holonomy-cli) | `holonomy` binary plus experimental file-store and document-session APIs, pad sources, and diagnostics. | Workspace binary and library; UI integration pending |
 | [`holonomy-wordcraft`](crates/holonomy-wordcraft) | Versioned Wordcraft codec, frontend session, and limited editing-engine adapter. | Experimental separate workspace; no editor UI |
-| [`holonomy-preview`](crates/holonomy-preview) | Explicitly unencrypted Wordcraft scratch-window integration preview. | Separate workspace; **never use sensitive data** |
-| [`holonomy-ui`](crates/holonomy-ui) | Capture-reporting helpers and projection of actual container save reports. | Standalone workspace; binary remains a placeholder; no editor integration |
+| [`holonomy-preview`](crates/holonomy-preview) | Unencrypted scratch window, restricted container demo, and read-only Wordcraft viewer. | Separate workspace; demo pad only; **never use sensitive data** |
+| [`holonomy-ui`](crates/holonomy-ui) | Read-only Wordcraft container viewer plus capture/status helpers. | Standalone workspace; demo pad only; no editing, saving, physical USB, or recovery |
 
 [`holonomy-old/`](holonomy-old/) is a read-only prior generation, not a workspace dependency. Its
 aligned direct-I/O rules informed the current USB I/O module.
@@ -174,7 +174,7 @@ upstream repositories for attribution and their license terms.
 
 | Project | Role in Holonomy |
 | :--- | :--- |
-| [`storytold/wordcraft`](https://github.com/storytold/wordcraft) | Document model used by the experimental codec and intended editor foundation; the UI is not linked into the current binary. |
+| [`storytold/wordcraft`](https://github.com/storytold/wordcraft) | Document model and renderer used by the experimental codec and read-only viewer; editable UI is not integrated. |
 | [`RustCrypto/KEMs`](https://github.com/RustCrypto/KEMs) | `ml-kem`, used for the ML-KEM-1024 portion of the hybrid envelope. |
 | [`dalek-cryptography/curve25519-dalek`](https://github.com/dalek-cryptography/curve25519-dalek) | X25519 key agreement via `x25519-dalek`; no Elligator mapping is claimed. |
 | [`RustCrypto/AEADs`](https://github.com/RustCrypto/AEADs) and [`RustCrypto/hashes`](https://github.com/RustCrypto/hashes) | XChaCha20-Poly1305 and hash primitives used by the crypto layer. |
@@ -192,7 +192,8 @@ upstream library security does not validate Holonomy's composition or implementa
 Requirements: Rust **1.95 or later** and access to the dependency sources. The main workspace
 contains the CLI and five libraries; `holonomy-ui`, `holonomy-preview`, and the experimental
 `holonomy-wordcraft` bridge are separate workspaces. The UI has a separate manifest so its
-Wordcraft dependencies stay out of the core workspace; its binary remains unfinished. The bridge
+Wordcraft dependencies stay out of the core workspace; it provides an experimental read-only
+viewer, not a full editor. The viewer uses the deterministic demo pad, not physical USB. The bridge
 and UI manifests repeat Wordcraft's pinned dependency patches because Cargo does not inherit
 patches from dependency workspaces.
 
@@ -204,18 +205,23 @@ cargo build --release -p holonomy-cli
 cargo test --workspace
 # Experimental Wordcraft codec (separate workspace)
 cargo test --manifest-path crates/holonomy-wordcraft/Cargo.toml
-# UI status shell (separate workspace; still not a connected editor)
+# Experimental UI (separate workspace)
 cargo test --manifest-path crates/holonomy-ui/Cargo.toml
+cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --view /path/to/container CURSOR
+# Headless decode/report without opening a window
+cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --inspect-only /path/to/container CURSOR
 ```
 
 The audit workflow runs build, tests, lint, and focused CLI safety regressions. Use the
 [Actions page](https://github.com/c4us4l1ty/holonomy/actions/workflows/audit.yml) for the actual
 result of a particular commit; a badge is not an independent security audit.
 
-The separate `holonomy-preview` is a **plaintext scratch-only development preview**, not a
-container editor. It launches only with an explicit opt-in; Wordcraft's own file, export, print,
-and clipboard actions can expose plaintext. Do not enter sensitive or irreplaceable data. It needs
-a graphical desktop, native windowing libraries, and the pinned upstream git dependencies:
+The separate `holonomy-preview` package contains an opt-in unencrypted Wordcraft scratch window,
+a restricted plain-text container demo, and the read-only rich viewer. These are integration
+prototypes, not a production editor; all use the deterministic demo pad rather than physical USB.
+The scratch window launches only with an explicit opt-in. Wordcraft's own file, export, print, and
+clipboard actions can expose plaintext. Do not enter sensitive or irreplaceable data. The windows
+need a graphical desktop, native windowing libraries, and the pinned upstream git dependencies:
 
 ```bash
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml -- --unencrypted-scratch-preview
@@ -315,12 +321,13 @@ procedure: it cannot tell you whether the container is readable, and a listing d
 rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
 
 A read-only Wordcraft window can render a container's document without offering any way to change
-or export it: `holonomy-rich-view --view /path/to/container CURSOR`, or
-`--inspect-only` to decode and report without a window. Hidden prompts supply the same credentials;
-the pad is the deterministic demo stand-in. The window drops every key, text, paste, copy and click
-event before the editor sees it, and every host hook that could save, print, download or write the
-clipboard refuses. Press Ctrl+Q to close. The decoding itself performs no write and no ratchet, but
-the document is plaintext in memory, so this is a viewing aid, not a protected reader.
+or export it. The standalone UI binary offers `--view PATH CURSOR` and `--inspect-only PATH CURSOR`;
+the preview alias `holonomy-rich-view` has the same modes. Hidden prompts supply credentials, and
+both paths use the deterministic demo pad, not physical USB. The window drops every key, text,
+paste, copy and click event before the editor sees it, and every host hook that could save, print,
+download or write the clipboard refuses. Press Ctrl+Q to close. Decoding performs no write and no
+ratchet, but the document is plaintext in memory and capture exclusion, editor-wide memory locking,
+and the watchdog are not integrated. This is a viewing aid, not a protected reader.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The

@@ -4,7 +4,7 @@ members = ["."]
 
 [package]
 name = "holonomy-ui"
-description = "Holonomy's unfinished Wordcraft shell and save-status projection"
+description = "Holonomy's experimental read-only Wordcraft container viewer and save-status projection"
 version = "5.1.0"
 edition = "2021"
 rust-version = "1.95"
@@ -28,6 +28,7 @@ holonomy-cli = { path = "../holonomy-cli" }
 holonomy-crypto = { path = "../holonomy-crypto" }
 holonomy-usb = { path = "../holonomy-usb" }
 holonomy-runtime = { path = "../holonomy-runtime" }
+holonomy-preview = { path = "../holonomy-preview" }
 
 # Wordcraft 0.15.1, pinned to the same revision as the bridge and preview workspaces.
 wordcraft-geom = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
@@ -35,7 +36,9 @@ wordcraft-doc = { git = "https://github.com/storytold/wordcraft", rev = "08afab5
 wordcraft-fonts = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-layout = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-render = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+wordcraft-engine = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
 wordcraft-ui-egui = { git = "https://github.com/storytold/wordcraft", rev = "08afab50b6a1ed19f9af55bb9f74d18f5e17bfa0" }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 
 libc = "0.2"
 

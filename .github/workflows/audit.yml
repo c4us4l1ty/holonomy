@@ -794,7 +794,7 @@ jobs:
           done
 
   holonomy-ui-shell:
-    name: Holonomy UI status shell
+    name: Holonomy read-only UI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -819,6 +819,12 @@ jobs:
         run: |
           set -o pipefail
           cargo test --manifest-path crates/holonomy-ui/Cargo.toml --all-targets --message-format=short 2>&1 | tee ui-test.log
+      - name: Smoke-test the UI launcher help
+        run: |
+          set -o pipefail
+          cargo run --manifest-path crates/holonomy-ui/Cargo.toml -- --help 2>&1 | tee ui-help.log
+          grep -qF -- '--view PATH CURSOR' ui-help.log
+          grep -qF 'demo pad' ui-help.log
       - name: Lint UI shell
         run: |
           set -o pipefail
@@ -831,7 +837,7 @@ jobs:
         if: failure()
         run: |
           set +e
-          for log in ui-test.log ui-clippy.log ui-fmt.log; do
+          for log in ui-test.log ui-help.log ui-clippy.log ui-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"
