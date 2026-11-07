@@ -324,7 +324,9 @@ procedure: it cannot tell you whether the container is readable, and a listing d
 rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
 
 A read-only Wordcraft window can render a container's document without offering any way to change
-or export it. The standalone UI binary opens an interactive screen with no arguments, or accepts
+or export it. In the interactive open form, enter a path or drop exactly one filesystem file; only
+its path is used, never its dropped contents. File-drop data is cleared before it can reach Wordcraft
+in the read-only viewer. The standalone UI binary opens an interactive screen with no arguments, or accepts
 `--view PATH CURSOR` and `--inspect-only PATH CURSOR`; the preview alias `holonomy-rich-view` has
 the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
 credentials visually but does not guarantee that all UI allocations are locked or wiped. Every

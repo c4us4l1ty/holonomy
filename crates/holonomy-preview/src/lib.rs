@@ -7,8 +7,8 @@
 //! * every host service Wordcraft can reach is replaced by one that refuses, so a file dialog,
 //!   download, save, print or clipboard write fails loudly instead of succeeding quietly;
 //! * the raw input stream is filtered down to pointer motion, scrolling and focus. No key, text,
-//!   paste or button event ever reaches the app, so no command that could edit, export or copy can
-//!   be invoked from the window.
+//!   paste or button event reaches the app, and hovered/dropped file payloads are cleared, so no
+//!   command that could edit, export, copy or open another file can be invoked from the window.
 //!
 //! Both are tested here. Neither is a sandbox: the decoded document is plaintext in this process,
 //! the renderer may allocate copies of it, and the operating system can expose them.
@@ -258,13 +258,15 @@ pub struct ViewInput {
 /// Reduce a frame's input to viewing only.
 ///
 /// Kept: pointer motion, wheel scrolling, pinch zoom and window focus. Everything else -- keys,
-/// typed text, paste, copy, cut, IME, pre-edit and every pointer button -- is dropped, so no click
-/// can press a ribbon button and no chord can reach a command. Ctrl/Cmd+Q closes the viewer;
-/// Ctrl/Cmd+O returns to the interactive open screen. Both are handled by the host filter because
-/// no key event may reach Wordcraft.
+/// typed text, paste, copy, cut, IME, pre-edit, pointer buttons, and hovered/dropped file data --
+/// is dropped, so no input can reach a Wordcraft command or file-open route. Ctrl/Cmd+Q closes the
+/// viewer; Ctrl/Cmd+O returns to the interactive open screen. Both are handled by the host filter.
 pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
     let mut outcome = ViewInput::default();
     let total = raw.events.len();
+    let file_events = raw.hovered_files.len() + raw.dropped_files.len();
+    raw.hovered_files.clear();
+    raw.dropped_files.clear();
     let mut kept = Vec::with_capacity(total);
     for event in std::mem::take(&mut raw.events) {
         match event {
@@ -287,7 +289,7 @@ pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
             _ => {}
         }
     }
-    outcome.dropped = total - kept.len();
+    outcome.dropped = total - kept.len() + file_events;
     raw.events = kept;
     outcome
 }
@@ -374,7 +376,7 @@ mod tests {
         );
     }
 
-    /// The input boundary: viewing survives, everything that could edit or copy does not.
+    /// The input boundary: viewing survives, while edits, clipboard operations and file drops do not.
     #[test]
     fn input_filter_keeps_viewing_and_drops_editing() {
         let mut raw = egui::RawInput {
@@ -390,15 +392,19 @@ mod tests {
                 egui::Event::Zoom(1.1),
                 egui::Event::WindowFocused(true),
             ],
+            hovered_files: vec![Default::default()],
+            dropped_files: vec![Default::default()],
             ..Default::default()
         };
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
         assert!(!outcome.return_to_open_requested);
         assert_eq!(
-            outcome.dropped, 6,
-            "keys, text, paste, copy, cut and clicks"
+            outcome.dropped, 8,
+            "keys, text, paste, copy, cut, clicks and file drag/drop data"
         );
+        assert!(raw.hovered_files.is_empty());
+        assert!(raw.dropped_files.is_empty());
         assert_eq!(
             raw.events,
             vec![

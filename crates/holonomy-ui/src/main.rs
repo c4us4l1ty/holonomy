@@ -117,6 +117,7 @@ impl eframe::App for ReadOnlyWindow {
 
 struct OpenForm {
     path: String,
+    selected_path: Option<PathBuf>,
     cursor: String,
     passphrase: String,
     root_share: String,
@@ -128,6 +129,7 @@ impl Default for OpenForm {
     fn default() -> Self {
         Self {
             path: String::new(),
+            selected_path: None,
             cursor: "0".into(),
             passphrase: String::new(),
             root_share: String::new(),
@@ -138,18 +140,28 @@ impl Default for OpenForm {
 }
 
 impl OpenForm {
+    fn select_dropped_path(&mut self, path: PathBuf) {
+        self.path = path.to_string_lossy().into_owned();
+        self.selected_path = Some(path);
+        self.clear_feedback_for_edits(true, false);
+    }
+
     fn prepare_credentials(
         &mut self,
     ) -> Result<(PathBuf, SealedPassphrase, Zeroizing<[u8; 32]>), String> {
-        if self.path.is_empty() {
-            return Err("enter a container path".into());
+        let path = self
+            .selected_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(self.path.as_str()));
+        if path.as_os_str().is_empty() {
+            return Err("enter a container path or drop a container file".into());
         }
         let passphrase = SealedPassphrase::new(&self.passphrase)
             .ok_or_else(|| "passphrase is empty or too long".to_string())?;
         let kappa = Zeroizing::new(parse_kappa(&self.root_share).map_err(str::to_owned)?);
         self.passphrase.zeroize();
         self.root_share.zeroize();
-        Ok((PathBuf::from(self.path.as_str()), passphrase, kappa))
+        Ok((path, passphrase, kappa))
     }
 
     fn prepare_request(&mut self) -> Result<OpenRequest, String> {
@@ -199,8 +211,12 @@ impl OpenForm {
         let mut path_or_cursor_changed = false;
         let mut credentials_changed = false;
         ui.add_enabled_ui(pending.is_none(), |ui| {
-            ui.label("Container path");
-            path_or_cursor_changed |= ui.text_edit_singleline(&mut self.path).changed();
+            ui.label("Container path (or drop a file here)");
+            let path_changed = ui.text_edit_singleline(&mut self.path).changed();
+            if path_changed {
+                self.selected_path = None;
+            }
+            path_or_cursor_changed |= path_changed;
             ui.label(format!(
                 "Cursor used to write this image (0–{})",
                 SAVES_BEFORE_DOMAIN_REUSE - 1
@@ -357,6 +373,25 @@ impl ViewerApp {
         }
     }
 
+    fn handle_dropped_files(&mut self, raw: &mut egui::RawInput) {
+        let dropped_files = std::mem::take(&mut raw.dropped_files);
+        raw.hovered_files.clear();
+        if self.pending.is_some() || dropped_files.is_empty() {
+            return;
+        }
+        if dropped_files.len() != 1 {
+            self.form.error = Some("drop one container file at a time".into());
+            return;
+        }
+        if let Some(path) = dropped_files[0].path.clone() {
+            self.form.select_dropped_path(path);
+        } else {
+            self.form.error = Some(
+                "drop a filesystem path; file contents are not accepted by the open form".into(),
+            );
+        }
+    }
+
     fn start_open(&mut self) {
         self.form.error = None;
         self.form.notice = None;
@@ -505,6 +540,8 @@ impl eframe::App for ViewerApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(viewer) = &mut self.viewer {
             eframe::App::raw_input_hook(viewer, ctx, raw);
+        } else {
+            self.handle_dropped_files(raw);
         }
     }
 
@@ -765,6 +802,7 @@ mod tests {
     fn preparing_an_open_request_clears_gui_credential_fields() {
         let mut form = OpenForm {
             path: "demo-container".into(),
+            selected_path: None,
             cursor: "4".into(),
             passphrase: "demo passphrase".into(),
             root_share: "11".repeat(32),
@@ -779,9 +817,39 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_file_selects_its_path_without_reading_its_contents() {
+        let expected_path = PathBuf::from("/tmp/demo container-雪.holonomy");
+        let mut app = ViewerApp::new();
+        let mut raw = egui::RawInput {
+            hovered_files: vec![Default::default()],
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(expected_path.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        app.handle_dropped_files(&mut raw);
+        assert!(raw.hovered_files.is_empty());
+        assert!(raw.dropped_files.is_empty());
+        assert_eq!(app.form.selected_path.as_ref(), Some(&expected_path));
+        assert_eq!(
+            app.form.path,
+            expected_path.to_string_lossy().into_owned()
+        );
+
+        app.form.cursor = "0".into();
+        app.form.passphrase = "demo passphrase".into();
+        app.form.root_share = "11".repeat(32);
+        let request = app.form.prepare_request().expect("dropped file path");
+        assert_eq!(request.path, expected_path);
+    }
+
+    #[test]
     fn preparing_a_scan_request_clears_credentials_without_requiring_a_cursor() {
         let mut form = OpenForm {
             path: "demo-container".into(),
+            selected_path: None,
             cursor: "cursor is discovered by the scan".into(),
             passphrase: "demo passphrase".into(),
             root_share: "11".repeat(32),
@@ -837,6 +905,7 @@ mod tests {
     fn open_form_rejects_the_pad_reuse_boundary_before_request_creation() {
         let mut form = OpenForm {
             path: "demo-container".into(),
+            selected_path: None,
             cursor: SAVES_BEFORE_DOMAIN_REUSE.to_string(),
             passphrase: String::new(),
             root_share: String::new(),
@@ -884,6 +953,7 @@ mod tests {
         let mut app = ViewerApp::new();
         app.form = OpenForm {
             path: path.display().to_string(),
+            selected_path: None,
             cursor: "not-required-for-search".into(),
             passphrase: passphrase.into(),
             root_share: "11".repeat(32),

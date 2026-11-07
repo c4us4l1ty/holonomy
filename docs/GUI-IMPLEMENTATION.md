@@ -55,9 +55,11 @@ durability, or complete recovery. Reading can update OS file-access metadata.
 
 `crates/holonomy-preview/src/bin/holonomy-rich-view.rs` was the first path where the real
 Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes an
-interactive open screen as well as CLI modes from the standalone UI package. The screen can search
-legal cursor candidates through the existing read-only store scan; it reports the first authenticating
-candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
+interactive open screen as well as CLI modes from the standalone UI package. The open form accepts
+one dropped filesystem path, but never reads dropped file contents; path selection preserves native
+path bytes. The screen can search legal cursor candidates through the existing read-only store scan;
+it reports the first authenticating candidate with attempt progress, clears credentials and requires
+them to be re-entered before opening.
 In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
 `Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
 establish freshness, uniqueness, recency or pad history and does not repair anything. The window is
@@ -83,9 +85,10 @@ Two boundaries stand between the renderer and the host:
    submission are absent. This is deliberate: a missing hook can make Wordcraft fall back
    to another destination, so every persistence hook is present and refuses.
 2. **Input filtering.** `filter_events()` keeps pointer motion, wheel scrolling, pinch zoom
-   and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit and every pointer
-   button are dropped before Wordcraft sees the frame, so no ribbon button, context menu or
-   shortcut can reach a command. The host consumes `Ctrl/Cmd+Q` to close and, in the interactive
+   and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit, pointer buttons,
+   hovered files and dropped-file payloads are removed before Wordcraft sees the frame, so
+   no ribbon button, context menu, shortcut or file-open route can receive them. The host
+   consumes `Ctrl/Cmd+Q` to close and, in the interactive
    viewer only, `Ctrl/Cmd+O` to return to the open form; neither chord reaches Wordcraft.
 
 Neither boundary is a sandbox and neither is a claim about Wordcraft's internals. The
