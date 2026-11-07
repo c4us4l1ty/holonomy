@@ -280,7 +280,7 @@ enum FormAction {
 }
 
 enum WorkerResult {
-    Open(Result<OpenedView, String>),
+    Open(Result<Box<OpenedView>, String>),
     Scan(Result<CursorSearch, String>),
 }
 
@@ -324,7 +324,7 @@ impl ViewerApp {
                 passphrase,
                 kappa,
             } = request;
-            let result = open_read_only(&path, cursor, passphrase, *kappa);
+            let result = open_read_only(&path, cursor, passphrase, *kappa).map(Box::new);
             let _ = sender.send(WorkerResult::Open(result));
         });
         self.pending = Some(PendingTask {
