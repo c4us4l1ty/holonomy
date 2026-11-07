@@ -383,12 +383,11 @@ impl ViewerApp {
             self.form.error = Some("drop one container file at a time".into());
             return;
         }
-        if let Some(path) = dropped_files[0].path.clone() {
-            self.form.select_dropped_path(path);
+        let path = dropped_files[0].path().to_path_buf();
+        if path.as_os_str().is_empty() {
+            self.form.error = Some("the dropped file did not provide a path".into());
         } else {
-            self.form.error = Some(
-                "drop a filesystem path; file contents are not accepted by the open form".into(),
-            );
+            self.form.select_dropped_path(path);
         }
     }
 
@@ -775,6 +774,29 @@ fn report(what: &str, pass: bool, detail: &str) {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct TestDroppedFile(PathBuf);
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("the open form must not read dropped contents".into())
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn bytes_async(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>,
+        > {
+            Box::pin(async { Err("the open form must not read dropped contents".into()) })
+        }
+    }
+
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
@@ -822,10 +844,9 @@ mod tests {
         let mut app = ViewerApp::new();
         let mut raw = egui::RawInput {
             hovered_files: vec![Default::default()],
-            dropped_files: vec![egui::DroppedFile {
-                path: Some(expected_path.clone()),
-                ..Default::default()
-            }],
+            dropped_files: vec![std::sync::Arc::new(TestDroppedFile(
+                expected_path.clone(),
+            ))],
             ..Default::default()
         };
 
@@ -833,10 +854,7 @@ mod tests {
         assert!(raw.hovered_files.is_empty());
         assert!(raw.dropped_files.is_empty());
         assert_eq!(app.form.selected_path.as_ref(), Some(&expected_path));
-        assert_eq!(
-            app.form.path,
-            expected_path.to_string_lossy().into_owned()
-        );
+        assert_eq!(app.form.path, expected_path.to_string_lossy().into_owned());
 
         app.form.cursor = "0".into();
         app.form.passphrase = "demo passphrase".into();

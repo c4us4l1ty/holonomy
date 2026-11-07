@@ -302,6 +302,29 @@ mod tests {
     use holonomy_wordcraft::BridgeError;
     use wordcraft_doc::Block;
 
+    #[derive(Debug)]
+    struct TestDroppedFile;
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &Path {
+            Path::new("dropped-container")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("the viewer filter must not read dropped contents".into())
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn bytes_async(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>,
+        > {
+            Box::pin(async { Err("the viewer filter must not read dropped contents".into()) })
+        }
+    }
+
     fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {
             key,
@@ -393,7 +416,7 @@ mod tests {
                 egui::Event::WindowFocused(true),
             ],
             hovered_files: vec![Default::default()],
-            dropped_files: vec![Default::default()],
+            dropped_files: vec![Arc::new(TestDroppedFile)],
             ..Default::default()
         };
         let outcome = filter_events(&mut raw);
