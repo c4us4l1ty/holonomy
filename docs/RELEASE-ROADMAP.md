@@ -22,12 +22,14 @@ irreplaceable data.
   removal and backups. The current demo's read-only inspection is only a preliminary
   tool for checking an authenticated candidate; it cannot complete recovery. The CLI
   `verify` command authenticates one candidate without printing document bytes, but does
-  not inspect its application format or pad history. `remnants` reports staged leftovers
-  and `recover` finds the cursor an image needs without writing, but neither repairs an
-  image, reconciles a partially ratcheted pad, or decides which of several copies is
-  newest. `recover --remnants` tests each staged copy as a candidate, yet choosing one,
-  promoting it into place and accounting for the pad it spent remain manual and
-  unimplemented.
+  not inspect its application format or pad history. `remnants` reports staged
+  leftovers and `recover` finds the cursor an image needs without writing. `recover-copy`
+  can authenticate a selected staged image and copy it to a new, non-existing path without
+  writing either source's contents. The generic `.holonomy-save-*` prefix is not bound to a
+  particular container, and authentication covers the format's authenticated structures and
+  declared payload, not unused image bytes. It does not repair or replace the container, reconcile
+  a partially ratcheted pad, decide which of several copies is newest, or account for the pad it
+  spent. Promotion and durable pad reconciliation remain manual and unimplemented.
 - Specify and implement safe USB provisioning, root-share storage, device identity and
   destruction behavior. Test real hardware and supported operating-system paths.
 - Specify versioned credentials and migrations; legacy passphrase mapping lowercases

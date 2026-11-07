@@ -1,4 +1,4 @@
-//! The 22-bit sector permutation: `FPE-22`, 11-bit halves, cycle-walked into Zone B.
+//! The custom 22-bit sector permutation: 11-bit halves, cycle-walked into Zone B.
 //!
 //! # What was wrong with `FPE-20`
 //!
@@ -11,28 +11,29 @@
 //!
 //! `2^21 = 2,097,152` would already cover 1,782,579, but the amended spec asks for **11-bit
 //! halves**, and 11 bits is what the record shows, so `2^22 = 4,194,304` is the domain here.
-//! Cycle-walking discards the `4,194,304 − 1,782,579 = 2,411,725` out-of-range outputs; expected
-//! iterations per call is `4,194,304 / 1,782,579 ≈ 2.35`, and it terminates with probability 1
-//! because the walk is bounded in expectation (see [`Feistel22::permute`]).
+//! Cycle-walking discards `4,194,304 − 1,782,579 = 2,411,725` outputs. For an ideal uniformly
+//! random permutation, the expected return time to Zone B is about `DOMAIN / ZONE_B_SECTORS ≈ 2.35`;
+//! that is a workload estimate, not a bound or a security result for this custom network. The
+//! deterministic bound comes from a different fact: inputs must start inside Zone B, and a finite
+//! permutation returns to that starting input within at most `DOMAIN` steps.
 //!
 //! # What this is, honestly
 //!
-//! A 6-round balanced Feistel network over a 22-bit block. **Its security is not the point and
-//! must not be claimed as if it were.** What the container needs from it is exactly one property:
-//! *given the epoch key, the map from `{0..32,767}` to physical LBA is injective*, so a save
-//! never reads the same sector twice. A 22-bit block cipher gives that for free and costs a few
-//! nanoseconds. It is a **sector-index scrambler**: an adversary who does not hold `K_perm`
-//! cannot reproduce the LBA list, and an adversary who does gets nothing from it, because
-//! knowing which pad sectors were read is not knowing the pad.
+//! A six-round balanced Feistel permutation over a 22-bit block. The Feistel construction gives
+//! bijectivity; it does **not** establish pseudorandomness. This implementation is not a reviewed
+//! format-preserving encryption scheme and must not be relied on to conceal pad-sector access
+//! patterns. Its current load-bearing property is only that valid logical sector indices map
+//! injectively into Zone B. Production claims about access-pattern secrecy require a reviewed
+//! construction and a threat model; this code supplies neither.
 //!
 //! # Round function
 //!
 //! The superseded version's round function was
 //! `(right * 0x9E3779B9 ^ k ^ round).rotate_left(5) & 0x3FF` — a **single multiply masked back
 //! down to 10 bits**, which is nearly affine in `right` and leaks the low bits of the Feistel
-//! state. [`round_function`] instead applies a full ARX mixing of the 11-bit half with a 32-bit
-//! round key and takes the high 11 bits, so every input bit reaches every output bit within a
-//! couple of rounds.
+//! state. [`round_function`] instead applies ARX-style mixing of the 11-bit half with a 32-bit
+//! round key and takes the high 11 bits. This is a construction detail, not a cryptographic
+//! security claim.
 
 use crate::layout::ZONE_B_SECTORS;
 
@@ -60,7 +61,6 @@ const _: () = {
 /// crate wants that to be a visible act rather than an accidental one.
 pub struct Feistel22 {
     round_keys: [u32; ROUNDS as usize],
-    epoch: u64,
 }
 
 /// Expand a 32-byte permutation key into six round keys plus nothing else.
@@ -122,7 +122,7 @@ impl Feistel22 {
         for (i, k) in round_keys.iter_mut().enumerate() {
             *k ^= (e.rotate_left((i as u32) * 5)).wrapping_mul(0x9E37_79B9);
         }
-        Self { round_keys, epoch }
+        Self { round_keys }
     }
 
     /// The raw 6-round permutation on `[0, 2^22)`. A bijection, before cycle-walking.
@@ -142,27 +142,28 @@ impl Feistel22 {
 
     /// Map a logical sector sequence number into a physical Zone B sector, `[0, ZONE_B_SECTORS)`.
     ///
-    /// Cycle-walks: apply the permutation, and if the output is outside Zone B, apply it again.
-    /// Terminates with probability 1, and the loop is bounded in expectation at `DOMAIN /
-    /// ZONE_B_SECTORS ≈ 2.35` iterations. The hard iteration cap exists only so a hypothetical
-    /// key that made the walk diverge would fail loudly instead of hanging a save.
+    /// `logical` must already be inside Zone B. Cycle-walking a permutation from an input inside
+    /// the target set must return to that input, and therefore to the target set, within one full
+    /// permutation orbit (at most `DOMAIN` applications). Starting outside the target set does not
+    /// have that guarantee, so invalid inputs are rejected rather than reduced modulo the domain.
+    /// The average of about `DOMAIN / ZONE_B_SECTORS ≈ 2.35` steps assumes an ideal random
+    /// permutation; it is not a bound for this implementation. The deterministic worst case is
+    /// `DOMAIN` block applications per logical sector, so this guarantees termination but not a
+    /// practical latency bound for pathological keys. Panics if `logical` is not inside Zone B.
     pub fn permute(&self, logical: u64) -> u32 {
-        // Reduce to the permutation domain. Distinct inputs inside one save's 32,768-wide window
-        // stay distinct because 32,768 < 2^22, and distinct saves' windows are disjoint ranges of
-        // this same value -- so the only thing the reduction can do is wrap a *very* long history,
-        // which the 54-save budget makes unreachable.
-        let mut x = (logical % DOMAIN as u64) as u32;
-        // 256 attempts against an expected 2.35 is a 10^-90 event; if it trips, the caller has a
-        // bug or the constant table is corrupt, and a panic beats a silent hang.
-        for _ in 0..256 {
+        assert!(
+            logical < ZONE_B_SECTORS as u64,
+            "Feistel22 cycle-walk input {logical} is outside Zone B"
+        );
+        let mut x = logical as u32;
+        for _ in 0..DOMAIN {
             x = self.permute_block(x);
             if x < ZONE_B_SECTORS {
                 return x;
             }
         }
-        panic!(
-            "Feistel22 cycle-walk did not converge; epoch {} is not usable",
-            self.epoch
+        unreachable!(
+            "Feistel22 permutation orbit did not return to its in-range start within DOMAIN steps"
         );
     }
 
@@ -171,16 +172,17 @@ impl Feistel22 {
     /// `cursor` is the monotonic counter of saves performed, **not** a random epoch number. The
     /// logical index for save `cursor` and slot `j` is `cursor * PAD_SECTORS_PER_SAVE + j`, so
     /// consecutive saves occupy disjoint logical ranges, and injectivity of the permutation
-    /// carries that disjointness into physical LBAs. This is what makes the documented
-    /// "0.000% overlap across 54 saves" true: it is a property of the *cursor arithmetic*,
-    /// with the permutation only required not to alias within a save.
+    /// carries that disjointness into physical LBAs. Panics if `j` is not a slot in one save or if
+    /// the arithmetic overflows; callers must separately enforce the finite save budget.
     pub fn logical_sector(cursor: u64, j: u32) -> u64 {
-        // `wrapping_*` only to make the overflow behaviour explicit; at 54 saves this is
-        // `53 * 32,768 + 32,767 = 1,769,471` and nothing overflows. Saturating would be worse: it
-        // would map every cursor past the limit onto one range.
+        assert!(
+            j < crate::layout::PAD_SECTORS_PER_SAVE,
+            "pad slot is out of range"
+        );
         cursor
-            .wrapping_mul(crate::layout::PAD_SECTORS_PER_SAVE as u64)
-            .wrapping_add(j as u64)
+            .checked_mul(crate::layout::PAD_SECTORS_PER_SAVE as u64)
+            .and_then(|base| base.checked_add(j as u64))
+            .expect("logical pad sector index overflow")
     }
 
     /// A keyed permutation of `[0, n)`, returned as a lookup table.
@@ -343,6 +345,25 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "outside Zone B")]
+    fn cycle_walk_rejects_a_start_outside_its_target_set() {
+        let f = Feistel22::new(&k(0x21), 0);
+        let _ = f.permute(ZONE_B_SECTORS as u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "logical pad sector index overflow")]
+    fn logical_sector_arithmetic_never_wraps() {
+        let _ = Feistel22::logical_sector(u64::MAX, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "pad slot is out of range")]
+    fn logical_sector_rejects_an_invalid_slot() {
+        let _ = Feistel22::logical_sector(0, PAD_SECTORS_PER_SAVE);
+    }
+
+    #[test]
     fn cycle_walk_stays_inside_zone_b() {
         let f = Feistel22::new(&k(0x22), 0);
         for j in 0..PAD_SECTORS_PER_SAVE {
@@ -387,8 +408,8 @@ mod tests {
         );
         let f = Feistel22::new(&k(0x33), 3);
         let mut above = 0;
-        for j in 0..200_000u32 {
-            if f.permute(Feistel22::logical_sector(0, j)) >= (1 << 20) {
+        for logical in 0..200_000u64 {
+            if f.permute(logical) >= (1 << 20) {
                 above += 1;
             }
         }

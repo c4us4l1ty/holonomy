@@ -15,7 +15,8 @@
 //!    long as the sectors it reads have not been ratcheted. A reader undoes what a writer folded by
 //!    asking for the same window; nondeterminism here corrupts containers silently instead of
 //!    failing.
-//! 2. **Disjointness across cursors.** Saves `0..54` must consume mutually distinct sectors. A
+//! 2. **Disjointness across cursors.** The 54 saves at cursors `0..54` (that is, `0` through `53`)
+//!    must consume mutually distinct sectors. A
 //!    source that ignored the cursor would satisfy (1) and still be broken, and broken in the worst
 //!    way: two containers whose folds partly cancel.
 //! 3. **Nothing else.** A source is not trusted with the container, the keys, or the decision to
@@ -28,7 +29,7 @@
 //! result is a container nothing can open. The key is therefore `BLAKE2b("K_PERM" ‖ κ_USB)`: the
 //! pad is a property of the stick, and the cursor selects which disjoint slice of it a save spends.
 
-use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SECTOR_BYTES};
+use holonomy_core::layout::{PAD_SECTORS_PER_SAVE, SAVES_BEFORE_DOMAIN_REUSE, SECTOR_BYTES};
 use holonomy_usb::io::{Access, AlignedBuf, DirectFile};
 use holonomy_usb::pad::{PadPlan, PadReader, ZONE_B_LBA_START};
 
@@ -107,9 +108,9 @@ pub trait PadSource {
 /// reader per save, which is what keeps the `O_RDONLY`-until-save rule enforceable rather than
 /// aspirational.
 ///
-/// It also holds the permutation key, derived once from `κ_USB`. Reading is 32,768 random sectors
-/// per save, so deriving a BLAKE2b hash on every call would be noise; more to the point, holding it
-/// makes it impossible for two calls in one session to disagree about the key.
+/// It also holds the permutation key, derived once from `κ_USB`. Reading is 32,768 distinct
+/// sectors per save, so deriving a BLAKE2b hash on every call would be noise; more to the point,
+/// holding it makes it impossible for two calls in one session to disagree about the key.
 pub struct DevicePad {
     device: DirectFile,
     k_perm: zeroize::Zeroizing<[u8; 32]>,
@@ -193,7 +194,8 @@ impl DevicePad {
                 .map_err(|e| format!("preparing the pad plan for save {cursor}: {e}"))?;
             return Ok(reader.plan().clone());
         }
-        let plan = PadPlan::for_save(&self.k_perm, cursor);
+        let plan = PadPlan::for_save(&self.k_perm, cursor)
+            .map_err(|e| format!("preparing the pad plan for save {cursor}: {e}"))?;
         if !plan.is_collision_free() {
             return Err(format!(
                 "the pad plan for save {cursor} is not collision-free"
@@ -307,6 +309,11 @@ impl DerivedPad {
 
 impl PadSource for DerivedPad {
     fn window(&mut self, kappa_usb: &[u8; 32], cursor: u64) -> Result<PadWindow, String> {
+        if cursor >= SAVES_BEFORE_DOMAIN_REUSE {
+            return Err(format!(
+                "pad cursor {cursor} is at or beyond the no-reuse budget of {SAVES_BEFORE_DOMAIN_REUSE} saves"
+            ));
+        }
         let mut bytes = AlignedBuf::new(WINDOW_BYTES);
         for j in 0..PAD_SECTORS_PER_SAVE as usize {
             let material = sector_material(crate::store::sector_index(kappa_usb, cursor, j));

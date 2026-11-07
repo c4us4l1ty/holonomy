@@ -111,7 +111,7 @@ impl Geometry {
         Self::from_device_len(DEVICE_BYTES).expect("the nominal device must satisfy the budget")
     }
 
-    /// How many saves this device's Zone B can serve before the domain wraps.
+    /// How many complete no-reuse save windows fit in this device's Zone B.
     pub fn saves_afforded(&self) -> u64 {
         self.zone_b_sectors / PAD_SECTORS_PER_SAVE as u64
     }

@@ -551,6 +551,10 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    // A real 128 MiB sealed-image save includes crypto, pad folding, and durable file operations.
+    // Keep a bound for a stuck worker while allowing heavily contended CI machines to finish.
+    const SAVE_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
     #[test]
     fn arguments_and_root_share_are_checked() {
         assert!(matches!(
@@ -721,8 +725,8 @@ mod tests {
             .as_ref()
             .expect("pending")
             .receiver
-            .recv_timeout(std::time::Duration::from_secs(180))
-            .expect("save finished");
+            .recv_timeout(SAVE_COMPLETION_TIMEOUT)
+            .expect("save should finish within the bounded CI timeout");
         editor.finish_save(outcome);
         assert!(!editor.dirty());
         assert_eq!(editor.cursor, 1);
@@ -917,8 +921,8 @@ mod tests {
             .as_ref()
             .expect("pending")
             .receiver
-            .recv_timeout(std::time::Duration::from_secs(180))
-            .expect("save finished");
+            .recv_timeout(SAVE_COMPLETION_TIMEOUT)
+            .expect("save should finish within the bounded CI timeout");
         editor.finish_save(outcome);
         assert!(editor.needs_recovery());
         assert!(editor.dirty());

@@ -1,7 +1,8 @@
 //! `holonomy` — the binary.
 //!
 //! Report the build, verify this machine, and act on containers: `provision`, `save`, `open`,
-//! `verify` and `remnants`. The editor front end, once it links, is started from here.
+//! `verify`, `remnants`, `recover` and `recover-copy`. The editor front end, once it links, is
+//! started from here.
 //!
 //! # Why `--check` lives here and not in `holonomy-ui`
 //!
@@ -11,6 +12,7 @@
 //! likely to need it. So the binary depends on the core crates plus `holonomy-session`, and the
 //! editor becomes a front end that this binary starts once its graph builds.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use zeroize::Zeroizing;
@@ -95,6 +97,9 @@ fn main() -> ExitCode {
     }
     if let Some(rest) = args.strip_prefix(&["recover".to_string()][..]) {
         return recover(rest);
+    }
+    if let Some(rest) = args.strip_prefix(&["recover-copy".to_string()][..]) {
+        return recover_copy(rest);
     }
 
     if args.is_empty() {
@@ -442,7 +447,6 @@ fn open(args: &[String]) -> ExitCode {
                 opened.directory.slot_count(),
                 opened.cursor()
             );
-            use std::io::Write;
             if let Err(e) = std::io::stdout().write_all(document.as_slice()) {
                 return failure(format!("writing the document to stdout: {e}"));
             }
@@ -629,13 +633,13 @@ fn recover(args: &[String]) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Test every staged `.holonomy-save-*` copy beside `container` with the same credentials, window
-/// and read-only discipline, and report which cursors open each one.
+/// Test the bounded, lexicographically ordered set of regular `.holonomy-save-*` files beside
+/// `container` with the same credentials and report which cursors open each candidate.
 ///
 /// Returns whether any copy opened, so the caller can say that a candidate exists without implying
-/// the container is fixed. A copy that is not a whole image is reported as cut short instead of
-/// failing the scan, and one that cannot be opened at all is reported and skipped: a short or
-/// unreadable leftover is a fact about a crash, not an error in the command.
+/// the container is fixed. A copy that is not a whole image is reported as incomplete instead of
+/// failing the scan, and one that cannot be opened is reported and skipped. Neither condition
+/// establishes why the file is present or incomplete.
 fn report_staged_copies(
     container: &str,
     pad: &mut dyn store::PadSource,
@@ -643,7 +647,8 @@ fn report_staged_copies(
     scan_all: bool,
     limit: u64,
 ) -> bool {
-    let (staged, truncated) = match store::find_save_remnants(std::path::Path::new(container)) {
+    let container_path = std::path::Path::new(container);
+    let (staged, truncated) = match store::find_save_remnants(container_path) {
         Ok(found) => found,
         Err(error) => {
             eprintln!("Staged copies beside {container} could not be listed: {error}");
@@ -651,26 +656,73 @@ fn report_staged_copies(
         }
     };
     if staged.is_empty() {
-        println!("No staged copies beside {container}.");
+        println!("No regular staged-name files beside {container}.");
         return false;
     }
     println!(
-        "Testing {} staged cop{} with the same credentials and pad window; nothing is ratcheted.",
+        "Testing {} matching file{} with the same credentials and pad window; nothing is ratcheted.",
         staged.len(),
-        if staged.len() == 1 { "y" } else { "ies" }
+        if staged.len() == 1 { "" } else { "s" }
     );
+    let current_origin = staged
+        .iter()
+        .any(|copy| matches!(copy.origin, store::RemnantOrigin::Bound { .. }))
+        .then(|| store::current_container_origin(container_path));
     let mut any_opened = false;
     for copy in &staged {
-        println!("Staged copy {} ({} bytes)", copy.path.display(), copy.len);
+        println!(
+            "Candidate file {} ({} bytes)",
+            copy.path.display(),
+            copy.len
+        );
         if copy.len != CONTAINER_BYTES as u64 {
             println!(
-                "  Not a whole image ({} of {} bytes), so its save was cut short and no cursor can \
-                 open it.",
+                "  Not a whole image ({} of {} bytes); no cursor can authenticate it; the \
+                 cause of this incomplete image is not established.",
                 copy.len, CONTAINER_BYTES
             );
             continue;
         }
-        let mut file = match store::ContainerFile::open(&copy.path, false) {
+        let association = match copy.origin {
+            store::RemnantOrigin::Bound { .. } => match current_origin.as_ref() {
+                Some(Ok(origin)) => {
+                    store::remnant_association_with_origin(container_path, &copy.path, Some(origin))
+                }
+                Some(Err(error)) => {
+                    println!("  Skipped while checking origin: {error}");
+                    continue;
+                }
+                None => {
+                    println!("  Skipped: current container origin was not computed.");
+                    continue;
+                }
+            },
+            store::RemnantOrigin::LegacyUnbound | store::RemnantOrigin::MalformedBound => {
+                store::remnant_association_with_origin(container_path, &copy.path, None)
+            }
+        };
+        match association {
+            Ok(store::RemnantAssociation::BoundToCurrentContainer) => println!(
+                "  Origin marker matches current container device/inode and prior image digest (not a MAC)."
+            ),
+            Ok(store::RemnantAssociation::LegacyUnbound) => println!(
+                "  Legacy unbound name: this may be from another container; authentication only tests it as a candidate."
+            ),
+            Ok(store::RemnantAssociation::DoesNotMatch) => {
+                println!("  Skipped: origin marker does not match this container's current identity and bytes.");
+                continue;
+            }
+            Ok(store::RemnantAssociation::MalformedBinding) => {
+                println!("  Skipped: malformed new-format origin marker.");
+                continue;
+            }
+            Err(error) => {
+                println!("  Skipped while checking origin: {error}");
+                continue;
+            }
+        }
+        let open_result = store::open_save_remnant_beside(container_path, &copy.path);
+        let mut file = match open_result {
             Ok(file) => file,
             Err(error) => {
                 println!("  Skipped: {error}");
@@ -700,13 +752,244 @@ fn report_staged_copies(
         any_opened = true;
     }
     if truncated {
-        println!("Only the first {} staged copies were tested.", staged.len());
+        println!(
+            "Only the first {} matching files by filename were tested; more exist.",
+            staged.len()
+        );
     }
     println!(
-        "A staged copy that opens is a candidate, not a choice: this does not say which copy is \
+        "A matching file that opens is a candidate, not a choice: this does not say which copy is \
          newest, does not put one in place, and does not prove the copy is durable."
     );
     any_opened
+}
+
+/// Copy a verified staged image to a new path without replacing either source.
+///
+/// This is a limited recovery aid, not a repair: the explicit cursor must authenticate the staged
+/// image, the destination must not exist, and neither the original container nor the staged image
+/// is modified. Origin checks are not atomic with later reads and do not coordinate concurrent
+/// writers. It does not reconcile or prove the pad's ratchet history.
+fn recover_copy(args: &[String]) -> ExitCode {
+    let mut remnant = None;
+    let mut output = None;
+    let mut allow_unbound = false;
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--remnant" | "--output" => {
+                let flag = args[i].as_str();
+                let Some(value) = args.get(i + 1).filter(|value| !value.starts_with("--")) else {
+                    return usage_error(format!("{flag} needs one path"));
+                };
+                let slot = if flag == "--remnant" {
+                    &mut remnant
+                } else {
+                    &mut output
+                };
+                if slot.replace(value.clone()).is_some() {
+                    return usage_error(format!("{flag} may only be specified once"));
+                }
+                i += 2;
+            }
+            "--allow-unbound" => {
+                if allow_unbound {
+                    return usage_error("--allow-unbound may only be specified once");
+                }
+                allow_unbound = true;
+                i += 1;
+            }
+            _ => {
+                remaining.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    let remnant = match remnant {
+        Some(path) => std::path::PathBuf::from(path),
+        None => return usage_error("recover-copy requires --remnant PATH"),
+    };
+    let output = match output {
+        Some(path) => std::path::PathBuf::from(path),
+        None => return usage_error("recover-copy requires --output NEW_PATH"),
+    };
+    let flags = match parse_flags(&remaining) {
+        Ok(flags) => flags,
+        Err(error) => return usage_error(error),
+    };
+    if !flags.cursor_explicit {
+        return usage_error("recover-copy requires --cursor N from a successful recover scan");
+    }
+    let limit = holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
+    if flags.cursor >= limit {
+        return usage_error(format!("--cursor must be between 0 and {}", limit - 1));
+    }
+
+    // Do these filesystem refusals before prompting or reading pad material. The final
+    // persist_noclobber below closes the race with a destination created after this check.
+    match std::fs::symlink_metadata(&output) {
+        Ok(_) => {
+            return failure(format!(
+                "refusing to overwrite existing destination {}",
+                output.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return failure(format!(
+                "checking destination {}: {error}",
+                output.display()
+            ));
+        }
+    }
+    // The diagnostic listing is intentionally capped. Open the explicitly selected path directly,
+    // or the twenty-first real remnant could become impossible to copy just because it was omitted
+    // from `recover --remnants`. On Unix, the helper uses O_NOFOLLOW and keeps the validated file
+    // handle for the rest of recovery; other platforms still need equivalent no-follow support.
+    let container_path = std::path::Path::new(&flags.path);
+    match std::fs::symlink_metadata(container_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return failure(
+                "recover-copy requires a regular container file, not a symlink or directory",
+            )
+        }
+        Err(error) => return failure(format!("checking container path: {error}")),
+    }
+    match store::remnant_association(container_path, &remnant) {
+        Ok(store::RemnantAssociation::BoundToCurrentContainer) => println!(
+            "Origin binding matches the current container identity and prior bytes; it is not authenticated."
+        ),
+        Ok(store::RemnantAssociation::LegacyUnbound) if allow_unbound => eprintln!(
+            "Warning: explicitly using a legacy remnant with no container-origin association."
+        ),
+        Ok(store::RemnantAssociation::LegacyUnbound) => {
+            return failure(
+                "legacy remnant is unbound to this container; inspect it and pass --allow-unbound to proceed",
+            );
+        }
+        Ok(store::RemnantAssociation::DoesNotMatch) => {
+            return failure(
+                "staged image origin does not match this container's current identity and bytes",
+            );
+        }
+        Ok(store::RemnantAssociation::MalformedBinding) => {
+            return failure("staged image has a malformed new-format origin marker");
+        }
+        Err(error) => {
+            return failure(format!("checking selected remnant origin: {error}"));
+        }
+    }
+    let source_result = store::open_save_remnant_beside(container_path, &remnant);
+    let mut source = match source_result {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "opening selected staged image {}: {error}",
+                remnant.display()
+            ));
+        }
+    };
+    let credentials = match credentials(&flags, false) {
+        Ok(credentials) => credentials,
+        Err(error) => return usage_error(error),
+    };
+    let mut pad = match pad_source(&flags, &credentials.kappa, false) {
+        Ok(pad) => pad,
+        Err(error) => return usage_error(error),
+    };
+    let context = context(&credentials.passphrase, &credentials.kappa, flags.cursor);
+    let digest = match store::verify_candidate(&mut source, pad.as_mut(), &context) {
+        Ok(digest) => digest,
+        Err(error) => {
+            return failure(format!(
+                "staged image did not authenticate at cursor {}: {error}",
+                flags.cursor
+            ));
+        }
+    };
+    let image = match source.read_image() {
+        Ok(image) => image,
+        Err(error) => return failure(format!("reading the verified staged image again: {error}")),
+    };
+    if holonomy_session::seal::image_digest(&image) != digest {
+        return failure("the staged image changed after verification; no copy was made");
+    }
+
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut staged_output = match tempfile::Builder::new()
+        .prefix(".holonomy-save-recovery-")
+        .tempfile_in(parent)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "staging recovered copy beside {}: {error}",
+                output.display()
+            ));
+        }
+    };
+    if let Err(error) = staged_output.as_file_mut().write_all(&image) {
+        return failure(format!("writing staged recovered copy: {error}"));
+    }
+    if let Err(error) = staged_output.as_file().sync_all() {
+        return failure(format!("syncing staged recovered copy: {error}"));
+    }
+    let mut copied_file = match staged_output.persist_noclobber(&output) {
+        Ok(file) => file,
+        Err(error) => {
+            return failure(format!(
+                "installing recovered copy at {} without overwriting: {}",
+                output.display(),
+                error.error
+            ));
+        }
+    };
+
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        return failure(format!(
+            "recovered copy was created at {}, but syncing its directory failed; durability is uncertain: {error}",
+            output.display()
+        ));
+    }
+
+    let copied_digest = match store::file_digest(&mut copied_file) {
+        Ok(digest) => digest,
+        Err(error) => {
+            return failure(format!(
+                "recovered copy was created at {}, but its read-back failed; its contents are not verified: {error}",
+                output.display()
+            ));
+        }
+    };
+    if copied_digest != digest {
+        return failure(format!(
+            "recovered copy was created at {}, but its read-back digest differs from the authenticated source; its contents are not verified",
+            output.display()
+        ));
+    }
+    drop(copied_file);
+
+    println!(
+        "Verified staged image copied and read back at {}",
+        output.display()
+    );
+    println!("Authenticated cursor: {}", flags.cursor);
+    println!("Unkeyed image digest: {}", hex(&digest));
+    println!("Pad source: {}", pad.describe());
+    println!(
+        "Container and remnant contents were not written; filesystem access metadata may change. The pad was not written or ratcheted."
+    );
+    println!(
+        "This copy does not establish which image is newest, pad freshness, ratchet history, or complete recovery."
+    );
+    ExitCode::SUCCESS
 }
 
 /// `holonomy remnants <path>`: report staged images a crashed save left behind.
@@ -721,27 +1004,71 @@ fn remnants(args: &[String]) -> ExitCode {
     };
     let (found, truncated) = match store::find_save_remnants(&path) {
         Ok(found) => found,
-        Err(error) => return failure(format!("scanning for interrupted saves: {error}")),
+        Err(error) => return failure(format!("scanning staged-image names: {error}")),
     };
 
     if found.is_empty() {
-        println!("No interrupted-save remnants next to {}.", path.display());
         println!(
-            "A remnant only appears when a save dies between staging its image and renaming it \
-             into place."
+            "No matching regular staged-image names next to {}.",
+            path.display()
+        );
+        println!(
+            "A crash leftover may use this prefix, but filenames alone cannot prove whether a save \
+             created the file or why it remains."
         );
         return ExitCode::SUCCESS;
     }
 
     println!(
-        "{} interrupted-save remnant{} next to {}:",
+        "{} matching staged-image file{} next to {}:",
         found.len(),
         if found.len() == 1 { "" } else { "s" },
         path.display()
     );
+    let current_origin = found
+        .iter()
+        .any(|remnant| matches!(remnant.origin, store::RemnantOrigin::Bound { .. }))
+        .then(|| store::current_container_origin(&path));
     for remnant in &found {
         println!("  {}", remnant.path.display());
         println!("    {} bytes", remnant.len);
+        let association = match remnant.origin {
+            store::RemnantOrigin::Bound { .. } => match current_origin.as_ref() {
+                Some(Ok(origin)) => Some(store::remnant_association_with_origin(
+                    &path,
+                    &remnant.path,
+                    Some(origin),
+                )),
+                Some(Err(error)) => {
+                    println!("    origin check unavailable: {error}");
+                    None
+                }
+                None => {
+                    println!("    current container origin was not computed");
+                    None
+                }
+            },
+            store::RemnantOrigin::LegacyUnbound | store::RemnantOrigin::MalformedBound => Some(
+                store::remnant_association_with_origin(&path, &remnant.path, None),
+            ),
+        };
+        if let Some(association) = association {
+            match association {
+                Ok(store::RemnantAssociation::BoundToCurrentContainer) => println!(
+                    "    origin marker matches current container device/inode and prior image digest (not a MAC)"
+                ),
+                Ok(store::RemnantAssociation::LegacyUnbound) => {
+                    println!("    legacy name: unbound to this container")
+                }
+                Ok(store::RemnantAssociation::DoesNotMatch) => {
+                    println!("    origin marker does not match this container's current identity/bytes")
+                }
+                Ok(store::RemnantAssociation::MalformedBinding) => {
+                    println!("    malformed new-format origin marker; do not treat as legacy")
+                }
+                Err(error) => println!("    origin check unavailable: {error}"),
+            }
+        }
         match store::path_digest(&remnant.path) {
             Ok(digest) => println!(
                 "    unkeyed digest {} (fingerprint only; not authenticity or durability)",
@@ -754,7 +1081,7 @@ fn remnants(args: &[String]) -> ExitCode {
         }
         if remnant.len != CONTAINER_BYTES as u64 {
             println!(
-                "    not a full container image: {} of {} bytes, so its save was cut short",
+                "    not a full container image: {} of {} bytes; cause of incompleteness is unknown",
                 remnant.len, CONTAINER_BYTES
             );
         }
@@ -766,25 +1093,25 @@ fn remnants(args: &[String]) -> ExitCode {
         );
     }
     println!();
-    println!("A remnant is the encrypted image of a save that never finished its rename, so the");
+    println!("If a file is a genuine crash leftover from before rename, it is an encrypted staged");
     println!(
-        "container itself is expected to hold the previous save -- unless another writer or an"
+        "image and the container may still hold the previous save. The name alone cannot establish"
     );
     println!(
-        "earlier failure broke that expectation. Verify the container before trusting either:"
+        "that history, and another writer or failure may break the expectation. Verify the container:"
     );
     println!();
     println!("    holonomy verify {} --cursor N", path.display());
     println!();
-    println!("To test the remnants as candidates without being told which cursor each needs:");
+    println!("To test these files as candidates without being told which cursor each needs:");
     println!();
     println!("    holonomy recover {} --remnants", path.display());
     println!();
     println!(
-        "That scan reports which cursor opens each copy and writes nothing, but it does not rank"
+        "That scan reports which cursor opens each file and writes nothing, but it does not rank"
     );
     println!(
-        "the copies or rename one into place. Remnants hold encrypted document bytes and occupy"
+        "the files or rename one into place. Candidate files may contain encrypted document bytes and occupy"
     );
     println!("full-container space; delete one only after deciding it is not the copy you need.");
     println!("Nothing above decrypts, repairs or ratchets anything.");
@@ -834,8 +1161,9 @@ fn help() {
          \x20   holonomy save <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D] < document\n\
          \x20   holonomy open <path> [--passphrase P] [--kappa HEX] [--cursor N] [--device D]\n\
          \x20   holonomy verify <path> --cursor N [--passphrase P] [--kappa HEX] [--device D]\n\
-         \x20   holonomy remnants <path>  report staged images a crashed save left behind (no credentials)\n\
+         \x20   holonomy remnants <path>  list regular files matching staged-image names (no credentials)\n\
          \x20   holonomy recover <path> [--all] [--remnants]  find the cursor that opens a container\n\
+         \x20   holonomy recover-copy <path> --remnant R --cursor N --output NEW [--allow-unbound]  copy a candidate image\n\
          \n\
          Omit --passphrase and --kappa to enter them at a hidden terminal prompt (recommended).\n\
          Argument values may appear in process listings or shell history. The root share is 64 hex\n\
@@ -850,10 +1178,17 @@ fn help() {
          Remnants lists `.holonomy-save-*` files next to a container and never decrypts them; it is a\n\
          directory report, not a recovery procedure.\n\
          Recover tries every cursor a save may have written (0 to 53) and reports the ones that open,\n\
-         without writing or ratcheting. --remnants tests each `.holonomy-save-*` copy beside the\n\
-         container the same way. It is read-only diagnosis, not a repair: a hit does not make the\n\
+         without writing or ratcheting. --remnants tests up to 20 regular matching files beside the\n\
+         container in filename order. It is read-only diagnosis, not a repair: a hit does not make the\n\
          image fresh, undamaged, the newest copy, or the only copy, and nothing is renamed into place.\n\
-         \n\
+         Recover-copy requires an explicit cursor and a regular `.holonomy-save-*` sibling. New\n\
+         staged names include the original Unix device/inode and old image digest; this detects many\n\
+         wrong-container or changed-container cases but is an unauthenticated, forgeable marker.\n\
+         Legacy names are unbound and require explicit `--allow-unbound`. Authentication checks the\n\
+         format's authenticated structures and declared payload, not every unused image byte. The\n\
+         command writes a separate copy only if its destination is\n\
+         absent. Source contents are not written, though access metadata may change; the pad is not\n\
+         written. It does not choose the newest image, reconcile a ratchet, or complete recovery.\n\
          `--device` is the whole stick (e.g. /dev/sdX, not /dev/sdX1): its Zone B, starting at\n\
          LBA 32,768, is the pad. Omit it and a stand-in derives the pad from the permutation\n\
          instead, which makes the container a demo -- anyone holding `--kappa` can recompute the\n\

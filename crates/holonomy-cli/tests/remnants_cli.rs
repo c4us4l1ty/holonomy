@@ -1,4 +1,4 @@
-//! `holonomy remnants` reports crash leftovers without credentials and without decrypting.
+//! `holonomy remnants` lists matching regular files without credentials or decryption.
 #![cfg(unix)]
 
 use std::process::Command;
@@ -59,7 +59,10 @@ fn remnants_reports_an_empty_directory_plainly() {
     let output = run(&[std::ffi::OsStr::new("remnants"), container.as_os_str()]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("No interrupted-save remnants"), "{text}");
+    assert!(
+        text.contains("No matching regular staged-image names"),
+        "{text}"
+    );
 }
 
 #[test]

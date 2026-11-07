@@ -3,8 +3,8 @@
 //! # The budget, not a guarantee
 //!
 //! `holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE` is 54: Zone B holds 1,782,579 sectors and a
-//! save consumes 32,768, so epochs `0..=53` read mutually disjoint pad material and epoch 54 is
-//! the first that wraps.
+//! save consumes 32,768, so cursors `0..=53` fit disjoint windows. Cursor 54 cannot fit another
+//! complete window; checked planning APIs reject it instead of wrapping or reusing sectors.
 //!
 //! So [`PadBudget`] tracks two facts per container: the **monotonic save cursor**, and whether the
 //! cursor is still inside the disjoint window. When it is not, [`PadBudget::layer`] reports

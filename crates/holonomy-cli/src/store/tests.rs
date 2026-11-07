@@ -384,7 +384,8 @@ fn the_store_and_the_usb_crate_choose_the_same_sectors() {
     let k_perm = k_perm_key(&KAPPA);
 
     for cursor in [0u64, 1, 27, 53] {
-        let plan = holonomy_usb::pad::PadPlan::for_save(&k_perm, cursor);
+        let plan = holonomy_usb::pad::PadPlan::for_save(&k_perm, cursor)
+            .expect("test cursor is within the no-reuse budget");
         assert_eq!(plan.len(), PAD_SECTORS);
         for (j, &lba) in plan.lbas().iter().enumerate() {
             assert_eq!(
@@ -1431,6 +1432,97 @@ fn remnants_do_not_follow_symlinks() {
     std::os::unix::fs::symlink(&target, dir.path().join(".holonomy-save-link")).expect("symlink");
     let (found, _) = find_save_remnants(&container).expect("scan");
     assert!(found.is_empty(), "{found:?}");
+    assert!(
+        !is_save_remnant_beside(&container, &dir.path().join(".holonomy-save-link"))
+            .expect("direct symlink check"),
+        "an explicit recovery path must not follow the planted symlink"
+    );
+    assert!(
+        open_save_remnant_beside(&container, &dir.path().join(".holonomy-save-link")).is_err(),
+        "opening the selected remnant must reject a symlink"
+    );
+}
+
+/// New-format origin names parse strictly, while pre-v2 names remain explicitly unbound.
+#[cfg(unix)]
+#[test]
+fn remnant_origin_names_distinguish_legacy_from_malformed_v2() {
+    let digest = [0xA5; 32];
+    let name = format!("{}nonce", remnant_v2_prefix(7, 11, &digest));
+    let path = std::path::Path::new(&name);
+    assert_eq!(
+        parse_remnant_origin(path),
+        RemnantOrigin::Bound {
+            device: 7,
+            inode: 11,
+            old_digest: digest,
+        }
+    );
+    assert_eq!(
+        parse_remnant_origin(std::path::Path::new(".holonomy-save-old")),
+        RemnantOrigin::LegacyUnbound
+    );
+    assert_eq!(
+        parse_remnant_origin(std::path::Path::new(".holonomy-save-v2-broken")),
+        RemnantOrigin::MalformedBound
+    );
+}
+
+/// A v2 origin matches only the same Unix file object with its original complete image bytes.
+#[cfg(unix)]
+#[test]
+fn remnant_association_checks_file_identity_and_full_old_image_digest() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    let file = File::create(&container).expect("create sparse container");
+    file.set_len(CONTAINER_BYTES as u64)
+        .expect("size container");
+    drop(file);
+    let metadata = std::fs::metadata(&container).expect("container metadata");
+    let origin = current_container_origin(&container).expect("current container origin");
+    let bound = dir.path().join(format!(
+        "{}nonce",
+        remnant_v2_prefix(metadata.dev(), metadata.ino(), &origin.image_digest)
+    ));
+    std::fs::write(&bound, b"staged image").expect("bound remnant");
+    assert_eq!(
+        remnant_association_with_origin(&container, &bound, Some(&origin))
+            .expect("matching association"),
+        RemnantAssociation::BoundToCurrentContainer
+    );
+
+    let wrong_identity = dir.path().join(format!(
+        "{}nonce",
+        remnant_v2_prefix(metadata.dev() ^ 1, metadata.ino(), &origin.image_digest)
+    ));
+    std::fs::write(&wrong_identity, b"staged image").expect("wrong-identity remnant");
+    assert_eq!(
+        remnant_association_with_origin(&container, &wrong_identity, Some(&origin))
+            .expect("identity mismatch"),
+        RemnantAssociation::DoesNotMatch
+    );
+
+    let mut changed = OpenOptions::new()
+        .write(true)
+        .open(&container)
+        .expect("open container to mutate");
+    changed.seek(SeekFrom::Start(0)).expect("seek");
+    changed.write_all(&[1]).expect("change old image in place");
+    changed.sync_all().expect("sync mutation");
+    assert_eq!(
+        remnant_association(&container, &bound).expect("changed association"),
+        RemnantAssociation::DoesNotMatch
+    );
+
+    let legacy = dir.path().join(".holonomy-save-legacy");
+    std::fs::write(&legacy, b"legacy staged image").expect("legacy remnant");
+    assert_eq!(
+        remnant_association(&container, &legacy).expect("legacy association"),
+        RemnantAssociation::LegacyUnbound
+    );
 }
 
 /// The listing is bounded, and the caller is told when it stopped early.
@@ -1439,26 +1531,71 @@ fn remnant_reporting_is_bounded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let container = dir.path().join("book");
     std::fs::write(&container, b"placeholder").expect("container");
-    for index in 0..(MAX_REMNANTS_REPORTED + 3) {
+    for index in (0..(MAX_REMNANTS_REPORTED + 3)).rev() {
         std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
             .expect("remnant");
     }
     let (found, truncated) = find_save_remnants(&container).expect("scan");
     assert_eq!(found.len(), MAX_REMNANTS_REPORTED);
     assert!(truncated, "the report must say it was truncated");
+    let names: Vec<_> = found
+        .iter()
+        .filter_map(|remnant| remnant.path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names.len(),
+        found.len(),
+        "every remnant path must have a filename"
+    );
+    let expected: Vec<_> = (0..MAX_REMNANTS_REPORTED)
+        .map(|index| format!(".holonomy-save-{index:03}"))
+        .collect();
+    assert_eq!(names, expected, "the bounded result must be stable by name");
+}
+
+/// A display cap must not make an explicitly selected valid remnant inaccessible.
+#[test]
+fn explicit_remnant_membership_is_not_limited_by_the_report_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let container = dir.path().join("book");
+    std::fs::write(&container, b"placeholder").expect("container");
+    for index in 0..(MAX_REMNANTS_REPORTED + 1) {
+        std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"x")
+            .expect("remnant");
+    }
+    let beyond_report = dir
+        .path()
+        .join(format!(".holonomy-save-{:03}", MAX_REMNANTS_REPORTED + 1));
+    std::fs::write(&beyond_report, b"selected").expect("selected remnant");
+
+    let (reported, truncated) = find_save_remnants(&container).expect("bounded scan");
+    assert!(truncated);
+    assert_eq!(reported.len(), MAX_REMNANTS_REPORTED);
+    assert!(!reported.iter().any(|entry| entry.path == beyond_report));
+    assert!(is_save_remnant_beside(&container, &beyond_report).expect("direct check"));
+    let ordinary_copy = dir.path().join("ordinary-copy");
+    let ordinary_is_remnant =
+        is_save_remnant_beside(&container, &ordinary_copy).expect("ordinary file check");
+    assert!(!ordinary_is_remnant);
 }
 
 /// The reported digest is the same unkeyed fingerprint the store reports for a container image.
 #[test]
 fn remnant_digest_matches_the_container_fingerprint() {
+    use std::io::{Seek, SeekFrom};
+
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("image");
     let bytes: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(&path, &bytes).expect("write");
-    assert_eq!(
-        path_digest(&path).expect("digest"),
-        holonomy_session::seal::image_digest(&bytes)
-    );
+    let expected = holonomy_session::seal::image_digest(&bytes);
+    assert_eq!(path_digest(&path).expect("path digest"), expected);
+
+    let mut file = File::open(&path).expect("open for streaming digest");
+    file.seek(SeekFrom::Start(13)).expect("set nonzero offset");
+    assert_eq!(file_digest(&mut file).expect("file digest"), expected);
+    assert_eq!(file.stream_position().expect("current offset"), 13);
 }
 
 /// The recovery question after a crash: which cursor does this image need? A scan answers it,

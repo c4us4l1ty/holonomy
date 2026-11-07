@@ -19,7 +19,7 @@
 //! | `.text`/`RIP`/`RDTSC` mixed into the keystream | deleted — non-deterministic by construction |
 //! | two live `vault_handles` selected branchlessly | replaced by one [`stratum::ActiveStratum`] |
 //! | 16.60 MiB RSS / zero-heap | replaced by measured budgets (see [`budgets`]) |
-//! | `FPE-20` over a 6.80 GiB zone | `FPE-22` — the 20-bit domain could not reach 41% of the drive |
+//! | 20-bit sector permutation | 22-bit permutation — the smaller domain could not reach 41% of the drive; neither is a reviewed FPE |
 //! | `±0.015%` Hamming tolerance (9.83σ) | `±0.0053%` (3.5σ) plus a longest-run gate |
 
 #![forbid(unsafe_code)]
@@ -31,7 +31,7 @@ pub mod budgets;
 pub mod capsule;
 /// Forward-only duress co-evolution: effort-matched, generated-not-stored decoy deltas.
 pub mod duress;
-/// `FPE-22`: the 22-bit sector permutation that reaches every sector of Zone B.
+/// Custom 22-bit sector permutation; bijective placement only, not a reviewed FPE or PRP.
 pub mod feistel;
 /// Container geometry, as exact constants.
 pub mod layout;

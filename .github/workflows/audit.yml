@@ -37,7 +37,18 @@ jobs:
       - name: Install rustfmt
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
-        run: cargo +stable fmt --all -- --check
+        run: |
+          set -o pipefail
+          cargo +stable fmt --all -- --check 2>&1 | tee rustfmt.log
+
+      # Runner logs are not reachable from the Agent environment; surface the formatter output
+      # as check annotations so a failed format gate can be corrected without guessing.
+      - name: Report formatting differences
+        if: failure()
+        run: |
+          head -160 rustfmt.log | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
   core-crates:
     name: core crates (no wordcraft)
@@ -621,7 +632,8 @@ jobs:
       - name: Build and test preview
         run: |
           set -o pipefail
-          cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-test.log
+          # These tests perform full-container crypto and fsyncs; avoid starving their save workers.
+          cargo test --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short -- --test-threads=2 2>&1 | tee preview-test.log
           cargo build --manifest-path crates/holonomy-preview/Cargo.toml --message-format=short 2>&1 | tee preview-build.log
       - name: Smoke-test the scratch window on a virtual display
         run: |
@@ -761,16 +773,21 @@ jobs:
           set -o pipefail
           cargo clippy --manifest-path crates/holonomy-preview/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee preview-clippy.log
       - name: Check preview formatting
-        run: cargo fmt --manifest-path crates/holonomy-preview/Cargo.toml --all -- --check
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path crates/holonomy-preview/Cargo.toml --all -- --check 2>&1 | tee preview-fmt.log
       - name: Annotate preview failures
         if: failure()
         run: |
           set +e
-          for log in preview-test.log preview-build.log preview-clippy.log; do
+          for log in preview-test.log preview-build.log preview-clippy.log preview-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"
             done
+            if [ "$log" = preview-fmt.log ]; then
+              head -100 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
             grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
               echo "::error::$line"
             done
@@ -804,16 +821,21 @@ jobs:
           set -o pipefail
           cargo clippy --manifest-path crates/holonomy-wordcraft/Cargo.toml --all-targets --message-format=short -- -D warnings 2>&1 | tee bridge-clippy.log
       - name: Check bridge formatting
-        run: cargo fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all -- --check
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path crates/holonomy-wordcraft/Cargo.toml --all -- --check 2>&1 | tee bridge-fmt.log
       - name: Annotate bridge failures
         if: failure()
         run: |
           set +e
-          for log in bridge-test.log bridge-clippy.log; do
+          for log in bridge-test.log bridge-clippy.log bridge-fmt.log; do
             [ -f "$log" ] || continue
             grep -E ': (error|warning)(\[[A-Z0-9]+\])?:|^error|^test result: FAILED' "$log" | head -30 | while IFS= read -r line; do
               echo "::error::$line"
             done
+            if [ "$log" = bridge-fmt.log ]; then
+              head -100 "$log" | while IFS= read -r line; do echo "::error::$line"; done
+            fi
             grep -A2 'panicked at' "$log" | tr '\n' ' ' | sed 's/panicked at/\npanicked at/g' | head -10 | while IFS= read -r line; do
               echo "::error::$line"
             done
@@ -838,13 +860,21 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Lint CLI
-        run: cargo clippy -p holonomy-cli --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy -p holonomy-cli --all-targets --message-format=short -- -D warnings 2>&1 | tee cli-clippy.log
+      - name: Report CLI lint findings as annotations
+        if: failure()
+        run: |
+          grep -E ': (error|warning)(\[[A-Z0-9]+\])?:' cli-clippy.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
       - name: Test redacted document buffer
         run: cargo test -p holonomy-session --lib a_saved_container_reopens_to_the_bytes_that_went_in
       - name: Run focused CLI safety tests
         run: |
           set -euo pipefail
-          for test in partial_ratchet_requires_recovery_after_replacement ratchet_count_must_match_the_full_window save_reports_unestablished_pad_freshness the_store_layer_does_not_claim_pad_freshness a_second_save_is_refused_while_a_save_is_running a_caller_held_lock_lets_its_own_save_proceed a_concurrent_save_is_refused_without_requiring_recovery remnants_reports_staged_images_without_asking_for_credentials remnants_reports_an_empty_directory_plainly remnants_rejects_flags_and_extra_paths recover_finds_the_cursor_of_a_container_without_writing_it recover_reports_a_failure_instead_of_a_cursor recover_refuses_an_explicit_cursor recover_tests_staged_copies_only_when_asked recover_reports_a_staged_copy_that_was_cut_short recover_reports_a_candidate_when_only_a_staged_copy_opens session_refuses_image_changed_since_open_before_pad_access session_updates_baseline_after_each_successful_save save_refuses_changed_path_before_pad_access save_refuses_same_size_original_change_without_ratchet verify_reports_snapshot_digest_and_rejects_tampered_payload verify_checks_candidate_without_printing_or_modifying_plaintext preflight_rejections_do_not_touch_file_or_require_recovery standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing standalone_container_refuses_growth_before_replacement standalone_container_rejects_truncation external_document_sessions_use_production_kdf_profile create_rejects_invalid_options_without_creating_a_file failed_ratchet_requires_recovery_even_after_image_was_replaced external_store_api_is_available_without_the_binary staged_replacement_updates_file_and_open_handle staged_replacement_refuses_changed_path prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
+          for test in partial_ratchet_requires_recovery_after_replacement ratchet_count_must_match_the_full_window save_reports_unestablished_pad_freshness the_store_layer_does_not_claim_pad_freshness a_second_save_is_refused_while_a_save_is_running a_caller_held_lock_lets_its_own_save_proceed a_concurrent_save_is_refused_without_requiring_recovery remnants_reports_staged_images_without_asking_for_credentials remnants_reports_an_empty_directory_plainly remnants_rejects_flags_and_extra_paths recover_finds_the_cursor_of_a_container_without_writing_it recover_reports_a_failure_instead_of_a_cursor recover_refuses_an_explicit_cursor recover_tests_staged_copies_only_when_asked recover_copy_preserves_sources_and_never_overwrites_the_destination recover_reports_an_incomplete_staged_copy_without_failing_the_scan recover_reports_a_candidate_when_only_a_staged_copy_opens session_refuses_image_changed_since_open_before_pad_access session_updates_baseline_after_each_successful_save save_refuses_changed_path_before_pad_access save_refuses_same_size_original_change_without_ratchet verify_reports_snapshot_digest_and_rejects_tampered_payload verify_checks_candidate_without_printing_or_modifying_plaintext preflight_rejections_do_not_touch_file_or_require_recovery standalone_container_refuses_extra_bytes_without_reading_pad_or_replacing standalone_container_refuses_growth_before_replacement standalone_container_rejects_truncation external_document_sessions_use_production_kdf_profile create_rejects_invalid_options_without_creating_a_file failed_ratchet_requires_recovery_even_after_image_was_replaced external_store_api_is_available_without_the_binary staged_replacement_updates_file_and_open_handle staged_replacement_refuses_changed_path prompted_credentials_are_confirmed_and_fail_closed explicit_credentials_do_not_prompt open_rejects_cursor_alias_even_when_pad_window_matches pad_reuse_boundary_refuses_without_touching_container provision_rejects_nonzero_cursor_without_creating_file input_is_bounded_and_exact_limit_is_accepted kappa_rejects_non_ascii_without_panicking kappa_accepts_upper_and_lowercase_hex flags_reject_missing_values_duplicates_and_extra_paths save_rejects_provisioning_cursor_without_changing_container provision_refuses_existing_path_without_overwriting_it; do
             # Annotations survive when the job log is not downloadable, and a failing gate is
             # useless if its reason cannot be seen from the run page.
             output=$(cargo test -p holonomy-cli "$test" -- --nocapture 2>&1) || {

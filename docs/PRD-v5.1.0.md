@@ -55,7 +55,7 @@ the stated hardware, and one was miscounted by 16 bytes.
               │                                                  │
               ▼                                                  ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
-   │ holonomy-core      geometry, capsule (65,536 B), FPE-22, duress, stats  │
+   │ holonomy-core      geometry, capsule (65,536 B), custom sector permutation, duress, stats  │
    │ holonomy-crypto    Argon2id → subkeys, CMT-4 AEAD, ML-KEM-1024 envelope │
    │ holonomy-usb       geometry, O_DIRECT I/O, pad plan, ratchet            │
    │ holonomy-runtime   zero-I/O PHY reaper, secret arenas                   │
@@ -142,9 +142,15 @@ container. Two commitments per capsule (phase 1 and phase 2), both pinned by the
 **FR-6.1 — What is folded.** All `134,217,728` container bytes XOR `134,217,728` physical bytes,
 `32,768` distinct 4 KiB sectors per save. One save = one container = one pad window.
 
-**FR-6.2 — The permutation.** `FPE-22`: 6-round balanced Feistel over 11-bit halves, domain
-`2^22 = 4,194,304 ≥ 1,782,579`, cycle-walked into Zone B. **Every Zone B sector is reachable.**
-`FPE-20` reached 58.8% of it.
+**FR-6.2 — The permutation.** The implementation is a custom six-round balanced Feistel permutation
+over 11-bit halves, with domain `2^22 = 4,194,304`, cycle-walked into Zone B. It is not a reviewed
+format-preserving encryption or pseudorandom permutation, and must not be treated as access-pattern
+concealment. Its proven role here is collision-free placement for valid logical indices. Inputs must
+start inside Zone B; cycle-walking then returns to that input within at most `2^22` applications.
+The ~2.35-step average is only an ideal-random-permutation workload estimate, not a bound or a
+security result. The deterministic worst case is `2^22` block applications per sector: finite, but
+not a practical latency guarantee for pathological keys. The earlier 20-bit domain could not reach
+41.2% of Zone B.
 
 **FR-6.3 — The 54-save budget.**
 
@@ -154,19 +160,23 @@ container. Two commitments per capsule (phase 1 and phase 2), both pinned by the
   budget  =        54 saves   (54 × 32,768 = 1,769,472 ≤ 1,782,579)
 ```
 
-Saves `0..=53` read mutually disjoint sectors. Save 54 is the first that wraps. This is a **budget
-with a stated consequence**, not a guarantee:
+Cursors `0..=53` describe 54 pairwise-disjoint windows: 1,769,472 sectors of the 1,782,579-sector
+Zone B. The remaining 13,107 sectors are fewer than one save requires. Cursor 54 is therefore
+rejected by checked planning APIs; any complete 55th window would have to reuse at least 19,661
+sectors. This is a **geometry-derived no-reuse budget**, not evidence that a physical device or
+its snapshots have preserved freshness.
 
-* **Writable USB (`O_RDWR`), save path:** after each save the spent sectors are overwritten with
-  fresh CSPRNG bytes. The window restarts. Indefinite fresh pad.
-* **Write-blocked USB (`O_RDONLY`), unlock and view:** zero writes to the bus, so a hardware
-  write-blocker sees nothing. But no ratchet, so past save 54 the sectors are reused.
+* **Writable USB (`O_RDWR`), save path:** the implementation attempts to overwrite spent sectors
+  with fresh CSPRNG bytes and sync them. A successful call is not proof that flash translation
+  layers erased prior copies or that storage hardware honored flushes. Snapshot/rollback
+  reconciliation remains unresolved.
+* **Write-blocked USB (`O_RDONLY`), unlock and view:** zero writes to the bus. The no-ratchet path
+  refuses saves once the fresh-window budget is exhausted; it does not silently reuse pad sectors.
 
-**Past the budget, the protection is `ML-KEM-1024` + `X25519` + `XChaCha20-Poly1305` with `CMT-4`,
-and it is not a one-time pad.** A reused pad byte gives `C₀ ⊕ C₅₄ = M₀ ⊕ M₅₄` to anyone holding
-both snapshots *and* the USB. The UI says this in the status line
-(`ProtectionLayer::describe`), and `PadBudget::complete_save` refuses the save outright rather than
-degrading silently. Saying so is the requirement; pretending otherwise is what §2 removed.
+If a caller bypassed those guards and reused a pad byte, `C₀ ⊕ C₁ = M₀ ⊕ M₁` would expose the XOR
+of the corresponding plaintext bytes to anyone holding both snapshots and the pad. The checked
+save path instead refuses without a successful ratchet. This is not evidence of production-ready
+crash recovery, anti-rollback accounting, or secure flash erase.
 
 **FR-6.4 — Write-blocker compatibility.** Unlock and view open the device `O_RDONLY` only. A ratchet
 requires an explicit `O_RDWR` handle, acquired for the save operation and released after.
