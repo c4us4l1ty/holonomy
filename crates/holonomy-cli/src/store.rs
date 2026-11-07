@@ -240,6 +240,26 @@ impl ContainerFile {
         Ok(original)
     }
 
+    /// Refuse writes through hard-linked container paths. Atomic replacement updates only the
+    /// selected directory entry; leaving another hard link on the old image would create a stale
+    /// fork that shares the same pad history.
+    #[cfg(unix)]
+    pub(crate) fn validate_single_link(&self) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = self.validate_open_path()?;
+        if metadata.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "container has {} hard links; writable saves require exactly one link so replacement cannot leave a stale copy",
+                    metadata.nlink()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Stage a complete encrypted image beside the original and replace it on Unix.
     ///
     /// A successful return means the staged file and its containing directory were synced.
@@ -314,6 +334,15 @@ impl ContainerFile {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "container size changed while saving; replacement refused",
+            ));
+        }
+        if current.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "container acquired {} hard links while saving; refusing replacement to avoid leaving a stale copy",
+                    current.nlink()
+                ),
             ));
         }
         let new_file = staged.persist(&self.filesystem_path).map_err(|e| e.error)?;
@@ -856,13 +885,20 @@ pub fn save(
 
 /// The sidecar path that serializes saves of one container.
 #[cfg(unix)]
-fn save_lock_path(container: &Path) -> PathBuf {
+fn save_lock_path(container: &Path) -> std::io::Result<PathBuf> {
+    let parent = container
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = std::fs::canonicalize(parent)?;
     let mut name = container
         .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path has no file name")
+        })?
+        .to_os_string();
     name.push(".holonomy-lock");
-    container.with_file_name(name)
+    Ok(parent.join(name))
 }
 
 /// Non-Unix builds refuse saves before this type could matter; it exists so signatures are
@@ -874,10 +910,10 @@ pub(crate) struct SaveLock(());
 /// An advisory exclusive lock held for the duration of one save.
 ///
 /// It narrows the window between reading the image and replacing it: a second Holonomy save of
-/// the same path fails instead of interleaving its read, replacement and ratchet. It does not
-/// close the race with a program that ignores the lock, and it is keyed by path, so a rename, a
-/// hard link or another spelling of the same file defeats it. The sidecar file is created next to
-/// the container, stays empty, and holds no key material.
+/// the same normalized path fails instead of interleaving its read, replacement and ratchet. The
+/// parent directory is canonicalized so relative-path spellings share the lock. It does not close
+/// the race with a program that ignores the lock or every alias case; writable saves separately
+/// reject existing hard links. The sidecar stays empty and holds no key material.
 #[cfg(unix)]
 pub(crate) struct SaveLock {
     _file: File,
@@ -888,7 +924,7 @@ impl SaveLock {
     pub(crate) fn acquire(container: impl AsRef<Path>) -> std::io::Result<Self> {
         use std::os::unix::io::AsRawFd;
 
-        let lock_path = save_lock_path(container.as_ref());
+        let lock_path = save_lock_path(container.as_ref())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -964,11 +1000,6 @@ fn save_inner(
     // sectors, do not enter a window that can overlap the first 54 windows.
     validate_save_cursor(ctx.cursor)?;
 
-    // Refuse a known stale handle before consulting the pad or staging an image.
-    // This is not atomic with the read or the later replacement.
-    #[cfg(unix)]
-    file.validate_open_path().map_err(|e| e.to_string())?;
-
     // Serialize Holonomy saves of this path across the read, the replacement, the read-back and
     // the ratchet. Best effort by design: it cannot stop a writer that ignores the lock. A caller
     // that already acquired it (a session, so contention is a preflight refusal) passes it in.
@@ -977,6 +1008,13 @@ fn save_inner(
         Some(_) => None,
         None => Some(SaveLock::acquire(file.path()).map_err(|e| e.to_string())?),
     };
+
+    // Refuse stale, aliased or multiply-linked files before consulting the pad or staging an image.
+    // These checks narrow known hazards but are not atomic with later I/O or replacement.
+    #[cfg(unix)]
+    file.validate_single_link().map_err(|e| {
+        format!("save refused before reading the pad or staging an image: {e}")
+    })?;
 
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;

@@ -40,9 +40,10 @@ those documents are historical and code and current CI results govern implementa
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
-ownership, ACLs, extended attributes, hard links, or other filesystem metadata. Saves take an
-advisory lock on a `*.holonomy-lock` sidecar, which refuses a second Holonomy save but cannot stop
-a program that ignores it or one that reaches the same inode by another path; it is coordination,
+ownership, ACLs, extended attributes, or other filesystem metadata; writable saves now refuse a
+container with multiple hard links to avoid leaving a stale fork. Saves take an advisory lock on a
+`*.holonomy-lock` sidecar, normalizing the parent directory so relative-path spellings share the
+lock. The lock cannot stop a program that ignores it or all aliases/races, so it is coordination,
 not a guarantee. Provisioning is not crash-atomic. Always keep independently tested backups
 together with the pad material needed to open them.
 

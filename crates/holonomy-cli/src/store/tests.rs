@@ -1350,7 +1350,63 @@ fn a_second_save_is_refused_while_a_save_is_running() {
     drop(lock);
     save(&mut file, &mut source(), &ctx, b"after the lock").expect("save after release");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(save_lock_path(&path));
+    let _ = std::fs::remove_file(save_lock_path(&path).expect("lock path"));
+}
+
+/// Relative path spellings in the same directory must not bypass the save lock.
+#[cfg(unix)]
+#[test]
+fn save_lock_normalizes_relative_parent_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested directory");
+    let path = dir.path().join("container");
+    std::fs::write(&path, b"test").expect("container");
+    let alternate = nested.join("..").join("container");
+
+    let lock = SaveLock::acquire(&path).expect("first lock");
+    assert!(
+        SaveLock::acquire(&alternate).is_err(),
+        "canonical parent paths must resolve to the same sidecar lock"
+    );
+    drop(lock);
+}
+
+/// Atomic replacement of a hard-linked container would leave a stale copy sharing pad history.
+#[cfg(unix)]
+#[test]
+fn writable_save_refuses_hardlinked_container_before_reading_pad() {
+    struct NeverReadPad;
+    impl PadSource for NeverReadPad {
+        fn window(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            panic!("hard-linked container must be rejected before reading the pad")
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("hard-linked container must never be ratcheted")
+        }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    let alias = dir.path().join("container-alias");
+    provision(&path, [0x19u8; SALT_BYTES], 0);
+    std::fs::hard_link(&path, &alias).expect("hard link");
+    let before = std::fs::read(&path).expect("read original");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+
+    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"must not fork")
+        .expect_err("hard-linked path must not be atomically replaced");
+    assert!(error.contains("exactly one link"), "{error}");
+    assert!(error.contains("before reading the pad"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("read original"), before);
+    assert_eq!(std::fs::read(&alias).expect("read alias"), before);
 }
 
 /// A caller that already holds the lock must not deadlock against itself.
@@ -1377,7 +1433,7 @@ fn a_caller_held_lock_lets_its_own_save_proceed() {
     )
     .expect("a held lock belongs to this save");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(save_lock_path(&path));
+    let _ = std::fs::remove_file(save_lock_path(&path).expect("lock path"));
 }
 
 /// A remnant report is a directory listing: it must find the staged prefix, report each file once,
