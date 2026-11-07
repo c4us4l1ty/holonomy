@@ -65,20 +65,13 @@ fn self_check() -> ExitCode {
     ok &= capsule == 65_536;
 
     // 2. Zone B geometry.
-    match holonomy_usb::Geometry::nominal() {
-        Ok(g) => {
-            report(
-                "8 GB device fits the documented pad budget",
-                g.meets_pad_budget(),
-                &format!("{} saves afforded", g.saves_afforded()),
-            );
-            ok &= g.meets_pad_budget();
-        }
-        Err(e) => {
-            report("8 GB device geometry", false, &e.to_string());
-            ok = false;
-        }
-    }
+    let g = holonomy_usb::Geometry::nominal();
+    report(
+        "8 GB device fits the documented pad budget",
+        g.meets_pad_budget(),
+        &format!("{} saves afforded", g.saves_afforded()),
+    );
+    ok &= g.meets_pad_budget();
 
     // 3. The permutation actually reaches the whole of Zone B.
     let f = holonomy_core::feistel::Feistel22::provisioned(&[0x5Au8; 32]);
