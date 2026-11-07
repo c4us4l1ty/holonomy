@@ -171,19 +171,28 @@ impl OpenForm {
 
     fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormAction {
         ui.heading("Open a container for read-only viewing");
+        let mut inputs_changed = false;
         ui.add_enabled_ui(pending.is_none(), |ui| {
             ui.label("Container path");
-            ui.text_edit_singleline(&mut self.path);
+            inputs_changed |= ui.text_edit_singleline(&mut self.path).changed();
             ui.label(format!(
                 "Cursor used to write this image (0–{})",
                 SAVES_BEFORE_DOMAIN_REUSE - 1
             ));
-            ui.text_edit_singleline(&mut self.cursor);
+            inputs_changed |= ui.text_edit_singleline(&mut self.cursor).changed();
             ui.label("Legacy passphrase (ASCII case variants are equivalent)");
-            ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
+            inputs_changed |= ui
+                .add(egui::TextEdit::singleline(&mut self.passphrase).password(true))
+                .changed();
             ui.label("Demo root share (exactly 64 hexadecimal characters)");
-            ui.add(egui::TextEdit::singleline(&mut self.root_share).password(true));
+            inputs_changed |= ui
+                .add(egui::TextEdit::singleline(&mut self.root_share).password(true))
+                .changed();
         });
+        if inputs_changed {
+            self.error = None;
+            self.notice = None;
+        }
         ui.label(
             "Credentials are only visually masked; clipboard, swap, crash dumps, and UI allocations may expose them.",
         );
