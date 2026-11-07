@@ -1,20 +1,23 @@
 //! The experimental, read-only Wordcraft container viewer.
 //!
 //! This binary opens containers only through the deterministic demo pad. It does not support
-//! physical USB, editing, saving, or recovery, and it is not suitable for sensitive data. The
+//! physical USB, editing, saving, or recovery beyond a read-only cursor-candidate scan, and it is
+//! not suitable for sensitive data. The
 //! read-only service boundary and input filter are shared with `holonomy-preview`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 
 use eframe::egui;
 use holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
 use holonomy_core::unlock::SealedPassphrase;
 use holonomy_preview::{
-    filter_events, open_read_only, parse_kappa, prompt_credentials, read_only_services, OpenedView,
-    ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
+    filter_events, find_read_only_cursor, open_read_only, parse_kappa, prompt_credentials,
+    read_only_services, CursorSearch, OpenedView, ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
 use wordcraft_engine::Session;
@@ -106,6 +109,7 @@ struct OpenForm {
     passphrase: String,
     root_share: String,
     error: Option<String>,
+    notice: Option<String>,
 }
 
 impl Default for OpenForm {
@@ -116,15 +120,27 @@ impl Default for OpenForm {
             passphrase: String::new(),
             root_share: String::new(),
             error: None,
+            notice: None,
         }
     }
 }
 
 impl OpenForm {
-    fn prepare_request(&mut self) -> Result<OpenRequest, String> {
+    fn prepare_credentials(
+        &mut self,
+    ) -> Result<(PathBuf, SealedPassphrase, Zeroizing<[u8; 32]>), String> {
         if self.path.is_empty() {
             return Err("enter a container path".into());
         }
+        let passphrase = SealedPassphrase::new(&self.passphrase)
+            .ok_or_else(|| "passphrase is empty or too long".to_string())?;
+        let kappa = Zeroizing::new(parse_kappa(&self.root_share).map_err(str::to_owned)?);
+        self.passphrase.zeroize();
+        self.root_share.zeroize();
+        Ok((PathBuf::from(self.path.as_str()), passphrase, kappa))
+    }
+
+    fn prepare_request(&mut self) -> Result<OpenRequest, String> {
         let cursor = self
             .cursor
             .parse::<u64>()
@@ -135,22 +151,27 @@ impl OpenForm {
                 SAVES_BEFORE_DOMAIN_REUSE - 1
             ));
         }
-        let passphrase = SealedPassphrase::new(&self.passphrase)
-            .ok_or_else(|| "passphrase is empty or too long".to_string())?;
-        let kappa = Zeroizing::new(parse_kappa(&self.root_share).map_err(str::to_owned)?);
-        self.passphrase.zeroize();
-        self.root_share.zeroize();
+        let (path, passphrase, kappa) = self.prepare_credentials()?;
         Ok(OpenRequest {
-            path: PathBuf::from(self.path.as_str()),
+            path,
             cursor,
             passphrase,
             kappa,
         })
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, opening: bool) -> bool {
+    fn prepare_scan_request(&mut self) -> Result<ScanRequest, String> {
+        let (path, passphrase, kappa) = self.prepare_credentials()?;
+        Ok(ScanRequest {
+            path,
+            passphrase,
+            kappa,
+        })
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingKind>) -> FormAction {
         ui.heading("Open a container for read-only viewing");
-        ui.add_enabled_ui(!opening, |ui| {
+        ui.add_enabled_ui(pending.is_none(), |ui| {
             ui.label("Container path");
             ui.text_edit_singleline(&mut self.path);
             ui.label(format!(
@@ -166,19 +187,44 @@ impl OpenForm {
         ui.label(
             "Credentials are only visually masked; clipboard, swap, crash dumps, and UI allocations may expose them.",
         );
-        let requested = if opening {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Opening read-only…");
-            });
-            false
-        } else {
-            ui.button("Open read-only").clicked()
-        };
+        ui.label(format!(
+            "Find cursor scans up to {SAVES_BEFORE_DOMAIN_REUSE} complete images and derives a key per attempt. It is read-only, may take time, and can be cancelled between attempts."
+        ));
+        let mut action = FormAction::None;
+        match pending {
+            Some(PendingKind::Opening) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Opening read-only…");
+                });
+            }
+            Some(PendingKind::Scanning) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Searching cursor candidates…");
+                    if ui.button("Cancel search").clicked() {
+                        action = FormAction::CancelSearch;
+                    }
+                });
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    if ui.button("Open read-only").clicked() {
+                        action = FormAction::Open;
+                    }
+                    if ui.button("Find cursor").clicked() {
+                        action = FormAction::FindCursor;
+                    }
+                });
+            }
+        }
+        if let Some(notice) = &self.notice {
+            ui.colored_label(egui::Color32::from_rgb(30, 110, 60), notice);
+        }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), error);
         }
-        requested
+        action
     }
 }
 
@@ -196,9 +242,39 @@ struct OpenRequest {
     kappa: Zeroizing<[u8; 32]>,
 }
 
+struct ScanRequest {
+    path: PathBuf,
+    passphrase: SealedPassphrase,
+    kappa: Zeroizing<[u8; 32]>,
+}
+
+#[derive(Clone, Copy)]
+enum PendingKind {
+    Opening,
+    Scanning,
+}
+
+enum FormAction {
+    None,
+    Open,
+    FindCursor,
+    CancelSearch,
+}
+
+enum WorkerResult {
+    Open(Result<OpenedView, String>),
+    Scan(Result<CursorSearch, String>),
+}
+
+struct PendingTask {
+    kind: PendingKind,
+    receiver: Receiver<WorkerResult>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
 struct ViewerApp {
     form: OpenForm,
-    pending: Option<Receiver<Result<OpenedView, String>>>,
+    pending: Option<PendingTask>,
     viewer: Option<ReadOnlyWindow>,
 }
 
@@ -213,6 +289,7 @@ impl ViewerApp {
 
     fn start_open(&mut self) {
         self.form.error = None;
+        self.form.notice = None;
         let request = match self.form.prepare_request() {
             Ok(request) => request,
             Err(error) => {
@@ -229,29 +306,94 @@ impl ViewerApp {
                 kappa,
             } = request;
             let result = open_read_only(&path, cursor, passphrase, *kappa);
-            let _ = sender.send(result);
+            let _ = sender.send(WorkerResult::Open(result));
         });
-        self.pending = Some(receiver);
+        self.pending = Some(PendingTask {
+            kind: PendingKind::Opening,
+            receiver,
+            cancel: None,
+        });
     }
 
-    fn finish_open(&mut self) {
-        let result = self
-            .pending
-            .as_ref()
-            .and_then(|receiver| match receiver.try_recv() {
+    fn start_scan(&mut self) {
+        self.form.error = None;
+        self.form.notice = None;
+        let request = match self.form.prepare_scan_request() {
+            Ok(request) => request,
+            Err(error) => {
+                self.form.error = Some(error);
+                return;
+            }
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let ScanRequest {
+                path,
+                passphrase,
+                kappa,
+            } = request;
+            let result = find_read_only_cursor(&path, passphrase, *kappa, &worker_cancelled);
+            let _ = sender.send(WorkerResult::Scan(result));
+        });
+        self.pending = Some(PendingTask {
+            kind: PendingKind::Scanning,
+            receiver,
+            cancel: Some(cancelled),
+        });
+    }
+
+    fn cancel_scan(&mut self) {
+        if let Some(cancel) = self.pending.as_ref().and_then(|task| task.cancel.as_ref()) {
+            cancel.store(true, Ordering::Relaxed);
+            self.form.notice = Some(
+                "Cancel requested. The current full-image attempt will finish before stopping."
+                    .into(),
+            );
+        }
+    }
+
+    fn finish_pending(&mut self) {
+        let result = self.pending.as_ref().and_then(|task| {
+            match task.receiver.try_recv() {
                 Ok(result) => Some(result),
-                Err(TryRecvError::Disconnected) => {
-                    Some(Err("read-only open worker stopped unexpectedly".into()))
-                }
+                Err(TryRecvError::Disconnected) => Some(match task.kind {
+                    PendingKind::Opening => WorkerResult::Open(Err(
+                        "read-only open worker stopped unexpectedly".into(),
+                    )),
+                    PendingKind::Scanning => WorkerResult::Scan(Err(
+                        "cursor search worker stopped unexpectedly".into(),
+                    )),
+                }),
                 Err(TryRecvError::Empty) => None,
-            });
+            }
+        });
         if let Some(result) = result {
-            self.pending = None;
+            let task = self.pending.take().expect("pending task exists");
             match result {
-                Ok(opened) => {
+                WorkerResult::Open(Ok(opened)) => {
                     self.viewer = Some(ReadOnlyWindow::new(opened.document, opened.cursor));
                 }
-                Err(error) => self.form.error = Some(error),
+                WorkerResult::Open(Err(error)) => self.form.error = Some(error),
+                WorkerResult::Scan(Ok(found)) => {
+                    self.form.cursor = found.cursor.to_string();
+                    self.form.notice = Some(format!(
+                        "Cursor {} authenticated on attempt {}. Re-enter credentials to open. This is not proof of freshness, uniqueness or pad history.",
+                        found.cursor, found.attempts
+                    ));
+                }
+                WorkerResult::Scan(Err(error)) => {
+                    if task
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                    {
+                        self.form.notice = Some(error);
+                    } else {
+                        self.form.error = Some(error);
+                    }
+                }
             }
         }
     }
@@ -259,7 +401,7 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.finish_open();
+        self.finish_pending();
         if self.pending.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -284,8 +426,12 @@ impl eframe::App for ViewerApp {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
         });
-        if self.form.show(ui, self.pending.is_some()) && self.pending.is_none() {
-            self.start_open();
+        let pending_kind = self.pending.as_ref().map(|task| task.kind);
+        match self.form.show(ui, pending_kind) {
+            FormAction::Open => self.start_open(),
+            FormAction::FindCursor => self.start_scan(),
+            FormAction::CancelSearch => self.cancel_scan(),
+            FormAction::None => {}
         }
     }
 }
@@ -328,7 +474,7 @@ fn print_usage() {
     println!("With no arguments, launch the interactive read-only open screen.");
     println!();
     println!("The viewer uses a deterministic demo pad, not physical USB.");
-    println!("It cannot edit, save, or recover containers. Never use sensitive data.");
+    println!("It can search candidate cursors but cannot repair or reconcile recovery. Never use sensitive data.");
     println!(
         "Interactive credentials are visually masked only; clipboard, swap, crash dumps, and UI allocations may expose them."
     );
@@ -524,10 +670,27 @@ mod tests {
             passphrase: "demo passphrase".into(),
             root_share: "11".repeat(32),
             error: None,
+            notice: None,
         };
         let request = form.prepare_request().expect("valid open form");
         assert_eq!(request.path, PathBuf::from("demo-container"));
         assert_eq!(request.cursor, 4);
+        assert!(form.passphrase.is_empty());
+        assert!(form.root_share.is_empty());
+    }
+
+    #[test]
+    fn preparing_a_scan_request_clears_credentials_without_requiring_a_cursor() {
+        let mut form = OpenForm {
+            path: "demo-container".into(),
+            cursor: "cursor is discovered by the scan".into(),
+            passphrase: "demo passphrase".into(),
+            root_share: "11".repeat(32),
+            error: None,
+            notice: None,
+        };
+        let request = form.prepare_scan_request().expect("valid scan credentials");
+        assert_eq!(request.path, PathBuf::from("demo-container"));
         assert!(form.passphrase.is_empty());
         assert!(form.root_share.is_empty());
     }
@@ -540,6 +703,7 @@ mod tests {
             passphrase: String::new(),
             root_share: String::new(),
             error: None,
+            notice: None,
         };
         let error = match form.prepare_request() {
             Err(error) => error,
@@ -556,7 +720,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn open_form_worker_opens_a_container_read_only() {
+    fn open_and_cursor_search_workers_use_read_only_paths() {
         use std::time::{Duration, Instant};
 
         use holonomy_cli::document::DocumentSessionOptions;
@@ -568,7 +732,7 @@ mod tests {
         let path = directory.path().join("container");
         let passphrase = "synthetic UI test passphrase";
         let root_share = [0x11; 32];
-        let session = EditorSession::create(
+        let mut session = EditorSession::create(
             &path,
             Box::new(DerivedPad::new()),
             SealedPassphrase::new(passphrase).expect("valid test passphrase"),
@@ -576,24 +740,54 @@ mod tests {
             DocumentSessionOptions::new(0, true, Topology::UmbilicalUsb),
         )
         .expect("create test container");
+        *session.document_mut() = Document::from_text("cursor search sample");
+        session.save().expect("save at cursor one");
         drop(session);
         let original_image = std::fs::read(&path).expect("read created container");
 
         let mut app = ViewerApp::new();
         app.form = OpenForm {
             path: path.display().to_string(),
-            cursor: "0".into(),
+            cursor: "not-required-for-search".into(),
             passphrase: passphrase.into(),
             root_share: "11".repeat(32),
             error: None,
+            notice: None,
         };
-        app.start_open();
+        app.start_scan();
         assert!(app.form.passphrase.is_empty());
         assert!(app.form.root_share.is_empty());
 
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(90);
         while app.pending.is_some() && Instant::now() < deadline {
-            app.finish_open();
+            app.finish_pending();
+            if app.pending.is_some() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert!(app.pending.is_none(), "cursor search worker did not finish in time");
+        assert_eq!(app.form.cursor, "1");
+        assert!(app
+            .form
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("not proof of freshness")));
+        assert!(app.viewer.is_none(), "scan must not open a document");
+        assert_eq!(
+            std::fs::read(&path).expect("read after cursor search"),
+            original_image,
+            "cursor search must leave the container bytes unchanged"
+        );
+
+        // The scan deliberately cleared credentials; re-enter them for the separate viewer open.
+        app.form.passphrase = passphrase.into();
+        app.form.root_share = "11".repeat(32);
+        app.start_open();
+        assert!(app.form.passphrase.is_empty());
+        assert!(app.form.root_share.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while app.pending.is_some() && Instant::now() < deadline {
+            app.finish_pending();
             if app.pending.is_some() {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -605,7 +799,7 @@ mod tests {
                 app.form.error.as_deref().unwrap_or("no error reported")
             )
         });
-        assert_eq!(viewer.cursor, 0);
+        assert_eq!(viewer.cursor, 1);
         assert!(viewer.app.session.path.is_none());
         assert!(!viewer.app.session.recovery_ready());
         assert_eq!(

@@ -334,6 +334,12 @@ Decoding performs no write and no ratchet, but the document is plaintext in memo
 exclusion, editor-wide memory locking, and the watchdog are not integrated. This is a viewing aid,
 not a protected reader.
 
+The interactive screen also offers **Find cursor** for a container when its cursor is unknown. It
+checks legal candidates read-only, reports the first one that authenticates, and can be cancelled
+between full-image attempts. Each attempt reads the image and derives a key, so the search may take
+time. It does not identify the newest or only copy, establish pad history or freshness, or repair the
+container; credentials are cleared after the search and must be entered again to open it.
+
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
 command opens the file and selected pad read-only and does not ratchet. It does decrypt into memory

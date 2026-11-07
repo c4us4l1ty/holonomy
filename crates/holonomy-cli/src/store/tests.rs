@@ -1683,6 +1683,7 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
     assert_eq!(scan.hits.len(), 1, "{scan:?}");
     assert_eq!(scan.hits[0].cursor, 2);
     assert_eq!(scan.attempts, 3, "cursors 0, 1 and 2");
+    assert!(!scan.cancelled);
     assert_eq!(
         scan.hits[0].digest,
         holonomy_session::seal::image_digest(&before),
@@ -1694,6 +1695,24 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
         before,
         "a scan must not write the container"
     );
+
+    // Cancellation is checked between full attempts, not in the middle of a derivation.
+    let mut file = ContainerFile::open(&path, false).expect("open read-only");
+    let mut checks = 0;
+    let cancelled = scan_cursor_range_with_cancel(
+        &mut file,
+        &mut source(),
+        &ctx(&pass, 0),
+        0..4,
+        true,
+        || {
+            checks += 1;
+            checks > 1
+        },
+    );
+    assert!(cancelled.cancelled);
+    assert_eq!(cancelled.attempts, 1);
+    assert!(cancelled.hits.is_empty());
 
     // Without the early stop the whole range is tried, and still only one cursor opens.
     let mut file = ContainerFile::open(&path, false).expect("open read-only");

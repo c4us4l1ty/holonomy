@@ -14,11 +14,13 @@
 //! the renderer may allocate copies of it, and the operating system can expose them.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
 use eframe::egui;
 use holonomy_cli::document::DocumentSessionOptions;
 use holonomy_cli::store::pad::DerivedPad;
+use holonomy_cli::store::{self, ContainerFile, SaveContext};
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_wordcraft::editor::EditorSession;
 use wordcraft_doc::Document;
@@ -91,6 +93,63 @@ pub struct OpenedView {
     pub document: Document,
     /// The cursor the caller supplied, authenticated by the store.
     pub cursor: u64,
+}
+
+/// A cursor that authenticated the encrypted image during the read-only candidate scan.
+#[derive(Debug)]
+pub struct CursorSearch {
+    /// The first cursor in the legal range that opened the container.
+    pub cursor: u64,
+    /// Full-image authentication attempts performed before finding it.
+    pub attempts: u64,
+    /// Digest of the encrypted image, for comparison with other inspection output.
+    pub digest: [u8; 32],
+}
+
+/// Search legal save cursors without writing the container or ratcheting the demo pad.
+///
+/// Each attempt reads and authenticates the complete container and derives its key, so this can be
+/// slow. Cancellation is checked between attempts. The first match is not proof of freshness,
+/// uniqueness, latest-copy status or pad history; the scan is a viewer convenience, not recovery.
+pub fn find_read_only_cursor(
+    path: &Path,
+    passphrase: SealedPassphrase,
+    kappa: [u8; 32],
+    cancelled: &AtomicBool,
+) -> Result<CursorSearch, String> {
+    let mut file = ContainerFile::open(path, false)
+        .map_err(|error| format!("opening {} for cursor search: {error}", path.display()))?;
+    let mut pad = DerivedPad::new();
+    let kappa = Zeroizing::new(kappa);
+    let options = DocumentSessionOptions::new(0, false, Topology::UmbilicalUsb);
+    let context = SaveContext {
+        passphrase: &passphrase,
+        kappa_usb: &kappa,
+        topology: Topology::UmbilicalUsb,
+        params: options.params(),
+        cursor: 0,
+    };
+    let scan = store::scan_cursors_cancellable(&mut file, &mut pad, &context, true, cancelled);
+    if scan.cancelled {
+        return Err(format!(
+            "cursor search cancelled between attempts after {}; no bytes were written and the pad was not ratcheted",
+            scan.attempts
+        ));
+    }
+    let hit = scan.hits.into_iter().next().ok_or_else(|| {
+        format!(
+            "no cursor authenticated after {} attempt(s); last refusal: {}",
+            scan.attempts,
+            scan.last_error
+                .as_deref()
+                .unwrap_or("no candidate was attempted")
+        )
+    })?;
+    Ok(CursorSearch {
+        cursor: hit.cursor,
+        attempts: scan.attempts,
+        digest: hit.digest,
+    })
 }
 
 /// Open a container **read-only** and decode its Wordcraft document.
@@ -396,6 +455,20 @@ mod tests {
         drop(session);
 
         let before = std::fs::read(&path).expect("read container");
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let found = find_read_only_cursor(&path, pass(), kappa, &cancelled)
+            .expect("read-only cursor search");
+        assert_eq!(found.cursor, 1);
+        assert_eq!(found.attempts, 2, "the scan checks cursors zero and one");
+        assert_eq!(
+            std::fs::read(&path).expect("read after cursor search"),
+            before,
+            "cursor search must not change the container"
+        );
+        let cancel_now = std::sync::atomic::AtomicBool::new(true);
+        assert!(find_read_only_cursor(&path, pass(), kappa, &cancel_now)
+            .expect_err("pre-cancelled scan")
+            .contains("cancelled between attempts"));
         let opened = open_read_only(&path, 1, pass(), kappa).expect("read-only open");
         assert!(
             opened.document.same_content(&original),

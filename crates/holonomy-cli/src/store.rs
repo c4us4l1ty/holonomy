@@ -894,7 +894,10 @@ fn save_lock_path(container: &Path) -> std::io::Result<PathBuf> {
     let mut name = container
         .file_name()
         .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "container path has no file name")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "container path has no file name",
+            )
         })?
         .to_os_string();
     name.push(".holonomy-lock");
@@ -1333,6 +1336,8 @@ pub struct CursorScan {
     pub attempts: u64,
     /// The last refusal, kept because "nothing opened" is not a diagnosis on its own.
     pub last_error: Option<String>,
+    /// Whether the caller requested cancellation between candidate attempts.
+    pub cancelled: bool,
 }
 
 /// Try every cursor a save may legitimately have written, and report the ones that open.
@@ -1361,6 +1366,28 @@ pub fn scan_cursors(
     )
 }
 
+/// Scan candidate cursors while allowing a caller to stop between expensive attempts.
+///
+/// Cancellation is cooperative: an in-progress candidate still completes its full image read and
+/// key derivation. It never interrupts a candidate midway through authentication. The scan remains
+/// strictly read-only and never ratchets the pad.
+pub fn scan_cursors_cancellable(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    template: &SaveContext<'_>,
+    stop_at_first: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> CursorScan {
+    scan_cursor_range_with_cancel(
+        file,
+        pad,
+        template,
+        0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE,
+        stop_at_first,
+        || cancelled.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// The scan itself, with the range named so tests do not have to read the whole legal range to
 /// prove the loop and the early stop. Production always passes the full legal range above.
 fn scan_cursor_range(
@@ -1370,8 +1397,23 @@ fn scan_cursor_range(
     range: std::ops::Range<u64>,
     stop_at_first: bool,
 ) -> CursorScan {
+    scan_cursor_range_with_cancel(file, pad, template, range, stop_at_first, || false)
+}
+
+fn scan_cursor_range_with_cancel(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    template: &SaveContext<'_>,
+    range: std::ops::Range<u64>,
+    stop_at_first: bool,
+    mut should_cancel: impl FnMut() -> bool,
+) -> CursorScan {
     let mut scan = CursorScan::default();
     for cursor in range {
+        if should_cancel() {
+            scan.cancelled = true;
+            break;
+        }
         let ctx = SaveContext {
             passphrase: template.passphrase,
             kappa_usb: template.kappa_usb,

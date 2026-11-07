@@ -8,10 +8,11 @@ neither is suitable for sensitive or irreplaceable data.
 container viewer, and a status projection that consumes an actual store `SaveReport`. The viewer
 uses the preview crate's tested read-only boundary and deterministic demo pad. Its GUI masks
 credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. Its
-UI tests create a temporary demo container and exercise form request preparation plus the asynchronous
-open worker, asserting a read-only viewer and unchanged container bytes. This does not simulate native
-keyboard or mouse entry; the Xvfb smoke check only verifies the open screen starts. The status code is
-not wired into a writable editor workflow. A reported ratchet count is not independent proof of
+UI tests create temporary demo containers and exercise form request preparation, the asynchronous
+read-only cursor search, and the open worker. They assert that a candidate cursor is found without
+changing bytes, credentials are cleared, and a subsequent open produces a read-only viewer. This does
+not simulate native keyboard or mouse entry; the Xvfb smoke check only verifies the open screen starts.
+The status code is not wired into a writable editor workflow. A reported ratchet count is not independent proof of
 persistent device writes, and the store still reports pad freshness as *not established*.
 
 | PRD interface goal | Current state | Work still needed |
@@ -54,8 +55,11 @@ durability, or complete recovery. Reading can update OS file-access metadata.
 
 `crates/holonomy-preview/src/bin/holonomy-rich-view.rs` was the first path where the real
 Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes an
-interactive open screen as well as CLI modes from the standalone UI package. The window is
-one-way by construction, not by configuration:
+interactive open screen as well as CLI modes from the standalone UI package. The screen can search
+legal cursor candidates through the existing read-only store scan; it reports the first authenticating
+candidate, clears credentials and requires them to be re-entered before opening. The search is
+cancellable between full-image attempts, but does not establish freshness, uniqueness, recency or pad
+history and does not repair anything. The window is one-way by construction, not by configuration:
 
 ```text
 holonomy                                  # open the interactive screen
