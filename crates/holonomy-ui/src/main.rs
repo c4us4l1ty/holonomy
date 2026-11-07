@@ -412,8 +412,10 @@ impl ViewerApp {
     }
 
     fn finish_pending(&mut self) {
-        let result = self.pending.as_ref().and_then(|task| {
-            match task.receiver.try_recv() {
+        let result = self
+            .pending
+            .as_ref()
+            .and_then(|task| match task.receiver.try_recv() {
                 Ok(result) => Some(result),
                 Err(TryRecvError::Disconnected) => Some(match task.kind {
                     PendingKind::Opening => WorkerResult::Open(Err(
@@ -424,8 +426,7 @@ impl ViewerApp {
                     )),
                 }),
                 Err(TryRecvError::Empty) => None,
-            }
-        });
+            });
         if let Some(result) = result {
             let task = self.pending.take().expect("pending task exists");
             match result {
