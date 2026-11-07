@@ -115,6 +115,7 @@ impl eframe::App for ReadOnlyWindow {
     }
 }
 
+#[derive(Default)]
 struct OpenForm {
     path: String,
     selected_path: Option<PathBuf>,
@@ -123,20 +124,6 @@ struct OpenForm {
     root_share: String,
     error: Option<String>,
     notice: Option<String>,
-}
-
-impl Default for OpenForm {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            selected_path: None,
-            cursor: String::new(),
-            passphrase: String::new(),
-            root_share: String::new(),
-            error: None,
-            notice: None,
-        }
-    }
 }
 
 impl OpenForm {

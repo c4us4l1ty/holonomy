@@ -492,11 +492,12 @@ At the original audit baseline, the `holonomy-ui` tests had not executed; that s
 superseded by the update above. The current UI crate has 19 unit tests. UI job `42398906778` passed
 the previous 17-test source, including cursor search, progress, feedback invalidation, worker
 cancellation and Ctrl/Cmd+O return navigation. Run `42400134106` exposed egui's trait-based dropped
-file API; run `42400460346` then passed the 18-test UI suite, launcher help, interactive open-screen
-smoke and lint, but failed the formatting step. Commit `cd38df4` applies CI's formatting diff; the
-blank-by-default cursor UX and its new test are awaiting a follow-up CI run. These tests cover parts
-of the status shell, capture reporting, launcher parsing, cursor-boundary validation, credential
-clearing, keyboard and file-drop filtering, and the asynchronous search/open path. That path uses
+file API; run `42400460346` then passed the 18-test UI suite, launcher help and interactive
+open-screen smoke, but failed formatting. Commit `cd38df4` applies CI's formatting diff. Run
+`42401655561` passed the 19-test suite, launcher help and open-screen smoke, but Clippy rejected the
+hand-written `OpenForm::default`; it is now derived, and that correction is awaiting CI. These tests
+cover parts of the status shell, capture reporting, launcher parsing, cursor-boundary validation,
+credential clearing, keyboard and file-drop filtering, and the asynchronous search/open path. That path uses
 synthetic credentials and temporary demo containers; it does not simulate native widget input. These
 tests are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
 
