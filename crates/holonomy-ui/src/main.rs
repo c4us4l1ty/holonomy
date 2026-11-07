@@ -169,30 +169,41 @@ impl OpenForm {
         })
     }
 
+    fn clear_feedback_for_edits(
+        &mut self,
+        path_or_cursor_changed: bool,
+        credentials_changed: bool,
+    ) {
+        if path_or_cursor_changed {
+            self.error = None;
+            self.notice = None;
+        } else if credentials_changed {
+            self.error = None;
+        }
+    }
+
     fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormAction {
         ui.heading("Open a container for read-only viewing");
-        let mut inputs_changed = false;
+        let mut path_or_cursor_changed = false;
+        let mut credentials_changed = false;
         ui.add_enabled_ui(pending.is_none(), |ui| {
             ui.label("Container path");
-            inputs_changed |= ui.text_edit_singleline(&mut self.path).changed();
+            path_or_cursor_changed |= ui.text_edit_singleline(&mut self.path).changed();
             ui.label(format!(
                 "Cursor used to write this image (0–{})",
                 SAVES_BEFORE_DOMAIN_REUSE - 1
             ));
-            inputs_changed |= ui.text_edit_singleline(&mut self.cursor).changed();
+            path_or_cursor_changed |= ui.text_edit_singleline(&mut self.cursor).changed();
             ui.label("Legacy passphrase (ASCII case variants are equivalent)");
-            inputs_changed |= ui
+            credentials_changed |= ui
                 .add(egui::TextEdit::singleline(&mut self.passphrase).password(true))
                 .changed();
             ui.label("Demo root share (exactly 64 hexadecimal characters)");
-            inputs_changed |= ui
+            credentials_changed |= ui
                 .add(egui::TextEdit::singleline(&mut self.root_share).password(true))
                 .changed();
         });
-        if inputs_changed {
-            self.error = None;
-            self.notice = None;
-        }
+        self.clear_feedback_for_edits(path_or_cursor_changed, credentials_changed);
         ui.label(
             "Credentials are only visually masked; clipboard, swap, crash dumps, and UI allocations may expose them.",
         );
@@ -417,7 +428,7 @@ impl ViewerApp {
                 WorkerResult::Scan(Ok(found)) => {
                     self.form.cursor = found.cursor.to_string();
                     self.form.notice = Some(format!(
-                        "Cursor {} authenticated on attempt {}. Re-enter credentials to open. This is not proof of freshness, uniqueness or pad history.",
+                        "Cursor {} authenticated on attempt {} with the search credentials. Re-enter those credentials to open. This is not proof of freshness, uniqueness or pad history.",
                         found.cursor, found.attempts
                     ));
                 }
@@ -737,6 +748,20 @@ mod tests {
         assert_eq!(request.path, PathBuf::from("demo-container"));
         assert!(form.passphrase.is_empty());
         assert!(form.root_share.is_empty());
+    }
+
+    #[test]
+    fn candidate_feedback_survives_credential_reentry_but_not_path_or_cursor_edits() {
+        let mut form = OpenForm::default();
+        form.notice = Some("candidate cursor found".into());
+        form.error = Some("previous validation error".into());
+
+        form.clear_feedback_for_edits(false, true);
+        assert!(form.notice.is_some(), "re-entering credentials must retain the search result");
+        assert!(form.error.is_none(), "credential edits clear stale errors");
+
+        form.clear_feedback_for_edits(true, false);
+        assert!(form.notice.is_none(), "a path or cursor edit invalidates the result");
     }
 
     #[test]
