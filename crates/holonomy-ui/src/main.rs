@@ -223,13 +223,16 @@ impl ViewerApp {
     }
 
     fn finish_open(&mut self) {
-        let result = self.pending.as_ref().and_then(|receiver| match receiver.try_recv() {
-            Ok(result) => Some(result),
-            Err(TryRecvError::Disconnected) => {
-                Some(Err("read-only open worker stopped unexpectedly".into()))
-            }
-            Err(TryRecvError::Empty) => None,
-        });
+        let result = self
+            .pending
+            .as_ref()
+            .and_then(|receiver| match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Disconnected) => {
+                    Some(Err("read-only open worker stopped unexpectedly".into()))
+                }
+                Err(TryRecvError::Empty) => None,
+            });
         if let Some(result) = result {
             self.pending = None;
             match result {
