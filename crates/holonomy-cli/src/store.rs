@@ -1378,6 +1378,27 @@ pub fn scan_cursors_cancellable(
     stop_at_first: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> CursorScan {
+    let completed_attempts = std::sync::atomic::AtomicU64::new(0);
+    scan_cursors_with_progress(
+        file,
+        pad,
+        template,
+        stop_at_first,
+        cancelled,
+        &completed_attempts,
+    )
+}
+
+/// Scan with a cooperative cancellation flag and a live count of completed full-image attempts.
+pub fn scan_cursors_with_progress(
+    file: &mut ContainerFile,
+    pad: &mut dyn PadSource,
+    template: &SaveContext<'_>,
+    stop_at_first: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+    completed_attempts: &std::sync::atomic::AtomicU64,
+) -> CursorScan {
+    completed_attempts.store(0, std::sync::atomic::Ordering::Relaxed);
     scan_cursor_range_with_cancel(
         file,
         pad,
@@ -1385,6 +1406,7 @@ pub fn scan_cursors_cancellable(
         0..holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE,
         stop_at_first,
         || cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        |attempts| completed_attempts.store(attempts, std::sync::atomic::Ordering::Relaxed),
     )
 }
 
@@ -1397,7 +1419,7 @@ fn scan_cursor_range(
     range: std::ops::Range<u64>,
     stop_at_first: bool,
 ) -> CursorScan {
-    scan_cursor_range_with_cancel(file, pad, template, range, stop_at_first, || false)
+    scan_cursor_range_with_cancel(file, pad, template, range, stop_at_first, || false, |_| {})
 }
 
 fn scan_cursor_range_with_cancel(
@@ -1407,6 +1429,7 @@ fn scan_cursor_range_with_cancel(
     range: std::ops::Range<u64>,
     stop_at_first: bool,
     mut should_cancel: impl FnMut() -> bool,
+    mut report_attempts: impl FnMut(u64),
 ) -> CursorScan {
     let mut scan = CursorScan::default();
     for cursor in range {
@@ -1422,7 +1445,9 @@ fn scan_cursor_range_with_cancel(
             cursor,
         };
         scan.attempts += 1;
-        match verify_candidate(file, pad, &ctx) {
+        let result = verify_candidate(file, pad, &ctx);
+        report_attempts(scan.attempts);
+        match result {
             Ok(digest) => {
                 scan.hits.push(CursorHit { cursor, digest });
                 if stop_at_first {

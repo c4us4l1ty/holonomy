@@ -8,7 +8,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 
@@ -169,7 +169,7 @@ impl OpenForm {
         })
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingKind>) -> FormAction {
+    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormAction {
         ui.heading("Open a container for read-only viewing");
         ui.add_enabled_ui(pending.is_none(), |ui| {
             ui.label("Container path");
@@ -192,13 +192,25 @@ impl OpenForm {
         ));
         let mut action = FormAction::None;
         match pending {
-            Some(PendingKind::Opening) => {
+            Some(PendingDisplay {
+                kind: PendingKind::Opening,
+                ..
+            }) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Opening read-only…");
                 });
             }
-            Some(PendingKind::Scanning) => {
+            Some(PendingDisplay {
+                kind: PendingKind::Scanning,
+                completed_attempts,
+            }) => {
+                let total = SAVES_BEFORE_DOMAIN_REUSE as f32;
+                ui.add(
+                    egui::ProgressBar::new(completed_attempts as f32 / total).text(format!(
+                        "{completed_attempts} of {SAVES_BEFORE_DOMAIN_REUSE} cursor candidates checked"
+                    )),
+                );
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Searching cursor candidates…");
@@ -254,6 +266,12 @@ enum PendingKind {
     Scanning,
 }
 
+#[derive(Clone, Copy)]
+struct PendingDisplay {
+    kind: PendingKind,
+    completed_attempts: u64,
+}
+
 enum FormAction {
     None,
     Open,
@@ -270,6 +288,7 @@ struct PendingTask {
     kind: PendingKind,
     receiver: Receiver<WorkerResult>,
     cancel: Option<Arc<AtomicBool>>,
+    progress: Option<Arc<AtomicU64>>,
 }
 
 struct ViewerApp {
@@ -312,6 +331,7 @@ impl ViewerApp {
             kind: PendingKind::Opening,
             receiver,
             cancel: None,
+            progress: None,
         });
     }
 
@@ -327,6 +347,8 @@ impl ViewerApp {
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
+        let progress = Arc::new(AtomicU64::new(0));
+        let worker_progress = Arc::clone(&progress);
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let ScanRequest {
@@ -334,13 +356,20 @@ impl ViewerApp {
                 passphrase,
                 kappa,
             } = request;
-            let result = find_read_only_cursor(&path, passphrase, *kappa, &worker_cancelled);
+            let result = find_read_only_cursor(
+                &path,
+                passphrase,
+                *kappa,
+                &worker_cancelled,
+                &worker_progress,
+            );
             let _ = sender.send(WorkerResult::Scan(result));
         });
         self.pending = Some(PendingTask {
             kind: PendingKind::Scanning,
             receiver,
             cancel: Some(cancelled),
+            progress: Some(progress),
         });
     }
 
@@ -426,8 +455,14 @@ impl eframe::App for ViewerApp {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
         });
-        let pending_kind = self.pending.as_ref().map(|task| task.kind);
-        match self.form.show(ui, pending_kind) {
+        let pending_display = self.pending.as_ref().map(|task| PendingDisplay {
+            kind: task.kind,
+            completed_attempts: task
+                .progress
+                .as_ref()
+                .map_or(0, |progress| progress.load(Ordering::Relaxed)),
+        });
+        match self.form.show(ui, pending_display) {
             FormAction::Open => self.start_open(),
             FormAction::FindCursor => self.start_scan(),
             FormAction::CancelSearch => self.cancel_scan(),

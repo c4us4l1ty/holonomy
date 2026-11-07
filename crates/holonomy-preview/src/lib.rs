@@ -14,7 +14,7 @@
 //! the renderer may allocate copies of it, and the operating system can expose them.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc;
 
 use eframe::egui;
@@ -116,6 +116,7 @@ pub fn find_read_only_cursor(
     passphrase: SealedPassphrase,
     kappa: [u8; 32],
     cancelled: &AtomicBool,
+    completed_attempts: &AtomicU64,
 ) -> Result<CursorSearch, String> {
     let mut file = ContainerFile::open(path, false)
         .map_err(|error| format!("opening {} for cursor search: {error}", path.display()))?;
@@ -129,7 +130,14 @@ pub fn find_read_only_cursor(
         params: options.params(),
         cursor: 0,
     };
-    let scan = store::scan_cursors_cancellable(&mut file, &mut pad, &context, true, cancelled);
+    let scan = store::scan_cursors_with_progress(
+        &mut file,
+        &mut pad,
+        &context,
+        true,
+        cancelled,
+        completed_attempts,
+    );
     if scan.cancelled {
         return Err(format!(
             "cursor search cancelled between attempts after {}; no bytes were written and the pad was not ratcheted",
@@ -456,19 +464,23 @@ mod tests {
 
         let before = std::fs::read(&path).expect("read container");
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let found = find_read_only_cursor(&path, pass(), kappa, &cancelled)
+        let completed = std::sync::atomic::AtomicU64::new(0);
+        let found = find_read_only_cursor(&path, pass(), kappa, &cancelled, &completed)
             .expect("read-only cursor search");
         assert_eq!(found.cursor, 1);
         assert_eq!(found.attempts, 2, "the scan checks cursors zero and one");
+        assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 2);
         assert_eq!(
             std::fs::read(&path).expect("read after cursor search"),
             before,
             "cursor search must not change the container"
         );
         let cancel_now = std::sync::atomic::AtomicBool::new(true);
-        assert!(find_read_only_cursor(&path, pass(), kappa, &cancel_now)
+        let no_progress = std::sync::atomic::AtomicU64::new(0);
+        assert!(find_read_only_cursor(&path, pass(), kappa, &cancel_now, &no_progress)
             .expect_err("pre-cancelled scan")
             .contains("cancelled between attempts"));
+        assert_eq!(no_progress.load(std::sync::atomic::Ordering::Relaxed), 0);
         let opened = open_read_only(&path, 1, pass(), kappa).expect("read-only open");
         assert!(
             opened.document.same_content(&original),
