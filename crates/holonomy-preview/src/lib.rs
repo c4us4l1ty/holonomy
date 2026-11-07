@@ -477,9 +477,11 @@ mod tests {
         );
         let cancel_now = std::sync::atomic::AtomicBool::new(true);
         let no_progress = std::sync::atomic::AtomicU64::new(0);
-        assert!(find_read_only_cursor(&path, pass(), kappa, &cancel_now, &no_progress)
-            .expect_err("pre-cancelled scan")
-            .contains("cancelled between attempts"));
+        assert!(
+            find_read_only_cursor(&path, pass(), kappa, &cancel_now, &no_progress)
+                .expect_err("pre-cancelled scan")
+                .contains("cancelled between attempts")
+        );
         assert_eq!(no_progress.load(std::sync::atomic::Ordering::Relaxed), 0);
         let opened = open_read_only(&path, 1, pass(), kappa).expect("read-only open");
         assert!(
