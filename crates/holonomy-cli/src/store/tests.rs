@@ -1696,18 +1696,46 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
         "a scan must not write the container"
     );
 
-    // An already requested cancellation prevents any candidate read.
+    // A cancellation requested during one expensive attempt stops before the next candidate.
+    struct CancelAfterWindow<'a> {
+        inner: DerivedPad,
+        cancelled: &'a std::sync::atomic::AtomicBool,
+    }
+    impl PadSource for CancelAfterWindow<'_> {
+        fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<pad::PadWindow, String> {
+            let window = self.inner.window(kappa, cursor);
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            window
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("read-only cursor scan must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "cancel-after-window test pad".into()
+        }
+    }
     let mut file = ContainerFile::open(&path, false).expect("open read-only");
-    let cancel_now = std::sync::atomic::AtomicBool::new(true);
-    let cancelled = scan_cursors_cancellable(
+    let cancel_after_first = std::sync::atomic::AtomicBool::new(false);
+    let completed = std::sync::atomic::AtomicU64::new(0);
+    let mut cancel_pad = CancelAfterWindow {
+        inner: source(),
+        cancelled: &cancel_after_first,
+    };
+    let cancelled = scan_cursors_with_progress(
         &mut file,
-        &mut source(),
+        &mut cancel_pad,
         &ctx(&pass, 0),
         true,
-        &cancel_now,
+        &cancel_after_first,
+        &completed,
     );
     assert!(cancelled.cancelled);
-    assert_eq!(cancelled.attempts, 0);
+    assert_eq!(cancelled.attempts, 1);
+    assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(cancelled.hits.is_empty());
 
     // Without the early stop the whole range is tried, and still only one cursor opens.
