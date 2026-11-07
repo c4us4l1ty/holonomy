@@ -218,7 +218,9 @@ mod tests {
     fn cursor_and_status_do_not_advance_on_an_unexpected_report() {
         let mut session = Session::new(7, capture());
         assert_eq!(
-            session.record_successful_save(9, &report(Some(1))).unwrap_err(),
+            session
+                .record_successful_save(9, &report(Some(1)))
+                .unwrap_err(),
             SessionError::UnexpectedCursor {
                 expected: 8,
                 actual: 9,
