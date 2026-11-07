@@ -387,7 +387,12 @@ fn view(path: &Path, cursor: u64) -> ExitCode {
     match eframe::run_native(
         TITLE,
         eframe::NativeOptions::default(),
-        Box::new(move |_| Ok(Box::new(ReadOnlyWindow::new(opened.document, opened.cursor)))),
+        Box::new(move |_| {
+            Ok(Box::new(ReadOnlyWindow::new(
+                opened.document,
+                opened.cursor,
+            )))
+        }),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
