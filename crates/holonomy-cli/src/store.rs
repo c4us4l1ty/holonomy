@@ -1456,6 +1456,10 @@ fn scan_cursor_range_with_cancel(
             }
             Err(error) => scan.last_error = Some(error),
         }
+        if should_cancel() {
+            scan.cancelled = true;
+            break;
+        }
     }
     scan
 }

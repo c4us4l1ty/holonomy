@@ -1725,13 +1725,14 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
         inner: source(),
         cancelled: &cancel_after_first,
     };
-    let cancelled = scan_cursors_with_progress(
+    let cancelled = scan_cursor_range_with_cancel(
         &mut file,
         &mut cancel_pad,
         &ctx(&pass, 0),
+        0..1,
         true,
-        &cancel_after_first,
-        &completed,
+        || cancel_after_first.load(std::sync::atomic::Ordering::Relaxed),
+        |attempts| completed.store(attempts, std::sync::atomic::Ordering::Relaxed),
     );
     assert!(cancelled.cancelled);
     assert_eq!(cancelled.attempts, 1);
