@@ -1282,7 +1282,26 @@ fn save_refuses_changed_path_before_pad_access() {
         b"new path contents"
     );
     assert_eq!(std::fs::read(&moved).expect("old path"), b"original");
-    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "container".to_string(),
+            "container.holonomy-lock".to_string(),
+            "moved".to_string(),
+        ],
+        "stale-path refusal may leave only the persistent empty lock sidecar"
+    );
 }
 
 #[test]
