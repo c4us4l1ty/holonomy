@@ -20,10 +20,10 @@ gate and the `wordcraft` symbol checks in §1 — was marked unverified rather t
 **Update, 2026-11-07:** `holonomy-ui` now has a standalone manifest and a dedicated CI job. The old
 simulated save-cadence model has been replaced by a projection of an actual `SaveReport`, so the
 shell no longer derives pad freshness from an `O_RDWR` handle. Its binary now exposes the existing
-read-only Wordcraft viewer; writable editor integration remains deferred. The UI status-shell tests,
-lint and formatting passed in run `42360046061` on commit `02d22ab`; the later viewer entrypoint
-changes still need their own CI result. The historical test counts and gate statements below refer
-to the earlier audit baseline, not the current branch.
+read-only Wordcraft viewer; writable editor integration remains deferred. The UI tests, launcher-help smoke test, lint and formatting passed in run `42360990999` on commit
+`2627433`; the full Audit run was still in progress at last check. This validates the new read-only
+entrypoint's build and CLI help, not a production editor or release gate. The historical test counts
+and gate statements below refer to the earlier audit baseline, not the current branch.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |
