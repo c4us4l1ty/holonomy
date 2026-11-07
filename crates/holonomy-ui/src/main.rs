@@ -57,16 +57,29 @@ struct ReadOnlyWindow {
     app: WordApp,
     cursor: u64,
     quit: bool,
+    return_to_open_enabled: bool,
+    return_to_open_requested: bool,
     dropped_events: usize,
 }
 
 impl ReadOnlyWindow {
-    fn new(document: Document, cursor: u64) -> Self {
+    fn new(document: Document, cursor: u64, return_to_open_enabled: bool) -> Self {
         Self {
             app: WordApp::new(Session::new(document), read_only_services()),
             cursor,
             quit: false,
+            return_to_open_enabled,
+            return_to_open_requested: false,
             dropped_events: 0,
+        }
+    }
+
+    fn apply_host_input(&mut self, input: ViewInput) {
+        self.dropped_events = self.dropped_events.saturating_add(input.dropped);
+        if input.quit_requested {
+            self.quit = true;
+        } else if self.return_to_open_enabled && input.return_to_open_requested {
+            self.return_to_open_requested = true;
         }
     }
 }
@@ -80,14 +93,7 @@ impl eframe::App for ReadOnlyWindow {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        let ViewInput {
-            quit_requested,
-            dropped,
-        } = filter_events(raw);
-        self.dropped_events = self.dropped_events.saturating_add(dropped);
-        if quit_requested {
-            self.quit = true;
-        }
+        self.apply_host_input(filter_events(raw));
         self.app.raw_input_hook(ctx, raw);
     }
 
@@ -97,7 +103,11 @@ impl eframe::App for ReadOnlyWindow {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
             ui.label(format!("Opened at cursor {}.", self.cursor));
-            ui.label("Press Ctrl+Q to close. The window ignores every other key and click.");
+            if self.return_to_open_enabled {
+                ui.label("Press Ctrl/Cmd+O to return to the open screen, or Ctrl/Cmd+Q to close.");
+            } else {
+                ui.label("Press Ctrl/Cmd+Q to close. The window ignores every other key and click.");
+            }
         });
         self.app.ui(ui);
     }
@@ -435,7 +445,7 @@ impl ViewerApp {
             let task = self.pending.take().expect("pending task exists");
             match result {
                 WorkerResult::Open(Ok(opened)) => {
-                    self.viewer = Some(ReadOnlyWindow::new(opened.document, opened.cursor));
+                    self.viewer = Some(ReadOnlyWindow::new(opened.document, opened.cursor, true));
                 }
                 WorkerResult::Open(Err(error)) => self.form.error = Some(error),
                 WorkerResult::Scan(Ok(found)) => {
@@ -459,6 +469,20 @@ impl ViewerApp {
             }
         }
     }
+
+    fn finish_viewer_transition(&mut self) -> bool {
+        let return_to_open = self.viewer.as_mut().is_some_and(|viewer| {
+            std::mem::take(&mut viewer.return_to_open_requested)
+        });
+        if return_to_open {
+            self.viewer = None;
+            self.form.notice = Some(
+                "The read-only view was closed. Re-enter credentials to open a document again."
+                    .into(),
+            );
+        }
+        return_to_open
+    }
 }
 
 impl eframe::App for ViewerApp {
@@ -469,6 +493,9 @@ impl eframe::App for ViewerApp {
         }
         if let Some(viewer) = &mut self.viewer {
             eframe::App::logic(viewer, ctx, frame);
+        }
+        if self.finish_viewer_transition() {
+            ctx.request_repaint();
         }
     }
 
@@ -617,6 +644,7 @@ fn view(path: &Path, cursor: u64) -> ExitCode {
             Ok(Box::new(ReadOnlyWindow::new(
                 opened.document,
                 opened.cursor,
+                false,
             )))
         }),
     ) {
@@ -925,8 +953,48 @@ mod tests {
     }
 
     #[test]
+    fn return_to_open_shortcut_only_changes_the_interactive_view() {
+        let input = ViewInput {
+            quit_requested: false,
+            return_to_open_requested: true,
+            dropped: 1,
+        };
+        let mut interactive = ReadOnlyWindow::new(Document::new(), 0, true);
+        interactive.apply_host_input(input);
+        assert!(interactive.return_to_open_requested);
+
+        let mut standalone = ReadOnlyWindow::new(Document::new(), 0, false);
+        standalone.apply_host_input(input);
+        assert!(!standalone.return_to_open_requested);
+    }
+
+    #[test]
+    fn interactive_view_returns_to_the_open_form_without_credentials() {
+        let mut app = ViewerApp::new();
+        app.viewer = Some(ReadOnlyWindow::new(
+            Document::from_text("viewed text"),
+            3,
+            true,
+        ));
+        app.viewer
+            .as_mut()
+            .expect("interactive viewer")
+            .return_to_open_requested = true;
+
+        assert!(app.finish_viewer_transition());
+        assert!(app.viewer.is_none());
+        assert!(app.form.passphrase.is_empty());
+        assert!(app.form.root_share.is_empty());
+        assert!(app
+            .form
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Re-enter credentials")));
+    }
+
+    #[test]
     fn the_view_window_has_no_path_or_recovery_state() {
-        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3);
+        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3, false);
         assert!(window.app.session.path.is_none());
         assert!(!window.app.session.recovery_ready());
         assert!(!window.quit);

@@ -244,10 +244,13 @@ pub fn read_only_services() -> Services {
 }
 
 /// What the input filter did with one frame.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewInput {
     /// The user asked to quit with Ctrl+Q (or Cmd+Q). The app never sees that chord.
     pub quit_requested: bool,
+    /// The user asked to return to the interactive open screen with Ctrl+O (or Cmd+O).
+    /// The document app never sees that chord.
+    pub return_to_open_requested: bool,
     /// How many events were discarded. Never printed per frame; useful in tests and diagnostics.
     pub dropped: usize,
 }
@@ -256,8 +259,9 @@ pub struct ViewInput {
 ///
 /// Kept: pointer motion, wheel scrolling, pinch zoom and window focus. Everything else -- keys,
 /// typed text, paste, copy, cut, IME, pre-edit and every pointer button -- is dropped, so no click
-/// can press a ribbon button and no chord can reach a command. Ctrl+Q is honoured here, in the
-/// host's own filter, because a keyboard-inert window still has to be closable.
+/// can press a ribbon button and no chord can reach a command. Ctrl/Cmd+Q closes the viewer;
+/// Ctrl/Cmd+O returns to the interactive open screen. Both are handled by the host filter because
+/// no key event may reach Wordcraft.
 pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
     let mut outcome = ViewInput::default();
     let total = raw.events.len();
@@ -270,6 +274,12 @@ pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
                 modifiers,
                 ..
             } if modifiers.command || modifiers.ctrl => outcome.quit_requested = true,
+            egui::Event::Key {
+                key: egui::Key::O,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.command || modifiers.ctrl => outcome.return_to_open_requested = true,
             egui::Event::PointerMoved(_)
             | egui::Event::MouseWheel { .. }
             | egui::Event::Zoom(_)
@@ -384,6 +394,7 @@ mod tests {
         };
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
+        assert!(!outcome.return_to_open_requested);
         assert_eq!(
             outcome.dropped, 6,
             "keys, text, paste, copy, cut and clicks"
@@ -398,6 +409,22 @@ mod tests {
             ],
             "scrolling and focus survive; nothing else does"
         );
+    }
+
+    /// Ctrl+O requests navigation without sending an open command to Wordcraft.
+    #[test]
+    fn return_to_open_chord_is_handled_by_the_filter_only() {
+        for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::COMMAND] {
+            let mut raw = egui::RawInput {
+                events: vec![key(egui::Key::O, modifiers)],
+                ..Default::default()
+            };
+            let outcome = filter_events(&mut raw);
+            assert!(outcome.return_to_open_requested);
+            assert!(!outcome.quit_requested);
+            assert_eq!(outcome.dropped, 1);
+            assert!(raw.events.is_empty(), "the chord must not reach Wordcraft");
+        }
     }
 
     /// Ctrl+Q closes the window, and the app still never sees a key event.

@@ -329,8 +329,9 @@ or export it. The standalone UI binary opens an interactive screen with no argum
 the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
 credentials visually but does not guarantee that all UI allocations are locked or wiped. Every
 mode uses the deterministic demo pad, not physical USB. The renderer drops editing input and every
-host hook that could save, print, download or write the clipboard refuses. Press Ctrl+Q to close.
-Decoding performs no write and no ratchet, but the document is plaintext in memory and capture
+host hook that could save, print, download or write the clipboard refuses. In the interactive viewer,
+Ctrl/Cmd+O returns to the open form and Ctrl/Cmd+Q closes; the standalone `--view` mode supports
+Ctrl/Cmd+Q to close. Decoding performs no write and no ratchet, but the document is plaintext in memory and capture
 exclusion, editor-wide memory locking, and the watchdog are not integrated. This is a viewing aid,
 not a protected reader.
 

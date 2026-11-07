@@ -58,8 +58,10 @@ Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` n
 interactive open screen as well as CLI modes from the standalone UI package. The screen can search
 legal cursor candidates through the existing read-only store scan; it reports the first authenticating
 candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
-The search is cancellable between full-image attempts, but does not establish freshness, uniqueness, recency or pad
-history and does not repair anything. The window is one-way by construction, not by configuration:
+In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
+`Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
+establish freshness, uniqueness, recency or pad history and does not repair anything. The window is
+one-way by construction, not by configuration:
 
 ```text
 holonomy                                  # open the interactive screen
@@ -83,8 +85,8 @@ Two boundaries stand between the renderer and the host:
 2. **Input filtering.** `filter_events()` keeps pointer motion, wheel scrolling, pinch zoom
    and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit and every pointer
    button are dropped before Wordcraft sees the frame, so no ribbon button, context menu or
-   shortcut can reach a command. `Ctrl+Q` is the one chord the host itself honours, because
-   a keyboard-inert window still has to close.
+   shortcut can reach a command. The host consumes `Ctrl/Cmd+Q` to close and, in the interactive
+   viewer only, `Ctrl/Cmd+O` to return to the open form; neither chord reaches Wordcraft.
 
 Neither boundary is a sandbox and neither is a claim about Wordcraft's internals. The
 decoded document is plaintext in the process, the renderer allocates further copies, and
