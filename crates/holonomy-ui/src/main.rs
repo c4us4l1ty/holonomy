@@ -473,9 +473,10 @@ impl ViewerApp {
     }
 
     fn finish_viewer_transition(&mut self) -> bool {
-        let return_to_open = self.viewer.as_mut().is_some_and(|viewer| {
-            std::mem::take(&mut viewer.return_to_open_requested)
-        });
+        let return_to_open = self
+            .viewer
+            .as_mut()
+            .is_some_and(|viewer| std::mem::take(&mut viewer.return_to_open_requested));
         if return_to_open {
             self.viewer = None;
             self.form.notice = Some(
