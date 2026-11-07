@@ -337,8 +337,9 @@ Ctrl/Cmd+Q to close. Decoding performs no write and no ratchet, but the document
 exclusion, editor-wide memory locking, and the watchdog are not integrated. This is a viewing aid,
 not a protected reader.
 
-The interactive screen also offers **Find cursor** for a container when its cursor is unknown. It
-checks legal candidates read-only, reports progress and the first one that authenticates, and can be
+The interactive screen leaves the cursor blank rather than assuming cursor 0 is correct. Enter a
+known cursor, or use **Find cursor** when it is unknown. The search checks
+legal candidates read-only, reports progress and the first one that authenticates, and can be
 cancelled between full-image attempts. Each attempt reads the image and derives a key, so the search
 may take time. It does not identify the newest or only copy, establish pad history or freshness, or repair the
 container; credentials are cleared after the search and must be entered again to open it.

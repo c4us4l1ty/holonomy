@@ -130,7 +130,7 @@ impl Default for OpenForm {
         Self {
             path: String::new(),
             selected_path: None,
-            cursor: "0".into(),
+            cursor: String::new(),
             passphrase: String::new(),
             root_share: String::new(),
             error: None,
@@ -168,7 +168,7 @@ impl OpenForm {
         let cursor = self
             .cursor
             .parse::<u64>()
-            .map_err(|_| "cursor must be an unsigned integer".to_string())?;
+            .map_err(|_| "enter a cursor, or use Find cursor to discover it".to_string())?;
         if cursor >= SAVES_BEFORE_DOMAIN_REUSE {
             return Err(format!(
                 "cursor must be between 0 and {} for this demo pad",
@@ -218,7 +218,7 @@ impl OpenForm {
             }
             path_or_cursor_changed |= path_changed;
             ui.label(format!(
-                "Cursor used to write this image (0–{})",
+                "Cursor used to write this image (0–{}; use Find cursor if unknown)",
                 SAVES_BEFORE_DOMAIN_REUSE - 1
             ));
             path_or_cursor_changed |= ui.text_edit_singleline(&mut self.cursor).changed();
@@ -834,6 +834,21 @@ mod tests {
         assert_eq!(request.cursor, 4);
         assert!(form.passphrase.is_empty());
         assert!(form.root_share.is_empty());
+    }
+
+    #[test]
+    fn open_form_does_not_assume_cursor_zero_for_an_unknown_container() {
+        let mut form = OpenForm {
+            path: "demo-container".into(),
+            ..OpenForm::default()
+        };
+        assert!(form.cursor.is_empty());
+
+        let error = match form.prepare_request() {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown cursor must not be guessed"),
+        };
+        assert_eq!(error, "enter a cursor, or use Find cursor to discover it");
     }
 
     #[test]

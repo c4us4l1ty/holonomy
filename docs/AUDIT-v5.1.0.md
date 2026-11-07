@@ -482,31 +482,32 @@ Four jobs, all green on `main`:
 | `invariant gates` | 15 named tests, one per claim in §2–§7, each run individually so a failure names the claim it broke |
 | `memory envelope` | the documented 180/440 MiB envelope fits a 2 GiB host, and the old 16.60 MiB claim is rejected as an understatement |
 
-The items in §1–§7 marked **Pass** above are the ones this covers. There are **182 `#[test]`
-functions**, of which 164 run in CI — the 18 in `holonomy-ui` are in the crate that does not link
-here, and the audit counts them rather than pretending they run.
+The items in §1–§7 marked **Pass** above are the ones this covers. There are **183 `#[test]`
+functions: 164 in the core-workspace CI job and 19 in the separately built `holonomy-ui` crate.
+They are not all invoked by one Cargo workspace command, but the UI tests have their own workflow.
 
 ### UI tests have a separate, limited scope
 
 At the original audit baseline, the `holonomy-ui` tests had not executed; that statement is now
-superseded by the update above. The current UI crate has 18 unit tests. UI job `42398906778` passed
+superseded by the update above. The current UI crate has 19 unit tests. UI job `42398906778` passed
 the previous 17-test source, including cursor search, progress, feedback invalidation, worker
-cancellation and Ctrl/Cmd+O return navigation. Run `42400134106` exposed an API mismatch: egui
-represents dropped files as a trait handle, not a struct. The current path-only handler and viewer-side
-payload clearing are awaiting CI. Tests cover parts of the status shell, capture reporting, launcher
-parsing, cursor-boundary validation, credential clearing, keyboard and file-drop filtering, and the
-asynchronous search/open path. That path uses synthetic credentials and
-temporary demo containers; it does not simulate native widget input. These tests are not evidence for
-the cryptographic, device, recovery, or durability claims in §1–§7.
+cancellation and Ctrl/Cmd+O return navigation. Run `42400134106` exposed egui's trait-based dropped
+file API; run `42400460346` then passed the 18-test UI suite, launcher help, interactive open-screen
+smoke and lint, but failed the formatting step. Commit `cd38df4` applies CI's formatting diff; the
+blank-by-default cursor UX and its new test are awaiting a follow-up CI run. These tests cover parts
+of the status shell, capture reporting, launcher parsing, cursor-boundary validation, credential
+clearing, keyboard and file-drop filtering, and the asynchronous search/open path. That path uses
+synthetic credentials and temporary demo containers; it does not simulate native widget input. These
+tests are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
 
 ### Deferred, with the reason
 
-* **`holonomy-ui` does not build in this sandbox.** It needs `crates.io` *and* wordcraft's pinned
-  `craft-*` git dependencies. The four `wordcraft` symbol claims in §1 are therefore checked by
-  inspection against the upstream manifests, not by the compiler. When it does build, the
-  measured-RSS gate in the workflow stops being a placeholder.
-* **The measured RSS gate** is a `--check` invocation that does not yet exist, because the binary
-  that would run it is the one that does not link here.
+* **The original UI build deferral is superseded.** Dedicated GitHub Actions jobs now build/test the
+  standalone UI, preview and Wordcraft bridge. The bridge job checks selected APIs, not every editor
+  integration route or rich-document preservation; see the UI scope above and the release roadmap.
+* **The measured RSS gate is limited.** CI measures peak RSS for the CLI `--check` self-check and
+  enforces its ceiling, but that does not measure the complete opened Wordcraft UI, its document,
+  renderer allocations or OS copies. Editor-wide memory use remains unvalidated.
 * **`O_DIRECT` and the real ratchet path** need a block device; the tests use
   `target/usb-scratch/` because tmpfs rejects `O_DIRECT`. A CI runner's filesystem may not honour it
   either, so that test is marked as host-dependent in its own docs.
