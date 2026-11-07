@@ -757,11 +757,17 @@ mod tests {
         form.error = Some("previous validation error".into());
 
         form.clear_feedback_for_edits(false, true);
-        assert!(form.notice.is_some(), "re-entering credentials must retain the search result");
+        assert!(
+            form.notice.is_some(),
+            "re-entering credentials must retain the search result"
+        );
         assert!(form.error.is_none(), "credential edits clear stale errors");
 
         form.clear_feedback_for_edits(true, false);
-        assert!(form.notice.is_none(), "a path or cursor edit invalidates the result");
+        assert!(
+            form.notice.is_none(),
+            "a path or cursor edit invalidates the result"
+        );
     }
 
     #[test]

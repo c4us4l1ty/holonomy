@@ -491,8 +491,8 @@ here, and the audit counts them rather than pretending they run.
 At the original audit baseline, the `holonomy-ui` tests had not executed; that statement is now
 superseded by the update above. The current UI crate has 14 unit tests. The previous dedicated UI job
 passed the earlier 12; the new cursor-search flow, progress reporting and feedback invalidation are in
-the current source, with CI still queued. Tests cover parts of the status shell, capture reporting, launcher parsing,
-cursor-boundary validation, credential clearing, and the asynchronous search/open path. That path uses
+the current source, with CI still queued. Tests cover parts of the status shell, capture reporting,
+launcher parsing, cursor-boundary validation, credential clearing, and the asynchronous search/open path. That path uses
 synthetic credentials and temporary demo containers; it does not simulate native widget input. These
 tests are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
 
