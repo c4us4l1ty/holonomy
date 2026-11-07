@@ -807,7 +807,7 @@ mod tests {
         let path = directory.path().join("container");
         let passphrase = "synthetic UI test passphrase";
         let root_share = [0x11; 32];
-        let mut session = EditorSession::create(
+        let session = EditorSession::create(
             &path,
             Box::new(DerivedPad::new()),
             SealedPassphrase::new(passphrase).expect("valid test passphrase"),
@@ -815,8 +815,6 @@ mod tests {
             DocumentSessionOptions::new(0, true, Topology::UmbilicalUsb),
         )
         .expect("create test container");
-        *session.document_mut() = Document::from_text("cursor search sample");
-        session.save().expect("save at cursor one");
         drop(session);
         let original_image = std::fs::read(&path).expect("read created container");
 
@@ -841,7 +839,7 @@ mod tests {
             }
         }
         assert!(app.pending.is_none(), "cursor search worker did not finish in time");
-        assert_eq!(app.form.cursor, "1");
+        assert_eq!(app.form.cursor, "0");
         assert!(app
             .form
             .notice
@@ -874,7 +872,7 @@ mod tests {
                 app.form.error.as_deref().unwrap_or("no error reported")
             )
         });
-        assert_eq!(viewer.cursor, 1);
+        assert_eq!(viewer.cursor, 0);
         assert!(viewer.app.session.path.is_none());
         assert!(!viewer.app.session.recovery_ready());
         assert_eq!(

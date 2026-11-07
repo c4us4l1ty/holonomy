@@ -1015,9 +1015,8 @@ fn save_inner(
     // Refuse stale, aliased or multiply-linked files before consulting the pad or staging an image.
     // These checks narrow known hazards but are not atomic with later I/O or replacement.
     #[cfg(unix)]
-    file.validate_single_link().map_err(|e| {
-        format!("save refused before reading the pad or staging an image: {e}")
-    })?;
+    file.validate_single_link()
+        .map_err(|e| format!("save refused before reading the pad or staging an image: {e}"))?;
 
     // 1. The old container, before anything is written.
     let mut old_image = file.read_image().map_err(|e| e.to_string())?;
