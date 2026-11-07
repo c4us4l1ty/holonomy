@@ -790,9 +790,7 @@ mod tests {
         #[cfg(target_arch = "wasm32")]
         fn bytes_async(
             &self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>,
-        > {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>> {
             Box::pin(async { Err("the open form must not read dropped contents".into()) })
         }
     }
