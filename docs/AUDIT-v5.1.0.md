@@ -13,9 +13,25 @@ and the tests that were supposed to defend them were either wrong, unfalsifiable
 fixture with a 77-bit constant prefix. The sections below now report what the gates established
 rather than what the design intended; §8 collects the corrections and the remaining deferrals.
 
-The one gate still deferred is `holonomy-ui`, which needs `crates.io` plus `wordcraft`'s pinned
-`craft-*` git dependencies. Everything that depends on it — the measured-RSS gate, the `wordcraft`
-symbol checks in §1 — is marked as unverified rather than asserted.
+The one gate still deferred at the time of this audit was `holonomy-ui`, which needed `crates.io`
+plus `wordcraft`'s pinned `craft-*` git dependencies. Everything that depended on it — the measured-RSS
+gate and the `wordcraft` symbol checks in §1 — was marked unverified rather than asserted.
+
+**Update, 2026-11-07:** `holonomy-ui` now has a standalone manifest and a dedicated CI job. The old
+simulated save-cadence model has been replaced by a projection of an actual `SaveReport`, so the
+shell no longer derives pad freshness from an `O_RDWR` handle. Its binary now exposes the existing
+read-only Wordcraft viewer; writable editor integration remains deferred. The UI tests, launcher-help smoke test, lint and formatting passed in run `42360990999` on commit
+`2627433`; the full Audit run was still in progress at last check. This validates the new read-only
+entrypoint's build and CLI help, not a production editor or release gate. The historical test counts
+and gate statements below refer to the earlier audit baseline, not the current branch.
+
+**Update, 2026-11-07 (interactive UI):** the no-argument launch now opens a form for a container
+path, cursor and visually masked demo credentials, then attempts the same read-only open used by the
+CLI modes. The UI job in run `42368195864` on commit `21893f0` passed its tests, launcher-help
+check, Xvfb screen-start smoke test, Clippy and UI formatting. That smoke test proves the screen
+starts; it does **not** submit the form or prove a container was opened through the GUI. The rest of
+the Audit run remained in progress at last check. Neither result is a release gate or evidence of
+production readiness.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |
@@ -469,11 +485,13 @@ The items in §1–§7 marked **Pass** above are the ones this covers. There are
 functions**, of which 164 run in CI — the 18 in `holonomy-ui` are in the crate that does not link
 here, and the audit counts them rather than pretending they run.
 
-### The UIs's eighteen tests are not evidence
+### UI tests have a separate, limited scope
 
-Worth saying plainly: `holonomy-ui` has 18 tests covering capture exclusion and the save shell,
-and none of them have executed. They are counted above and relied on by nothing in this document.
-A test that has never run is a comment with punctuation.
+At the original audit baseline, the `holonomy-ui` tests had not executed; that statement is now
+superseded by the update above. The current UI crate has 10 unit tests, and the dedicated UI job has
+run them. They cover parts of the status shell, capture reporting, launcher parsing, and the open
+form's credential-field clearing. They do not prove the GUI form can open a container end-to-end,
+and they are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
 
 ### Deferred, with the reason
 

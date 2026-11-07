@@ -33,7 +33,10 @@ pub enum CaptureExclusion {
     /// The platform has no mechanism; screenshots and screen recording will see the document.
     LinuxUnavailable,
     /// The API exists but the call failed. The errno/code is kept for the log.
-    Failed { code: i32 },
+    Failed {
+        /// Platform error code returned by the failed API call.
+        code: i32,
+    },
     /// Not attempted (headless, or the window does not exist yet).
     NotAttempted,
 }
