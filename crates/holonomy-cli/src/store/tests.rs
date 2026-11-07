@@ -1696,22 +1696,18 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
         "a scan must not write the container"
     );
 
-    // Cancellation is checked between full attempts, not in the middle of a derivation.
+    // An already requested cancellation prevents any candidate read.
     let mut file = ContainerFile::open(&path, false).expect("open read-only");
-    let mut checks = 0;
-    let cancelled = scan_cursor_range_with_cancel(
+    let cancel_now = std::sync::atomic::AtomicBool::new(true);
+    let cancelled = scan_cursors_cancellable(
         &mut file,
         &mut source(),
         &ctx(&pass, 0),
-        0..4,
         true,
-        || {
-            checks += 1;
-            checks > 1
-        },
+        &cancel_now,
     );
     assert!(cancelled.cancelled);
-    assert_eq!(cancelled.attempts, 1);
+    assert_eq!(cancelled.attempts, 0);
     assert!(cancelled.hits.is_empty());
 
     // Without the early stop the whole range is tried, and still only one cursor opens.
