@@ -311,6 +311,17 @@ struct PendingTask {
     progress: Option<Arc<AtomicU64>>,
 }
 
+fn stopped_worker_result(kind: PendingKind) -> WorkerResult {
+    match kind {
+        PendingKind::Opening => {
+            WorkerResult::Open(Err("read-only open worker stopped unexpectedly".into()))
+        }
+        PendingKind::Scanning => {
+            WorkerResult::Scan(Err("cursor search worker stopped unexpectedly".into()))
+        }
+    }
+}
+
 struct ViewerApp {
     form: OpenForm,
     pending: Option<PendingTask>,
@@ -417,14 +428,7 @@ impl ViewerApp {
             .as_ref()
             .and_then(|task| match task.receiver.try_recv() {
                 Ok(result) => Some(result),
-                Err(TryRecvError::Disconnected) => Some(match task.kind {
-                    PendingKind::Opening => WorkerResult::Open(Err(
-                        "read-only open worker stopped unexpectedly".into(),
-                    )),
-                    PendingKind::Scanning => WorkerResult::Scan(Err(
-                        "cursor search worker stopped unexpectedly".into(),
-                    )),
-                }),
+                Err(TryRecvError::Disconnected) => Some(stopped_worker_result(task.kind)),
                 Err(TryRecvError::Empty) => None,
             });
         if let Some(result) = result {
