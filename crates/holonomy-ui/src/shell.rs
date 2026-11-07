@@ -238,7 +238,9 @@ mod tests {
         assert_eq!(session.cursor(), None);
         assert!(session.latest_save().is_none());
         assert_eq!(
-            session.record_successful_save(8, &report(Some(32_768))).unwrap_err(),
+            session
+                .record_successful_save(8, &report(Some(32_768)))
+                .unwrap_err(),
             SessionError::RecoveryRequired
         );
     }
