@@ -236,8 +236,11 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
     // More than the 20-entry diagnostic cap, with lexically earlier names: explicit copy must
     // still validate this selected candidate without requiring it to appear in the report.
     for index in 0..21 {
-        std::fs::write(dir.path().join(format!(".holonomy-save-{index:03}")), b"short")
-            .expect("add earlier diagnostic entries");
+        std::fs::write(
+            dir.path().join(format!(".holonomy-save-{index:03}")),
+            b"short",
+        )
+        .expect("add earlier diagnostic entries");
     }
     let listing = Command::new(binary())
         .arg("recover")
@@ -249,10 +252,7 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
     assert!(listing.status.success());
     let listing_text = String::from_utf8_lossy(&listing.stdout);
     let truncation_note = "Only the first 20 matching files by filename were tested; more exist.";
-    assert!(
-        listing_text.contains(truncation_note),
-        "{listing_text}"
-    );
+    assert!(listing_text.contains(truncation_note), "{listing_text}");
     assert!(
         !listing_text.contains(".holonomy-save-recovery-candidate"),
         "the 21st lexical remnant should be beyond the display cap: {listing_text}"
@@ -318,7 +318,10 @@ fn recover_copy_preserves_sources_and_never_overwrites_the_destination() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("Verified staged image copied and read back at"), "{text}");
+    assert!(
+        text.contains("Verified staged image copied and read back at"),
+        "{text}"
+    );
     assert!(
         text.contains("Container and remnant contents were not written"),
         "{text}"

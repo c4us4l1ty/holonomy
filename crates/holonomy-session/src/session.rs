@@ -417,7 +417,9 @@ mod tests {
         // later cursors rather than reducing them modulo a domain and aliasing an earlier window.
         let s = unlocked_session(PadMode::ReadWrite);
         for cursor in 0..SAVES_BEFORE_DOMAIN_REUSE {
-            let plan = s.plan_for_save(cursor).expect("cursor is within the budget");
+            let plan = s
+                .plan_for_save(cursor)
+                .expect("cursor is within the budget");
             let mut sorted = plan.clone();
             sorted.sort_unstable();
             sorted.dedup();

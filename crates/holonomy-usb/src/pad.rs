@@ -292,8 +292,8 @@ mod tests {
     fn plans_for_consecutive_saves_are_disjoint() {
         let mut seen = std::collections::HashSet::new();
         for cursor in 0..54u64 {
-            let p = PadPlan::for_save(&k(), cursor)
-                .expect("test cursor is within the no-reuse budget");
+            let p =
+                PadPlan::for_save(&k(), cursor).expect("test cursor is within the no-reuse budget");
             for &lba in p.lbas() {
                 assert!(seen.insert(lba), "LBA {lba} reused at save {cursor}");
             }
@@ -309,11 +309,17 @@ mod tests {
         }
         assert!(matches!(
             PadPlan::for_save(&k(), 54),
-            Err(PadIoError::InvalidCursor { cursor: 54, limit: 54 })
+            Err(PadIoError::InvalidCursor {
+                cursor: 54,
+                limit: 54
+            })
         ));
         assert!(matches!(
             PadPlan::for_save(&k(), 200),
-            Err(PadIoError::InvalidCursor { cursor: 200, limit: 54 })
+            Err(PadIoError::InvalidCursor {
+                cursor: 200,
+                limit: 54
+            })
         ));
     }
 

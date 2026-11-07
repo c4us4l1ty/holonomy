@@ -59,7 +59,10 @@ fn remnants_reports_an_empty_directory_plainly() {
     let output = run(&[std::ffi::OsStr::new("remnants"), container.as_os_str()]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("No matching regular staged-image names"), "{text}");
+    assert!(
+        text.contains("No matching regular staged-image names"),
+        "{text}"
+    );
 }
 
 #[test]

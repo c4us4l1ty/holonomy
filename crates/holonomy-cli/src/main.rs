@@ -685,11 +685,9 @@ fn report_staged_copies(
         }
         let association = match copy.origin {
             store::RemnantOrigin::Bound { .. } => match current_origin.as_ref() {
-                Some(Ok(origin)) => store::remnant_association_with_origin(
-                    container_path,
-                    &copy.path,
-                    Some(origin),
-                ),
+                Some(Ok(origin)) => {
+                    store::remnant_association_with_origin(container_path, &copy.path, Some(origin))
+                }
                 Some(Err(error)) => {
                     println!("  Skipped while checking origin: {error}");
                     continue;
@@ -853,7 +851,11 @@ fn recover_copy(args: &[String]) -> ExitCode {
     let container_path = std::path::Path::new(&flags.path);
     match std::fs::symlink_metadata(container_path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => return failure("recover-copy requires a regular container file, not a symlink or directory"),
+        Ok(_) => {
+            return failure(
+                "recover-copy requires a regular container file, not a symlink or directory",
+            )
+        }
         Err(error) => return failure(format!("checking container path: {error}")),
     }
     match store::remnant_association(container_path, &remnant) {
@@ -1006,7 +1008,10 @@ fn remnants(args: &[String]) -> ExitCode {
     };
 
     if found.is_empty() {
-        println!("No matching regular staged-image names next to {}.", path.display());
+        println!(
+            "No matching regular staged-image names next to {}.",
+            path.display()
+        );
         println!(
             "A crash leftover may use this prefix, but filenames alone cannot prove whether a save \
              created the file or why it remains."
@@ -1043,13 +1048,9 @@ fn remnants(args: &[String]) -> ExitCode {
                     None
                 }
             },
-            store::RemnantOrigin::LegacyUnbound | store::RemnantOrigin::MalformedBound => {
-                Some(store::remnant_association_with_origin(
-                    &path,
-                    &remnant.path,
-                    None,
-                ))
-            }
+            store::RemnantOrigin::LegacyUnbound | store::RemnantOrigin::MalformedBound => Some(
+                store::remnant_association_with_origin(&path, &remnant.path, None),
+            ),
         };
         if let Some(association) = association {
             match association {
