@@ -840,7 +840,12 @@ mod tests {
     fn open_form_does_not_assume_cursor_zero_for_an_unknown_container() {
         let mut form = OpenForm {
             path: "demo-container".into(),
-            ..OpenForm::default()
+            selected_path: None,
+            cursor: String::new(),
+            passphrase: String::new(),
+            root_share: String::new(),
+            error: None,
+            notice: None,
         };
         assert!(form.cursor.is_empty());
 
