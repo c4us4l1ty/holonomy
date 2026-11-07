@@ -522,6 +522,67 @@ mod tests {
         assert!(form.root_share.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn open_form_worker_opens_a_container_read_only() {
+        use std::time::{Duration, Instant};
+
+        use holonomy_cli::document::DocumentSessionOptions;
+        use holonomy_cli::store::pad::DerivedPad;
+        use holonomy_core::unlock::Topology;
+        use holonomy_wordcraft::editor::EditorSession;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("container");
+        let passphrase = "synthetic UI test passphrase";
+        let root_share = [0x11; 32];
+        let session = EditorSession::create(
+            &path,
+            Box::new(DerivedPad::new()),
+            SealedPassphrase::new(passphrase).expect("valid test passphrase"),
+            root_share,
+            DocumentSessionOptions::new(0, true, Topology::UmbilicalUsb),
+        )
+        .expect("create test container");
+        drop(session);
+        let original_image = std::fs::read(&path).expect("read created container");
+
+        let mut app = ViewerApp::new();
+        app.form = OpenForm {
+            path: path.display().to_string(),
+            cursor: "0".into(),
+            passphrase: passphrase.into(),
+            root_share: "11".repeat(32),
+            error: None,
+        };
+        app.start_open();
+        assert!(app.form.passphrase.is_empty());
+        assert!(app.form.root_share.is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.pending.is_some() && Instant::now() < deadline {
+            app.finish_open();
+            if app.pending.is_some() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert!(app.pending.is_none(), "open worker did not finish in time");
+        let viewer = app.viewer.as_ref().unwrap_or_else(|| {
+            panic!(
+                "container open failed: {}",
+                app.form.error.as_deref().unwrap_or("no error reported")
+            )
+        });
+        assert_eq!(viewer.cursor, 0);
+        assert!(viewer.app.session.path.is_none());
+        assert!(!viewer.app.session.recovery_ready());
+        assert_eq!(
+            std::fs::read(&path).expect("read after read-only open"),
+            original_image,
+            "read-only open must leave the container bytes unchanged"
+        );
+    }
+
     #[test]
     fn the_view_window_has_no_path_or_recovery_state() {
         let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3);
