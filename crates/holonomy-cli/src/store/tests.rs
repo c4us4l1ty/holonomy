@@ -1401,8 +1401,13 @@ fn writable_save_refuses_hardlinked_container_before_reading_pad() {
     let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
     let mut file = ContainerFile::open(&path, true).expect("open");
 
-    let error = save(&mut file, &mut NeverReadPad, &ctx(&pass, 1), b"must not fork")
-        .expect_err("hard-linked path must not be atomically replaced");
+    let error = save(
+        &mut file,
+        &mut NeverReadPad,
+        &ctx(&pass, 1),
+        b"must not fork",
+    )
+    .expect_err("hard-linked path must not be atomically replaced");
     assert!(error.contains("exactly one link"), "{error}");
     assert!(error.contains("before reading the pad"), "{error}");
     assert_eq!(std::fs::read(&path).expect("read original"), before);
