@@ -317,6 +317,14 @@ struct ViewerApp {
     viewer: Option<ReadOnlyWindow>,
 }
 
+impl Drop for ViewerApp {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.pending.as_ref().and_then(|task| task.cancel.as_ref()) {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl ViewerApp {
     fn new() -> Self {
         Self {
@@ -771,6 +779,25 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_viewer_requests_cancellation_of_a_cursor_scan() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (_sender, receiver) = mpsc::channel();
+        let app = ViewerApp {
+            form: OpenForm::default(),
+            pending: Some(PendingTask {
+                kind: PendingKind::Scanning,
+                receiver,
+                cancel: Some(Arc::clone(&cancelled)),
+                progress: Some(Arc::new(AtomicU64::new(0))),
+            }),
+            viewer: None,
+        };
+
+        drop(app);
+        assert!(cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn open_form_rejects_the_pad_reuse_boundary_before_request_creation() {
         let mut form = OpenForm {
             path: "demo-container".into(),
@@ -838,7 +865,13 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        assert!(app.pending.is_none(), "cursor search worker did not finish in time");
+        if let Some(task) = &app.pending {
+            let completed = task
+                .progress
+                .as_ref()
+                .map_or(0, |progress| progress.load(Ordering::Relaxed));
+            panic!("cursor search worker timed out after {completed} candidate attempt(s)");
+        }
         assert_eq!(app.form.cursor, "0");
         assert!(app
             .form
@@ -865,7 +898,11 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        assert!(app.pending.is_none(), "open worker did not finish in time");
+        assert!(
+            app.pending.is_none(),
+            "open worker did not finish in time; reported error: {:?}",
+            app.form.error
+        );
         let viewer = app.viewer.as_ref().unwrap_or_else(|| {
             panic!(
                 "container open failed: {}",
