@@ -25,13 +25,14 @@ read-only Wordcraft viewer; writable editor integration remains deferred. The UI
 entrypoint's build and CLI help, not a production editor or release gate. The historical test counts
 and gate statements below refer to the earlier audit baseline, not the current branch.
 
-**Update, 2026-11-07 (interactive UI):** the no-argument launch now opens a form for a container
-path, cursor and visually masked demo credentials, then attempts the same read-only open used by the
-CLI modes. The UI job in run `42368195864` on commit `21893f0` passed its tests, launcher-help
-check, Xvfb screen-start smoke test, Clippy and UI formatting. That smoke test proves the screen
-starts; it does **not** submit the form or prove a container was opened through the GUI. The rest of
-the Audit run remained in progress at last check. Neither result is a release gate or evidence of
-production readiness.
+**Update, 2026-11-07 (interactive UI):** the no-argument launch opens a form for a container path,
+cursor and visually masked demo credentials, then attempts the same read-only open as the CLI modes.
+The UI job in run `42371537182` on commit `149aff7` passed 12 tests, launcher-help checks, the Xvfb
+screen-start smoke test, Clippy and UI formatting. One test creates a temporary demo container,
+exercises form request preparation and the async open worker, then verifies a read-only viewer and
+unchanged container bytes. It does not drive native keyboard or mouse input; the Xvfb smoke only
+proves screen startup. The other Audit jobs were still in progress at last check. This is scoped
+validation, not a release gate or evidence of production readiness.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |
@@ -488,10 +489,11 @@ here, and the audit counts them rather than pretending they run.
 ### UI tests have a separate, limited scope
 
 At the original audit baseline, the `holonomy-ui` tests had not executed; that statement is now
-superseded by the update above. The current UI crate has 10 unit tests, and the dedicated UI job has
-run them. They cover parts of the status shell, capture reporting, launcher parsing, and the open
-form's credential-field clearing. They do not prove the GUI form can open a container end-to-end,
-and they are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
+superseded by the update above. The current UI crate has 12 unit tests, and the dedicated UI job has
+run them. They cover parts of the status shell, capture reporting, launcher parsing, cursor boundary
+validation and the open form's credential clearing/worker path. The async open test uses synthetic
+credentials and a temporary demo container; it does not simulate native widget input. These tests
+are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
 
 ### Deferred, with the reason
 

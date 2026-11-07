@@ -7,10 +7,12 @@ neither is suitable for sensitive or irreplaceable data.
 `crates/holonomy-ui` now has its own build/test workspace, an interactive read-only Wordcraft
 container viewer, and a status projection that consumes an actual store `SaveReport`. The viewer
 uses the preview crate's tested read-only boundary and deterministic demo pad. Its GUI masks
-credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. The
-status code is not wired into a writable editor workflow. A reported ratchet count is not
-independent proof of persistent device writes, and the store still reports pad freshness as *not
-established*.
+credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. Its
+UI tests create a temporary demo container and exercise form request preparation plus the asynchronous
+open worker, asserting a read-only viewer and unchanged container bytes. This does not simulate native
+keyboard or mouse entry; the Xvfb smoke check only verifies the open screen starts. The status code is
+not wired into a writable editor workflow. A reported ratchet count is not independent proof of
+persistent device writes, and the store still reports pad freshness as *not established*.
 
 | PRD interface goal | Current state | Work still needed |
 | --- | --- | --- |
