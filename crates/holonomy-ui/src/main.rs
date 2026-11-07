@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
+use holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
 use holonomy_core::unlock::SealedPassphrase;
 use holonomy_preview::{
     filter_events, open_read_only, parse_kappa, prompt_credentials, read_only_services, OpenedView,
@@ -128,6 +129,12 @@ impl OpenForm {
             .cursor
             .parse::<u64>()
             .map_err(|_| "cursor must be an unsigned integer".to_string())?;
+        if cursor >= SAVES_BEFORE_DOMAIN_REUSE {
+            return Err(format!(
+                "cursor must be between 0 and {} for this demo pad",
+                SAVES_BEFORE_DOMAIN_REUSE - 1
+            ));
+        }
         let passphrase = SealedPassphrase::new(&self.passphrase)
             .ok_or_else(|| "passphrase is empty or too long".to_string())?;
         let kappa = Zeroizing::new(parse_kappa(&self.root_share).map_err(str::to_owned)?);
@@ -146,7 +153,10 @@ impl OpenForm {
         ui.add_enabled_ui(!opening, |ui| {
             ui.label("Container path");
             ui.text_edit_singleline(&mut self.path);
-            ui.label("Cursor used to write this image");
+            ui.label(format!(
+                "Cursor used to write this image (0–{})",
+                SAVES_BEFORE_DOMAIN_REUSE - 1
+            ));
             ui.text_edit_singleline(&mut self.cursor);
             ui.label("Legacy passphrase (ASCII case variants are equivalent)");
             ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
@@ -520,6 +530,28 @@ mod tests {
         assert_eq!(request.cursor, 4);
         assert!(form.passphrase.is_empty());
         assert!(form.root_share.is_empty());
+    }
+
+    #[test]
+    fn open_form_rejects_the_pad_reuse_boundary_before_request_creation() {
+        let mut form = OpenForm {
+            path: "demo-container".into(),
+            cursor: SAVES_BEFORE_DOMAIN_REUSE.to_string(),
+            passphrase: String::new(),
+            root_share: String::new(),
+            error: None,
+        };
+        let error = match form.prepare_request() {
+            Err(error) => error,
+            Ok(_) => panic!("reuse boundary must not create an open request"),
+        };
+        assert_eq!(
+            error,
+            format!(
+                "cursor must be between 0 and {} for this demo pad",
+                SAVES_BEFORE_DOMAIN_REUSE - 1
+            )
+        );
     }
 
     #[cfg(unix)]
