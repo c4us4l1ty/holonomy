@@ -16,9 +16,9 @@ use holonomy_preview::{
     ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
-use zeroize::{Zeroize, Zeroizing};
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::WordApp;
+use zeroize::{Zeroize, Zeroizing};
 
 const TITLE: &str = "Holonomy — DEMO PAD · READ-ONLY WORDCRAFT VIEW";
 const DEMO_WARNING: &str = "DEMO PAD — deterministic stand-in, not physical USB. Prototype protections such as capture exclusion, editor-wide memory locking, and the watchdog are not integrated. Never use sensitive or irreplaceable data.";
@@ -314,7 +314,9 @@ fn print_usage() {
     println!();
     println!("The viewer uses a deterministic demo pad, not physical USB.");
     println!("It cannot edit, save, or recover containers. Never use sensitive data.");
-    println!("Interactive credentials are visually masked only; clipboard, swap, crash dumps, and UI allocations may expose them.");
+    println!(
+        "Interactive credentials are visually masked only; clipboard, swap, crash dumps, and UI allocations may expose them."
+    );
 }
 
 fn interactive_open() -> ExitCode {
@@ -382,9 +384,7 @@ fn view(path: &Path, cursor: u64) -> ExitCode {
     match eframe::run_native(
         TITLE,
         eframe::NativeOptions::default(),
-        Box::new(move |_| {
-            Ok(Box::new(ReadOnlyWindow::new(opened.document, opened.cursor)))
-        }),
+        Box::new(move |_| Ok(Box::new(ReadOnlyWindow::new(opened.document, opened.cursor)))),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
