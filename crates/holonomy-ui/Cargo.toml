@@ -44,6 +44,7 @@ libc = "0.2"
 zeroize = "1.8"
 
 [dev-dependencies]
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 holonomy-wordcraft = { path = "../holonomy-wordcraft" }
 tempfile = "3"
 

@@ -258,23 +258,17 @@ impl OpenForm {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Searching cursor candidates…");
-                    let response = ui.button("Cancel search");
-                    display.cancel_search_button = Some(response.rect);
-                    if response.clicked() {
+                    if ui.button("Cancel search").clicked() {
                         display.action = FormAction::CancelSearch;
                     }
                 });
             }
             None => {
                 ui.horizontal(|ui| {
-                    let open = ui.button("Open read-only");
-                    display.open_button = Some(open.rect);
-                    if open.clicked() {
+                    if ui.button("Open read-only").clicked() {
                         display.action = FormAction::Open;
                     }
-                    let find_cursor = ui.button("Find cursor");
-                    display.find_cursor_button = Some(find_cursor.rect);
-                    if find_cursor.clicked() {
+                    if ui.button("Find cursor").clicked() {
                         display.action = FormAction::FindCursor;
                     }
                 });
@@ -334,9 +328,6 @@ enum FormAction {
 #[derive(Default)]
 struct FormDisplay {
     action: FormAction,
-    open_button: Option<egui::Rect>,
-    find_cursor_button: Option<egui::Rect>,
-    cancel_search_button: Option<egui::Rect>,
 }
 
 enum WorkerResult {
@@ -818,102 +809,61 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
-    fn render_form(
-        ctx: &egui::Context,
-        form: &mut OpenForm,
+    struct FormHarnessState {
+        form: OpenForm,
         pending: Option<PendingDisplay>,
-        events: Vec<egui::Event>,
-    ) -> FormDisplay {
-        let mut display = FormDisplay::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 900.0),
-            )),
-            events,
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(input, |ui| {
-            display = form.show(ui, pending);
-        });
-        display
+        display: FormDisplay,
     }
 
-    fn click_form_button(
-        ctx: &egui::Context,
-        form: &mut OpenForm,
-        pending: Option<PendingDisplay>,
-        rect: egui::Rect,
-    ) -> FormDisplay {
-        let pos = rect.center();
-        let _ = render_form(
-            ctx,
-            form,
-            pending,
-            vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
+    fn form_harness(form: OpenForm, pending: Option<PendingDisplay>) -> egui_kittest::Harness<'static, FormHarnessState> {
+        egui_kittest::Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, state| {
+                    state.display = state.form.show(ui, state.pending);
                 },
-            ],
-        );
-        render_form(
-            ctx,
-            form,
-            pending,
-            vec![egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-        )
+                FormHarnessState {
+                    form,
+                    pending,
+                    display: FormDisplay::default(),
+                },
+            )
     }
 
     #[test]
     fn egui_pointer_clicks_activate_open_search_and_cancel_actions() {
-        let mut form = OpenForm {
-            path: "demo-container".into(),
-            selected_path: None,
-            cursor: "0".into(),
-            passphrase: "demo passphrase".into(),
-            root_share: "11".repeat(32),
-            error: None,
-            notice: None,
-        };
-        let context = egui::Context::default();
-        let initial = render_form(&context, &mut form, None, Vec::new());
-        let find_cursor = initial
-            .find_cursor_button
-            .expect("find cursor button is visible");
-        let opened = initial
-            .open_button
-            .expect("open button is visible");
-        assert_eq!(
-            click_form_button(&context, &mut form, None, find_cursor).action,
-            FormAction::FindCursor
-        );
-        assert_eq!(
-            click_form_button(&context, &mut form, None, opened).action,
-            FormAction::Open
-        );
+        use egui_kittest::kittest::{NodeT, Queryable};
 
-        let scanning = Some(PendingDisplay {
-            kind: PendingKind::Scanning,
-            completed_attempts: 2,
-        });
-        let context = egui::Context::default();
-        let pending = render_form(&context, &mut form, scanning, Vec::new());
-        let cancel = pending
-            .cancel_search_button
-            .expect("cancel button is visible during a cursor scan");
-        assert_eq!(
-            click_form_button(&context, &mut form, scanning, cancel).action,
-            FormAction::CancelSearch
+        let mut harness = form_harness(
+            OpenForm {
+                path: "demo-container".into(),
+                selected_path: None,
+                cursor: "0".into(),
+                passphrase: "demo passphrase".into(),
+                root_share: "11".repeat(32),
+                error: None,
+                notice: None,
+            },
+            None,
         );
+        harness.get_by_label("Find cursor").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::FindCursor);
+
+        harness.get_by_label("Open read-only").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::Open);
+
+        let mut harness = form_harness(
+            OpenForm::default(),
+            Some(PendingDisplay {
+                kind: PendingKind::Scanning,
+                completed_attempts: 2,
+            }),
+        );
+        harness.get_by_label("Cancel search").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::CancelSearch);
     }
 
     #[test]

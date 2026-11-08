@@ -11,8 +11,8 @@ credentials visually, but makes no guarantee that UI allocations are memory-lock
 UI tests create temporary demo containers and exercise form request preparation, the asynchronous
 read-only cursor search, and the open worker. They assert that a candidate cursor is found without
 changing bytes, credentials are cleared, and a subsequent open produces a read-only viewer. A headless
-egui-input test also clicks the visible open, find-cursor and cancel controls and checks that invalid
-file drops clear any stale path selection. This exercises egui's input processing, not native desktop
+`egui_kittest` test drives pointer clicks on the visible open, find-cursor and cancel controls and checks
+that invalid file drops clear any stale path selection. This exercises egui's input processing, not native desktop
 keyboard or mouse entry; the Xvfb smoke check still only verifies that the open screen starts.
 The status code is not wired into a writable editor workflow. A reported ratchet count is not independent proof of
 persistent device writes, and the store still reports pad freshness as *not established*.
