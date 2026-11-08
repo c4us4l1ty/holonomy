@@ -1241,12 +1241,7 @@ mod tests {
 
     #[test]
     fn the_view_window_has_no_path_or_recovery_state() {
-        let window = ReadOnlyWindow::new(
-            Document::from_text("viewed text"),
-            3,
-            [0; 32],
-            false,
-        );
+        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3, [0; 32], false);
         assert!(window.app.session.path.is_none());
         assert!(!window.app.session.recovery_ready());
         assert!(!window.quit);
