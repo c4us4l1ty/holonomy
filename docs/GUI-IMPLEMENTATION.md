@@ -60,8 +60,11 @@ Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` n
 interactive open screen as well as CLI modes from the standalone UI package. The open form accepts
 one dropped filesystem path, but never reads dropped file contents; path selection preserves native
 path bytes. A collapsed first-time setup panel shows the command for creating a disposable demo
-container and explains that this viewer cannot create, edit or save it. The cursor field starts blank
-so the UI never assumes cursor zero: enter a known cursor or use **Find cursor** to search legal
+container and explains that this viewer cannot create, edit or save it. It now tells the user that
+the Unix-only creation command opens a separate text editor, to use throwaway credentials and a new
+path, save sample text if desired, note the resulting cursor and then reopen through this viewer.
+The cursor field starts blank so the UI never assumes cursor zero: enter a known cursor or use
+**Find cursor** to search legal
 candidates through the existing read-only store scan. The search reports the first authenticating
 candidate with attempt progress and an unkeyed encrypted-image digest for comparison with other
 inspection output. Known-cursor opens also show it in the viewer and inspect-only output; it may

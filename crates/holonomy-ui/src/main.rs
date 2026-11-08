@@ -242,9 +242,10 @@ impl OpenForm {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("This viewer opens existing containers only; it cannot create, edit, or save them.");
-                ui.label("To make a disposable local demo container, run:");
+                ui.label("On Unix, create a disposable container in a terminal with:");
                 ui.monospace(DEMO_CREATE_COMMAND);
-                ui.label("Keep the passphrase and demo root share you enter during creation. A new container starts at cursor 0; for a later image, enter its known cursor or choose Find cursor.");
+                ui.label("The command opens the separate plain-text demo editor. Enter throwaway credentials at its hidden terminal prompts; do not reuse real secrets. Type sample text and save if you want content. Creation and saves are currently Unix-only.");
+                ui.label("Close the editor, then enter the same path and credentials here. An untouched container uses cursor 0; after a save, use the cursor the editor reports or choose Find cursor if you are unsure.");
             });
         let mut display = FormDisplay::default();
         match pending {

@@ -258,6 +258,13 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-inspect /path/to/demo-container 1
 ```
 
+`--demo-create` is Unix-only and opens the separate text-only demo editor after creation. Use a new
+disposable path and throwaway credentials entered at the hidden terminal prompts. Type sample text,
+save if you want a nonempty document, and note the cursor displayed by the editor. Close that window,
+then launch the read-only viewer with the same path and credentials; an untouched image is at cursor
+0, while a saved image uses the displayed cursor. In the interactive viewer, **Find cursor** can
+search when the current cursor is unknown.
+
 Read-only inspection authenticates and decodes the candidate at the supplied cursor. It can display
 a plain-text body preview of a rich document, but the preview may omit formatting, images, tables,
 headers, footers and other content; it is not the complete document. Editing and saving remain
