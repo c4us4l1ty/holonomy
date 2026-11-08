@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn egui_pointer_clicks_activate_open_search_and_cancel_actions() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
 
         let mut harness = form_harness(
             OpenForm {
