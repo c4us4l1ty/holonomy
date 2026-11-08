@@ -819,7 +819,7 @@ mod tests {
     }
 
     fn render_form(
-        ctx: &egui::Context,
+        ctx: &mut egui::Context,
         form: &mut OpenForm,
         pending: Option<PendingDisplay>,
         events: Vec<egui::Event>,
@@ -842,7 +842,7 @@ mod tests {
     }
 
     fn click_form_button(
-        ctx: &egui::Context,
+        ctx: &mut egui::Context,
         form: &mut OpenForm,
         pending: Option<PendingDisplay>,
         rect: egui::Rect,
@@ -886,8 +886,8 @@ mod tests {
             error: None,
             notice: None,
         };
-        let context = egui::Context::default();
-        let initial = render_form(&context, &mut form, None, Vec::new());
+        let mut context = egui::Context::default();
+        let initial = render_form(&mut context, &mut form, None, Vec::new());
         let find_cursor = initial
             .find_cursor_button
             .expect("find cursor button is visible");
@@ -895,11 +895,11 @@ mod tests {
             .open_button
             .expect("open button is visible");
         assert_eq!(
-            click_form_button(&context, &mut form, None, find_cursor).action,
+            click_form_button(&mut context, &mut form, None, find_cursor).action,
             FormAction::FindCursor
         );
         assert_eq!(
-            click_form_button(&context, &mut form, None, opened).action,
+            click_form_button(&mut context, &mut form, None, opened).action,
             FormAction::Open
         );
 
@@ -907,13 +907,13 @@ mod tests {
             kind: PendingKind::Scanning,
             completed_attempts: 2,
         });
-        let context = egui::Context::default();
-        let pending = render_form(&context, &mut form, scanning, Vec::new());
+        let mut context = egui::Context::default();
+        let pending = render_form(&mut context, &mut form, scanning, Vec::new());
         let cancel = pending
             .cancel_search_button
             .expect("cancel button is visible during a cursor scan");
         assert_eq!(
-            click_form_button(&context, &mut form, scanning, cancel).action,
+            click_form_button(&mut context, &mut form, scanning, cancel).action,
             FormAction::CancelSearch
         );
     }
