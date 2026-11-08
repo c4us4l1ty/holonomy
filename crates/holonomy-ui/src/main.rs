@@ -833,11 +833,11 @@ mod tests {
             events,
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                display = form.show(ui, pending);
-            });
+        ctx.begin_pass(input);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            display = form.show(ui, pending);
         });
+        let _ = ctx.end_pass();
         display
     }
 
