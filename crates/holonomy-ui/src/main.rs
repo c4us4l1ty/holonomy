@@ -834,9 +834,11 @@ mod tests {
             ..Default::default()
         };
         ctx.begin_pass(input);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            display = form.show(ui, pending);
-        });
+        egui::Area::new(egui::Id::new("open-form-test"))
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                display = form.show(ui, pending);
+            });
         let _ = ctx.end_pass();
         display
     }
