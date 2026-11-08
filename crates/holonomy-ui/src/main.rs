@@ -850,9 +850,7 @@ mod tests {
         let mut app = ViewerApp::new();
         let mut raw = egui::RawInput {
             hovered_files: vec![Default::default()],
-            dropped_files: vec![std::sync::Arc::new(TestDroppedFile(
-                expected_path.clone(),
-            ))],
+            dropped_files: vec![std::sync::Arc::new(TestDroppedFile(expected_path.clone()))],
             ..Default::default()
         };
 

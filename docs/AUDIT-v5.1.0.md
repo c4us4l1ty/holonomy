@@ -495,10 +495,12 @@ cancellation and Ctrl/Cmd+O return navigation. Run `42400134106` exposed egui's 
 file API; run `42400460346` then passed the 18-test UI suite, launcher help and interactive
 open-screen smoke, but failed formatting. Commit `cd38df4` applies CI's formatting diff. Run
 `42401655561` passed the 19-test suite, launcher help and open-screen smoke, but Clippy rejected the
-hand-written `OpenForm::default`; commit `d8b0bbd` derives it. Run `42402133433` then passed UI tests,
-smokes and lint, plus preview build, tests, smokes and lint, but both separate-workspace format checks
-required moving the wasm-only test method's opening brace to a separate line. That formatting fix is
-awaiting its next run. These tests cover parts of the status shell, capture reporting, launcher
+hand-written `OpenForm::default`; commit `d8b0bbd` derives it. Run `42402133433` then passed UI tests, smokes and lint, plus preview build, tests, smokes and lint,
+but both separate-workspace format checks required moving the wasm-only test method's opening brace
+to a separate line. In run `42445571950`, the UI tests, launcher smoke, screen smoke and lint passed,
+but its formatter additionally requested a single-line dropped-file fixture; that adjustment is now
+applied. The preview formatting step in that run has not completed, so the current formatting fixes
+are still awaiting CI. These tests cover parts of the status shell, capture reporting, launcher
 parsing, cursor-boundary validation, credential clearing, keyboard and file-drop filtering, and the
 asynchronous search/open path. That path uses synthetic credentials and temporary demo containers; it
 does not simulate native widget input. These tests are not evidence for the cryptographic, device,
