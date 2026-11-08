@@ -194,7 +194,7 @@ impl OpenForm {
         }
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormAction {
+    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormDisplay {
         ui.heading("Open a container for read-only viewing");
         let mut path_or_cursor_changed = false;
         let mut credentials_changed = false;
@@ -234,7 +234,7 @@ impl OpenForm {
                 ui.monospace(DEMO_CREATE_COMMAND);
                 ui.label("Keep the passphrase and demo root share you enter during creation. A new container starts at cursor 0; for a later image, enter its known cursor or choose Find cursor.");
             });
-        let mut action = FormAction::None;
+        let mut display = FormDisplay::default();
         match pending {
             Some(PendingDisplay {
                 kind: PendingKind::Opening,
@@ -258,18 +258,24 @@ impl OpenForm {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Searching cursor candidates…");
-                    if ui.button("Cancel search").clicked() {
-                        action = FormAction::CancelSearch;
+                    let response = ui.button("Cancel search");
+                    display.cancel_search_button = Some(response.rect);
+                    if response.clicked() {
+                        display.action = FormAction::CancelSearch;
                     }
                 });
             }
             None => {
                 ui.horizontal(|ui| {
-                    if ui.button("Open read-only").clicked() {
-                        action = FormAction::Open;
+                    let open = ui.button("Open read-only");
+                    display.open_button = Some(open.rect);
+                    if open.clicked() {
+                        display.action = FormAction::Open;
                     }
-                    if ui.button("Find cursor").clicked() {
-                        action = FormAction::FindCursor;
+                    let find_cursor = ui.button("Find cursor");
+                    display.find_cursor_button = Some(find_cursor.rect);
+                    if find_cursor.clicked() {
+                        display.action = FormAction::FindCursor;
                     }
                 });
             }
@@ -280,7 +286,7 @@ impl OpenForm {
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), error);
         }
-        action
+        display
     }
 }
 
@@ -316,11 +322,21 @@ struct PendingDisplay {
     completed_attempts: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FormAction {
+    #[default]
     None,
     Open,
     FindCursor,
     CancelSearch,
+}
+
+#[derive(Default)]
+struct FormDisplay {
+    action: FormAction,
+    open_button: Option<egui::Rect>,
+    find_cursor_button: Option<egui::Rect>,
+    cancel_search_button: Option<egui::Rect>,
 }
 
 enum WorkerResult {
@@ -376,11 +392,17 @@ impl ViewerApp {
             return;
         }
         if dropped_files.len() != 1 {
+            self.form.path.clear();
+            self.form.selected_path = None;
+            self.form.clear_feedback_for_edits(true, false);
             self.form.error = Some("drop one container file at a time".into());
             return;
         }
         let path = dropped_files[0].path().to_path_buf();
         if path.as_os_str().is_empty() {
+            self.form.path.clear();
+            self.form.selected_path = None;
+            self.form.clear_feedback_for_edits(true, false);
             self.form.error = Some("the dropped file did not provide a path".into());
         } else {
             self.form.select_dropped_path(path);
@@ -557,7 +579,7 @@ impl eframe::App for ViewerApp {
                 .as_ref()
                 .map_or(0, |progress| progress.load(Ordering::Relaxed)),
         });
-        match self.form.show(ui, pending_display) {
+        match self.form.show(ui, pending_display).action {
             FormAction::Open => self.start_open(),
             FormAction::FindCursor => self.start_scan(),
             FormAction::CancelSearch => self.cancel_scan(),
@@ -796,6 +818,106 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    fn render_form(
+        ctx: &egui::Context,
+        form: &mut OpenForm,
+        pending: Option<PendingDisplay>,
+        events: Vec<egui::Event>,
+    ) -> FormDisplay {
+        let mut display = FormDisplay::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                display = form.show(ui, pending);
+            });
+        });
+        display
+    }
+
+    fn click_form_button(
+        ctx: &egui::Context,
+        form: &mut OpenForm,
+        pending: Option<PendingDisplay>,
+        rect: egui::Rect,
+    ) -> FormDisplay {
+        let pos = rect.center();
+        let _ = render_form(
+            ctx,
+            form,
+            pending,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_form(
+            ctx,
+            form,
+            pending,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    #[test]
+    fn egui_pointer_clicks_activate_open_search_and_cancel_actions() {
+        let mut form = OpenForm {
+            path: "demo-container".into(),
+            selected_path: None,
+            cursor: "0".into(),
+            passphrase: "demo passphrase".into(),
+            root_share: "11".repeat(32),
+            error: None,
+            notice: None,
+        };
+        let context = egui::Context::default();
+        let initial = render_form(&context, &mut form, None, Vec::new());
+        let find_cursor = initial
+            .find_cursor_button
+            .expect("find cursor button is visible");
+        let opened = initial
+            .open_button
+            .expect("open button is visible");
+        assert_eq!(
+            click_form_button(&context, &mut form, None, find_cursor).action,
+            FormAction::FindCursor
+        );
+        assert_eq!(
+            click_form_button(&context, &mut form, None, opened).action,
+            FormAction::Open
+        );
+
+        let scanning = Some(PendingDisplay {
+            kind: PendingKind::Scanning,
+            completed_attempts: 2,
+        });
+        let context = egui::Context::default();
+        let pending = render_form(&context, &mut form, scanning, Vec::new());
+        let cancel = pending
+            .cancel_search_button
+            .expect("cancel button is visible during a cursor scan");
+        assert_eq!(
+            click_form_button(&context, &mut form, scanning, cancel).action,
+            FormAction::CancelSearch
+        );
+    }
+
     #[test]
     fn view_modes_are_explicit_and_bounded() {
         assert_eq!(
@@ -874,6 +996,46 @@ mod tests {
         app.form.root_share = "11".repeat(32);
         let request = app.form.prepare_request().expect("dropped file path");
         assert_eq!(request.path, expected_path);
+    }
+
+    #[test]
+    fn invalid_file_drops_clear_any_previous_container_selection() {
+        let previous_path = PathBuf::from("previous-container");
+        let mut app = ViewerApp::new();
+        app.form.path = previous_path.display().to_string();
+        app.form.selected_path = Some(previous_path);
+        let mut raw = egui::RawInput {
+            dropped_files: vec![
+                std::sync::Arc::new(TestDroppedFile(PathBuf::from("first"))),
+                std::sync::Arc::new(TestDroppedFile(PathBuf::from("second"))),
+            ],
+            ..Default::default()
+        };
+
+        app.handle_dropped_files(&mut raw);
+
+        assert!(raw.dropped_files.is_empty());
+        assert!(app.form.path.is_empty());
+        assert!(app.form.selected_path.is_none());
+        assert_eq!(
+            app.form.error.as_deref(),
+            Some("drop one container file at a time")
+        );
+
+        let mut app = ViewerApp::new();
+        app.form.path = "previous-container".into();
+        app.form.selected_path = Some(PathBuf::from("previous-container"));
+        let mut raw = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(TestDroppedFile(PathBuf::new()))],
+            ..Default::default()
+        };
+        app.handle_dropped_files(&mut raw);
+        assert!(app.form.path.is_empty());
+        assert!(app.form.selected_path.is_none());
+        assert_eq!(
+            app.form.error.as_deref(),
+            Some("the dropped file did not provide a path")
+        );
     }
 
     #[test]

@@ -325,7 +325,8 @@ rejected save safe to repeat. Delete a remnant only after deciding it is not the
 
 A read-only Wordcraft window can render a container's document without offering any way to change
 or export it. In the interactive open form, enter a path or drop exactly one filesystem file; only
-its path is used, never its dropped contents. File-drop data is cleared before it can reach Wordcraft
+its path is used, never its dropped contents. An empty or multi-file drop clears the previous
+selection and asks for a single path. File-drop data is cleared before it can reach Wordcraft
 in the read-only viewer. The standalone UI binary opens an interactive screen with no arguments, or accepts
 `--view PATH CURSOR` and `--inspect-only PATH CURSOR`; the preview alias `holonomy-rich-view` has
 the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
