@@ -195,7 +195,7 @@ impl DocumentSession {
         // Take the store's save lock here, so contention is a refusal that writes nothing and
         // leaves the session usable, instead of a failure discovered mid-save.
         #[cfg(unix)]
-        let lock = match store::SaveLock::acquire(self.file.path()) {
+        let lock = match store::SaveLock::acquire(self.file.filesystem_path()) {
             Ok(lock) => lock,
             Err(error) => {
                 return Err(format!(

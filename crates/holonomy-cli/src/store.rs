@@ -125,6 +125,11 @@ impl ContainerFile {
         &self.path
     }
 
+    /// The original filesystem path, retaining platform-native path bytes.
+    pub(crate) fn filesystem_path(&self) -> &Path {
+        &self.filesystem_path
+    }
+
     /// Whether this handle may write.
     pub fn is_writable(&self) -> bool {
         self.writable
@@ -1009,7 +1014,7 @@ fn save_inner(
     #[cfg(unix)]
     let _save_lock = match held_lock {
         Some(_) => None,
-        None => Some(SaveLock::acquire(file.path()).map_err(|e| e.to_string())?),
+        None => Some(SaveLock::acquire(file.filesystem_path()).map_err(|e| e.to_string())?),
     };
 
     // Refuse stale, aliased or multiply-linked files before consulting the pad or staging an image.

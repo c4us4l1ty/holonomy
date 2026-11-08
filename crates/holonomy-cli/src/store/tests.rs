@@ -1391,6 +1391,25 @@ fn save_lock_normalizes_relative_parent_paths() {
     drop(lock);
 }
 
+/// Save locking preserves non-UTF-8 path bytes instead of using the lossy display string.
+#[cfg(unix)]
+#[test]
+fn save_lock_preserves_non_utf8_container_name() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = std::ffi::OsString::from_vec(b"container-\xff".to_vec());
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"test").expect("container");
+    let file = ContainerFile::open(&path, false).expect("open container");
+
+    let lock = SaveLock::acquire(file.filesystem_path()).expect("native path lock");
+    let mut lock_name = path.file_name().expect("file name").to_os_string();
+    lock_name.push(".holonomy-lock");
+    assert!(dir.path().join(lock_name).is_file());
+    drop(lock);
+}
+
 /// Atomic replacement of a hard-linked container would leave a stale copy sharing pad history.
 #[cfg(unix)]
 #[test]
