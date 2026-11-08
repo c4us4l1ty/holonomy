@@ -258,6 +258,13 @@ cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo
 cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-inspect /path/to/demo-container 1
 ```
 
+`--demo-create` is Unix-only and opens the separate text-only demo editor after creation. Use a new
+disposable path and throwaway credentials entered at the hidden terminal prompts. Type sample text,
+save if you want a nonempty document, and note the cursor displayed by the editor. Close that window,
+then launch the read-only viewer with the same path and credentials; an untouched image is at cursor
+0, while a saved image uses the displayed cursor. In the interactive viewer, **Find cursor** can
+search when the current cursor is unknown.
+
 Read-only inspection authenticates and decodes the candidate at the supplied cursor. It can display
 a plain-text body preview of a rich document, but the preview may omit formatting, images, tables,
 headers, footers and other content; it is not the complete document. Editing and saving remain
@@ -325,7 +332,8 @@ rejected save safe to repeat. Delete a remnant only after deciding it is not the
 
 A read-only Wordcraft window can render a container's document without offering any way to change
 or export it. In the interactive open form, enter a path or drop exactly one filesystem file; only
-its path is used, never its dropped contents. File-drop data is cleared before it can reach Wordcraft
+its path is used, never its dropped contents. An empty or multi-file drop clears the previous
+selection and asks for a single path. File-drop data is cleared before it can reach Wordcraft
 in the read-only viewer. The standalone UI binary opens an interactive screen with no arguments, or accepts
 `--view PATH CURSOR` and `--inspect-only PATH CURSOR`; the preview alias `holonomy-rich-view` has
 the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
@@ -341,9 +349,12 @@ The interactive screen includes a collapsed first-time setup panel with the comm
 disposable demo container. It leaves the cursor blank rather than assuming cursor 0 is correct. Enter
 a known cursor, or use **Find cursor** when it is unknown. The search checks
 legal candidates read-only, reports progress and the first one that authenticates, and can be
-cancelled between full-image attempts. Each attempt reads the image and derives a key, so the search
-may take time. It does not identify the newest or only copy, establish pad history or freshness, or repair the
-container; credentials are cleared after the search and must be entered again to open it.
+cancelled between full-image attempts. The result includes an unkeyed encrypted-image digest for
+comparison with other inspection output; it can correlate copies and proves neither authenticity
+nor freshness. Known-cursor opens and inspect-only output show the same digest. Each attempt reads
+the image and derives a key, so the search may take time. It does not identify the newest or only
+copy, establish pad history or freshness, or repair the container; credentials are cleared after
+the search and must be entered again to open it.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The

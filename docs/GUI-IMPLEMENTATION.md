@@ -10,8 +10,10 @@ uses the preview crate's tested read-only boundary and deterministic demo pad. I
 credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. Its
 UI tests create temporary demo containers and exercise form request preparation, the asynchronous
 read-only cursor search, and the open worker. They assert that a candidate cursor is found without
-changing bytes, credentials are cleared, and a subsequent open produces a read-only viewer. This does
-not simulate native keyboard or mouse entry; the Xvfb smoke check only verifies the open screen starts.
+changing bytes, credentials are cleared, and a subsequent open produces a read-only viewer. A headless
+`egui_kittest` test drives pointer clicks on the visible open, find-cursor and cancel controls and checks
+that invalid file drops clear any stale path selection. This exercises egui's input processing, not native desktop
+keyboard or mouse entry; the Xvfb smoke check still only verifies that the open screen starts.
 The status code is not wired into a writable editor workflow. A reported ratchet count is not independent proof of
 persistent device writes, and the store still reports pad freshness as *not established*.
 
@@ -58,10 +60,16 @@ Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` n
 interactive open screen as well as CLI modes from the standalone UI package. The open form accepts
 one dropped filesystem path, but never reads dropped file contents; path selection preserves native
 path bytes. A collapsed first-time setup panel shows the command for creating a disposable demo
-container and explains that this viewer cannot create, edit or save it. The cursor field starts blank
-so the UI never assumes cursor zero: enter a known cursor or use **Find cursor** to search legal
+container and explains that this viewer cannot create, edit or save it. It now tells the user that
+the Unix-only creation command opens a separate text editor, to use throwaway credentials and a new
+path, save sample text if desired, note the resulting cursor and then reopen through this viewer.
+The cursor field starts blank so the UI never assumes cursor zero: enter a known cursor or use
+**Find cursor** to search legal
 candidates through the existing read-only store scan. The search reports the first authenticating
-candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
+candidate with attempt progress and an unkeyed encrypted-image digest for comparison with other
+inspection output. Known-cursor opens also show it in the viewer and inspect-only output; it may
+correlate copies and is not proof of authenticity or freshness. The search clears credentials and
+requires them to be re-entered before opening.
 In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
 `Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
 establish freshness, uniqueness, recency or pad history and does not repair anything. The window is

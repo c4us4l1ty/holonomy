@@ -16,8 +16,9 @@ use eframe::egui;
 use holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
 use holonomy_core::unlock::SealedPassphrase;
 use holonomy_preview::{
-    filter_events, find_read_only_cursor, open_read_only, parse_kappa, prompt_credentials,
-    read_only_services, CursorSearch, OpenedView, ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
+    filter_events, find_read_only_cursor, format_image_digest, open_read_only, parse_kappa,
+    prompt_credentials, read_only_services, CursorSearch, OpenedView, ViewInput, READ_ONLY_LIMITS,
+    READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
 use wordcraft_engine::Session;
@@ -57,6 +58,7 @@ fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
 struct ReadOnlyWindow {
     app: WordApp,
     cursor: u64,
+    digest: [u8; 32],
     quit: bool,
     return_to_open_enabled: bool,
     return_to_open_requested: bool,
@@ -64,10 +66,16 @@ struct ReadOnlyWindow {
 }
 
 impl ReadOnlyWindow {
-    fn new(document: Document, cursor: u64, return_to_open_enabled: bool) -> Self {
+    fn new(
+        document: Document,
+        cursor: u64,
+        digest: [u8; 32],
+        return_to_open_enabled: bool,
+    ) -> Self {
         Self {
             app: WordApp::new(Session::new(document), read_only_services()),
             cursor,
+            digest,
             quit: false,
             return_to_open_enabled,
             return_to_open_requested: false,
@@ -104,6 +112,10 @@ impl eframe::App for ReadOnlyWindow {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
             ui.label(format!("Opened at cursor {}.", self.cursor));
+            ui.label(
+                "Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness):",
+            );
+            ui.monospace(format_image_digest(&self.digest));
             if self.return_to_open_enabled {
                 ui.label("Press Ctrl/Cmd+O to return to the open screen, or Ctrl/Cmd+Q to close.");
             } else {
@@ -194,7 +206,7 @@ impl OpenForm {
         }
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormAction {
+    fn show(&mut self, ui: &mut egui::Ui, pending: Option<PendingDisplay>) -> FormDisplay {
         ui.heading("Open a container for read-only viewing");
         let mut path_or_cursor_changed = false;
         let mut credentials_changed = false;
@@ -230,11 +242,12 @@ impl OpenForm {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("This viewer opens existing containers only; it cannot create, edit, or save them.");
-                ui.label("To make a disposable local demo container, run:");
+                ui.label("On Unix, create a disposable container in a terminal with:");
                 ui.monospace(DEMO_CREATE_COMMAND);
-                ui.label("Keep the passphrase and demo root share you enter during creation. A new container starts at cursor 0; for a later image, enter its known cursor or choose Find cursor.");
+                ui.label("The command opens the separate plain-text demo editor. Enter throwaway credentials at its hidden terminal prompts; do not reuse real secrets. Type sample text and save if you want content. Creation and saves are currently Unix-only.");
+                ui.label("Close the editor, then enter the same path and credentials here. An untouched container uses cursor 0; after a save, use the cursor the editor reports or choose Find cursor if you are unsure.");
             });
-        let mut action = FormAction::None;
+        let mut display = FormDisplay::default();
         match pending {
             Some(PendingDisplay {
                 kind: PendingKind::Opening,
@@ -259,17 +272,17 @@ impl OpenForm {
                     ui.spinner();
                     ui.label("Searching cursor candidates…");
                     if ui.button("Cancel search").clicked() {
-                        action = FormAction::CancelSearch;
+                        display.action = FormAction::CancelSearch;
                     }
                 });
             }
             None => {
                 ui.horizontal(|ui| {
                     if ui.button("Open read-only").clicked() {
-                        action = FormAction::Open;
+                        display.action = FormAction::Open;
                     }
                     if ui.button("Find cursor").clicked() {
-                        action = FormAction::FindCursor;
+                        display.action = FormAction::FindCursor;
                     }
                 });
             }
@@ -280,7 +293,7 @@ impl OpenForm {
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), error);
         }
-        action
+        display
     }
 }
 
@@ -316,11 +329,18 @@ struct PendingDisplay {
     completed_attempts: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FormAction {
+    #[default]
     None,
     Open,
     FindCursor,
     CancelSearch,
+}
+
+#[derive(Default)]
+struct FormDisplay {
+    action: FormAction,
 }
 
 enum WorkerResult {
@@ -376,11 +396,17 @@ impl ViewerApp {
             return;
         }
         if dropped_files.len() != 1 {
+            self.form.path.clear();
+            self.form.selected_path = None;
+            self.form.clear_feedback_for_edits(true, false);
             self.form.error = Some("drop one container file at a time".into());
             return;
         }
         let path = dropped_files[0].path().to_path_buf();
         if path.as_os_str().is_empty() {
+            self.form.path.clear();
+            self.form.selected_path = None;
+            self.form.clear_feedback_for_edits(true, false);
             self.form.error = Some("the dropped file did not provide a path".into());
         } else {
             self.form.select_dropped_path(path);
@@ -477,13 +503,19 @@ impl ViewerApp {
             let task = self.pending.take().expect("pending task exists");
             match result {
                 WorkerResult::Open(Ok(opened)) => {
-                    self.viewer = Some(ReadOnlyWindow::new(opened.document, opened.cursor, true));
+                    self.viewer = Some(ReadOnlyWindow::new(
+                        opened.document,
+                        opened.cursor,
+                        opened.digest,
+                        true,
+                    ));
                 }
                 WorkerResult::Open(Err(error)) => self.form.error = Some(error),
                 WorkerResult::Scan(Ok(found)) => {
                     self.form.cursor = found.cursor.to_string();
+                    let digest = format_image_digest(&found.digest);
                     self.form.notice = Some(format!(
-                        "Cursor {} authenticated on attempt {} with the search credentials. Re-enter those credentials to open. This is not proof of freshness, uniqueness or pad history.",
+                        "Cursor {} authenticated on attempt {}. Unkeyed encrypted-image digest: {digest}. It can correlate copies and is only for comparison; it does not prove authenticity, freshness, uniqueness or pad history. Re-enter the search credentials to open.",
                         found.cursor, found.attempts
                     ));
                 }
@@ -557,7 +589,7 @@ impl eframe::App for ViewerApp {
                 .as_ref()
                 .map_or(0, |progress| progress.load(Ordering::Relaxed)),
         });
-        match self.form.show(ui, pending_display) {
+        match self.form.show(ui, pending_display).action {
             FormAction::Open => self.start_open(),
             FormAction::FindCursor => self.start_scan(),
             FormAction::CancelSearch => self.cancel_scan(),
@@ -646,6 +678,10 @@ fn inspect_only(path: &Path, cursor: u64) -> ExitCode {
     println!("Container: {}", path.display());
     println!("Cursor authenticated: {}", opened.cursor);
     println!(
+        "Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness): {}",
+        format_image_digest(&opened.digest)
+    );
+    println!(
         "Wordcraft document decoded: {} body character(s); the text is not printed",
         body_characters
     );
@@ -679,6 +715,7 @@ fn view(path: &Path, cursor: u64) -> ExitCode {
             Ok(Box::new(ReadOnlyWindow::new(
                 opened.document,
                 opened.cursor,
+                opened.digest,
                 false,
             )))
         }),
@@ -796,6 +833,71 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    struct FormHarnessState {
+        form: OpenForm,
+        pending: Option<PendingDisplay>,
+        display: FormDisplay,
+    }
+
+    fn form_harness(
+        form: OpenForm,
+        pending: Option<PendingDisplay>,
+    ) -> egui_kittest::Harness<'static, FormHarnessState> {
+        egui_kittest::Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, state| {
+                    state.display = state.form.show(ui, state.pending);
+                },
+                FormHarnessState {
+                    form,
+                    pending,
+                    display: FormDisplay::default(),
+                },
+            )
+    }
+
+    #[test]
+    fn egui_pointer_clicks_activate_open_search_and_cancel_actions() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = form_harness(
+            OpenForm {
+                path: "demo-container".into(),
+                selected_path: None,
+                cursor: "0".into(),
+                passphrase: "demo passphrase".into(),
+                root_share: "11".repeat(32),
+                error: None,
+                notice: None,
+            },
+            None,
+        );
+        harness.get_by_label("Find cursor").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::FindCursor);
+
+        harness.get_by_label("Open read-only").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::Open);
+
+        let mut harness = form_harness(
+            OpenForm::default(),
+            Some(PendingDisplay {
+                kind: PendingKind::Scanning,
+                completed_attempts: 2,
+            }),
+        );
+        harness.get_by_label("Cancel search").click();
+        harness.step();
+        assert_eq!(harness.state().display.action, FormAction::CancelSearch);
+    }
+
+    #[test]
+    fn image_digest_is_rendered_as_full_lowercase_hex() {
+        assert_eq!(format_image_digest(&[0xAB; 32]), "ab".repeat(32));
+    }
+
     #[test]
     fn view_modes_are_explicit_and_bounded() {
         assert_eq!(
@@ -874,6 +976,46 @@ mod tests {
         app.form.root_share = "11".repeat(32);
         let request = app.form.prepare_request().expect("dropped file path");
         assert_eq!(request.path, expected_path);
+    }
+
+    #[test]
+    fn invalid_file_drops_clear_any_previous_container_selection() {
+        let previous_path = PathBuf::from("previous-container");
+        let mut app = ViewerApp::new();
+        app.form.path = previous_path.display().to_string();
+        app.form.selected_path = Some(previous_path);
+        let mut raw = egui::RawInput {
+            dropped_files: vec![
+                std::sync::Arc::new(TestDroppedFile(PathBuf::from("first"))),
+                std::sync::Arc::new(TestDroppedFile(PathBuf::from("second"))),
+            ],
+            ..Default::default()
+        };
+
+        app.handle_dropped_files(&mut raw);
+
+        assert!(raw.dropped_files.is_empty());
+        assert!(app.form.path.is_empty());
+        assert!(app.form.selected_path.is_none());
+        assert_eq!(
+            app.form.error.as_deref(),
+            Some("drop one container file at a time")
+        );
+
+        let mut app = ViewerApp::new();
+        app.form.path = "previous-container".into();
+        app.form.selected_path = Some(PathBuf::from("previous-container"));
+        let mut raw = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(TestDroppedFile(PathBuf::new()))],
+            ..Default::default()
+        };
+        app.handle_dropped_files(&mut raw);
+        assert!(app.form.path.is_empty());
+        assert!(app.form.selected_path.is_none());
+        assert_eq!(
+            app.form.error.as_deref(),
+            Some("the dropped file did not provide a path")
+        );
     }
 
     #[test]
@@ -1010,11 +1152,11 @@ mod tests {
             panic!("cursor search worker timed out after {completed} candidate attempt(s)");
         }
         assert_eq!(app.form.cursor, "0");
-        assert!(app
-            .form
-            .notice
-            .as_deref()
-            .is_some_and(|notice| notice.contains("not proof of freshness")));
+        assert!(app.form.notice.as_deref().is_some_and(|notice| {
+            notice.contains("Unkeyed encrypted-image digest:")
+                && notice.contains("does not prove authenticity, freshness")
+                && notice.contains("Re-enter the search credentials")
+        }));
         assert!(app.viewer.is_none(), "scan must not open a document");
         assert_eq!(
             std::fs::read(&path).expect("read after cursor search"),
@@ -1063,11 +1205,11 @@ mod tests {
             return_to_open_requested: true,
             dropped: 1,
         };
-        let mut interactive = ReadOnlyWindow::new(Document::new(), 0, true);
+        let mut interactive = ReadOnlyWindow::new(Document::new(), 0, [0; 32], true);
         interactive.apply_host_input(input);
         assert!(interactive.return_to_open_requested);
 
-        let mut standalone = ReadOnlyWindow::new(Document::new(), 0, false);
+        let mut standalone = ReadOnlyWindow::new(Document::new(), 0, [0; 32], false);
         standalone.apply_host_input(input);
         assert!(!standalone.return_to_open_requested);
     }
@@ -1078,6 +1220,7 @@ mod tests {
         app.viewer = Some(ReadOnlyWindow::new(
             Document::from_text("viewed text"),
             3,
+            [0; 32],
             true,
         ));
         app.viewer
@@ -1098,7 +1241,7 @@ mod tests {
 
     #[test]
     fn the_view_window_has_no_path_or_recovery_state() {
-        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3, false);
+        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3, [0; 32], false);
         assert!(window.app.session.path.is_none());
         assert!(!window.app.session.recovery_ready());
         assert!(!window.quit);

@@ -74,6 +74,14 @@ impl EditorSession {
         &self.document
     }
 
+    /// Unkeyed digest of the last successfully opened or saved encrypted image.
+    ///
+    /// It is useful only for comparing image copies, may correlate copies, and is not proof of
+    /// authenticity, freshness, durability or pad history.
+    pub fn image_digest(&self) -> &[u8; 32] {
+        self.session.image_digest()
+    }
+
     /// Mutable Wordcraft document. Changes remain in memory until saved.
     ///
     /// This also works in read-only mode for local inspection or editing, but

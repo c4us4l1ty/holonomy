@@ -154,6 +154,14 @@ impl DocumentSession {
         self.options.cursor
     }
 
+    /// Unkeyed digest of the last successfully opened or saved encrypted image.
+    ///
+    /// This is useful only for comparing image copies. It may correlate copies and is not proof of
+    /// authenticity, freshness, durability or pad history.
+    pub fn image_digest(&self) -> &[u8; 32] {
+        &self.last_image_digest
+    }
+
     /// Whether another save is allowed without recovery.
     pub fn state(&self) -> DocumentSessionState {
         self.state
