@@ -1154,7 +1154,7 @@ mod tests {
         assert_eq!(app.form.cursor, "0");
         assert!(app.form.notice.as_deref().is_some_and(|notice| {
             notice.contains("Unkeyed encrypted-image digest:")
-                && notice.contains("does not prove freshness")
+                && notice.contains("does not prove authenticity, freshness")
                 && notice.contains("Re-enter the search credentials")
         }));
         assert!(app.viewer.is_none(), "scan must not open a document");
