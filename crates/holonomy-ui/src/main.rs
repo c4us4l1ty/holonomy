@@ -834,7 +834,7 @@ mod tests {
             ..Default::default()
         };
         ctx.begin_pass(input);
-        egui::Area::new(egui::Id::new("open-form-test"))
+        egui::Area::new(egui::Id::unique("holonomy-open-form-test"))
             .fixed_pos(egui::Pos2::ZERO)
             .show(ctx, |ui| {
                 display = form.show(ui, pending);
