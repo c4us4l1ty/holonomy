@@ -57,10 +57,11 @@ durability, or complete recovery. Reading can update OS file-access metadata.
 Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes an
 interactive open screen as well as CLI modes from the standalone UI package. The open form accepts
 one dropped filesystem path, but never reads dropped file contents; path selection preserves native
-path bytes. The cursor field starts blank so the UI never assumes cursor zero: enter a known cursor or
-use **Find cursor** to search legal candidates through the existing read-only store scan. The search
-reports the first authenticating candidate with attempt progress, clears credentials and requires
-them to be re-entered before opening.
+path bytes. A collapsed first-time setup panel shows the command for creating a disposable demo
+container and explains that this viewer cannot create, edit or save it. The cursor field starts blank
+so the UI never assumes cursor zero: enter a known cursor or use **Find cursor** to search legal
+candidates through the existing read-only store scan. The search reports the first authenticating
+candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
 In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
 `Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
 establish freshness, uniqueness, recency or pad history and does not repair anything. The window is

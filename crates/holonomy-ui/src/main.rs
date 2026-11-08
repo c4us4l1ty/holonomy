@@ -26,6 +26,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const TITLE: &str = "Holonomy — DEMO PAD · READ-ONLY WORDCRAFT VIEW";
 const DEMO_WARNING: &str = "DEMO PAD — deterministic stand-in, not physical USB. Prototype protections such as capture exclusion, editor-wide memory locking, and the watchdog are not integrated. Never use sensitive or irreplaceable data.";
+const DEMO_CREATE_COMMAND: &str = "cargo run --manifest-path crates/holonomy-preview/Cargo.toml --bin holonomy-demo-editor -- --demo-create PATH";
 const USAGE: &str = "usage: holonomy [--help] [--version] [--check]\n       holonomy --view PATH CURSOR\n       holonomy --inspect-only PATH CURSOR";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -225,6 +226,14 @@ impl OpenForm {
         ui.label(format!(
             "Find cursor scans up to {SAVES_BEFORE_DOMAIN_REUSE} complete images and derives a key per attempt. It is read-only, may take time, and can be cancelled between attempts."
         ));
+        egui::CollapsingHeader::new("First-time demo setup")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("This viewer opens existing containers only; it cannot create, edit, or save them.");
+                ui.label("To make a disposable local demo container, run:");
+                ui.monospace(DEMO_CREATE_COMMAND);
+                ui.label("Keep the passphrase and demo root share you enter during creation. A new container starts at cursor 0; for a later image, enter its known cursor or choose Find cursor.");
+            });
         let mut action = FormAction::None;
         match pending {
             Some(PendingDisplay {
