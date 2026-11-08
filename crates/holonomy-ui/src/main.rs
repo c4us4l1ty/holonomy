@@ -815,7 +815,10 @@ mod tests {
         display: FormDisplay,
     }
 
-    fn form_harness(form: OpenForm, pending: Option<PendingDisplay>) -> egui_kittest::Harness<'static, FormHarnessState> {
+    fn form_harness(
+        form: OpenForm,
+        pending: Option<PendingDisplay>,
+    ) -> egui_kittest::Harness<'static, FormHarnessState> {
         egui_kittest::Harness::builder()
             .with_accessibility_check(false)
             .build_ui_state(
