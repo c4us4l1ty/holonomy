@@ -495,8 +495,9 @@ impl ViewerApp {
                 WorkerResult::Open(Err(error)) => self.form.error = Some(error),
                 WorkerResult::Scan(Ok(found)) => {
                     self.form.cursor = found.cursor.to_string();
+                    let digest = digest_hex(&found.digest);
                     self.form.notice = Some(format!(
-                        "Cursor {} authenticated on attempt {} with the search credentials. Re-enter those credentials to open. This is not proof of freshness, uniqueness or pad history.",
+                        "Cursor {} authenticated on attempt {}. Unkeyed encrypted-image digest: {digest}. It can correlate copies and is only for comparison; it does not prove freshness, uniqueness or pad history. Re-enter the search credentials to open.",
                         found.cursor, found.attempts
                     ));
                 }
@@ -779,6 +780,10 @@ fn report(what: &str, pass: bool, detail: &str) {
     println!("  [{}] {what} — {detail}", if pass { "ok" } else { "FAIL" });
 }
 
+fn digest_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,6 +872,11 @@ mod tests {
         harness.get_by_label("Cancel search").click();
         harness.step();
         assert_eq!(harness.state().display.action, FormAction::CancelSearch);
+    }
+
+    #[test]
+    fn image_digest_is_rendered_as_full_lowercase_hex() {
+        assert_eq!(digest_hex(&[0xAB; 32]), "ab".repeat(32));
     }
 
     #[test]
@@ -1123,11 +1133,11 @@ mod tests {
             panic!("cursor search worker timed out after {completed} candidate attempt(s)");
         }
         assert_eq!(app.form.cursor, "0");
-        assert!(app
-            .form
-            .notice
-            .as_deref()
-            .is_some_and(|notice| notice.contains("not proof of freshness")));
+        assert!(app.form.notice.as_deref().is_some_and(|notice| {
+            notice.contains("Unkeyed encrypted-image digest:")
+                && notice.contains("does not prove freshness")
+                && notice.contains("Re-enter the search credentials")
+        }));
         assert!(app.viewer.is_none(), "scan must not open a document");
         assert_eq!(
             std::fs::read(&path).expect("read after cursor search"),

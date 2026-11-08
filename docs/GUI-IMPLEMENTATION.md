@@ -63,7 +63,9 @@ path bytes. A collapsed first-time setup panel shows the command for creating a 
 container and explains that this viewer cannot create, edit or save it. The cursor field starts blank
 so the UI never assumes cursor zero: enter a known cursor or use **Find cursor** to search legal
 candidates through the existing read-only store scan. The search reports the first authenticating
-candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
+candidate with attempt progress and an unkeyed encrypted-image digest for comparison with other
+inspection output. The digest may correlate copies and is not proof of authenticity or freshness.
+The search clears credentials and requires them to be re-entered before opening.
 In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
 `Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
 establish freshness, uniqueness, recency or pad history and does not repair anything. The window is
