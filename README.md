@@ -344,9 +344,10 @@ a known cursor, or use **Find cursor** when it is unknown. The search checks
 legal candidates read-only, reports progress and the first one that authenticates, and can be
 cancelled between full-image attempts. The result includes an unkeyed encrypted-image digest for
 comparison with other inspection output; it can correlate copies and proves neither authenticity
-nor freshness. Each attempt reads the image and derives a key, so the search may take time. It does
-not identify the newest or only copy, establish pad history or freshness, or repair the container;
-credentials are cleared after the search and must be entered again to open it.
+nor freshness. Known-cursor opens and inspect-only output show the same digest. Each attempt reads
+the image and derives a key, so the search may take time. It does not identify the newest or only
+copy, establish pad history or freshness, or repair the container; credentials are cleared after
+the search and must be entered again to open it.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The

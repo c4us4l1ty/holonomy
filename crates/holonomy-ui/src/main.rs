@@ -16,8 +16,9 @@ use eframe::egui;
 use holonomy_core::layout::SAVES_BEFORE_DOMAIN_REUSE;
 use holonomy_core::unlock::SealedPassphrase;
 use holonomy_preview::{
-    filter_events, find_read_only_cursor, open_read_only, parse_kappa, prompt_credentials,
-    read_only_services, CursorSearch, OpenedView, ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
+    filter_events, find_read_only_cursor, format_image_digest, open_read_only, parse_kappa,
+    prompt_credentials, read_only_services, CursorSearch, OpenedView, ViewInput, READ_ONLY_LIMITS,
+    READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
 use wordcraft_engine::Session;
@@ -57,6 +58,7 @@ fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
 struct ReadOnlyWindow {
     app: WordApp,
     cursor: u64,
+    digest: [u8; 32],
     quit: bool,
     return_to_open_enabled: bool,
     return_to_open_requested: bool,
@@ -64,10 +66,16 @@ struct ReadOnlyWindow {
 }
 
 impl ReadOnlyWindow {
-    fn new(document: Document, cursor: u64, return_to_open_enabled: bool) -> Self {
+    fn new(
+        document: Document,
+        cursor: u64,
+        digest: [u8; 32],
+        return_to_open_enabled: bool,
+    ) -> Self {
         Self {
             app: WordApp::new(Session::new(document), read_only_services()),
             cursor,
+            digest,
             quit: false,
             return_to_open_enabled,
             return_to_open_requested: false,
@@ -104,6 +112,8 @@ impl eframe::App for ReadOnlyWindow {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
             ui.label(format!("Opened at cursor {}.", self.cursor));
+            ui.label("Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness):");
+            ui.monospace(format_image_digest(&self.digest));
             if self.return_to_open_enabled {
                 ui.label("Press Ctrl/Cmd+O to return to the open screen, or Ctrl/Cmd+Q to close.");
             } else {
@@ -490,14 +500,19 @@ impl ViewerApp {
             let task = self.pending.take().expect("pending task exists");
             match result {
                 WorkerResult::Open(Ok(opened)) => {
-                    self.viewer = Some(ReadOnlyWindow::new(opened.document, opened.cursor, true));
+                    self.viewer = Some(ReadOnlyWindow::new(
+                        opened.document,
+                        opened.cursor,
+                        opened.digest,
+                        true,
+                    ));
                 }
                 WorkerResult::Open(Err(error)) => self.form.error = Some(error),
                 WorkerResult::Scan(Ok(found)) => {
                     self.form.cursor = found.cursor.to_string();
-                    let digest = digest_hex(&found.digest);
+                    let digest = format_image_digest(&found.digest);
                     self.form.notice = Some(format!(
-                        "Cursor {} authenticated on attempt {}. Unkeyed encrypted-image digest: {digest}. It can correlate copies and is only for comparison; it does not prove freshness, uniqueness or pad history. Re-enter the search credentials to open.",
+                        "Cursor {} authenticated on attempt {}. Unkeyed encrypted-image digest: {digest}. It can correlate copies and is only for comparison; it does not prove authenticity, freshness, uniqueness or pad history. Re-enter the search credentials to open.",
                         found.cursor, found.attempts
                     ));
                 }
@@ -660,6 +675,10 @@ fn inspect_only(path: &Path, cursor: u64) -> ExitCode {
     println!("Container: {}", path.display());
     println!("Cursor authenticated: {}", opened.cursor);
     println!(
+        "Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness): {}",
+        format_image_digest(&opened.digest)
+    );
+    println!(
         "Wordcraft document decoded: {} body character(s); the text is not printed",
         body_characters
     );
@@ -693,6 +712,7 @@ fn view(path: &Path, cursor: u64) -> ExitCode {
             Ok(Box::new(ReadOnlyWindow::new(
                 opened.document,
                 opened.cursor,
+                opened.digest,
                 false,
             )))
         }),
@@ -778,10 +798,6 @@ fn self_check() -> ExitCode {
 
 fn report(what: &str, pass: bool, detail: &str) {
     println!("  [{}] {what} — {detail}", if pass { "ok" } else { "FAIL" });
-}
-
-fn digest_hex(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -876,7 +892,7 @@ mod tests {
 
     #[test]
     fn image_digest_is_rendered_as_full_lowercase_hex() {
-        assert_eq!(digest_hex(&[0xAB; 32]), "ab".repeat(32));
+        assert_eq!(format_image_digest(&[0xAB; 32]), "ab".repeat(32));
     }
 
     #[test]
@@ -1186,11 +1202,11 @@ mod tests {
             return_to_open_requested: true,
             dropped: 1,
         };
-        let mut interactive = ReadOnlyWindow::new(Document::new(), 0, true);
+        let mut interactive = ReadOnlyWindow::new(Document::new(), 0, [0; 32], true);
         interactive.apply_host_input(input);
         assert!(interactive.return_to_open_requested);
 
-        let mut standalone = ReadOnlyWindow::new(Document::new(), 0, false);
+        let mut standalone = ReadOnlyWindow::new(Document::new(), 0, [0; 32], false);
         standalone.apply_host_input(input);
         assert!(!standalone.return_to_open_requested);
     }
@@ -1201,6 +1217,7 @@ mod tests {
         app.viewer = Some(ReadOnlyWindow::new(
             Document::from_text("viewed text"),
             3,
+            [0; 32],
             true,
         ));
         app.viewer
@@ -1221,7 +1238,12 @@ mod tests {
 
     #[test]
     fn the_view_window_has_no_path_or_recovery_state() {
-        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 3, false);
+        let window = ReadOnlyWindow::new(
+            Document::from_text("viewed text"),
+            3,
+            [0; 32],
+            false,
+        );
         assert!(window.app.session.path.is_none());
         assert!(!window.app.session.recovery_ready());
         assert!(!window.quit);

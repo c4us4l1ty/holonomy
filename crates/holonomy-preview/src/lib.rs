@@ -87,12 +87,14 @@ fn announce_credentials() {
     );
 }
 
-/// A container opened for viewing: the decoded document and the cursor that opened it.
+/// A container opened for viewing: the decoded document, cursor, and image comparison digest.
 pub struct OpenedView {
     /// Wordcraft's model. Plaintext; it is not wiped on drop.
     pub document: Document,
     /// The cursor the caller supplied, authenticated by the store.
     pub cursor: u64,
+    /// Unkeyed encrypted-image digest; useful for comparison only and not proof of authenticity.
+    pub digest: [u8; 32],
 }
 
 /// A cursor that authenticated the encrypted image during the read-only candidate scan.
@@ -102,8 +104,14 @@ pub struct CursorSearch {
     pub cursor: u64,
     /// Full-image authentication attempts performed before finding it.
     pub attempts: u64,
-    /// Digest of the encrypted image, for comparison with other inspection output.
+    /// Unkeyed digest of the encrypted image, for comparison with other inspection output.
+    /// It may correlate copies and is not proof of authenticity, freshness or pad history.
     pub digest: [u8; 32],
+}
+
+/// Format an unkeyed encrypted-image digest as lowercase hexadecimal.
+pub fn format_image_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Search legal save cursors without writing the container or ratcheting the demo pad.
@@ -182,9 +190,14 @@ pub fn open_read_only(
     )
     .map_err(|error| error.to_string())?;
     let cursor = session.cursor();
+    let digest = *session.image_digest();
     let document = session.document().clone();
     drop(session);
-    Ok(OpenedView { document, cursor })
+    Ok(OpenedView {
+        document,
+        cursor,
+        digest,
+    })
 }
 
 /// Host services in which every persistence, export and clipboard-write path refuses.
@@ -544,6 +557,7 @@ mod tests {
             "rich content must survive the read-only path"
         );
         assert_eq!(opened.cursor, 1);
+        assert_eq!(opened.digest, found.digest);
         assert_eq!(
             std::fs::read(&path).expect("read container again"),
             before,

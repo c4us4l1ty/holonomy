@@ -20,8 +20,8 @@ use std::process::ExitCode;
 
 use eframe::egui;
 use holonomy_preview::{
-    filter_events, open_read_only, prompt_credentials, read_only_services, ViewInput,
-    READ_ONLY_LIMITS, READ_ONLY_RULE,
+    filter_events, format_image_digest, open_read_only, prompt_credentials, read_only_services,
+    ViewInput, READ_ONLY_LIMITS, READ_ONLY_RULE,
 };
 use wordcraft_doc::{Document, StoryRef};
 use wordcraft_engine::Session;
@@ -57,15 +57,19 @@ fn parse_args(args: &[OsString]) -> Result<Launch, &'static str> {
 /// The window. Holds no path, no store and no writable handle: only the document it renders.
 struct ReadOnlyWindow {
     app: WordApp,
+    cursor: u64,
+    digest: [u8; 32],
     quit: bool,
     dropped_events: usize,
 }
 
 impl ReadOnlyWindow {
-    fn new(document: Document) -> Self {
+    fn new(document: Document, cursor: u64, digest: [u8; 32]) -> Self {
         // No `enable_recovery`, no path, no profile directory: the document exists only in memory.
         Self {
             app: WordApp::new(Session::new(document), read_only_services()),
+            cursor,
+            digest,
             quit: false,
             dropped_events: 0,
         }
@@ -97,6 +101,9 @@ impl eframe::App for ReadOnlyWindow {
         egui::Panel::top("holonomy_read_only_banner").show(ui, |ui| {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
+            ui.label(format!("Opened at cursor {}.", self.cursor));
+            ui.label("Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness):");
+            ui.monospace(format_image_digest(&self.digest));
             ui.label("Press Ctrl+Q to close. The window ignores every other key and click.");
         });
         self.app.ui(ui);
@@ -141,6 +148,10 @@ fn inspect_only(path: &std::path::Path, cursor: u64) -> ExitCode {
     println!("Container: {}", path.display());
     println!("Cursor authenticated: {}", opened.cursor);
     println!(
+        "Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness): {}",
+        format_image_digest(&opened.digest)
+    );
+    println!(
         "Wordcraft document decoded: {} body character(s); the text is not printed",
         body_characters
     );
@@ -173,7 +184,13 @@ fn view(path: &std::path::Path, cursor: u64) -> ExitCode {
     match eframe::run_native(
         TITLE,
         options,
-        Box::new(move |_| Ok(Box::new(ReadOnlyWindow::new(opened.document)))),
+        Box::new(move |_| {
+            Ok(Box::new(ReadOnlyWindow::new(
+                opened.document,
+                opened.cursor,
+                opened.digest,
+            )))
+        }),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -214,7 +231,7 @@ mod tests {
     /// nothing to save even if a command were reachable.
     #[test]
     fn the_window_holds_no_file_or_recovery_state() {
-        let window = ReadOnlyWindow::new(Document::from_text("viewed text"));
+        let window = ReadOnlyWindow::new(Document::from_text("viewed text"), 0, [0; 32]);
         assert!(window.app.session.path.is_none());
         assert!(!window.app.session.recovery_ready());
         assert!(!window.quit);
