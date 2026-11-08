@@ -54,8 +54,9 @@ irreplaceable data.
 
 - Complete platform-specific durable file replacement, locking, hardware I/O,
   suspend/disconnect notifications, capture handling and memory protection; document
-  platform-specific limitations. Current saves are Unix-only and take only an advisory,
-  path-keyed lock; writers that ignore it, or reach the inode by another path, still race.
+  platform-specific limitations. Current saves are Unix-only and take only an advisory
+  sidecar lock; normalized relative paths share it and writable saves reject existing
+  hard links, but writers that ignore the lock and other alias/race cases remain.
 - Measure memory, UI responsiveness, watchdog timing and failure behavior under realistic
   workloads and constrained hardware. The PRD's resource figures are not measurements of
   the finished product.

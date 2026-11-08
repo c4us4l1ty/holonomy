@@ -84,6 +84,7 @@ impl eframe::App for ReadOnlyWindow {
         let ViewInput {
             quit_requested,
             dropped,
+            ..
         } = filter_events(raw);
         self.dropped_events = self.dropped_events.saturating_add(dropped);
         if quit_requested {

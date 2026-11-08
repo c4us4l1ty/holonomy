@@ -1,9 +1,10 @@
 //! Holonomy's unfinished integration shell around `wordcraft`.
 //!
-//! The container save path lives in `holonomy-wordcraft` and `holonomy-cli`; this crate currently
-//! reports completed store results and capture-exclusion status. Its reporting layer does not
-//! perform I/O, track pad use across containers, or prove that a reported ratchet reached hardware.
-//! The binary is still a placeholder, and this crate is not a production editor.
+//! The container save path lives in `holonomy-wordcraft` and `holonomy-cli`; this library reports
+//! completed store results and capture-exclusion status. Its reporting layer does not perform I/O,
+//! track pad use across containers, or prove that a reported ratchet reached hardware. The binary
+//! is an interactive, read-only Wordcraft viewer over a deterministic demo pad, not a production
+//! editor.
 
 #![deny(missing_docs)]
 

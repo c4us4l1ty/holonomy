@@ -1282,7 +1282,26 @@ fn save_refuses_changed_path_before_pad_access() {
         b"new path contents"
     );
     assert_eq!(std::fs::read(&moved).expect("old path"), b"original");
-    assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 2);
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("list")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "container".to_string(),
+            "container.holonomy-lock".to_string(),
+            "moved".to_string(),
+        ],
+        "stale-path refusal may leave only the persistent empty lock sidecar"
+    );
 }
 
 #[test]
@@ -1350,7 +1369,87 @@ fn a_second_save_is_refused_while_a_save_is_running() {
     drop(lock);
     save(&mut file, &mut source(), &ctx, b"after the lock").expect("save after release");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(save_lock_path(&path));
+    let _ = std::fs::remove_file(save_lock_path(&path).expect("lock path"));
+}
+
+/// Relative path spellings in the same directory must not bypass the save lock.
+#[cfg(unix)]
+#[test]
+fn save_lock_normalizes_relative_parent_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested directory");
+    let path = dir.path().join("container");
+    std::fs::write(&path, b"test").expect("container");
+    let alternate = nested.join("..").join("container");
+
+    let lock = SaveLock::acquire(&path).expect("first lock");
+    assert!(
+        SaveLock::acquire(&alternate).is_err(),
+        "canonical parent paths must resolve to the same sidecar lock"
+    );
+    drop(lock);
+}
+
+/// Save locking preserves non-UTF-8 path bytes instead of using the lossy display string.
+#[cfg(unix)]
+#[test]
+fn save_lock_preserves_non_utf8_container_name() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = std::ffi::OsString::from_vec(b"container-\xff".to_vec());
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"test").expect("container");
+    let file = ContainerFile::open(&path, false).expect("open container");
+
+    let lock = SaveLock::acquire(file.filesystem_path()).expect("native path lock");
+    let mut lock_name = path.file_name().expect("file name").to_os_string();
+    lock_name.push(".holonomy-lock");
+    assert!(dir.path().join(lock_name).is_file());
+    drop(lock);
+}
+
+/// Atomic replacement of a hard-linked container would leave a stale copy sharing pad history.
+#[cfg(unix)]
+#[test]
+fn writable_save_refuses_hardlinked_container_before_reading_pad() {
+    struct NeverReadPad;
+    impl PadSource for NeverReadPad {
+        fn window(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<pad::PadWindow, String> {
+            panic!("hard-linked container must be rejected before reading the pad")
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("hard-linked container must never be ratcheted")
+        }
+        fn can_ratchet(&self) -> bool {
+            true
+        }
+        fn describe(&self) -> String {
+            "test pad".into()
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("container");
+    let alias = dir.path().join("container-alias");
+    provision(&path, [0x19u8; SALT_BYTES], 0);
+    std::fs::hard_link(&path, &alias).expect("hard link");
+    let before = std::fs::read(&path).expect("read original");
+    let pass = SealedPassphrase::new(PASSPHRASE).expect("passphrase");
+    let mut file = ContainerFile::open(&path, true).expect("open");
+
+    let error = save(
+        &mut file,
+        &mut NeverReadPad,
+        &ctx(&pass, 1),
+        b"must not fork",
+    )
+    .expect_err("hard-linked path must not be atomically replaced");
+    assert!(error.contains("exactly one link"), "{error}");
+    assert!(error.contains("before reading the pad"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("read original"), before);
+    assert_eq!(std::fs::read(&alias).expect("read alias"), before);
 }
 
 /// A caller that already holds the lock must not deadlock against itself.
@@ -1377,7 +1476,7 @@ fn a_caller_held_lock_lets_its_own_save_proceed() {
     )
     .expect("a held lock belongs to this save");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(save_lock_path(&path));
+    let _ = std::fs::remove_file(save_lock_path(&path).expect("lock path"));
 }
 
 /// A remnant report is a directory listing: it must find the staged prefix, report each file once,
@@ -1622,6 +1721,7 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
     assert_eq!(scan.hits.len(), 1, "{scan:?}");
     assert_eq!(scan.hits[0].cursor, 2);
     assert_eq!(scan.attempts, 3, "cursors 0, 1 and 2");
+    assert!(!scan.cancelled);
     assert_eq!(
         scan.hits[0].digest,
         holonomy_session::seal::image_digest(&before),
@@ -1633,6 +1733,49 @@ fn scanning_cursors_finds_the_saved_cursor_and_writes_nothing() {
         before,
         "a scan must not write the container"
     );
+
+    // A cancellation requested during one expensive attempt stops before the next candidate.
+    struct CancelAfterWindow<'a> {
+        inner: DerivedPad,
+        cancelled: &'a std::sync::atomic::AtomicBool,
+    }
+    impl PadSource for CancelAfterWindow<'_> {
+        fn window(&mut self, kappa: &[u8; 32], cursor: u64) -> Result<pad::PadWindow, String> {
+            let window = self.inner.window(kappa, cursor);
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            window
+        }
+        fn ratchet(&mut self, _kappa: &[u8; 32], _cursor: u64) -> Result<u32, String> {
+            panic!("read-only cursor scan must not ratchet")
+        }
+        fn can_ratchet(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "cancel-after-window test pad".into()
+        }
+    }
+    let mut file = ContainerFile::open(&path, false).expect("open read-only");
+    let cancel_after_first = std::sync::atomic::AtomicBool::new(false);
+    let completed = std::sync::atomic::AtomicU64::new(0);
+    let mut cancel_pad = CancelAfterWindow {
+        inner: source(),
+        cancelled: &cancel_after_first,
+    };
+    let cancelled = scan_cursor_range_with_cancel(
+        &mut file,
+        &mut cancel_pad,
+        &ctx(&pass, 0),
+        0..1,
+        true,
+        || cancel_after_first.load(std::sync::atomic::Ordering::Relaxed),
+        |attempts| completed.store(attempts, std::sync::atomic::Ordering::Relaxed),
+    );
+    assert!(cancelled.cancelled);
+    assert_eq!(cancelled.attempts, 1);
+    assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(cancelled.hits.is_empty());
 
     // Without the early stop the whole range is tried, and still only one cursor opens.
     let mut file = ContainerFile::open(&path, false).expect("open read-only");

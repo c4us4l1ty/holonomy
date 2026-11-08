@@ -7,10 +7,13 @@ neither is suitable for sensitive or irreplaceable data.
 `crates/holonomy-ui` now has its own build/test workspace, an interactive read-only Wordcraft
 container viewer, and a status projection that consumes an actual store `SaveReport`. The viewer
 uses the preview crate's tested read-only boundary and deterministic demo pad. Its GUI masks
-credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. The
-status code is not wired into a writable editor workflow. A reported ratchet count is not
-independent proof of persistent device writes, and the store still reports pad freshness as *not
-established*.
+credentials visually, but makes no guarantee that UI allocations are memory-locked or wiped. Its
+UI tests create temporary demo containers and exercise form request preparation, the asynchronous
+read-only cursor search, and the open worker. They assert that a candidate cursor is found without
+changing bytes, credentials are cleared, and a subsequent open produces a read-only viewer. This does
+not simulate native keyboard or mouse entry; the Xvfb smoke check only verifies the open screen starts.
+The status code is not wired into a writable editor workflow. A reported ratchet count is not independent proof of
+persistent device writes, and the store still reports pad freshness as *not established*.
 
 | PRD interface goal | Current state | Work still needed |
 | --- | --- | --- |
@@ -52,7 +55,16 @@ durability, or complete recovery. Reading can update OS file-access metadata.
 
 `crates/holonomy-preview/src/bin/holonomy-rich-view.rs` was the first path where the real
 Wordcraft renderer drew a container document. `crates/holonomy-ui/src/main.rs` now exposes an
-interactive open screen as well as CLI modes from the standalone UI package. The window is
+interactive open screen as well as CLI modes from the standalone UI package. The open form accepts
+one dropped filesystem path, but never reads dropped file contents; path selection preserves native
+path bytes. A collapsed first-time setup panel shows the command for creating a disposable demo
+container and explains that this viewer cannot create, edit or save it. The cursor field starts blank
+so the UI never assumes cursor zero: enter a known cursor or use **Find cursor** to search legal
+candidates through the existing read-only store scan. The search reports the first authenticating
+candidate with attempt progress, clears credentials and requires them to be re-entered before opening.
+In the interactive viewer, `Ctrl/Cmd+O` closes the current view and returns to the open form;
+`Ctrl/Cmd+Q` closes the window. The search is cancellable between full-image attempts, but does not
+establish freshness, uniqueness, recency or pad history and does not repair anything. The window is
 one-way by construction, not by configuration:
 
 ```text
@@ -75,10 +87,11 @@ Two boundaries stand between the renderer and the host:
    submission are absent. This is deliberate: a missing hook can make Wordcraft fall back
    to another destination, so every persistence hook is present and refuses.
 2. **Input filtering.** `filter_events()` keeps pointer motion, wheel scrolling, pinch zoom
-   and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit and every pointer
-   button are dropped before Wordcraft sees the frame, so no ribbon button, context menu or
-   shortcut can reach a command. `Ctrl+Q` is the one chord the host itself honours, because
-   a keyboard-inert window still has to close.
+   and window focus. Keys, typed text, paste, copy, cut, IME, pre-edit, pointer buttons,
+   hovered files and dropped-file payloads are removed before Wordcraft sees the frame, so
+   no ribbon button, context menu, shortcut or file-open route can receive them. The host
+   consumes `Ctrl/Cmd+Q` to close and, in the interactive
+   viewer only, `Ctrl/Cmd+O` to return to the open form; neither chord reaches Wordcraft.
 
 Neither boundary is a sandbox and neither is a claim about Wordcraft's internals. The
 decoded document is plaintext in the process, the renderer allocates further copies, and

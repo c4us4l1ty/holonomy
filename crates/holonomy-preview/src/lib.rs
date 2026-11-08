@@ -7,18 +7,20 @@
 //! * every host service Wordcraft can reach is replaced by one that refuses, so a file dialog,
 //!   download, save, print or clipboard write fails loudly instead of succeeding quietly;
 //! * the raw input stream is filtered down to pointer motion, scrolling and focus. No key, text,
-//!   paste or button event ever reaches the app, so no command that could edit, export or copy can
-//!   be invoked from the window.
+//!   paste or button event reaches the app, and hovered/dropped file payloads are cleared, so no
+//!   command that could edit, export, copy or open another file can be invoked from the window.
 //!
 //! Both are tested here. Neither is a sandbox: the decoded document is plaintext in this process,
 //! the renderer may allocate copies of it, and the operating system can expose them.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc;
 
 use eframe::egui;
 use holonomy_cli::document::DocumentSessionOptions;
 use holonomy_cli::store::pad::DerivedPad;
+use holonomy_cli::store::{self, ContainerFile, SaveContext};
 use holonomy_core::unlock::{SealedPassphrase, Topology};
 use holonomy_wordcraft::editor::EditorSession;
 use wordcraft_doc::Document;
@@ -91,6 +93,71 @@ pub struct OpenedView {
     pub document: Document,
     /// The cursor the caller supplied, authenticated by the store.
     pub cursor: u64,
+}
+
+/// A cursor that authenticated the encrypted image during the read-only candidate scan.
+#[derive(Debug)]
+pub struct CursorSearch {
+    /// The first cursor in the legal range that opened the container.
+    pub cursor: u64,
+    /// Full-image authentication attempts performed before finding it.
+    pub attempts: u64,
+    /// Digest of the encrypted image, for comparison with other inspection output.
+    pub digest: [u8; 32],
+}
+
+/// Search legal save cursors without writing the container or ratcheting the demo pad.
+///
+/// Each attempt reads and authenticates the complete container and derives its key, so this can be
+/// slow. Cancellation is checked between attempts. The first match is not proof of freshness,
+/// uniqueness, latest-copy status or pad history; the scan is a viewer convenience, not recovery.
+pub fn find_read_only_cursor(
+    path: &Path,
+    passphrase: SealedPassphrase,
+    kappa: [u8; 32],
+    cancelled: &AtomicBool,
+    completed_attempts: &AtomicU64,
+) -> Result<CursorSearch, String> {
+    let mut file = ContainerFile::open(path, false)
+        .map_err(|error| format!("opening {} for cursor search: {error}", path.display()))?;
+    let mut pad = DerivedPad::new();
+    let kappa = Zeroizing::new(kappa);
+    let options = DocumentSessionOptions::new(0, false, Topology::UmbilicalUsb);
+    let context = SaveContext {
+        passphrase: &passphrase,
+        kappa_usb: &kappa,
+        topology: Topology::UmbilicalUsb,
+        params: options.params(),
+        cursor: 0,
+    };
+    let scan = store::scan_cursors_with_progress(
+        &mut file,
+        &mut pad,
+        &context,
+        true,
+        cancelled,
+        completed_attempts,
+    );
+    if scan.cancelled {
+        return Err(format!(
+            "cursor search cancelled between attempts after {}; no bytes were written and the pad was not ratcheted",
+            scan.attempts
+        ));
+    }
+    let hit = scan.hits.into_iter().next().ok_or_else(|| {
+        format!(
+            "no cursor authenticated after {} attempt(s); last refusal: {}",
+            scan.attempts,
+            scan.last_error
+                .as_deref()
+                .unwrap_or("no candidate was attempted")
+        )
+    })?;
+    Ok(CursorSearch {
+        cursor: hit.cursor,
+        attempts: scan.attempts,
+        digest: hit.digest,
+    })
 }
 
 /// Open a container **read-only** and decode its Wordcraft document.
@@ -177,10 +244,13 @@ pub fn read_only_services() -> Services {
 }
 
 /// What the input filter did with one frame.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewInput {
     /// The user asked to quit with Ctrl+Q (or Cmd+Q). The app never sees that chord.
     pub quit_requested: bool,
+    /// The user asked to return to the interactive open screen with Ctrl+O (or Cmd+O).
+    /// The document app never sees that chord.
+    pub return_to_open_requested: bool,
     /// How many events were discarded. Never printed per frame; useful in tests and diagnostics.
     pub dropped: usize,
 }
@@ -188,12 +258,15 @@ pub struct ViewInput {
 /// Reduce a frame's input to viewing only.
 ///
 /// Kept: pointer motion, wheel scrolling, pinch zoom and window focus. Everything else -- keys,
-/// typed text, paste, copy, cut, IME, pre-edit and every pointer button -- is dropped, so no click
-/// can press a ribbon button and no chord can reach a command. Ctrl+Q is honoured here, in the
-/// host's own filter, because a keyboard-inert window still has to be closable.
+/// typed text, paste, copy, cut, IME, pre-edit, pointer buttons, and hovered/dropped file data --
+/// is dropped, so no input can reach a Wordcraft command or file-open route. Ctrl/Cmd+Q closes the
+/// viewer; Ctrl/Cmd+O returns to the interactive open screen. Both are handled by the host filter.
 pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
     let mut outcome = ViewInput::default();
     let total = raw.events.len();
+    let file_events = raw.hovered_files.len() + raw.dropped_files.len();
+    raw.hovered_files.clear();
+    raw.dropped_files.clear();
     let mut kept = Vec::with_capacity(total);
     for event in std::mem::take(&mut raw.events) {
         match event {
@@ -203,6 +276,12 @@ pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
                 modifiers,
                 ..
             } if modifiers.command || modifiers.ctrl => outcome.quit_requested = true,
+            egui::Event::Key {
+                key: egui::Key::O,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.command || modifiers.ctrl => outcome.return_to_open_requested = true,
             egui::Event::PointerMoved(_)
             | egui::Event::MouseWheel { .. }
             | egui::Event::Zoom(_)
@@ -210,7 +289,7 @@ pub fn filter_events(raw: &mut egui::RawInput) -> ViewInput {
             _ => {}
         }
     }
-    outcome.dropped = total - kept.len();
+    outcome.dropped = total - kept.len() + file_events;
     raw.events = kept;
     outcome
 }
@@ -222,6 +301,28 @@ mod tests {
 
     use holonomy_wordcraft::BridgeError;
     use wordcraft_doc::Block;
+
+    #[derive(Debug)]
+    struct TestDroppedFile;
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &Path {
+            Path::new("dropped-container")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("the viewer filter must not read dropped contents".into())
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn bytes_async(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + '_>>
+        {
+            Box::pin(async { Err("the viewer filter must not read dropped contents".into()) })
+        }
+    }
 
     fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {
@@ -297,7 +398,7 @@ mod tests {
         );
     }
 
-    /// The input boundary: viewing survives, everything that could edit or copy does not.
+    /// The input boundary: viewing survives, while edits, clipboard operations and file drops do not.
     #[test]
     fn input_filter_keeps_viewing_and_drops_editing() {
         let mut raw = egui::RawInput {
@@ -313,14 +414,19 @@ mod tests {
                 egui::Event::Zoom(1.1),
                 egui::Event::WindowFocused(true),
             ],
+            hovered_files: vec![Default::default()],
+            dropped_files: vec![Arc::new(TestDroppedFile)],
             ..Default::default()
         };
         let outcome = filter_events(&mut raw);
         assert!(!outcome.quit_requested);
+        assert!(!outcome.return_to_open_requested);
         assert_eq!(
-            outcome.dropped, 6,
-            "keys, text, paste, copy, cut and clicks"
+            outcome.dropped, 8,
+            "keys, text, paste, copy, cut, clicks and file drag/drop data"
         );
+        assert!(raw.hovered_files.is_empty());
+        assert!(raw.dropped_files.is_empty());
         assert_eq!(
             raw.events,
             vec![
@@ -331,6 +437,22 @@ mod tests {
             ],
             "scrolling and focus survive; nothing else does"
         );
+    }
+
+    /// Ctrl+O requests navigation without sending an open command to Wordcraft.
+    #[test]
+    fn return_to_open_chord_is_handled_by_the_filter_only() {
+        for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::COMMAND] {
+            let mut raw = egui::RawInput {
+                events: vec![key(egui::Key::O, modifiers)],
+                ..Default::default()
+            };
+            let outcome = filter_events(&mut raw);
+            assert!(outcome.return_to_open_requested);
+            assert!(!outcome.quit_requested);
+            assert_eq!(outcome.dropped, 1);
+            assert!(raw.events.is_empty(), "the chord must not reach Wordcraft");
+        }
     }
 
     /// Ctrl+Q closes the window, and the app still never sees a key event.
@@ -396,6 +518,26 @@ mod tests {
         drop(session);
 
         let before = std::fs::read(&path).expect("read container");
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let completed = std::sync::atomic::AtomicU64::new(0);
+        let found = find_read_only_cursor(&path, pass(), kappa, &cancelled, &completed)
+            .expect("read-only cursor search");
+        assert_eq!(found.cursor, 1);
+        assert_eq!(found.attempts, 2, "the scan checks cursors zero and one");
+        assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            std::fs::read(&path).expect("read after cursor search"),
+            before,
+            "cursor search must not change the container"
+        );
+        let cancel_now = std::sync::atomic::AtomicBool::new(true);
+        let no_progress = std::sync::atomic::AtomicU64::new(0);
+        assert!(
+            find_read_only_cursor(&path, pass(), kappa, &cancel_now, &no_progress)
+                .expect_err("pre-cancelled scan")
+                .contains("cancelled between attempts")
+        );
+        assert_eq!(no_progress.load(std::sync::atomic::Ordering::Relaxed), 0);
         let opened = open_read_only(&path, 1, pass(), kappa).expect("read-only open");
         assert!(
             opened.document.same_content(&original),

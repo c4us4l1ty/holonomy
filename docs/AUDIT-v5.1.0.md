@@ -25,13 +25,14 @@ read-only Wordcraft viewer; writable editor integration remains deferred. The UI
 entrypoint's build and CLI help, not a production editor or release gate. The historical test counts
 and gate statements below refer to the earlier audit baseline, not the current branch.
 
-**Update, 2026-11-07 (interactive UI):** the no-argument launch now opens a form for a container
-path, cursor and visually masked demo credentials, then attempts the same read-only open used by the
-CLI modes. The UI job in run `42368195864` on commit `21893f0` passed its tests, launcher-help
-check, Xvfb screen-start smoke test, Clippy and UI formatting. That smoke test proves the screen
-starts; it does **not** submit the form or prove a container was opened through the GUI. The rest of
-the Audit run remained in progress at last check. Neither result is a release gate or evidence of
-production readiness.
+**Update, 2026-11-07 (interactive UI):** the no-argument launch opens a form for a container path,
+cursor and visually masked demo credentials, then attempts the same read-only open as the CLI modes.
+The UI job in run `42371537182` on commit `149aff7` passed 12 tests, launcher-help checks, the Xvfb
+screen-start smoke test, Clippy and UI formatting. One test creates a temporary demo container,
+exercises form request preparation and the async open worker, then verifies a read-only viewer and
+unchanged container bytes. It does not drive native keyboard or mouse input; the Xvfb smoke only
+proves screen startup. The other Audit jobs were still in progress at last check. This is scoped
+validation, not a release gate or evidence of production readiness.
 
 | # | checkpoint | verdict |
 | :-: | :--- | :--- |
@@ -481,26 +482,38 @@ Four jobs, all green on `main`:
 | `invariant gates` | 15 named tests, one per claim in §2–§7, each run individually so a failure names the claim it broke |
 | `memory envelope` | the documented 180/440 MiB envelope fits a 2 GiB host, and the old 16.60 MiB claim is rejected as an understatement |
 
-The items in §1–§7 marked **Pass** above are the ones this covers. There are **182 `#[test]`
-functions**, of which 164 run in CI — the 18 in `holonomy-ui` are in the crate that does not link
-here, and the audit counts them rather than pretending they run.
+The items in §1–§7 marked **Pass** above are the ones this covers. There are **183 `#[test]`
+functions: 164 in the core-workspace CI job and 19 in the separately built `holonomy-ui` crate.
+They are not all invoked by one Cargo workspace command, but the UI tests have their own workflow.
 
 ### UI tests have a separate, limited scope
 
 At the original audit baseline, the `holonomy-ui` tests had not executed; that statement is now
-superseded by the update above. The current UI crate has 10 unit tests, and the dedicated UI job has
-run them. They cover parts of the status shell, capture reporting, launcher parsing, and the open
-form's credential-field clearing. They do not prove the GUI form can open a container end-to-end,
-and they are not evidence for the cryptographic, device, recovery, or durability claims in §1–§7.
+superseded by the update above. The current UI crate has 19 unit tests. UI job `42398906778` passed
+the previous 17-test source, including cursor search, progress, feedback invalidation, worker
+cancellation and Ctrl/Cmd+O return navigation. Run `42400134106` exposed egui's trait-based dropped
+file API; run `42400460346` then passed the 18-test UI suite, launcher help and interactive
+open-screen smoke, but failed formatting. Commit `cd38df4` applies CI's formatting diff. Run
+`42401655561` passed the 19-test suite, launcher help and open-screen smoke, but Clippy rejected the
+hand-written `OpenForm::default`; commit `d8b0bbd` derives it. Run `42402133433` then passed UI tests, smokes and lint, plus preview build, tests, smokes and lint,
+but both separate-workspace format checks required moving the wasm-only test method's opening brace
+to a separate line. In run `42445571950`, the UI tests, launcher smoke, screen smoke and lint passed,
+but its formatter additionally requested a single-line dropped-file fixture; that adjustment is now
+applied. The preview formatting step in that run has not completed, so the current formatting fixes
+are still awaiting CI. These tests cover parts of the status shell, capture reporting, launcher
+parsing, cursor-boundary validation, credential clearing, keyboard and file-drop filtering, and the
+asynchronous search/open path. That path uses synthetic credentials and temporary demo containers; it
+does not simulate native widget input. These tests are not evidence for the cryptographic, device,
+recovery, or durability claims in §1–§7.
 
 ### Deferred, with the reason
 
-* **`holonomy-ui` does not build in this sandbox.** It needs `crates.io` *and* wordcraft's pinned
-  `craft-*` git dependencies. The four `wordcraft` symbol claims in §1 are therefore checked by
-  inspection against the upstream manifests, not by the compiler. When it does build, the
-  measured-RSS gate in the workflow stops being a placeholder.
-* **The measured RSS gate** is a `--check` invocation that does not yet exist, because the binary
-  that would run it is the one that does not link here.
+* **The original UI build deferral is superseded.** Dedicated GitHub Actions jobs now build/test the
+  standalone UI, preview and Wordcraft bridge. The bridge job checks selected APIs, not every editor
+  integration route or rich-document preservation; see the UI scope above and the release roadmap.
+* **The measured RSS gate is limited.** CI measures peak RSS for the CLI `--check` self-check and
+  enforces its ceiling, but that does not measure the complete opened Wordcraft UI, its document,
+  renderer allocations or OS copies. Editor-wide memory use remains unvalidated.
 * **`O_DIRECT` and the real ratchet path** need a block device; the tests use
   `target/usb-scratch/` because tmpfs rejects `O_DIRECT`. A CI runner's filesystem may not honour it
   either, so that test is marked as host-dependent in its own docs.

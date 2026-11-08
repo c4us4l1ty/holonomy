@@ -43,6 +43,10 @@ eframe = { version = "0.37", default-features = false, features = ["default_font
 libc = "0.2"
 zeroize = "1.8"
 
+[dev-dependencies]
+holonomy-wordcraft = { path = "../holonomy-wordcraft" }
+tempfile = "3"
+
 # Windows-only import for `SetWindowDisplayAffinity`; macOS uses `NSWindow.sharingType`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

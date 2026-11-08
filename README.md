@@ -40,9 +40,10 @@ those documents are historical and code and current CI results govern implementa
 | Pad budget | Provisioning starts at cursor 0; saves reject cursors 54 and above. This conservative bound is **not** durable pad accounting and cannot detect reuse across containers or restored backups. |
 
 Unix staged saves replace the file inode. They preserve its permission bits, but may not preserve
-ownership, ACLs, extended attributes, hard links, or other filesystem metadata. Saves take an
-advisory lock on a `*.holonomy-lock` sidecar, which refuses a second Holonomy save but cannot stop
-a program that ignores it or one that reaches the same inode by another path; it is coordination,
+ownership, ACLs, extended attributes, or other filesystem metadata; writable saves now refuse a
+container with multiple hard links to avoid leaving a stale fork. Saves take an advisory lock on a
+`*.holonomy-lock` sidecar, normalizing the parent directory so relative-path spellings share the
+lock. The lock cannot stop a program that ignores it or all aliases/races, so it is coordination,
 not a guarantee. Provisioning is not crash-atomic. Always keep independently tested backups
 together with the pad material needed to open them.
 
@@ -323,15 +324,26 @@ procedure: it cannot tell you whether the container is readable, and a listing d
 rejected save safe to repeat. Delete a remnant only after deciding it is not the copy you need.
 
 A read-only Wordcraft window can render a container's document without offering any way to change
-or export it. The standalone UI binary opens an interactive screen with no arguments, or accepts
+or export it. In the interactive open form, enter a path or drop exactly one filesystem file; only
+its path is used, never its dropped contents. File-drop data is cleared before it can reach Wordcraft
+in the read-only viewer. The standalone UI binary opens an interactive screen with no arguments, or accepts
 `--view PATH CURSOR` and `--inspect-only PATH CURSOR`; the preview alias `holonomy-rich-view` has
 the same command-line modes. CLI modes use hidden terminal prompts; the interactive screen masks
 credentials visually but does not guarantee that all UI allocations are locked or wiped. Every
 mode uses the deterministic demo pad, not physical USB. The renderer drops editing input and every
-host hook that could save, print, download or write the clipboard refuses. Press Ctrl+Q to close.
-Decoding performs no write and no ratchet, but the document is plaintext in memory and capture
+host hook that could save, print, download or write the clipboard refuses. In the interactive viewer,
+Ctrl/Cmd+O returns to the open form and Ctrl/Cmd+Q closes; the standalone `--view` mode supports
+Ctrl/Cmd+Q to close. Decoding performs no write and no ratchet, but the document is plaintext in memory and capture
 exclusion, editor-wide memory locking, and the watchdog are not integrated. This is a viewing aid,
 not a protected reader.
+
+The interactive screen includes a collapsed first-time setup panel with the command to create a
+disposable demo container. It leaves the cursor blank rather than assuming cursor 0 is correct. Enter
+a known cursor, or use **Find cursor** when it is unknown. The search checks
+legal candidates read-only, reports progress and the first one that authenticates, and can be
+cancelled between full-image attempts. Each attempt reads the image and derives a key, so the search
+may take time. It does not identify the newest or only copy, establish pad history or freshness, or repair the
+container; credentials are cleared after the search and must be entered again to open it.
 
 To authenticate a single candidate without printing its document bytes, use
 `holonomy verify /path/to/container --cursor N` and answer the hidden credential prompts. The
