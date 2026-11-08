@@ -102,7 +102,9 @@ impl eframe::App for ReadOnlyWindow {
             ui.colored_label(egui::Color32::from_rgb(190, 35, 35), READ_ONLY_RULE);
             ui.colored_label(egui::Color32::GRAY, READ_ONLY_LIMITS);
             ui.label(format!("Opened at cursor {}.", self.cursor));
-            ui.label("Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness):");
+            ui.label(
+                "Unkeyed encrypted-image digest (comparison only; may correlate copies; not proof of authenticity or freshness):",
+            );
             ui.monospace(format_image_digest(&self.digest));
             ui.label("Press Ctrl+Q to close. The window ignores every other key and click.");
         });
