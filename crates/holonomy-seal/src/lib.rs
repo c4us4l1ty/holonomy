@@ -27,16 +27,26 @@ mod envelope;
 mod kdf;
 mod rng;
 
+mod calibrate;
+mod error;
+mod lock;
+mod passphrase;
+mod secret;
+
+pub use calibrate::{
+    calibrate, select_params, Calibration, KdfParamsRecord, FENCE_MAX_KIB, FENCE_MIN_KIB,
+    TARGET_BAND_MS,
+};
 pub use capability::{DEMKey, UnwrapKey};
 pub use envelope::{Capsule, EnvelopeError, HybridCiphertext, HybridKem, MlKem1024X25519};
 pub use error::SealError;
 pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
+pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
+pub use passphrase::{PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES};
 
 /// The boundary law, carried in code so it is compiled, not just quoted.
 pub const BOUNDARY_LAW: &str =
     "key material crosses one boundary, held only behind capability tokens";
-
-mod error;
 
 use commit::{open_committed, seal_committed, CommittedCiphertext};
 use zeroize::Zeroizing;

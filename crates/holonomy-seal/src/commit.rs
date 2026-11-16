@@ -70,15 +70,6 @@ pub enum AeadError {
     CommitmentMismatch,
     /// The AEAD tag did not match after a matching commitment.
     AuthenticationFailed,
-    /// The plaintext buffer was too small for the output.
-    OutputTooSmall,
-    /// The plaintext does not fit the fixed-length field it is destined for.
-    TooLarge {
-        /// Bytes offered.
-        offered: usize,
-        /// Bytes available.
-        capacity: usize,
-    },
 }
 
 impl core::fmt::Display for AeadError {
@@ -86,13 +77,6 @@ impl core::fmt::Display for AeadError {
         match self {
             Self::CommitmentMismatch => f.write_str("CMT-4 commitment mismatch"),
             Self::AuthenticationFailed => f.write_str("AEAD authentication failed"),
-            Self::OutputTooSmall => f.write_str("output buffer too small"),
-            Self::TooLarge { offered, capacity } => {
-                write!(
-                    f,
-                    "plaintext of {offered} bytes does not fit {capacity} bytes of field"
-                )
-            }
         }
     }
 }

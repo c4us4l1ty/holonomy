@@ -64,7 +64,6 @@ impl From<AeadError> for SealError {
         match e {
             AeadError::CommitmentMismatch => Self::CommitmentMismatch,
             AeadError::AuthenticationFailed => Self::AuthenticationFailed,
-            AeadError::TooLarge { .. } | AeadError::OutputTooSmall => Self::BadEncoding,
         }
     }
 }

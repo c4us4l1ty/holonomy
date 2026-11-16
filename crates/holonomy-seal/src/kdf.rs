@@ -113,6 +113,26 @@ pub fn derive_root_secret(
     Ok(RootSecret(out))
 }
 
+/// Stage 1, replayed: derive under an *explicit* recorded parameter set.
+///
+/// This is how a container created on a calibrated host opens on any other machine: the
+/// header (Block 3) stores the [`crate::calibrate::KdfParamsRecord`]; open replays it. Direct
+/// param selection bypasses the fence and is therefore crate-internal on purpose — the only
+/// calibrated producer is [`crate::calibrate::calibrate`].
+pub fn derive_root_secret_with(
+    passphrase: &[u8],
+    salt: &[u8; DERIVE_SALT_BYTES],
+    params: &crate::calibrate::KdfParamsRecord,
+) -> Result<RootSecret, KdfError> {
+    let p = Params::new(params.m_kib, params.t, params.p, Some(ROOT_SECRET_BYTES))
+        .map_err(|_| KdfError::InvalidParams)?;
+    let mut out = [0u8; ROOT_SECRET_BYTES];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, p)
+        .hash_password_into(passphrase, salt, &mut out)
+        .map_err(|_| KdfError::Argon2Failed)?;
+    Ok(RootSecret(out))
+}
+
 /// A 32-byte subkey, zeroized on drop.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Subkey(pub [u8; 32]);
