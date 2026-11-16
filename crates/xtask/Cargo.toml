@@ -12,4 +12,3 @@ workspace = true
 
 [dependencies]
 holonomy-ledger = { path = "../holonomy-ledger" }
-holonomy-ledger = { path = "../holonomy-ledger" }
