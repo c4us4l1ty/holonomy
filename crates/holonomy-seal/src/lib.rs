@@ -10,7 +10,8 @@
 //! > (two-phase, non-circular, audit-proven) is inherited; the mandatory USB pad is not.
 
 /// The boundary law, carried in code so it is compiled, not just quoted.
-pub const BOUNDARY_LAW: &str = "key material crosses one boundary, held only behind capability tokens";
+pub const BOUNDARY_LAW: &str =
+    "key material crosses one boundary, held only behind capability tokens";
 
 #[cfg(test)]
 mod tests {

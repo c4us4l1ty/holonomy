@@ -32,7 +32,10 @@ pub struct Summary {
 ///
 /// Panics if `samples` is zero.
 pub fn measure<T>(samples: usize, mut f: impl FnMut() -> T) -> Summary {
-    assert!(samples > 0, "a distribution over zero runs measures nothing");
+    assert!(
+        samples > 0,
+        "a distribution over zero runs measures nothing"
+    );
     let mut runs = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = Instant::now();

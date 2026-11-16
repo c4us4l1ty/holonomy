@@ -10,7 +10,8 @@
 //! > tail bytes (L-10).
 
 /// The append-only law, carried in code so it is compiled, not just quoted.
-pub const APPEND_ONLY_LAW: &str = "writes append sealed segments and commit a witness; nothing overwrites, nothing precedes the chain";
+pub const APPEND_ONLY_LAW: &str =
+    "writes append sealed segments and commit a witness; nothing overwrites, nothing precedes the chain";
 
 #[cfg(test)]
 mod tests {

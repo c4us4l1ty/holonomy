@@ -15,7 +15,12 @@ const USAGE: &str = "usage: cargo run -p xtask -- gates [--check]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["gates"] => match write_gates() {
             Ok(path) => {
                 println!("wrote {}", path.display());

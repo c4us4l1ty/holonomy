@@ -12,7 +12,8 @@
 //! glyph is GATES law **L-8**. Until then, this crate is the place that law lives.
 
 /// The single-geometry law, carried in code so it is compiled, not just quoted.
-pub const SINGLE_GEOMETRY_LAW: &str = "paint and hit-test consume one layout run tree; no second geometry may exist";
+pub const SINGLE_GEOMETRY_LAW: &str =
+    "paint and hit-test consume one layout run tree; no second geometry may exist";
 
 #[cfg(test)]
 mod tests {

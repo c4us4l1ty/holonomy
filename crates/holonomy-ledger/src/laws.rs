@@ -131,7 +131,10 @@ mod tests {
     fn ids_are_unique_and_well_formed() {
         for (i, law) in LAWS.iter().enumerate() {
             let expected = format!("L-{}", i + 1);
-            assert_eq!(law.id, expected, "ids are contiguous from L-1, never reused");
+            assert_eq!(
+                law.id, expected,
+                "ids are contiguous from L-1, never reused"
+            );
         }
         let mut seen: Vec<&str> = LAWS.iter().map(|l| l.id).collect();
         let count = seen.len();

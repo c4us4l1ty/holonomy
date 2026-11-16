@@ -10,7 +10,8 @@
 //! > counting allocator), and latency is invariant in document length.
 
 /// The eyes-only law, carried in code so it is compiled, not just quoted.
-pub const EYES_ONLY_LAW: &str = "plaintext is bounded by the viewport, wiped on exit, and document length never enters the memory equation";
+pub const EYES_ONLY_LAW: &str =
+    "plaintext is bounded by the viewport, wiped on exit, and document length never enters the memory equation";
 
 #[cfg(test)]
 mod tests {

@@ -20,7 +20,7 @@
 //! allocations from sibling tests being attributed to them. The integration tests that prove
 //! this machinery are arranged that way on purpose.
 
-use core::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout, System};
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -130,7 +130,10 @@ pub fn claim_quiet<T>(f: impl FnOnce() -> T) -> T {
     let before = AllocStats::snapshot();
     let out = f();
     let delta = before.delta(&AllocStats::snapshot());
-    assert!(delta.allocations == 0, "allocation-free claim failed: {delta}");
+    assert!(
+        delta.allocations == 0,
+        "allocation-free claim failed: {delta}"
+    );
     out
 }
 
