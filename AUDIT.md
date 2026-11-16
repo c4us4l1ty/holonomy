@@ -48,3 +48,8 @@ Listed so they stay dead.
 - **2026-11-16** — Block 1 ground laid: workspace unified (the v5 fork-exile failure closed),
   gates machinery in `holonomy-ledger`, this protocol instituted, RFC-001…004 filed as
   attack targets, UI spec filed *before* UI code (the H1 inversion corrected).
+- **2026-11-16** — Block 1 gates **passed** (CI all green). Process notes recorded for later
+  blocks: (a) counting-allocator proofs must live in binaries that *install* the allocator —
+  the first unit-test version measured nothing and CI caught it; the same honesty rule
+  applies to every future gate; (b) the diagnostics bridge (issue #51) remains in CI,
+  dormant unless a step fails.
