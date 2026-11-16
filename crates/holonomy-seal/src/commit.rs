@@ -157,11 +157,6 @@ pub fn open_committed(
     Ok(Zeroizing::new(plain))
 }
 
-/// Scrub a buffer, wrapping `zeroize` so call sites cannot forget the compiler fence.
-pub fn scrub(buf: &mut [u8]) {
-    buf.zeroize();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,12 +241,5 @@ mod tests {
         let c = seal_committed(&k, &n, b"", b"ours");
         let p = open_committed(&k, &n, b"", &c).unwrap();
         assert_eq!(&p[..], b"ours");
-    }
-
-    #[test]
-    fn scrub_zeroes() {
-        let mut b = b"plaintext".to_vec();
-        scrub(&mut b);
-        assert!(b.iter().all(|&x| x == 0));
     }
 }
