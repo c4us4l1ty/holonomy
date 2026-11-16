@@ -1,0 +1,78 @@
+# HOLONOMY v6 — THREAT MODEL
+*Status: Block 1 working canon. Versioned with the repo; changes require an AUDIT.md entry.*
+
+This is the legal system the rest of v6 is built under. It says what we protect, against
+whom, at which moments — and, just as importantly, what we **refuse to pretend** to protect.
+A protection that cannot name its attack is decorative, and the v5.0-OMEGA audit showed what
+decorative costs.
+
+## 1. The asset
+
+1. **Document plaintext, at rest** — the `.wavefunction` file, in cloud copies, on any disk.
+2. **Document plaintext, in use** — the resident plaintext slabs while editing.
+3. **Passphrase and derived key material** — `K_unwrap`, `K_DEM`, slab keys.
+4. **Editing metadata with causal value** — undo history, write times, file growth shape.
+5. **History** — the world-line is the asset. Protecting "the document" without protecting
+   every draft is protection theater.
+
+## 2. The adversaries
+
+| ID | Adversary | What they can do | In scope? |
+| -- | --------- | ---------------- | --------- |
+| A1 | **Archive & wait** | Copy `.wavefunction` today (disk, cloud breach, interception); attack it later, including with quantum hardware (harvest-now-decrypt-later) | **Yes** — the core case |
+| A2 | **Live-memory intruder** | Read RAM while the editor runs (post-exploit, forensic live capture, cold boot) | **Yes** — bounding this is the singularity |
+| A3 | **OS-level observer** | Read clipboard, swap, crash dumps, page cache, thumbnails, IME/AT text events | **Yes, partially** — mitigations per platform; see §5 |
+| A4 | **Cloud integrity attacker** | Truncate, reorder, or flip bytes in the synced copy | **Yes** — detectability is mandatory, rollback is a format property |
+| A5 | **Online brute forcer** | Unlimited offline KDF attempts against a stolen file | **Yes** — cost is the defense (memory-hard KDF + PQ envelope), not secrecy of the format |
+| A6 | **Physical observer / hardware implant** | Cameras reading the screen, keyloggers below the OS input API, compromised firmware | **No** — stated openly, not pretended away |
+
+## 3. Boundaries of trust
+
+v6 trusts, in order of decreasing trust:
+
+1. **The Rust process itself** — and inside it, only `holonomy-seal` holds key material,
+   enforced by capability tokens (RFC-001) so the compiler polices the inner boundary.
+2. **The OS kernel** — memory isolation, secure erase of freed pages, suspend notifications.
+   We *use* kernel facilities (`memfd_secret`, `mlock`+`MADV_DONTDUMP`, `VirtualLock`) and
+   honestly surface on the Security panel when a platform denies them.
+3. **The GPU/compositor (GPUI pipeline)** — pixels of the page being viewed are, at paint
+   time, observable by definition. We bound this by law L-2: it is the viewport only.
+
+**Explicitly distrusted:** disk state (sealed), cloud copies (sealed + verified), the
+clipboard (egress door — flagged confidential, cleared on blur), crash infrastructure
+(core dumps disabled; plaintext pages marked `DONTDUMP`/`DONTFORK`).
+
+## 4. Invariant moments
+
+The threat model bites hardest at specific instants; each has a designated behavior:
+
+- **Open:** plaintext delta is the viewport neighborhood (L-2), never the file (RFC-002).
+- **Scroll/edit:** slabs wipe as they exit residency; keystrokes allocate zero (L-2).
+- **Save:** append sealed segments, commit witness atomically; power loss bounded (L-6).
+- **Blur/lock:** plaintext pages shed residency and wipe; clipboard cleared (Block 9).
+- **Suspend/quit/tripwire:** L-7 verified wipe — wipe set is the (bounded) resident set, so
+  the v5 problem of a 180 MiB wipe exceeding its budget is deleted by construction.
+- **Copy to a new machine:** the whole security decision travels as *one passphrase* — A1's
+  file reveals nothing without it (L-9).
+
+## 5. Honest residual list (what we do NOT claim)
+
+Recorded so no future version quietly upgrades these into claims:
+
+- A live kernel-level adversary can in principle read the viewport's painted plaintext. We
+  shrink it to the screen, we do not pretend it is zero.
+- A3 mitigations vary by OS; the Security panel reports the actual ladder rung, not the wish.
+- Timing side channels on the KDF (wrong-passphrase latency) are bounded to a fixed cost
+  profile; nothing beyond that uniformity is claimed.
+- **Undo history doubles as exposure history**: the world-line keeps old drafts by design
+  (Vision III). Opt-in compaction (RFC-002 §7) is the user's control over that tradeoff.
+
+## 6. Registry: law → adversary
+
+| Law | Serves adversary case |
+| --- | --------------------- |
+| L-1, L-6, L-10 | A4 (integrity), A1 (sealed growth) |
+| L-2 | A2, A3 |
+| L-7 | A2 |
+| L-8 | (correctness law — integrity of intent, not confidentiality) |
+| L-9 | A1 + usability: security that requires hardware excludes most users |
