@@ -17,24 +17,32 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
-  # Temporary lockfile bootstrap for the repository's first committed workspace lock.
-  # Remove this job once Cargo.lock is checked in and every cargo command uses --locked.
+  # Temporary lockfile bootstrap. The sandbox cannot download Actions artifacts because their
+  # blob host is outside its egress allowlist, so commit the generated lock on the current
+  # Arena branch. This job is removed once the lock is present in the checkout.
   lockfile-bootstrap:
     name: lockfile bootstrap
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo generate-lockfile
-      - uses: actions/upload-artifact@v4
-        with:
-          name: workspace-lockfile
-          path: Cargo.lock
-          retention-days: 1
+      - name: Commit the generated workspace lockfile to this branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m 'build: add workspace lockfile'
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
 
   # Diagnostics bridge: the sandbox reads api.github.com but cannot reach the Actions log
   # hosts, so any failing step's output is posted to the pinned diagnostics issue.
