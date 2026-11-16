@@ -118,8 +118,11 @@ pub fn calibrate() -> Calibration {
 
     let start = Instant::now();
     let mut out = [0u8; ROOT_SECRET_BYTES];
-    let result = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(PROBE_PW, &PROBE_SALT, &mut out);
+    let result = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hash_password_into(
+        PROBE_PW,
+        &PROBE_SALT,
+        &mut out,
+    );
     let probe_ms = start.elapsed().as_millis() as u64;
 
     match result {

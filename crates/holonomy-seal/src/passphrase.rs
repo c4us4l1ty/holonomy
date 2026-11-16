@@ -94,7 +94,10 @@ mod tests {
 
     #[test]
     fn empty_and_oversize_are_refused() {
-        assert_eq!(PassphraseInput::new("").unwrap_err(), PassphraseError::Empty);
+        assert_eq!(
+            PassphraseInput::new("").unwrap_err(),
+            PassphraseError::Empty
+        );
         let long = "a".repeat(MAX_PASSPHRASE_BYTES + 1);
         assert!(matches!(
             PassphraseInput::new(&long),

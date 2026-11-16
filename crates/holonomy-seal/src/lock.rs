@@ -319,7 +319,9 @@ mod tests {
     #[test]
     fn claims_do_not_overclaim() {
         assert!(LockCapability::Resident.claim().contains("dumpable"));
-        assert!(LockCapability::ResidentNoDump.claim().contains("core dumps"));
+        assert!(LockCapability::ResidentNoDump
+            .claim()
+            .contains("core dumps"));
         assert!(LockCapability::DirectMapExcluded
             .claim()
             .contains("direct map"));

@@ -183,14 +183,34 @@ impl MasterKeys {
         class: ParamsClass,
     ) -> Result<Self, KdfError> {
         let root = derive_root_secret(passphrase, salt, class)?;
+        Ok(Self::from_root(&root, usb))
+    }
+
+    /// The open path: replay the exact parameters the container header recorded at creation
+    /// (see [`crate::calibrate::KdfParamsRecord`]). Must derive **identical** keys to `derive`
+    /// for equal parameters — one formula, two entry points, tested pairwise — so a container
+    /// created on a calibrated host opens on every other machine.
+    pub fn derive_with(
+        passphrase: &[u8],
+        salt: &[u8; DERIVE_SALT_BYTES],
+        usb: Option<&[u8; 32]>,
+        params: &crate::calibrate::KdfParamsRecord,
+    ) -> Result<Self, KdfError> {
+        let root = derive_root_secret_with(passphrase, salt, params)?;
+        Ok(Self::from_root(&root, usb))
+    }
+
+    /// The one USB-binding subkey step both entry points share, so the two can never drift:
+    /// presence flag then bytes, in the derivation context, hashed — never XORed (v5's lesson).
+    fn from_root(root: &RootSecret, usb: Option<&[u8; 32]>) -> Self {
         let usb_bytes = usb.copied().unwrap_or([0u8; 32]);
         let mut ctx = Vec::with_capacity(1 + 32);
         ctx.push(u8::from(usb.is_some()));
         ctx.extend_from_slice(&usb_bytes);
-        let unwrap = derive_subkey(&root, labels::K_UNWRAP, &ctx);
-        Ok(Self {
+        let unwrap = derive_subkey(root, labels::K_UNWRAP, &ctx);
+        Self {
             unwrap: UnwrapKey::from_bytes(unwrap.0),
-        })
+        }
     }
 
     /// The unwrap-key capability, presented to the envelope operations. Public because the
@@ -248,6 +268,31 @@ mod tests {
         assert_ne!(none.unwrap_key().expose(), with.unwrap_key().expose());
         // And "no stick" is distinct from "a stick of zeros": the presence flag is in the hash.
         assert_ne!(none.unwrap_key().expose(), zeros.unwrap_key().expose());
+    }
+
+    #[test]
+    #[test]
+    fn replayed_params_derive_identical_keys() {
+        // The portability contract: a header record replayed on another host equals the class
+        // derivation performed at creation.
+        let record = crate::calibrate::KdfParamsRecord {
+            m_kib: 8_192,
+            t: 1,
+            p: 1,
+        };
+        let via_class = MasterKeys::derive(b"pw", &[5u8; 64], None, ParamsClass::Test).unwrap();
+        let via_record =
+            MasterKeys::derive_with(b"pw", &[5u8; 64], None, &record).unwrap();
+        assert_eq!(via_class.unwrap_key().expose(), via_record.unwrap_key().expose());
+        let stick = [7u8; 32];
+        let via_class_usb =
+            MasterKeys::derive(b"pw", &[5u8; 64], Some(&stick), ParamsClass::Test).unwrap();
+        let via_record_usb =
+            MasterKeys::derive_with(b"pw", &[5u8; 64], Some(&stick), &record).unwrap();
+        assert_eq!(
+            via_class_usb.unwrap_key().expose(),
+            via_record_usb.unwrap_key().expose()
+        );
     }
 
     #[test]
