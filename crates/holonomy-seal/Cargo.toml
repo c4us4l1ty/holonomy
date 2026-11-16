@@ -1,0 +1,10 @@
+[package]
+name = "holonomy-seal"
+description = "The blessed crypto boundary (Block 2). Audited v5.1.0 envelope, capability tokens, zeroized key handling. Nothing else touches primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "holonomy-text"
+description = "The Spine: immutable slab-tree document engine (Block 4). Viewport-bounded residency, path-copy edits, measured zero-allocation keystrokes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+description = "Repo automation (Block 1): `cargo run -p xtask -- gates [--check]` renders or verifies docs/GATES.md from the ledger's laws."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+holonomy-ledger = { path = "../holonomy-ledger" }
