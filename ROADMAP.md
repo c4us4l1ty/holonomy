@@ -83,19 +83,32 @@ limited by disk, not by format — this is what makes sixty years *the default s
   as in H1's `aead.rs`), witness commits, staged no-replace publication for initial creation
   and compaction, plus append transactions that sync segment records before the witness commit
   and sync the containing directory when publishing a new path. No pad fold in the core path.
-- Crash model implemented and tortured: torn writes, out-of-space, power loss mid-append —
-  the log must always open at its last committed witness.
+- Software fault model: tests inject a short write after every byte of an append, failures at
+  each append sync barrier, and failures while discarding an uncommitted tail. Reopen must find
+  the prior authenticated witness, or (after an uncertain final sync) a complete authenticated
+  new witness. These in-process injections do not establish physical power-loss, real ENOSPC,
+  filesystem-journal, or device-cache behavior; L-6 remains unproven until platform durability
+  qualification is run.
 - Retention: old segments are the free-version history. Compaction exists **only** as an
   explicit, opt-in, passphrase-confirmed operation that rewrites history — never automatic.
-- Cloud-proofing: append-only layout so any incremental sync tool uploads only new tail
-  bytes; `holonomy verify` re-checks segment integrity after a copy, so a cloud-mangled file
-  is detected, not silently trusted.
+- Incremental-sync fit: the append-only layout preserves the old prefix and the writer's
+  measured `File::write` calls are confined to newly appended records. This is local write-path
+  evidence, not an end-to-end backup-transfer guarantee; bytes sent depend on a concrete sync
+  client/backend, which is not implemented or measured here. `holonomy verify` re-checks segment
+  integrity after a copy, so a cloud-mangled file is detected, not silently trusted.
 
 **GATES**
-- [ ] Property tests: random crash injection at every append point; always opens at last
-      good witness; zero silent corruption.
-- [ ] A container grown to simulated 30 M words writes new saves touching only tail segments.
-- [ ] `verify` catches flipped bytes anywhere, including in "old" history.
+- [x] Exhaustive short-write injection at every append byte, both sync failures, and recovery
+      truncate failures reopen to the last committed witness (or a complete authenticated new
+      witness after an uncertain commit sync).
+- [ ] Qualify L-6 under actual supported-filesystem/device power-loss and out-of-space behavior;
+      in-process fault injection alone is not a power-cut test.
+- [x] A simulated 30 M-word history records the append writer's actual `File::write` offsets and
+      byte counts: every write starts at the previous EOF, the old prefix is unchanged, and the
+      total equals `AppendReceipt::bytes_appended`.
+- [ ] Measure bytes transferred by a named backup/sync client after a save; local append writes
+      do not establish the L-10 transfer bound.
+- [x] `verify` catches flipped bytes anywhere, including in "old" history.
 
 ---
 

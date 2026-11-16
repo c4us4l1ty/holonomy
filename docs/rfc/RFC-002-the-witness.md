@@ -1,10 +1,12 @@
 # RFC-002 — The Witness (Block 3)
 
-*Status: Block 3 implementation and test draft. CI run 43923405534 passed rustfmt, clippy,
-workspace tests, and the gates contract; local Rust tooling remains unavailable. The synthetic
-crash-prefix tests do not prove real power-loss or filesystem-failure behavior, so L-6/L-10 are
-not marked passed. The valid-prefix rollback limit is explicitly amended below and remains open
-as AUDIT OQ-7.*
+*Status: Block 3 implementation and test draft. CI run 43926666233 passed rustfmt, clippy,
+workspace tests, and the gates contract. New tests inject a short write at every append byte,
+fail each sync barrier, and fail tail-recovery truncation. They measure `File::write` offsets and
+completed byte counts on a simulated 30 M-word file. They do not model actual power loss, ENOSPC,
+filesystem journaling, or backup-network transfer. L-6 and L-10 therefore remain `spec`, not
+passed gates. The valid-prefix rollback limit is explicitly amended below and remains open as
+AUDIT OQ-7.*
 
 ## Context
 
@@ -27,9 +29,11 @@ of sealed slabs*.
    epoch. A witness is the only commit point; a complete segment frame without a following
    witness is uncommitted.
 3. **Append-only growth**: a save appends changed slabs plus one witness. Nothing overwrites
-   committed bytes. A crashed, uncommitted physical tail is reported on open and discarded
-   before the next append. Cold storage after N appends transfers the appended tail only
-   (L-10).
+   committed bytes. An incomplete or uncommitted tail is reported on open and discarded before
+   the next append. Tests now trace the appender's `File::write` calls, confirming offsets start
+   at the prior EOF and write bytes match the appended frames, even on a simulated 30 M-word
+   history. This proves the local writer is tail-only, not that any backup client transfers only
+   that tail; L-10 remains unproven until a concrete sync path is measured.
 4. **Atomic commit**: for an existing file: segment writes → file sync → witness write → file
    sync. The witness is the commit point. Initial creation writes a complete staged inode,
    syncs it, links it into place without replacing an existing path, then syncs the containing
@@ -77,11 +81,12 @@ of sealed slabs*.
 
 | Adversary | Mechanism | Control | Proving test |
 | --------- | --------- | ------- | ------------ |
-| A4 torn append / partial tail | cut a segment or witness frame before its commit point | last complete authenticated witness remains authoritative; `RecoveryInfo` reports trailing bytes | every byte-prefix cut of a multi-segment append reopens at the prior commit; a subsequent append removes only the uncommitted tail |
+| A4 torn append / partial tail | short write within a segment or witness frame before its commit point | last complete authenticated witness remains authoritative; `RecoveryInfo` reports trailing bytes | synthetic every-byte cut matrix plus injected short-write failure after each append byte; reopen verifies the prior commit |
 | A4 segment bit-flip | flip committed ciphertext or record metadata | witness MMR binds record metadata; per-segment CMT-4 binds the body | metadata-only open skips body; full `verify` rejects a flipped old segment; metadata/tag changes reject the witness root |
 | A4 splice/reorder | rearrange segments across files or epochs | file ID, epoch, sequence, predecessor tag, and CMT-4 are bound into the segment chain | capsule-replay-across-files open-refusal test; sequence/root checks reject reorder |
 | A4 valid-prefix rollback | truncate exactly to an earlier complete witness | **not detectable from the file alone** without an external monotonic anchor; no local test may claim otherwise | regression test documents the indistinguishable valid-prefix case; residual is AUDIT OQ-7 |
-| — torn write (crash) | power loss at append boundaries | segment batch sync precedes the witness; incomplete tail is never a commit | every-byte cut matrix plus torn-tail recovery test |
+| — append I/O failure | partial write, failure of either sync barrier, or failure truncating a recovered tail | append errors poison the handle; open selects only the last complete authenticated witness; final-sync failure is reported as uncertain | byte-by-byte injected short writes, both sync failpoints, recovery-truncate failpoints, and reopen/verify assertions |
+| — physical power loss | loss of power at arbitrary file/device-cache boundaries | required durability ordering is implemented, but physical persistence behavior depends on filesystem and hardware | not tested; no power-cut/VM snapshot or platform filesystem qualification has been run, so L-6 remains `spec` |
 | A2 open-time exposure | bulk read at open | segment ciphertext is skipped by seek; only public metadata and bounded witness bodies are read | guarded reader test fails if open reads any segment body |
 
 ## Offline rollback limit (amendment)
@@ -91,9 +96,10 @@ chain can detect malformed, reordered, or partial tails, but a byte-perfect pref
 earlier valid witness is indistinguishable from a file that legitimately stopped there. Detecting
 that rollback requires trusted state outside the copied file (for example, a remote transparency
 anchor); v6 has no such mandatory service because passphrase portability is constitutional.
-Accordingly, the implementation claims crash consistency and integrity of the bytes present,
-not freshness against whole-prefix rollback. This remains an explicit A4 residual, not a hidden
-property.
+Accordingly, the format claims integrity of the bytes present, not freshness against
+whole-prefix rollback. Injected I/O failures exercise the append recovery logic, but platform
+power-loss durability remains unqualified. The rollback limit remains an explicit A4 residual,
+not a hidden property.
 
 ## Rejected alternatives
 
@@ -104,5 +110,5 @@ property.
   the segment quantum at 64 KiB; changing it requires a format-version change, with an explicit
   segment-size field reserved for a later version.
 - **Directory-of-segments**: best incremental-sync story, worst drag-and-drop story; one
-  file wins because L-9's portability is constitutional. Sync efficiency is achieved by
-  appended tails instead.
+  file wins because L-9's portability is constitutional. Appending preserves the old file prefix,
+  but end-to-end sync efficiency still depends on a backup client/backend and remains unmeasured.

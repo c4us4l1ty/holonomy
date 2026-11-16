@@ -33,6 +33,94 @@ const WITNESS_BASE_BYTES: usize = 1 + 8 + 8 + 32 + 32 + 32 + 32;
 const MAX_WITNESS_BYTES: usize = WITNESS_BASE_BYTES + 64 * 32;
 const MAX_WITNESS_CIPHERTEXT_BYTES: u32 = (MAX_WITNESS_BYTES as u32) + AEAD_TAG_BYTES;
 
+// Test-only hooks exercise short writes and failed durability barriers through the same
+// append path used in production. The thread-local scope keeps unrelated parallel tests from
+// sharing failpoints or counters.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppendIoWrite {
+    offset: u64,
+    bytes: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppendIoSync {
+    bytes_written: u64,
+    succeeded: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppendIoTruncate {
+    length: u64,
+    succeeded: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AppendIoSnapshot {
+    writes: Vec<AppendIoWrite>,
+    syncs: Vec<AppendIoSync>,
+    truncations: Vec<AppendIoTruncate>,
+    bytes_written: u64,
+}
+
+#[cfg(test)]
+struct AppendIoState {
+    fail_after_write_bytes: Option<u64>,
+    fail_on_sync: Option<usize>,
+    fail_truncate: bool,
+    snapshot: AppendIoSnapshot,
+}
+
+#[cfg(test)]
+thread_local! {
+    static APPEND_IO_STATE: std::cell::RefCell<Option<AppendIoState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct AppendIoProbeGuard;
+
+#[cfg(test)]
+impl AppendIoProbeGuard {
+    fn install(
+        fail_after_write_bytes: Option<u64>,
+        fail_on_sync: Option<usize>,
+        fail_truncate: bool,
+    ) -> Self {
+        APPEND_IO_STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "append I/O probe already installed");
+            *slot = Some(AppendIoState {
+                fail_after_write_bytes,
+                fail_on_sync,
+                fail_truncate,
+                snapshot: AppendIoSnapshot::default(),
+            });
+        });
+        Self
+    }
+
+    fn snapshot(&self) -> AppendIoSnapshot {
+        APPEND_IO_STATE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("append I/O probe was removed")
+                .snapshot
+                .clone()
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for AppendIoProbeGuard {
+    fn drop(&mut self) {
+        APPEND_IO_STATE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
 /// Public failures from the world-line format and storage layer.
 #[derive(Debug)]
 pub enum LineError {
@@ -579,8 +667,8 @@ impl<'key> WorldLine<'key> {
         self.recovery = disk_state.recovery;
 
         if self.recovery.needs_recovery() {
-            file.set_len(self.committed_end)?;
-            file.sync_all()?;
+            truncate_append_tail(&file, self.committed_end)?;
+            sync_append_file(&file)?;
             self.observed_len = self.committed_end;
             self.recovery = RecoveryInfo {
                 trailing_bytes: 0,
@@ -610,7 +698,7 @@ impl<'key> WorldLine<'key> {
                 plaintext,
             )?;
             let record_offset = file.stream_position()?;
-            file.write_all(&encoded.frame)?;
+            write_append_bytes(&mut file, &encoded.frame)?;
             bytes_written = bytes_written
                 .checked_add(encoded.frame.len() as u64)
                 .ok_or(LineError::ResourceExhausted)?;
@@ -631,7 +719,7 @@ impl<'key> WorldLine<'key> {
         }
 
         // Data records are durable before the commit point is written.
-        file.sync_all()?;
+        sync_append_file(&file)?;
         let witness_sequence = self.next_witness_sequence;
         let (witness_frame, witness_tag) = encode_witness_record(
             &self.header,
@@ -642,11 +730,11 @@ impl<'key> WorldLine<'key> {
             &last_segment_tag,
             &mmr,
         )?;
-        file.write_all(&witness_frame)?;
+        write_append_bytes(&mut file, &witness_frame)?;
         bytes_written = bytes_written
             .checked_add(witness_frame.len() as u64)
             .ok_or(LineError::ResourceExhausted)?;
-        if file.sync_all().is_err() {
+        if sync_append_file(&file).is_err() {
             return Err(LineError::DurabilityUncertain);
         }
         let committed_end = file.stream_position()?;
@@ -701,6 +789,143 @@ impl<'key> WorldLine<'key> {
         }
         Ok(plaintext)
     }
+}
+
+fn write_append_bytes(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    let mut offset = file.stream_position()?;
+
+    while !bytes.is_empty() {
+        #[cfg(test)]
+        let allowed = append_test_write_limit(bytes.len())?;
+        #[cfg(not(test))]
+        let allowed = bytes.len();
+
+        match file.write(&bytes[..allowed]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write world-line append record",
+                ));
+            }
+            Ok(written) => {
+                #[cfg(test)]
+                {
+                    record_append_test_write(offset, written);
+                    offset = offset.saturating_add(written as u64);
+                }
+                bytes = &bytes[written..];
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn sync_append_file(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return (None, false);
+        };
+        let index = state.snapshot.syncs.len();
+        let fail = state.fail_on_sync == Some(index + 1);
+        state.snapshot.syncs.push(AppendIoSync {
+            bytes_written: state.snapshot.bytes_written,
+            succeeded: false,
+        });
+        (Some(index), fail)
+    });
+    #[cfg(not(test))]
+    let injected_failure = false;
+
+    let result = if injected_failure {
+        Err(io::Error::other("injected world-line sync failure"))
+    } else {
+        file.sync_all()
+    };
+
+    #[cfg(test)]
+    if let Some(index) = event_index {
+        APPEND_IO_STATE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("append I/O probe disappeared during sync")
+                .snapshot
+                .syncs[index]
+                .succeeded = result.is_ok();
+        });
+    }
+    result
+}
+
+fn truncate_append_tail(file: &File, length: u64) -> io::Result<()> {
+    #[cfg(test)]
+    let (event_index, injected_failure) = APPEND_IO_STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return (None, false);
+        };
+        let index = state.snapshot.truncations.len();
+        let fail = state.fail_truncate;
+        state.snapshot.truncations.push(AppendIoTruncate {
+            length,
+            succeeded: false,
+        });
+        (Some(index), fail)
+    });
+    #[cfg(not(test))]
+    let injected_failure = false;
+
+    let result = if injected_failure {
+        Err(io::Error::other("injected world-line truncate failure"))
+    } else {
+        file.set_len(length)
+    };
+
+    #[cfg(test)]
+    if let Some(index) = event_index {
+        APPEND_IO_STATE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("append I/O probe disappeared during truncate")
+                .snapshot
+                .truncations[index]
+                .succeeded = result.is_ok();
+        });
+    }
+    result
+}
+
+#[cfg(test)]
+fn append_test_write_limit(requested: usize) -> io::Result<usize> {
+    APPEND_IO_STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return Ok(requested);
+        };
+        match state.fail_after_write_bytes {
+            Some(0) => Err(io::Error::other("injected world-line short write")),
+            Some(remaining) => Ok(requested.min(usize::try_from(remaining).unwrap_or(usize::MAX))),
+            None => Ok(requested),
+        }
+    })
+}
+
+#[cfg(test)]
+fn record_append_test_write(offset: u64, bytes: usize) {
+    APPEND_IO_STATE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.snapshot.writes.push(AppendIoWrite { offset, bytes });
+            state.snapshot.bytes_written =
+                state.snapshot.bytes_written.saturating_add(bytes as u64);
+            if let Some(remaining) = &mut state.fail_after_write_bytes {
+                *remaining = remaining.saturating_sub(bytes as u64);
+            }
+        }
+    });
 }
 
 struct EncodedSegment {

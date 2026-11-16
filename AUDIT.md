@@ -48,6 +48,23 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-16** — Block 3 fault-injection and tail-write evidence: routed append data, witness,
+  sync, and recovery truncation through private I/O wrappers with `cfg(test)` failpoints only.
+  Tests inject a short write after every byte of a two-segment append, fail the data and final
+  witness sync barriers separately, and fail both tail truncation and its sync. Each uncertain
+  operation poisons the handle; reopen/verify finds only the last complete authenticated witness
+  or a complete authenticated new witness. A 30-million-word simulated file now records the
+  completed byte counts returned by the appender's actual `File::write` calls and offsets sampled
+  immediately before them; writes begin at the previous EOF, total `AppendReceipt::bytes_appended`,
+  and preserve the old prefix.
+  This is local writer evidence, not physical disk-sector or backup-network measurement. Injected
+  errors are returned before OS sync/truncate operations; no real ENOSPC, filesystem failure,
+  process/device power cut, or filesystem/hardware durability qualification was run, so **L-6
+  remains `spec`**. No concrete backup client was measured, so **L-10 remains `spec`**. OQ-7's
+  valid-prefix rollback limitation remains accepted and open. CI run 43926260051 first caught
+  Clippy's `missing_const_for_thread_local`; fixed in `58ee6ac`. CI run 43926666233 then passed
+  rustfmt, clippy, workspace tests, and the gates contract.
+
 - **2026-11-16** — Block 3 implementation draft: added the fixed `.wavefunction` header,
   fenced KDF replay, sealed segment frames, MMR witness commits, lazy body reads, explicit
   passphrase-confirmed compaction, and same-directory atomic publication. Tests specify
@@ -56,10 +73,10 @@ Listed so they stay dead.
   contention, no-replace creation/compaction, and compaction behavior. Local Rust tooling is
   absent; the first CI run (43922948005) found a missing `Debug` derive used by MMR tests, fixed
   in `50ac36f`. CI run 43923405534 then passed rustfmt, clippy, workspace tests, and the gates
-  contract. Block 3 remains a draft, not a passed L-6/L-10 gate: the crash matrix uses synthetic
-  byte-prefix truncations and does not inject real power loss or filesystem failures.
-  `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating BLAKE2b-512; its
-  reference-vector regression test passed in workspace CI.
+  contract. Block 3 remains a draft, not a passed L-6/L-10 gate: the initial crash matrix used
+  synthetic byte-prefix truncations only, which did not establish real power-loss or filesystem
+  failure behavior. `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating
+  BLAKE2b-512; its reference-vector regression test passed in workspace CI.
 
 - **2026-11-16** — Block 2 residuals closed. **OQ-5**: Argon2 now runs exclusively through
   `kdf::run_argon2`, which derives over a caller-owned `Arena` whose `Drop` zeroizes the
