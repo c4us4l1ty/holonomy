@@ -14,10 +14,8 @@ static COUNTING: Counting = Counting;
 fn allocation_claim_is_measured_not_asserted() {
     let before = AllocStats::snapshot();
 
-    let mut v: Vec<u64> = black_box(Vec::new());
-    for i in 0..100 {
-        v.push(black_box(i));
-    }
+    let mut v: Vec<u64> = black_box(Vec::with_capacity(black_box(64)));
+    v.extend(0..100u64);
     black_box(&v);
 
     let delta = before.delta(&AllocStats::snapshot());
