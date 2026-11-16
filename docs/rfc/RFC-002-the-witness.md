@@ -1,8 +1,10 @@
 # RFC-002 — The Witness (Block 3)
 
-*Status: Block 3 implementation and test draft; local Rust validation is pending because the
-pinned toolchain is not installed in the current sandbox. The valid-prefix rollback limit is
-explicitly amended below and remains open as AUDIT OQ-7.*
+*Status: Block 3 implementation and test draft. CI run 43923405534 passed rustfmt, clippy,
+workspace tests, and the gates contract; local Rust tooling remains unavailable. The synthetic
+crash-prefix tests do not prove real power-loss or filesystem-failure behavior, so L-6/L-10 are
+not marked passed. The valid-prefix rollback limit is explicitly amended below and remains open
+as AUDIT OQ-7.*
 
 ## Context
 

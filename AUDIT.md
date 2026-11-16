@@ -50,15 +50,16 @@ Listed so they stay dead.
 
 - **2026-11-16** — Block 3 implementation draft: added the fixed `.wavefunction` header,
   fenced KDF replay, sealed segment frames, MMR witness commits, lazy body reads, explicit
-  passphrase-confirmed compaction, and same-directory atomic publication. Tests now specify
+  passphrase-confirmed compaction, and same-directory atomic publication. Tests specify
   every-byte append-tail cuts, 30-million-word simulated growth with exact-prefix preservation,
   historical metadata/body tampering, stale-writer refusal, shared-open/exclusive-append lock
-  contention, no-replace creation/compaction, and compaction behavior. The local
-  sandbox has no `cargo`/`rustc`; source formatting was applied with the `@scalar/rust-fmt`
-  WASM build (rustfmt 1.99.1), but the pinned 1.100.0 formatter and compiler/tests/clippy/gates/
-  CI remain unrun, so Block 3 is still a draft, not a passed gate.
-  `metadata_digest` now uses variable-output BLAKE2b-256 rather than truncating BLAKE2b-512, with
-  a reference-vector regression test.
+  contention, no-replace creation/compaction, and compaction behavior. Local Rust tooling is
+  absent; the first CI run (43922948005) found a missing `Debug` derive used by MMR tests, fixed
+  in `50ac36f`. CI run 43923405534 then passed rustfmt, clippy, workspace tests, and the gates
+  contract. Block 3 remains a draft, not a passed L-6/L-10 gate: the crash matrix uses synthetic
+  byte-prefix truncations and does not inject real power loss or filesystem failures.
+  `metadata_digest` uses variable-output BLAKE2b-256 rather than truncating BLAKE2b-512; its
+  reference-vector regression test passed in workspace CI.
 
 - **2026-11-16** — Block 2 residuals closed. **OQ-5**: Argon2 now runs exclusively through
   `kdf::run_argon2`, which derives over a caller-owned `Arena` whose `Drop` zeroizes the
