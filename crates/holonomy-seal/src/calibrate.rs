@@ -20,9 +20,9 @@
 
 use std::time::Instant;
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::Params;
 
-use crate::kdf::ROOT_SECRET_BYTES;
+use crate::kdf::{run_argon2, ROOT_SECRET_BYTES};
 
 /// Minimum Argon2id memory cost: 64 MiB. Below this there is no fence worth the name.
 pub const FENCE_MIN_KIB: u32 = 65_536;
@@ -116,13 +116,11 @@ pub fn calibrate() -> Calibration {
     let params = Params::new(PROBE_KIB, 1, CALIBRATION_P, Some(ROOT_SECRET_BYTES))
         .expect("probe params are constant and valid");
 
+    // The probe runs through the same scrubbed arena as every real derivation (OQ-5): no
+    // second Argon2 invocation shape may exist anywhere in the workspace.
     let start = Instant::now();
     let mut out = [0u8; ROOT_SECRET_BYTES];
-    let result = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hash_password_into(
-        PROBE_PW,
-        &PROBE_SALT,
-        &mut out,
-    );
+    let result = run_argon2(PROBE_PW, &PROBE_SALT, &params, &mut out);
     let probe_ms = start.elapsed().as_millis() as u64;
 
     match result {

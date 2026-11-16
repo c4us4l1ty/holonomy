@@ -42,10 +42,21 @@ Listed so they stay dead.
 | OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Design answer: opt-in compaction (RFC-002 §7). Edit-side question: is a sealed-then-compacted segment ever recoverable through cloud history? Cloud copies keep tails — compaction must document that cloud mirrors preserve old witness chains | open |
 | OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel | open |
 | OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. Accept (viewport is presumably visible to that adversary anyway) or smooth? Decide before Block 4 gate | open |
-| OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocate the m-cost arena inside `hash_password_into` and free it unwiped (v5's H1 hit exactly this and switched to `hash_password_into_with_memory` + a scrubbed `SecureBlock`). v6 must land the same pattern once argon2's `Block` type is scrubbable under the pinned toolchain. Interim exposure accepted deliberately and recorded here, not hidden | open |
-| OQ-6 | `ParamsClass::Test` misuse guard: nothing yet prevents a release build from deriving a user container at the weakened test schedule. Candidate: gate the variant behind `debug_assertions`/feature, and make Block 3's header writer refuse `Test` in non-debug builds | open |
+| OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
+| OQ-6 | `ParamsClass::Test` misuse guard: nothing prevented a release build from deriving a user container at the weakened test schedule. Fixed at the derivation boundary: `derive_root_secret` refuses `Test` with a loud `KdfError::TestScheduleRefused` whenever `debug_assertions` is off *and* no test harness is present; test/debug profiles keep a nil guard with the identical signature so call sites never drift. Residual carried to Block 3: the open path replays header records, so the header reader must fence `m_kib ≥ FENCE_MIN_KIB` as part of provenance validation | **closed** 2026-11-16 (residual noted) |
 
 ## Audit trail
+
+- **2026-11-16** — Block 2 residuals closed. **OQ-5**: Argon2 now runs exclusively through
+  `kdf::run_argon2`, which derives over a caller-owned `Arena` whose `Drop` zeroizes the
+  whole m-cost slab before free (argon2 `zeroize` feature enabled at the workspace pin);
+  byte-equality with argon2's internal-allocator output is test-pinned so the scrub layer
+  can never silently alter derivations. **OQ-6**: `derive_root_secret` carries the
+  `TestScheduleRefused` guard, active exactly in non-debug non-test builds; the nil-profile
+  twin keeps call sites identical. The replay path (`derive_root_secret_with` →
+  `MasterKeys::derive_with`) gained its first consumer plus a pairwise test pinning
+  `derive == derive_with` for equal parameters — the cross-machine portability contract
+  Block 3's header will rely on.
 
 - **2026-11-16** — Block 2 implementation + RFC-001 attack cycle. Verdicts: **AC-1**
   (capsule replay across files) → amended — RFC-002 §6 makes the witness commit to the

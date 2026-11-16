@@ -16,7 +16,7 @@
 //! mixed instruction bytes and cycle counters into the keystream ("PEED") and thereby wrote
 //! documents it could never decrypt again; K-6 stays on the wall in `AUDIT.md`.
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use blake2::{Blake2b512, Digest};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -65,14 +65,6 @@ impl ParamsClass {
             Self::Test => (8_192, 1, 1),
         }
     }
-
-    /// The concrete `Argon2` instance.
-    pub fn argon2(self) -> Result<Argon2<'static>, KdfError> {
-        let (m, t, p) = self.costs();
-        let params =
-            Params::new(m, t, p, Some(ROOT_SECRET_BYTES)).map_err(|_| KdfError::InvalidParams)?;
-        Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
-    }
 }
 
 /// Derivation failure.
@@ -82,6 +74,10 @@ pub enum KdfError {
     InvalidParams,
     /// Argon2 failed internally.
     Argon2Failed,
+    /// OQ-6's guard fired: a build that could touch a user container was asked to derive at the
+    /// weakened **test-only** schedule. Reaching this means a bug routed real material through
+    /// `ParamsClass::Test`; the loud refusal is the point.
+    TestScheduleRefused,
 }
 
 impl core::fmt::Display for KdfError {
@@ -89,11 +85,71 @@ impl core::fmt::Display for KdfError {
         match self {
             Self::InvalidParams => f.write_str("argon2 rejected the parameter block"),
             Self::Argon2Failed => f.write_str("argon2 failed"),
+            Self::TestScheduleRefused => {
+                f.write_str("test-only kdf schedule reached a production derivation guard")
+            }
         }
     }
 }
 
 impl std::error::Error for KdfError {}
+
+/// The Argon2 working arena: caller-owned so it can be scrubbed before the heap reclaims it
+/// (OQ-5, closed).
+///
+/// `Argon2::hash_password_into` allocates `m_cost` KiB internally and frees it **unwiped** —
+/// v5's H1 file wound, where freed arena bytes carried password-derived state into whatever
+/// the allocator touched next. Here the arena is ours: `Block` is plain data (`Copy`, 1 KiB)
+/// and implements `Zeroize` via argon2's `zeroize` feature, so drop zeroizes the slab and
+/// only then frees it. Every Argon2 invocation in this crate runs through [`run_argon2`]
+/// below, so the discipline cannot exist in one entry point and lapse in another.
+struct Arena(Vec<Block>);
+
+impl Arena {
+    /// Allocate exactly the number of blocks these parameters demand (argon2 errors on fewer).
+    fn for_params(params: &Params) -> Self {
+        Self(vec![Block::new(); params.block_count()])
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        self.0.as_mut_slice().zeroize();
+    }
+}
+
+/// Run Argon2id once with explicit `params`, through a scrubbed [`Arena`]. Shared by both
+/// derivation entry points (creation's class, open's replayed record) and by the calibration
+/// probe — the only place in the workspace where Argon2 actually executes.
+pub(crate) fn run_argon2(
+    passphrase: &[u8],
+    salt: &[u8],
+    params: &Params,
+    out: &mut [u8],
+) -> Result<(), KdfError> {
+    let mut arena = Arena::for_params(params);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone())
+        .hash_password_into_with_memory(passphrase, salt, out, &mut arena.0)
+        .map_err(|_| KdfError::Argon2Failed)
+}
+
+/// OQ-6's guard, compiled into existence only where it matters: in a build without
+/// `debug_assertions` and outside test harnesses — i.e. exactly the builds that could touch a
+/// user's container — the weakened `Test` schedule is refused at the derivation boundary.
+/// Test and debug builds get a nil guard with the *same signature*, so call sites never drift.
+#[cfg(not(any(debug_assertions, test)))]
+fn refuse_test_class_in_release(class: ParamsClass) -> Result<(), KdfError> {
+    if matches!(class, ParamsClass::Test) {
+        return Err(KdfError::TestScheduleRefused);
+    }
+    Ok(())
+}
+
+/// The nil-profile twin of the guard above; see its documentation.
+#[cfg(any(debug_assertions, test))]
+fn refuse_test_class_in_release(_: ParamsClass) -> Result<(), KdfError> {
+    Ok(())
+}
 
 /// Stage 1: passphrase + salt → 64-byte root secret.
 ///
@@ -105,11 +161,12 @@ pub fn derive_root_secret(
     salt: &[u8; DERIVE_SALT_BYTES],
     class: ParamsClass,
 ) -> Result<RootSecret, KdfError> {
+    refuse_test_class_in_release(class)?;
+    let (m_kib, t, p) = class.costs();
+    let params = Params::new(m_kib, t, p, Some(ROOT_SECRET_BYTES))
+        .map_err(|_| KdfError::InvalidParams)?;
     let mut out = [0u8; ROOT_SECRET_BYTES];
-    class
-        .argon2()?
-        .hash_password_into(passphrase, salt, &mut out)
-        .map_err(|_| KdfError::Argon2Failed)?;
+    run_argon2(passphrase, salt, &params, &mut out)?;
     Ok(RootSecret(out))
 }
 
@@ -122,14 +179,12 @@ pub fn derive_root_secret(
 pub fn derive_root_secret_with(
     passphrase: &[u8],
     salt: &[u8; DERIVE_SALT_BYTES],
-    params: &crate::calibrate::KdfParamsRecord,
+    record: &crate::calibrate::KdfParamsRecord,
 ) -> Result<RootSecret, KdfError> {
-    let p = Params::new(params.m_kib, params.t, params.p, Some(ROOT_SECRET_BYTES))
+    let params = Params::new(record.m_kib, record.t, record.p, Some(ROOT_SECRET_BYTES))
         .map_err(|_| KdfError::InvalidParams)?;
     let mut out = [0u8; ROOT_SECRET_BYTES];
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, p)
-        .hash_password_into(passphrase, salt, &mut out)
-        .map_err(|_| KdfError::Argon2Failed)?;
+    run_argon2(passphrase, salt, &params, &mut out)?;
     Ok(RootSecret(out))
 }
 
@@ -271,7 +326,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn replayed_params_derive_identical_keys() {
         // The portability contract: a header record replayed on another host equals the class
         // derivation performed at creation.
@@ -281,9 +335,11 @@ mod tests {
             p: 1,
         };
         let via_class = MasterKeys::derive(b"pw", &[5u8; 64], None, ParamsClass::Test).unwrap();
-        let via_record =
-            MasterKeys::derive_with(b"pw", &[5u8; 64], None, &record).unwrap();
-        assert_eq!(via_class.unwrap_key().expose(), via_record.unwrap_key().expose());
+        let via_record = MasterKeys::derive_with(b"pw", &[5u8; 64], None, &record).unwrap();
+        assert_eq!(
+            via_class.unwrap_key().expose(),
+            via_record.unwrap_key().expose()
+        );
         let stick = [7u8; 32];
         let via_class_usb =
             MasterKeys::derive(b"pw", &[5u8; 64], Some(&stick), ParamsClass::Test).unwrap();
@@ -293,6 +349,27 @@ mod tests {
             via_class_usb.unwrap_key().expose(),
             via_record_usb.unwrap_key().expose()
         );
+    }
+
+    #[test]
+    fn scrubbed_arena_matches_argon2s_internal_arena() {
+        // OQ-5's correctness pin: the caller-owned scrubbed arena must derive byte-identical
+        // output to argon2's own (unwiped) internal allocation, through both entry points.
+        let salt = [9u8; DERIVE_SALT_BYTES];
+        let params = Params::new(8_192, 1, 1, Some(ROOT_SECRET_BYTES)).unwrap();
+        let mut expected = [0u8; ROOT_SECRET_BYTES];
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password_into(b"pw", &salt, &mut expected)
+            .unwrap();
+        let via_class = derive_root_secret(b"pw", &salt, ParamsClass::Test).unwrap();
+        assert_eq!(via_class.0, expected);
+        let record = crate::calibrate::KdfParamsRecord {
+            m_kib: 8_192,
+            t: 1,
+            p: 1,
+        };
+        let via_record = derive_root_secret_with(b"pw", &salt, &record).unwrap();
+        assert_eq!(via_record.0, expected);
     }
 
     #[test]
