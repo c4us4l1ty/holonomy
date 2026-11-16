@@ -107,18 +107,6 @@ pub struct CommittedCiphertext {
     pub cmt4: [u8; CMT4_TAG_BYTES],
 }
 
-impl CommittedCiphertext {
-    /// Length of the ciphertext, excluding the commitment (which travels beside it).
-    pub fn len(&self) -> usize {
-        self.ciphertext.len()
-    }
-
-    /// Whether the ciphertext is empty (only for an empty plaintext).
-    pub fn is_empty(&self) -> bool {
-        self.ciphertext.is_empty()
-    }
-}
-
 /// Encrypt with `XChaCha20-Poly1305` and produce the binding commitment alongside.
 pub fn seal_committed(
     key: &[u8; 32],
