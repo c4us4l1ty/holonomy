@@ -55,8 +55,8 @@ pub fn measure<T>(samples: usize, mut f: impl FnMut() -> T) -> Summary {
 }
 
 /// Nearest-rank percentile index for `p` percent over `count` sorted samples.
-const fn nearest_rank(count: usize, p: usize) -> usize {
-    let rank = (p * count + 99) / 100;
+fn nearest_rank(count: usize, p: usize) -> usize {
+    let rank = (p * count).div_ceil(100);
     if rank == 0 {
         0
     } else if rank > count {

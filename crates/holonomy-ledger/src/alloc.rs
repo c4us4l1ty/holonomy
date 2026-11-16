@@ -20,9 +20,9 @@
 //! allocations from sibling tests being attributed to them. The integration tests that prove
 //! this machinery are arranged that way on purpose.
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::{Mutex, OnceLock};
 
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -142,16 +142,9 @@ mod tests {
     use super::*;
     use std::hint::black_box;
 
-    #[test]
-    fn snapshots_are_monotonic() {
-        let before = AllocStats::snapshot();
-        let v: Vec<u8> = black_box(Vec::with_capacity(black_box(4096)));
-        let during = AllocStats::snapshot();
-        assert!(during.allocations > before.allocations);
-        drop(v);
-        let after = AllocStats::snapshot();
-        assert!(after.deallocations > before.deallocations);
-    }
+    // NOTE: counting is proven in `tests/alloc_counting.rs`, which installs `Counting` as the
+    // binary's `#[global_allocator]`. A unit test here would run under the default allocator
+    // and measure nothing — the crate-not-installed failure mode bit exactly that way in CI.
 
     #[test]
     fn quiet_arithmetic_passes() {
