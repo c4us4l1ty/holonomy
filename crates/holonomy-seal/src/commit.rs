@@ -88,7 +88,10 @@ impl core::fmt::Display for AeadError {
             Self::AuthenticationFailed => f.write_str("AEAD authentication failed"),
             Self::OutputTooSmall => f.write_str("output buffer too small"),
             Self::TooLarge { offered, capacity } => {
-                write!(f, "plaintext of {offered} bytes does not fit {capacity} bytes of field")
+                write!(
+                    f,
+                    "plaintext of {offered} bytes does not fit {capacity} bytes of field"
+                )
             }
         }
     }

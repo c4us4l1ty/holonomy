@@ -37,7 +37,9 @@ blake2 = { version = "0.10", default-features = false }
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
-getrandom = "0.2"
+
+# getrandom is crate-local in crates/holonomy-seal (only the boundary draws entropy; keeping
+# it out of workspace.dependencies also keeps clippy's unused-workspace-dependency gate quiet).
 
 [workspace.lints.rust]
 # The compiler helps patrol the boundaries the audits used to guard by hand.

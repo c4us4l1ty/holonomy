@@ -137,11 +137,8 @@ pub struct Capsule {
 
 impl Capsule {
     /// Fixed serialized length: ct(1,568+32) ‖ wrapped(3,216) ‖ nonce(24) ‖ phase1(32).
-    pub const WIRE_BYTES: usize = ML_KEM_1024_CT_BYTES
-        + X25519_SK_BYTES
-        + WRAPPED_SK_BYTES
-        + NONCE_BYTES
-        + CMT4_TAG_BYTES;
+    pub const WIRE_BYTES: usize =
+        ML_KEM_1024_CT_BYTES + X25519_SK_BYTES + WRAPPED_SK_BYTES + NONCE_BYTES + CMT4_TAG_BYTES;
 
     /// Serialize in field order. The layout is the contract; Block 3 writes it verbatim.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -166,16 +163,21 @@ impl Capsule {
             pos += n;
             s
         };
-        let ml_kem: [u8; ML_KEM_1024_CT_BYTES] =
-            take(ML_KEM_1024_CT_BYTES).try_into().map_err(|_| EnvelopeError::BadLength)?;
-        let x25519: [u8; X25519_SK_BYTES] =
-            take(X25519_SK_BYTES).try_into().map_err(|_| EnvelopeError::BadLength)?;
-        let wrapped_sk: [u8; WRAPPED_SK_BYTES] =
-            take(WRAPPED_SK_BYTES).try_into().map_err(|_| EnvelopeError::BadLength)?;
-        let sk_unwrap_nonce: [u8; NONCE_BYTES] =
-            take(NONCE_BYTES).try_into().map_err(|_| EnvelopeError::BadLength)?;
-        let phase1: [u8; CMT4_TAG_BYTES] =
-            take(CMT4_TAG_BYTES).try_into().map_err(|_| EnvelopeError::BadLength)?;
+        let ml_kem: [u8; ML_KEM_1024_CT_BYTES] = take(ML_KEM_1024_CT_BYTES)
+            .try_into()
+            .map_err(|_| EnvelopeError::BadLength)?;
+        let x25519: [u8; X25519_SK_BYTES] = take(X25519_SK_BYTES)
+            .try_into()
+            .map_err(|_| EnvelopeError::BadLength)?;
+        let wrapped_sk: [u8; WRAPPED_SK_BYTES] = take(WRAPPED_SK_BYTES)
+            .try_into()
+            .map_err(|_| EnvelopeError::BadLength)?;
+        let sk_unwrap_nonce: [u8; NONCE_BYTES] = take(NONCE_BYTES)
+            .try_into()
+            .map_err(|_| EnvelopeError::BadLength)?;
+        let phase1: [u8; CMT4_TAG_BYTES] = take(CMT4_TAG_BYTES)
+            .try_into()
+            .map_err(|_| EnvelopeError::BadLength)?;
         Ok(Self {
             ct: HybridCiphertext { ml_kem, x25519 },
             wrapped_sk,
@@ -242,9 +244,7 @@ pub fn unwrap_key_bytes(
     let mut dk = [0u8; ML_KEM_1024_SEED_BYTES];
     let mut x = [0u8; X25519_SK_BYTES];
     dk.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
-    x.copy_from_slice(
-        &plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES],
-    );
+    x.copy_from_slice(&plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES]);
     plain.zeroize();
     Ok(HybridDecapsulationKey {
         ml_kem: dk,
@@ -367,10 +367,9 @@ impl HybridKem for MlKem1024X25519 {
 
         // `EncapsulationKey::new(&Key<Self>)` is the only constructor — a wrong-length slice
         // can never silently become a key; the checks live at the converts.
-        let key_array: ml_kem::Key<ml_kem::kem::EncapsulationKey<MlKem1024>> = ml_kem::Key::<
-            ml_kem::kem::EncapsulationKey<MlKem1024>,
-        >::try_from(pk.ml_kem.as_slice())
-        .map_err(|_| EnvelopeError::KemRejected)?;
+        let key_array: ml_kem::Key<ml_kem::kem::EncapsulationKey<MlKem1024>> =
+            ml_kem::Key::<ml_kem::kem::EncapsulationKey<MlKem1024>>::try_from(pk.ml_kem.as_slice())
+                .map_err(|_| EnvelopeError::KemRejected)?;
         let ek = <MlKem1024 as Kem>::EncapsulationKey::new(&key_array)
             .map_err(|_| EnvelopeError::KemRejected)?;
 

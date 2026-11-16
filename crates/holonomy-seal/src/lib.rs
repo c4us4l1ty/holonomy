@@ -97,7 +97,12 @@ pub fn open_capsule_for(
     capsule: &Capsule,
     usb: Option<&[u8; 32]>,
 ) -> Result<DEMKey, SealError> {
-    Ok(envelope::open_capsule(&MlKem1024X25519, unwrap, capsule, usb)?)
+    Ok(envelope::open_capsule(
+        &MlKem1024X25519,
+        unwrap,
+        capsule,
+        usb,
+    )?)
 }
 
 #[cfg(test)]
@@ -125,8 +130,7 @@ mod tests {
     #[test]
     fn wrong_passphrase_never_opens_the_real_capsule() {
         let keys = MasterKeys::derive(b"pw", &[1u8; 64], None, ParamsClass::Test).unwrap();
-        let bad_keys =
-            MasterKeys::derive(b"nope", &[1u8; 64], None, ParamsClass::Test).unwrap();
+        let bad_keys = MasterKeys::derive(b"nope", &[1u8; 64], None, ParamsClass::Test).unwrap();
         let (capsule, _) = create_capsule_for(keys_test_hook(&keys), None).unwrap();
         assert!(open_capsule_for(keys_test_hook(&bad_keys), &capsule, None).is_err());
     }

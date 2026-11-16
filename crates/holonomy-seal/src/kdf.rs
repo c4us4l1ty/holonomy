@@ -224,8 +224,7 @@ mod tests {
         let stick = [9u8; 32];
         let none = MasterKeys::derive(b"pw", &salt, None, ParamsClass::Test).unwrap();
         let with = MasterKeys::derive(b"pw", &salt, Some(&stick), ParamsClass::Test).unwrap();
-        let zeros = MasterKeys::derive(b"pw", &salt, Some(&[0u8; 32]), ParamsClass::Test)
-            .unwrap();
+        let zeros = MasterKeys::derive(b"pw", &salt, Some(&[0u8; 32]), ParamsClass::Test).unwrap();
         assert_ne!(none.unwrap_key().expose(), with.unwrap_key().expose());
         // And "no stick" is distinct from "a stick of zeros": the presence flag is in the hash.
         assert_ne!(none.unwrap_key().expose(), zeros.unwrap_key().expose());
@@ -234,8 +233,7 @@ mod tests {
     #[test]
     fn secrets_do_not_debug_print() {
         let root = RootSecret([9u8; 64]);
-        let keys =
-            MasterKeys::derive(b"pw", &[1u8; 64], None, ParamsClass::Test).unwrap();
+        let keys = MasterKeys::derive(b"pw", &[1u8; 64], None, ParamsClass::Test).unwrap();
         assert_eq!(format!("{root:?}"), "RootSecret(<redacted>)");
         assert_eq!(format!("{keys:?}"), "MasterKeys(<redacted>)");
     }
