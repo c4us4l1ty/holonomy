@@ -1,0 +1,13 @@
+[package]
+name = "holonomy-ledger"
+description = "Block 1 gate machinery: the counting allocator, the laws-as-code registry, and timing measurement. Claims here are measured, never asserted."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

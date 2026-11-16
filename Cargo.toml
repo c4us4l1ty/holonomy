@@ -1,0 +1,36 @@
+# HOLONOMY v6 — unified workspace.
+#
+# Block 1 law: one workspace, one lockfile, every crate a member. The v5 tree had to exile
+# its UI crates behind git-fork `[patch.crates-io]` sections; that friction is designed out
+# here. `holonomy-old/` and `holonomy-v5-1-0/` are prior art: referenced, never modified,
+# never members.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/holonomy-eye",
+    "crates/holonomy-ledger",
+    "crates/holonomy-line",
+    "crates/holonomy-seal",
+    "crates/holonomy-text",
+    "crates/xtask",
+]
+exclude = ["holonomy-old", "holonomy-v5-1-0"]
+
+[workspace.package]
+# One bump per roadmap block; sealed at 6.0.0 by Block 10's release gate.
+# (No `publish` here: not an inheritable workspace key on all toolchain versions —
+# each member manifest sets its own `publish = false`.)
+version = "6.0.0-block.1"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+# The compiler helps patrol the boundaries the audits used to guard by hand.
+unsafe_op_in_unsafe_fn = "warn"
+missing_docs = "warn"
+
+[profile.release]
+# Security release posture lands with Block 2; Block 1 keeps the profile minimal.
+incremental = false

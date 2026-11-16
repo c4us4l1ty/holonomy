@@ -1,0 +1,6 @@
+# Block 1: channel `stable` until a sandboxed local compiler exists to pin against.
+# Pinning a concrete version is tracked as an open item in AUDIT.md.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

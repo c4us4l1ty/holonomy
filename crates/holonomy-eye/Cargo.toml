@@ -1,0 +1,13 @@
+[package]
+name = "holonomy-eye"
+description = "Headless layout and hit-test geometry (Block 5). One geometry, two consumers: paint and caret can never diverge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
