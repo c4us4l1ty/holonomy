@@ -68,6 +68,21 @@ pub struct KdfParamsRecord {
     pub p: u32,
 }
 
+impl KdfParamsRecord {
+    /// Whether this record is a production schedule emitted by the calibrated selector.
+    ///
+    /// Open paths must check this before invoking Argon2: memory below the floor weakens the
+    /// offline-guessing defense, while unbounded `t` or `p` values let a hostile header demand
+    /// arbitrary work. The current version pins lanes and passes; a future schedule change is
+    /// a format-version change, not an untrusted header knob.
+    pub fn is_production_fenced(&self) -> bool {
+        (FENCE_MIN_KIB..=FENCE_MAX_KIB).contains(&self.m_kib)
+            && self.m_kib % 4_096 == 0
+            && self.t == CALIBRATION_T
+            && self.p == CALIBRATION_P
+    }
+}
+
 /// Select parameters from a measured probe wall time. Pure, so the fences can be unit-tested
 /// without spending a second of Argon2 in CI.
 ///
@@ -161,6 +176,28 @@ mod tests {
         assert!(n2.contains("ceiling"));
         let (degenerate, _) = select_params(0);
         assert_eq!(degenerate.m_kib, FENCE_MAX_KIB);
+    }
+
+    #[test]
+    fn production_fence_accepts_only_calibrated_records() {
+        let valid = KdfParamsRecord {
+            m_kib: FENCE_MIN_KIB,
+            t: CALIBRATION_T,
+            p: CALIBRATION_P,
+        };
+        assert!(valid.is_production_fenced());
+        assert!(!KdfParamsRecord {
+            m_kib: 8_192,
+            t: 1,
+            p: 1,
+        }
+        .is_production_fenced());
+        assert!(!KdfParamsRecord {
+            m_kib: FENCE_MIN_KIB,
+            t: u32::MAX,
+            p: CALIBRATION_P,
+        }
+        .is_production_fenced());
     }
 
     #[test]

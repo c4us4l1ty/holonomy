@@ -38,14 +38,27 @@ Listed so they stay dead.
 
 | Case | Target | Status |
 | ---- | ------ | ------ |
-| OQ-1 | Toolchain: root `rust-toolchain.toml` uses floating `stable`; pin to a concrete version when a sandbox compiler exists to verify against | open |
-| OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Design answer: opt-in compaction (RFC-002 §7). Edit-side question: is a sealed-then-compacted segment ever recoverable through cloud history? Cloud copies keep tails — compaction must document that cloud mirrors preserve old witness chains | open |
+| OQ-1 | Toolchain: root `rust-toolchain.toml` used floating `stable`. Pinned to Rust 1.100.0 after observing the CI compiler; no local sandbox toolchain was available for an independent pin check. | **closed 2026-11-16** |
+| OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Compaction is explicit, file-scoped, and passphrase-confirmed; RFC-002 states that cloud mirrors may retain pre-compaction files and their history, so users must also prune external backups. | **closed — residual disclosed** |
 | OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel | open |
 | OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. Accept (viewport is presumably visible to that adversary anyway) or smooth? Decide before Block 4 gate | open |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
-| OQ-6 | `ParamsClass::Test` misuse guard: nothing prevented a release build from deriving a user container at the weakened test schedule. Fixed at the derivation boundary: `derive_root_secret` refuses `Test` with a loud `KdfError::TestScheduleRefused` whenever `debug_assertions` is off *and* no test harness is present; test/debug profiles keep a nil guard with the identical signature so call sites never drift. Residual carried to Block 3: the open path replays header records, so the header reader must fence `m_kib ≥ FENCE_MIN_KIB` as part of provenance validation | **closed** 2026-11-16 (residual noted) |
+| OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
+| OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 
 ## Audit trail
+
+- **2026-11-16** — Block 3 implementation draft: added the fixed `.wavefunction` header,
+  fenced KDF replay, sealed segment frames, MMR witness commits, lazy body reads, explicit
+  passphrase-confirmed compaction, and same-directory atomic publication. Tests now specify
+  every-byte append-tail cuts, 30-million-word simulated growth with exact-prefix preservation,
+  historical metadata/body tampering, stale-writer refusal, shared-open/exclusive-append lock
+  contention, no-replace creation/compaction, and compaction behavior. The local
+  sandbox has no `cargo`/`rustc`; source formatting was applied with the `@scalar/rust-fmt`
+  WASM build (rustfmt 1.99.1), but the pinned 1.100.0 formatter and compiler/tests/clippy/gates/
+  CI remain unrun, so Block 3 is still a draft, not a passed gate.
+  `metadata_digest` now uses variable-output BLAKE2b-256 rather than truncating BLAKE2b-512, with
+  a reference-vector regression test.
 
 - **2026-11-16** — Block 2 residuals closed. **OQ-5**: Argon2 now runs exclusively through
   `kdf::run_argon2`, which derives over a caller-owned `Arena` whose `Drop` zeroizes the

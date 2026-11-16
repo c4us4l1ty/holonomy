@@ -56,8 +56,8 @@ pub fn cmt4_tag(
 /// exit, `black_box` on the result so an optimizer cannot elide the discipline.
 pub fn cmt4_verify(expected: &[u8; CMT4_TAG_BYTES], actual: &[u8; CMT4_TAG_BYTES]) -> bool {
     let mut diff = 0u8;
-    for i in 0..CMT4_TAG_BYTES {
-        diff |= expected[i] ^ actual[i];
+    for (&expected_byte, &actual_byte) in expected.iter().zip(actual.iter()) {
+        diff |= expected_byte ^ actual_byte;
     }
     std::hint::black_box(diff) == 0
 }

@@ -80,8 +80,9 @@ limited by disk, not by format — this is what makes sixty years *the default s
 
 **Deliverables**
 - `holonomy-line` crate: segment format (AEAD per segment, predecessor-commitment chaining
-  as in H1's `aead.rs`), witness commits, atomic stage-and-replace writes with directory
-  fsync (v5's tested 9-step save, simplified: no pad fold in the core path).
+  as in H1's `aead.rs`), witness commits, staged no-replace publication for initial creation
+  and compaction, plus append transactions that sync segment records before the witness commit
+  and sync the containing directory when publishing a new path. No pad fold in the core path.
 - Crash model implemented and tortured: torn writes, out-of-space, power loss mid-append —
   the log must always open at its last committed witness.
 - Retention: old segments are the free-version history. Compaction exists **only** as an

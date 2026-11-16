@@ -33,9 +33,18 @@ mod lock;
 mod passphrase;
 mod secret;
 
+use blake2::digest::consts::U32;
+#[cfg(test)]
+use blake2::Blake2b512;
+use blake2::{Blake2b, Digest};
+
+type Blake2b256 = Blake2b<U32>;
+use commit::{open_committed, seal_committed, CommittedCiphertext};
+use zeroize::Zeroizing;
+
 pub use calibrate::{
-    calibrate, select_params, Calibration, KdfParamsRecord, FENCE_MAX_KIB, FENCE_MIN_KIB,
-    TARGET_BAND_MS,
+    calibrate, select_params, Calibration, KdfParamsRecord, CALIBRATION_P, CALIBRATION_T,
+    FENCE_MAX_KIB, FENCE_MIN_KIB, TARGET_BAND_MS,
 };
 pub use capability::{DEMKey, UnwrapKey};
 pub use envelope::{Capsule, EnvelopeError, HybridCiphertext, HybridKem, MlKem1024X25519};
@@ -48,8 +57,79 @@ pub use passphrase::{PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES};
 pub const BOUNDARY_LAW: &str =
     "key material crosses one boundary, held only behind capability tokens";
 
-use commit::{open_committed, seal_committed, CommittedCiphertext};
-use zeroize::Zeroizing;
+/// Draw a fresh per-container identifier from the OS CSPRNG.
+pub fn generate_container_id() -> Result<[u8; 16], SealError> {
+    let mut id = [0u8; 16];
+    rng::fill(&mut id).map_err(|_| SealError::EntropyUnavailable)?;
+    Ok(id)
+}
+
+/// Draw a fresh Argon2 salt from the OS CSPRNG.
+pub fn generate_kdf_salt() -> Result<[u8; DERIVE_SALT_BYTES], SealError> {
+    let mut salt = [0u8; DERIVE_SALT_BYTES];
+    rng::fill(&mut salt).map_err(|_| SealError::EntropyUnavailable)?;
+    Ok(salt)
+}
+
+/// One-shot proof that the user re-entered the passphrase for an explicit history compaction.
+///
+/// It is scoped to one file identifier and cannot be constructed outside this crate. It carries
+/// no key material; the fresh derivation used to create it is zeroized at the seal boundary.
+#[must_use = "consume the confirmation token in an explicit compact operation"]
+pub struct CompactionApproval {
+    file_id: [u8; 16],
+}
+
+impl CompactionApproval {
+    /// Whether this one-shot approval was created for the presented file identifier.
+    pub fn is_for_file(&self, file_id: &[u8; 16]) -> bool {
+        &self.file_id == file_id
+    }
+}
+
+/// Re-derive the file's unwrap key from a freshly entered passphrase and mint a one-shot,
+/// file-scoped compaction approval only if it matches the currently unlocked capability.
+pub fn confirm_compaction(
+    passphrase: &[u8],
+    salt: &[u8; DERIVE_SALT_BYTES],
+    usb: Option<&[u8; 32]>,
+    params: &KdfParamsRecord,
+    expected_unwrap: &UnwrapKey,
+    file_id: &[u8; 16],
+) -> Result<CompactionApproval, SealError> {
+    let rederived = MasterKeys::derive_with(passphrase, salt, usb, params)?;
+    let actual = rederived.unwrap_key().expose();
+    let expected = expected_unwrap.expose();
+    let mut difference = 0u8;
+    for (&actual_byte, &expected_byte) in actual.iter().zip(expected.iter()) {
+        difference |= actual_byte ^ expected_byte;
+    }
+    if std::hint::black_box(difference) != 0 {
+        return Err(SealError::OpenRejected);
+    }
+    Ok(CompactionApproval { file_id: *file_id })
+}
+
+/// A public, domain-separated BLAKE2b-256 digest for authenticated format metadata.
+///
+/// This is not a key derivation or a MAC. It is the hashing hook the world-line uses for its
+/// public Merkle accumulator; callers must still authenticate roots with sealed witnesses.
+pub fn metadata_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
+    let mut h = Blake2b256::new();
+    h.update(b"HOLONOMY_V6_PUBLIC_METADATA");
+    h.update([0u8]);
+    h.update((domain.len() as u64).to_le_bytes());
+    h.update(domain);
+    h.update((bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// The zeroizing plaintext returned by a successful object-open operation.
+pub type OpenedPlaintext = Zeroizing<Vec<u8>>;
 
 /// A sealed document object: ciphertext, its nonce, and the CMT-4 commitment binding both to
 /// the document key and the associated data. The world-line stores these verbatim.
@@ -80,7 +160,7 @@ pub fn open_object(
     key: &DEMKey,
     associated_data: &[u8],
     sealed: &SealedObject,
-) -> Result<Zeroizing<Vec<u8>>, SealError> {
+) -> Result<OpenedPlaintext, SealError> {
     let committed = CommittedCiphertext {
         ciphertext: sealed.ciphertext.clone(),
         cmt4: sealed.cmt4,
@@ -135,6 +215,59 @@ mod tests {
         assert_eq!(&plain[..], b"hello world-line");
         // Relocation fails at the commitment, through the public surface.
         assert!(open_object(&dem, b"segment:1", &sealed).is_err());
+    }
+
+    #[test]
+    fn metadata_digest_is_blake2b_256_not_truncated_blake2b_512() {
+        let digest = metadata_digest(b"test-domain", b"holonomy metadata");
+        assert_eq!(
+            digest,
+            [
+                0x77, 0x46, 0xe1, 0xee, 0x5c, 0x9d, 0x01, 0x3c, 0xee, 0xea, 0xa3, 0x11, 0xba, 0x8c,
+                0xb8, 0x08, 0x9f, 0xbf, 0xe5, 0xbf, 0x6e, 0x45, 0x44, 0x7e, 0x5a, 0x94, 0xec, 0x50,
+                0x4a, 0x18, 0x7f, 0xe0,
+            ]
+        );
+        assert_ne!(digest, {
+            let mut hasher = Blake2b512::new();
+            hasher.update(b"HOLONOMY_V6_PUBLIC_METADATA");
+            hasher.update([0u8]);
+            hasher.update(11u64.to_le_bytes());
+            hasher.update(b"test-domain");
+            hasher.update(17u64.to_le_bytes());
+            hasher.update(b"holonomy metadata");
+            let wide = hasher.finalize();
+            let mut truncated = [0u8; 32];
+            truncated.copy_from_slice(&wide[..32]);
+            truncated
+        });
+    }
+
+    #[test]
+    fn compaction_confirmation_rederives_and_is_file_scoped() {
+        let salt = [0xA2; DERIVE_SALT_BYTES];
+        let params = KdfParamsRecord {
+            m_kib: 8_192,
+            t: 1,
+            p: 1,
+        };
+        let keys = MasterKeys::derive(b"confirm me", &salt, None, ParamsClass::Test).unwrap();
+        let file_id = [0x61; 16];
+        let approval = confirm_compaction(
+            b"confirm me",
+            &salt,
+            None,
+            &params,
+            keys.unwrap_key(),
+            &file_id,
+        )
+        .unwrap();
+        assert!(approval.is_for_file(&file_id));
+        assert!(!approval.is_for_file(&[0x62; 16]));
+        assert!(matches!(
+            confirm_compaction(b"wrong", &salt, None, &params, keys.unwrap_key(), &file_id,),
+            Err(SealError::OpenRejected)
+        ));
     }
 
     #[test]

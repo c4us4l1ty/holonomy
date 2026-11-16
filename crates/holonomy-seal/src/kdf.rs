@@ -181,11 +181,28 @@ pub fn derive_root_secret(
 /// header (Block 3) stores the [`crate::calibrate::KdfParamsRecord`]; open replays it. Direct
 /// param selection bypasses the fence and is therefore crate-internal on purpose — the only
 /// calibrated producer is [`crate::calibrate::calibrate`].
+fn validate_replayed_params(
+    record: &crate::calibrate::KdfParamsRecord,
+    allow_test_schedule: bool,
+) -> Result<(), KdfError> {
+    if allow_test_schedule && (record.m_kib, record.t, record.p) == (8_192, 1, 1) {
+        return Ok(());
+    }
+    if record.m_kib < crate::calibrate::FENCE_MIN_KIB {
+        return Err(KdfError::TestScheduleRefused);
+    }
+    if !record.is_production_fenced() {
+        return Err(KdfError::InvalidParams);
+    }
+    Ok(())
+}
+
 pub fn derive_root_secret_with(
     passphrase: &[u8],
     salt: &[u8; DERIVE_SALT_BYTES],
     record: &crate::calibrate::KdfParamsRecord,
 ) -> Result<RootSecret, KdfError> {
+    validate_replayed_params(record, cfg!(any(debug_assertions, test)))?;
     let params = Params::new(record.m_kib, record.t, record.p, Some(ROOT_SECRET_BYTES))
         .map_err(|_| KdfError::InvalidParams)?;
     let mut out = [0u8; ROOT_SECRET_BYTES];
@@ -353,6 +370,29 @@ mod tests {
         assert_eq!(
             via_class_usb.unwrap_key().expose(),
             via_record_usb.unwrap_key().expose()
+        );
+    }
+
+    #[test]
+    fn replayed_params_reject_weak_or_unbounded_release_schedules() {
+        let test = crate::calibrate::KdfParamsRecord {
+            m_kib: 8_192,
+            t: 1,
+            p: 1,
+        };
+        assert_eq!(
+            validate_replayed_params(&test, false),
+            Err(KdfError::TestScheduleRefused)
+        );
+        assert_eq!(validate_replayed_params(&test, true), Ok(()));
+        let oversized_time = crate::calibrate::KdfParamsRecord {
+            m_kib: crate::calibrate::FENCE_MIN_KIB,
+            t: u32::MAX,
+            p: 1,
+        };
+        assert_eq!(
+            validate_replayed_params(&oversized_time, false),
+            Err(KdfError::InvalidParams)
         );
     }
 

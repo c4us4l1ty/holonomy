@@ -1,6 +1,6 @@
 [package]
 name = "holonomy-line"
-description = "The Witness: the append-only .wavefunction world-line container (Block 3). Sealed segments, witness chain, crash-proof commits."
+description = "The Witness: the append-only .wavefunction world-line container (Block 3). Sealed segments, witness chain, crash-recoverable commits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,5 @@ publish = false
 workspace = true
 
 [dependencies]
+holonomy-seal = { path = "../holonomy-seal" }
+libc.workspace = true
