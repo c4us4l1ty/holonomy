@@ -114,7 +114,12 @@ impl Arena {
 
 impl Drop for Arena {
     fn drop(&mut self) {
-        self.0.as_mut_slice().zeroize();
+        // `zeroize` intentionally does not implement Zeroize for `[T]` when T is only
+        // `Zeroize` (rather than the stronger `DefaultIsZeroes` bound); iterate so each
+        // Argon2 Block's own volatile zeroization impl is used.
+        for block in &mut self.0 {
+            block.zeroize();
+        }
     }
 }
 
@@ -163,8 +168,8 @@ pub fn derive_root_secret(
 ) -> Result<RootSecret, KdfError> {
     refuse_test_class_in_release(class)?;
     let (m_kib, t, p) = class.costs();
-    let params = Params::new(m_kib, t, p, Some(ROOT_SECRET_BYTES))
-        .map_err(|_| KdfError::InvalidParams)?;
+    let params =
+        Params::new(m_kib, t, p, Some(ROOT_SECRET_BYTES)).map_err(|_| KdfError::InvalidParams)?;
     let mut out = [0u8; ROOT_SECRET_BYTES];
     run_argon2(passphrase, salt, &params, &mut out)?;
     Ok(RootSecret(out))
