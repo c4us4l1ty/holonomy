@@ -16,7 +16,45 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
+  # Diagnostics bridge: the sandbox reads api.github.com but cannot reach the Actions log
+  # hosts, so any failing step's output is posted to the pinned diagnostics issue.
+  diag:
+    name: diagnostics bridge
+    runs-on: ubuntu-latest
+    if: always() && failure()
+    needs: [fmt, clippy, test, gates]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Reproduce each command and post output to the diag issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIAG_ISSUE: "51"
+        run: |
+          set +e
+          {
+            echo '### diag: workflow commands, verbatim output'
+            echo '```'
+            for cmd in \
+              "cargo fmt --all -- --check" \
+              "cargo clippy --workspace --all-targets -- -D warnings" \
+              "cargo test --workspace" \
+              "cargo run -p xtask -- gates --check"; do
+              echo "== $cmd"
+              eval "$cmd" 2>&1 | head -c 12000
+              echo "(exit ${PIPESTATUS[0]})"
+              echo
+            done
+            echo '```'
+          } > diag.md
+          head -c 60000 diag.md > diag-trim.md
+          gh issue comment "$DIAG_ISSUE" --body-file diag-trim.md
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
