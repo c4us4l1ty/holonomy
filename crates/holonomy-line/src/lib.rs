@@ -77,7 +77,7 @@ struct AppendIoState {
 #[cfg(test)]
 thread_local! {
     static APPEND_IO_STATE: std::cell::RefCell<Option<AppendIoState>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
