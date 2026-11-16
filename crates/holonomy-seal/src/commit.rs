@@ -16,7 +16,7 @@
 use blake2::{Blake2b512, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Length of a CMT-4 commitment.
 pub const CMT4_TAG_BYTES: usize = 32;
