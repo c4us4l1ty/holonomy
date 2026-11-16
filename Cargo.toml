@@ -19,11 +19,12 @@ exclude = ["holonomy-old", "holonomy-v5-1-0"]
 
 [workspace.package]
 # One bump per roadmap block; sealed at 6.0.0 by Block 10's release gate.
+# (No `publish` here: not an inheritable workspace key on all toolchain versions —
+# each member manifest sets its own `publish = false`.)
 version = "6.0.0-block.1"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT OR Apache-2.0"
-publish = false
 
 [workspace.lints.rust]
 # The compiler helps patrol the boundaries the audits used to guard by hand.
