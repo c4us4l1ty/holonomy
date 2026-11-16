@@ -21,6 +21,6 @@ Neither folder is a workspace member; both are prior art, kept unmodified.
 
 ## Building
 
-Rust stable (see `rust-toolchain.toml`). `cargo test --workspace` after Block 2's workspace
-bootstrap; today the workspace contains the Block 1 ground: gate machinery
-(`holonomy-ledger`), constitutional-carrying stubs, and `xtask`.
+Rust stable (see `rust-toolchain.toml`). `cargo test --workspace` compiles and passes today
+(CI proves it every push); the workspace currently holds the Block 1 ground: gate machinery
+(`holonomy-ledger`), constitution-carrying stubs for the Blocks 2–5 crates, and `xtask`.

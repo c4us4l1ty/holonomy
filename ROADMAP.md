@@ -38,7 +38,7 @@ where its abuses are already illegal.
   claims must be *measured* (the v3 gate pattern), timing budgets measured on reference
   hardware, sizes recorded per commit.
 
-**GATES** — ✅ **passed 2026-11-16** (CI run [43891997903](../../actions/runs/43891997903), all four jobs green)
+**GATES** — ✅ **passed 2026-11-16** (CI run [43891997903](https://github.com/c4us4l1ty/holonomy/actions/runs/43891997903), all four jobs green)
 - [x] Every RFC names the attack it resists and the test that proves it. (`docs/rfc/RFC-001…004`, attack tables with proving tests)
 - [x] CI enforces: no unpinned deps, no forbidden allocator behavior, license/clippy clean. (fmt / clippy `-D warnings` / test / gates-contract on every push)
 - [x] UI spec is complete enough that a reader can derive caret position from it alone. (`docs/UI-SPEC.md` §4)
