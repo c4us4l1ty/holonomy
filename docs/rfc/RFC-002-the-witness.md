@@ -1,12 +1,12 @@
 # RFC-002 — The Witness (Block 3)
 
-*Status: Block 3 implementation and test draft. CI run 43923405534 passed the original
-implementation checks; follow-up fault-injection and write-trace changes still require CI. New
-tests inject a short write at every append byte, fail each sync barrier, and fail tail-recovery
-truncation. They measure `File::write` offsets and completed byte counts on a simulated 30 M-word
-file. They do not model actual power loss, ENOSPC, filesystem journaling, or backup-network
-transfer. L-6 and L-10 therefore remain `spec`, not passed gates. The valid-prefix rollback limit
-is explicitly amended below and remains open as AUDIT OQ-7.*
+*Status: Block 3 implementation and test draft. CI run 43926666233 passed rustfmt, clippy,
+workspace tests, and the gates contract. New tests inject a short write at every append byte,
+fail each sync barrier, and fail tail-recovery truncation. They measure `File::write` offsets and
+completed byte counts on a simulated 30 M-word file. They do not model actual power loss, ENOSPC,
+filesystem journaling, or backup-network transfer. L-6 and L-10 therefore remain `spec`, not
+passed gates. The valid-prefix rollback limit is explicitly amended below and remains open as
+AUDIT OQ-7.*
 
 ## Context
 

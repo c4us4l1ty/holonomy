@@ -61,8 +61,9 @@ Listed so they stay dead.
   errors are returned before OS sync/truncate operations; no real ENOSPC, filesystem failure,
   process/device power cut, or filesystem/hardware durability qualification was run, so **L-6
   remains `spec`**. No concrete backup client was measured, so **L-10 remains `spec`**. OQ-7's
-  valid-prefix rollback limitation remains accepted and open. CI status for these follow-up
-  changes is recorded below after validation.
+  valid-prefix rollback limitation remains accepted and open. CI run 43926260051 first caught
+  Clippy's `missing_const_for_thread_local`; fixed in `58ee6ac`. CI run 43926666233 then passed
+  rustfmt, clippy, workspace tests, and the gates contract.
 
 - **2026-11-16** — Block 3 implementation draft: added the fixed `.wavefunction` header,
   fenced KDF replay, sealed segment frames, MMR witness commits, lazy body reads, explicit
