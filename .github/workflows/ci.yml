@@ -21,6 +21,21 @@ permissions:
   issues: write
 
 jobs:
+  # Temporary lockfile bootstrap for the repository's first committed workspace lock.
+  # Remove this job once Cargo.lock is checked in and every cargo command uses --locked.
+  lockfile-bootstrap:
+    name: lockfile bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo generate-lockfile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-lockfile
+          path: Cargo.lock
+          retention-days: 1
+
   # Diagnostics bridge: the sandbox reads api.github.com but cannot reach the Actions log
   # hosts, so any failing step's output is posted to the pinned diagnostics issue.
   diag:
