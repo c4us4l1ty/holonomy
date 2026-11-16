@@ -65,6 +65,27 @@ fn files_equal_prefix(left: &Path, right: &Path, length: u64) -> io::Result<bool
     Ok(true)
 }
 
+fn assert_tail_write_trace(
+    trace: &AppendIoSnapshot,
+    old_len: u64,
+    new_len: u64,
+    receipt: AppendReceipt,
+) {
+    assert_eq!(trace.bytes_written, receipt.bytes_appended);
+    assert_eq!(trace.syncs.len(), 2);
+    assert!(trace.syncs.iter().all(|sync| sync.succeeded));
+    assert!(trace.syncs[0].bytes_written < trace.syncs[1].bytes_written);
+    assert_eq!(trace.syncs[1].bytes_written, receipt.bytes_appended);
+    assert!(trace.truncations.is_empty());
+
+    let mut expected_offset = old_len;
+    for write in &trace.writes {
+        assert_eq!(write.offset, expected_offset, "append write offset");
+        expected_offset += write.bytes as u64;
+    }
+    assert_eq!(expected_offset, new_len);
+}
+
 #[test]
 fn create_does_not_replace_an_existing_path() {
     let path = temp_path("create-no-replace");
@@ -137,12 +158,16 @@ fn append_writes_only_new_tail_records() {
     let before = fs::read(&path.0).unwrap();
     let old_len = before.len() as u64;
 
+    let probe = AppendIoProbeGuard::install(None, None, false);
     let receipt = line.append_segments(&[&b"new tail segment"[..]]).unwrap();
+    let trace = probe.snapshot();
+    drop(probe);
     let after = fs::read(&path.0).unwrap();
     let new_len = after.len() as u64;
     assert_eq!(new_len - old_len, receipt.bytes_appended);
     assert_eq!(&after[..old_len as usize], &before);
     assert_eq!(receipt.segment_count, 2);
+    assert_tail_write_trace(&trace, old_len, new_len, receipt);
 }
 
 #[test]
@@ -245,10 +270,14 @@ fn a_simulated_thirty_million_word_history_still_appends_only_the_new_tail() {
     let before_len = fs::metadata(&path.0).unwrap().len();
     let snapshot = temp_path("tail-snapshot");
     fs::copy(&path.0, &snapshot.0).unwrap();
+    let probe = AppendIoProbeGuard::install(None, None, false);
     let receipt = line.append_segments(&[&b"new tail edit"[..]]).unwrap();
+    let trace = probe.snapshot();
+    drop(probe);
     let after_len = fs::metadata(&path.0).unwrap().len();
     assert_eq!(after_len - before_len, receipt.bytes_appended);
     assert!(files_equal_prefix(&path.0, &snapshot.0, before_len).unwrap());
+    assert_tail_write_trace(&trace, before_len, after_len, receipt);
 
     drop(line);
     let reopened = WorldLine::open(&path.0, &dem).unwrap();
@@ -352,6 +381,185 @@ fn every_byte_cut_of_an_append_recovers_to_the_last_witness() {
     let committed = WorldLine::open(&path.0, &dem).unwrap();
     assert_eq!(committed.segment_count(), 2);
     assert!(!committed.recovery_info().needs_recovery());
+}
+
+#[test]
+fn injected_short_write_at_every_byte_reopens_to_the_last_commit() {
+    let path = temp_path("injected-short-write-matrix");
+    let salt = [0x42; 64];
+    let (_keys, capsule, dem) = test_material(b"injected short writes", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    line.append_segments(&[&b"last committed segment"[..]])
+        .unwrap();
+    let baseline = fs::read(&path.0).unwrap();
+    let new_segments: [&[u8]; 2] = [
+        &b"first pending segment"[..],
+        &b"second pending segment"[..],
+    ];
+    let sample = line.append_segments(&new_segments).unwrap();
+    assert_eq!(
+        fs::metadata(&path.0).unwrap().len() - baseline.len() as u64,
+        sample.bytes_appended
+    );
+    drop(line);
+
+    // Inject a short-write failure through the append writer at each byte position. Each error
+    // poisons the handle; reopening must authenticate the prior witness and report only the
+    // uncommitted tail, never expose either pending segment as committed.
+    for cut in 0..sample.bytes_appended {
+        fs::write(&path.0, &baseline).unwrap();
+        let mut candidate = WorldLine::open(&path.0, &dem).unwrap();
+        let probe = AppendIoProbeGuard::install(Some(cut), None, false);
+        let result = candidate.append_segments(&new_segments);
+        let trace = probe.snapshot();
+        drop(probe);
+
+        assert!(
+            matches!(result, Err(LineError::Io(_))),
+            "cut after {cut} bytes"
+        );
+        assert_eq!(trace.bytes_written, cut, "cut after {cut} bytes");
+        assert!(matches!(
+            candidate.append_segments(&[&b"must reopen"[..]]),
+            Err(LineError::ReopenRequired)
+        ));
+        drop(candidate);
+
+        let recovered = WorldLine::open(&path.0, &dem)
+            .unwrap_or_else(|error| panic!("open failed after injected cut {cut}: {error}"));
+        assert_eq!(recovered.segment_count(), 1, "cut after {cut} bytes");
+        assert_eq!(
+            recovered.recovery_info().trailing_bytes,
+            cut,
+            "cut after {cut} bytes"
+        );
+        assert_eq!(
+            &recovered.open_segment(0).unwrap()[..],
+            b"last committed segment"
+        );
+        assert_eq!(recovered.verify().unwrap().segments_verified, 1);
+    }
+}
+
+#[test]
+fn injected_sync_failures_leave_only_authenticated_commit_states() {
+    for fail_on_sync in [1, 2] {
+        let path = temp_path("injected-sync-failure");
+        let salt = [0x43; 64];
+        let (_keys, capsule, dem) = test_material(b"injected sync failures", salt);
+        let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+        line.append_segments(&[&b"last committed segment"[..]])
+            .unwrap();
+        let baseline = fs::read(&path.0).unwrap();
+
+        let probe = AppendIoProbeGuard::install(None, Some(fail_on_sync), false);
+        let result = line.append_segments(&[&b"pending segment"[..]]);
+        let trace = probe.snapshot();
+        drop(probe);
+
+        assert_eq!(trace.syncs.len(), fail_on_sync);
+        assert!(!trace.syncs[fail_on_sync - 1].succeeded);
+        assert_eq!(
+            trace.syncs.last().unwrap().bytes_written,
+            trace.bytes_written
+        );
+        if fail_on_sync == 1 {
+            assert!(matches!(result, Err(LineError::Io(_))));
+            assert_eq!(trace.syncs[0].bytes_written, trace.bytes_written);
+        } else {
+            assert!(trace.syncs[0].succeeded);
+            assert!(matches!(result, Err(LineError::DurabilityUncertain)));
+        }
+        assert!(matches!(
+            line.append_segments(&[&b"must reopen"[..]]),
+            Err(LineError::ReopenRequired)
+        ));
+        drop(line);
+
+        let written = fs::read(&path.0).unwrap();
+        assert_eq!(&written[..baseline.len()], &baseline);
+        assert_eq!(
+            written.len() as u64 - baseline.len() as u64,
+            trace.bytes_written
+        );
+        let observed = WorldLine::open(&path.0, &dem).unwrap();
+        if fail_on_sync == 1 {
+            assert_eq!(observed.segment_count(), 1);
+            assert_eq!(observed.recovery_info().trailing_bytes, trace.bytes_written);
+            assert_eq!(observed.verify().unwrap().segments_verified, 1);
+        } else {
+            // A failed final sync can leave either the old commit or the complete new commit
+            // durable. This run observes the latter; both states must authenticate cleanly.
+            assert_eq!(observed.segment_count(), 2);
+            assert!(!observed.recovery_info().needs_recovery());
+            assert_eq!(observed.verify().unwrap().segments_verified, 2);
+            drop(observed);
+            fs::write(&path.0, &baseline).unwrap(); // model loss of the unsynced commit tail
+            let lost_tail = WorldLine::open(&path.0, &dem).unwrap();
+            assert_eq!(lost_tail.segment_count(), 1);
+            assert_eq!(lost_tail.verify().unwrap().segments_verified, 1);
+        }
+    }
+}
+
+#[test]
+fn injected_recovery_truncate_failures_preserve_the_last_commit() {
+    for fail_truncate in [true, false] {
+        let path = temp_path("injected-recovery-truncate");
+        let salt = [0x44; 64];
+        let (_keys, capsule, dem) = test_material(b"injected recovery truncate", salt);
+        let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+        line.append_segments(&[&b"committed before recovery"[..]])
+            .unwrap();
+        let committed_end = line.committed_end;
+        drop(line);
+        let orphan_tail = b"W6RC\x01\x00"; // an incomplete record header at EOF
+        OpenOptions::new()
+            .append(true)
+            .open(&path.0)
+            .unwrap()
+            .write_all(orphan_tail)
+            .unwrap();
+
+        let mut recovering = WorldLine::open(&path.0, &dem).unwrap();
+        assert_eq!(
+            recovering.recovery_info().trailing_bytes,
+            orphan_tail.len() as u64
+        );
+        let fail_on_sync = (!fail_truncate).then_some(1);
+        let probe = AppendIoProbeGuard::install(None, fail_on_sync, fail_truncate);
+        let result = recovering.append_segments(&[&b"after recovery"[..]]);
+        let trace = probe.snapshot();
+        drop(probe);
+        assert!(matches!(result, Err(LineError::Io(_))));
+        assert!(trace.writes.is_empty());
+        assert_eq!(trace.truncations.len(), 1);
+        assert_eq!(trace.truncations[0].length, committed_end);
+        assert_eq!(trace.truncations[0].succeeded, !fail_truncate);
+        if fail_truncate {
+            assert!(trace.syncs.is_empty());
+        } else {
+            assert_eq!(trace.syncs.len(), 1);
+            assert!(!trace.syncs[0].succeeded);
+        }
+        drop(recovering);
+
+        let reopened = WorldLine::open(&path.0, &dem).unwrap();
+        assert_eq!(reopened.segment_count(), 1);
+        assert_eq!(
+            &reopened.open_segment(0).unwrap()[..],
+            b"committed before recovery"
+        );
+        assert_eq!(
+            reopened.recovery_info().trailing_bytes,
+            if fail_truncate {
+                orphan_tail.len() as u64
+            } else {
+                0
+            }
+        );
+        assert_eq!(reopened.verify().unwrap().segments_verified, 1);
+    }
 }
 
 #[test]
