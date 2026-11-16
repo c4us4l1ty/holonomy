@@ -6,7 +6,7 @@ use crate::LineError;
 
 const HEIGHTS: usize = 64;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Mmr {
     count: u64,
     peaks: [Option<[u8; 32]>; HEIGHTS],
