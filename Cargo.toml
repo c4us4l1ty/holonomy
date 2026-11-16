@@ -21,10 +21,27 @@ exclude = ["holonomy-old", "holonomy-v5-1-0"]
 # One bump per roadmap block; sealed at 6.0.0 by Block 10's release gate.
 # (No `publish` here: not an inheritable workspace key on all toolchain versions —
 # each member manifest sets its own `publish = false`.)
-version = "6.0.0-block.1"
+version = "6.0.0-block.3"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Cryptography pins are inherited verbatim from holonomy-v5-1-0's audited workspace: that set
+# ships the reduction-hardened ml-kem 0.3.4 line and a rand_core 0.10 that matches it, and it
+# built and passed its two-phase audit tests. Repinning blind would be worse than inheriting.
+ml-kem = { version = "0.3.4", default-features = false, features = ["alloc", "zeroize"] }
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
+blake2 = { version = "0.10", default-features = false }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
+rand_core = { version = "0.10", default-features = false }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+libc = "0.2"
+unicode-normalization = "0.1"
+
+# getrandom is crate-local in crates/holonomy-seal (only the boundary draws entropy; keeping
+# it out of workspace.dependencies also keeps clippy's unused-workspace-dependency gate quiet).
 
 [workspace.lints.rust]
 # The compiler helps patrol the boundaries the audits used to guard by hand.

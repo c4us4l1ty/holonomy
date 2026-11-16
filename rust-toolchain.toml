@@ -1,6 +1,6 @@
-# Block 1: channel `stable` until a sandboxed local compiler exists to pin against.
-# Pinning a concrete version is tracked as an open item in AUDIT.md.
+# Pinned during Block 2 (AUDIT OQ-1 closed): CI's observed stable was 1.100.0 — pinning makes
+# every gate byte-reproducible. Bump deliberately, with an AUDIT.md entry, never drift.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

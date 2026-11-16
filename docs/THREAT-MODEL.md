@@ -22,7 +22,7 @@ decorative costs.
 | A1 | **Archive & wait** | Copy `.wavefunction` today (disk, cloud breach, interception); attack it later, including with quantum hardware (harvest-now-decrypt-later) | **Yes** — the core case |
 | A2 | **Live-memory intruder** | Read RAM while the editor runs (post-exploit, forensic live capture, cold boot) | **Yes** — bounding this is the singularity |
 | A3 | **OS-level observer** | Read clipboard, swap, crash dumps, page cache, thumbnails, IME/AT text events | **Yes, partially** — mitigations per platform; see §5 |
-| A4 | **Cloud integrity attacker** | Truncate, reorder, or flip bytes in the synced copy | **Yes** — detectability is mandatory, rollback is a format property |
+| A4 | **Cloud integrity attacker** | Truncate, reorder, or flip bytes in the synced copy | **Partially** — malformed edits, non-prefix truncation, reorder, and flips are detected; a byte-perfect rollback to an earlier valid witness prefix is not detectable from the file alone (AUDIT OQ-7) |
 | A5 | **Online brute forcer** | Unlimited offline KDF attempts against a stolen file | **Yes** — cost is the defense (memory-hard KDF + PQ envelope), not secrecy of the format |
 | A6 | **Physical observer / hardware implant** | Cameras reading the screen, keyloggers below the OS input API, compromised firmware | **No** — stated openly, not pretended away |
 
@@ -66,6 +66,10 @@ Recorded so no future version quietly upgrades these into claims:
   profile; nothing beyond that uniformity is claimed.
 - **Undo history doubles as exposure history**: the world-line keeps old drafts by design
   (Vision III). Opt-in compaction (RFC-002 §7) is the user's control over that tradeoff.
+- A byte-perfect rollback to an earlier valid witness prefix cannot be distinguished from a
+  legitimately shorter file without trusted monotonic state outside the copied `.wavefunction`.
+  v6 claims integrity of the bytes present and crash consistency, not freshness against this
+  rollback; see RFC-002 and AUDIT OQ-7.
 
 ## 6. Registry: law → adversary
 
