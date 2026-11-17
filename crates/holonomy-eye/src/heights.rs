@@ -253,11 +253,7 @@ impl HeightModel {
         let end = if height <= Fixed::ZERO {
             first + 1
         } else {
-            let stop = start + height;
-            match self.leaf_before(stop) {
-                Some(leaf) => leaf + 1,
-                None => leaves,
-            }
+            self.leaves_starting_before(start + height).unwrap_or(0)
         };
         let end = end.clamp(first + 1, leaves);
         Window {
@@ -268,8 +264,12 @@ impl HeightModel {
         }
     }
 
-    /// The largest leaf index whose top edge is strictly before `y`, O(log n).
-    fn leaf_before(&self, y: Fixed) -> Option<usize> {
+    /// How many leaves have a top edge strictly before `y` — the exclusive end of a window whose
+    /// bottom edge is `y`, O(log n).
+    ///
+    /// This may equal the number of leaves: a `y` past the document has every leaf starting before
+    /// it. `None` when `y` is at or before zero.
+    fn leaves_starting_before(&self, y: Fixed) -> Option<usize> {
         if y <= Fixed::ZERO {
             return None;
         }
@@ -341,20 +341,21 @@ mod tests {
         None
     }
 
-    /// The largest leaf index whose top edge is strictly before `y`, by scanning.
-    fn naive_leaf_before(heights: &[i64], y: Fixed) -> Option<usize> {
+    /// How many leaves start strictly before `y`, by scanning.
+    fn naive_leaves_starting_before(heights: &[i64], y: Fixed) -> Option<usize> {
         if y <= Fixed::ZERO {
             return None;
         }
         let mut acc = Fixed::ZERO;
-        let mut answer = None;
-        for (leaf, height) in heights.iter().enumerate() {
-            if acc < y {
-                answer = Some(leaf);
+        let mut count = 0;
+        for height in heights {
+            if acc >= y {
+                break;
             }
+            count += 1;
             acc += Fixed::units(*height);
         }
-        answer
+        Some(count)
     }
 
     #[test]
@@ -410,17 +411,19 @@ mod tests {
     }
 
     #[test]
-    fn leaf_before_matches_a_scan() {
+    fn leaves_starting_before_matches_a_scan() {
         let heights = [4, 0, 0, 6, 2];
         let model = model(&heights);
         for y in -1..14 {
             let point = Fixed::units(y);
             assert_eq!(
-                model.leaf_before(point),
-                naive_leaf_before(&heights, point),
+                model.leaves_starting_before(point),
+                naive_leaves_starting_before(&heights, point),
                 "at {y}"
             );
         }
+        // Past the document every leaf starts before the point, so the count saturates at 5.
+        assert_eq!(model.leaves_starting_before(Fixed::units(13)), Some(5));
     }
 
     #[test]
@@ -530,12 +533,11 @@ mod tests {
                         let expected_end = if height <= Fixed::ZERO {
                             first + 1
                         } else {
-                            match naive_leaf_before(&heights, start + height) {
-                                Some(leaf) => leaf + 1,
-                                None => leaves,
-                            }
+                            let count = naive_leaves_starting_before(&heights, start + height);
+                            count.unwrap_or(0)
                         };
-                        assert_eq!(window.end(), expected_end.min(leaves), "round {round}");
+                        let expected_end = expected_end.clamp(first + 1, leaves);
+                        assert_eq!(window.end(), expected_end, "round {round}");
                         assert_eq!(window.bottom(), model.prefix(window.end()));
                     }
                 }
