@@ -27,8 +27,9 @@ seal (`holonomy-seal`, Block 2 — closed 2026-11-17 by scope amendment), the ap
 (`holonomy-line`, Block 3 — closed in scope, with L-6/L-10 qualification owed to Blocks 6 and 10),
 the Spine's first three slices (`holonomy-text`: immutable slab tree, history, capacity-bounded
 resident set, an in-place keystroke path whose zero-allocation claim is measured by a counting
-allocator in CI, and the commit boundary that seals an edited slab into the world-line and
-path-copies the spine onto it — proven against the real container, but with no editor above them
-yet) and a law-carrying stub for the Eye, plus `xtask`. Every unmeasured law reads
+allocator in CI, the commit boundary that seals an edited slab into the world-line and path-copies
+the spine onto it — proven against the real container — and the live-length overlay that keeps
+positions correct while the spine is stale, but with no editor above them yet) and a law-carrying
+stub for the Eye, plus `xtask`. Every unmeasured law reads
 `spec` in `GATES.md`; that column is the honest one and nothing is promoted to `gated` without a
 measurement in CI.

@@ -50,6 +50,45 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-17 — Block 4, fourth slice: the live-length overlay, so a stale spine still answers.**
+  D-2 recorded its own cost in plain words: the resident slab is authoritative while it is edited,
+  the spine is path-copied at commit, and *the editor must carry a live-length overlay until
+  commit*. Without it, a keystroke followed by a viewport query is answered by geometry that is
+  wrong by exactly the number of characters typed. [`Draft`] is that overlay.
+
+  **What it is.** A record of a handful of leaves and the lengths their resident text now has.
+  Every query partitions the walk at those leaves and asks the spine its own O(log N) question per
+  region, translating offsets by the accumulated difference. `document_len`, `locate` and
+  `spans_in` therefore stay correct while the spine is stale, and **the view does not move when the
+  commit lands**: the integration test types a character, records the draft, queries offsets,
+  lengths and spans against the stale root, commits, forgets the draft, and asserts the answers are
+  the same against the sealed one.
+
+  **Why it is a projection and not a document.** It holds no plaintext, so the wipe set is
+  untouched; nothing in the spine consults it, so geometry stays the only thing the tree knows; and
+  `forget`/`clear` restore the sealed view exactly. That last property is what makes
+  undo-after-commit sound: the old root is unchanged, so the overlay must go back to matching it.
+
+  **Two asymmetries, both deliberate and tested.**
+  - *Sealed leaves are clipped to the requested range; drafted leaves are returned whole.* A
+    drafted leaf's visible portion cannot be expressed as a `Slab` — its bytes exist in no segment
+    until commit — so a partial extent would name nothing. The caller clips inside the resident
+    buffer it already holds.
+  - *An emptied leaf occupies no space.* A drafted leaf whose text was deleted out is not a span
+    and is never located; the commit boundary removes it rather than sealing an empty segment. The
+    two agree because both treat "no bytes" as "not there".
+
+  **What this entry does not claim.**
+  - **No measurement, again.** Re-recording a leaf that is already drafted updates in place and
+    allocates nothing; the *first* record for a leaf may allocate unless `Draft::with_capacity`
+    covers the dirty set, and the editor sizes it from the viewport the way it sizes the resident
+    budget. None of that is measured: the L-2 gate's window is still `locate` → resident hit →
+    in-place edit, and the overlay sits outside it until a future slice folds it in or measures it
+    separately. No law is promoted.
+  - **Still no editor.** The overlay answers geometry questions; caret placement, selection,
+    scrolling and paint are Block 5's Eye, and the wiring that decides *when* to commit — a slab
+    change, a scroll, an idle timer — is a policy this crate does not make.
+
 - **2026-11-17 — Block 4, third slice: the commit boundary, proven against the real container.**
   D-2 said the spine is path-copied "at commit" and admitted the commit boundary did not exist.
   It exists now: `commit::commit_slab` seals an edited resident slab into the world-line, takes

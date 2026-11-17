@@ -1,11 +1,12 @@
 # RFC-003 — The Spine (Block 4)
 
-*Status: **three slices implemented 2026-11-17** (`holonomy-text`: spine, aggregates, history,
-resident set; the measured keystroke path; and the commit boundary — seal → append → witness → new
-root, proven against a real `holonomy-line` world-line in `tests/commit_boundary.rs`), still an
-open attack target for the rest. No editor exists above them, the live-length overlay D-2 requires
-is unbuilt, and every Block 4 gate is a document-scale measurement that has not been run. Two
-deliverables are amended: §4 (AUDIT decision **D-1**) and §5 (AUDIT decisions **D-2**, **D-3**).*
+*Status: **four pieces implemented 2026-11-17** (`holonomy-text`: spine, aggregates, history,
+resident set; the measured keystroke path; the commit boundary — seal → append → witness → new
+root, proven against a real `holonomy-line` world-line in `tests/commit_boundary.rs`; and the
+live-length overlay that keeps position queries correct while the spine is stale), still an open
+attack target for the rest. No editor exists above them — caret, selection and paint are Block 5 —
+and every Block 4 gate is a document-scale measurement that has not been run. Two deliverables are
+amended: §4 (AUDIT decision **D-1**) and §5 (AUDIT decisions **D-2**, **D-3**).*
 
 ## Context
 
@@ -44,7 +45,10 @@ is born living inside the security model instead of being wrapped by it later.
    gate out of reach by construction, so the resident slab is authoritative while it is edited and
    the spine is path-copied at the **commit boundary**: the edited slab is sealed as a new segment,
    the world-line commits it with a witness, and the spine's leaf is replaced by one naming the new
-   segment. One structural event per burst of typing, never one per character.
+   segment. One structural event per burst of typing, never one per character. The stale geometry
+   is bridged in memory by `Draft`, which answers lengths, offsets and ranges against the
+   committed tree plus the live lengths of the leaves being edited, so the document view is correct
+   before the seal and byte-identical after it.
 
 ## Attacks resisted
 
