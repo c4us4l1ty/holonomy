@@ -106,6 +106,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Check secret-state zeroization feature graph
+        run: |
+          set -euo pipefail
+          feature_tree="$RUNNER_TEMP/holonomy-seal-features.txt"
+          cargo tree --locked -e features -p holonomy-seal > "$feature_tree"
+          for edge in \
+            'argon2 feature "zeroize"' \
+            'chacha20 feature "zeroize"' \
+            'curve25519-dalek feature "zeroize"' \
+            'ml-kem feature "zeroize"' \
+            'poly1305 feature "zeroize"' \
+            'sha3 feature "zeroize"' \
+            'shake feature "zeroize"' \
+            'sponge-cursor feature "zeroize"' \
+            'x25519-dalek feature "zeroize"'; do
+            if ! grep -Fq "$edge" "$feature_tree"; then
+              echo "missing required Cargo feature edge: $edge" >&2
+              cat "$feature_tree" >&2
+              exit 1
+            fi
+          done
       - run: cargo test --locked --workspace
 
   sync:

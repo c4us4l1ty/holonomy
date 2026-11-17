@@ -209,6 +209,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "crypto-common 0.2.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -266,6 +267,8 @@ dependencies = [
  "ml-kem",
  "poly1305",
  "rand_core 0.10.1",
+ "sha3",
+ "shake",
  "unicode-normalization",
  "x25519-dalek",
  "zeroize",
@@ -479,6 +482,9 @@ name = "sponge-cursor"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "subtle"

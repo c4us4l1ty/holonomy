@@ -34,9 +34,11 @@ ml-kem = { version = "0.3.4", default-features = false, features = ["alloc", "ze
 x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
 blake2 = { version = "0.10", default-features = false }
-# Feature-unification edge: chacha20poly1305 0.10.1 does not forward Poly1305's optional
-# zeroize feature, so holonomy-seal enables it directly for the transitive AEAD state.
+# Feature-unification edges: the pinned AEAD does not forward Poly1305's optional zeroize
+# feature, and ml-kem does not forward zeroize to its SHA-3/SHAKE dependencies.
 poly1305 = { version = "0.8", default-features = false, features = ["zeroize"] }
+sha3 = { version = "0.12", default-features = false, features = ["zeroize"] }
+shake = { version = "0.1", default-features = false, features = ["zeroize"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 rand_core = { version = "0.10", default-features = false }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
