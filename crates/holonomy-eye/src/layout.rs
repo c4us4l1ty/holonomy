@@ -23,6 +23,7 @@
 use crate::cluster::Clusters;
 use crate::geom::{Fixed, Point};
 use crate::shaper::Shaper;
+use crate::view::View;
 
 /// One cluster, placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,63 +137,23 @@ impl<'a> Layout<'a> {
 
     /// The caret at document byte `byte`, if `byte` is a caret position in this window.
     ///
-    /// This is the paint side: it answers where to draw the caret.
+    /// This is the paint side, in logical units. It is [`View::IDENTITY`]'s answer, which is the
+    /// only implementation of the walk: zoom and DPI are a view transform, never a second
+    /// geometry, so there is nothing here for a device-space answer to drift from.
     #[must_use]
     pub fn paint_point(&self, byte: u64) -> Option<Caret> {
-        for (index, line) in self.lines.iter().enumerate() {
-            for (x, at) in line.boundaries() {
-                if at == byte {
-                    return Some(Caret {
-                        byte,
-                        line: index,
-                        x,
-                        top: line.top,
-                        height: line.height,
-                    });
-                }
-            }
-        }
-        None
+        View::IDENTITY.paint_point(self, byte)
     }
 
     /// The caret nearest to `point`, in the same units `paint_point` returns.
     ///
-    /// This is the click side. The nearest boundary wins; a tie goes to the earlier one so the
-    /// answer never depends on the order the clusters happen to be stored in. `y` is clamped into
-    /// the content, as clicking past the last line does in every editor.
+    /// This is the click side, in logical units, and it is [`View::IDENTITY`]'s answer: the
+    /// nearest boundary wins, a tie goes to the earlier one so the answer never depends on the
+    /// order the clusters happen to be stored in, and `y` is clamped into the content as clicking
+    /// past the last line does in every editor.
     #[must_use]
     pub fn hit_test(&self, point: Point) -> Option<Caret> {
-        if self.lines.is_empty() {
-            return None;
-        }
-        let mut index = self.lines.len() - 1;
-        for (candidate, line) in self.lines.iter().enumerate() {
-            if point.y < line.top + line.height {
-                index = candidate;
-                break;
-            }
-        }
-        let line = &self.lines[index];
-        let mut best: Option<(Fixed, Fixed, u64)> = None;
-        for (x, byte) in line.boundaries() {
-            let distance = if point.x < x {
-                x - point.x
-            } else {
-                point.x - x
-            };
-            match best {
-                Some((closest, _, _)) if distance >= closest => {}
-                _ => best = Some((distance, x, byte)),
-            }
-        }
-        let (_, x, byte) = best?;
-        Some(Caret {
-            byte,
-            line: index,
-            x,
-            top: line.top,
-            height: line.height,
-        })
+        View::IDENTITY.hit_test(self, point)
     }
 }
 
@@ -313,41 +274,7 @@ pub fn layout_window<'a, S: Shaper + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A deterministic fake: `m` and `中` are wide, `i` narrow, everything else one unit.
-    struct Fake {
-        line_height: Fixed,
-    }
-
-    impl Fake {
-        fn new() -> Self {
-            Self {
-                line_height: Fixed::units(20),
-            }
-        }
-    }
-
-    impl Shaper for Fake {
-        fn advance(&self, cluster: &str) -> Fixed {
-            match cluster.chars().next() {
-                Some('m') | Some('中') => Fixed::units(2),
-                Some('i') | Some('l') => Fixed::from_64ths(32),
-                _ => Fixed::ONE,
-            }
-        }
-
-        fn line_height(&self) -> Fixed {
-            self.line_height
-        }
-
-        fn ascent(&self) -> Fixed {
-            Fixed::units(15)
-        }
-    }
-
-    fn layout(text: &str, width_units: i64) -> Layout<'_> {
-        layout_window(text, 0, Fixed::units(width_units), &Fake::new())
-    }
+    use crate::test_support::{layout, Fake};
 
     #[test]
     fn golden_geometry_is_exact() {

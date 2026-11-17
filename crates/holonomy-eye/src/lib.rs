@@ -18,26 +18,40 @@
 //! - `shaper`: the [`Shaper`] trait — the only door through which advances enter the system.
 //! - `layout`: one run tree per laid-out window, which both [`Layout::paint_point`] and
 //!   [`Layout::hit_test`] walk.
+//! - `view`: [`View`], zoom and DPI as one exact integer transform that **both** consumers call —
+//!   paint through [`View::paint_point`], hit-test through [`View::hit_test`] on a device-space
+//!   point. There is deliberately no inverse transform: hit-testing compares device observations
+//!   against the device positions paint would draw, so no rounding is ever undone by a second
+//!   rounding.
 //!
-//! Two gaps keep L-8 at `spec` rather than `enforced`. Segmentation is a hand-written
-//! approximation of UAX #29 (a few sequences UAX #29 joins are left as separate clusters), and the
-//! zoom/DPI view transform does not exist yet, so the "at every zoom and DPI" half of the law has
-//! nothing to quantify over. Both are later Block 5 slices; neither can produce two answers for
-//! the same point, which is what the law forbids.
+//! The property L-8 names — every caret survives the trip from paint to hit-test and back, at
+//! every zoom and DPI — is tested across a corpus of scripts, marks, ZWJ sequences, wide clusters
+//! and line breaks, at eight zoom steps and five DPIs, on a fake shaper so it needs no font.
+//!
+//! L-8 still carries `status: spec`, and the crate says why rather than leaving it to a reader:
+//! segmentation is a hand-written approximation of UAX #29 (a few sequences UAX #29 joins are left
+//! as separate clusters, and BiDi reordering is not attempted at all), and the run tree is built
+//! from a whole window of text, so nothing here yet constrains shaping cost to the viewport. Those
+//! are Block 5's remaining gates, not this crate's footnotes.
 
 mod cluster;
 mod geom;
 mod layout;
 mod shaper;
+mod view;
 
 pub use crate::cluster::Clusters;
 pub use crate::geom::{Fixed, Point};
 pub use crate::layout::{layout_window, Caret, Layout, Line, Placed};
 pub use crate::shaper::Shaper;
+pub use crate::view::View;
 
 /// The single-geometry law, carried in code so it is compiled, not just quoted.
 pub const SINGLE_GEOMETRY_LAW: &str =
     "paint and hit-test consume one layout run tree; no second geometry may exist";
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {
