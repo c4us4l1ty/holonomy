@@ -46,13 +46,42 @@ Listed so they stay dead.
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
-| OQ-10 | A full resident slab has **no continuation policy** — solved by D-7: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; sealing is a state change of the same source and **leaves the root untouched**, so history and `verify` never observe it; each byte is written once, which removes rather than manages option A's quadratic cost; and the commit no longer needs to know where the caret is. Costs: ids become identities (allocated at seal, recorded in the segment header), residency gains a source lookup, and at most a handful of sources may be open at once. | **decided 2026-11-17 (D-7); register + insert path pending** |
+| OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it (witnessed by `holonomy-eye/tests/typing_visible.rs`); a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. The session is append-only so far: typing in the middle of a document needs the caret model. | **closed 2026-11-17 — `typing.rs`; mid-document insertion pending** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
 | OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate is a claim about the caller. The chain exists — `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, `holonomy_eye::byte_window` joins them contiguously — and D-7 removed the last structural objection by making text being typed an ordinary leaf. What is missing is the editor loop that calls all three and the measurement that proves the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed, no caller or measurement yet** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 
 ## Audit trail
+
+- **2026-11-17 — D-8 — the typing session, and the overclaim it caught.** D-7 was a design with a
+  testable claim attached. Building it (`typing.rs`) found one place where the claim was wrong, and
+  the measurement now exists for the rest.
+
+  **What a keystroke costs.** One insert into a spare-capacity [`SlabText`] — measured
+  allocation-free since Block 4 — and one `Draft::record`, which updates an entry in place. No root
+  is copied, no segment is written, nothing is allocated. The first byte of a source registers its
+  leaf with the length it has at that instant, so the tree needs no draft yet; only later keystrokes
+  are drafts.
+
+  **The overclaim.** "Sealing leaves the root untouched" was false in one respect: the tree has been
+  carrying the leaf's *registered* length, so a seal must correct that leaf to its live length before
+  the draft can be dropped. A root object changes. D-7 is amended in place rather than left standing,
+  because a record that is 95% right is the most expensive kind to leave in a repo.
+
+  **What survives.** No history entry is made: `Typing` owns the current root and rewrites it, so
+  undo steps over a seal the way it steps over an idle moment. It is one root per 64 KiB of text,
+  not one per keystroke — 500× fewer copies at a realistic buffer size. And nothing is written twice:
+  the sink receives each byte exactly once, which is now a test rather than an argument.
+
+  **The claim D-7 cared most about is now witnessed, not asserted.** `holonomy-eye`'s
+  `typing_visible.rs` types into a session that has sealed nothing, asks `byte_window` what the
+  viewport should shape, and gets the text being typed — the exact thing that was structurally
+  impossible before D-7.
+
+  **What is deliberately not done.** The session is append-only: the open source is always the
+  document's tail. Typing in the middle splits a leaf, which needs the caret to say where, and the
+  caret belongs to the editor. The record says so instead of implying the harder case works.
 
 - **2026-11-17 — D-7 — OQ-10 solved: a leaf names a place, and a place can be open.** D-6 was
   correct about the arithmetic and wrong about the shape. It accepted the frame "a leaf names a
@@ -100,6 +129,14 @@ Listed so they stay dead.
   commit, and the sentence in OQ-12 that said the viewport could not see what the user is typing.
   The overlay keeps exactly one job — the live length of a source being edited — which is the job it
   had all along (D-2).
+
+  **Amended the same day, when D-8 built it: "sealing leaves the root untouched" was too strong.**
+  The tree carries the leaf's *registered* length — the length it had when the leaf first got a byte
+  — while the overlay carries the live one, so the seal has to correct that one leaf's length before
+  the draft can be dropped. A root object therefore does change. What remains true, and is the
+  claim that matters: **no history entry is made**, so undo steps over a seal as it steps over an
+  idle moment; nothing is re-read; and it is one root per buffer, not one per keystroke. The
+  correction is stated here rather than quietly left in the code.
 
 - **2026-11-17 — D-6 — OQ-10, first answer: seal at the caret, and the pending leaf is an overlay, not a leaf.** *(Superseded the same day by D-7: the awkward part was not the overlay's shape but the assumption that a leaf names a *sealed* segment. Kept because the arithmetic it records is still the reason option A is dead.)*
   `SlabText::insert` refuses with `WouldSplit` when a resident slab is full, and nothing said what

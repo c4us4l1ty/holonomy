@@ -47,6 +47,7 @@ pub mod source;
 mod spine;
 pub mod text;
 mod tree;
+pub mod typing;
 
 pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
@@ -55,6 +56,7 @@ pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use source::{is_provisional, Location, OpenSources, SealError};
 pub use spine::{History, Spine, SpineError};
 pub use text::{EditOutcome, SlabText, TextError};
+pub use typing::{Typing, TypingError};
 
 /// Test-only support shared by the crate's property tests.
 #[cfg(test)]
