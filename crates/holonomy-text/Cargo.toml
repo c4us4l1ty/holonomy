@@ -11,3 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
+# Wipe-on-drop for resident plaintext. Not a crypto primitive: the seal stays the only crate that
+# links one (RFC-001 §1), and the Spine never sees a key.
+zeroize.workspace = true

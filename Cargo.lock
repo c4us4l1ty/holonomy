@@ -288,6 +288,9 @@ dependencies = [
 [[package]]
 name = "holonomy-text"
 version = "6.0.0-block.3"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "hybrid-array"

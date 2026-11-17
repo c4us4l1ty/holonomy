@@ -172,17 +172,25 @@ the **measured allocation-free keystroke path** — plus the Fenwick-over-height
 kept in `holonomy-geometry`. The H1 mistakes being deleted: layout-as-lines (page breaks
 were faked with newline padding) and any structure that walks the document on a keystroke.
 
-**Deliverables**
-- `holonomy-text`: an **immutable, path-copied slab tree** (rope-shaped Merkle spine over
-  segment IDs). An edit path-copies O(log N) slabs; the old spine survives as history.
-  Undo between any two points in the world-line is a pointer swap.
+**Deliverables** — *first slice landed 2026-11-17, see `AUDIT.md`; the keystroke path is not built*
+- `holonomy-text`: an **immutable, path-copied slab tree** over segment IDs, AVL-balanced so
+  appends cannot degenerate into a list. An edit path-copies O(log N) nodes; the old spine
+  survives as history. Undo between any two points in the world-line is a pointer swap.
+  **Landed:** `Spine` (append / insert / remove / split / locate / spans), `History`.
 - **Resident-set scheduler:** plaintext slabs fault in under the viewport, fault out on a
   strict budget, wipe on exit. Document length cannot enter the memory equation.
-- Fenwick index over *slab* heights for O(log segments) scroll-position math.
+  **Landed as a mechanism:** `ResidentSet` + `SegmentSource`, with the budget asserted at every
+  fault-in; the *gate* below is a measurement on reference hardware and stays open.
+- **Amended — one index, not two:** position math is carried by subtree aggregates (bytes,
+  slab count, height) rather than a separate flat Fenwick over slab heights. Same O(log segments)
+  prefix sums; a second structure that must be rebuilt on every path copy is the K-8
+  two-geometry disease in index form (AUDIT 2026-11-17, decision D-1).
 - Counting-allocator gate on the keystroke path: a typed character must make **zero**
-  allocations outside slab boundaries — measured, per H1's gate pattern.
+  allocations outside slab boundaries — measured, per H1's gate pattern. *Not started: there is
+  no mutable resident text buffer yet, and asserting this before building it would be exactly the
+  unmeasured claim VISION §5 refuses.*
 
-**GATES**
+**GATES** — none passed; the slice above is structure, not measurement
 - [ ] Open a synthetic 30 M-word document: memory at open is within a fixed bound that
       identical input of 1 page also satisfies.
 - [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.
@@ -200,7 +208,7 @@ makes that structurally impossible: **one layout engine, two consumers** (paint 
 
 **Deliverables**
 - `holonomy-eye` (headless): viewport-driven layout — only segments under the viewport plus
-  margin are shaped; everything else is a height read from the Spine's Fenwick index.
+  margin are shaped; everything else is a height read from the Spine's aggregate index.
 - Caret, selection, click-hit-test, and paint walk the **same** shaped runs through the
   **same** API. Proportional fonts are the *only* arithmetic — there is no grid mode.
 - Style runs (bold/italic/heading size changes) as first-class layout data, so Block 7's
