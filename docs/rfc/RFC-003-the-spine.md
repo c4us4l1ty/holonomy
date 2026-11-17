@@ -1,9 +1,11 @@
 # RFC-003 — The Spine (Block 4)
 
-*Status: **first slice implemented 2026-11-17** (`holonomy-text`: spine, aggregates, history,
-resident set — CI run 44042785220), still an open attack target for the rest. The keystroke path,
-the mutable resident text buffer and every L-2/L-4 measurement remain unbuilt, so no Block 4 gate
-has passed. One deliverable is amended: see §4 and AUDIT decision **D-1**.*
+*Status: **three slices implemented 2026-11-17** (`holonomy-text`: spine, aggregates, history,
+resident set; the measured keystroke path; and the commit boundary — seal → append → witness → new
+root, proven against a real `holonomy-line` world-line in `tests/commit_boundary.rs`), still an
+open attack target for the rest. No editor exists above them, the live-length overlay D-2 requires
+is unbuilt, and every Block 4 gate is a document-scale measurement that has not been run. Two
+deliverables are amended: §4 (AUDIT decision **D-1**) and §5 (AUDIT decisions **D-2**, **D-3**).*
 
 ## Context
 
@@ -37,6 +39,12 @@ is born living inside the security model instead of being wrapped by it later.
    plaintext + leaf metadata; cross-slab edits split/merge path-copied nodes. The counting
    allocator (holonomy-ledger) gates it: zero allocations within-slab, counted otherwise.
    Document-length independence is the measured invariant (L-4 in Block 6 consumes this).
+   **Amended 2026-11-17 (AUDIT D-2, D-3):** leaf metadata is *not* rewritten per keystroke. With
+   an immutable path-copied tree that would allocate O(log N) nodes per character and put the L-2
+   gate out of reach by construction, so the resident slab is authoritative while it is edited and
+   the spine is path-copied at the **commit boundary**: the edited slab is sealed as a new segment,
+   the world-line commits it with a witness, and the spine's leaf is replaced by one naming the new
+   segment. One structural event per burst of typing, never one per character.
 
 ## Attacks resisted
 

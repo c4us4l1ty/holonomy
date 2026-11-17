@@ -290,6 +290,8 @@ name = "holonomy-text"
 version = "6.0.0-block.3"
 dependencies = [
  "holonomy-ledger",
+ "holonomy-line",
+ "holonomy-seal",
  "zeroize",
 ]
 

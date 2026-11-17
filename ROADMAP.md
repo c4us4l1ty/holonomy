@@ -172,7 +172,7 @@ the **measured allocation-free keystroke path** — plus the Fenwick-over-height
 kept in `holonomy-geometry`. The H1 mistakes being deleted: layout-as-lines (page breaks
 were faked with newline padding) and any structure that walks the document on a keystroke.
 
-**Deliverables** — *two slices landed 2026-11-17, see `AUDIT.md`; there is still no editor above them*
+**Deliverables** — *three slices landed 2026-11-17, see `AUDIT.md`; there is still no editor above them*
 - `holonomy-text`: an **immutable, path-copied slab tree** over segment IDs, AVL-balanced so
   appends cannot degenerate into a list. An edit path-copies O(log N) nodes; the old spine
   survives as history. Undo between any two points in the world-line is a pointer swap.
@@ -193,7 +193,17 @@ were faked with newline padding) and any structure that walks the document on a 
   slack, and the refusal — with a control asserting a fault-in on a miss **does** allocate, so a
   broken counter cannot pass as a quiet path. Scope, stated exactly: the measured window is
   `locate` → resident hit → in-place edit. Fault-in, split, seal and the commit boundary allocate
-  by design and are outside it (AUDIT decision D-2). *The commit boundary itself is not built.*
+  by design and are outside it (AUDIT decision D-2).
+- **The commit boundary — seal → append → witness → new root.** An edited resident slab is
+  sealed into the world-line as a **new segment**, committed with a witness, and the spine is
+  path-copied onto it (`commit::commit_slab`, `Spine::replace_range`). The unit is one slab's
+  document extent, so no offset outside it moves. A stale span is refused **before** the append,
+  because an append with no spine edit is an orphan segment that is durable, authenticated and
+  unreferenced. **Landed and proven against the real container:** `tests/commit_boundary.rs`
+  drives the actual `holonomy-line` world-line and `holonomy-seal` capsule — keystroke, commit,
+  reopen from disk, full `verify()`, and the resident set faulting in exactly the committed bytes.
+  Nothing in that path is a mock. What is still missing is the editor itself: the live-length
+  overlay D-2 requires (the spine stays stale *by design* between commits) and Block 5's Eye.
 
 **GATES** — none passed; the three measurements below are untouched
 *(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
