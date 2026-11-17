@@ -48,8 +48,43 @@ Listed so they stay dead.
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
+| OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, first slice: one geometry, two consumers.** The Eye's geometry core lands
+  as four modules with no dependencies, no font, and no window, because the property that matters
+  is provable without any of them.
+
+  **Coordinates are integers.** [`Fixed`] is an `i64` in 64ths of a logical unit. L-8 compares
+  positions for equality, and floats would make "the same point" a question about rounding: paint
+  would round one way and hit-test the other, reopening the seam inside the arithmetic itself. The
+  only float in the crate is `to_f32`, for the GPU, and nothing compares against it.
+
+  **Caret positions are cluster boundaries.** Segmentation is a hand-written, conservative
+  approximation of UAX #29: combining marks, variation selectors, ZWJ sequences, skin tones,
+  regional-indicator pairs and CRLF merge; **nothing ever splits a mark from its base**. The
+  approximation errs in the safe direction — a caret may sit where a real renderer would not allow
+  one (Hangul jamo stays split; OQ-11), but it can never produce two answers for one point.
+
+  **The one list.** `layout_window` builds lines of placed clusters; `Line::boundaries` yields
+  `(x, byte)` for every caret position on a line, and `paint_point` and `hit_test` are the same
+  walk in opposite directions. A soft-wrapped line deliberately exposes **no** end caret, because
+  wrapping inserts no character: offering one would give a byte two visual positions, which is the
+  drift this block exists to prevent. Ties in `hit_test` go to the earlier boundary, so the answer
+  never depends on storage order.
+
+  **What the tests pin.** Golden geometry (`"abc"` at three-unit glyphs, exact 64ths), wrap and
+  hard-break line splitting, empty lines keeping exactly one caret, click tie-breaks, every caret
+  position in nine corpus strings round-tripping at six widths, and 64 randomized windows over an
+  alphabet of combining marks, ZWJ emoji, skin tones, wide clusters and newlines. Advances enter
+  only through the `Shaper` trait, so a fake shaper proves the law without a font.
+
+  **Still `spec`.** `L-8` stays `spec` for two reasons, both stated in the crate docs rather than
+  hidden: segmentation is approximate (gate 3's BiDi half is not attempted at all), and the
+  zoom/DPI view transform does not exist yet, so "at every zoom and DPI" quantifies over nothing.
+  The transform is the next slice; promoting `L-8` before it lands would be the audit failure this
+  document exists to prevent.
 
 - **2026-11-17 — Block 4, fourth slice: the live-length overlay, so a stale spine still answers.**
   D-2 recorded its own cost in plain words: the resident slab is authoritative while it is edited,
