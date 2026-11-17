@@ -222,6 +222,22 @@ impl Spine {
         locate_in(&self.root, offset)
     }
 
+    /// The slab at `index` in document order, with the document offset of its first byte.
+    ///
+    /// A height index is keyed by leaf position — `holonomy-eye`'s `HeightModel` records one
+    /// measured height per leaf — so this is where a window of leaves becomes byte ranges: one
+    /// descent over cached slab counts, O(log N) whatever the document's size. Without it the Eye
+    /// would have to scan `spans_in` to learn which leaf sits at a given position, and the cost of
+    /// finding the viewport would grow with the document, which is the thing Block 5's second gate
+    /// forbids.
+    #[must_use]
+    pub fn slab_span(&self, index: u32) -> Option<SlabSpan> {
+        if index >= self.slab_count() {
+            return None;
+        }
+        slab_span_in(&self.root, index, 0)
+    }
+
     /// The slabs overlapping `start..end`, clipped to it, with their document offsets.
     ///
     /// The returned vector is proportional to the **viewport's** span count, not the document's:
@@ -234,6 +250,20 @@ impl Spine {
             collect(&self.root, 0, start, end, &mut spans);
         }
         spans
+    }
+}
+
+fn slab_span_in(node: &Arc<Node>, index: u32, base: u64) -> Option<SlabSpan> {
+    match node.as_ref() {
+        Node::Empty => None,
+        Node::Leaf(slab) => Some(SlabSpan::new(base, *slab)),
+        Node::Branch { left, right, .. } => {
+            let left_slabs = left.slabs();
+            if index < left_slabs {
+                return slab_span_in(left, index, base);
+            }
+            slab_span_in(right, index - left_slabs, base + left.bytes())
+        }
     }
 }
 
@@ -387,6 +417,56 @@ mod tests {
         assert_eq!(last.slab().segment(), SegmentId::new(2));
         assert_eq!(last.within(), 29);
         assert!(spine.locate(60).is_none());
+    }
+
+    #[test]
+    fn slab_spans_follow_document_order_and_offsets() {
+        let spine = Spine::from_slabs(vec![slab(0, 10), slab(1, 20), slab(2, 30)]);
+        let expected = [(0u64, 10u64), (10, 20), (30, 30)];
+        for (index, (offset, len)) in expected.iter().enumerate() {
+            let span = spine.slab_span(index as u32).expect("a leaf");
+            assert_eq!(span.offset(), *offset);
+            assert_eq!(span.len(), *len);
+            assert_eq!(span.slab().segment(), SegmentId::new(index as u64));
+        }
+        assert!(spine.slab_span(3).is_none());
+        assert!(Spine::empty().slab_span(0).is_none());
+    }
+
+    #[test]
+    fn slab_spans_agree_with_a_full_scan_of_the_same_spine() {
+        let mut spine = Spine::from_slabs(vec![slab(0, 10)]);
+        for segment in 1..8u64 {
+            spine = spine.append(slab(segment, 3u32 * (segment as u32)));
+        }
+        let scanned = spine.spans_in(0, spine.len());
+        assert_eq!(scanned.len() as u32, spine.slab_count());
+        for (index, span) in scanned.iter().enumerate() {
+            let found = spine.slab_span(index as u32).expect("a leaf");
+            assert_eq!(found.offset(), span.offset());
+            assert_eq!(found.len(), span.len());
+            assert_eq!(found.slab(), span.slab());
+        }
+        assert!(spine.slab_span(spine.slab_count()).is_none());
+    }
+
+    #[test]
+    fn a_split_moves_the_order_statistic_with_the_leaves() {
+        let spine = Spine::from_slabs(vec![slab(0, 10), slab(1, 10)]);
+        let (left, right) = spine.split_at(10).expect("in range");
+        assert_eq!(left.slab_count(), 1);
+        assert_eq!(right.slab_count(), 1);
+        // The split spine's coordinates restart at zero, and the leaf it starts with is the second
+        // one of the document it came from.
+        let first = right.slab_span(0).expect("a leaf");
+        assert_eq!(first.offset(), 0);
+        assert_eq!(first.slab().segment(), SegmentId::new(1));
+        // The lifetime document's order statistic lands on the last leaf rather than scanning.
+        let lifetime = lifetime_spine();
+        let last = lifetime
+            .slab_span(lifetime.slab_count() - 1)
+            .expect("the final leaf");
+        assert_eq!(last.offset() + last.len(), lifetime.len());
     }
 
     #[test]
