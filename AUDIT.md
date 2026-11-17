@@ -41,12 +41,224 @@ Listed so they stay dead.
 | OQ-1 | Toolchain: root `rust-toolchain.toml` used floating `stable`. Pinned to Rust 1.100.0 after observing the CI compiler; no local sandbox toolchain was available for an independent pin check. | **closed 2026-11-16** |
 | OQ-2 | Undo exposure: world-line keeps all drafts (Vision III) vs. an adversary who wants the right to truly delete a draft. Compaction is explicit, file-scoped, and passphrase-confirmed; RFC-002 states that cloud mirrors may retain pre-compaction files and their history, so users must also prune external backups. | **closed — residual disclosed** |
 | OQ-3 | Clipboard egress on each OS: flag-confidential + clear-on-blur must be verified per platform (Block 9) or labeled unverified in the Security panel | open |
-| OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. Accept (viewport is presumably visible to that adversary anyway) or smooth? Decide before Block 4 gate | open |
+| OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. | **closed 2026-11-17 — accept and disclose.** The pattern is already visible at the I/O layer: fetching an old page reads its ciphertext at a known file offset, so any observer who can time slab faults can observe the reads themselves. Smoothing would buy nothing and would spend L-5 (idle is idle) on traversal cost the architecture exists to delete. Residual recorded in `docs/THREAT-MODEL.md` §5. |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
+| OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
+| OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but repeated split/rejoin churn (a commit boundary is a split) inflates the leaf count and with it the height and every slab-count-derived budget. Either coalesce same-segment neighbours at commit or bound the fragmentation. Found 2026-11-17 by the new shape test's first red run. | **open — no fix yet** |
 
 ## Audit trail
+
+- **2026-11-17 — bug hunt before the commit boundary: property tests and three hardening fixes.**
+  The Spine's own tests were scripted — a 4,096-append sequence, every byte of a 7-slab split — and
+  scripted tests cannot find the shape nobody wrote down. This entry adds the machinery that can,
+  and fixes what inspection found in the meantime.
+
+  **Property tests now in CI:**
+  - `tree::check_invariants` recomputes bytes, slab count and height from the leaves and panics on
+    any disagreement with the cached aggregates, on an AVL violation, on an `Empty` child that
+    should have been normalized away, or on a zero-byte leaf.
+  - `random_join_and_split_shapes_keep_every_invariant` — 400 random appends, splits, rejoins and
+    block concatenations per seed, over four seeds, checking aggregates against an independent
+    count after **every** operation.
+  - `random_edits_match_a_byte_level_model` — 250 random appends, insertions, removals and
+    split/rejoins per seed, over four seeds, verified against a trivial `Vec<(segment, offset)>`
+    model: same length after every step, spans tile the document contiguously, the expanded
+    geometry is byte-identical to the model, and `locate` agrees with it. This is the test that
+    catches a tree that keeps the right length while scrambling where the bytes came from.
+  - `random_edits_match_a_string_model` — 500 random insertions and deletions per seed against a
+    `String`, over four seeds, using multi-byte characters (é, 中, 🙂) so the boundary rules are
+    exercised at every width.
+
+  **Fixed by inspection (each now has a test or an invariant that would catch a regression):**
+  - Zero-length slabs could enter the tree as leaves that carry no bytes, inflating `slab_count`,
+    path copies and any budget computed from slab counts. `from_slabs`, `append` and `insert_slab`
+    now drop them, and `check_invariants` rejects a zero-byte leaf outright.
+  - `Slab::new` accepted `start + len` beyond `u32`, which would have made `end()` (and every
+    offset derived from a slab) lie. It now refuses at construction.
+  - `SlabText::insert` computed `len + text.len()` in a plain addition; it now saturates, so the
+    refusal condition cannot wrap on a 32-bit target, and the one remaining panic in
+    `from_plaintext` (an absurd configured slack) is documented rather than discovered.
+
+  **Found and not fixed — recorded as OQ-8:** `History` keeps one root per state, so an unbounded
+  undo history grows with the number of *edits*, not with the document. Subtrees are shared, so
+  each root costs O(log N) nodes, but years of typing is still an unbounded set of them, and the
+  world-line on disk already stores the history. Bounding the in-memory history is a design
+  decision (ring of roots plus reconstruction from the log), not a patch, and it belongs before
+  Block 6 rather than after it.
+
+  **What CI said about the hunt itself, on the first push.** The property tests were written
+  without a local compiler, and CI (run
+  [44046796516](https://github.com/c4us4l1ty/holonomy/actions/runs/44046796516)) found exactly the
+  class of error that reading cannot: `check_invariants` reported no drift, the AVL checks held,
+  and the only failures were in the *test's own model*. The new shape test compared the tree's leaf
+  count with the model's slab count, and seed 1 disagreed by one — six leaves against five slabs.
+  The tree was right and the model was wrong: a cut inside a leaf produces two leaves for one
+  segment and `join` never merges them back, which is the documented design (a segment's bytes may
+  span several slabs) and the reason `splitting_and_rejoining_every_byte_preserves_the_sequence`
+  already compares bytes rather than leaves. Counting "inside the document" was still one leaf too
+  generous, and the second red run said so (28 modelled against 27 real): a cut can be strictly
+  inside the document and still fall exactly on a leaf boundary, which spends nothing. The test now
+  carries an independent set of leaf-start offsets and asserts leaves equal its size, which is exact
+  — and it was replayed against a mirror of `join`/`split` for 16,000 random operations before the
+  third push rather than trusting a fourth blind run. Two `clippy::unusual_byte_groupings` lints in
+  the new seed arrays were the only other findings.
+
+  **A bug in the diagnostic channel itself.** The third push went red on the `rustfmt` job while
+  the bridge reported `cargo fmt --all -- --check` as **exit 0** — because the bridge ran
+  `cargo fmt --all` (to capture the formatter's patch) *before* the loop, so the check it printed
+  was inspecting a tree the formatter had already rewritten and could never fail. The check now
+  runs first and the rewrite happens after it; the patch is appended to the report afterwards, so
+  the verbatim patch is still what gets applied and the printed status is finally the real one.
+  This is the second time this session a tool that reported success was the problem — the first
+  was the keystroke gate measuring the default allocator.
+
+  **What this entry does not claim.** The hunt covered `holonomy-text` — the code written this
+  session and the only part not yet exercised by a property test. `holonomy-seal` and
+  `holonomy-line` were read for consistency with their audits but not re-attacked; that is Block 9's
+  implementation audit, still owed. No new measurement was taken: these are tests that run in CI,
+  and every one of them is a claim a future change can fail.
+
+- **2026-11-17 — Block 4, second slice: the keystroke path is measured, not asserted.** CI run
+  [44045023810](https://github.com/c4us4l1ty/holonomy/actions/runs/44045023810) is green, and the
+  workspace test job now executes a binary whose global allocator **counts**.
+
+  **The claim.** `locate` (a descent over cached aggregates) → resident hit → in-place insert of one
+  typed character performs **zero** allocations. Also zero: a backspace, filling the slab's spare
+  capacity, and the refusal that follows when it is full. The count is taken by
+  `holonomy_ledger::alloc::claim_quiet`, which panics with the measured delta rather than logging
+  it. A control in the same binary asserts that faulting a segment in on a *miss* **does** allocate:
+  if that control ever stops counting, the binary is not measuring anything and every zero above is
+  worthless — the exact failure Block 1 recorded when its first unit-test version measured the
+  default allocator.
+
+  **Design decisions this slice forced, both recorded as decisions rather than preferences:**
+
+  - **D-2 — edits are in place per keystroke; the spine is path-copied at commit.** With an
+    immutable path-copied tree, updating a leaf's length per character would allocate O(log N)
+    nodes per keystroke and make the L-2 gate unreachable by construction. So the resident slab is
+    authoritative while it is being edited, and the spine is path-copied when the slab is re-sealed
+    or the viewport moves — counted, occasional work rather than per-character work. The consequence
+    is explicit: the editor must carry a live-length overlay until commit, and that overlay is not
+    built. Nothing here claims a keystroke updates the spine.
+  - **Recency is a counter, not a deque.** A `VecDeque` hit moves the entry to the back, and
+    `push_back` may reallocate — an allocator call inside the very path being measured. The resident
+    set now scans for the smallest `last_used` on a *miss* instead, which cannot allocate and costs
+    O(resident), and the resident set is viewport-sized.
+
+  **The budget got more honest.** `ResidentSet` now accounts its bound against **allocated
+  capacity**, not text length: the slack reserved for typing is memory, and a bound that ignored it
+  would be a bound in name only. Allocation-side accounting is what a memory adversary actually
+  measures. Plaintext length is still reported separately.
+
+  **Growth is refused, never done quietly.** `SlabText::insert` returns
+  `EditOutcome::WouldSplit { needed, capacity }` and leaves the buffer untouched when the edit does
+  not fit. A buffer that grew instead would hide an allocation inside the keystroke path and break
+  the law silently; refusing turns the event into a structural one, where allocation is expected
+  and counted.
+
+  **UTF-8 is checked where the cost is, not everywhere.** Whole-buffer validation on each keystroke
+  would cost O(slab) per character — precisely the "cost proportional to what changed" failure the
+  architecture exists to prevent. The buffer is validated once at fault-in; each edit validates its
+  own inserted bytes and its own boundary bytes. Grapheme clusters remain the Eye's business, not
+  this type's.
+
+  **CI trail.** Run 44044481285 caught rustfmt drift plus one real test-arithmetic error: an
+  insertion at offset 9 into a buffer that had become 8 bytes long — caught by the test asserting
+  the outcome of an earlier insert, not by review. 44045023810 is green, including the new counting
+  binary. Clippy was clean on the first pass this time.
+
+  **What this does not claim.** L-2 as a law stays `spec`: the keystroke half is measured, but the
+  document-scale half — the same resident bound at one page and at thirty million words on reference
+  hardware — has not been measured, and the commit boundary, the editor, and the Eye do not exist.
+  The counting binary measures one test function in its own process; the module docs explain why
+  sibling tests would race the counters. Nothing here promotes a law in `docs/GATES.md`.
+
+- **2026-11-17 — Block 4, first slice: the Spine and the resident set.** `holonomy-text` now
+  holds the structural half of RFC-003 and nothing of its measured half. CI run
+  [44042785220](https://github.com/c4us4l1ty/holonomy/actions/runs/44042785220) is green: rustfmt,
+  Clippy, 35 in-crate tests, the gates contract, and both qualification rehearsals.
+
+  **Landed.** `Spine` — an immutable tree over `Slab { segment, start, len }` references, one
+  slab being a byte range of one sealed segment. It is AVL-balanced, so ordered appends cannot
+  degenerate into a list (a 4,096-append test pins height ≤ 24 against a degenerate 4,096);
+  interior nodes carry bytes, slab count and height, so `locate` and `spans_in` are descents.
+  Every edit returns a new root and path-copies O(log N) nodes — a test counts the shared
+  `Arc` pointers and fails if an append copies more than its path. `History` keeps roots, so
+  undo and redo are pointer swaps and no plaintext enters history. `ResidentSet` enforces a byte
+  budget fixed at construction, evicts LRU from the front, wipes on eviction through
+  `Zeroizing`, and offers `retain` for viewport moves; `SegmentSource` is the seam the
+  world-line will fill, so the Spine still does not depend on a crypto crate.
+
+  The L-2 *mechanism* is visible in test form: a 916-slab, 60,000,000-byte simulated lifetime
+  scrolls end to end at a four-segment budget, resident bytes never exceed 262,144, each segment
+  is faulted exactly once, and the same budget serves a two-slab document unchanged. This is the
+  mechanism, not the gate: L-2 still reads `spec` in `docs/GATES.md`, and no reference-hardware
+  memory measurement exists.
+
+  **Decision D-1 — the flat Fenwick is subsumed by the tree's aggregates.** RFC-003 §4 named a
+  Fenwick over slab heights. A flat Fenwick would need rebuilding beside every path copy and
+  could disagree with the tree it indexes while computing the same prefix sums; the tree already
+  carries bytes, slab count and height per subtree, so the descent *is* the index. Adopted
+  subtree aggregates (with a note that the Eye's layout heights will ride the same aggregate),
+  rejected the second structure, and amended RFC-003 §4 and the roadmap deliverable. The trade
+  is explicit: one index cannot drift, and a future Eye height update path-copies O(log N) nodes
+  instead of updating one array slot.
+
+  **What this slice does not do.** No mutable resident text buffer, therefore no keystroke path,
+  therefore no zero-allocation claim — asserting that before building it is the exact unmeasured
+  promise VISION §5 refuses. No Eye, so no layout heights, no paint/hit-test geometry. Wipe is by
+  construction (`Zeroizing` on eviction), not proven: the canary and the counting allocator that
+  would prove it belong to Block 9. And the Block 4 gates below remain untouched:
+  open-memory equivalence at 30 M words, offset-invariant keystroke latency, and the 1 M-keystroke
+  fuzz run have not been attempted on any hardware.
+
+  **CI trail for this slice** (recorded because "the compiler is CI" is a claim worth checking):
+  run 44041603841 caught formatting, a missing `is_empty` companion and four `assert_eq!`s
+  comparing `Result<Spine, _>` (Spine deliberately has no `PartialEq`); 44041980922 caught the
+  same comparison errors after the formatter was satisfied; 44042360027 caught a real test-logic
+  error — the LRU assertion expected eviction before the budget was full; 44042785220 is green.
+  The diagnostics bridge was also made lossless in this slice: it now runs `cargo fmt --all`,
+  posts the formatter's patch verbatim for `git apply`, and base64-chunks its report, because the
+  previous single 60,000-byte comment silently dropped every command after the fmt diff.
+
+- **2026-11-17 — gate-closure amendment: Block 2 closed, Block 3 closed in scope, Block 4
+  unblocked.** Two gate items could not be answered with evidence available to this project — an
+  allocator-wide proof of dependency-internal wiping, and physical power-loss/device qualification —
+  and leaving them "open" had the same effect as killing the roadmap, because Block 4 may not
+  start. The protocol already defines the third path: **amended** — the claim survives in weakened,
+  explicitly stated form. Each claim below is narrowed to what a test establishes, the remainder is
+  named as an unproven residual, and it is assigned to the gate that can measure it. Earlier audit
+  entries that still describe these gates as open are left exactly as written — the trail records
+  what was known on the day, and this entry supersedes them without rewriting them.
+
+  **Evidence base:** the code and test tree at `8ac3618`, whose CI run
+  [44034435423](https://github.com/c4us4l1ty/holonomy/actions/runs/44034435423) passed rustfmt,
+  Clippy, the feature-graph check, workspace tests, the gates contract, and both the rsync and
+  ext4-ENOSPC rehearsals. Nothing in this entry is a new measurement; it is a decision about what
+  the existing measurements are allowed to mean.
+
+  | Item | Verdict | Now claimed | Not claimed | Owed to |
+  | ---- | ------- | ----------- | ----------- | ------- |
+  | Block 2 — dependency-temporary zeroization | **amended** | every project-owned secret buffer is zero before free under the registered-allocation audit (nonzero-at-free, secret reallocation, and registry overflow all fail the gate); the reviewed wipe features are enabled and CI-enforced | that dependency-internal stack/heap temporaries are erased; a whole-allocator proof; any register or physical-memory guarantee | future hardening; residual in TM §5 |
+  | Block 2 — RFC-001 audit closure | **amended** | every open RFC-001 item is killed, scoped with its exact limit, or assigned to its owning block | that the original unbounded wording was ever proven | — |
+  | Block 3 — L-6 crash consistency | **amended** | the append/commit/recover ordering behaves correctly under injected short writes at every byte, both sync barriers, truncate failure, and real ENOSPC on an ext4 loop image | power-loss, controller/device-cache durability, journal replay, any supported-device matrix | Block 6 *kill-power-at-random-instant* gate; Block 10 release gate |
+  | Block 3 — L-10 tail transfer | **amended** | one named client (rsync 3.2.7, protocol 31, 64 KiB block, local daemon over TCP) transfers literal data ≤ appended bytes + one block and ≤ 8× appended application-layer bytes for the measured workload | that any other client, backend, or remote service behaves the same | Block 10 backend matrix, or an explicit narrowing of L-10 in `LAWS` |
+  | OQ-4 — scroll-timing side channel | **closed — accept and disclose** | the slab fault-in pattern is observable, and is already observable at the I/O layer: reading an old page reads its ciphertext at a known offset, so timing smoothing would hide the pattern from nobody who can observe the reads | that the pattern is hidden from a timing observer | TM §5 residual |
+
+  **Protocol consequences, written into the repo by this entry.** `ROADMAP.md` Blocks 2 and 3 now
+  carry these wordings and the named deferrals; `RFC-001` and `RFC-002` status lines and their
+  zeroization/power-loss paragraphs match them; `docs/THREAT-MODEL.md` §4 and §5 gain the
+  dependency-scratch, power-loss and scroll-timing residuals; OQ-4 moves from open to closed.
+  `crates/holonomy-ledger/src/laws.rs` and the generated `docs/GATES.md` are **untouched**: no law is
+  promoted, and L-6 and L-10 still read `spec` because neither has been measured to its bound.
+
+  **What this entry does not do.** It does not certify v6, promote a law, or convert a residual into
+  a claim. It moves an obligation from "nobody owns this" to "these gates own this". A future entry
+  that treats these obligations as settled because this one filed them is invalid. If Block 10
+  cannot obtain the hardware matrix, the honest outcome is to narrow L-6's bound in `laws.rs` — a
+  visible edit to the machine-readable contract — not to pass it silently.
 
 - **2026-11-16 — Block 2 dependency-temporary zeroization audit (gate remains open):**
   Reviewed the selected secret-bearing source paths at the release revisions below. `Cargo.lock`
