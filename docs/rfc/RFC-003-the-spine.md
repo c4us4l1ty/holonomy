@@ -1,6 +1,9 @@
 # RFC-003 — The Spine (Block 4)
 
-*Status: open attack target. File attack cases in `AUDIT.md`.*
+*Status: **first slice implemented 2026-11-17** (`holonomy-text`: spine, aggregates, history,
+resident set — CI run 44042785220), still an open attack target for the rest. The keystroke path,
+the mutable resident text buffer and every L-2/L-4 measurement remain unbuilt, so no Block 4 gate
+has passed. One deliverable is amended: see §4 and AUDIT decision **D-1**.*
 
 ## Context
 
@@ -23,9 +26,13 @@ is born living inside the security model instead of being wrapped by it later.
    fault out on LRU beyond the budget; wipe-on-exit via `holonomy-seal` zeroizing pages. The
    budget is a constant set at startup from the viewport, **never** derived from document
    length (L-2).
-4. **Fenwick over slab heights**: scroll position ⇄ content position in O(log segments);
-   usable before the target slabs are even resident (skeleton layout — H1's `fault_residency`
-   lineage).
+4. **Prefix sums over subtree aggregates** (amended 2026-11-17, AUDIT decision D-1): scroll
+   position ⇄ content position in O(log segments) by descending each node's cached bytes,
+   slab count and height; usable before the target slabs are resident (skeleton layout — H1's
+   `fault_residency` lineage). The original text named a separate flat Fenwick over slab
+   heights. That structure would have to be rebuilt alongside every path copy and could drift
+   from the tree it indexes — the K-8 two-geometry disease in index form — while computing the
+   same prefix sums. One index, held by the tree, is the amendment.
 5. **Keystroke path**: insert/delete within a slab is an in-place edit of the resident
    plaintext + leaf metadata; cross-slab edits split/merge path-copied nodes. The counting
    allocator (holonomy-ledger) gates it: zero allocations within-slab, counted otherwise.
@@ -36,7 +43,7 @@ is born living inside the security model instead of being wrapped by it later.
 | Adversary / failure | Mechanism | Control | Proving test |
 | ------------------- | --------- | ------- | ------------ |
 | A2 memory mass | resident plaintext grows with doc | fixed residency scheduler | L-2 gate: 1-page vs 30M-word windows measure equal residency |
-| (correctness) latency drift | cost grows with offset/size | tree + Fenwick | L-4 harness at offsets {0, N/2, N-1} |
+| (correctness) latency drift | cost grows with offset/size | balanced tree with subtree aggregates | L-4 harness at offsets {0, N/2, N-1} (unbuilt) |
 | (correctness) edit at think-speed | allocator stalls in the hot path | zero-alloc claim within slab | counting-allocator gate (ledger) |
 | A2 undo leakage | old plaintext lingering for history | undo holds pointers only | resident-set audit test: history deep → resident small |
 | A4/A1 history integrity | segment references point to real slabs | Merkle leaves; witness covers the set | corrupt-segment detection on open |

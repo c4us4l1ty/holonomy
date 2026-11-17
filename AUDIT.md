@@ -48,6 +48,54 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-17 — Block 4, first slice: the Spine and the resident set.** `holonomy-text` now
+  holds the structural half of RFC-003 and nothing of its measured half. CI run
+  [44042785220](https://github.com/c4us4l1ty/holonomy/actions/runs/44042785220) is green: rustfmt,
+  Clippy, 35 in-crate tests, the gates contract, and both qualification rehearsals.
+
+  **Landed.** `Spine` — an immutable tree over `Slab { segment, start, len }` references, one
+  slab being a byte range of one sealed segment. It is AVL-balanced, so ordered appends cannot
+  degenerate into a list (a 4,096-append test pins height ≤ 24 against a degenerate 4,096);
+  interior nodes carry bytes, slab count and height, so `locate` and `spans_in` are descents.
+  Every edit returns a new root and path-copies O(log N) nodes — a test counts the shared
+  `Arc` pointers and fails if an append copies more than its path. `History` keeps roots, so
+  undo and redo are pointer swaps and no plaintext enters history. `ResidentSet` enforces a byte
+  budget fixed at construction, evicts LRU from the front, wipes on eviction through
+  `Zeroizing`, and offers `retain` for viewport moves; `SegmentSource` is the seam the
+  world-line will fill, so the Spine still does not depend on a crypto crate.
+
+  The L-2 *mechanism* is visible in test form: a 916-slab, 60,000,000-byte simulated lifetime
+  scrolls end to end at a four-segment budget, resident bytes never exceed 262,144, each segment
+  is faulted exactly once, and the same budget serves a two-slab document unchanged. This is the
+  mechanism, not the gate: L-2 still reads `spec` in `docs/GATES.md`, and no reference-hardware
+  memory measurement exists.
+
+  **Decision D-1 — the flat Fenwick is subsumed by the tree's aggregates.** RFC-003 §4 named a
+  Fenwick over slab heights. A flat Fenwick would need rebuilding beside every path copy and
+  could disagree with the tree it indexes while computing the same prefix sums; the tree already
+  carries bytes, slab count and height per subtree, so the descent *is* the index. Adopted
+  subtree aggregates (with a note that the Eye's layout heights will ride the same aggregate),
+  rejected the second structure, and amended RFC-003 §4 and the roadmap deliverable. The trade
+  is explicit: one index cannot drift, and a future Eye height update path-copies O(log N) nodes
+  instead of updating one array slot.
+
+  **What this slice does not do.** No mutable resident text buffer, therefore no keystroke path,
+  therefore no zero-allocation claim — asserting that before building it is the exact unmeasured
+  promise VISION §5 refuses. No Eye, so no layout heights, no paint/hit-test geometry. Wipe is by
+  construction (`Zeroizing` on eviction), not proven: the canary and the counting allocator that
+  would prove it belong to Block 9. And the Block 4 gates below remain untouched:
+  open-memory equivalence at 30 M words, offset-invariant keystroke latency, and the 1 M-keystroke
+  fuzz run have not been attempted on any hardware.
+
+  **CI trail for this slice** (recorded because "the compiler is CI" is a claim worth checking):
+  run 44041603841 caught formatting, a missing `is_empty` companion and four `assert_eq!`s
+  comparing `Result<Spine, _>` (Spine deliberately has no `PartialEq`); 44041980922 caught the
+  same comparison errors after the formatter was satisfied; 44042360027 caught a real test-logic
+  error — the LRU assertion expected eviction before the budget was full; 44042785220 is green.
+  The diagnostics bridge was also made lossless in this slice: it now runs `cargo fmt --all`,
+  posts the formatter's patch verbatim for `git apply`, and base64-chunks its report, because the
+  previous single 60,000-byte comment silently dropped every command after the fmt diff.
+
 - **2026-11-17 — gate-closure amendment: Block 2 closed, Block 3 closed in scope, Block 4
   unblocked.** Two gate items could not be answered with evidence available to this project — an
   allocator-wide proof of dependency-internal wiping, and physical power-loss/device qualification —
