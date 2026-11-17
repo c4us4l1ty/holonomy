@@ -290,20 +290,26 @@ mod tests {
 
     #[test]
     fn the_budget_holds_and_the_coldest_segment_leaves_first() {
+        // Four 64-byte segments fit exactly; nothing is evicted until a fifth arrives.
         let mut resident = set(256);
-        resident.fault_in(id(0)).expect("source works");
-        resident.fault_in(id(1)).expect("source works");
-        resident.fault_in(id(2)).expect("source works");
-        resident.fault_in(id(3)).expect("source works");
+        for segment in 0..4 {
+            resident.fault_in(id(segment)).expect("source works");
+        }
         assert_eq!(resident.resident_bytes(), 256);
+        assert_eq!(resident.resident_segments(), 4);
+        assert!(resident.contains(id(0)));
+
+        resident.fault_in(id(4)).expect("source works");
         assert!(
             !resident.contains(id(0)),
             "the oldest segment must be evicted"
         );
-
-        resident.fault_in(id(4)).expect("source works");
-        assert!(!resident.contains(id(1)));
         assert!(resident.contains(id(4)));
+        assert_eq!(resident.resident_bytes(), 256);
+
+        resident.fault_in(id(5)).expect("source works");
+        assert!(!resident.contains(id(1)), "then the next oldest");
+        assert!(resident.contains(id(5)));
         assert!(resident.resident_bytes() <= resident.budget_bytes());
     }
 
