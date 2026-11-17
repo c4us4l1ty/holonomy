@@ -24,6 +24,11 @@
 //!   [`Layout::hit_test`] walk.
 //! - `heights`: [`HeightModel`], the Fenwick index over leaf heights, so the Eye can find a
 //!   viewport in O(log n) index reads instead of measuring the document to discover where it is.
+//! - `window`: [`byte_window`], the join between that index and the document — leaf positions to a
+//!   contiguous byte range, one [`Spine::slab_span`] descent per edge, so what to shape costs
+//!   O(log n) in the document's length.
+//!
+//! [`Spine::slab_span`]: holonomy_text::Spine::slab_span
 //! - `view`: [`View`], zoom and DPI as one exact integer transform that **both** consumers call —
 //!   paint through [`View::paint_point`], hit-test through [`View::hit_test`] on a device-space
 //!   point. There is deliberately no inverse transform: hit-testing compares device observations
@@ -47,6 +52,7 @@ mod layout;
 mod shaper;
 mod style;
 mod view;
+mod window;
 
 pub use crate::cluster::Clusters;
 pub use crate::geom::{Fixed, Point};
@@ -55,6 +61,7 @@ pub use crate::layout::{layout_styled, layout_window, Caret, Layout, Line, Place
 pub use crate::shaper::Shaper;
 pub use crate::style::{Style, StyledRun, StyledText};
 pub use crate::view::View;
+pub use crate::window::{byte_window, ShapedWindow};
 
 /// The single-geometry law, carried in code so it is compiled, not just quoted.
 pub const SINGLE_GEOMETRY_LAW: &str =

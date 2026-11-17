@@ -49,10 +49,34 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
-| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. The index half now does: `HeightModel` (`heights.rs`) finds a leaf range for a viewport in O(log n) counted reads. What remains is the Spine wiring that turns a leaf range into text — and that wiring must decide OQ-10 first, because a pending leaf has text but no spine entry to hold its height. | **open — index landed 2026-11-17, caller not written** |
+| OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate ("layout cost on a 30 M-word doc is invariant in document length") is a claim about the caller. The chain now exists: `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, and `holonomy_eye::byte_window` joins them, contiguously — an unmeasured leaf inside the window has its bytes included, so the shaped text never has a hole. What is missing is the editor loop that calls all three and the measurement that would prove the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed 2026-11-17, no caller or measurement yet** |
 | OQ-13 | **How quiet-md enters the tree.** Block 1 forbids `[patch.crates-io]` onto forks in the core tree; quiet-md ships a patched GPUI (`vendor/PATCHES.md`). Adopting it as a dependency, a vendored subtree, or a fork of a fork are three different trees with three different failure modes, and only one of them is legal under Block 1 without an explicit exception. Decide before Block 6 opens; the choice also fixes how holonomy takes upstream GPUI fixes, and therefore how much of its own vendor surface it must maintain. | **open — decision needed before Block 6** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, fifth slice: the viewport chain closes.** Three pieces that had been built
+  for each other but never introduced: the height index answers *which leaves*, the spine answers
+  *where those leaves live*, and nothing joined them.
+
+  **`Spine::slab_span(index)`** is an order statistic: descend the cached slab counts, O(log N),
+  no scan. Without it the Eye would have to read `spans_in` and count leaves to answer "which leaf is
+  the twelfth", and the cost of finding the viewport would grow with the document — the thing Block
+  5's second gate forbids.
+
+  **`byte_window`** is the join, and its interesting decision is that the byte range is *contiguous*
+  from the first covered leaf's start to the last covered leaf's end. Building it leaf by leaf would
+  be the obvious implementation and would leave holes: an unmeasured leaf has zero height, so a
+  viewport can skip over it, and shaping the covered leaves individually would silently drop the text
+  in between. The range therefore includes it, and the docs say why. An unmeasured *prefix* or
+  suffix is still excluded — that remains the provisional-scroll limitation recorded with the model.
+
+  **The dependency, stated.** `holonomy-eye` now depends on `holonomy-text` (workspace path, no
+  registry cost) for exactly this join. Geometry still enters through `Shaper` alone: the Eye reads
+  byte offsets and leaf geometry, never text, and the Spine still holds no plaintext.
+
+  **Still open.** OQ-12's caller — the editor loop — and its 30 M-word measurement arrive with Block
+  6. OQ-10's pending leaf has no leaf index and no `slab_span`, so it is in no window this function
+  produces; that decision is unchanged and still gates the editor.
 
 - **2026-11-17 — The UI basis is quiet-md, recorded rather than assumed.** The user named
   [`s1dashu/quiet-md`](https://github.com/s1dashu/quiet-md) — a Rust + GPUI notes app, MIT, an app in

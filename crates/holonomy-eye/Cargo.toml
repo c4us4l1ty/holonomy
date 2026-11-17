@@ -11,3 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
+# The document engine, for one thing: turning a window of leaves into a byte range
+# (`window::byte_window`). Geometry still enters through `Shaper` alone.
+holonomy-text = { path = "../holonomy-text" }
