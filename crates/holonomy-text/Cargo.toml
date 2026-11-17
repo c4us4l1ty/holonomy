@@ -19,3 +19,9 @@ zeroize.workspace = true
 # The counting allocator this crate's keystroke gate installs as its global allocator. Dev-only:
 # the shipped Spine never depends on the ledger.
 holonomy-ledger = { path = "../holonomy-ledger" }
+# The commit boundary is proven against the real world-line and the real seal — no mock of the
+# container, the durability barrier or the MMR. Dev-only, and one-directional: `holonomy-line`
+# does not depend on `holonomy-text`, and the library speaks to it through `SegmentSink` /
+# `SegmentSource` traits, so the shipped Spine still links neither.
+holonomy-line = { path = "../holonomy-line" }
+holonomy-seal = { path = "../holonomy-seal" }

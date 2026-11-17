@@ -175,6 +175,32 @@ impl Spine {
         })
     }
 
+    /// Replaces the byte range `start..end` with one slab, path-copying O(log N) nodes.
+    ///
+    /// This is the commit boundary's structural half: the range a re-sealed slab occupied is
+    /// swapped for a leaf naming the new segment, and no offset outside the range moves. An empty
+    /// slab is equivalent to removing the range — the tree may not hold a leaf that carries
+    /// nothing.
+    pub fn replace_range(&self, start: u64, end: u64, slab: Slab) -> Result<Self, SpineError> {
+        if start > end || end > self.len() {
+            return Err(SpineError::RangeOutOfRange {
+                start,
+                end,
+                len: self.len(),
+            });
+        }
+        let (before, rest) = tree::split(&self.root, start);
+        let (_replaced, after) = tree::split(&rest, end - start);
+        let middle = if slab.is_empty() {
+            tree::empty()
+        } else {
+            tree::leaf(slab)
+        };
+        Ok(Self {
+            root: tree::join(tree::join(before, middle), after),
+        })
+    }
+
     /// Splits the document into `0..at` and `at..len`.
     pub fn split_at(&self, at: u64) -> Result<(Self, Self), SpineError> {
         if at > self.len() {

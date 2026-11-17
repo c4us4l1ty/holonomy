@@ -46,9 +46,106 @@ Listed so they stay dead.
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
-| OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but repeated split/rejoin churn (a commit boundary is a split) inflates the leaf count and with it the height and every slab-count-derived budget. Either coalesce same-segment neighbours at commit or bound the fragmentation. Found 2026-11-17 by the new shape test's first red run. | **open — no fix yet** |
+| OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
+| OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 4, fourth slice: the live-length overlay, so a stale spine still answers.**
+  D-2 recorded its own cost in plain words: the resident slab is authoritative while it is edited,
+  the spine is path-copied at commit, and *the editor must carry a live-length overlay until
+  commit*. Without it, a keystroke followed by a viewport query is answered by geometry that is
+  wrong by exactly the number of characters typed. [`Draft`] is that overlay.
+
+  **What it is.** A record of a handful of leaves and the lengths their resident text now has.
+  Every query partitions the walk at those leaves and asks the spine its own O(log N) question per
+  region, translating offsets by the accumulated difference. `document_len`, `locate` and
+  `spans_in` therefore stay correct while the spine is stale, and **the view does not move when the
+  commit lands**: the integration test types a character, records the draft, queries offsets,
+  lengths and spans against the stale root, commits, forgets the draft, and asserts the answers are
+  the same against the sealed one.
+
+  **Why it is a projection and not a document.** It holds no plaintext, so the wipe set is
+  untouched; nothing in the spine consults it, so geometry stays the only thing the tree knows; and
+  `forget`/`clear` restore the sealed view exactly. That last property is what makes
+  undo-after-commit sound: the old root is unchanged, so the overlay must go back to matching it.
+
+  **Two asymmetries, both deliberate and tested.**
+  - *Sealed leaves are clipped to the requested range; drafted leaves are returned whole.* A
+    drafted leaf's visible portion cannot be expressed as a `Slab` — its bytes exist in no segment
+    until commit — so a partial extent would name nothing. The caller clips inside the resident
+    buffer it already holds.
+  - *An emptied leaf occupies no space.* A drafted leaf whose text was deleted out is not a span
+    and is never located; the commit boundary removes it rather than sealing an empty segment. The
+    two agree because both treat "no bytes" as "not there".
+
+  **What this entry does not claim.**
+  - **No measurement, again.** Re-recording a leaf that is already drafted updates in place and
+    allocates nothing; the *first* record for a leaf may allocate unless `Draft::with_capacity`
+    covers the dirty set, and the editor sizes it from the viewport the way it sizes the resident
+    budget. None of that is measured: the L-2 gate's window is still `locate` → resident hit →
+    in-place edit, and the overlay sits outside it until a future slice folds it in or measures it
+    separately. No law is promoted.
+  - **Still no editor.** The overlay answers geometry questions; caret placement, selection,
+    scrolling and paint are Block 5's Eye, and the wiring that decides *when* to commit — a slab
+    change, a scroll, an idle timer — is a policy this crate does not make.
+
+- **2026-11-17 — Block 4, third slice: the commit boundary, proven against the real container.**
+  D-2 said the spine is path-copied "at commit" and admitted the commit boundary did not exist.
+  It exists now: `commit::commit_slab` seals an edited resident slab into the world-line, takes
+  the witness, and returns a new root. The chain is executed, not asserted — `holonomy-line`'s
+  real `WorldLine`, `holonomy-seal`'s real capsule and DEM key, the real durability barrier, the
+  real MMR — in `crates/holonomy-text/tests/commit_boundary.rs`.
+
+  **D-3 — the commit unit is one slab's document extent, not one segment's, and the fence precedes
+  the append.** Two decisions, both forced:
+  - *One slab's extent.* A re-seal replaces exactly the range one leaf covers
+    (`Spine::replace_range`), so no offset outside that range moves and no neighbour is rewritten.
+    Committing at **segment** granularity instead would mean rewriting every leaf naming the edited
+    segment and shifting their start offsets after the edit point — the offset arithmetic that
+    silently duplicates or loses bytes, in every leaf, on every commit. A segment already cut into
+    several leaves is committed leaf by leaf; each commit seals that leaf's bytes as a fresh
+    segment.
+  - *The fence precedes the append.* `commit_slab` refuses a span the spine no longer holds
+    (offset moved, leaf replaced, or offset no longer at a leaf start) **before** the world-line is
+    touched. Appending first and discovering the span was stale afterwards would leave an orphan
+    segment — durable, authenticated, unreferenced, and indistinguishable from a real one in the
+    file. Undo-then-recommit is exactly how a real editor would produce that, so it is a test, not
+    a hypothetical.
+
+  **What the tests prove.** One typed character inside a resident slab becomes segment 1; the new
+  root names it over the whole extent the old leaf covered; the old root still describes the
+  document it was cut from; a fresh handle on the file sees both segments, the same segment root,
+  and passes a full `verify()`; a `ResidentSet` bound to that world-line faults in exactly the
+  committed bytes for the segment the new root names. Committing an emptied slab removes the leaf
+  and appends **nothing** (no empty segment, no witness), committing the same span twice is refused
+  with the world-line byte-for-byte unchanged, and a refused append leaves the spine alone. Undo
+  across a commit walks back to a root whose segment was never rewritten.
+
+  **What this entry does not claim.**
+  - **No measurement.** Commitment allocates — path copies, the segment record, the witness — and
+    is supposed to. L-2's zero-allocation claim stays exactly as narrow as the keystroke binary
+    measures it: `locate` → resident hit → in-place edit. Nothing here promotes L-2, and no new
+    number was taken.
+  - **No editor.** The spine stays stale between commits by design; the editor's live-length
+    overlay is still unbuilt, so a keystroke followed by a viewport query is *not* answered by this
+    code — the overlay answers it. That overlay, and wiring it to this boundary, is Block 5's.
+  - **No coalescing.** The commit replaces one leaf and never merges neighbours, so it creates no
+    fragments (the tests assert the leaf count is unchanged across a commit) but it does not repair
+    fragments either. OQ-9 is narrowed below, not closed.
+
+  **What the first push cost.** Two compile-level findings, both about the test, neither about the
+  boundary: `drop(sink)` on a type that implements no `Drop` (clippy's `drop_non_drop`; NLL already
+  ends the borrow at the sink's last use) and `assert_eq!` over `Result<Committed, _>`, which cannot
+  work because `Committed` holds a `Spine` and `Spine` deliberately has no `PartialEq` — two spines
+  with equal bytes are not the same spine. The refusals are compared as errors instead. A design
+  constraint became a compile error in the tests, which is where it belongs.
+
+  **Dependency direction.** `holonomy-line` and `holonomy-seal` are **dev**-dependencies of
+  `holonomy-text`: the shipped Spine links neither, and speaks to both through `SegmentSink` /
+  `SegmentSource`. The adapters live in the test file because the application crate that will own
+  the production wiring does not exist yet — putting them there means CI executes the seam rather
+  than a comment describing it.
 
 - **2026-11-17 — bug hunt before the commit boundary: property tests and three hardening fixes.**
   The Spine's own tests were scripted — a 4,096-append sequence, every byte of a 7-slab split — and
