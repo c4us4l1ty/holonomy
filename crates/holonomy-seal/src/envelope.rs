@@ -405,10 +405,7 @@ impl HybridKem for MlKem1024X25519 {
 
         let mut ct_ml = [0u8; ML_KEM_1024_CT_BYTES];
         ct_ml.copy_from_slice(&ct);
-        let shared_secrets = SharedSecrets {
-            pq: *pq,
-            ecc: *ecc,
-        };
+        let shared_secrets = SharedSecrets { pq: *pq, ecc: *ecc };
         Ok((
             HybridCiphertext {
                 ml_kem: ct_ml,

@@ -642,29 +642,27 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
             Err(error) => panic!("filler write failed for a non-ENOSPC reason: {error}"),
         }
     };
+    let query_available_bytes = || {
+        let output = Command::new("df")
+            .args(["-B1", "--output=avail"])
+            .arg(&storage_dir)
+            .output()
+            .expect("df is required to measure remaining filesystem space");
+        assert!(
+            output.status.success(),
+            "df available-space query failed: {output:?}"
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .expect("df reports available bytes")
+            .trim()
+            .parse::<u64>()
+            .expect("df available bytes are numeric")
+    };
+    let available_bytes_after_fill = query_available_bytes();
     let filler_bytes = fs::metadata(&filler_path.0).unwrap().len();
     assert!(filler_bytes > 0, "the filler must consume filesystem space");
-
-    let available_output = Command::new("df")
-        .args(["-B1", "--output=avail"])
-        .arg(&storage_dir)
-        .output()
-        .expect("df is required to verify that the filesystem is full");
-    assert!(
-        available_output.status.success(),
-        "df available-space query failed: {available_output:?}"
-    );
-    let available_bytes_after_fill: u64 = String::from_utf8_lossy(&available_output.stdout)
-        .lines()
-        .last()
-        .expect("df reports available bytes")
-        .trim()
-        .parse()
-        .expect("df available bytes are numeric");
-    assert_eq!(
-        available_bytes_after_fill, 0,
-        "filler reported ENOSPC but the filesystem still has available blocks"
-    );
 
     // Request more segment payload than the entire bounded filesystem can hold. Repeated
     // borrowed slices keep memory bounded while ensuring any inode preallocation is exhausted.
@@ -673,6 +671,15 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         usize::try_from(filesystem_bytes / u64::from(MAX_SEGMENT_BYTES) + 1)
             .expect("the bounded filesystem yields a representable segment count");
     let disk_full_segments = vec![&disk_full_payload[..]; disk_full_segment_count];
+    let requested_payload_bytes = u64::try_from(disk_full_segment_count)
+        .expect("the bounded filesystem yields a representable segment count")
+        .checked_mul(u64::from(MAX_SEGMENT_BYTES))
+        .expect("requested qualification payload length fits in u64");
+    assert!(
+        requested_payload_bytes > filesystem_bytes
+            && requested_payload_bytes > available_bytes_after_fill,
+        "the append request must exceed total filesystem size and remaining space"
+    );
     let committed_segments_before_failure = line.segment_count();
     let append_result = line.append_segments(&disk_full_segments);
     assert_eq!(committed_segments_before_failure, 1);
@@ -696,17 +703,14 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         "the failed append must leave the last successful witness authoritative"
     );
     let verification = recovered.verify().unwrap();
-    assert_eq!(
-        verification.segments_verified,
-        recovered.segment_count()
-    );
+    assert_eq!(verification.segments_verified, recovered.segment_count());
     assert_eq!(
         &recovered.open_segment(0).unwrap()[..],
         &initial_payload[..]
     );
     let recovered_tail_bytes = recovered.recovery_info().trailing_bytes;
     eprintln!(
-        "HOLONOMY_ENOSPC_MEASUREMENT filesystem={fs_type}; mount_source={mount_source}; filesystem_bytes={filesystem_bytes}; filesystem_block_bytes={filesystem_block_bytes}; initial_free_bytes={initial_free_bytes}; baseline_end_aligned={}; filler_bytes={filler_bytes}; filler_enospc_phase={filler_enospc_phase}; available_bytes_after_fill={available_bytes_after_fill}; requested_full_segments={disk_full_segment_count}; append_error={append_result:?}; recovered_segments={}; recovered_tail_bytes={recovered_tail_bytes}; verified_segments={}",
+        "HOLONOMY_ENOSPC_MEASUREMENT filesystem={fs_type}; mount_source={mount_source}; filesystem_bytes={filesystem_bytes}; filesystem_block_bytes={filesystem_block_bytes}; initial_free_bytes={initial_free_bytes}; baseline_end_aligned={}; filler_bytes={filler_bytes}; filler_enospc_phase={filler_enospc_phase}; available_bytes_after_fill={available_bytes_after_fill}; requested_full_segments={disk_full_segment_count}; requested_payload_bytes={requested_payload_bytes}; append_error={append_result:?}; recovered_segments={}; recovered_tail_bytes={recovered_tail_bytes}; verified_segments={}",
         baseline_committed_end % filesystem_block_bytes == 0,
         recovered.segment_count(),
         verification.segments_verified,
