@@ -269,10 +269,11 @@ world-line history internal (no history UI yet), smooth at any size.
 - GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):
   quiet-md-grade page (generous margins, paper feel, zero chrome competing with words), with the
   Google-Docs-shaped toolbar of Block 7 above it and `docs/UI-SPEC.md` §3 governing it. Unlock
-  screen: drop a `.wavefunction`, passphrase, open. quiet-md is **prior art and an attributed source
-  of MIT code, not a dependency**: its patched GPUI cannot travel with it and reproducing those
-  patches here is the shape Block 1 forbids. `docs/UI-SPEC.md` §8 states what that costs, and
-  `THIRD_PARTY.md` is the ledger for any file that is ever adapted from it.
+  screen: drop a `.wavefunction`, passphrase, open. **The look is quiet-md's, to the pixel** — its
+  page width, type scale, colours and rhythm are quoted as numbers in `docs/UI-SPEC.md` §8, which is
+  the acceptance table for this block. Its code is not reused (OQ-13): a dependency's
+  `[patch.crates-io]` does not travel and reproducing its GPUI patches is the shape Block 1 forbids,
+  so `THIRD_PARTY.md` is the ledger if a file is ever adapted.
 - Full editing surface on the Eye's geometry: selection, IME-safe input path, copy (with
   clipboard policy: contents flagged confidential, cleared on blur), paste sized to slabs.
 - Autosave by log-append with the Block 3 atomic commit; explicit `Cmd/Ctrl-S`.

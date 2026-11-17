@@ -46,24 +46,71 @@ Listed so they stay dead.
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
-| OQ-10 | A full resident slab has **no continuation policy** — decided 2026-11-17 as D-6: on `WouldSplit`, seal the prefix at the caret and never the whole leaf. `commit_slab(prefix)` plus `Spine::replace_range(leaf_start, caret, new_slab)` is expressible today, because `replace_range` collapses the range to one slab and the tail keeps naming its old segment. Re-sealing the whole leaf instead would seal 64 KiB, then 128 KiB, then 192 KiB — about n²/128 KiB of sealed bytes for n typed, i.e. ~8 GB of world-line copies for 1 MB of typing into one leaf. **Implementation pending**: the pending leaf cannot be a spine leaf (`tree.rs` asserts a leaf carries bytes, and `Draft` maps an existing leaf to a live length but cannot invent one), so it has to be an overlay concept — an insertion case beside `Sealed`/`Draft` in `LiveSpan`. Until that exists, `byte_window` cannot see newly typed text, which is why OQ-12's caller waits on this and not the reverse. | **decided 2026-11-17 (D-6); implementation open** |
+| OQ-10 | A full resident slab has **no continuation policy** — solved by D-7: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; sealing is a state change of the same source and **leaves the root untouched**, so history and `verify` never observe it; each byte is written once, which removes rather than manages option A's quadratic cost; and the commit no longer needs to know where the caret is. Costs: ids become identities (allocated at seal, recorded in the segment header), residency gains a source lookup, and at most a handful of sources may be open at once. | **decided 2026-11-17 (D-7); register + insert path pending** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
-| OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate ("layout cost on a 30 M-word doc is invariant in document length") is a claim about the caller. The chain now exists: `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, and `holonomy_eye::byte_window` joins them, contiguously — an unmeasured leaf inside the window has its bytes included, so the shaped text never has a hole. What is missing is the editor loop that calls all three and the measurement that would prove the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed 2026-11-17; the caller waits on OQ-10's insertion case (D-6), then on a 30 M-word measurement** |
+| OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate is a claim about the caller. The chain exists — `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, `holonomy_eye::byte_window` joins them contiguously — and D-7 removed the last structural objection by making text being typed an ordinary leaf. What is missing is the editor loop that calls all three and the measurement that proves the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed, no caller or measurement yet** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 
 ## Audit trail
 
-- **2026-11-17 — D-6 — OQ-10 decided: seal at the caret, and the pending leaf is an overlay, not a leaf.**
+- **2026-11-17 — D-7 — OQ-10 solved: a leaf names a place, and a place can be open.** D-6 was
+  correct about the arithmetic and wrong about the shape. It accepted the frame "a leaf names a
+  sealed segment, so text that is not sealed has no leaf" and then paid for that frame with a third
+  overlay case, a caret-dependent commit, and a hole in `byte_window` exactly where the user is
+  typing. The frame was the bug.
+
+  **The turn.** Separate two questions that were tangled: *where does this leaf's text live* and
+  *which sealed segment is it in*. A leaf needs the first; only the storage layer cares about the
+  second. Let a leaf name a **source**, and let a source be **open** (bytes in a resident buffer,
+  being typed into) or **sealed** (bytes in the world-line). Same address either way.
+
+  **What that buys, in order of how much it matters.**
+
+  *The typed text is a leaf.* It gets a leaf index, a `slab_span`, a height and a byte range from
+  its first byte. `byte_window` sees it with no new case, so OQ-12's caller is no longer blocked by
+  a hole in the middle of the viewport. The "overlay cannot express an insertion" problem was never
+  about insertions: it was about leaves being restricted to sealed territory.
+
+  *Sealing is a state change, not an edit.* When the buffer fills, the source is sealed — same id,
+  bytes appended once — and a fresh open source takes over. **The root does not change.** So the
+  world-line, `History`, undo and `verify` never observe a seal at all; the document never changed,
+  only where its bytes live did. That also answers the question D-6 left dangling: undo across a
+  seal is not "an ordinary commit's undo", it is *no undo event at all*.
+
+  *Each byte is written once.* Typed into an open source, sealed once. One megabyte of typing seals
+  one megabyte, against option A's 8.5 MiB for the same megabyte and 8 GiB by thirty-two — and the
+  difference is structural rather than tuned: nothing is ever re-sealed, because nothing that is
+  sealed is ever typed into again.
+
+  *The caret stops mattering.* D-6 needed the commit to know where the caret was, because it was
+  sealing an edited leaf's prefix. With open sources the editor only ever seals a source it owns,
+  whole — no split, no prefix, no caret. Where the caret sits is a *view* concern again, which is
+  where it belonged.
+
+  **What it costs, stated before it is built.** Ids become identities rather than positions, so a
+  segment id is allocated when its bytes are sealed and the world-line records it in the segment
+  header; a world-line whose ids are not positions must say so, and `verify` reads the id from the
+  segment rather than inferring it. Residency gains a lookup: a source resolves to a buffer or to a
+  segment. And at most a handful of sources may be open at once, because each one is a resident
+  buffer and residency is a bounded resource (L-2) — the editor's insert path must seal before it
+  opens another, which is one `if` and one test, not a policy.
+
+  **What it deletes.** D-6's third overlay case, D-6's empty-leaf workaround, D-6's caret-dependent
+  commit, and the sentence in OQ-12 that said the viewport could not see what the user is typing.
+  The overlay keeps exactly one job — the live length of a source being edited — which is the job it
+  had all along (D-2).
+
+- **2026-11-17 — D-6 — OQ-10, first answer: seal at the caret, and the pending leaf is an overlay, not a leaf.** *(Superseded the same day by D-7: the awkward part was not the overlay's shape but the assumption that a leaf names a *sealed* segment. Kept because the arithmetic it records is still the reason option A is dead.)*
   `SlabText::insert` refuses with `WouldSplit` when a resident slab is full, and nothing said what
   happens next. There are exactly two continuations, and one of them does not scale.
 
   **Why not re-seal the leaf.** Committing the full leaf and re-faulting it works and is one line of
-  wiring, but each exhaustion seals the leaf's whole text again: at 64 KiB, typing n bytes past a
-  full leaf seals 64 KiB, then 128 KiB, then 192 KiB — about n²/128 KiB of world-line copies. One
-  megabyte of typing into a single leaf is roughly 8 GB of redundant sealed plaintext, and every byte
-  of it is a ciphertext a future `verify` must walk. That is not a write-amplification nit; it is the
-  world-line growing quadratically in the thing the app exists to do.
+  wiring, but each exhaustion seals the leaf's whole text again: at 64 KiB, typing past a full leaf
+  seals 64 KiB, then 128, then 192 — the k-th seal writes k·64 KiB, so n typed bytes seal about
+  n²/128 KiB. The first megabyte costs 8.5 MiB of redundant sealed plaintext; by 32 MiB it costs
+  8 GiB, and every byte is a ciphertext a future `verify` must walk. The ratio is not a constant,
+  which is the tell: 8× at one megabyte, 256× at thirty-two.
 
   **What we do instead.** Seal only the prefix, at the caret: `commit_slab` the resident prefix and
   `Spine::replace_range(leaf_start, caret, new_slab)`. This is expressible with the API the commit

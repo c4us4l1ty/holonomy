@@ -103,34 +103,73 @@ Behavior rules:
 - Screen-reader: the Eye's run tree is the a11y tree source (U0 again) — announced text is
   byte-identical to painted text.
 
-## 8. Framework surface: GPUI upstream, never patched
+## 8. Parity with quiet-md: the page, to the pixel
 
-The shell is GPUI, at the version the workspace pins, **unpatched**. The reference app (quiet-md)
-carries `[patch.crates-io]` entries for `gpui`, `taffy` and `xattr`, and 43 listed GPUI patches;
-none of them enter this tree. The reason is mechanical, not aesthetic:
+The shell's *appearance* is quiet-md's. That is a commitment with numbers, not an aesthetic
+adjective, so the numbers are here — read out of quiet-md 0.1.13's own theme source
+(`src/theme.rs`, `src/themes.rs`) rather than guessed from screenshots. Its engineering is not
+ours to reuse (OQ-13 in `AUDIT.md`: its patched GPUI cannot travel, and Block 1 forbids reproducing
+the patch), so the split is exactly this: **the look is quoted, the machinery is ours.**
 
-- Cargo ignores a **dependency's** `[patch.crates-io]`. Consuming quiet-md would build against stock
-  GPUI, and quiet-md's app code calls API that only the patches add (`grid_col_widths`,
-  `Window::paint_pixels`, `Window::replace_root`, `Window::set_window_min_size`,
-  `RenderImage::with_scale_factor`, `Path::transformed`). It would not compile, so it is not a
-  dependency that exists and one we declined — it is not consumable as one.
-- Reproducing those patches at our root is a `[patch.crates-io]` onto a fork inside the core
-  workspace, which Block 1 forbids by name and which is how v5 lost its UI crates.
-- Exiling the UI to a second workspace to keep the patches out is the other shape Block 1 forbids:
-  one workspace, one lockfile, every crate a member.
+### The page
 
-`AUDIT.md` records this as OQ-13. What it costs, in behaviour we must earn rather than inherit:
+| token | value | quiet-md source |
+| --- | --- | --- |
+| page max width | 820 | `page.width` |
+| body size / line height | 15 / 22 | `BODY_SIZE`, `BODY_LINE` |
+| paragraph gap | 13 | `BLOCK_GAP`, `p.gap` |
+| page background | `#ffffff` | `bg_body` = `craft::N00` |
+| body text | `#1f2225` | `text` = `craft::N900` |
+| captions, meta | `#737477` | `text_caption` = `craft::N600` |
+| placeholders | `#9c9fa0` | `text_placeholder` = `craft::N500` |
+| caret | `#3a85f7`, 2pt wide | `caret` = `craft::B500` |
+| selection | `#3a85f7` at 24% | `selection` |
+| link | `#0f5492` | `mix(0x0087ff, N900, 0.5)` |
+| dividers | black at 6% / 8% | `line_divider`, `line_border` |
+| quote bar | `N900` at 82% | `quote_bar` |
+| code background / gutter | `#fbfbfb` / `#f8f8f8` | `code_bg`, `code_gutter` |
 
-- **Line breaking is ours, not GPUI's.** The Eye lays out the page, so CJK 避头尾 rules, script-aware
-  word classification (Hangul, Hebrew, Arabic, Syriac, ...) and RTL line ordering are
-  `holonomy-eye`'s responsibility. quiet-md's patches #4, #23, #30, #31, #32 are the reference list
-  for what "correct" means — and they are the same gap OQ-11 records. They were never inheritable
-  anyway: they live in GPUI's line wrapper, which this design does not use.
-- **Rendering fidelity is whatever the platform gives.** Font-smoothing parity, synthesized oblique,
-  and the PingFang PostScript collision are quiet-md patches #1, #12, #14. Without them the page is
-  stock GPUI. Any fidelity claim in a gate is measured against stock GPUI, never against quiet-md.
-- **Anything else we need, we upstream.** A GPUI change may be sent as a PR; if it lands, the pinned
-  version moves and the change arrives with it. No local divergence, in the core tree or any other.
+### Headings and title
+
+| level | size | line | margin-top | margin-bottom | weight |
+| --- | --- | --- | --- | --- | --- |
+| title | 34 | 55.25 | 0 | 0 | 700 |
+| h1 | 21 | 27 | 48 | 16 | 700 |
+| h2 | 19 | 25 | 36 | 16 | 700 |
+| h3 | 18 | 24 | 28 | 12 | 600 |
+| h4 | 16 | 25 | 16 | 16 | 600 |
+| h5–h9 | 15 | 22 | 13 | 13 | 600 |
+
+### Type
+
+System UI family for chrome, and the platform's monospace for code — `SystemUIFont` +
+`AppleSystemUIFontMonospaced` on macOS, `Consolas` on Windows, `Noto Sans` / `Noto Sans Mono` on
+Linux. **No webfonts, no network fetches** (§2), which quiet-md also honours: it uses the system's
+own families and bundles only what it draws itself.
+
+### What parity means operationally
+
+1. These values live in one table in the shell crate (Block 6), and a test asserts the table equals
+   the numbers above. Drift is a failing test, not a design review.
+2. A screenshot comparison at matched zoom and DPI is the acceptance check for Block 6, recorded in
+   `AUDIT.md` with the two images named — a claim of "looks like quiet-md" that is not a diff is not
+   a claim.
+3. A deliberate deviation is written down with its reason and its measurement. quiet-md does this
+   itself: its title is 34/55.25 against a 21pt reference, and its source says the larger title is
+   "an intentional deviation, not a measurement". That is the standard.
+
+### What parity does not include
+
+- **Its code.** OQ-13: a dependency's `[patch.crates-io]` does not travel, quiet-md's app calls API
+  its 43 GPUI patches add, and reproducing them here is the shape Block 1 forbids. `THIRD_PARTY.md`
+  is the ledger if a file is ever adapted.
+- **Its line breaking.** CJK 避头尾, script-aware word classes (Hangul, Hebrew, Arabic, Syriac) and
+  RTL line order live in GPUI's line wrapper, which this design does not use: the Eye lays out the
+  page. Patches #4, #23, #30, #31, #32 are the reference list for what correct means there, and the
+  same gap OQ-11 records.
+- **Its font fidelity patches.** Smoothing parity, synthesized oblique and the PingFang PostScript
+  collision are #1, #12, #14. Without them the page is stock GPUI, and a fidelity claim in a gate is
+  measured against stock GPUI, never against quiet-md's pixels.
 
 ## 9. What is deliberately absent in v6.0
 
