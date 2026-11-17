@@ -37,6 +37,42 @@ pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use spine::{History, Spine, SpineError};
 pub use text::{EditOutcome, SlabText, TextError};
 
+/// Test-only support shared by the crate's property tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// A deterministic xorshift64 PRNG.
+    ///
+    /// Property tests must be reproducible from a seed: a failing case has to be re-runnable
+    /// without a dependency, a harness, or a saved corpus.
+    pub(crate) struct XorShift(u64);
+
+    impl XorShift {
+        /// Seeds the generator; a zero seed is replaced so the sequence cannot be constant.
+        pub(crate) fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        /// The next value.
+        pub(crate) fn next(&mut self) -> u64 {
+            let mut state = self.0;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            self.0 = state;
+            state
+        }
+
+        /// A value in `0..bound`; zero when `bound` is zero.
+        pub(crate) fn below(&mut self, bound: u64) -> u64 {
+            if bound == 0 {
+                0
+            } else {
+                self.next() % bound
+            }
+        }
+    }
+}
+
 /// The eyes-only law, carried in code so it is compiled, not just quoted.
 pub const EYES_ONLY_LAW: &str =
     "plaintext is bounded by the viewport, wiped on exit, and document length never enters the memory equation";

@@ -44,8 +44,17 @@ pub struct Slab {
 
 impl Slab {
     /// Creates a slab naming `len` bytes from `start` inside `segment`.
+    ///
+    /// # Panics
+    ///
+    /// If `start + len` does not fit in `u32`: a slab whose range overflows would make
+    /// [`Self::end`] lie, and every downstream offset with it.
     #[must_use]
     pub const fn new(segment: SegmentId, start: u32, len: u32) -> Self {
+        assert!(
+            start.checked_add(len).is_some(),
+            "a slab range must fit in u32"
+        );
         Self {
             segment,
             start,
@@ -220,6 +229,14 @@ mod tests {
         let hit = SlabHit::new(slab, 12);
         assert_eq!(hit.within(), 12);
         assert_eq!(hit.segment_offset(), 512);
+    }
+
+    #[test]
+    #[should_panic(expected = "a slab range must fit in u32")]
+    fn a_slab_range_that_overflows_u32_is_refused() {
+        let start = std::hint::black_box(u32::MAX - 1);
+        let len = std::hint::black_box(2);
+        let _ = Slab::new(id(0), start, len);
     }
 
     #[test]

@@ -84,7 +84,12 @@ impl Spine {
     where
         I: IntoIterator<Item = Slab>,
     {
-        let collected: Vec<Slab> = slabs.into_iter().collect();
+        // A zero-byte leaf carries nothing but would inflate slab counts and path copies; the
+        // document is unchanged by definition, so it is dropped at the door.
+        let collected: Vec<Slab> = slabs
+            .into_iter()
+            .filter(|slab| !slab.is_empty())
+            .collect();
         Self {
             root: tree::build_balanced(&collected),
         }
@@ -109,10 +114,27 @@ impl Spine {
     }
 
     /// Appends one slab, path-copying O(log N) nodes.
+    ///
+    /// An empty slab is a no-op: it would occupy a node without carrying a byte.
     #[must_use]
     pub fn append(&self, slab: Slab) -> Self {
+        if slab.is_empty() {
+            return self.clone();
+        }
         Self {
             root: tree::join(Arc::clone(&self.root), tree::leaf(slab)),
+        }
+    }
+
+    /// Concatenates `other` after this spine, path-copying O(log N) nodes.
+    ///
+    /// Both spines stay valid afterwards, which is what makes split-and-rejoin (the shape an
+    /// editor uses when it isolates the viewport, or when it pastes a cut selection back) cost
+    /// the seam rather than the document.
+    #[must_use]
+    pub fn concat(&self, other: &Self) -> Self {
+        Self {
+            root: tree::join(Arc::clone(&self.root), Arc::clone(&other.root)),
         }
     }
 
@@ -127,6 +149,9 @@ impl Spine {
                 offset: at,
                 len: self.len(),
             });
+        }
+        if slab.is_empty() {
+            return Ok(self.clone());
         }
         let (before, after) = tree::split(&self.root, at);
         Ok(Self {
@@ -486,6 +511,124 @@ mod tests {
         assert_eq!(window.len(), 2);
         assert_eq!(window[0].offset(), 30_010_000);
         assert_eq!(window[0].len(), 30_015_488 - 30_010_000);
+    }
+
+    #[test]
+    fn empty_slabs_cannot_enter_the_tree() {
+        let spine = Spine::from_slabs(vec![slab(0, 10), Slab::new(SegmentId::new(1), 0, 0)]);
+        assert_eq!(spine.slab_count(), 1, "a zero-byte slab must not become a leaf");
+        assert_eq!(spine.len(), 10);
+
+        let appended = spine.append(Slab::new(SegmentId::new(2), 0, 0));
+        assert_eq!(appended.len(), spine.len());
+        assert_eq!(appended.slab_count(), spine.slab_count());
+
+        let inserted = spine
+            .insert_slab(5, Slab::new(SegmentId::new(3), 0, 0))
+            .expect("offset in range");
+        assert_eq!(inserted.len(), spine.len());
+        assert_eq!(inserted.slab_count(), spine.slab_count());
+        crate::tree::check_invariants(&inserted.root);
+    }
+
+    #[test]
+    fn concat_undoes_a_split_exactly() {
+        let spine = Spine::from_slabs(vec![slab(0, 10), slab(1, 10), slab(2, 10)]);
+        for at in [0u64, 1, 10, 15, 29, 30] {
+            let (left, right) = spine.split_at(at).expect("offset in range");
+            let rejoined = left.concat(&right);
+            assert_eq!(rejoined.len(), spine.len(), "split at {at}");
+            crate::tree::check_invariants(&rejoined.root);
+            let pairs = |value: &Spine| -> Vec<(u64, u32)> {
+                let mut out = Vec::new();
+                for span in value.spans_in(0, value.len()) {
+                    let slab = span.slab();
+                    for offset in 0..slab.len() {
+                        out.push((slab.segment().get(), slab.start() + offset));
+                    }
+                }
+                out
+            };
+            assert_eq!(pairs(&rejoined), pairs(&spine), "split at {at}");
+        }
+    }
+
+    #[test]
+    fn random_edits_match_a_byte_level_model() {
+        use crate::test_support::XorShift;
+
+        for seed in [1u64, 9, 0xC0FF_EE, 123_456_789] {
+            let mut rng = XorShift::new(seed);
+            let mut spine = Spine::empty();
+            // (segment, offset in segment) for every document byte, in order.
+            let mut model: Vec<(u64, u32)> = Vec::new();
+            let mut next_segment = 0u64;
+
+            for _ in 0..250 {
+                match rng.below(4) {
+                    0 => {
+                        let len = 1 + rng.below(16) as u32;
+                        let slab = Slab::new(SegmentId::new(next_segment), 0, len);
+                        next_segment += 1;
+                        spine = spine.append(slab);
+                        model.extend((0..len).map(|offset| (slab.segment().get(), offset)));
+                    }
+                    1 => {
+                        let len = 1 + rng.below(8) as u32;
+                        let at = rng.below(model.len() as u64 + 1) as usize;
+                        let slab = Slab::new(SegmentId::new(next_segment), 0, len);
+                        next_segment += 1;
+                        spine = spine.insert_slab(at as u64, slab).expect("offset in range");
+                        for (index, offset) in (0..len).enumerate() {
+                            model.insert(at + index, (slab.segment().get(), offset));
+                        }
+                    }
+                    2 => {
+                        if model.is_empty() {
+                            continue;
+                        }
+                        let start = rng.below(model.len() as u64);
+                        let end = start + rng.below(model.len() as u64 - start + 1);
+                        spine = spine.remove_range(start, end).expect("valid range");
+                        model.drain(start as usize..end as usize);
+                    }
+                    _ => {
+                        // Split and rejoin: shape churn with no content change.
+                        let at = rng.below(model.len() as u64 + 1);
+                        let (left, right) = spine.split_at(at).expect("offset in range");
+                        spine = left.concat(&right);
+                    }
+                }
+
+                crate::tree::check_invariants(&spine.root);
+                assert_eq!(spine.len(), model.len() as u64, "seed {seed}");
+
+                // The whole document, byte for byte: catches a tree that keeps the right length
+                // while scrambling the geometry.
+                let mut produced = Vec::with_capacity(model.len());
+                let mut covered = 0u64;
+                for span in spine.spans_in(0, spine.len()) {
+                    assert_eq!(span.offset(), covered, "spans must tile the document, seed {seed}");
+                    let slab = span.slab();
+                    for offset in 0..slab.len() {
+                        produced.push((slab.segment().get(), slab.start() + offset));
+                    }
+                    covered += span.len();
+                }
+                assert_eq!(covered, spine.len(), "seed {seed}");
+                assert_eq!(produced, model, "seed {seed}");
+
+                if !model.is_empty() {
+                    let offset = rng.below(model.len() as u64);
+                    let hit = spine.locate(offset).expect("in range");
+                    assert_eq!(
+                        (hit.slab().segment().get(), hit.segment_offset()),
+                        model[offset as usize],
+                        "seed {seed} at offset {offset}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

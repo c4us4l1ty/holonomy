@@ -44,9 +44,54 @@ Listed so they stay dead.
 | OQ-4 | Scroll-timing side channel: slab fault-in pattern leaks *where* you read, to whoever sees slab access timing. | **closed 2026-11-17 — accept and disclose.** The pattern is already visible at the I/O layer: fetching an old page reads its ciphertext at a known file offset, so any observer who can time slab faults can observe the reads themselves. Smoothing would buy nothing and would spend L-5 (idle is idle) on traversal cost the architecture exists to delete. Residual recorded in `docs/THREAT-MODEL.md` §5. |
 | OQ-5 | Argon2's internal working arena: `MasterKeys::derive`, `kdf::derive_root_secret*`, and the calibration probe all allocated the m-cost arena inside `hash_password_into` and freed it unwiped (v5's H1 hit exactly this and switched to caller-owned memory + a scrubbed block). Fixed by making the arena caller-owned everywhere: `kdf::Arena(Vec<argon2::Block>)` zeroizes the slab on Drop via argon2's `zeroize` feature, and the single `run_argon2` runner serves creation, replay, *and* the calibration probe, with a test pinning byte-equality against argon2's own allocator | **closed** 2026-11-16 |
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
+| OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
 
 ## Audit trail
+
+- **2026-11-17 — bug hunt before the commit boundary: property tests and three hardening fixes.**
+  The Spine's own tests were scripted — a 4,096-append sequence, every byte of a 7-slab split — and
+  scripted tests cannot find the shape nobody wrote down. This entry adds the machinery that can,
+  and fixes what inspection found in the meantime.
+
+  **Property tests now in CI:**
+  - `tree::check_invariants` recomputes bytes, slab count and height from the leaves and panics on
+    any disagreement with the cached aggregates, on an AVL violation, on an `Empty` child that
+    should have been normalized away, or on a zero-byte leaf.
+  - `random_join_and_split_shapes_keep_every_invariant` — 400 random appends, splits, rejoins and
+    block concatenations per seed, over four seeds, checking aggregates against an independent
+    count after **every** operation.
+  - `random_edits_match_a_byte_level_model` — 250 random appends, insertions, removals and
+    split/rejoins per seed, over four seeds, verified against a trivial `Vec<(segment, offset)>`
+    model: same length after every step, spans tile the document contiguously, the expanded
+    geometry is byte-identical to the model, and `locate` agrees with it. This is the test that
+    catches a tree that keeps the right length while scrambling where the bytes came from.
+  - `random_edits_match_a_string_model` — 500 random insertions and deletions per seed against a
+    `String`, over four seeds, using multi-byte characters (é, 中, 🙂) so the boundary rules are
+    exercised at every width.
+
+  **Fixed by inspection (each now has a test or an invariant that would catch a regression):**
+  - Zero-length slabs could enter the tree as leaves that carry no bytes, inflating `slab_count`,
+    path copies and any budget computed from slab counts. `from_slabs`, `append` and `insert_slab`
+    now drop them, and `check_invariants` rejects a zero-byte leaf outright.
+  - `Slab::new` accepted `start + len` beyond `u32`, which would have made `end()` (and every
+    offset derived from a slab) lie. It now refuses at construction.
+  - `SlabText::insert` computed `len + text.len()` in a plain addition; it now saturates, so the
+    refusal condition cannot wrap on a 32-bit target, and the one remaining panic in
+    `from_plaintext` (an absurd configured slack) is documented rather than discovered.
+
+  **Found and not fixed — recorded as OQ-8:** `History` keeps one root per state, so an unbounded
+  undo history grows with the number of *edits*, not with the document. Subtrees are shared, so
+  each root costs O(log N) nodes, but years of typing is still an unbounded set of them, and the
+  world-line on disk already stores the history. Bounding the in-memory history is a design
+  decision (ring of roots plus reconstruction from the log), not a patch, and it belongs before
+  Block 6 rather than after it.
+
+  **What this entry does not claim.** The hunt covered `holonomy-text` — the code written this
+  session and the only part not yet exercised by a property test. `holonomy-seal` and
+  `holonomy-line` were read for consistency with their audits but not re-attacked; that is Block 9's
+  implementation audit, still owed. No new measurement was taken: these are tests that run in CI,
+  and every one of them is a claim a future change can fail.
 
 - **2026-11-17 — Block 4, second slice: the keystroke path is measured, not asserted.** CI run
   [44045023810](https://github.com/c4us4l1ty/holonomy/actions/runs/44045023810) is green, and the

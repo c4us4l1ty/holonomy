@@ -215,6 +215,47 @@ pub(crate) fn build_balanced(slabs: &[Slab]) -> Arc<Node> {
     }
 }
 
+/// Verifies every structural invariant the rest of the crate relies on, returning the
+/// `(bytes, slabs, height)` recomputed from the leaves.
+///
+/// Exists for the property tests: aggregates are cached, so a bug can produce a tree whose
+/// lengths look right while its caches, its balance or its emptiness discipline are wrong. The
+/// checker recomputes from the bottom up and panics on the first disagreement.
+#[cfg(test)]
+pub(crate) fn check_invariants(node: &Arc<Node>) -> (u64, u32, u32) {
+    match node.as_ref() {
+        Node::Empty => (0, 0, 0),
+        Node::Leaf(slab) => {
+            assert!(!slab.is_empty(), "a leaf must carry bytes");
+            (u64::from(slab.len()), 1, 1)
+        }
+        Node::Branch { left, right, .. } => {
+            assert!(
+                !matches!(left.as_ref(), Node::Empty),
+                "an Empty child must have been normalized away"
+            );
+            assert!(
+                !matches!(right.as_ref(), Node::Empty),
+                "an Empty child must have been normalized away"
+            );
+            let (left_bytes, left_slabs, left_height) = check_invariants(left);
+            let (right_bytes, right_slabs, right_height) = check_invariants(right);
+            assert!(
+                left_height.abs_diff(right_height) <= 1,
+                "AVL invariant broken: {left_height} vs {right_height}"
+            );
+            assert_eq!(node.bytes(), left_bytes + right_bytes, "bytes cache drifted");
+            assert_eq!(node.slabs(), left_slabs + right_slabs, "slab cache drifted");
+            assert_eq!(
+                node.height(),
+                left_height.max(right_height) + 1,
+                "height cache drifted"
+            );
+            (left_bytes + right_bytes, left_slabs + right_slabs, left_height.max(right_height) + 1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -229,26 +270,20 @@ mod tests {
 
     /// Verifies aggregates and the AVL invariant, returning the subtree's slab list.
     fn check(node: &Arc<Node>) -> Vec<Slab> {
-        match node.as_ref() {
-            Node::Empty => Vec::new(),
-            Node::Leaf(value) => vec![*value],
-            Node::Branch { left, right, .. } => {
-                assert!(
-                    left.height().abs_diff(right.height()) <= 1,
-                    "AVL invariant broken: {} vs {}",
-                    left.height(),
-                    right.height()
-                );
-                assert!(!matches!(left.as_ref(), Node::Empty));
-                assert!(!matches!(right.as_ref(), Node::Empty));
-                let mut slabs = check(left);
-                slabs.extend(check(right));
-                let summed: u64 = slabs.iter().map(|value| u64::from(value.len())).sum();
-                assert_eq!(node.bytes(), summed, "aggregates drifted from the leaves");
-                assert_eq!(node.slabs(), slabs.len() as u32);
-                slabs
+        check_invariants(node);
+        fn collect(node: &Arc<Node>, out: &mut Vec<Slab>) {
+            match node.as_ref() {
+                Node::Empty => {}
+                Node::Leaf(value) => out.push(*value),
+                Node::Branch { left, right, .. } => {
+                    collect(left, out);
+                    collect(right, out);
+                }
             }
         }
+        let mut slabs = Vec::new();
+        collect(node, &mut slabs);
+        slabs
     }
 
     fn collect_ptrs(node: &Arc<Node>, out: &mut HashSet<*const Node>) {
@@ -342,6 +377,50 @@ mod tests {
             "append copied more than its path: {shared} of {} shared",
             old_ptrs.len()
         );
+    }
+
+    #[test]
+    fn random_join_and_split_shapes_keep_every_invariant() {
+        use crate::test_support::XorShift;
+
+        for seed in [1u64, 7, 42, 0xDEAD_BEEF] {
+            let mut rng = XorShift::new(seed);
+            let mut root = empty();
+            let mut expected: Vec<Slab> = Vec::new();
+
+            for _ in 0..400 {
+                match rng.below(3) {
+                    0 => {
+                        // Append.
+                        let slab = slab(rng.below(64), 1 + rng.below(24) as u32);
+                        root = join(root, leaf(slab));
+                        expected.push(slab);
+                    }
+                    1 => {
+                        // Split at a random offset and rejoin: shape churn without content change.
+                        let at = rng.below(root.bytes() + 1);
+                        let (left, right) = split(&root, at);
+                        check_invariants(&left);
+                        check_invariants(&right);
+                        root = join(left, right);
+                    }
+                    _ => {
+                        // Concatenate an independently built tree onto the end.
+                        let count = 1 + rng.below(5) as usize;
+                        let extra: Vec<Slab> = (0..count)
+                            .map(|_| slab(rng.below(64), 1 + rng.below(16) as u32))
+                            .collect();
+                        let block = build_balanced(&extra);
+                        root = join(root, block);
+                        expected.extend(extra);
+                    }
+                }
+                let (bytes, slabs, _) = check_invariants(&root);
+                let expected_bytes: u64 = expected.iter().map(|s| u64::from(s.len())).sum();
+                assert_eq!(bytes, expected_bytes, "seed {seed}");
+                assert_eq!(u64::from(slabs), expected.len() as u64, "seed {seed}");
+            }
+        }
     }
 
     #[test]

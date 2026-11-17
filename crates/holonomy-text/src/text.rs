@@ -97,6 +97,11 @@ impl SlabText {
     /// # Errors
     ///
     /// [`TextError::InvalidUtf8`] if `plaintext` is not valid UTF-8.
+    ///
+    /// # Panics
+    ///
+    /// If `plaintext.len() + slack` exceeds the maximum allocation size — the same panic
+    /// `Vec::reserve` gives, and reachable only by configuring an absurd slack.
     pub fn from_plaintext(plaintext: Vec<u8>, slack: usize) -> Result<Self, TextError> {
         if std::str::from_utf8(&plaintext).is_err() {
             return Err(TextError::InvalidUtf8);
@@ -176,7 +181,9 @@ impl SlabText {
         if std::str::from_utf8(text).is_err() {
             return Err(TextError::InvalidUtf8);
         }
-        let needed = len + text.len();
+        // Saturating, not wrapping: on any width this either fits or is far larger than the
+        // capacity, which is exactly the refusal condition.
+        let needed = len.saturating_add(text.len());
         if needed > self.capacity() {
             return Ok(EditOutcome::WouldSplit {
                 needed,
@@ -325,6 +332,55 @@ mod tests {
                 len: 3
             })
         );
+    }
+
+    #[test]
+    fn random_edits_match_a_string_model() {
+        use crate::test_support::XorShift;
+
+        // Multi-byte characters on purpose: the boundary rules must hold for every width.
+        let alphabet = ['a', 'b', ' ', 'é', '中', '🙂'];
+        for seed in [3u64, 11, 777, 0x00AB_CD] {
+            let mut rng = XorShift::new(seed);
+            let mut text = SlabText::from_text("", 512);
+            let mut model = String::new();
+
+            for _ in 0..500 {
+                let boundaries: Vec<usize> = model
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(model.len()))
+                    .collect();
+
+                if rng.below(2) == 0 || model.is_empty() {
+                    let at = boundaries[rng.below(boundaries.len() as u64) as usize];
+                    let character = alphabet[rng.below(alphabet.len() as u64) as usize];
+                    let mut buffer = [0u8; 4];
+                    let encoded = character.encode_utf8(&mut buffer).as_bytes().to_vec();
+                    if text.spare() < encoded.len() {
+                        continue;
+                    }
+                    assert_eq!(
+                        text.insert(at, &encoded).expect("a boundary offset is valid"),
+                        EditOutcome::InPlace
+                    );
+                    model.insert(at, character);
+                } else {
+                    let first = boundaries[rng.below(boundaries.len() as u64) as usize];
+                    let second = boundaries[rng.below(boundaries.len() as u64) as usize];
+                    let (start, end) = if first <= second {
+                        (first, second)
+                    } else {
+                        (second, first)
+                    };
+                    text.delete(start, end).expect("boundary offsets are valid");
+                    model.replace_range(start..end, "");
+                }
+
+                assert_eq!(text.as_str(), model, "seed {seed}");
+                assert_eq!(text.len(), model.len(), "seed {seed}");
+            }
+        }
     }
 
     #[test]
