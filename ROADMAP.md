@@ -99,8 +99,8 @@ limited by disk, not by format — this is what makes sixty years *the default s
   measured `File::write` calls are confined to newly appended records. The ignored qualification
   test `tests::rsync_measures_append_transfer_over_a_named_local_daemon` measures a named rsync
   client over TCP against a local daemon using a real 30-million-word sealed file; it records the
-  client version, application-layer bytes, and append size. A passing run would be evidence only
-  for that rsync build/configuration/workload, not every backup client or remote service.
+  client version, application-layer bytes, and append size. Evidence from a passing run applies
+  only to that rsync build/configuration/workload, not every backup client or remote service.
   `holonomy verify` re-checks segment integrity after a copy, so a cloud-mangled file is detected,
   not silently trusted.
 
