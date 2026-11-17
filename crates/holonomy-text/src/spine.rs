@@ -86,10 +86,7 @@ impl Spine {
     {
         // A zero-byte leaf carries nothing but would inflate slab counts and path copies; the
         // document is unchanged by definition, so it is dropped at the door.
-        let collected: Vec<Slab> = slabs
-            .into_iter()
-            .filter(|slab| !slab.is_empty())
-            .collect();
+        let collected: Vec<Slab> = slabs.into_iter().filter(|slab| !slab.is_empty()).collect();
         Self {
             root: tree::build_balanced(&collected),
         }
@@ -516,7 +513,11 @@ mod tests {
     #[test]
     fn empty_slabs_cannot_enter_the_tree() {
         let spine = Spine::from_slabs(vec![slab(0, 10), Slab::new(SegmentId::new(1), 0, 0)]);
-        assert_eq!(spine.slab_count(), 1, "a zero-byte slab must not become a leaf");
+        assert_eq!(
+            spine.slab_count(),
+            1,
+            "a zero-byte slab must not become a leaf"
+        );
         assert_eq!(spine.len(), 10);
 
         let appended = spine.append(Slab::new(SegmentId::new(2), 0, 0));
@@ -608,7 +609,11 @@ mod tests {
                 let mut produced = Vec::with_capacity(model.len());
                 let mut covered = 0u64;
                 for span in spine.spans_in(0, spine.len()) {
-                    assert_eq!(span.offset(), covered, "spans must tile the document, seed {seed}");
+                    assert_eq!(
+                        span.offset(),
+                        covered,
+                        "spans must tile the document, seed {seed}"
+                    );
                     let slab = span.slab();
                     for offset in 0..slab.len() {
                         produced.push((slab.segment().get(), slab.start() + offset));

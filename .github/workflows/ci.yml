@@ -48,12 +48,13 @@ jobs:
         run: |
           set +e
           # The sandbox that fixes a failure cannot reach the Actions log hosts, so the diag
-          # comments are the only channel. Two rules make them lossless:
+          # comments are the only channel. Three rules make them lossless:
           #   1. the formatter's own patch is captured verbatim (apply it, do not retype it);
           #   2. the whole report is base64'd and split into comment-sized chunks, because a
           #      single 60,000-byte comment silently dropped everything after the fmt diff.
-          cargo fmt --all >/dev/null 2>&1
-          git diff > "$RUNNER_TEMP/fmt.patch"
+          # The check runs before the formatter rewrites the tree: reformatting first made
+          # `cargo fmt --all -- --check` report exit 0 on every failure, so the only signal was
+          # the rustfmt job's red mark and no patch was ever produced for it.
           {
             echo '### diag: workflow commands, capped output and exit status'
             echo '```'
@@ -84,11 +85,16 @@ jobs:
               echo
             done
             echo '```'
+          } > diag.md
+          # Only now rewrite the tree, so the check above reports the real result.
+          cargo fmt --all >/dev/null 2>&1
+          git diff > "$RUNNER_TEMP/fmt.patch"
+          {
             echo '### rustfmt patch (apply verbatim: git apply)'
             echo '```diff'
             cat "$RUNNER_TEMP/fmt.patch"
             echo '```'
-          } > diag.md
+          } >> diag.md
           base64 -w0 diag.md | split -b 50000 -d -a 2 - diag-chunk-
           total="$(ls diag-chunk-* | wc -l | tr -d '[:space:]')"
           for chunk in diag-chunk-*; do

@@ -244,14 +244,22 @@ pub(crate) fn check_invariants(node: &Arc<Node>) -> (u64, u32, u32) {
                 left_height.abs_diff(right_height) <= 1,
                 "AVL invariant broken: {left_height} vs {right_height}"
             );
-            assert_eq!(node.bytes(), left_bytes + right_bytes, "bytes cache drifted");
+            assert_eq!(
+                node.bytes(),
+                left_bytes + right_bytes,
+                "bytes cache drifted"
+            );
             assert_eq!(node.slabs(), left_slabs + right_slabs, "slab cache drifted");
             assert_eq!(
                 node.height(),
                 left_height.max(right_height) + 1,
                 "height cache drifted"
             );
-            (left_bytes + right_bytes, left_slabs + right_slabs, left_height.max(right_height) + 1)
+            (
+                left_bytes + right_bytes,
+                left_slabs + right_slabs,
+                left_height.max(right_height) + 1,
+            )
         }
     }
 }

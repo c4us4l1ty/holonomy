@@ -105,6 +105,15 @@ Listed so they stay dead.
   third push rather than trusting a fourth blind run. Two `clippy::unusual_byte_groupings` lints in
   the new seed arrays were the only other findings.
 
+  **A bug in the diagnostic channel itself.** The third push went red on the `rustfmt` job while
+  the bridge reported `cargo fmt --all -- --check` as **exit 0** — because the bridge ran
+  `cargo fmt --all` (to capture the formatter's patch) *before* the loop, so the check it printed
+  was inspecting a tree the formatter had already rewritten and could never fail. The check now
+  runs first and the rewrite happens after it; the patch is appended to the report afterwards, so
+  the verbatim patch is still what gets applied and the printed status is finally the real one.
+  This is the second time this session a tool that reported success was the problem — the first
+  was the keystroke gate measuring the default allocator.
+
   **What this entry does not claim.** The hunt covered `holonomy-text` — the code written this
   session and the only part not yet exercised by a property test. `holonomy-seal` and
   `holonomy-line` were read for consistency with their audits but not re-attacked; that is Block 9's

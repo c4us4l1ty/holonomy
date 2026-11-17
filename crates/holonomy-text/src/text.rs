@@ -361,7 +361,8 @@ mod tests {
                         continue;
                     }
                     assert_eq!(
-                        text.insert(at, &encoded).expect("a boundary offset is valid"),
+                        text.insert(at, &encoded)
+                            .expect("a boundary offset is valid"),
                         EditOutcome::InPlace
                     );
                     model.insert(at, character);
