@@ -136,6 +136,15 @@ impl SlabSpan {
     pub const fn len(self) -> u64 {
         self.slab.len() as u64
     }
+
+    /// Whether this span covers no bytes.
+    ///
+    /// A span produced by [`crate::Spine::spans_in`] is never empty; this exists so the span's
+    /// length obeys the same shape as every other length in the crate.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.slab.is_empty()
+    }
 }
 
 /// Where a document offset lands: the slab containing it, and the offset within that slab.
