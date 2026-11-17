@@ -6,9 +6,10 @@
 //! `tests/keystroke_allocations.rs` (GATES law L-2's keystroke half); the commit boundary
 //! ([`commit`]) that seals an edited slab into the world-line, takes the witness, and path-copies
 //! the spine to the new root — proven against a real `holonomy-line` world-line in
-//! `tests/commit_boundary.rs`; and the live-length overlay ([`Draft`]) that keeps every position
-//! query correct *between* commits, while the spine is stale by design. What is still missing is
-//! the editor itself and Block 5's Eye, so L-2 as a whole remains `spec` and the Block 4 gates
+//! `tests/commit_boundary.rs`; the live-length overlay ([`Draft`]) that keeps every position
+//! query correct *between* commits, while the spine is stale by design; and the typing session
+//! ([`Typing`]) where open sources are born, typed into, sealed and deleted. What is still missing
+//! is the editor itself and Block 5's Eye, so L-2 as a whole remains `spec` and the Block 4 gates
 //! remain open.
 //!
 //! The constitutional clause still governs everything here:
@@ -18,7 +19,7 @@
 //! > it. Undo is a pointer walk, never a plaintext buffer — otherwise the wipe set would grow
 //! > with history.
 //!
-//! Seven structural consequences, each witnessed by a test in this crate:
+//! Eight structural consequences, each witnessed by a test in this crate:
 //!
 //! * A [`Spine`] holds no plaintext at all — only [`Slab`] references — so a sixty-year document
 //!   costs bytes that scale with segment count, not with readable text.
@@ -38,6 +39,9 @@
 //!   (bytes in the world-line), at the same address ([`OpenSources`], D-7). Text being typed is
 //!   therefore an ordinary leaf, and sealing it changes no root — so undo, history and `verify`
 //!   never observe a seal.
+//! * Deletion is a pointer operation: removing a range copies a root and writes no bytes, because
+//!   the bytes were never the document's. It follows that deletion does not erase — the world-line
+//!   keeps what was removed, exactly as an append-only log must ([`Typing::delete`], OQ-14).
 
 pub mod commit;
 pub mod draft;

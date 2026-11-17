@@ -161,6 +161,22 @@ impl OpenSources {
         Ok(())
     }
 
+    /// Abandons `source`: its text was deleted before it was ever sealed.
+    ///
+    /// Nothing is appended and nothing is renamed, so the provisional id stops naming text and
+    /// [`Self::locate`] answers [`Location::Unknown`] for it. That is the honest answer — the id
+    /// *was* handed out, so it is not a stranger, but the text it named is gone, and renaming it to
+    /// a segment that was never written would be worse.
+    ///
+    /// Returns whether the source was open, so closing twice is refused rather than repeated.
+    pub fn close(&mut self, source: SegmentId) -> bool {
+        let Some(index) = self.open.iter().position(|open| *open == source) else {
+            return false;
+        };
+        self.open.remove(index);
+        true
+    }
+
     /// Where the bytes of `address` are, as far as this register knows.
     ///
     /// A non-provisional id is a sealed segment by definition: the world-line only ever mints real
@@ -281,6 +297,22 @@ mod tests {
         let first = sources.open();
         assert_eq!(first, SegmentId::new(PROVISIONAL_BASE));
         assert!(sources.locate(first).is_open());
+    }
+
+    #[test]
+    fn an_abandoned_source_becomes_unknown_rather_than_staying_open() {
+        let mut sources = OpenSources::new();
+        let source = sources.open();
+        assert!(sources.locate(source).is_open());
+        assert!(sources.close(source));
+        // Not open any more, and not sealed under some invented segment: unknown.
+        assert_eq!(sources.locate(source), Location::Unknown);
+        assert_eq!(sources.open_count(), 0);
+        assert_eq!(sources.sealed_as(source), None);
+        assert!(
+            !sources.close(source),
+            "closing twice is refused, not repeated"
+        );
     }
 
     #[test]

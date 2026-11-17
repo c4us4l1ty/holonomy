@@ -34,6 +34,19 @@
 //! leaves the document fully sealed. Without the rule there would be several open sources drafting
 //! lengths at once and every offset query would walk them all; with it, every offset before the
 //! open leaf is exact and the overlay is a single entry.
+//!
+//! # Deletion is a pointer operation
+//!
+//! [`Typing::delete`] takes a range out, and it is the cheapest structural change here. Inside
+//! the open buffer it is one in-place [`SlabText::delete`]; across sealed text it seals what is
+//! open and then removes the range from the spine — **one root copy, and no bytes written**,
+//! because the document is geometry and the bytes were never its bytes. Cutting a megabyte out
+//! costs what cutting ten out costs.
+//!
+//! **Deletion does not erase.** The world-line still holds the ciphertext of what was removed, and
+//! a reader with the passphrase can still decrypt it. An authenticated append-only log cannot do
+//! better without a compaction policy, and this session has none; AUDIT's OQ-14 records that,
+//! rather than letting "deleted" quietly mean two different things.
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
@@ -170,6 +183,56 @@ impl<S: SegmentSink> Typing<S> {
             self.next_at = Some(at.min(self.spine.len()));
         }
         self.type_bytes(bytes)
+    }
+
+    /// Deletes the range `start..end`, leaving the caret at `start`.
+    ///
+    /// A range inside the open buffer is one in-place edit, and the keystroke path stays the
+    /// keystroke path. A range that reaches sealed text seals what is open first — so every offset
+    /// is the tree's own and no correction is needed — and then takes the range out of the spine.
+    /// Either way **no bytes are written**: the world-line keeps what was deleted, which is OQ-14's
+    /// subject, and the leaf fragments a cut leaves behind are OQ-9's.
+    ///
+    /// Deleting the whole open buffer takes the leaf with it and abandons the source: the tree may
+    /// not carry a leaf that names nothing.
+    ///
+    /// # Errors
+    ///
+    /// A range whose ends are not character boundaries, or a spine range the geometry refuses. A
+    /// refused cut changes nothing.
+    pub fn delete(&mut self, start: u64, end: u64) -> Result<(), TypingError> {
+        let document = self.document_len();
+        let (start, end) = (start.min(document), end.min(document));
+        if start >= end {
+            return Ok(());
+        }
+        if let Some(open) = self.open {
+            let live = u64::try_from(self.buffer.len()).expect("a buffer fits in u64");
+            let live_end = open.at + live;
+            if start >= open.at && end <= live_end {
+                let from = usize::try_from(start - open.at).expect("a buffer fits in usize");
+                let to = usize::try_from(end - open.at).expect("a buffer fits in usize");
+                self.buffer.delete(from, to)?;
+                if self.buffer.is_empty() {
+                    // The leaf carried the only bytes this source had. It leaves the spine, and the
+                    // provisional id becomes unknown rather than pointing at nothing.
+                    let leaf_end = open.at + u64::from(open.registered);
+                    self.spine = self.spine.remove_range(open.at, leaf_end)?;
+                    self.sources.close(open.source);
+                    self.draft.forget(open.at);
+                    self.open = None;
+                    self.next_at = Some(open.at);
+                } else {
+                    self.settle()?;
+                }
+                return Ok(());
+            }
+        }
+        // Something sealed is involved: seal what is open so every offset is exact, then cut.
+        self.flush()?;
+        self.spine = self.spine.remove_range(start, end)?;
+        self.next_at = Some(start);
+        Ok(())
     }
 
     /// The document offset the next typed byte lands at.
@@ -530,6 +593,110 @@ mod tests {
             .collect();
         assert_eq!(leaves, vec![(0, 4), (4, 8), (12, 2), (14, 4)]);
         assert_eq!(typing.document_len(), 18);
+    }
+
+    #[test]
+    fn backspace_inside_the_open_buffer_writes_nothing() {
+        let mut typing = session(64);
+        typing.insert(b"hello world").expect("typed");
+        typing.delete(5, 11).expect("deleted");
+        assert_eq!(typing.pending(), b"hello");
+        assert_eq!(typing.document_len(), 5);
+        assert_eq!(typing.spine().slab_count(), 1, "no cut, so no fragment");
+        assert_eq!(typing.caret(), 5);
+        assert!(
+            typing.sink.segments.is_empty(),
+            "a backspace seals nothing at all"
+        );
+        assert_eq!(typing.sealed_bytes(), 0);
+    }
+
+    #[test]
+    fn deleting_the_whole_open_buffer_takes_the_leaf_with_it() {
+        let mut typing = session(64);
+        typing.insert(b"abc").expect("typed");
+        typing.delete(0, 3).expect("deleted");
+        assert_eq!(
+            typing.spine().slab_count(),
+            0,
+            "no empty leaf is left behind"
+        );
+        assert_eq!(typing.spine().len(), 0);
+        assert_eq!(typing.document_len(), 0);
+        assert!(typing.pending().is_empty());
+        assert_eq!(
+            typing.sources().open_count(),
+            0,
+            "the source was abandoned, not sealed"
+        );
+        assert_eq!(typing.sealed_bytes(), 0);
+        assert_eq!(typing.caret(), 0, "the caret is where the text began");
+    }
+
+    #[test]
+    fn deleting_sealed_text_costs_a_root_copy_and_no_bytes() {
+        let mut typing = session(8);
+        typing.insert(b"0123456789abcdefghij").expect("typed");
+        typing.flush().expect("flushed");
+        assert_eq!(typing.sealed_bytes(), 20);
+        let segments = typing.sink.segments.len();
+        typing.delete(2, 12).expect("deleted");
+        assert_eq!(typing.sealed_bytes(), 20, "deletion wrote nothing");
+        assert_eq!(
+            typing.sink.segments.len(),
+            segments,
+            "and sealed no segment"
+        );
+        assert_eq!(typing.document_len(), 10);
+        assert_eq!(
+            typing.spine().len(),
+            10,
+            "the tree and the document agree"
+        );
+        // Three leaves, not two: the leaves the cut lands in are split, and nothing rejoins them.
+        assert_eq!(typing.spine().slab_count(), 3);
+        // The removed bytes are still in the world-line. That is OQ-14, and it is why this is
+        // called deletion and not erasure.
+        assert_eq!(typing.sink.written().len(), 20);
+    }
+
+    #[test]
+    fn deleting_across_the_open_leaf_seals_it_first() {
+        let mut typing = session(8);
+        // Eight bytes seal, and two are still open in the second source.
+        typing.insert(b"0123456789").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 8);
+        assert_eq!(typing.pending(), b"89");
+        typing.delete(6, 10).expect("deleted");
+        assert_eq!(
+            typing.sealed_bytes(),
+            10,
+            "the open bytes were sealed before the cut"
+        );
+        assert!(typing.pending().is_empty());
+        assert!(typing.draft().is_empty(), "nothing is open, so nothing is drafted");
+        assert_eq!(typing.document_len(), 6);
+        assert_eq!(typing.spine().len(), 6);
+        assert_eq!(typing.caret(), 6);
+    }
+
+    #[test]
+    fn typing_after_a_deletion_continues_where_the_text_was_taken_out() {
+        let mut typing = session(64);
+        typing.insert(b"0123456789").expect("typed");
+        typing.delete(4, 8).expect("deleted");
+        assert_eq!(typing.pending(), b"012389", "the buffer closed the gap");
+        typing.insert(b"XY").expect("typed");
+        assert_eq!(typing.pending(), b"012389XY");
+        // Take everything out: the leaf goes, and the next keystroke starts a new one at zero.
+        typing.delete(0, 99).expect("deleted");
+        assert_eq!(typing.document_len(), 0);
+        assert_eq!(typing.spine().slab_count(), 0);
+        assert_eq!(typing.caret(), 0);
+        typing.insert(b"z").expect("typed");
+        assert_eq!(typing.caret(), 1);
+        assert_eq!(typing.document_len(), 1);
+        assert_eq!(typing.spine().len(), 1);
     }
 
     #[test]

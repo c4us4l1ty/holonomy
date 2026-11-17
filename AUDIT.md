@@ -46,13 +46,48 @@ Listed so they stay dead.
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
-| OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Not yet: deletion and selection. | **closed 2026-11-17 — `typing.rs`** |
+| OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Deletion is D-11 (a pointer operation; the bytes stay in the log — OQ-14). Not yet: selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
 | OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured, its clock is not. | **open — cost inputs measured 2026-11-17; timing needs Block 6's shaper** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
+| OQ-14 | **Deletion does not erase.** `Typing::delete` removes a range from the tree, which is a pointer operation: no bytes written, no segment sealed. The deleted text therefore stays in the world-line as ciphertext, decryptable by anyone holding the passphrase. That is inherent to an authenticated append-only log — the log *is* the history, and the document is a view of it — and it is also why the log is trustworthy. A policy is needed (segment-by-segment re-encryption in a compaction pass, or a per-document epoch the user is expected to rotate), and until one exists "deleted" must not be read as "erased" in any user-facing claim. Found 2026-11-17 while implementing deletion. | **open — found 2026-11-17, no policy yet** |
 
 ## Audit trail
+
+- **2026-11-17 — D-11 — deletion is a pointer operation, and that word has to be chosen carefully.**
+  Removing text turned out to be the smallest structural change in the engine and the largest
+  semantic one.
+
+  **What it costs.** Backspace inside the open buffer edits the buffer in place: one
+  `SlabText::delete`, allocation-free, nothing sealed — the keystroke path stays the keystroke path.
+  A range that reaches sealed text seals what is open (one append) and then calls `remove_range`:
+  one root copy, **zero bytes written**, because the document is geometry and the bytes were never
+  the document's. Cutting a million bytes out of a document costs what cutting ten out of it costs.
+
+  **What it means, and this is the part worth the ink.** The world-line still holds the ciphertext
+  of everything deleted; a reader with the passphrase can decrypt it. That is not a defect in the
+  deletion path — it is what an authenticated append-only log *is*. But it means "deleted" and
+  "erased" are different words, and a product that uses the first while its users hear the second is
+  lying by vocabulary. **OQ-14** records the gap and names the two shapes a policy could take; until
+  one exists, no user-facing claim may say erased.
+
+  **A cut leaves fragments, and that is OQ-9, not a bug.** Deleting a range that spans leaf
+  boundaries splits the leaves it lands in and rejoins nothing, so the leaf count can grow while the
+  document shrinks. Found by a test that asserted two leaves where the engine correctly leaves
+  three; the test now says three and names the open question rather than the code being bent to fit
+  a guess.
+
+  **The empty-leaf case, again.** Deleting the whole open buffer leaves a source with no bytes, and
+  the tree may not hold a leaf that carries nothing. The leaf leaves the spine, the register
+  abandons the source (`OpenSources::close`), and the provisional id becomes `Unknown` rather than
+  pointing at a segment that was never written — the same instinct that made `tree.rs` refuse empty
+  leaves in the first place.
+
+  **What is still missing, on purpose.** Selection is a pair of offsets in the caller's view, so the
+  storage layer owes it nothing new; undo of a deletion needs `History` to observe the root swap,
+  which is the next slice, and it is where OQ-8's unbounded-history question has to be answered
+  rather than deferred again.
 
 - **2026-11-17 — D-10 — the viewport, measured on thirty million words.** Gate 2 says layout cost is
   invariant in document length. Half of that is about fonts and belongs to Block 6; the half that
