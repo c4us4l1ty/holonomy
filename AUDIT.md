@@ -134,8 +134,11 @@ Listed so they stay dead.
   [44032166408](https://github.com/c4us4l1ty/holonomy/actions/runs/44032166408), exercised the
   maximum-input combining-sequence regression: its test, Clippy, gates, and both qualification
   jobs passed, while rustfmt requested a line-wrap correction. Diagnostics confirmed the failure
-  was formatting-only; that correction and an explicit `digest/zeroize` graph assertion are in the
-  current worktree and await a full CI rerun.
+  was formatting-only. Commit `a190519` applies that correction and adds an explicit `digest/zeroize`
+  graph assertion; CI [44033037131](https://github.com/c4us4l1ty/holonomy/actions/runs/44033037131)
+  then passed rustfmt, Clippy, the strengthened feature-graph check, workspace tests, the gates
+  contract, and both L-6/L-10 rehearsals. All code and feature-graph checks are green; L-6 and
+  L-10 remain `spec` and Block 4 has not started.
 
   **Verdict:** the dependency-temporary zeroization gate remains open. Current bounded input and
   enabled feature edges narrow exposure and improve cleanup for selected retained states, but
