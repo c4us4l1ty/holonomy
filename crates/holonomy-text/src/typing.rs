@@ -648,11 +648,7 @@ mod tests {
             "and sealed no segment"
         );
         assert_eq!(typing.document_len(), 10);
-        assert_eq!(
-            typing.spine().len(),
-            10,
-            "the tree and the document agree"
-        );
+        assert_eq!(typing.spine().len(), 10, "the tree and the document agree");
         // Three leaves, not two: the leaves the cut lands in are split, and nothing rejoins them.
         assert_eq!(typing.spine().slab_count(), 3);
         // The removed bytes are still in the world-line. That is OQ-14, and it is why this is
@@ -674,7 +670,10 @@ mod tests {
             "the open bytes were sealed before the cut"
         );
         assert!(typing.pending().is_empty());
-        assert!(typing.draft().is_empty(), "nothing is open, so nothing is drafted");
+        assert!(
+            typing.draft().is_empty(),
+            "nothing is open, so nothing is drafted"
+        );
         assert_eq!(typing.document_len(), 6);
         assert_eq!(typing.spine().len(), 6);
         assert_eq!(typing.caret(), 6);
