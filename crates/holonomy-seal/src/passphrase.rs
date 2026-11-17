@@ -162,12 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn long_combining_sequence_is_rejected_at_the_nfc_output_limit() {
-        // This exceeds TinyVec's inline capacity in unicode-normalization 0.1.26. The test
-        // covers the length guard, not wiping of the iterator's dependency-owned scratch.
+    fn maximum_bounded_combining_sequence_is_rejected_at_the_nfc_output_limit() {
+        // Fill the allowed raw input with one non-starter run. unicode-normalization 0.1.26
+        // buffers this sequence in dependency-owned TinyVecs before it can emit normalized
+        // output. This exercises the input bound and output limit; it does not prove that the
+        // iterator's scratch is wiped on drop.
         let mark = char::from_u32(0x0301).unwrap();
-        let raw = format!("a{}", mark.to_string().repeat(MAX_PASSPHRASE_BYTES));
-        assert!(raw.len() <= MAX_PASSPHRASE_INPUT_BYTES);
+        let raw = format!(
+            "a{}b",
+            mark.to_string().repeat((MAX_PASSPHRASE_INPUT_BYTES - 2) / mark.len_utf8())
+        );
+        assert_eq!(raw.len(), MAX_PASSPHRASE_INPUT_BYTES);
         assert_eq!(
             PassphraseInput::new(&raw).unwrap_err(),
             PassphraseError::TooLong { len: 1_026 }
