@@ -544,7 +544,7 @@ mod tests {
     fn random_documents_tile_and_locate_consistently() {
         use crate::test_support::XorShift;
 
-        for seed in [1u64, 5, 99, 0x00F0_0D] {
+        for seed in [1u64, 5, 99, 0x0000_F00D] {
             let mut rng = XorShift::new(seed);
             let count = 1 + rng.below(6) as usize;
             let mut slabs: Vec<Slab> = Vec::with_capacity(count);
