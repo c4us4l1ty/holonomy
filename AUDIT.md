@@ -49,9 +49,81 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
-| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. The index half now does: `HeightModel` (`heights.rs`) finds a leaf range for a viewport in O(log n) counted reads. What remains is the Spine wiring that turns a leaf range into text — and that wiring must decide OQ-10 first, because a pending leaf has text but no spine entry to hold its height. | **open — index landed 2026-11-17, caller not written** |
+| OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate ("layout cost on a 30 M-word doc is invariant in document length") is a claim about the caller. The chain now exists: `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, and `holonomy_eye::byte_window` joins them, contiguously — an unmeasured leaf inside the window has its bytes included, so the shaped text never has a hole. What is missing is the editor loop that calls all three and the measurement that would prove the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed 2026-11-17, no caller or measurement yet** |
+| OQ-13 | **How quiet-md enters the tree.** Block 1 forbids `[patch.crates-io]` onto forks in the core tree; quiet-md ships a patched GPUI (`vendor/PATCHES.md`). Adopting it as a dependency, a vendored subtree, or a fork of a fork are three different trees with three different failure modes, and only one of them is legal under Block 1 without an explicit exception. Decide before Block 6 opens; the choice also fixes how holonomy takes upstream GPUI fixes, and therefore how much of its own vendor surface it must maintain. | **open — decision needed before Block 6** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, fifth slice: the viewport chain closes.** Three pieces that had been built
+  for each other but never introduced: the height index answers *which leaves*, the spine answers
+  *where those leaves live*, and nothing joined them.
+
+  **`Spine::slab_span(index)`** is an order statistic: descend the cached slab counts, O(log N),
+  no scan. Without it the Eye would have to read `spans_in` and count leaves to answer "which leaf is
+  the twelfth", and the cost of finding the viewport would grow with the document — the thing Block
+  5's second gate forbids.
+
+  **`byte_window`** is the join, and its interesting decision is that the byte range is *contiguous*
+  from the first covered leaf's start to the last covered leaf's end. Building it leaf by leaf would
+  be the obvious implementation and would leave holes: an unmeasured leaf has zero height, so a
+  viewport can skip over it, and shaping the covered leaves individually would silently drop the text
+  in between. The range therefore includes it, and the docs say why. An unmeasured *prefix* or
+  suffix is still excluded — that remains the provisional-scroll limitation recorded with the model.
+
+  **The dependency, stated.** `holonomy-eye` now depends on `holonomy-text` (workspace path, no
+  registry cost) for exactly this join. Geometry still enters through `Shaper` alone: the Eye reads
+  byte offsets and leaf geometry, never text, and the Spine still holds no plaintext.
+
+  **Still open.** OQ-12's caller — the editor loop — and its 30 M-word measurement arrive with Block
+  6. OQ-10's pending leaf has no leaf index and no `slab_span`, so it is in no window this function
+  produces; that decision is unchanged and still gates the editor.
+
+- **2026-11-17 — The UI basis is quiet-md, recorded rather than assumed.** The user named
+  [`s1dashu/quiet-md`](https://github.com/s1dashu/quiet-md) — a Rust + GPUI notes app, MIT, an app in
+  `src/`, a library in `crates/core`, and a **patched GPUI under `vendor/`** — as the codebase the
+  editor's shell is built on, with a Google-Docs-shaped toolbar above the page. Two parts of that
+  were already the plan; one was not, and the difference is the point of this entry.
+
+  **Already specified.** The toolbar is Block 7's entire subject ("the Google-Docs toolbar inside the
+  calm", `ROADMAP.md`), with `docs/UI-SPEC.md` §3 specifying its behaviour — focus returns after a
+  click, read-only actions grey out, the security dot at the right end. Block 6 already says the
+  shell is a GPUI window with a quiet-md-*grade* page. What did **not** exist anywhere in this repo
+  was quiet-md as a dependency: it appeared only as that adjective, an aesthetic benchmark, with no
+  licence, version or commit recorded.
+
+  **What the decision adds.** quiet-md is the basis of the UI rather than a reference to it, so Block
+  6 starts from a codebase that already solves GPUI text drawing, IME and the page feel. Its licence
+  is MIT, compatible with this workspace's `MIT OR Apache-2.0`.
+
+  **The law it collides with, stated before anything depends on it.** Block 1 forbids
+  `[patch.crates-io]` onto forks in the core tree, and quiet-md's tree carries a *patched* GPUI with
+  a numbered patch list (`vendor/PATCHES.md`, #43 as of 0.1.13). Both cannot stand unchanged. The
+  three shapes that can: depend on quiet-md's published crate and leave GPUI alone; vendor quiet-md
+  under an audited patch list of our own; or upstream the patches we need and keep the core tree on
+  upstream GPUI. Each has a different failure mode, none should be chosen by accident, so it is
+  **OQ-13** and it must be settled before Block 6 opens rather than during it.
+
+  **What this does not change.** The Spine stays authoritative for text, styles and history:
+  quiet-md is the shell and the editing surface, not the document engine. The Eye is headless, so
+  L-8 and the single-geometry law are untouched by which framework draws the result.
+
+- **2026-11-17 — D-4 — the height index lives beside the tree, not inside it.** `tree.rs` ends with a
+  standing invitation: "Weights are byte lengths today; the Eye's layout heights will ride the same
+  aggregate once Block 5 defines them." Block 5 has now defined them — `Fixed` 64ths, per style, per
+  leaf — and they still do not ride that aggregate. This entry is the argument, because the
+  alternative is a comment left standing that the code silently contradicts.
+
+  **Why not the tree.** A leaf's height is *measured*, lazily, at the current wrap width. A window
+  resize invalidates every measured height at once, and an immutable path-copied tree can only
+  express that by rewriting all of its nodes: O(n) nodes for an event as common as dragging a window
+  edge. The Fenwick model is invalidated in O(1) and re-measures only what the viewport looks at.
+
+  **Why this is not the K-8 disease.** The danger `tree.rs` guards against is duplicate *geometry* —
+  two arithmetics that must agree and therefore can disagree. `HeightModel` stores the Eye's own
+  measurements, produced by the one geometry, and nothing computes a height twice: it holds numbers,
+  it does not hold a second opinion about where text goes. The tree keeps its byte, slab and height
+  aggregates, and `Spine::slab_span` is the join between the two indexes — leaf position to byte
+  range in one descent — so neither side ever walks the other's structure.
 
 - **2026-11-17 — Block 5, bug hunt before merge: a break that stopped being a break.** Three real
   defects in the segmentation and transform, found by reading the code adversarially rather than by

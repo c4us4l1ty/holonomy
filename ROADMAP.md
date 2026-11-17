@@ -266,8 +266,11 @@ already obeys every constitutional law: viewport plaintext, one file, password-o
 world-line history internal (no history UI yet), smooth at any size.
 
 **Deliverables**
-- GPUI shell: quiet-md-grade page (generous margins, paper feel, zero chrome competing with
-  words). Unlock screen: drop a `.wavefunction`, passphrase, open.
+- GPUI shell built on **quiet-md** ([s1dashu/quiet-md](https://github.com/s1dashu/quiet-md), MIT):
+  quiet-md-grade page (generous margins, paper feel, zero chrome competing with words), with the
+  Google-Docs-shaped toolbar of Block 7 above it and `docs/UI-SPEC.md` §3 governing it. Unlock
+  screen: drop a `.wavefunction`, passphrase, open. How quiet-md enters the tree — dependency,
+  vendored subtree, or audited patch list — is OQ-13 and must be settled before this block opens.
 - Full editing surface on the Eye's geometry: selection, IME-safe input path, copy (with
   clipboard policy: contents flagged confidential, cleared on blur), paste sized to slabs.
 - Autosave by log-append with the Block 3 atomic commit; explicit `Cmd/Ctrl-S`.
@@ -289,7 +292,8 @@ world-line history internal (no history UI yet), smooth at any size.
 *Purpose: the Google-Docs toolbar inside the calm — the familiar controls, re-founded.*
 
 v3 died bolting a Wordcraft-shaped ribbon onto split geometry. v6 puts the toolbar on Block
-5's single geometry and the Block 1 UI spec — same visual language, none of the split-brain.
+5's single geometry and the Block 1 UI spec — same visual language, none of the split-brain. It
+sits above the quiet-md page Block 6 installs, in the same window, in the same run tree.
 
 **Deliverables**
 - Toolbar per spec: font family/size, bold/italic/underline/strike, headings 1–3, alignment,
