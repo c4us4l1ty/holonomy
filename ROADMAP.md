@@ -172,7 +172,7 @@ the **measured allocation-free keystroke path** — plus the Fenwick-over-height
 kept in `holonomy-geometry`. The H1 mistakes being deleted: layout-as-lines (page breaks
 were faked with newline padding) and any structure that walks the document on a keystroke.
 
-**Deliverables** — *first slice landed 2026-11-17, see `AUDIT.md`; the keystroke path is not built*
+**Deliverables** — *two slices landed 2026-11-17, see `AUDIT.md`; there is still no editor above them*
 - `holonomy-text`: an **immutable, path-copied slab tree** over segment IDs, AVL-balanced so
   appends cannot degenerate into a list. An edit path-copies O(log N) nodes; the old spine
   survives as history. Undo between any two points in the world-line is a pointer swap.
@@ -186,11 +186,18 @@ were faked with newline padding) and any structure that walks the document on a 
   prefix sums; a second structure that must be rebuilt on every path copy is the K-8
   two-geometry disease in index form (AUDIT 2026-11-17, decision D-1).
 - Counting-allocator gate on the keystroke path: a typed character must make **zero**
-  allocations outside slab boundaries — measured, per H1's gate pattern. *Not started: there is
-  no mutable resident text buffer yet, and asserting this before building it would be exactly the
-  unmeasured claim VISION §5 refuses.*
+  allocations outside slab boundaries — measured, per H1's gate pattern.
+  **Landed and measured:** `SlabText` edits in place and *refuses* to grow, and
+  `crates/holonomy-text/tests/keystroke_allocations.rs` installs the counting allocator as its
+  global allocator and claims zero allocations for a typed character, a backspace, filling the
+  slack, and the refusal — with a control asserting a fault-in on a miss **does** allocate, so a
+  broken counter cannot pass as a quiet path. Scope, stated exactly: the measured window is
+  `locate` → resident hit → in-place edit. Fault-in, split, seal and the commit boundary allocate
+  by design and are outside it (AUDIT decision D-2). *The commit boundary itself is not built.*
 
-**GATES** — none passed; the slice above is structure, not measurement
+**GATES** — none passed; the three measurements below are untouched
+*(the keystroke *deliverable* is measured; these gates are document-scale, latency and fuzz
+measurements on reference hardware and share nothing with it)*
 - [ ] Open a synthetic 30 M-word document: memory at open is within a fixed bound that
       identical input of 1 page also satisfies.
 - [ ] Keystroke at offset 0 and at offset `N-1`: statistically identical latency curves.

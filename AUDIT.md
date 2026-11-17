@@ -48,6 +48,61 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-17 — Block 4, second slice: the keystroke path is measured, not asserted.** CI run
+  [44045023810](https://github.com/c4us4l1ty/holonomy/actions/runs/44045023810) is green, and the
+  workspace test job now executes a binary whose global allocator **counts**.
+
+  **The claim.** `locate` (a descent over cached aggregates) → resident hit → in-place insert of one
+  typed character performs **zero** allocations. Also zero: a backspace, filling the slab's spare
+  capacity, and the refusal that follows when it is full. The count is taken by
+  `holonomy_ledger::alloc::claim_quiet`, which panics with the measured delta rather than logging
+  it. A control in the same binary asserts that faulting a segment in on a *miss* **does** allocate:
+  if that control ever stops counting, the binary is not measuring anything and every zero above is
+  worthless — the exact failure Block 1 recorded when its first unit-test version measured the
+  default allocator.
+
+  **Design decisions this slice forced, both recorded as decisions rather than preferences:**
+
+  - **D-2 — edits are in place per keystroke; the spine is path-copied at commit.** With an
+    immutable path-copied tree, updating a leaf's length per character would allocate O(log N)
+    nodes per keystroke and make the L-2 gate unreachable by construction. So the resident slab is
+    authoritative while it is being edited, and the spine is path-copied when the slab is re-sealed
+    or the viewport moves — counted, occasional work rather than per-character work. The consequence
+    is explicit: the editor must carry a live-length overlay until commit, and that overlay is not
+    built. Nothing here claims a keystroke updates the spine.
+  - **Recency is a counter, not a deque.** A `VecDeque` hit moves the entry to the back, and
+    `push_back` may reallocate — an allocator call inside the very path being measured. The resident
+    set now scans for the smallest `last_used` on a *miss* instead, which cannot allocate and costs
+    O(resident), and the resident set is viewport-sized.
+
+  **The budget got more honest.** `ResidentSet` now accounts its bound against **allocated
+  capacity**, not text length: the slack reserved for typing is memory, and a bound that ignored it
+  would be a bound in name only. `allocate`-side accounting is what a memory adversary actually
+  measures. Plaintext length is still reported separately.
+
+  **Growth is refused, never done quietly.** `SlabText::insert` returns
+  `EditOutcome::WouldSplit { needed, capacity }` and leaves the buffer untouched when the edit does
+  not fit. A buffer that grew instead would hide an allocation inside the keystroke path and break
+  the law silently; refusing turns the event into a structural one, where allocation is expected
+  and counted.
+
+  **UTF-8 is checked where the cost is, not everywhere.** Whole-buffer validation on each keystroke
+  would cost O(slab) per character — precisely the "cost proportional to what changed" failure the
+  architecture exists to prevent. The buffer is validated once at fault-in; each edit validates its
+  own inserted bytes and its own boundary bytes. Grapheme clusters remain the Eye's business, not
+  this type's.
+
+  **CI trail.** Run 44044481285 caught rustfmt drift plus one real test-arithmetic error: an
+  insertion at offset 9 into a buffer that had become 8 bytes long — caught by the test asserting
+  the outcome of an earlier insert, not by review. 44045023810 is green, including the new counting
+  binary. Clippy was clean on the first pass this time.
+
+  **What this does not claim.** L-2 as a law stays `spec`: the keystroke half is measured, but the
+  document-scale half — the same resident bound at one page and at thirty million words on reference
+  hardware — has not been measured, and the commit boundary, the editor, and the Eye do not exist.
+  The counting binary measures one test function in its own process; the module docs explain why
+  sibling tests would race the counters. Nothing here promotes a law in `docs/GATES.md`.
+
 - **2026-11-17 — Block 4, first slice: the Spine and the resident set.** `holonomy-text` now
   holds the structural half of RFC-003 and nothing of its measured half. CI run
   [44042785220](https://github.com/c4us4l1ty/holonomy/actions/runs/44042785220) is green: rustfmt,
