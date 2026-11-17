@@ -43,6 +43,11 @@ use blake2::digest::consts::U32;
 #[cfg(test)]
 use blake2::Blake2b512;
 use blake2::{Blake2b, Digest};
+// Direct feature-unification edges keep the pinned transitive MAC and ML-KEM sponge state
+// wipe-on-drop features enabled; their upstream parent crates do not request all of them.
+use poly1305 as _;
+use sha3 as _;
+use shake as _;
 
 type Blake2b256 = Blake2b<U32>;
 use commit::{open_committed, seal_committed, CommittedCiphertext};
@@ -60,7 +65,9 @@ pub use envelope::{Capsule, EnvelopeError, HybridCiphertext};
 pub use error::SealError;
 pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
 pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
-pub use passphrase::{PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES};
+pub use passphrase::{
+    PassphraseError, PassphraseInput, MAX_PASSPHRASE_BYTES, MAX_PASSPHRASE_INPUT_BYTES,
+};
 
 /// The boundary law, carried in code so it is compiled, not just quoted.
 pub const BOUNDARY_LAW: &str =
@@ -227,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_heap_allocations_are_counted_and_zeroized_before_free() {
+    fn registered_secret_heap_buffers_are_zeroized_before_free() {
         let before = allocation_audit::snapshot();
         {
             let passphrase =

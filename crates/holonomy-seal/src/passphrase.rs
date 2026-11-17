@@ -6,9 +6,11 @@
 //!   surprising users). RFC-001 rejects that: v6 accepts the user's exact text, normalized to
 //!   NFC so the *same logical string* types identically across macOS/Windows/Linux input
 //!   methods — and nothing else is touched.
-//! * **Bounds exist:** an empty passphrase is an accident, not a choice; an absurdly long one
-//!   is a paste mishap. Both are refused. Everything else — memorable or brutal — is the
-//!   user's security decision, and the UI spec's strength meter warns rather than blocks.
+//! * **Bounds exist:** empty input, raw input beyond [`MAX_PASSPHRASE_INPUT_BYTES`], and NFC
+//!   output beyond [`MAX_PASSPHRASE_BYTES`] are refused. The raw cap bounds (but does not wipe)
+//!   dependency-owned normalization scratch; the output is built in a fixed wipe-on-drop string.
+//!   Within those bounds, passphrase strength remains the user's decision; the UI warns rather
+//!   than blocks.
 
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -16,11 +18,19 @@ use zeroize::Zeroizing;
 /// Longest accepted NFC-normalized passphrase in UTF-8 bytes.
 pub const MAX_PASSPHRASE_BYTES: usize = 1_024;
 
+/// Hard UTF-8 input bound applied before normalization to bound dependency-owned scratch.
+pub const MAX_PASSPHRASE_INPUT_BYTES: usize = 4_096;
+
 /// Why a passphrase was refused at intake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassphraseError {
     /// Empty after NFC normalization (including whitespace-free empty strings).
     Empty,
+    /// Raw UTF-8 input exceeds [`MAX_PASSPHRASE_INPUT_BYTES`] before normalization.
+    InputTooLong {
+        /// Raw input length in UTF-8 bytes.
+        len: usize,
+    },
     /// Longer than [`MAX_PASSPHRASE_BYTES`] after normalization.
     TooLong {
         /// The normalized UTF-8 length observed when the limit was crossed.
@@ -32,6 +42,10 @@ impl core::fmt::Display for PassphraseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => f.write_str("passphrase is empty"),
+            Self::InputTooLong { len } => write!(
+                f,
+                "raw passphrase exceeds the {MAX_PASSPHRASE_INPUT_BYTES}-byte input limit ({len} bytes)"
+            ),
             Self::TooLong { len } => write!(
                 f,
                 "normalized passphrase exceeds the {MAX_PASSPHRASE_BYTES}-byte limit (at least {len} bytes)"
@@ -42,15 +56,24 @@ impl core::fmt::Display for PassphraseError {
 
 impl std::error::Error for PassphraseError {}
 
-/// A normalized, zeroizing passphrase. Bytes are exposed only inside a callback so nothing
-/// holds a second copy after the row of work is done.
+/// A normalized passphrase whose owned output buffer is zeroized on drop. Bytes are exposed
+/// only inside a callback. The borrowed source text and unicode-normalization's internal
+/// iterator buffers are outside this guard; `new` bounds, but does not wipe, the latter.
 pub struct PassphraseInput(Zeroizing<String>);
 
 impl PassphraseInput {
-    /// Accept user text: NFC-normalize, bound-check, wrap zeroizing.
+    /// NFC-normalize and bound-check borrowed user text into a zeroizing output buffer.
+    /// This does not zeroize the caller's source text or dependency-owned normalization scratch.
     pub fn new(raw: &str) -> Result<Self, PassphraseError> {
         if raw.is_empty() {
             return Err(PassphraseError::Empty);
+        }
+
+        // unicode-normalization 0.1.26 buffers pending canonical-combining sequences in
+        // non-zeroizing TinyVecs. Bound the source length before entering it. This limits
+        // scratch growth; it does not wipe the dependency-owned buffers on drop.
+        if raw.len() > MAX_PASSPHRASE_INPUT_BYTES {
+            return Err(PassphraseError::InputTooLong { len: raw.len() });
         }
 
         // Allocate the maximum accepted size once and guard it before writing secret bytes.
@@ -127,6 +150,36 @@ mod tests {
             PassphraseInput::new(&long),
             Err(PassphraseError::TooLong { .. })
         ));
+    }
+
+    #[test]
+    fn raw_input_limit_is_checked_before_normalization() {
+        let raw = "x".repeat(MAX_PASSPHRASE_INPUT_BYTES + 1);
+        assert_eq!(
+            PassphraseInput::new(&raw).unwrap_err(),
+            PassphraseError::InputTooLong {
+                len: MAX_PASSPHRASE_INPUT_BYTES + 1
+            }
+        );
+    }
+
+    #[test]
+    fn maximum_bounded_combining_sequence_is_rejected_at_the_nfc_output_limit() {
+        // Fill the allowed raw input with one non-starter run. unicode-normalization 0.1.26
+        // buffers this sequence in dependency-owned TinyVecs before it can emit normalized
+        // output. This exercises the input bound and output limit; it does not prove that the
+        // iterator's scratch is wiped on drop.
+        let mark = char::from_u32(0x0301).unwrap();
+        let raw = format!(
+            "a{}b",
+            mark.to_string()
+                .repeat((MAX_PASSPHRASE_INPUT_BYTES - 2) / mark.len_utf8())
+        );
+        assert_eq!(raw.len(), MAX_PASSPHRASE_INPUT_BYTES);
+        assert_eq!(
+            PassphraseInput::new(&raw).unwrap_err(),
+            PassphraseError::TooLong { len: 1_026 }
+        );
     }
 
     #[test]

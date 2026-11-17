@@ -48,6 +48,104 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-16 — Block 2 dependency-temporary zeroization audit (gate remains open):**
+  Reviewed the selected secret-bearing source paths at the release revisions below. `Cargo.lock`
+  pins registry archives by version and checksum; the source links identify the corresponding
+  release commits used for this static review. This is not a binary, allocator-wide, register, or
+  physical-memory erasure proof.
+
+  | Review area | Pinned source revisions reviewed |
+  | ----------- | ------------------------------- |
+  | NFC normalization | [`unicode-normalization` 0.1.26 (16c9597)](https://github.com/unicode-rs/unicode-normalization/tree/16c9597b73ec5b6b8ed55f4249a5ac854892544c); [`tinyvec` 1.13.3 (e343bbb)](https://github.com/Lokathor/tinyvec/tree/e343bbbb5a6594c9d57de718e6f232e6c0115dcb) |
+  | KDF/hash | [`argon2` 0.5.3 (2b6f968)](https://github.com/RustCrypto/password-hashes/tree/2b6f9688625db3db798b35c8a209e4799bb60e11/argon2); [`blake2` 0.10.6 (1f727ce)](https://github.com/RustCrypto/hashes/tree/1f727ce37ff40fa0cce84eb8543a45bdd3ca4a4e/blake2); `digest` 0.10.7 ([3443894](https://github.com/RustCrypto/traits/tree/344389411fd9718a0742435152e933a9e71461ee/digest)) |
+  | Hybrid KEM / DH | [`ml-kem` 0.3.4 (c53fd02)](https://github.com/RustCrypto/KEMs/tree/c53fd02ba7dcf5dc2c9287f814d1e401f26bfcce/ml-kem); [`x25519-dalek` 2.0.1 (4ac84dd)](https://github.com/dalek-cryptography/curve25519-dalek/tree/4ac84dd0668b1d2e51654fcdffe4e6a687bef00/x25519-dalek); `curve25519-dalek` 4.1.3 ([5312a03](https://github.com/dalek-cryptography/curve25519-dalek/tree/5312a0311ec40df95be953eacfa8a11b9a34bc54/curve25519-dalek)) |
+  | AEAD / MAC | [`chacha20poly1305` 0.10.1 (c5c1999)](https://github.com/RustCrypto/AEADs/tree/c5c199953aba561261bed1c55f62b9c19d0f49cf/chacha20poly1305); [`chacha20` 0.9.1 (9c40806)](https://github.com/RustCrypto/stream-ciphers/tree/9c4080658507df4994508c1ef788f7eb89fe628c/chacha20); `poly1305` 0.8.0 ([35de31a](https://github.com/RustCrypto/universal-hashes/tree/35de31af7396fe57fa28265e91532c816183c47f/poly1305)) |
+  | Sponge state / wipe support | [`sha3` 0.12.0 (0bdea4f)](https://github.com/RustCrypto/hashes/tree/0bdea4f919f86c17f75c6177567520010fedb735/sha3); [`shake` 0.1.0 (8f3e56d)](https://github.com/RustCrypto/XOFs/tree/8f3e56dc4e197b8adbc3d5a9ed109e326d6b159c/shake); [`sponge-cursor` 0.1.0 (9c8674f)](https://github.com/RustCrypto/utils/tree/9c8674f4fdf00fb524cd06d89da29d125db07582/sponge-cursor); `digest` 0.11.3 ([2fb9ed8](https://github.com/RustCrypto/traits/tree/2fb9ed8922e244117040bb037a7d141a6a2b8228/digest)), `block-buffer` 0.12.1 ([cbd0963](https://github.com/RustCrypto/utils/tree/cbd0963c685df025c42bed31f78c50d1bada3805/block-buffer)), and `zeroize` 1.9.1 ([34a6ebc](https://github.com/RustCrypto/utils/tree/34a6ebcb9b920ec7ae5809e470fce94fe7c0cb55/zeroize)) |
+
+  The ML-KEM source checkout was at peeled commit `c53fd02ba7dcf5dc2c9287f814d1e401f26bfcce`;
+  its annotated release tag `ml-kem/v0.3.4` has tag-object ID
+  `6855b16a6cca9fc1c3eaea76776a7cd50ad67846`. This resolves the earlier tag-object/commit
+  ambiguity.
+
+  Findings and scoped mitigations:
+
+  - **Passphrase normalization:** `unicode-normalization`'s NFC iterator stores pending canonical
+    decomposition/recomposition sequences in `TinyVec` buffers with inline capacity four
+    (`src/decompose.rs`, `src/recompose.rs`). Long combining runs spill to heap. The reviewed
+    `tinyvec` source has no `Zeroize` or wipe-on-drop integration; normal drop releases its owned
+    buffer but does not erase its bytes, and a moving growth allocation cannot recover/wipe old
+    storage. `PassphraseInput::new` checks raw UTF-8 length before invoking NFC, so the 4,096-byte
+    cap bounds the input driving that scratch. The normalized output is separately written to a
+    fixed-capacity `Zeroizing<String>` and is not grown. A regression now fills the full 4,096-byte
+    input allowance with one long U+0301 combining run and verifies rejection at 1,026 normalized
+    bytes. This test exercises the cap/guard path; it does not observe or prove wiping of TinyVec
+    scratch. The input is borrowed as `&str`, so the caller's original text is not wiped by this
+    API. The raw-input cap also rejects inputs over 4,096 bytes even before their normalized
+    length is known.
+
+  - **Argon2 and BLAKE2:** the `argon2` `zeroize` feature gives `Block` an explicit `Zeroize`
+    implementation, but not automatic drop wiping. Holonomy's caller-owned `Arena` iterates over
+    all blocks and wipes them before freeing the slab; the byte-equality test and registered
+    allocation test cover that project-owned arena. In the reviewed Argon2 source, the 1 KiB
+    password-derived `hash` array is loaded into a block but not then wiped; `Block::compress`
+    creates secret-derived `Copy` temporaries (`r` and `q`) without visible wipes; and
+    `blake2b_long`/BLAKE2 hasher state and intermediate digest material have no reviewed wipe
+    hooks. Argon2 explicitly wipes `initial_hash` after seed-block generation and its final block
+    plus byte copy after successful final hashing, but error returns can precede those wipes. The
+    direct `blake2` 0.10.6 pin has no `zeroize` feature. Holonomy also wipes BLAKE2 digest output
+    arrays in `derive_subkey` and CMT-4, but those output wipes do not erase the dependency's
+    internal hasher state (CMT-4's input includes the key).
+
+  - **ML-KEM:** with the enabled `zeroize` feature, `DecapsulationKey::drop` wipes stored `dk_pke`,
+    seed `d` when present, and `z`; the PKE decryption key exposes `Zeroize` for its stored
+    `s_hat`. That covers the retained key object, not its working copies. Reviewed key-generation
+    and PKE locals (`sigma`, `s`, `e`, `s_hat`/`e_hat` and arithmetic results), decrypt locals
+    (`sTu`, `w`, and message output), and the decapsulation `mp`, `Kp`/`rp`, `Kbar`, and reencryption
+    `cp` have no visible zeroize-on-drop path. The feature-graph check cannot establish cleanup of
+    these locals.
+
+  - **X25519 and XChaCha20-Poly1305:** the active `x25519-dalek` `zeroize` edge enables drop wipes
+    for `StaticSecret` and `SharedSecret`. `SharedSecret::to_bytes()` makes an ordinary array copy;
+    Holonomy wraps its copies in `Zeroizing` at the envelope call sites. This is not proof that
+    every curve-operation stack intermediate is erased. The pinned AEAD wipes its stored key on
+    drop, its local Poly1305 key after MAC-state construction, and the ChaCha core state under the
+    feature. A direct `poly1305/zeroize` edge is required because `chacha20poly1305` 0.10.1 does
+    not forward that optional feature; its state now has a feature-gated drop wipe. In the used
+    XChaCha path, `hchacha`'s stack state and the returned local derived-subkey copy have no
+    explicit wipe before return/drop.
+
+  - **SHA-3/SHAKE:** direct `sha3/zeroize` and `shake/zeroize` edges enable feature-gated state
+    and reader-state wiping; the `sponge-cursor` implementation itself zeroizes only its position
+    field. `digest` 0.11.3's `zeroize` feature weakly forwards the feature to `block-buffer` when
+    that optional dependency is present; `block-buffer` 0.12.1's gated Drop implementation wipes
+    its internal buffer and cursor. The CI feature-graph check requires the SHA-3/SHAKE, digest,
+    and sponge-cursor edges, along with Argon2, ChaCha20, curve25519-dalek, ML-KEM, Poly1305, and
+    X25519; it passed after the lockfile correction. Feature activation is useful coverage, not
+    evidence that every implementation or compiler-generated temporary is wiped.
+
+  The first follow-up run, [44031374849](https://github.com/c4us4l1ty/holonomy/actions/runs/44031374849),
+  exposed a stale `Cargo.lock`: the SHA-3/SHAKE feature-unified dependency resolution produced a
+  `block-buffer` 0.12.1 package entry and disambiguated package edges, but the earlier manual lock
+  update had omitted them. The lockfile now records that metadata (commit `8e796f7`). The earlier failed-run logs for
+  [44031050938](https://github.com/c4us4l1ty/holonomy/actions/runs/44031050938) were unavailable;
+  no cause is inferred for that run. CI [44031769120](https://github.com/c4us4l1ty/holonomy/actions/runs/44031769120)
+  passed rustfmt, Clippy, the feature-graph check, workspace tests, the gates contract, and both
+  L-6/L-10 rehearsals. Those two gates remain `spec`; Block 4 has not started. The next run,
+  [44032166408](https://github.com/c4us4l1ty/holonomy/actions/runs/44032166408), exercised the
+  maximum-input combining-sequence regression: its test, Clippy, gates, and both qualification
+  jobs passed, while rustfmt requested a line-wrap correction. Diagnostics confirmed the failure
+  was formatting-only. Commit `a190519` applies that correction and adds an explicit `digest/zeroize`
+  graph assertion; CI [44033037131](https://github.com/c4us4l1ty/holonomy/actions/runs/44033037131)
+  then passed rustfmt, Clippy, the strengthened feature-graph check, workspace tests, the gates
+  contract, and both L-6/L-10 rehearsals. All code and feature-graph checks are green; L-6 and
+  L-10 remain `spec` and Block 4 has not started.
+
+  **Verdict:** the dependency-temporary zeroization gate remains open. Current bounded input and
+  enabled feature edges narrow exposure and improve cleanup for selected retained states, but
+  known stack/heap temporaries remain unwiped or not proven wiped. The registered-allocation test
+  only checks project buffers explicitly registered with it; neither that test nor source review
+  establishes universal secret erasure. See RFC-001's remaining zeroization question.
+
 - **2026-11-16 — Block 2/3 CI repair and qualification evidence review (Block 4 not started):**
   CI run [44017105999](https://github.com/c4us4l1ty/holonomy/actions/runs/44017105999) passed
   rustfmt, clippy (`-D warnings`), workspace tests, the gates contract, and both qualification
