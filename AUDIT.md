@@ -48,6 +48,35 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-16 — follow-up Block 2/3 review (implementation pending CI):** found and corrected
+  five concrete boundary defects: Linux `MADV_DONTDUMP` used the wrong advice value and did not
+  page-align the common small heap-cell range; `LockedSecret` declared its boxed bytes before the
+  lock guard, so field drop order could free the allocation before `munlock`; page-granular
+  `munlock` calls on separate tiny heap boxes could unlock a page still holding another key; the
+  public `HybridKem`/`MlKem1024X25519` test abstraction could return `SharedSecrets` with raw key
+  bytes outside the capability API; and `x25519-dalek` had default features disabled without
+  enabling its optional `zeroize` feature, leaving `StaticSecret`/`SharedSecret` drops unscrubbed.
+  The KEM plumbing is now crate-private, the lock advice is page-aligned and uses libc's Linux
+  constant, each secret cell gets a separate 64 KiB-aligned lock unit with the guard dropping
+  before its allocation is freed, and the X25519 `zeroize` feature is enabled and locked.
+  The threat model/RFC wording was also corrected: `memfd_secret` is probed on supported Linux
+  architectures but not used, and there is no global core-dump disable or `DONTFORK` implementation.
+  Added a test-only registered-allocation
+  wipe audit, AEAD/envelope corruption tests, an ignored rsync transfer harness, and an ext4-loop
+  ENOSPC/recovery rehearsal. Follow-up review also fixed the private `MlKem1024X25519` import,
+  wrapped ML-KEM shared-key/seed copies, and changed AEAD encryption to use wipe-on-drop
+  in-place buffers. A further passphrase review replaced `NFC.collect::<String>()` with a
+  pre-sized, wipe-on-drop buffer and bounded pushes, avoiding growth reallocations before the
+  guard exists; an NFC-expansion regression test covers the size boundary. Rust changes, tests,
+  and manual lockfile feature edges remain uncompiled or unvalidated; workflow YAML parsing and
+  shell syntax checks pass. The allocation test does not by
+  itself audit every dependency-owned temporary; RFC-001's zeroization gate remains open. Local
+  execution is blocked: `cargo`, `rustc`, `rsync`, `mkfs.ext4`, and QEMU
+  are absent; invoking `scripts/qualify-ext4-enospc.sh` exited 127 at line 20 (`mkfs.ext4: command
+  not found`). No filesystem ENOSPC result or rsync measurement exists yet. The ext4 rehearsal cannot
+  emulate physical power loss or controller caches, and the rsync run is limited to its measured
+  version/configuration/workload; keep L-6 and L-10 `spec` until their required evidence is reviewed.
+
 - **2026-11-16** — Block 3 fault-injection and tail-write evidence: routed append data, witness,
   sync, and recovery truncation through private I/O wrappers with `cfg(test)` failpoints only.
   Tests inject a short write after every byte of a two-segment append, fail the data and final

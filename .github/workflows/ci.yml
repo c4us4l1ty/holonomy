@@ -17,43 +17,29 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 permissions:
-  contents: write
-  issues: write
+  contents: read
 
 jobs:
-  # Temporary lockfile bootstrap. The sandbox cannot download Actions artifacts because their
-  # blob host is outside its egress allowlist, so commit the generated lock on the current
-  # Arena branch. This job is removed once the lock is present in the checkout.
-  lockfile-bootstrap:
-    name: lockfile bootstrap
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo generate-lockfile
-      - name: Commit the generated workspace lockfile to this branch
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock
-          if ! git diff --cached --quiet; then
-            git commit -m 'build: add workspace lockfile'
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          fi
-
   # Diagnostics bridge: the sandbox reads api.github.com but cannot reach the Actions log
   # hosts, so any failing step's output is posted to the pinned diagnostics issue.
   diag:
     name: diagnostics bridge
     runs-on: ubuntu-latest
-    if: always() && failure()
-    needs: [fmt, clippy, test, gates]
+    # Never run code from a pull request while a write-capable issue token is available.
+    if: always() && failure() && github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    needs: [fmt, clippy, test, gates, sync, filesystem]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install optional qualification tools
+        run: |
+          if ! command -v rsync >/dev/null 2>&1 || ! command -v mkfs.ext4 >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y rsync e2fsprogs
+          fi
       - name: Reproduce each command and post output to the diag issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -65,9 +51,11 @@ jobs:
             echo '```'
             for cmd in \
               "cargo fmt --all -- --check" \
-              "cargo clippy --workspace --all-targets -- -D warnings" \
-              "cargo test --workspace" \
-              "cargo run -p xtask -- gates --check"; do
+              "cargo clippy --locked --workspace --all-targets -- -D warnings" \
+              "cargo test --locked --workspace" \
+              "cargo run --locked -p xtask -- gates --check" \
+              "cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture" \
+              "scripts/qualify-ext4-enospc.sh"; do
               echo "== $cmd"
               eval "$cmd" 2>&1 | head -c 12000
               echo "(exit ${PIPESTATUS[0]})"
@@ -95,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     name: test (stable)
@@ -104,7 +92,67 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
+
+  sync:
+    name: L-10 rsync transfer measurement
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure rsync is installed
+        run: |
+          if ! command -v rsync >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y rsync
+          fi
+      - name: Measure a 30-million-word append through rsync over TCP
+        run: |
+          set -o pipefail
+          cargo test --locked -p holonomy-line --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/rsync-qualification.log"
+          grep 'HOLONOMY_RSYNC_MEASUREMENT' "$RUNNER_TEMP/rsync-qualification.log" > "$RUNNER_TEMP/rsync-measurement.txt"
+      - name: Record measured rsync transfer in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### L-10 rsync application-layer measurement'; echo '```text'; cat "$RUNNER_TEMP/rsync-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/rsync-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/rsync-comment.md"
+
+  filesystem:
+    name: L-6 ext4 ENOSPC rehearsal (not power-loss qualification)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure ext4 tools are installed
+        run: |
+          if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y e2fsprogs
+          fi
+      - name: Run append and recovery on a 128 MiB ext4 loop filesystem
+        run: |
+          set -o pipefail
+          scripts/qualify-ext4-enospc.sh 2>&1 | tee "$RUNNER_TEMP/ext4-enospc.log"
+          grep -E 'HOLONOMY_EXT4_|HOLONOMY_ENOSPC_MEASUREMENT' "$RUNNER_TEMP/ext4-enospc.log" > "$RUNNER_TEMP/ext4-enospc-measurement.txt"
+      - name: Record ext4 ENOSPC evidence and limitation in the audit issue
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/arena/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { echo '### L-6 ext4 loop-filesystem ENOSPC evidence (not a device power-cut test)'; echo '```text'; cat "$RUNNER_TEMP/ext4-enospc-measurement.txt"; echo '```'; } > "$RUNNER_TEMP/ext4-enospc-comment.md"
+          gh issue comment 51 --body-file "$RUNNER_TEMP/ext4-enospc-comment.md"
 
   gates:
     name: gates contract
@@ -114,6 +162,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The human-readable contract must be byte-fresh from the law table in code.
-      - run: cargo run -p xtask -- gates --check
+      - run: cargo run --locked -p xtask -- gates --check
       # The gate machinery itself is tested: allocator counting, laws, timing.
-      - run: cargo test -p holonomy-ledger --release
+      - run: cargo test --locked -p holonomy-ledger --release

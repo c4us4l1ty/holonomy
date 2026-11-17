@@ -28,10 +28,10 @@
 //!   sits inside an *opaque sealed slot* anyway.
 
 use blake2::{Blake2b512, Digest};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
+use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::capability::{DEMKey, UnwrapKey};
 use crate::commit::{cmt4_tag, cmt4_verify, CMT4_TAG_BYTES, NONCE_BYTES, POLY1305_TAG_BYTES};
@@ -55,7 +55,7 @@ pub const WRAPPED_SK_BYTES: usize = WRAPPED_SK_PLAINTEXT_BYTES + POLY1305_TAG_BY
 /// A hybrid KEM decapsulation key. `Zeroize`d on drop, not `Clone`: a second copy of a private
 /// key is a second thing to leak. `Debug` prints the word "redacted", never bytes.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct HybridDecapsulationKey {
+pub(crate) struct HybridDecapsulationKey {
     ml_kem: [u8; ML_KEM_1024_SEED_BYTES],
     x25519: [u8; X25519_SK_BYTES],
 }
@@ -68,11 +68,11 @@ impl core::fmt::Debug for HybridDecapsulationKey {
 
 /// The public half of a hybrid keypair.
 #[derive(Clone)]
-pub struct HybridEncapsulationKey {
+pub(crate) struct HybridEncapsulationKey {
     /// ML-KEM-1024 encapsulation key.
-    pub ml_kem: Vec<u8>,
+    ml_kem: Vec<u8>,
     /// X25519 public key.
-    pub x25519: [u8; X25519_SK_BYTES],
+    x25519: [u8; X25519_SK_BYTES],
 }
 
 /// A hybrid ciphertext pair.
@@ -86,11 +86,11 @@ pub struct HybridCiphertext {
 
 /// The 64 bytes of shared secret the combiner consumes. Zeroized on drop.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct SharedSecrets {
+pub(crate) struct SharedSecrets {
     /// ML-KEM shared secret.
-    pub pq: [u8; 32],
+    pq: [u8; 32],
     /// X25519 shared secret.
-    pub ecc: [u8; 32],
+    ecc: [u8; 32],
 }
 
 /// Envelope-operation failure. Coarse on purpose: a decryption oracle needs vocabulary, and
@@ -193,68 +193,70 @@ impl Capsule {
 /// [`WRAPPED_SK_PLAINTEXT_BYTES`]; the padding is *inside* the AEAD, so it is authenticated,
 /// and the fixed size means the record's length leaks nothing. Output is the ciphertext body
 /// plus tag: exactly [`WRAPPED_SK_BYTES`].
-pub fn wrap_key(
+pub(crate) fn wrap_key(
     k_unwrap: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     dk: &HybridDecapsulationKey,
 ) -> [u8; WRAPPED_SK_BYTES] {
-    let mut plain = [0u8; WRAPPED_SK_PLAINTEXT_BYTES];
-    plain[..ML_KEM_1024_SEED_BYTES].copy_from_slice(&dk.ml_kem);
-    plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES]
+    let mut payload = Zeroizing::new([0u8; WRAPPED_SK_PLAINTEXT_BYTES]);
+    payload[..ML_KEM_1024_SEED_BYTES].copy_from_slice(&dk.ml_kem);
+    payload[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES]
         .copy_from_slice(&dk.x25519);
 
     let cipher = XChaCha20Poly1305::new_from_slice(k_unwrap).expect("32-byte key");
-    let sealed = cipher
-        .encrypt(
+    let tag = cipher
+        .encrypt_in_place_detached(
             XNonce::from_slice(nonce),
-            Payload {
-                msg: &plain,
-                aad: b"HOLONOMY_V6_SK_WRAP",
-            },
+            b"HOLONOMY_V6_SK_WRAP",
+            &mut payload[..],
         )
         .expect("bounded buffer");
-    plain.zeroize();
 
     let mut out = [0u8; WRAPPED_SK_BYTES];
-    out.copy_from_slice(&sealed);
+    out[..WRAPPED_SK_PLAINTEXT_BYTES].copy_from_slice(&payload[..]);
+    out[WRAPPED_SK_PLAINTEXT_BYTES..].copy_from_slice(tag.as_slice());
     out
 }
 
 /// Unwrap the hybrid decapsulation key. Failures are deliberately undifferentiated.
-pub fn unwrap_key_bytes(
+pub(crate) fn unwrap_key_bytes(
     k_unwrap: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     wrapped: &[u8; WRAPPED_SK_BYTES],
 ) -> Result<HybridDecapsulationKey, EnvelopeError> {
     let cipher =
         XChaCha20Poly1305::new_from_slice(k_unwrap).map_err(|_| EnvelopeError::UnwrapFailed)?;
-    let mut plain = cipher
-        .decrypt(
+    let tag_offset = WRAPPED_SK_PLAINTEXT_BYTES;
+    let mut plain = Zeroizing::new(wrapped[..tag_offset].to_vec());
+    #[cfg(test)]
+    crate::allocation_audit::watch(plain.as_ptr(), plain.len());
+    let tag = Tag::from_slice(&wrapped[tag_offset..]);
+    cipher
+        .decrypt_in_place_detached(
             XNonce::from_slice(nonce),
-            Payload {
-                msg: wrapped,
-                aad: b"HOLONOMY_V6_SK_WRAP",
-            },
+            b"HOLONOMY_V6_SK_WRAP",
+            &mut plain[..],
+            tag,
         )
         .map_err(|_| EnvelopeError::UnwrapFailed)?;
     if plain.len() != WRAPPED_SK_PLAINTEXT_BYTES {
-        plain.zeroize();
         return Err(EnvelopeError::BadLength);
     }
-    let mut dk = [0u8; ML_KEM_1024_SEED_BYTES];
-    let mut x = [0u8; X25519_SK_BYTES];
-    dk.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
-    x.copy_from_slice(&plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES]);
-    plain.zeroize();
+    let mut ml_seed = Zeroizing::new([0u8; ML_KEM_1024_SEED_BYTES]);
+    let mut x25519 = Zeroizing::new([0u8; X25519_SK_BYTES]);
+    ml_seed.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
+    x25519.copy_from_slice(
+        &plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES],
+    );
     Ok(HybridDecapsulationKey {
-        ml_kem: dk,
-        x25519: x,
+        ml_kem: *ml_seed,
+        x25519: *x25519,
     })
 }
 
 /// Phase-1 commitment: binds nonce, both ciphertexts, and the wrapped key, checked before any
 /// of their contents are used — the wrong-passphrase "no" is cheap, constant, and uniform.
-pub fn phase1_commitment(
+pub(crate) fn phase1_commitment(
     k_unwrap: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     ct: &HybridCiphertext,
@@ -273,7 +275,7 @@ pub fn phase1_commitment(
 /// key; binding `K_unwrap` means a capsule is only valid under one passphrase; binding the USB
 /// slot's *presence flag and bytes* (never XORed, hashed — v5's unlock-destruction lesson)
 /// means an armed stick participates in exactly one, deterministic, non-circular place.
-pub fn derive_dem_key(
+pub(crate) fn derive_dem_key(
     ss: &SharedSecrets,
     ct: &HybridCiphertext,
     k_unwrap: &[u8; 32],
@@ -282,23 +284,28 @@ pub fn derive_dem_key(
     let mut h = Blake2b512::new();
     h.update(b"HOLONOMY_V6_DEM");
     h.update([0u8]);
-    h.update(ss.pq);
-    h.update(ss.ecc);
+    h.update(&ss.pq);
+    h.update(&ss.ecc);
     h.update(ct.ml_kem);
     h.update(ct.x25519);
     h.update(k_unwrap);
     h.update([u8::from(usb.is_some())]);
-    h.update(usb.copied().unwrap_or([0u8; 32]));
-    let digest = h.finalize();
-    let mut k_dem = [0u8; 32];
+    if let Some(usb_bytes) = usb {
+        h.update(usb_bytes);
+    } else {
+        h.update([0u8; 32]);
+    }
+    let mut digest = h.finalize();
+    let mut k_dem = Zeroizing::new([0u8; 32]);
     k_dem.copy_from_slice(&digest[..32]);
-    DEMKey::from_bytes(k_dem)
+    digest.as_mut_slice().zeroize();
+    DEMKey::from_bytes(*k_dem)
 }
 
 /// The KEM operations the envelope needs, behind a trait so the state machine can be tested
 /// exhaustively without lattice arithmetic, while `tests/` exercise the real one — v5.1.0's
 /// audit pattern, inherited deliberately.
-pub trait HybridKem {
+pub(crate) trait HybridKem {
     /// Generate a fresh keypair from the OS CSPRNG. Not deterministic — a save that could
     /// reproduce its own ephemeral keys would be a bug.
     fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey);
@@ -319,7 +326,7 @@ pub trait HybridKem {
 ///
 /// The combiner is concatenation-then-hash with everything bound (see [`derive_dem_key`]),
 /// not a general-purpose construction: do not reuse it outside this boundary.
-pub struct MlKem1024X25519;
+pub(crate) struct MlKem1024X25519;
 
 impl HybridKem for MlKem1024X25519 {
     fn keygen(&self) -> (HybridDecapsulationKey, HybridEncapsulationKey) {
@@ -335,22 +342,29 @@ impl HybridKem for MlKem1024X25519 {
         .expect("OS CSPRNG unavailable");
         let ek = dk.encapsulation_key().clone();
 
-        let mut x_bytes = [0u8; 32];
-        crate::rng::fill(&mut x_bytes).expect("OS CSPRNG unavailable");
-        let x_sk = StaticSecret::from(x_bytes);
+        let mut x_bytes = Zeroizing::new([0u8; X25519_SK_BYTES]);
+        crate::rng::fill(&mut x_bytes[..]).expect("OS CSPRNG unavailable");
+        let x_sk = StaticSecret::from(*x_bytes);
         let x_pk = PublicKey::from(&x_sk);
+        drop(x_sk);
 
         // The stored decapsulation key is the FIPS 203 64-byte *seed*, the canonical form that
         // round-trips on any conformant implementation — not the expanded 3,168-byte form.
-        let seed = dk.to_bytes();
-        let mut ml_seed = [0u8; ML_KEM_1024_SEED_BYTES];
-        ml_seed.copy_from_slice(&seed);
+        let seed = Zeroizing::new(dk.to_bytes());
+        drop(dk);
+        let mut ml_seed = Zeroizing::new([0u8; ML_KEM_1024_SEED_BYTES]);
+        ml_seed.copy_from_slice(&seed[..]);
+
+        let decapsulation_key = HybridDecapsulationKey {
+            ml_kem: *ml_seed,
+            x25519: *x_bytes,
+        };
+        drop(seed);
+        drop(ml_seed);
+        drop(x_bytes);
 
         (
-            HybridDecapsulationKey {
-                ml_kem: ml_seed,
-                x25519: x_bytes,
-            },
+            decapsulation_key,
             HybridEncapsulationKey {
                 ml_kem: ek.to_bytes().to_vec(),
                 x25519: x_pk.to_bytes(),
@@ -374,26 +388,34 @@ impl HybridKem for MlKem1024X25519 {
             .map_err(|_| EnvelopeError::KemRejected)?;
 
         let (ct, ss) = ek.encapsulate_with_rng(&mut rand_core::UnwrapErr(crate::rng::OsRng));
-        let mut pq = [0u8; 32];
-        pq.copy_from_slice(&ss);
+        let ss = Zeroizing::new(ss);
+        let mut pq = Zeroizing::new([0u8; 32]);
+        pq.copy_from_slice(ss.as_slice());
+        drop(ss);
 
         // Ephemeral ECDH: a fresh scalar per encapsulation, discarded immediately.
-        let mut eph_bytes = [0u8; 32];
-        crate::rng::fill(&mut eph_bytes).expect("OS CSPRNG unavailable");
-        let eph = StaticSecret::from(eph_bytes);
+        let mut eph_bytes = Zeroizing::new([0u8; 32]);
+        crate::rng::fill(&mut eph_bytes[..]).expect("OS CSPRNG unavailable");
+        let eph = StaticSecret::from(*eph_bytes);
         let eph_pk = PublicKey::from(&eph);
         let peer = PublicKey::from(pk.x25519);
-        let ecc = eph.diffie_hellman(&peer).to_bytes();
-        eph_bytes.zeroize();
+        let shared = eph.diffie_hellman(&peer);
+        let ecc = Zeroizing::new(shared.to_bytes());
+        drop(shared);
+        drop(eph);
 
         let mut ct_ml = [0u8; ML_KEM_1024_CT_BYTES];
         ct_ml.copy_from_slice(&ct);
+        let shared_secrets = SharedSecrets {
+            pq: *pq,
+            ecc: *ecc,
+        };
         Ok((
             HybridCiphertext {
                 ml_kem: ct_ml,
                 x25519: eph_pk.to_bytes(),
             },
-            SharedSecrets { pq, ecc },
+            shared_secrets,
         ))
     }
 
@@ -412,15 +434,23 @@ impl HybridKem for MlKem1024X25519 {
             .expect("64-byte seed is the decapsulation key's KeySize");
         let ml_ct = ml_kem::Ciphertext::<MlKem1024>::try_from(ct.ml_kem.as_slice())
             .map_err(|_| EnvelopeError::KemRejected)?;
-        let ss = dk.decapsulate(&ml_ct);
-        let mut pq = [0u8; 32];
-        pq.copy_from_slice(&ss);
+        let ss = Zeroizing::new(dk.decapsulate(&ml_ct));
+        let mut pq = Zeroizing::new([0u8; 32]);
+        pq.copy_from_slice(ss.as_slice());
+        drop(ss);
+        drop(dk);
 
         let x_sk = StaticSecret::from(sk.x25519);
         let peer = PublicKey::from(ct.x25519);
-        let ecc = x_sk.diffie_hellman(&peer).to_bytes();
+        let shared = x_sk.diffie_hellman(&peer);
+        let ecc = Zeroizing::new(shared.to_bytes());
+        drop(shared);
+        drop(x_sk);
 
-        Ok(SharedSecrets { pq, ecc })
+        Ok(SharedSecrets {
+            pq: *pq,
+            ecc: *ecc,
+        })
     }
 }
 
@@ -430,7 +460,7 @@ impl HybridKem for MlKem1024X25519 {
 /// leaves the boundary is public ciphertext plus the derived [`DEMKey`] capability. This is
 /// precisely what lets a later save re-capsulate without ever holding the private key: it has
 /// `K_unwrap` and generates a fresh pair (v5's design, v6 keeps the shape).
-pub fn create_capsule(
+pub(crate) fn create_capsule(
     kem: &dyn HybridKem,
     unwrap: &UnwrapKey,
     usb: Option<&[u8; 32]>,
@@ -457,7 +487,7 @@ pub fn create_capsule(
 /// Phase order is load-bearing: commitment → unwrap → decapsulate → derive. Every failure is
 /// the same coarse "no" through [`EnvelopeError`]; the phase-1 check happens before any byte
 /// of the capsule influences anything.
-pub fn open_capsule(
+pub(crate) fn open_capsule(
     kem: &dyn HybridKem,
     unwrap: &UnwrapKey,
     capsule: &Capsule,
@@ -488,6 +518,7 @@ pub fn open_capsule(
 impl HybridDecapsulationKey {
     /// Construct from raw halves. **Test-only**: production keypairs come from
     /// [`HybridKem::keygen`], which draws from the OS CSPRNG.
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn for_test(ml_kem: [u8; ML_KEM_1024_SEED_BYTES], x25519: [u8; X25519_SK_BYTES]) -> Self {
         Self { ml_kem, x25519 }
@@ -496,6 +527,7 @@ impl HybridDecapsulationKey {
 
 impl HybridEncapsulationKey {
     /// Construct from raw halves. **Test-only.**
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn for_test(ml_kem: Vec<u8>, x25519: [u8; X25519_SK_BYTES]) -> Self {
         Self { ml_kem, x25519 }
@@ -607,6 +639,43 @@ mod tests {
         let (_, dem_none) = create_capsule(&FakeKem, &k, None).unwrap();
         let (_, dem_stick) = create_capsule(&FakeKem, &k, Some(&stick)).unwrap();
         assert_ne!(dem_none.expose(), dem_stick.expose());
+    }
+
+    #[test]
+    fn every_capsule_field_bit_flip_is_rejected_at_the_coarse_phase1_boundary() {
+        let k = unwrap();
+        let (capsule, _) = create_capsule(&FakeKem, &k, None).unwrap();
+
+        let mut bad = capsule.clone();
+        bad.ct.ml_kem[0] ^= 1;
+        assert_eq!(
+            open_capsule(&FakeKem, &k, &bad, None).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
+        let mut bad = capsule.clone();
+        bad.ct.x25519[0] ^= 1;
+        assert_eq!(
+            open_capsule(&FakeKem, &k, &bad, None).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
+        let mut bad = capsule.clone();
+        bad.wrapped_sk[0] ^= 1;
+        assert_eq!(
+            open_capsule(&FakeKem, &k, &bad, None).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
+        let mut bad = capsule.clone();
+        bad.sk_unwrap_nonce[0] ^= 1;
+        assert_eq!(
+            open_capsule(&FakeKem, &k, &bad, None).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
+        let mut bad = capsule;
+        bad.phase1[0] ^= 1;
+        assert_eq!(
+            open_capsule(&FakeKem, &k, &bad, None).unwrap_err(),
+            EnvelopeError::Phase1CommitmentMismatch
+        );
     }
 
     #[test]

@@ -32,15 +32,22 @@ v6 trusts, in order of decreasing trust:
 
 1. **The Rust process itself** — and inside it, only `holonomy-seal` holds key material,
    enforced by capability tokens (RFC-001) so the compiler polices the inner boundary.
-2. **The OS kernel** — memory isolation, secure erase of freed pages, suspend notifications.
-   We *use* kernel facilities (`memfd_secret`, `mlock`+`MADV_DONTDUMP`, `VirtualLock`) and
-   honestly surface on the Security panel when a platform denies them.
+2. **The OS kernel** — memory isolation and the platform memory-protection APIs we request.
+   Key cells attempt `mlock` on Unix or `VirtualLock` on Windows; Linux additionally attempts
+   page-aligned `MADV_DONTDUMP` after a successful `mlock`. `memfd_secret` availability is
+   probed where this build supports the syscall, but key cells are not backed by it. The reported
+   rung can be lower when the OS denies a request. This code does not disable process-wide core
+   dumps or request `DONTFORK`,
+   and zeroization is a best-effort process action, not a kernel secure-erase guarantee.
 3. **The GPU/compositor (GPUI pipeline)** — pixels of the page being viewed are, at paint
    time, observable by definition. We bound this by law L-2: it is the viewport only.
 
 **Explicitly distrusted:** disk state (sealed), cloud copies (sealed + verified), the
-clipboard (egress door — flagged confidential, cleared on blur), crash infrastructure
-(core dumps disabled; plaintext pages marked `DONTDUMP`/`DONTFORK`).
+clipboard (egress door — flagged confidential, cleared on blur), and crash infrastructure.
+On Linux, successfully locked key pages are marked `MADV_DONTDUMP` when the kernel accepts
+it; this is not a process-wide core-dump disable and is not implemented as `DONTFORK`. Other
+platforms may only reach the resident-memory rung. The Security panel must report the actual
+per-cell rung, not a global claim.
 
 ## 4. Invariant moments
 
@@ -48,7 +55,8 @@ The threat model bites hardest at specific instants; each has a designated behav
 
 - **Open:** plaintext delta is the viewport neighborhood (L-2), never the file (RFC-002).
 - **Scroll/edit:** slabs wipe as they exit residency; keystrokes allocate zero (L-2).
-- **Save:** append sealed segments, commit witness atomically; power loss bounded (L-6).
+- **Save:** append sealed segments and sync a witness commit point. Crash-consistency injections
+  exist, but actual power-loss/device durability remains unqualified (L-6 is still `spec`).
 - **Blur/lock:** plaintext pages shed residency and wipe; clipboard cleared (Block 9).
 - **Suspend/quit/tripwire:** L-7 verified wipe — wipe set is the (bounded) resident set, so
   the v5 problem of a 180 MiB wipe exceeding its budget is deleted by construction.

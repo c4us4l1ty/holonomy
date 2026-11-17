@@ -31,7 +31,7 @@ license = "MIT OR Apache-2.0"
 # ships the reduction-hardened ml-kem 0.3.4 line and a rand_core 0.10 that matches it, and it
 # built and passed its two-phase audit tests. Repinning blind would be worse than inheriting.
 ml-kem = { version = "0.3.4", default-features = false, features = ["alloc", "zeroize"] }
-x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
 blake2 = { version = "0.10", default-features = false }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }

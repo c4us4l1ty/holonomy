@@ -23,6 +23,7 @@ use std::time::Instant;
 use argon2::Params;
 
 use crate::kdf::{run_argon2, ROOT_SECRET_BYTES};
+use zeroize::Zeroizing;
 
 /// Minimum Argon2id memory cost: 64 MiB. Below this there is no fence worth the name.
 pub const FENCE_MIN_KIB: u32 = 65_536;
@@ -134,13 +135,13 @@ pub fn calibrate() -> Calibration {
     // The probe runs through the same scrubbed arena as every real derivation (OQ-5): no
     // second Argon2 invocation shape may exist anywhere in the workspace.
     let start = Instant::now();
-    let mut out = [0u8; ROOT_SECRET_BYTES];
-    let result = run_argon2(PROBE_PW, &PROBE_SALT, &params, &mut out);
+    let mut out = Zeroizing::new([0u8; ROOT_SECRET_BYTES]);
+    let result = run_argon2(PROBE_PW, &PROBE_SALT, &params, &mut out[..]);
     let probe_ms = start.elapsed().as_millis() as u64;
 
     match result {
         Ok(()) => {
-            std::hint::black_box(out);
+            std::hint::black_box(&out[..]);
         }
         Err(_) => {
             // A host that cannot Argon2 the probe cannot Argon2 anything: report the floor and

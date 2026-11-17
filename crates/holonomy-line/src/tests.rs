@@ -2,8 +2,12 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::net::{TcpListener, TcpStream};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use holonomy_seal::{
     create_capsule_for, generate_container_id, Capsule, DEMKey, KdfParamsRecord, MasterKeys,
@@ -18,6 +22,25 @@ impl Drop for TempPath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_dir(label: &str) -> TempDir {
+    let id = generate_container_id().unwrap();
+    let suffix = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = std::env::temp_dir().join(format!("holonomy-{label}-{suffix}"));
+    fs::create_dir(&path).unwrap();
+    TempDir(path)
 }
 
 fn temp_path(label: &str) -> TempPath {
@@ -84,6 +107,86 @@ fn assert_tail_write_trace(
         expected_offset += write.bytes as u64;
     }
     assert_eq!(expected_offset, new_len);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RsyncStats {
+    literal_data: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
+fn parse_rsync_stat(output: &str, label: &str) -> u64 {
+    let prefix = format!("{label}:");
+    let line = output
+        .lines()
+        .find(|line| line.trim_start().starts_with(&prefix))
+        .unwrap_or_else(|| panic!("rsync --stats output omitted {label}:\n{output}"));
+    line.trim_start()
+        .split_once(':')
+        .expect("stat line has a colon")
+        .1
+        .split_whitespace()
+        .next()
+        .expect("stat line has a number")
+        .replace(',', "")
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid rsync {label} value: {line}"))
+}
+
+fn rsync_transfer(source: &Path, destination: &str, port: u16) -> (RsyncStats, String) {
+    let output = Command::new("rsync")
+        .args([
+            "--archive",
+            "--stats",
+            "--no-whole-file",
+            "--block-size=65536",
+            "--timeout=60",
+        ])
+        .arg(format!("--port={port}"))
+        .env("LC_ALL", "C")
+        .arg(source)
+        .arg(destination)
+        .output()
+        .expect("rsync must be installed for the L-10 qualification");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "rsync failed: {text}");
+    (
+        RsyncStats {
+            literal_data: parse_rsync_stat(&text, "Literal data"),
+            bytes_sent: parse_rsync_stat(&text, "Total bytes sent"),
+            bytes_received: parse_rsync_stat(&text, "Total bytes received"),
+        },
+        text,
+    )
+}
+
+struct RsyncDaemon(Child);
+
+impl Drop for RsyncDaemon {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn wait_for_rsync(port: u16, daemon: &mut Child) {
+    for _ in 0..100 {
+        if let Some(status) = daemon.try_wait().expect("check rsync daemon") {
+            panic!("rsync daemon exited before accepting connections: {status}");
+        }
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("rsync daemon did not listen on 127.0.0.1:{port}");
 }
 
 #[test]
@@ -285,6 +388,249 @@ fn a_simulated_thirty_million_word_history_still_appends_only_the_new_tail() {
     assert_eq!(
         &reopened.open_segment((FULL_SEGMENTS + 1) as u64).unwrap()[..],
         b"new tail edit"
+    );
+}
+
+#[test]
+#[ignore = "requires rsync and a local daemon; run the named-client qualification explicitly"]
+fn rsync_measures_append_transfer_over_a_named_local_daemon() {
+    let version = Command::new("rsync")
+        .arg("--version")
+        .output()
+        .expect("rsync must be installed for the L-10 qualification");
+    assert!(version.status.success());
+    let version = String::from_utf8_lossy(&version.stdout)
+        .lines()
+        .next()
+        .unwrap_or("rsync version unknown")
+        .to_owned();
+
+    let directory = temp_dir("rsync-qualification");
+    let remote_root = directory.0.join("remote");
+    fs::create_dir(&remote_root).unwrap();
+    let source = directory.0.join("history.wavefunction");
+    let config = directory.0.join("rsyncd.conf");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        &config,
+        format!(
+            "address = 127.0.0.1\nport = {port}\npid file = {}\nlock file = {}\nuse chroot = no\n[holonomy]\npath = {}\nread only = no\nlist = no\n",
+            directory.0.join("rsyncd.pid").display(),
+            directory.0.join("rsyncd.lock").display(),
+            remote_root.display()
+        ),
+    )
+    .unwrap();
+    let mut daemon = RsyncDaemon(
+        Command::new("rsync")
+            .arg("--daemon")
+            .arg("--no-detach")
+            .arg("--config")
+            .arg(&config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start local rsync daemon"),
+    );
+    wait_for_rsync(port, &mut daemon.0);
+
+    const TOTAL_WORDS: usize = 30_000_000;
+    const FULL_SEGMENT_WORDS: usize = 32_768;
+    const FULL_SEGMENTS: usize = 915;
+    const FINAL_SEGMENT_WORDS: usize = TOTAL_WORDS - FULL_SEGMENTS * FULL_SEGMENT_WORDS;
+
+    let salt = [0x5A; 64];
+    let (_keys, capsule, dem) = test_material(b"rsync 30M qualification", salt);
+    let mut line = WorldLine::create(&source, test_header(salt, capsule), &dem).unwrap();
+    let full_segment = b"a ".repeat(FULL_SEGMENT_WORDS);
+    let final_segment = b"a ".repeat(FINAL_SEGMENT_WORDS);
+    let mut history = vec![full_segment.as_slice(); FULL_SEGMENTS];
+    history.push(final_segment.as_slice());
+    line.append_segments(&history).unwrap();
+
+    let destination = format!("rsync://127.0.0.1:{port}/holonomy/history.wavefunction");
+    let (initial_stats, _) = rsync_transfer(&source, &destination, port);
+    let old_len = fs::metadata(&source).unwrap().len();
+    let remote_file = remote_root.join("history.wavefunction");
+    assert_eq!(fs::metadata(&remote_file).unwrap().len(), old_len);
+    assert!(files_equal_prefix(&source, &remote_file, old_len).unwrap());
+
+    let appended_segment = vec![b'z'; MAX_SEGMENT_BYTES as usize];
+    let segments: [&[u8]; 4] = [
+        &appended_segment,
+        &appended_segment,
+        &appended_segment,
+        &appended_segment,
+    ];
+    let receipt = line.append_segments(&segments).unwrap();
+    let new_len = fs::metadata(&source).unwrap().len();
+    assert_eq!(new_len - old_len, receipt.bytes_appended);
+    let (delta_stats, _) = rsync_transfer(&source, &destination, port);
+    assert_eq!(fs::metadata(&remote_file).unwrap().len(), new_len);
+    assert!(files_equal_prefix(&source, &remote_file, new_len).unwrap());
+
+    // A partial final checksum block can require retransmitting up to one block of old tail;
+    // report the raw client/server totals separately so protocol overhead is not hidden behind
+    // the payload-only `Literal data` statistic.
+    let delta_network_bytes = delta_stats.bytes_sent + delta_stats.bytes_received;
+    let initial_network_bytes = initial_stats.bytes_sent + initial_stats.bytes_received;
+    assert!(
+        delta_stats.literal_data <= receipt.bytes_appended + MAX_SEGMENT_BYTES as u64,
+        "rsync sent unexpectedly much literal file data: {delta_stats:?}, append={}",
+        receipt.bytes_appended
+    );
+    assert!(
+        delta_network_bytes <= receipt.bytes_appended.saturating_mul(8),
+        "rsync application-layer traffic exceeded 8x the appended record bytes: network={delta_network_bytes}, append={}",
+        receipt.bytes_appended
+    );
+    eprintln!(
+        "HOLONOMY_RSYNC_MEASUREMENT client={version}; transport=local-rsync-daemon-over-TCP; block_size=65536; old_file_bytes={old_len}; new_file_bytes={new_len}; appended_record_bytes={}; initial_literal_data={}; initial_client_bytes_sent={}; initial_client_bytes_received={}; initial_application_bytes={initial_network_bytes}; delta_literal_data={}; delta_client_bytes_sent={}; delta_client_bytes_received={}; delta_application_bytes={delta_network_bytes}",
+        receipt.bytes_appended,
+        initial_stats.literal_data,
+        initial_stats.bytes_sent,
+        initial_stats.bytes_received,
+        delta_stats.literal_data,
+        delta_stats.bytes_sent,
+        delta_stats.bytes_received,
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires ext4 loop ENOSPC; see scripts/qualify-ext4-enospc.sh"]
+fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
+    let storage_dir = PathBuf::from(
+        std::env::var_os("HOLONOMY_ENOSPC_DIR")
+            .expect("set HOLONOMY_ENOSPC_DIR to the mounted ext4 qualification filesystem"),
+    );
+    let fs_type = Command::new("findmnt")
+        .args(["-n", "-o", "FSTYPE", "--target"])
+        .arg(&storage_dir)
+        .output()
+        .expect("findmnt is required to verify the qualification filesystem");
+    assert!(fs_type.status.success(), "findmnt failed: {fs_type:?}");
+    let fs_type = String::from_utf8_lossy(&fs_type.stdout).trim().to_owned();
+    assert_eq!(fs_type, "ext4", "L-6 test must run on ext4, not {fs_type}");
+
+    let mount_source = Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "--target"])
+        .arg(&storage_dir)
+        .output()
+        .expect("findmnt is required to verify the bounded loop device");
+    assert!(mount_source.status.success(), "findmnt source lookup failed");
+    let mount_source = String::from_utf8_lossy(&mount_source.stdout).trim().to_owned();
+    assert!(
+        mount_source.starts_with("/dev/loop"),
+        "L-6 rehearsal refuses non-loop devices, got {mount_source}"
+    );
+
+    let filesystem_space = Command::new("df")
+        .args(["-B1", "--output=size,avail"])
+        .arg(&storage_dir)
+        .output()
+        .expect("df is required to verify the bounded filesystem");
+    assert!(filesystem_space.status.success(), "df failed: {filesystem_space:?}");
+    let filesystem_space = String::from_utf8_lossy(&filesystem_space.stdout);
+    let filesystem_space = filesystem_space
+        .lines()
+        .last()
+        .expect("df reports a filesystem row");
+    let mut filesystem_space = filesystem_space.split_whitespace();
+    let filesystem_bytes: u64 = filesystem_space
+        .next()
+        .expect("df reports filesystem size")
+        .parse()
+        .expect("df filesystem size is numeric");
+    let initial_free_bytes: u64 = filesystem_space
+        .next()
+        .expect("df reports free bytes")
+        .parse()
+        .expect("df free bytes are numeric");
+    assert!(
+        filesystem_bytes <= 256 * 1024 * 1024,
+        "L-6 rehearsal refuses filesystems larger than 256 MiB, got {filesystem_bytes} bytes"
+    );
+
+    let id = generate_container_id().unwrap();
+    let suffix = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = TempPath(storage_dir.join(format!("holonomy-enospc-{suffix}.wavefunction")));
+    let filler_path = TempPath(storage_dir.join(format!("holonomy-enospc-fill-{suffix}.bin")));
+    let salt = [0x6B; 64];
+    let (_keys, capsule, dem) = test_material(b"real ENOSPC qualification", salt);
+    let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
+    line.append_segments(&[&b"witness committed before filesystem full"[..]])
+        .unwrap();
+
+    let mut filler = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&filler_path.0)
+        .unwrap();
+    let chunk = vec![0x5A; 1024 * 1024];
+    let mut observed_enospc = false;
+    loop {
+        match filler.write_all(&chunk) {
+            Ok(()) => match filler.sync_all() {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                    observed_enospc = true;
+                    break;
+                }
+                Err(error) => panic!("filler sync failed for a non-ENOSPC reason: {error}"),
+            },
+            Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                observed_enospc = true;
+                break;
+            }
+            Err(error) => panic!("filler write failed for a non-ENOSPC reason: {error}"),
+        }
+    }
+    assert!(observed_enospc, "the mounted filesystem must report real ENOSPC");
+    let filler_bytes = fs::metadata(&filler_path.0).unwrap().len();
+    assert!(filler_bytes > 0, "the filler must consume filesystem space");
+
+    let append_result = line.append_segments(&[&b"must survive disk-full failure"[..]]);
+    assert!(
+        matches!(
+            &append_result,
+            Err(LineError::Io(error))
+                if error.raw_os_error() == Some(libc::ENOSPC)
+                    || error.kind() == io::ErrorKind::WriteZero
+        ) || matches!(&append_result, Err(LineError::DurabilityUncertain)),
+        "expected an actual disk-full append error, got {append_result:?}"
+    );
+    drop(line);
+    drop(filler);
+    fs::remove_file(&filler_path.0).unwrap();
+
+    let recovered = WorldLine::open(&path.0, &dem).unwrap();
+    assert!(
+        recovered.segment_count() == 1 || recovered.segment_count() == 2,
+        "recovery exposed an unexpected segment count"
+    );
+    assert_eq!(recovered.verify().unwrap().segments_verified, recovered.segment_count());
+    assert_eq!(
+        &recovered.open_segment(0).unwrap()[..],
+        b"witness committed before filesystem full"
+    );
+    if recovered.segment_count() == 2 {
+        assert_eq!(
+            &recovered.open_segment(1).unwrap()[..],
+            b"must survive disk-full failure"
+        );
+    }
+    eprintln!(
+        "HOLONOMY_ENOSPC_MEASUREMENT filesystem={fs_type}; mount_source={mount_source}; filesystem_bytes={filesystem_bytes}; initial_free_bytes={initial_free_bytes}; filler_bytes={filler_bytes}; observed_real_enospc={observed_enospc}; append_error={append_result:?}; recovered_segments={}; verified_segments={}",
+        recovered.segment_count(),
+        recovered.verify().unwrap().segments_verified,
     );
 }
 

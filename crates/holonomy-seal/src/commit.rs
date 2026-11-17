@@ -14,9 +14,9 @@
 //! sealed-object machinery only.
 
 use blake2::{Blake2b512, Digest};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use zeroize::Zeroizing;
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
+use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Length of a CMT-4 commitment.
 pub const CMT4_TAG_BYTES: usize = 32;
@@ -46,9 +46,10 @@ pub fn cmt4_tag(
     h.update(associated_data);
     h.update((ciphertext.len() as u64).to_le_bytes());
     h.update(ciphertext);
-    let digest = h.finalize();
+    let mut digest = h.finalize();
     let mut out = [0u8; CMT4_TAG_BYTES];
     out.copy_from_slice(&digest[..CMT4_TAG_BYTES]);
+    digest.as_mut_slice().zeroize();
     out
 }
 
@@ -98,19 +99,29 @@ pub fn seal_committed(
     associated_data: &[u8],
     plaintext: &[u8],
 ) -> CommittedCiphertext {
+    // Reserve before copying plaintext, then encrypt this wipe-on-drop buffer in place. The
+    // allocating `Aead::encrypt` convenience method can free an intermediate plaintext Vec if
+    // tag growth reallocates or encryption fails.
+    let mut ciphertext = Zeroizing::new(Vec::new());
+    ciphertext.reserve_exact(plaintext.len());
+    ciphertext.extend_from_slice(plaintext);
+    #[cfg(test)]
+    crate::allocation_audit::watch(ciphertext.as_ptr(), ciphertext.len());
+
     let cipher = XChaCha20Poly1305::new_from_slice(key).expect("32-byte key is valid");
-    let ct = cipher
-        .encrypt(
+    let tag = cipher
+        .encrypt_in_place_detached(
             XNonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad: associated_data,
-            },
+            associated_data,
+            &mut ciphertext[..],
         )
         .expect("encryption of a bounded buffer cannot fail");
-    let cmt4 = cmt4_tag(key, nonce, associated_data, &ct);
+    let mut output = Vec::with_capacity(plaintext.len() + POLY1305_TAG_BYTES);
+    output.extend_from_slice(&ciphertext[..]);
+    output.extend_from_slice(tag.as_slice());
+    let cmt4 = cmt4_tag(key, nonce, associated_data, &output);
     CommittedCiphertext {
-        ciphertext: ct,
+        ciphertext: output,
         cmt4,
     }
 }
@@ -127,18 +138,27 @@ pub fn open_committed(
     if !cmt4_verify(&expected, &committed.cmt4) {
         return Err(AeadError::CommitmentMismatch);
     }
+    if committed.ciphertext.len() < POLY1305_TAG_BYTES {
+        return Err(AeadError::AuthenticationFailed);
+    }
+    let tag_offset = committed.ciphertext.len() - POLY1305_TAG_BYTES;
+    let mut plaintext = Zeroizing::new(committed.ciphertext[..tag_offset].to_vec());
+    #[cfg(test)]
+    crate::allocation_audit::watch(plaintext.as_ptr(), plaintext.len());
+    let tag = Tag::from_slice(&committed.ciphertext[tag_offset..]);
     let cipher =
         XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::AuthenticationFailed)?;
-    let plain = cipher
-        .decrypt(
+    // Decrypt into a wipe-on-drop buffer. On an authentication failure, in-place AEAD
+    // implementations may already have overwritten ciphertext with plaintext before returning.
+    cipher
+        .decrypt_in_place_detached(
             XNonce::from_slice(nonce),
-            Payload {
-                msg: &committed.ciphertext,
-                aad: associated_data,
-            },
+            associated_data,
+            &mut plaintext[..],
+            tag,
         )
         .map_err(|_| AeadError::AuthenticationFailed)?;
-    Ok(Zeroizing::new(plain))
+    Ok(plaintext)
 }
 
 #[cfg(test)]
@@ -216,6 +236,29 @@ mod tests {
         b[0] ^= 1;
         assert!(cmt4_verify(&t, &t));
         assert!(!cmt4_verify(&t, &b));
+    }
+
+    #[test]
+    fn aead_failure_is_coarse_and_short_ciphertexts_do_not_panic() {
+        let k = key(3);
+        let n = [1u8; NONCE_BYTES];
+        let mut bad_tag = seal_committed(&k, &n, b"aad", b"plaintext must be wiped on failure");
+        let last = bad_tag.ciphertext.len() - 1;
+        bad_tag.ciphertext[last] ^= 1;
+        bad_tag.cmt4 = cmt4_tag(&k, &n, b"aad", &bad_tag.ciphertext);
+        assert_eq!(
+            open_committed(&k, &n, b"aad", &bad_tag).unwrap_err(),
+            AeadError::AuthenticationFailed
+        );
+
+        let short = CommittedCiphertext {
+            ciphertext: Vec::new(),
+            cmt4: cmt4_tag(&k, &n, b"aad", &[]),
+        };
+        assert_eq!(
+            open_committed(&k, &n, b"aad", &short).unwrap_err(),
+            AeadError::AuthenticationFailed
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use blake2::{Blake2b512, Digest};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::capability::UnwrapKey;
 
@@ -108,7 +108,13 @@ struct Arena(Vec<Block>);
 impl Arena {
     /// Allocate exactly the number of blocks these parameters demand (argon2 errors on fewer).
     fn for_params(params: &Params) -> Self {
-        Self(vec![Block::new(); params.block_count()])
+        let arena = Self(vec![Block::new(); params.block_count()]);
+        #[cfg(test)]
+        crate::allocation_audit::watch(
+            arena.0.as_ptr().cast(),
+            arena.0.len() * core::mem::size_of::<Block>(),
+        );
+        arena
     }
 }
 
@@ -170,9 +176,9 @@ pub fn derive_root_secret(
     let (m_kib, t, p) = class.costs();
     let params =
         Params::new(m_kib, t, p, Some(ROOT_SECRET_BYTES)).map_err(|_| KdfError::InvalidParams)?;
-    let mut out = [0u8; ROOT_SECRET_BYTES];
-    run_argon2(passphrase, salt, &params, &mut out)?;
-    Ok(RootSecret(out))
+    let mut out = Zeroizing::new([0u8; ROOT_SECRET_BYTES]);
+    run_argon2(passphrase, salt, &params, &mut out[..])?;
+    Ok(RootSecret(*out))
 }
 
 /// Stage 1, replayed: derive under an *explicit* recorded parameter set.
@@ -205,9 +211,9 @@ pub fn derive_root_secret_with(
     validate_replayed_params(record, cfg!(any(debug_assertions, test)))?;
     let params = Params::new(record.m_kib, record.t, record.p, Some(ROOT_SECRET_BYTES))
         .map_err(|_| KdfError::InvalidParams)?;
-    let mut out = [0u8; ROOT_SECRET_BYTES];
-    run_argon2(passphrase, salt, &params, &mut out)?;
-    Ok(RootSecret(out))
+    let mut out = Zeroizing::new([0u8; ROOT_SECRET_BYTES]);
+    run_argon2(passphrase, salt, &params, &mut out[..])?;
+    Ok(RootSecret(*out))
 }
 
 /// A 32-byte subkey, zeroized on drop.
@@ -224,13 +230,14 @@ pub fn derive_subkey(root: &RootSecret, label: &[u8], context: &[u8]) -> Subkey 
     h.update((label.len() as u64).to_le_bytes());
     h.update(label);
     h.update([0u8]);
-    h.update(root.0);
+    h.update(&root.0);
     h.update((context.len() as u64).to_le_bytes());
     h.update(context);
-    let digest = h.finalize();
-    let mut out = [0u8; 32];
+    let mut digest = h.finalize();
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&digest[..32]);
-    Subkey(out)
+    digest.as_mut_slice().zeroize();
+    Subkey(*out)
 }
 
 /// Labels, spelled once so call sites cannot drift.
@@ -280,11 +287,14 @@ impl MasterKeys {
     /// The one USB-binding subkey step both entry points share, so the two can never drift:
     /// presence flag then bytes, in the derivation context, hashed — never XORed (v5's lesson).
     fn from_root(root: &RootSecret, usb: Option<&[u8; 32]>) -> Self {
-        let usb_bytes = usb.copied().unwrap_or([0u8; 32]);
-        let mut ctx = Vec::with_capacity(1 + 32);
-        ctx.push(u8::from(usb.is_some()));
-        ctx.extend_from_slice(&usb_bytes);
-        let unwrap = derive_subkey(root, labels::K_UNWRAP, &ctx);
+        // Fixed-size, stack-only context: the optional device secret never enters an ordinary
+        // heap Vec. The wrapper also erases this temporary on every exit path.
+        let mut ctx = Zeroizing::new([0u8; 33]);
+        ctx[0] = u8::from(usb.is_some());
+        if let Some(usb_bytes) = usb {
+            ctx[1..].copy_from_slice(usb_bytes);
+        }
+        let unwrap = derive_subkey(root, labels::K_UNWRAP, &ctx[..]);
         Self {
             unwrap: UnwrapKey::from_bytes(unwrap.0),
         }

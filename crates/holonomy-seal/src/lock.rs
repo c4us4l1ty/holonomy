@@ -7,7 +7,7 @@
 //!
 //! | mechanism | what it actually does |
 //! | :--- | :--- |
-//! | `memfd_secret(0)` (Linux 5.14+) | removes the page from the kernel direct map; even root cannot map it back |
+//! | `memfd_secret(2)` (Linux 5.14+) | probed on supported architectures, but not used to back key cells |
 //! | `mlock` + `MADV_DONTDUMP` | keeps the page out of swap and out of core dumps; still debugger-readable |
 //! | `VirtualLock` (Windows) | keeps the page resident; still readable by a same-user process |
 //! | `mlock` (macOS) | resident, no dump exclusion |
@@ -26,7 +26,7 @@ pub enum LockCapability {
     Resident,
     /// Resident and excluded from core dumps (`MADV_DONTDUMP`).
     ResidentNoDump,
-    /// Removed from the kernel direct map (`memfd_secret`). Linux 5.14+.
+    /// Reserved for a future `memfd_secret`-backed allocation; not reported by this version.
     DirectMapExcluded,
 }
 
@@ -38,7 +38,7 @@ impl LockCapability {
             Self::Resident => "memory is resident (still dumpable; enable process protection)",
             Self::ResidentNoDump => "memory is resident and excluded from core dumps",
             Self::DirectMapExcluded => {
-                "memory is excluded from the kernel direct map (memfd_secret)"
+                "reserved; memfd_secret-backed key cells are not implemented in this version"
             }
         }
     }
@@ -98,7 +98,8 @@ pub struct LockedRegion {
 }
 
 impl LockedRegion {
-    /// Lock `len` bytes at `ptr`, strongest mechanism first, degrading with the reason recorded.
+    /// Lock `len` bytes at `ptr` using the mechanisms implemented for this allocation, and
+    /// record any downgrade. `memfd_secret` is probed separately but is not yet used here.
     ///
     /// Never returns `Err` for a mere downgrade; a process that gets only `mlock` is still
     /// better off than one that gave up, and the report says which one happened.
@@ -185,11 +186,35 @@ fn munlock(ptr: *mut u8, len: usize) {
 
 #[cfg(target_os = "linux")]
 fn madvise_dontdump(ptr: *mut u8, len: usize) -> Result<(), ()> {
-    // `MADV_DONTDUMP` is 19 on Linux and **only** on Linux: macOS's advice 19 is a different
-    // request, so the constant must never be exported behind a shared name (v5's note, kept).
-    const MADV_DONTDUMP: libc::c_int = 19;
-    // SAFETY: region validity delegated to `LockedRegion::lock`'s caller.
-    let rc = unsafe { libc::madvise(ptr.cast(), len, MADV_DONTDUMP) };
+    if len == 0 {
+        return Err(());
+    }
+    // Linux requires a page-aligned start address. Round out to the pages that contain the
+    // region; small heap cells are commonly unaligned and otherwise silently miss DONTDUMP.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(());
+    }
+    let page_size = usize::try_from(page_size).map_err(|_| ())?;
+    let start = ptr as usize;
+    let end = start.checked_add(len).ok_or(())?;
+    let aligned_start = start - (start % page_size);
+    let aligned_end = end
+        .div_ceil(page_size)
+        .checked_mul(page_size)
+        .ok_or(())?;
+    let aligned_len = aligned_end.checked_sub(aligned_start).ok_or(())?;
+
+    // Use libc's platform constant: Linux MADV_DONTDUMP is 16 (19 is KEEPONFORK).
+    // SAFETY: the caller guarantees `ptr..ptr+len` is valid; the rounded range covers only
+    // mapped pages that contain it, as with mlock's page-granular behavior.
+    let rc = unsafe {
+        libc::madvise(
+            aligned_start as *mut libc::c_void,
+            aligned_len,
+            libc::MADV_DONTDUMP,
+        )
+    };
     if rc == 0 {
         Ok(())
     } else {
@@ -252,12 +277,16 @@ unsafe fn windows_virtual_unlock(ptr: *mut core::ffi::c_void, len: usize) {
     unsafe { VirtualUnlock(ptr, len) };
 }
 
-/// Whether `memfd_secret(2)` is usable right now — probed, not assumed: the syscall exists on
-/// Linux 5.14+ but is frequently seccomp-blocked in container runtimes.
+/// Whether `memfd_secret(2)` is usable right now — probed, not assumed, on Linux x86_64 and
+/// aarch64. It returns false on other targets and when the syscall is unavailable or blocked.
 pub fn memfd_secret_available() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
-        // SYS_memfd_secret = 447 on x86_64/aarch64. Returns an fd or -1.
+        // SYS_memfd_secret = 447 on x86_64/aarch64. Returns an fd or -1. This is an
+        // availability probe only; LockedSecret does not currently use the returned mechanism.
         const SYS_MEMFD_SECRET: libc::c_long = 447;
         const MFD_CLOEXEC: libc::c_uint = 0x0001;
         // SAFETY: `syscall` with a scalar argument only; no pointers cross.
@@ -270,7 +299,10 @@ pub fn memfd_secret_available() -> bool {
             false
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     {
         false
     }
@@ -278,13 +310,29 @@ pub fn memfd_secret_available() -> bool {
 
 /// One line for logs/UI about how the current rung was reached.
 pub fn describe_how() -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         if memfd_secret_available() {
-            "memfd_secret(2) available (direct-map-excluded arenas possible)"
+            concat!(
+                "memfd_secret(2) is available but unused; ",
+                "key cells attempt mlock + MADV_DONTDUMP (see per-cell report)"
+            )
         } else {
-            "memfd_secret unavailable (kernel < 5.14 or seccomp); mlock + MADV_DONTDUMP fallback"
+            "memfd_secret(2) unavailable; key cells use mlock + MADV_DONTDUMP when permitted"
         }
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(target_arch = "x86_64", target_arch = "aarch64"))
+    ))]
+    {
+        concat!(
+            "memfd_secret(2) not probed on this architecture; ",
+            "key cells use mlock + MADV_DONTDUMP when permitted"
+        )
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
@@ -296,12 +344,14 @@ pub fn describe_how() -> &'static str {
     }
 }
 
-/// The best rung this process can reach, probed.
+/// Probe the rung the current `LockedRegion` implementation can obtain on a small heap cell.
+/// `memfd_secret` availability is informational only until key cells are backed by it.
 pub fn probe_capability() -> LockCapability {
-    if memfd_secret_available() {
-        LockCapability::DirectMapExcluded
-    } else {
-        LockCapability::ResidentNoDump
+    let mut probe = vec![0u8; 4_096];
+    // SAFETY: the vector remains allocated and unmoved until the guard has dropped.
+    match unsafe { LockedRegion::lock(probe.as_mut_ptr(), probe.len()) } {
+        Ok(region) => region.report().capability,
+        Err(_) => LockCapability::None,
     }
 }
 
@@ -324,7 +374,7 @@ mod tests {
             .contains("core dumps"));
         assert!(LockCapability::DirectMapExcluded
             .claim()
-            .contains("direct map"));
+            .contains("not implemented"));
         assert!(!LockCapability::Resident.is_direct_map_excluded());
     }
 
@@ -345,10 +395,50 @@ mod tests {
         assert_eq!(buf[0], 1);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dontdump_uses_linux_flag_and_accepts_unaligned_cells() {
+        fn mapping_has_dontdump(address: usize) -> bool {
+            let smaps = std::fs::read_to_string("/proc/self/smaps")
+                .expect("Linux exposes this process's VMA flags in /proc/self/smaps");
+            let mut matching_vma = false;
+            for line in smaps.lines() {
+                if matching_vma {
+                    if let Some(flags) = line.strip_prefix("VmFlags:") {
+                        return flags.split_whitespace().any(|flag| flag == "dd");
+                    }
+                    continue;
+                }
+                let Some(range) = line.split_whitespace().next() else {
+                    continue;
+                };
+                let Some((start, end)) = range.split_once('-') else {
+                    continue;
+                };
+                let (Ok(start), Ok(end)) = (
+                    usize::from_str_radix(start, 16),
+                    usize::from_str_radix(end, 16),
+                ) else {
+                    continue;
+                };
+                matching_vma = start <= address && address < end;
+            }
+            false
+        }
+
+        let mut cell = vec![0u8; 64];
+        // The intentionally unaligned byte range catches the former bug: madvise returned EINVAL
+        // for the Box pointer, and the old hard-coded 19 set KEEPONFORK rather than DONTDUMP.
+        let address = cell.as_mut_ptr() as usize + 1;
+        assert!(madvise_dontdump(unsafe { cell.as_mut_ptr().add(1) }, 1).is_ok());
+        assert!(mapping_has_dontdump(address));
+    }
+
     #[test]
     fn probe_and_describe_never_panic() {
         let c = probe_capability();
         assert!(c >= LockCapability::None);
+        assert_ne!(c, LockCapability::DirectMapExcluded);
         assert!(!describe_how().is_empty());
     }
 }

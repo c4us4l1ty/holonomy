@@ -2,8 +2,8 @@
 //!
 //! All primitives — Argon2id, BLAKE2b, XChaCha20-Poly1305, CMT-4, ML-KEM-1024, X25519 — live
 //! behind this crate and nowhere else. What other crates receive are **capabilities**, not
-//! keys: a [`DEMKey`] can seal and open any document object, and no code anywhere in the
-//! workspace can read its bytes.
+//! keys: a [`DEMKey`] can seal and open any document object, and no other workspace crate can
+//! read its bytes. Only this crate's sealed operations expose them internally.
 //!
 //! ```text
 //!   passphrase (NFC bytes) ─┐
@@ -21,6 +21,8 @@
 //! world-line or to the deferred list). The USB "extra deadbolt" is exactly one optional
 //! argument, on exactly one code path, at exactly two hash inputs (KDF context + DEM bind).
 
+#[cfg(test)]
+mod allocation_audit;
 mod capability;
 mod commit;
 mod envelope;
@@ -33,6 +35,11 @@ mod lock;
 mod passphrase;
 mod secret;
 
+#[cfg(test)]
+#[global_allocator]
+static ZEROIZE_AUDIT_ALLOCATOR: allocation_audit::AuditAllocator =
+    allocation_audit::AuditAllocator;
+
 use blake2::digest::consts::U32;
 #[cfg(test)]
 use blake2::Blake2b512;
@@ -40,6 +47,7 @@ use blake2::{Blake2b, Digest};
 
 type Blake2b256 = Blake2b<U32>;
 use commit::{open_committed, seal_committed, CommittedCiphertext};
+use envelope::MlKem1024X25519;
 use zeroize::Zeroizing;
 
 pub use calibrate::{
@@ -47,7 +55,9 @@ pub use calibrate::{
     FENCE_MAX_KIB, FENCE_MIN_KIB, TARGET_BAND_MS,
 };
 pub use capability::{DEMKey, UnwrapKey};
-pub use envelope::{Capsule, EnvelopeError, HybridCiphertext, HybridKem, MlKem1024X25519};
+// The KEM trait and concrete implementation stay crate-private: their internal return path
+// includes raw shared secrets. Downstream crates get only the opaque capsule/key operations.
+pub use envelope::{Capsule, EnvelopeError, HybridCiphertext};
 pub use error::SealError;
 pub use kdf::{MasterKeys, ParamsClass, DERIVE_SALT_BYTES};
 pub use lock::{describe_how, probe_capability, LockCapability, LockReport};
@@ -215,6 +225,42 @@ mod tests {
         assert_eq!(&plain[..], b"hello world-line");
         // Relocation fails at the commitment, through the public surface.
         assert!(open_object(&dem, b"segment:1", &sealed).is_err());
+    }
+
+    #[test]
+    fn secret_heap_allocations_are_counted_and_zeroized_before_free() {
+        let before = allocation_audit::snapshot();
+        {
+            let passphrase =
+                PassphraseInput::new("allocator audit passphrase, not user data").unwrap();
+            let oversize = "x".repeat(MAX_PASSPHRASE_BYTES + 1);
+            assert!(matches!(
+                PassphraseInput::new(&oversize),
+                Err(PassphraseError::TooLong { .. })
+            ));
+
+            let salt = [0x52; DERIVE_SALT_BYTES];
+            let usb = [0xD7; 32];
+            let keys = passphrase
+                .with_bytes(|bytes| MasterKeys::derive(bytes, &salt, Some(&usb), ParamsClass::Test))
+                .unwrap();
+            let (capsule, dem) = create_capsule_for(keys.unwrap_key(), Some(&usb)).unwrap();
+            let reopened = open_capsule_for(keys.unwrap_key(), &capsule, Some(&usb)).unwrap();
+
+            let message = [0xA6; 128];
+            let sealed = seal_object(&dem, b"allocation-audit", &message);
+            let plaintext = open_object(&reopened, b"allocation-audit", &sealed).unwrap();
+            assert_eq!(&plaintext[..], &message);
+        }
+        let after = allocation_audit::snapshot();
+
+        assert!(after.allocations > before.allocations);
+        assert!(after.deallocations > before.deallocations);
+        assert!(after.registered >= before.registered + 6);
+        assert!(after.zeroed_before_free > before.zeroed_before_free);
+        assert_eq!(after.nonzero_before_free, before.nonzero_before_free);
+        assert_eq!(after.registry_overflow, before.registry_overflow);
+        assert_eq!(after.secret_reallocations, before.secret_reallocations);
     }
 
     #[test]

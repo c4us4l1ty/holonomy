@@ -14,13 +14,18 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
 ## Decision
 
 1. **One crate boundary:** `holonomy-seal` is the only crate that links crypto primitives.
-   Every other crate receives keys as opaque capability tokens (`DEMCap`, `SlabKeyCap`) whose
+   Every other crate receives keys as opaque capability tokens (`DEMKey`, `UnwrapKey`) whose
    types enforce flow at compile time: a token can be *used* to request an operation from the
-   seal, never read as bytes outside it.
+   seal, never read as bytes outside it. The KEM trait, its concrete implementation, and raw
+   `SharedSecrets` stay crate-private; exporting that testable plumbing would expose raw shared
+   key material.
 2. **Envelope (inherited):** passphrase → Argon2id (memory-hard, host-calibrated cost,
    recorded ledger-style) → `K_unwrap` → phase-1 unwrap of the per-save hybrid decapsulation
    key → ML-KEM-1024 + X25519 decapsulation → `K_DEM`. Key-committing AEAD (CMT-4) per sealed
-   object, `ZeroizeOnDrop` and `DONTDUMP`-laddered buffers throughout.
+   object; owned secret buffers are zeroized, and OS page protections are reported honestly:
+   Unix `mlock` / Windows `VirtualLock`, plus Linux `MADV_DONTDUMP` where accepted. `memfd_secret`
+   availability is probed on supported Linux architectures, but key cells are not backed by it;
+   there is no process-wide core-dump disable or `DONTFORK` claim.
 3. **USB, truly optional:** the KDF info string carries a domain-separated *optional* USB
    secret slot; absent → passphrase-only derivation passes the same code path with the slot
    inactive. No boolean fork of security logic; one path, one code review.
@@ -34,7 +39,7 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
 | ----------------- | --------- | ------- | ------------ |
 | A1 harvest-later | PQ break of classical ECDH | ML-KEM-1024 hybrid; classical break alone insufficient | envelope round-trip + known-answer vectors |
 | A5 offline brute | KDF cost | memory-hard Argon2id, calibrated per host, params recorded | calibration bounds test (H1's measured-correction pattern) |
-| A2 key lifetime | keys dumping with process memory | `DONTDUMP` ladder + zeroize; capability tokens prevent copy-out | counting/zeroize tests; dump-region map check |
+| A2 key lifetime | keys dumping with process memory | best-effort zeroization and the reported OS memory-lock rung; Linux `MADV_DONTDUMP` only where accepted; opaque capabilities prevent API copy-out | registered-allocation wipe test; Linux dump-region map check; platform caveats |
 | A1/A4 wrong-capsule oracles | decrypt-with-garbage distinguishers | coarse errors only; phase commitments (CMT-4) checked before use | garbage-capsule unlock test (inherited from v5 `two_phase.rs` pattern) |
 | A4 rollback: old keys presented for new file | envelope/witness mismatch | envelope commits to witness root at seal time (RFC-002 handshake) | cross-file rejection test |
 
@@ -54,3 +59,7 @@ the sole required factor (L-9) and demotes USB to an optional hardener.
   fence?). Numbers land in the Block 2 calibration gate; until then the RFC commits only to
   the *mechanism* of calibration, not a guessed constant — the exact discipline H1 paid 57×
   to learn.
+- The allocation-audit test observes explicitly registered secret buffers and total allocator
+  activity, but cannot by itself prove that every dependency-owned temporary is secret-free or
+  wiped. Complete the heap proof with dependency/allocation coverage (including normalization
+  internals) or a safe alternative before closing Block 2's zeroization gate.
