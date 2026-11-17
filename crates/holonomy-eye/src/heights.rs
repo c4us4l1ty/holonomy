@@ -153,7 +153,7 @@ impl HeightModel {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if `leaf` is not a leaf of this model.
+    /// Panics if `leaf` is not a leaf of this model.
     #[must_use]
     pub fn height(&self, leaf: usize) -> Fixed {
         debug_assert!(leaf < self.heights.len(), "leaf out of range");
@@ -162,9 +162,13 @@ impl HeightModel {
 
     /// Records `height` for `leaf`, O(log n).
     ///
+    /// `height` must not be negative — a negative height would make every prefix after it wrong —
+    /// and debug builds assert it. There is no meaningful clamp: a caller that reached this with a
+    /// negative measurement has a shaper bug, and silently storing zero would hide it.
+    ///
     /// # Panics
     ///
-    /// Panics in debug builds if `leaf` is not a leaf of this model.
+    /// Panics if `leaf` is not a leaf of this model.
     pub fn set(&mut self, leaf: usize, height: Fixed) {
         debug_assert!(leaf < self.heights.len(), "leaf out of range");
         debug_assert!(
@@ -190,7 +194,7 @@ impl HeightModel {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if `leaf` is greater than the number of leaves.
+    /// Panics if `leaf` is greater than the number of leaves.
     #[must_use]
     pub fn prefix(&self, leaf: usize) -> Fixed {
         debug_assert!(leaf <= self.heights.len(), "prefix past the model");
