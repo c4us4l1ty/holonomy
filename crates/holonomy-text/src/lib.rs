@@ -1,13 +1,14 @@
 //! The Spine — the immutable slab-tree document engine (ROADMAP Block 4).
 //!
-//! Block 4's construction is specified in `docs/rfc/RFC-003-the-spine.md`. Three slices have
+//! Block 4's construction is specified in `docs/rfc/RFC-003-the-spine.md`. Four pieces have
 //! landed: the spine itself with its position algebra and undo-as-pointer-swap; the editable
 //! resident text whose in-place insert/delete is **measured** allocation-free by
-//! `tests/keystroke_allocations.rs` (GATES law L-2's keystroke half); and the commit boundary
-//! ([`commit`]), which seals an edited slab into the world-line, takes the witness, and
-//! path-copies the spine to the new root — proven against a real `holonomy-line` world-line in
-//! `tests/commit_boundary.rs`. What is still missing is the editor above them (Block 5's Eye and
-//! the live-length overlay D-2 requires), so L-2 as a whole remains `spec` and the Block 4 gates
+//! `tests/keystroke_allocations.rs` (GATES law L-2's keystroke half); the commit boundary
+//! ([`commit`]) that seals an edited slab into the world-line, takes the witness, and path-copies
+//! the spine to the new root — proven against a real `holonomy-line` world-line in
+//! `tests/commit_boundary.rs`; and the live-length overlay ([`Draft`]) that keeps every position
+//! query correct *between* commits, while the spine is stale by design. What is still missing is
+//! the editor itself and Block 5's Eye, so L-2 as a whole remains `spec` and the Block 4 gates
 //! remain open.
 //!
 //! The constitutional clause still governs everything here:
@@ -17,7 +18,7 @@
 //! > it. Undo is a pointer walk, never a plaintext buffer — otherwise the wipe set would grow
 //! > with history.
 //!
-//! Five structural consequences, each witnessed by a test in this crate:
+//! Six structural consequences, each witnessed by a test in this crate:
 //!
 //! * A [`Spine`] holds no plaintext at all — only [`Slab`] references — so a sixty-year document
 //!   costs bytes that scale with segment count, not with readable text.
@@ -30,8 +31,12 @@
 //!   what lets the counting allocator prove the keystroke path quiet instead of assuming it.
 //! * [`commit_slab`] refuses a span the spine no longer holds **before** it appends, so a stale
 //!   commit cannot leave an authenticated but unreferenced segment in the world-line.
+//! * [`Draft`] answers offsets and ranges against the committed geometry plus the drafted lengths,
+//!   so the document view is correct while the spine is out of date — and an empty overlay answers
+//!   exactly as the spine does.
 
 pub mod commit;
+pub mod draft;
 pub mod residency;
 pub mod slab;
 mod spine;
@@ -39,6 +44,7 @@ pub mod text;
 mod tree;
 
 pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Witness};
+pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use residency::{ResidencyError, ResidentSet, SegmentSource};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
 pub use spine::{History, Spine, SpineError};
