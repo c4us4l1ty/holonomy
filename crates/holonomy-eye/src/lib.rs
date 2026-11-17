@@ -22,6 +22,8 @@
 //!   shape with.
 //! - `layout`: one run tree per laid-out window, which both [`Layout::paint_point`] and
 //!   [`Layout::hit_test`] walk.
+//! - `heights`: [`HeightModel`], the Fenwick index over leaf heights, so the Eye can find a
+//!   viewport in O(log n) index reads instead of measuring the document to discover where it is.
 //! - `view`: [`View`], zoom and DPI as one exact integer transform that **both** consumers call —
 //!   paint through [`View::paint_point`], hit-test through [`View::hit_test`] on a device-space
 //!   point. There is deliberately no inverse transform: hit-testing compares device observations
@@ -40,6 +42,7 @@
 
 mod cluster;
 mod geom;
+mod heights;
 mod layout;
 mod shaper;
 mod style;
@@ -47,6 +50,7 @@ mod view;
 
 pub use crate::cluster::Clusters;
 pub use crate::geom::{Fixed, Point};
+pub use crate::heights::{HeightModel, Window};
 pub use crate::layout::{layout_styled, layout_window, Caret, Layout, Line, Placed};
 pub use crate::shaper::Shaper;
 pub use crate::style::{Style, StyledRun, StyledText};
