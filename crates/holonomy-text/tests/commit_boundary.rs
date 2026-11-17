@@ -288,7 +288,8 @@ fn the_document_view_is_correct_before_the_commit_and_identical_after() {
     let path = temp_path();
     let (capsule, dem) = material(b"overlay", [0x61; 64]);
     let mut line = create_line(&path, capsule, &dem);
-    line.append_segments(&[b"alpha", b"beta"]).expect("two segments");
+    line.append_segments(&[b"alpha", b"beta"])
+        .expect("two segments");
 
     let first = Slab::new(SegmentId::new(0), 0, 5);
     let second = Slab::new(SegmentId::new(1), 0, 4);
@@ -312,7 +313,11 @@ fn the_document_view_is_correct_before_the_commit_and_identical_after() {
     let typed = draft.locate(&spine, 5).expect("in range");
     assert!(typed.span().is_draft());
     assert_eq!(typed.within(), 5);
-    assert_eq!(typed.segment_offset(), None, "uncommitted bytes have no segment");
+    assert_eq!(
+        typed.segment_offset(),
+        None,
+        "uncommitted bytes have no segment"
+    );
 
     // Commit, then drop the draft. The document view must not move by a single byte.
     let mut sink = LineSink { line: &mut line };
@@ -325,7 +330,10 @@ fn the_document_view_is_correct_before_the_commit_and_identical_after() {
         .iter()
         .map(|live| (live.offset(), live.len()))
         .collect();
-    assert_eq!(now, before, "the view is the same before and after the seal");
+    assert_eq!(
+        now, before,
+        "the view is the same before and after the seal"
+    );
 
     // The same caret position now names committed geometry in the segment the commit wrote.
     let sealed = draft.locate(&after, 5).expect("in range");

@@ -49,7 +49,10 @@ impl std::fmt::Display for DraftError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Overlaps { at, with } => {
-                write!(formatter, "the span at {at} overlaps the drafted leaf at {with}")
+                write!(
+                    formatter,
+                    "the span at {at} overlaps the drafted leaf at {with}"
+                )
             }
         }
     }
@@ -333,6 +336,14 @@ impl LiveSpan {
         }
     }
 
+    /// Whether the leaf covers no bytes.
+    ///
+    /// Only a drafted leaf can be empty — the spine refuses a leaf that carries nothing.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
     /// The sealed geometry the leaf derives from.
     #[must_use]
     pub const fn slab(self) -> Slab {
@@ -475,7 +486,11 @@ mod tests {
         assert_eq!(draft.document_len(&spine), 40);
         // A leaf with no bytes is not a span.
         assert_eq!(geometry(&spine, &draft), vec![(0, 10, 0), (10, 30, 2)]);
-        assert!(!draft.locate(&spine, 10).expect("in range").span().is_draft());
+        assert!(!draft
+            .locate(&spine, 10)
+            .expect("in range")
+            .span()
+            .is_draft());
     }
 
     #[test]
