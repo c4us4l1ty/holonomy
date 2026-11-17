@@ -264,6 +264,7 @@ dependencies = [
  "getrandom",
  "libc",
  "ml-kem",
+ "poly1305",
  "rand_core 0.10.1",
  "unicode-normalization",
  "x25519-dalek",
@@ -393,6 +394,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]

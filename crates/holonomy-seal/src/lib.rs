@@ -43,6 +43,8 @@ use blake2::digest::consts::U32;
 #[cfg(test)]
 use blake2::Blake2b512;
 use blake2::{Blake2b, Digest};
+// This direct feature-unification dependency enables zeroize in chacha20poly1305's Poly1305.
+use poly1305 as _;
 
 type Blake2b256 = Blake2b<U32>;
 use commit::{open_committed, seal_committed, CommittedCiphertext};
