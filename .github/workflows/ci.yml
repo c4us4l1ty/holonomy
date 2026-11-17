@@ -52,6 +52,7 @@ jobs:
             echo '```'
             for cmd in \
               "cargo fmt --all -- --check" \
+              "cargo tree -e features -p holonomy-seal >/tmp/holonomy-seal-feature-tree.txt && { grep -F zeroize /tmp/holonomy-seal-feature-tree.txt; git diff -- Cargo.lock; }" \
               "cargo clippy --locked --workspace --all-targets -- -D warnings" \
               "cargo test --locked --workspace" \
               "cargo run --locked -p xtask -- gates --check" \
