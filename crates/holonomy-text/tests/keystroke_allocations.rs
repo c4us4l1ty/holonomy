@@ -62,7 +62,9 @@ fn the_keystroke_path_allocates_nothing_and_the_control_proves_it() {
     // 1. A typed character: locate, hit a resident slab, insert in place.
     claim_quiet(|| {
         let hit = spine.locate(target).expect("in range");
-        let text = resident.fault_in_mut(hit.slab().segment()).expect("resident");
+        let text = resident
+            .fault_in_mut(hit.slab().segment())
+            .expect("resident");
         let outcome = text.insert(hit.within() as usize, b"k").expect("in range");
         assert_eq!(outcome, EditOutcome::InPlace);
         black_box(outcome);

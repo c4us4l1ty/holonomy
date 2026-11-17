@@ -242,7 +242,7 @@ mod tests {
     fn insertion_at_both_ends_works() {
         let mut slab = SlabText::from_text("middle", 8);
         assert_eq!(slab.insert(0, b"a ").expect("fits"), EditOutcome::InPlace);
-        assert_eq!(slab.insert(9, b" end").expect("fits"), EditOutcome::InPlace);
+        assert_eq!(slab.insert(8, b" end").expect("fits"), EditOutcome::InPlace);
         assert_eq!(slab.as_str(), "a middle end");
     }
 
@@ -294,10 +294,7 @@ mod tests {
     #[test]
     fn invalid_bytes_are_never_admitted() {
         let mut slab = SlabText::from_text("ok", 8);
-        assert_eq!(
-            slab.insert(2, &[0xFF]),
-            Err(TextError::InvalidUtf8)
-        );
+        assert_eq!(slab.insert(2, &[0xFF]), Err(TextError::InvalidUtf8));
         assert_eq!(slab.as_str(), "ok");
         assert_eq!(
             SlabText::from_plaintext(vec![0xF0, 0x28], 0).map(|_| ()),

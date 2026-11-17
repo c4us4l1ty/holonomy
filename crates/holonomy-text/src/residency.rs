@@ -109,11 +109,7 @@ impl<S: SegmentSource> ResidentSet<S> {
     /// # Errors
     ///
     /// [`ResidencyError::ZeroBudget`] if `budget_bytes` is zero.
-    pub fn new(
-        source: S,
-        budget_bytes: usize,
-        slack_bytes: usize,
-    ) -> Result<Self, ResidencyError> {
+    pub fn new(source: S, budget_bytes: usize, slack_bytes: usize) -> Result<Self, ResidencyError> {
         if budget_bytes == 0 {
             return Err(ResidencyError::ZeroBudget);
         }
@@ -230,8 +226,7 @@ impl<S: SegmentSource> ResidentSet<S> {
     /// next neighborhood is faulted in.
     pub fn retain(&mut self, keep: &[SegmentId]) -> usize {
         let before = self.entries.len();
-        self.entries
-            .retain(|entry| keep.contains(&entry.segment));
+        self.entries.retain(|entry| keep.contains(&entry.segment));
         before - self.entries.len()
     }
 
@@ -411,8 +406,7 @@ mod tests {
 
     #[test]
     fn slack_counts_against_the_budget_because_slack_is_memory() {
-        let mut resident =
-            ResidentSet::new(Counting::new(64), 256, 32).expect("non-zero budget");
+        let mut resident = ResidentSet::new(Counting::new(64), 256, 32).expect("non-zero budget");
         for segment in 0..3 {
             resident.fault_in(id(segment)).expect("source works");
         }
@@ -430,7 +424,10 @@ mod tests {
         let mut resident = ResidentSet::new(Counting::new(64), 256, 32).expect("non-zero budget");
         resident.fault_in(id(3)).expect("source works");
         let text = resident.fault_in_mut(id(3)).expect("resident");
-        assert_eq!(text.insert(0, b"typed ").expect("fits"), crate::EditOutcome::InPlace);
+        assert_eq!(
+            text.insert(0, b"typed ").expect("fits"),
+            crate::EditOutcome::InPlace
+        );
         assert_eq!(resident.resident_bytes(), 70);
         assert_eq!(
             resident.text(id(3)).expect("resident").as_str(),
@@ -508,8 +505,8 @@ mod tests {
         assert_eq!(spine.len(), 60_000_000);
 
         let budget = 4 * 65_536;
-        let mut resident = ResidentSet::new(Counting::new(65_536), budget, 0)
-            .expect("non-zero budget");
+        let mut resident =
+            ResidentSet::new(Counting::new(65_536), budget, 0).expect("non-zero budget");
 
         // Scroll through the whole lifetime a window at a time; the resident bound never moves,
         // and what is resident is always a consequence of the window, not of the document.
