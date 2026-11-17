@@ -276,7 +276,9 @@ impl<S: SegmentSink> Typing<S> {
                 let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
                 // `insert_slab` cuts the leaf at `at` if the offset lands inside one. The halves
                 // name adjacent ranges of the same sealed segment, so the text is not touched.
-                self.spine = self.spine.insert_slab(at, Slab::new(source, 0, registered))?;
+                self.spine = self
+                    .spine
+                    .insert_slab(at, Slab::new(source, 0, registered))?;
                 self.open = Some(Open {
                     source,
                     at,
@@ -473,7 +475,10 @@ mod tests {
         assert_eq!(last.slab().start(), 5);
         assert_ne!(middle.slab().segment(), first.slab().segment());
         assert_eq!(typing.document_len(), 21);
-        assert_eq!(typing.sink.segments, vec![b"hello world".to_vec(), b" beautiful".to_vec()]);
+        assert_eq!(
+            typing.sink.segments,
+            vec![b"hello world".to_vec(), b" beautiful".to_vec()]
+        );
     }
 
     #[test]
@@ -482,7 +487,11 @@ mod tests {
         typing.insert(b"abc").expect("typed");
         assert_eq!(typing.sealed_bytes(), 0);
         typing.insert_at(0, b"xy").expect("typed");
-        assert_eq!(typing.sealed_bytes(), 3, "the caret moved, so the open bytes were sealed");
+        assert_eq!(
+            typing.sealed_bytes(),
+            3,
+            "the caret moved, so the open bytes were sealed"
+        );
         assert_eq!(typing.pending(), b"xy");
         assert_eq!(typing.document_len(), 5);
         assert_eq!(typing.caret(), 2);
