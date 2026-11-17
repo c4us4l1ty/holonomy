@@ -10,22 +10,27 @@
 //! the shaper from the hit-test path would be the two-geometry disease with extra steps.
 
 use crate::geom::Fixed;
+use crate::style::Style;
 
 /// Where cluster widths and line heights come from.
+///
+/// Every metric question is asked *with* the style it applies to, because a heading is not the
+/// same layout drawn bigger: it has bigger advances and a taller line box, and the layout has to
+/// know that before it can place a caret.
 pub trait Shaper {
-    /// The advance width of one grapheme cluster, in logical units.
+    /// The advance width of one grapheme cluster at `style`, in logical units.
     ///
     /// Called once per cluster per layout, never from hit-test.
-    fn advance(&self, cluster: &str) -> Fixed;
+    fn advance(&self, cluster: &str, style: Style) -> Fixed;
 
-    /// The height of one line of text, in logical units.
+    /// The height of one line of text at `style`, in logical units.
     ///
     /// Must be positive: hit-testing picks a line by `y`, and a zero-height line box would make
     /// that choice undefined. Layout debug-asserts it.
-    fn line_height(&self) -> Fixed;
+    fn line_height(&self, style: Style) -> Fixed;
 
-    /// The distance from a line's top to its baseline, in logical units.
+    /// The distance from a line's top to its baseline at `style`, in logical units.
     ///
     /// Paint needs it to place glyphs; hit-test never does, which is why it cannot drift from it.
-    fn ascent(&self) -> Fixed;
+    fn ascent(&self, style: Style) -> Fixed;
 }

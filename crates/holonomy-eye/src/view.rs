@@ -117,6 +117,7 @@ impl View {
                         byte: cluster.byte,
                         x: self.to_device(cluster.x),
                         advance: self.to_device(cluster.advance),
+                        style: cluster.style,
                         text: cluster.text,
                     },
                 ));
@@ -227,13 +228,14 @@ mod tests {
     use super::*;
     use crate::layout::layout_window;
     use crate::shaper::Shaper;
+    use crate::style::Style;
     use crate::test_support::layout;
 
     /// A shaper whose clusters can have zero width, as marks do in a real font.
     struct Marks;
 
     impl Shaper for Marks {
-        fn advance(&self, cluster: &str) -> Fixed {
+        fn advance(&self, cluster: &str, _style: Style) -> Fixed {
             if cluster == "i" {
                 Fixed::ZERO
             } else {
@@ -241,11 +243,11 @@ mod tests {
             }
         }
 
-        fn line_height(&self) -> Fixed {
+        fn line_height(&self, _style: Style) -> Fixed {
             Fixed::units(20)
         }
 
-        fn ascent(&self) -> Fixed {
+        fn ascent(&self, _style: Style) -> Fixed {
             Fixed::units(15)
         }
     }

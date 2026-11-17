@@ -15,7 +15,11 @@
 //!   question about geometry and not about rounding) and [`Point`].
 //! - `cluster`: grapheme-cluster segmentation, so a caret can never land inside an extended
 //!   grapheme cluster.
-//! - `shaper`: the [`Shaper`] trait — the only door through which advances enter the system.
+//! - `shaper`: the [`Shaper`] trait — the only door through which advances enter the system, and
+//!   it is asked with a [`Style`], because a heading is a geometry change and not a decoration.
+//! - `style`: [`Style`], [`StyledRun`] and [`StyledText`]: style runs as layout data, so Block 7's
+//!   toolbar can change a heading without a renderer ever applying a style the layout did not
+//!   shape with.
 //! - `layout`: one run tree per laid-out window, which both [`Layout::paint_point`] and
 //!   [`Layout::hit_test`] walk.
 //! - `view`: [`View`], zoom and DPI as one exact integer transform that **both** consumers call —
@@ -38,12 +42,14 @@ mod cluster;
 mod geom;
 mod layout;
 mod shaper;
+mod style;
 mod view;
 
 pub use crate::cluster::Clusters;
 pub use crate::geom::{Fixed, Point};
-pub use crate::layout::{layout_window, Caret, Layout, Line, Placed};
+pub use crate::layout::{layout_styled, layout_window, Caret, Layout, Line, Placed};
 pub use crate::shaper::Shaper;
+pub use crate::style::{Style, StyledRun, StyledText};
 pub use crate::view::View;
 
 /// The single-geometry law, carried in code so it is compiled, not just quoted.

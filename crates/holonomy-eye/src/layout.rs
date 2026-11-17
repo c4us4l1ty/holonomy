@@ -23,6 +23,7 @@
 use crate::cluster::Clusters;
 use crate::geom::{Fixed, Point};
 use crate::shaper::Shaper;
+use crate::style::{Style, StyledText};
 use crate::view::View;
 
 /// One cluster, placed.
@@ -34,6 +35,8 @@ pub struct Placed<'a> {
     pub x: Fixed,
     /// Advance width.
     pub advance: Fixed,
+    /// The style the cluster was shaped with — the same value both consumers read.
+    pub style: Style,
     /// The cluster's text.
     pub text: &'a str,
 }
@@ -183,11 +186,13 @@ impl Caret {
     }
 }
 
-/// Lays `text` out at `width`, wrapping between clusters.
+/// Lays plain `text` out at `width`, wrapping between clusters — every cluster at
+/// [`Style::DEFAULT`].
 ///
-/// `origin` is `text`'s document byte offset, so every cluster and caret position is expressed in
-/// document coordinates — the same coordinates the Spine and the overlay use. A window that starts
-/// at byte 4,096 produces carets at 4,096 and beyond, never at zero.
+/// This is [`layout_styled`] with no runs. `origin` is `text`'s document byte offset, so every
+/// cluster and caret position is expressed in document coordinates — the same coordinates the
+/// Spine and the overlay use. A window that starts at byte 4,096 produces carets at 4,096 and
+/// beyond, never at zero.
 ///
 /// Wrapping is between clusters, not between words: word wrapping needs a word model, and a
 /// wrong word model would be a second opinion about where text goes.
@@ -198,38 +203,57 @@ pub fn layout_window<'a, S: Shaper + ?Sized>(
     width: Fixed,
     shaper: &S,
 ) -> Layout<'a> {
-    let line_height = shaper.line_height();
-    debug_assert!(
-        !line_height.is_zero(),
-        "a line height of zero makes hit-testing by y undefined"
-    );
+    layout_styled(StyledText::plain(text), origin, width, shaper)
+}
+
+/// Lays styled `text` out at `width`, wrapping between clusters.
+///
+/// This is the real entry point: a window of text and the runs that style it, in the same shape
+/// the Spine hands them over. Each cluster is shaped once, with the style in effect at its first
+/// byte, and that style is stored in the run tree — so a renderer never applies a style the layout
+/// did not shape with, and a caret never assumes a width the shaper did not report.
+///
+/// A line box is as tall as its tallest cluster's line height. An empty line — two hard breaks in a
+/// row, or the line after a trailing newline — takes the height of the style that reaches it.
+#[must_use]
+pub fn layout_styled<'a, S: Shaper + ?Sized>(
+    styled: StyledText<'a>,
+    origin: u64,
+    width: Fixed,
+    shaper: &S,
+) -> Layout<'a> {
+    let text = styled.text();
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut clusters: Vec<Placed<'a>> = Vec::new();
     let mut x = Fixed::ZERO;
     let mut top = Fixed::ZERO;
     let mut start_byte = origin;
     let mut end_byte = origin;
+    let mut line_height = Fixed::ZERO;
 
     for (offset, cluster) in Clusters::new(text) {
         let byte = origin + offset as u64;
         if cluster == "\n" || cluster == "\r\n" {
             // The line's content ends before the break; the next line starts after it.
+            let height = filled_height(line_height, styled, offset, shaper);
             lines.push(Line {
                 top,
-                height: line_height,
+                height,
                 clusters: core::mem::take(&mut clusters),
                 start_byte,
                 end_byte: byte,
                 end_x: x,
                 has_end: true,
             });
-            top += line_height;
+            top += height;
             x = Fixed::ZERO;
+            line_height = Fixed::ZERO;
             start_byte = byte + cluster.len() as u64;
             end_byte = start_byte;
             continue;
         }
-        let advance = shaper.advance(cluster);
+        let style = styled.style_at(offset as u64);
+        let advance = shaper.advance(cluster, style);
         if !clusters.is_empty() && x + advance > width {
             lines.push(Line {
                 top,
@@ -243,32 +267,63 @@ pub fn layout_window<'a, S: Shaper + ?Sized>(
             });
             top += line_height;
             x = Fixed::ZERO;
+            line_height = Fixed::ZERO;
             start_byte = byte;
         }
+        line_height = line_height.max(shaped_line_height(shaper, style));
         clusters.push(Placed {
             byte,
             x,
             advance,
+            style,
             text: cluster,
         });
         x += advance;
         end_byte = byte + cluster.len() as u64;
     }
+    let height = filled_height(line_height, styled, text.len(), shaper);
     lines.push(Line {
         top,
-        height: line_height,
+        height,
         clusters,
         start_byte,
         end_byte,
         end_x: x,
         has_end: true,
     });
-    let height = top + line_height;
+    let total = top + height;
     Layout {
         lines,
         width,
-        height,
+        height: total,
     }
+}
+
+/// A line's own height if it has clusters, otherwise the height of the style reaching `offset`.
+///
+/// An empty line is not a rendered glyph run, so there is no cluster whose height the line could
+/// inherit; the style at the line's own position is the only answer the window contains.
+fn filled_height<S: Shaper + ?Sized>(
+    line_height: Fixed,
+    styled: StyledText<'_>,
+    offset: usize,
+    shaper: &S,
+) -> Fixed {
+    if line_height.is_zero() {
+        let style = styled.style_at(offset as u64);
+        return shaped_line_height(shaper, style);
+    }
+    line_height
+}
+
+/// The shaper's line height for `style`, with the invariant hit-testing depends on asserted.
+fn shaped_line_height<S: Shaper + ?Sized>(shaper: &S, style: Style) -> Fixed {
+    let height = shaper.line_height(style);
+    debug_assert!(
+        !height.is_zero(),
+        "a line height of zero makes hit-testing by y undefined"
+    );
+    height
 }
 
 #[cfg(test)]
