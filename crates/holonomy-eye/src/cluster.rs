@@ -168,7 +168,10 @@ mod tests {
         let flag = "\u{1F1F3}\u{1F1F5}";
         assert_eq!(clusters(flag), vec![flag]);
         // A third indicator starts a new cluster instead of joining the finished flag.
-        assert_eq!(clusters(&format!("{flag}\u{1F1E6}")), vec![flag, "\u{1F1E6}"]);
+        assert_eq!(
+            clusters(&format!("{flag}\u{1F1E6}")),
+            vec![flag, "\u{1F1E6}"]
+        );
     }
 
     #[test]

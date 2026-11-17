@@ -99,7 +99,10 @@ impl<'a> Line<'a> {
     /// This is the one list both directions of the geometry walk. A line has a boundary before
     /// each cluster, plus its end position when the line ends in a hard break.
     pub fn boundaries(&self) -> impl Iterator<Item = (Fixed, u64)> + '_ {
-        let starts = self.clusters.iter().map(|cluster| (cluster.x, cluster.byte));
+        let starts = self
+            .clusters
+            .iter()
+            .map(|cluster| (cluster.x, cluster.byte));
         starts.chain(self.has_end.then_some((self.end_x, self.end_byte)))
     }
 }
@@ -172,7 +175,11 @@ impl<'a> Layout<'a> {
         let line = &self.lines[index];
         let mut best: Option<(Fixed, Fixed, u64)> = None;
         for (x, byte) in line.boundaries() {
-            let distance = if point.x < x { x - point.x } else { point.x - x };
+            let distance = if point.x < x {
+                x - point.x
+            } else {
+                point.x - x
+            };
             match best {
                 Some((closest, _, _)) if distance >= closest => {}
                 _ => best = Some((distance, x, byte)),
@@ -473,7 +480,7 @@ mod tests {
     fn random_texts_round_trip_at_random_widths() {
         const ALPHABET: &str = "abmi \né中\u{301}\u{1F600}\u{1F3FD}\u{200D}";
         let alphabet: Vec<char> = ALPHABET.chars().collect();
-        let state = 0x2545_F491_4F6C_DD1Du64;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
