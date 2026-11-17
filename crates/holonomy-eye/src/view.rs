@@ -83,6 +83,10 @@ impl View {
     /// Maps a logical coordinate to device space.
     ///
     /// This is the entire transform. Both consumers call it, and neither calls anything else.
+    ///
+    /// Sizes that overflow the 64-bit range saturate rather than wrap: a coordinate that large is
+    /// nowhere near a viewport, and a saturated number stays visibly absurd where a wrapped one
+    /// would look like geometry.
     #[must_use]
     pub fn to_device(&self, value: Fixed) -> Fixed {
         let numerator = i128::from(self.zoom_milli) * i128::from(self.dpi);
@@ -158,7 +162,12 @@ impl View {
         }
         let mut index = lines.len() - 1;
         for (candidate, line) in lines.iter().enumerate() {
-            if point.y < self.to_device(line.top() + line.height()) {
+            let bottom = self.to_device(line.top() + line.height());
+            debug_assert!(
+                bottom > self.to_device(line.top()),
+                "a line box that maps to zero device units cannot be hit-tested"
+            );
+            if point.y < bottom {
                 index = candidate;
                 break;
             }
@@ -213,14 +222,36 @@ fn device_boundaries(view: &View, line: &Line<'_>) -> Vec<(Fixed, u64)> {
 /// offsets can produce.
 fn round_ratio(value: i64, numerator: i128) -> i64 {
     let denominator = REFERENCE_DPI * i128::from(ZOOM_ONE);
-    let product = i128::from(value) * numerator;
+    let Some(product) = i128::from(value).checked_mul(numerator) else {
+        return saturate(value);
+    };
     let half = denominator / 2;
     let adjusted = if product < 0 {
-        product - half
+        product.saturating_sub(half)
     } else {
-        product + half
+        product.saturating_add(half)
     };
-    (adjusted / denominator) as i64
+    let rounded = adjusted / denominator;
+    let too_large = rounded > i128::from(i64::MAX);
+    let too_small = rounded < i128::from(i64::MIN);
+    if too_large {
+        return i64::MAX;
+    }
+    if too_small {
+        return i64::MIN;
+    }
+    rounded as i64
+}
+
+/// The end of the representable range in `value`'s direction.
+///
+/// A coordinate that saturates is already outside every viewport, and saturating keeps it obvious;
+/// wrapping would hand back a plausible-looking number instead.
+fn saturate(value: i64) -> i64 {
+    if value < 0 {
+        return i64::MIN;
+    }
+    i64::MAX
 }
 
 #[cfg(test)]
@@ -306,6 +337,18 @@ mod tests {
             let fixed = Fixed::from_64ths(value);
             assert_eq!(View::IDENTITY.to_device(fixed), fixed);
         }
+    }
+
+    #[test]
+    fn an_absurd_zoom_saturates_instead_of_wrapping() {
+        let absurd = View::new(i64::MAX, i64::MAX).expect("positive");
+        assert_eq!(absurd.to_device(Fixed::ONE), Fixed::from_64ths(i64::MAX));
+        let negative = Fixed::from_64ths(-64);
+        assert_eq!(absurd.to_device(negative), Fixed::from_64ths(i64::MIN));
+        // A zoom whose product still fits in 128 bits, but whose result does not fit in 64,
+        // clamps rather than truncating the cast.
+        let large = View::new(4_000_000_000_000_000_000, 4096).expect("positive");
+        assert_eq!(large.to_device(Fixed::ONE), Fixed::from_64ths(i64::MAX));
     }
 
     #[test]

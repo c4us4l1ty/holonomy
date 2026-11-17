@@ -233,7 +233,7 @@ pub fn layout_styled<'a, S: Shaper + ?Sized>(
 
     for (offset, cluster) in Clusters::new(text) {
         let byte = origin + offset as u64;
-        if cluster == "\n" || cluster == "\r\n" {
+        if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
             // The line's content ends before the break; the next line starts after it.
             let height = filled_height(line_height, styled, offset, shaper);
             lines.push(Line {
@@ -438,6 +438,78 @@ mod tests {
         assert!(checked > 0, "no caret positions were checked");
     }
 
+    /// The window's bytes, reassembled from the run tree in line order, must equal the window.
+    ///
+    /// Clusters carry their own text and each line carries its boundaries, so the bytes between
+    /// one line's end and the next line's start are exactly the break that separated them —
+    /// nothing, for a soft wrap. This is the invariant that catches a break being swallowed into a
+    /// cluster: the newline would simply be gone from the reconstruction.
+    fn assert_consumes_every_byte(laid: &Layout<'_>, text: &str) {
+        let mut rebuilt = String::new();
+        for (index, line) in laid.lines().iter().enumerate() {
+            for cluster in line.clusters() {
+                rebuilt.push_str(cluster.text);
+            }
+            match laid.lines().get(index + 1) {
+                Some(next) => {
+                    let start = line.end_byte() as usize;
+                    let end = next.start_byte() as usize;
+                    assert!(start <= end, "lines overlap in {text:?}");
+                    rebuilt.push_str(&text[start..end]);
+                }
+                None => {
+                    let end = line.end_byte();
+                    assert_eq!(end, text.len() as u64, "lost the tail of {text:?}");
+                }
+            }
+        }
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn the_run_tree_holds_every_byte_of_the_window_exactly_once() {
+        let texts = [
+            "",
+            "abc",
+            "a\n\nb",
+            "a\r\nb",
+            "a\rb",
+            "a\n\u{301}b",
+            "line one\nline two\n",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}x\n山田",
+        ];
+        for text in texts {
+            for width in [1, 3, 10] {
+                let laid = layout(text, width);
+                assert_consumes_every_byte(&laid, text);
+            }
+        }
+    }
+
+    #[test]
+    fn every_kind_of_break_splits_a_line() {
+        for text in ["a\nb", "a\r\nb", "a\rb"] {
+            let laid = layout(text, 10);
+            assert_eq!(laid.lines().len(), 2, "{text:?}");
+            assert_eq!(laid.lines()[1].start_byte(), text.len() as u64 - 1);
+            assert_eq!(laid.lines()[1].clusters()[0].text, "b");
+            // The break itself is not a cluster: it is not drawn and cannot hold a caret.
+            assert_eq!(laid.lines()[0].clusters().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_mark_after_a_break_does_not_swallow_it() {
+        let laid = layout("a\n\u{301}b", 10);
+        assert_eq!(laid.lines().len(), 2);
+        assert_eq!(laid.lines()[1].clusters()[0].text, "\u{301}");
+        assert_eq!(laid.lines()[1].clusters()[1].text, "b");
+        // The caret at the start of the second line is the first byte after the break.
+        let caret = laid.paint_point(2).expect("the second line's first byte");
+        assert_eq!(caret.line, 1);
+        assert_eq!(caret.x, Fixed::ZERO);
+    }
+
     #[test]
     fn every_caret_position_round_trips() {
         for text in [
@@ -478,6 +550,7 @@ mod tests {
             let width = 1 + (next() % 12) as i64;
             let laid = layout(&text, width);
             assert_round_trip(&laid, &text);
+            assert_consumes_every_byte(&laid, &text);
             // Clusters tile each line without overlapping.
             for line in laid.lines() {
                 let mut cursor = Fixed::ZERO;

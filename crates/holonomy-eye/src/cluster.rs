@@ -14,8 +14,11 @@
 //! * variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF),
 //! * ZWJ sequences: a character following U+200D always joins the cluster,
 //! * emoji skin-tone modifiers (U+1F3FB–U+1F3FF),
-//! * regional-indicator pairs (a flag is two of them),
-//! * CR LF, which is one break.
+//! * regional-indicator pairs (a flag is two of them).
+//!
+//! And it never joins across or onto a **line break**: CR, LF and CR LF end a cluster, so a
+//! combining mark or a zero-width joiner on the far side of a newline cannot swallow it. A lone CR
+//! is a break of its own, which the layout honours.
 //!
 //! It is conservative in the direction that matters: **it never splits a mark from its base**. The
 //! cost of the approximation is the other direction — a few sequences that UAX #29 would join are
@@ -68,12 +71,29 @@ fn is_regional_indicator(character: char) -> bool {
     matches!(character, '\u{1F1E6}'..='\u{1F1FF}')
 }
 
+/// Whether `character` is a line break, and therefore ends a cluster whatever follows it.
+///
+/// CR, LF and CR LF are all mandatory breaks (UAX #29 §4.4, GB3/GB4), and this crate treats all
+/// three as a hard break in layout. Nothing may join one: a mark glued to an LF would turn the
+/// cluster into something that is no longer `"\n"`, and the line break would silently vanish —
+/// the caret and the renderer would then disagree about where the line ended, which is the exact
+/// class of disagreement this crate exists to make impossible.
+fn is_break(character: char) -> bool {
+    character == '\n' || character == '\r'
+}
+
 /// Whether `current` continues the cluster that ends with `previous`.
 ///
 /// `regionals` is how many regional indicators the cluster already holds, which is what decides
 /// whether this one completes a pair or starts a new one.
 fn continues(previous: char, current: char, regionals: u32) -> bool {
-    if previous == '\u{200D}' || (previous == '\u{000D}' && current == '\u{000A}') {
+    if previous == '\r' && current == '\n' {
+        return true;
+    }
+    if is_break(previous) || is_break(current) {
+        return false;
+    }
+    if previous == '\u{200D}' {
         return true;
     }
     if is_regional_indicator(previous) && is_regional_indicator(current) {
@@ -179,6 +199,21 @@ mod tests {
         assert_eq!(clusters("\u{1F44D}\u{1F3FD}"), vec!["\u{1F44D}\u{1F3FD}"]);
         assert_eq!(clusters("a\r\nb"), vec!["a", "\r\n", "b"]);
         assert_eq!(clusters("a\nb"), vec!["a", "\n", "b"]);
+    }
+
+    #[test]
+    fn a_break_is_never_joined_by_what_follows_it() {
+        // A combining mark after an LF must not become part of the break's cluster: if it did, the
+        // cluster would no longer be "\n" and the line break would disappear.
+        assert_eq!(clusters("a\n\u{301}b"), vec!["a", "\n", "\u{301}", "b"]);
+        // Nor may a joining emoji sequence reach past a newline.
+        assert_eq!(clusters("a\u{200D}\nb"), vec!["a\u{200D}", "\n", "b"]);
+        // A mark before a break does not drag the break into the cluster either.
+        assert_eq!(clusters("e\u{301}\nx"), vec!["e\u{301}", "\n", "x"]);
+        // CR LF is still one break; a lone CR is a break by itself.
+        assert_eq!(clusters("a\r\nb"), vec!["a", "\r\n", "b"]);
+        assert_eq!(clusters("a\rb"), vec!["a", "\r", "b"]);
+        assert_eq!(clusters("a\r\u{301}b"), vec!["a", "\r", "\u{301}", "b"]);
     }
 
     #[test]

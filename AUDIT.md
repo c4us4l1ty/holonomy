@@ -53,6 +53,39 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-17 — Block 5, bug hunt before merge: a break that stopped being a break.** Three real
+  defects in the segmentation and transform, found by reading the code adversarially rather than by
+  a failing user report.
+
+  **1. A mark after a newline swallowed the line break.** Segmentation joined a combining mark to
+  whatever preceded it, including `"\n"`. The cluster then read `"\n\u{301}"`, which is not
+  `"\n"`, so the layout never took the hard-break branch: the newline was laid out as nothing and
+  the next line's text joined the previous one. The caret and any renderer would have disagreed
+  about where the line ended — the exact failure class this crate exists to make impossible.
+
+  **2. A zero-width joiner reached across a newline** for the same reason, from the other side: the
+  ZWJ rule was unconditional, so `👨\u{200D}\n` was one cluster.
+
+  **3. A lone carriage return was not a break at all.** UAX #29 makes CR, LF and CR LF all mandatory
+  breaks (GB3/GB4); the layout only knew two of the three, so a CR-only document rendered its line
+  ends as glyphs and its carets ran through them.
+
+  The fix is a single guard: nothing joins across or onto a break, and CR LF is the only pair that
+  merges. The regression tests are the interesting part. Besides six segmentation assertions, the
+  layout now has an invariant that would have caught all three at once: **the window's bytes,
+  reassembled from the run tree in line order, must equal the window**. Clusters carry their text
+  and lines carry their boundaries, so the bytes between one line's end and the next line's start
+  are exactly the break that separated them — nothing at all for a soft wrap. A swallowed newline
+  disappears from that reconstruction. The check runs over a fixed corpus and inside the randomized
+  property test, so future segmentation edits have to keep the bytes.
+
+  **Also hardened, not fixed.** `View::to_device` multiplied a coordinate by the zoom numerator in
+  `i128` and cast the result with `as i64`: an absurd zoom (or a coordinate near the end of the
+  range) wrapped in release and panicked in debug. It now saturates, because a coordinate that
+  large is nowhere near a viewport and a saturated number stays visibly absurd where a wrapped one
+  looks like geometry. `View::hit_test` debug-asserts that a line box does not map to zero device
+  units, which is the one input that would make "which line is this click on" undefined.
+
 - **2026-11-17 — Block 5, fourth slice: the height index, and a cost claim that is counted.**
   Block 5's second gate says layout cost must be invariant in document length. Half of that is the
   index that finds the viewport without reading the document; the other half is the caller that
