@@ -557,7 +557,7 @@ mod tests {
     fn random_edits_match_a_byte_level_model() {
         use crate::test_support::XorShift;
 
-        for seed in [1u64, 9, 0xC0FF_EE, 123_456_789] {
+        for seed in [1u64, 9, 0x00C0_FFEE, 123_456_789] {
             let mut rng = XorShift::new(seed);
             let mut spine = Spine::empty();
             // (segment, offset in segment) for every document byte, in order.

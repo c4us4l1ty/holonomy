@@ -46,6 +46,7 @@ Listed so they stay dead.
 | OQ-6 | `ParamsClass::Test` misuse guard: a release build could derive a user container at the weakened schedule, and replayed records had no fence. Closed at both boundaries: `derive_root_secret` refuses `Test`; `derive_root_secret_with` refuses below-floor schedules and accepts only records emitted by the calibrated production selector; Block 3's header rejects weak memory, out-of-range memory, non-step-aligned memory, or unbounded time/lanes **before Argon2 runs**. Test/debug profiles admit only the exact test tuple. | **closed** 2026-11-16 |
 | OQ-8 | Undo depth as memory: `History` keeps one `Spine` root per state. Roots share subtrees, so the cost per edit is O(log N) nodes, but an unbounded history over years of typing still grows with the **number of edits**, not with the document — and the world-line on disk already holds that history. Either bound the in-memory history (a ring of roots plus reconstruction from the log) or state the growth openly. Decide before Block 6, where a session is long enough for it to matter. | **open — found 2026-11-17 by the bug hunt, no fix yet** |
 | OQ-7 | Valid-prefix rollback: a byte-perfect earlier witness prefix is indistinguishable from a file that legitimately stopped there without trusted state outside the file. RFC-002 amended to claim integrity of present bytes and crash consistency, not freshness against full-prefix rollback. An external transparency/monotonic anchor would resolve this but cannot be mandatory under passphrase portability (L-9). | **open — accepted limitation, not locally solvable** |
+| OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but repeated split/rejoin churn (a commit boundary is a split) inflates the leaf count and with it the height and every slab-count-derived budget. Either coalesce same-segment neighbours at commit or bound the fragmentation. Found 2026-11-17 by the new shape test's first red run. | **open — no fix yet** |
 
 ## Audit trail
 
@@ -86,6 +87,20 @@ Listed so they stay dead.
   world-line on disk already stores the history. Bounding the in-memory history is a design
   decision (ring of roots plus reconstruction from the log), not a patch, and it belongs before
   Block 6 rather than after it.
+
+  **What CI said about the hunt itself, on the first push.** The property tests were written
+  without a local compiler, and CI (run
+  [44046796516](https://github.com/c4us4l1ty/holonomy/actions/runs/44046796516)) found exactly the
+  class of error that reading cannot: `check_invariants` reported no drift, the AVL checks held,
+  and the only failures were in the *test's own model*. The new shape test compared the tree's leaf
+  count with the model's slab count, and seed 1 disagreed by one — six leaves against five slabs.
+  The tree was right and the model was wrong: a cut inside a leaf produces two leaves for one
+  segment and `join` never merges them back, which is the documented design (a segment's bytes may
+  span several slabs) and the reason `splitting_and_rejoining_every_byte_preserves_the_sequence`
+  already compares bytes rather than leaves. The assertion is now exact instead of approximate —
+  leaves equal modelled slabs **plus one per interior cut**, with boundary cuts counted as free —
+  so a genuinely lost or invented leaf still fails. Two `clippy::unusual_byte_groupings` lints in
+  the new seed arrays were the only other findings.
 
   **What this entry does not claim.** The hunt covered `holonomy-text` — the code written this
   session and the only part not yet exercised by a property test. `holonomy-seal` and

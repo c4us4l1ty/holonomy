@@ -340,7 +340,7 @@ mod tests {
 
         // Multi-byte characters on purpose: the boundary rules must hold for every width.
         let alphabet = ['a', 'b', ' ', 'é', '中', '🙂'];
-        for seed in [3u64, 11, 777, 0x00AB_CD] {
+        for seed in [3u64, 11, 777, 0x0000_ABCD] {
             let mut rng = XorShift::new(seed);
             let mut text = SlabText::from_text("", 512);
             let mut model = String::new();

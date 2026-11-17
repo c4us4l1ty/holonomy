@@ -387,6 +387,10 @@ mod tests {
             let mut rng = XorShift::new(seed);
             let mut root = empty();
             let mut expected: Vec<Slab> = Vec::new();
+            // A cut inside one leaf spends one leaf for good: joins never merge fragments back,
+            // because a segment's bytes may legitimately span several slabs. Boundary cuts are
+            // free (`split` returns the leaf whole on either side).
+            let mut fragments = 0u64;
 
             for _ in 0..400 {
                 match rng.below(3) {
@@ -399,6 +403,9 @@ mod tests {
                     1 => {
                         // Split at a random offset and rejoin: shape churn without content change.
                         let at = rng.below(root.bytes() + 1);
+                        if at > 0 && at < root.bytes() {
+                            fragments += 1;
+                        }
                         let (left, right) = split(&root, at);
                         check_invariants(&left);
                         check_invariants(&right);
@@ -418,7 +425,11 @@ mod tests {
                 let (bytes, slabs, _) = check_invariants(&root);
                 let expected_bytes: u64 = expected.iter().map(|s| u64::from(s.len())).sum();
                 assert_eq!(bytes, expected_bytes, "seed {seed}");
-                assert_eq!(u64::from(slabs), expected.len() as u64, "seed {seed}");
+                assert_eq!(
+                    u64::from(slabs),
+                    expected.len() as u64 + fragments,
+                    "seed {seed}: a leaf was gained or lost"
+                );
             }
         }
     }
