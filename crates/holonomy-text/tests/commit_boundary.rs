@@ -173,7 +173,7 @@ fn the_resident_set_reads_the_segment_the_commit_wrote() {
     let spine = Spine::from_slabs([Slab::new(SegmentId::new(0), 0, 19)]);
     let span = spine.spans_in(0, spine.len()).pop().expect("one span");
     let mut text = resident(&line, 0, 32);
-    text.insert(9, b"very ").expect("fits");
+    text.insert(10, b"very ").expect("fits");
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
     let after = committed.spine().clone();
