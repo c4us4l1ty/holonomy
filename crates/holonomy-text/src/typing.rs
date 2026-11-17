@@ -22,11 +22,18 @@
 //! so a user pressing undo steps over a seal the way they step over an idle moment. One root per
 //! 64 KiB, not one per keystroke.
 //!
-//! # What this does not do yet
+//! # The caret is the caller's, the split is here
 //!
-//! The open source is the document's **tail**. Typing in the middle of a document splits a leaf and
-//! needs the caret, which is the editor's model, not the storage's; that is the next slice, and
-//! nothing here pretends otherwise: `at` is always `spine.len()`.
+//! [`Typing::insert_at`] types at a document offset, which is what a caret is. Placing text in the
+//! middle of a leaf is pure geometry: [`Spine::insert_slab`] cuts the leaf in two — the halves name
+//! adjacent ranges of the same sealed segment, so no byte moves and nothing is re-sealed — and the
+//! new source sits between them.
+//!
+//! One rule makes that safe to reason about: **moving the caret seals what is open.** A session
+//! holds at most one open source, so a jump to another position appends the pending bytes once and
+//! leaves the document fully sealed. Without the rule there would be several open sources drafting
+//! lengths at once and every offset query would walk them all; with it, every offset before the
+//! open leaf is exact and the overlay is a single entry.
 
 use crate::commit::{Appended, SegmentSink};
 use crate::draft::Draft;
@@ -107,6 +114,8 @@ pub struct Typing<S> {
     buffer: SlabText,
     capacity: usize,
     open: Option<Open>,
+    /// Where the next source is placed, when it is not the document's tail.
+    next_at: Option<u64>,
     sealed_bytes: u64,
 }
 
@@ -131,17 +140,50 @@ impl<S: SegmentSink> Typing<S> {
                 .expect("an empty slab is valid UTF-8"),
             capacity,
             open: None,
+            next_at: None,
             sealed_bytes: 0,
         }
     }
 
-    /// Types `bytes` at the end of the document, sealing as often as the buffer requires.
+    /// Types `bytes` wherever the caret is — the document's end when nothing is open.
     ///
     /// # Errors
     ///
     /// A text, spine or sink error. A refused seal leaves the text in the buffer, so nothing typed
     /// is lost, and a burst larger than a whole buffer is split across seals rather than refused.
     pub fn insert(&mut self, bytes: &[u8]) -> Result<(), TypingError> {
+        let at = self.caret();
+        self.insert_at(at, bytes)
+    }
+
+    /// Types `bytes` at document offset `at`, moving the caret there first.
+    ///
+    /// Moving the caret **seals** whatever is open: one append, and the document is fully sealed
+    /// while the new source is placed. That is what keeps every offset before the open leaf exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::insert`].
+    pub fn insert_at(&mut self, at: u64, bytes: &[u8]) -> Result<(), TypingError> {
+        if at != self.caret() {
+            self.flush()?;
+            self.next_at = Some(at.min(self.spine.len()));
+        }
+        self.type_bytes(bytes)
+    }
+
+    /// The document offset the next typed byte lands at.
+    #[must_use]
+    pub fn caret(&self) -> u64 {
+        match self.open {
+            Some(open) => open.at + u64::try_from(self.buffer.len()).expect("a buffer fits in u64"),
+            None => self.next_at.unwrap_or_else(|| self.spine.len()),
+        }
+    }
+
+    /// The keystroke loop: fill the buffer, seal when it is full, place the source when the first
+    /// byte arrives.
+    fn type_bytes(&mut self, bytes: &[u8]) -> Result<(), TypingError> {
         let mut rest = bytes;
         while !rest.is_empty() {
             let room = self.capacity - self.buffer.len();
@@ -231,8 +273,10 @@ impl<S: SegmentSink> Typing<S> {
                 }
                 let source = self.sources.open();
                 let registered = u32::try_from(self.buffer.len()).expect("capacity fits in u32");
-                let at = self.spine.len();
-                self.spine = self.spine.append(Slab::new(source, 0, registered));
+                let at = self.next_at.take().unwrap_or_else(|| self.spine.len());
+                // `insert_slab` cuts the leaf at `at` if the offset lands inside one. The halves
+                // name adjacent ranges of the same sealed segment, so the text is not touched.
+                self.spine = self.spine.insert_slab(at, Slab::new(source, 0, registered))?;
                 self.open = Some(Open {
                     source,
                     at,
@@ -268,6 +312,7 @@ impl<S: SegmentSink> Typing<S> {
         self.spine = self.spine.replace_range(open.at, end, corrected)?;
         self.draft.forget(open.at);
         self.sealed_bytes += u64::try_from(len).expect("a buffer fits in u64");
+        self.next_at = Some(open.at + u64::try_from(len).expect("a buffer fits in u64"));
         self.open = None;
         self.buffer = SlabText::from_plaintext(Vec::new(), self.capacity)
             .expect("an empty slab is valid UTF-8");
@@ -406,6 +451,76 @@ mod tests {
         // No root was copied per keystroke: the seal count is the buffer's, not the keyboard's.
         assert!(typing.spine().slab_count() as usize >= typed.len() / 64);
         assert!(typing.spine().slab_count() as usize <= typed.len() / 64 + 1);
+    }
+
+    #[test]
+    fn typing_in_the_middle_splits_a_leaf_and_moves_no_bytes() {
+        let mut typing = session(64);
+        typing.insert(b"hello world").expect("typed");
+        // Moving the caret to 5 seals what was open, then places a new source there.
+        typing.insert_at(5, b" beautiful").expect("typed");
+        typing.flush().expect("flushed");
+        let spine = typing.spine();
+        assert_eq!(spine.slab_count(), 3);
+        let leaves = spine.spans_in(0, spine.len());
+        let (first, middle, last) = (leaves[0], leaves[1], leaves[2]);
+        assert_eq!((first.offset(), first.len()), (0, 5));
+        assert_eq!((middle.offset(), middle.len()), (5, 10));
+        assert_eq!((last.offset(), last.len()), (15, 6));
+        // The outer two are halves of one sealed segment: a cut, not a rewrite.
+        assert_eq!(first.slab().segment(), last.slab().segment());
+        assert_eq!(first.slab().start(), 0);
+        assert_eq!(last.slab().start(), 5);
+        assert_ne!(middle.slab().segment(), first.slab().segment());
+        assert_eq!(typing.document_len(), 21);
+        assert_eq!(typing.sink.segments, vec![b"hello world".to_vec(), b" beautiful".to_vec()]);
+    }
+
+    #[test]
+    fn moving_the_caret_seals_what_was_open() {
+        let mut typing = session(64);
+        typing.insert(b"abc").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 0);
+        typing.insert_at(0, b"xy").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 3, "the caret moved, so the open bytes were sealed");
+        assert_eq!(typing.pending(), b"xy");
+        assert_eq!(typing.document_len(), 5);
+        assert_eq!(typing.caret(), 2);
+    }
+
+    #[test]
+    fn typing_at_the_end_does_not_seal() {
+        let mut typing = session(64);
+        typing.insert(b"abc").expect("typed");
+        typing.insert_at(3, b"def").expect("typed");
+        assert_eq!(typing.sealed_bytes(), 0);
+        assert_eq!(typing.spine().slab_count(), 1);
+        assert_eq!(typing.document_len(), 6);
+    }
+
+    #[test]
+    fn a_caret_past_the_end_appends() {
+        let mut typing = session(64);
+        typing.insert(b"abc").expect("typed");
+        typing.insert_at(99, b"def").expect("typed");
+        assert_eq!(typing.document_len(), 6);
+        assert_eq!(typing.caret(), 6);
+    }
+
+    #[test]
+    fn a_mid_document_source_fills_and_seals_without_moving_other_bytes() {
+        let mut typing = session(8);
+        typing.insert(b"HEADTAIL").expect("typed");
+        typing.insert_at(4, b"0123456789").expect("typed");
+        typing.flush().expect("flushed");
+        let spine = typing.spine();
+        let leaves: Vec<(u64, u64)> = spine
+            .spans_in(0, spine.len())
+            .iter()
+            .map(|span| (span.offset(), span.len()))
+            .collect();
+        assert_eq!(leaves, vec![(0, 4), (4, 8), (12, 2), (14, 4)]);
+        assert_eq!(typing.document_len(), 18);
     }
 
     #[test]
