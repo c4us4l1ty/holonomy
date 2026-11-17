@@ -18,7 +18,7 @@
 //! > it. Undo is a pointer walk, never a plaintext buffer — otherwise the wipe set would grow
 //! > with history.
 //!
-//! Six structural consequences, each witnessed by a test in this crate:
+//! Seven structural consequences, each witnessed by a test in this crate:
 //!
 //! * A [`Spine`] holds no plaintext at all — only [`Slab`] references — so a sixty-year document
 //!   costs bytes that scale with segment count, not with readable text.
@@ -34,11 +34,16 @@
 //! * [`Draft`] answers offsets and ranges against the committed geometry plus the drafted lengths,
 //!   so the document view is correct while the spine is out of date — and an empty overlay answers
 //!   exactly as the spine does.
+//! * A leaf names a **source**, and a source is either open (bytes in a resident buffer) or sealed
+//!   (bytes in the world-line), at the same address ([`OpenSources`], D-7). Text being typed is
+//!   therefore an ordinary leaf, and sealing it changes no root — so undo, history and `verify`
+//!   never observe a seal.
 
 pub mod commit;
 pub mod draft;
 pub mod residency;
 pub mod slab;
+pub mod source;
 mod spine;
 pub mod text;
 mod tree;
@@ -47,6 +52,7 @@ pub use commit::{commit_slab, Appended, CommitError, Committed, SegmentSink, Wit
 pub use draft::{Draft, DraftError, LiveHit, LiveSpan};
 pub use residency::{ResidencyError, ResidentSet, SegmentSource};
 pub use slab::{SegmentId, Slab, SlabHit, SlabSpan};
+pub use source::{is_provisional, Location, OpenSources, SealError};
 pub use spine::{History, Spine, SpineError};
 pub use text::{EditOutcome, SlabText, TextError};
 
