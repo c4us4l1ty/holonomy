@@ -267,8 +267,11 @@ impl HeightModel {
     /// How many leaves have a top edge strictly before `y` — the exclusive end of a window whose
     /// bottom edge is `y`, O(log n).
     ///
-    /// This may equal the number of leaves: a `y` past the document has every leaf starting before
-    /// it. `None` when `y` is at or before zero.
+    /// The search finds the last leaf whose top edge is strictly before `y`, so the count includes
+    /// that leaf and every leaf before it — zero-height leaves share a top edge with their
+    /// neighbour and are counted together. The count saturates at the number of leaves, because a
+    /// `y` past the document has every leaf starting before it. `None` when `y` is at or before
+    /// zero.
     fn leaves_starting_before(&self, y: Fixed) -> Option<usize> {
         if y <= Fixed::ZERO {
             return None;
@@ -287,7 +290,7 @@ impl HeightModel {
             }
             step >>= 1;
         }
-        Some(index)
+        Some((index + 1).min(self.heights.len()))
     }
 
     fn read_cell(&self, cell: usize) -> Fixed {
