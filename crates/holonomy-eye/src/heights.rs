@@ -167,7 +167,10 @@ impl HeightModel {
     /// Panics in debug builds if `leaf` is not a leaf of this model.
     pub fn set(&mut self, leaf: usize, height: Fixed) {
         debug_assert!(leaf < self.heights.len(), "leaf out of range");
-        debug_assert!(!height.sixtyfourths().is_negative(), "heights are not negative");
+        debug_assert!(
+            !height.sixtyfourths().is_negative(),
+            "heights are not negative"
+        );
         let delta = height - self.heights[leaf];
         self.heights[leaf] = height;
         let mut cell = leaf + 1;
@@ -412,7 +415,11 @@ mod tests {
         let model = model(&heights);
         for y in -1..14 {
             let point = Fixed::units(y);
-            assert_eq!(model.leaf_before(point), naive_leaf_before(&heights, point), "at {y}");
+            assert_eq!(
+                model.leaf_before(point),
+                naive_leaf_before(&heights, point),
+                "at {y}"
+            );
         }
     }
 
@@ -476,7 +483,10 @@ mod tests {
             assert_eq!(window.len(), 20);
             // log2(leaves) = exponent; a window is two searches and two prefixes.
             let bound = 8 * u64::from(exponent) + 16;
-            assert!(measured <= bound, "{measured} reads for 2^{exponent} leaves");
+            assert!(
+                measured <= bound,
+                "{measured} reads for 2^{exponent} leaves"
+            );
             reads.push(measured);
         }
         // Sixteen times the leaves costs less than twice the reads: the work tracks log(leaves),
@@ -487,7 +497,7 @@ mod tests {
 
     #[test]
     fn the_window_agrees_with_a_scan_over_random_heights() {
-        let state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
