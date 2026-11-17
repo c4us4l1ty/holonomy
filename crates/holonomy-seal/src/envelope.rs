@@ -245,9 +245,8 @@ pub(crate) fn unwrap_key_bytes(
     let mut ml_seed = Zeroizing::new([0u8; ML_KEM_1024_SEED_BYTES]);
     let mut x25519 = Zeroizing::new([0u8; X25519_SK_BYTES]);
     ml_seed.copy_from_slice(&plain[..ML_KEM_1024_SEED_BYTES]);
-    x25519.copy_from_slice(
-        &plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES],
-    );
+    x25519
+        .copy_from_slice(&plain[ML_KEM_1024_SEED_BYTES..ML_KEM_1024_SEED_BYTES + X25519_SK_BYTES]);
     Ok(HybridDecapsulationKey {
         ml_kem: *ml_seed,
         x25519: *x25519,
@@ -284,8 +283,8 @@ pub(crate) fn derive_dem_key(
     let mut h = Blake2b512::new();
     h.update(b"HOLONOMY_V6_DEM");
     h.update([0u8]);
-    h.update(&ss.pq);
-    h.update(&ss.ecc);
+    h.update(ss.pq.as_slice());
+    h.update(ss.ecc.as_slice());
     h.update(ct.ml_kem);
     h.update(ct.x25519);
     h.update(k_unwrap);
@@ -447,10 +446,7 @@ impl HybridKem for MlKem1024X25519 {
         drop(shared);
         drop(x_sk);
 
-        Ok(SharedSecrets {
-            pq: *pq,
-            ecc: *ecc,
-        })
+        Ok(SharedSecrets { pq: *pq, ecc: *ecc })
     }
 }
 

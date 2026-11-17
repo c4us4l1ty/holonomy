@@ -37,8 +37,7 @@ mod secret;
 
 #[cfg(test)]
 #[global_allocator]
-static ZEROIZE_AUDIT_ALLOCATOR: allocation_audit::AuditAllocator =
-    allocation_audit::AuditAllocator;
+static ZEROIZE_AUDIT_ALLOCATOR: allocation_audit::AuditAllocator = allocation_audit::AuditAllocator;
 
 use blake2::digest::consts::U32;
 #[cfg(test)]

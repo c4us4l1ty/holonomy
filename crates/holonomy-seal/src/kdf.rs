@@ -230,7 +230,7 @@ pub fn derive_subkey(root: &RootSecret, label: &[u8], context: &[u8]) -> Subkey 
     h.update((label.len() as u64).to_le_bytes());
     h.update(label);
     h.update([0u8]);
-    h.update(&root.0);
+    h.update(root.0.as_slice());
     h.update((context.len() as u64).to_le_bytes());
     h.update(context);
     let mut digest = h.finalize();

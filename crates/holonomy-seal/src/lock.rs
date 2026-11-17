@@ -199,10 +199,7 @@ fn madvise_dontdump(ptr: *mut u8, len: usize) -> Result<(), ()> {
     let start = ptr as usize;
     let end = start.checked_add(len).ok_or(())?;
     let aligned_start = start - (start % page_size);
-    let aligned_end = end
-        .div_ceil(page_size)
-        .checked_mul(page_size)
-        .ok_or(())?;
+    let aligned_end = end.div_ceil(page_size).checked_mul(page_size).ok_or(())?;
     let aligned_len = aligned_end.checked_sub(aligned_start).ok_or(())?;
 
     // Use libc's platform constant: Linux MADV_DONTDUMP is 16 (19 is KEEPONFORK).

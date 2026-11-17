@@ -14,15 +14,12 @@ struct Watched {
     length: AtomicUsize,
 }
 
-static WATCHED: [Watched; WATCH_SLOTS] = [
-    const {
-        Watched {
-            address: AtomicUsize::new(0),
-            length: AtomicUsize::new(0),
-        }
-    };
-    WATCH_SLOTS
-];
+static WATCHED: [Watched; WATCH_SLOTS] = [const {
+    Watched {
+        address: AtomicUsize::new(0),
+        length: AtomicUsize::new(0),
+    }
+}; WATCH_SLOTS];
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static REGISTERED: AtomicUsize = AtomicUsize::new(0);

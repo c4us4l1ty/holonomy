@@ -131,13 +131,14 @@ mod tests {
 
     #[test]
     fn nfc_expansion_is_counted_without_exceeding_the_fixed_buffer() {
-        // U+0344 canonically decomposes to two UTF-8 combining marks under NFC. After 257
-        // inputs, the normalized prefix crosses the 1,024-byte limit at 1,028 bytes.
+        // U+0344 canonically decomposes to two two-byte combining marks under NFC. The first
+        // mark of input 257 crosses the 1,024-byte limit at 1,026 bytes; the second is not
+        // written into the fixed-size buffer.
         let raw = "\u{344}".repeat(513);
         assert_eq!(raw.len(), 1_026);
         assert_eq!(
             PassphraseInput::new(&raw).unwrap_err(),
-            PassphraseError::TooLong { len: 1_028 }
+            PassphraseError::TooLong { len: 1_026 }
         );
     }
 

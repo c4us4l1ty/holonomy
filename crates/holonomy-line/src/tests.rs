@@ -522,8 +522,13 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         .arg(&storage_dir)
         .output()
         .expect("findmnt is required to verify the bounded loop device");
-    assert!(mount_source.status.success(), "findmnt source lookup failed");
-    let mount_source = String::from_utf8_lossy(&mount_source.stdout).trim().to_owned();
+    assert!(
+        mount_source.status.success(),
+        "findmnt source lookup failed"
+    );
+    let mount_source = String::from_utf8_lossy(&mount_source.stdout)
+        .trim()
+        .to_owned();
     assert!(
         mount_source.starts_with("/dev/loop"),
         "L-6 rehearsal refuses non-loop devices, got {mount_source}"
@@ -534,7 +539,10 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         .arg(&storage_dir)
         .output()
         .expect("df is required to verify the bounded filesystem");
-    assert!(filesystem_space.status.success(), "df failed: {filesystem_space:?}");
+    assert!(
+        filesystem_space.status.success(),
+        "df failed: {filesystem_space:?}"
+    );
     let filesystem_space = String::from_utf8_lossy(&filesystem_space.stdout);
     let filesystem_space = filesystem_space
         .lines()
@@ -556,6 +564,25 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         "L-6 rehearsal refuses filesystems larger than 256 MiB, got {filesystem_bytes} bytes"
     );
 
+    let block_size_output = Command::new("stat")
+        .args(["-f", "-c", "%S", "--"])
+        .arg(&storage_dir)
+        .output()
+        .expect("stat is required to query the ext4 block size");
+    assert!(
+        block_size_output.status.success(),
+        "stat filesystem query failed: {block_size_output:?}"
+    );
+    let filesystem_block_bytes: u64 = String::from_utf8_lossy(&block_size_output.stdout)
+        .trim()
+        .parse()
+        .expect("stat reports a numeric filesystem block size");
+    assert!(
+        filesystem_block_bytes.is_power_of_two()
+            && filesystem_block_bytes <= u64::from(MAX_SEGMENT_BYTES),
+        "L-6 requires a power-of-two filesystem block no larger than a segment, got {filesystem_block_bytes} bytes"
+    );
+
     let id = generate_container_id().unwrap();
     let suffix = id
         .iter()
@@ -566,8 +593,37 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
     let salt = [0x6B; 64];
     let (_keys, capsule, dem) = test_material(b"real ENOSPC qualification", salt);
     let mut line = WorldLine::create(&path.0, test_header(salt, capsule), &dem).unwrap();
-    line.append_segments(&[&b"witness committed before filesystem full"[..]])
-        .unwrap();
+
+    // End the committed prefix on a block boundary. Otherwise a tiny append can fit in the
+    // already allocated final block even after the filler has received ENOSPC.
+    let next_segment_count = line
+        .segment_count()
+        .checked_add(1)
+        .expect("genesis leaves room for one segment");
+    let genesis_end = fs::metadata(&path.0).unwrap().len();
+    let record_frame_overhead =
+        (RECORD_HEADER_BYTES + RECORD_FIXED_BYTES + AEAD_TAG_BYTES as usize) as u64;
+    let next_append_overhead = 2 * record_frame_overhead
+        + WITNESS_BASE_BYTES as u64
+        + u64::from(next_segment_count.count_ones()) * 32;
+    let mut initial_payload_bytes = (filesystem_block_bytes
+        - (genesis_end + next_append_overhead) % filesystem_block_bytes)
+        % filesystem_block_bytes;
+    if initial_payload_bytes == 0 {
+        initial_payload_bytes = filesystem_block_bytes;
+    }
+    assert!(
+        initial_payload_bytes <= u64::from(MAX_SEGMENT_BYTES),
+        "block-alignment segment exceeds the format limit"
+    );
+    let initial_payload = vec![0x6B; initial_payload_bytes as usize];
+    line.append_segments(&[&initial_payload[..]]).unwrap();
+    let baseline_committed_end = fs::metadata(&path.0).unwrap().len();
+    assert_eq!(
+        baseline_committed_end % filesystem_block_bytes,
+        0,
+        "prior authenticated witness must end on a fresh allocation block"
+    );
 
     let mut filler = OpenOptions::new()
         .write(true)
@@ -575,62 +631,85 @@ fn real_enospc_preserves_an_authenticated_witness_on_ext4() {
         .open(&filler_path.0)
         .unwrap();
     let chunk = vec![0x5A; 1024 * 1024];
-    let mut observed_enospc = false;
-    loop {
+    let filler_enospc_phase = loop {
         match filler.write_all(&chunk) {
             Ok(()) => match filler.sync_all() {
                 Ok(()) => {}
-                Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
-                    observed_enospc = true;
-                    break;
-                }
+                Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => break "sync",
                 Err(error) => panic!("filler sync failed for a non-ENOSPC reason: {error}"),
             },
-            Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
-                observed_enospc = true;
-                break;
-            }
+            Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => break "write",
             Err(error) => panic!("filler write failed for a non-ENOSPC reason: {error}"),
         }
-    }
-    assert!(observed_enospc, "the mounted filesystem must report real ENOSPC");
+    };
     let filler_bytes = fs::metadata(&filler_path.0).unwrap().len();
     assert!(filler_bytes > 0, "the filler must consume filesystem space");
 
-    let append_result = line.append_segments(&[&b"must survive disk-full failure"[..]]);
+    let available_output = Command::new("df")
+        .args(["-B1", "--output=avail"])
+        .arg(&storage_dir)
+        .output()
+        .expect("df is required to verify that the filesystem is full");
+    assert!(
+        available_output.status.success(),
+        "df available-space query failed: {available_output:?}"
+    );
+    let available_bytes_after_fill: u64 = String::from_utf8_lossy(&available_output.stdout)
+        .lines()
+        .last()
+        .expect("df reports available bytes")
+        .trim()
+        .parse()
+        .expect("df available bytes are numeric");
+    assert_eq!(
+        available_bytes_after_fill, 0,
+        "filler reported ENOSPC but the filesystem still has available blocks"
+    );
+
+    // Request more segment payload than the entire bounded filesystem can hold. Repeated
+    // borrowed slices keep memory bounded while ensuring any inode preallocation is exhausted.
+    let disk_full_payload = vec![0xD4; MAX_SEGMENT_BYTES as usize];
+    let disk_full_segment_count =
+        usize::try_from(filesystem_bytes / u64::from(MAX_SEGMENT_BYTES) + 1)
+            .expect("the bounded filesystem yields a representable segment count");
+    let disk_full_segments = vec![&disk_full_payload[..]; disk_full_segment_count];
+    let committed_segments_before_failure = line.segment_count();
+    let append_result = line.append_segments(&disk_full_segments);
+    assert_eq!(committed_segments_before_failure, 1);
     assert!(
         matches!(
             &append_result,
             Err(LineError::Io(error))
                 if error.raw_os_error() == Some(libc::ENOSPC)
                     || error.kind() == io::ErrorKind::WriteZero
-        ) || matches!(&append_result, Err(LineError::DurabilityUncertain)),
-        "expected an actual disk-full append error, got {append_result:?}"
+        ),
+        "expected the append itself to return ENOSPC, got {append_result:?}"
     );
     drop(line);
     drop(filler);
     fs::remove_file(&filler_path.0).unwrap();
 
     let recovered = WorldLine::open(&path.0, &dem).unwrap();
-    assert!(
-        recovered.segment_count() == 1 || recovered.segment_count() == 2,
-        "recovery exposed an unexpected segment count"
+    assert_eq!(
+        recovered.segment_count(),
+        committed_segments_before_failure,
+        "the failed append must leave the last successful witness authoritative"
     );
-    assert_eq!(recovered.verify().unwrap().segments_verified, recovered.segment_count());
+    let verification = recovered.verify().unwrap();
+    assert_eq!(
+        verification.segments_verified,
+        recovered.segment_count()
+    );
     assert_eq!(
         &recovered.open_segment(0).unwrap()[..],
-        b"witness committed before filesystem full"
+        &initial_payload[..]
     );
-    if recovered.segment_count() == 2 {
-        assert_eq!(
-            &recovered.open_segment(1).unwrap()[..],
-            b"must survive disk-full failure"
-        );
-    }
+    let recovered_tail_bytes = recovered.recovery_info().trailing_bytes;
     eprintln!(
-        "HOLONOMY_ENOSPC_MEASUREMENT filesystem={fs_type}; mount_source={mount_source}; filesystem_bytes={filesystem_bytes}; initial_free_bytes={initial_free_bytes}; filler_bytes={filler_bytes}; observed_real_enospc={observed_enospc}; append_error={append_result:?}; recovered_segments={}; verified_segments={}",
+        "HOLONOMY_ENOSPC_MEASUREMENT filesystem={fs_type}; mount_source={mount_source}; filesystem_bytes={filesystem_bytes}; filesystem_block_bytes={filesystem_block_bytes}; initial_free_bytes={initial_free_bytes}; baseline_end_aligned={}; filler_bytes={filler_bytes}; filler_enospc_phase={filler_enospc_phase}; available_bytes_after_fill={available_bytes_after_fill}; requested_full_segments={disk_full_segment_count}; append_error={append_result:?}; recovered_segments={}; recovered_tail_bytes={recovered_tail_bytes}; verified_segments={}",
+        baseline_committed_end % filesystem_block_bytes == 0,
         recovered.segment_count(),
-        recovered.verify().unwrap().segments_verified,
+        verification.segments_verified,
     );
 }
 
