@@ -9,6 +9,8 @@
 //! Block 3 (`holonomy-line`) will hold a [`DEMKey`] from unlock to lock and request segment
 //! sealing/opening through it; at no point does the world-line crate learn what the key *is*.
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::lock::LockReport;
 use crate::secret::LockedSecret;
 
@@ -21,9 +23,11 @@ pub struct DEMKey {
 impl DEMKey {
     /// Crate-internal construction. Callers outside this crate can never make one directly:
     /// a `DEMKey` exists only as the output of a successful envelope open or capsule create.
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(mut bytes: [u8; 32]) -> Self {
+        let guarded = Zeroizing::new(bytes);
+        bytes.zeroize();
         Self {
-            inner: LockedSecret::new(bytes),
+            inner: LockedSecret::new(*guarded),
         }
     }
 
@@ -53,9 +57,11 @@ pub struct UnwrapKey {
 
 impl UnwrapKey {
     /// Crate-internal construction; see [`DEMKey::from_bytes`].
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(mut bytes: [u8; 32]) -> Self {
+        let guarded = Zeroizing::new(bytes);
+        bytes.zeroize();
         Self {
-            inner: LockedSecret::new(bytes),
+            inner: LockedSecret::new(*guarded),
         }
     }
 

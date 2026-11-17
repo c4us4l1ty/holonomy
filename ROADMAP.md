@@ -57,8 +57,11 @@ v5.0-OMEGA theatricality.
 - `holonomy-seal` crate: Argon2id (memory-hard, host-calibrated) → `K_unwrap` → hybrid
   ML-KEM-1024 + X25519 decapsulation → `K_DEM`; key-committing AEAD (CMT-4) for every
   sealed object.
-- `SecureBlock`-style memory handling (guard pages, `mlock`/`VirtualLock`, zeroize-on-drop)
-  ported and modernized from H1 `holonomy-secure` / v5 `holonomy-crypto::lock`.
+- Secret-cell memory handling ported and modernized from H1 `holonomy-secure` / v5
+  `holonomy-crypto::lock`: fixed-size, 64 KiB-aligned boxed cells (to isolate page-granular
+  locks), best-effort `mlock`/`VirtualLock`, zeroize on drop, and Linux `MADV_DONTDUMP` where
+  accepted. Guard pages are not implemented in this Block 2 code; the threat model records the
+  actual protection rung and residual limits.
 - Explicit **capability tokens**: code that does not hold the token type cannot receive
   plaintext key bytes. The compiler enforces the boundary the audits used to patrol by hand.
 
@@ -86,28 +89,40 @@ limited by disk, not by format — this is what makes sixty years *the default s
 - Software fault model: tests inject a short write after every byte of an append, failures at
   each append sync barrier, and failures while discarding an uncommitted tail. Reopen must find
   the prior authenticated witness, or (after an uncertain final sync) a complete authenticated
-  new witness. These in-process injections do not establish physical power-loss, real ENOSPC,
-  filesystem-journal, or device-cache behavior; L-6 remains unproven until platform durability
-  qualification is run.
+  new witness. These in-process injections do not establish physical power-loss, filesystem
+  journal, or device-cache behavior. `scripts/qualify-ext4-enospc.sh` additionally exercises the
+  real append/recovery path on a bounded ext4 loop filesystem until it reports ENOSPC; that
+  remains ext4 software-loop evidence, not physical-device power-loss qualification.
 - Retention: old segments are the free-version history. Compaction exists **only** as an
   explicit, opt-in, passphrase-confirmed operation that rewrites history — never automatic.
 - Incremental-sync fit: the append-only layout preserves the old prefix and the writer's
-  measured `File::write` calls are confined to newly appended records. This is local write-path
-  evidence, not an end-to-end backup-transfer guarantee; bytes sent depend on a concrete sync
-  client/backend, which is not implemented or measured here. `holonomy verify` re-checks segment
-  integrity after a copy, so a cloud-mangled file is detected, not silently trusted.
+  measured `File::write` calls are confined to newly appended records. The ignored qualification
+  test `tests::rsync_measures_append_transfer_over_a_named_local_daemon` measures a named rsync
+  client over TCP against a local daemon using a real 30-million-word sealed file; it records the
+  client version, application-layer bytes, and append size. Evidence from a passing run applies
+  only to that rsync build/configuration/workload, not every backup client or remote service.
+  `holonomy verify` re-checks segment integrity after a copy, so a cloud-mangled file is detected,
+  not silently trusted.
 
 **GATES**
 - [x] Exhaustive short-write injection at every append byte, both sync failures, and recovery
       truncate failures reopen to the last committed witness (or a complete authenticated new
       witness after an uncertain commit sync).
 - [ ] Qualify L-6 under actual supported-filesystem/device power-loss and out-of-space behavior;
-      in-process fault injection alone is not a power-cut test.
+      in-process fault injection alone is not a power-cut test. The explicit ext4 ENOSPC rehearsal is
+      `scripts/qualify-ext4-enospc.sh` (128 MiB loop image; run metadata and `HOLONOMY_ENOSPC_MEASUREMENT`
+      are recorded by CI). It covers ENOSPC/recovery on that ext4 loop filesystem only; a controlled
+      physical-device power cut, controller-cache evaluation, and supported-device matrix remain
+      unperformed and are required before this gate can pass.
 - [x] A simulated 30 M-word history records the append writer's actual `File::write` offsets and
       byte counts: every write starts at the previous EOF, the old prefix is unchanged, and the
       total equals `AppendReceipt::bytes_appended`.
-- [ ] Measure bytes transferred by a named backup/sync client after a save; local append writes
-      do not establish the L-10 transfer bound.
+- [ ] Measure bytes transferred by a named backup/sync client after a save. The ignored rsync
+      harness in `crates/holonomy-line/src/tests.rs` runs with `cargo test --locked -p holonomy-line
+      --lib tests::rsync_measures_append_transfer_over_a_named_local_daemon -- --exact --ignored
+      --nocapture`; CI records the rsync version, file/append sizes, and client application-layer
+      bytes. Evidence remains specific to that client build/configuration/workload and does not
+      qualify other clients or remote backends.
 - [x] `verify` catches flipped bytes anywhere, including in "old" history.
 
 ---

@@ -23,7 +23,7 @@ pub enum PassphraseError {
     Empty,
     /// Longer than [`MAX_PASSPHRASE_BYTES`] after normalization.
     TooLong {
-        /// The offered length in bytes.
+        /// The normalized UTF-8 length observed when the limit was crossed.
         len: usize,
     },
 }
@@ -32,7 +32,10 @@ impl core::fmt::Display for PassphraseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => f.write_str("passphrase is empty"),
-            Self::TooLong { len } => write!(f, "passphrase of {len} bytes exceeds the limit"),
+            Self::TooLong { len } => write!(
+                f,
+                "normalized passphrase exceeds the {MAX_PASSPHRASE_BYTES}-byte limit (at least {len} bytes)"
+            ),
         }
     }
 }
@@ -46,16 +49,37 @@ pub struct PassphraseInput(Zeroizing<String>);
 impl PassphraseInput {
     /// Accept user text: NFC-normalize, bound-check, wrap zeroizing.
     pub fn new(raw: &str) -> Result<Self, PassphraseError> {
-        let normalized: String = raw.nfc().collect();
+        if raw.is_empty() {
+            return Err(PassphraseError::Empty);
+        }
+
+        // Allocate the maximum accepted size once and guard it before writing secret bytes.
+        // Bounded pushes avoid String growth/reallocation, which could otherwise free an
+        // intermediate normalized passphrase before the wipe-on-drop guard exists.
+        let mut normalized = Zeroizing::new(String::with_capacity(MAX_PASSPHRASE_BYTES));
+        let mut normalized_len = 0usize;
+        for character in raw.nfc() {
+            normalized_len = normalized_len.saturating_add(character.len_utf8());
+            if normalized_len > MAX_PASSPHRASE_BYTES {
+                #[cfg(test)]
+                if !normalized.is_empty() {
+                    crate::allocation_audit::watch(normalized.as_ptr(), normalized.len());
+                }
+                return Err(PassphraseError::TooLong {
+                    len: normalized_len,
+                });
+            }
+            normalized.push(character);
+        }
+
+        #[cfg(test)]
+        if !normalized.is_empty() {
+            crate::allocation_audit::watch(normalized.as_ptr(), normalized.len());
+        }
         if normalized.is_empty() {
             return Err(PassphraseError::Empty);
         }
-        if normalized.len() > MAX_PASSPHRASE_BYTES {
-            return Err(PassphraseError::TooLong {
-                len: normalized.len(),
-            });
-        }
-        Ok(Self(Zeroizing::new(normalized)))
+        Ok(Self(normalized))
     }
 
     /// Run `f` with the passphrase bytes, producing some derived value without the bytes
@@ -103,6 +127,19 @@ mod tests {
             PassphraseInput::new(&long),
             Err(PassphraseError::TooLong { .. })
         ));
+    }
+
+    #[test]
+    fn nfc_expansion_is_counted_without_exceeding_the_fixed_buffer() {
+        // U+0344 canonically decomposes to two two-byte combining marks under NFC. The first
+        // mark of input 257 crosses the 1,024-byte limit at 1,026 bytes; the second is not
+        // written into the fixed-size buffer.
+        let raw = "\u{344}".repeat(513);
+        assert_eq!(raw.len(), 1_026);
+        assert_eq!(
+            PassphraseInput::new(&raw).unwrap_err(),
+            PassphraseError::TooLong { len: 1_026 }
+        );
     }
 
     #[test]

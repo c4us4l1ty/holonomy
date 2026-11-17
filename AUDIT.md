@@ -48,6 +48,71 @@ Listed so they stay dead.
 
 ## Audit trail
 
+- **2026-11-16 — Block 2/3 CI repair and qualification evidence review (Block 4 not started):**
+  CI run [44017105999](https://github.com/c4us4l1ty/holonomy/actions/runs/44017105999) passed
+  rustfmt, clippy (`-D warnings`), workspace tests, the gates contract, and both qualification
+  jobs; the diagnostics bridge was skipped because no job failed. The rustfmt failure from run
+  44013849921 was actual formatting drift under pinned Rust 1.100.0 (the diagnostics reproduction
+  also exited 1), not a toolchain mismatch. Clippy's three `needless_borrows_for_generic_args`
+  findings were corrected with byte-slice borrows, avoiding by-value secret-array copies. The NFC
+  expansion test now expects 1,026 bytes: the first two-byte mark from input 257 crosses the
+  1,024-byte bound, and the bounded normalizer does not write the second mark. A first ext4-test
+  repair still failed in run 44016177594 because the filler reported ENOSPC with 352,256 bytes
+  still available. The final harness aligns the prior witness to the 4,096-byte block boundary
+  and makes one append request more than the entire bounded filesystem using repeated borrowed
+  64 KiB slices; it verifies the appender's actual ENOSPC error and recovery.
+  - **L-6:** the [recorded ext4 result](https://github.com/c4us4l1ty/holonomy/issues/51#issuecomment-6938306377)
+    used a 128 MiB image, ext4 on `/dev/loop0`, Linux 7.0.0-1017-azure x86_64, and e2fsprogs
+    1.47.0. The filesystem reported 108,974,080 bytes total, 4,096-byte blocks, and 106,266,624
+    initially free. The filler consumed 105,906,176 bytes and received ENOSPC on write, with
+    352,256 bytes still available. The append requested 1,663 segments (108,986,368 plaintext
+    bytes, more than the filesystem size) and returned OS error 28 (`ENOSPC`). Reopen recovered
+    one committed segment, retained a 352,256-byte uncommitted tail, and verified that segment.
+    This is evidence for that ext4 loop configuration only, not physical power loss, controller
+    caches, or a supported-device matrix; **L-6 remains `spec`**.
+  - **L-10:** the [passing rsync run](https://github.com/c4us4l1ty/holonomy/issues/51#issuecomment-6938309911)
+    used rsync 3.2.7 / protocol 31 over a local daemon on TCP with a 65,536-byte block. Old/new
+    file sizes were 60,093,554 / 60,356,483 bytes; the append was 262,929 bytes. Delta literal
+    data was 325,507 bytes; client bytes sent/received were 329,363 / 5,545, for 334,908 total
+    application-layer bytes. This remains one client/build/configuration/workload rather than a
+    qualification of remote services or other clients; **L-10 remains `spec`**.
+  - **CI trigger review:** `.github/workflows/ci.yml` contains a `pull_request` trigger. PRs run
+    the read-only validation jobs; `diag`, `sync`, and `filesystem` are explicitly push-only
+    before their issue-writing steps can run. The earlier check that reported no PR trigger was
+    a false negative. The diagnostics bridge now captures each command to a file before capping
+    displayed output, preserving its actual exit status instead of risking SIGPIPE from `head`.
+  The allocation audit still does not cover every dependency-owned temporary, so RFC-001's
+  dependency-temporary zeroization gate remains open.
+
+- **2026-11-16 — follow-up Block 2/3 review (implementation pending CI):** found and corrected
+  five concrete boundary defects: Linux `MADV_DONTDUMP` used the wrong advice value and did not
+  page-align the common small heap-cell range; `LockedSecret` declared its boxed bytes before the
+  lock guard, so field drop order could free the allocation before `munlock`; page-granular
+  `munlock` calls on separate tiny heap boxes could unlock a page still holding another key; the
+  public `HybridKem`/`MlKem1024X25519` test abstraction could return `SharedSecrets` with raw key
+  bytes outside the capability API; and `x25519-dalek` had default features disabled without
+  enabling its optional `zeroize` feature, leaving `StaticSecret`/`SharedSecret` drops unscrubbed.
+  The KEM plumbing is now crate-private, the lock advice is page-aligned and uses libc's Linux
+  constant, each secret cell gets a separate 64 KiB-aligned lock unit with the guard dropping
+  before its allocation is freed, and the X25519 `zeroize` feature is enabled and locked.
+  The threat model/RFC wording was also corrected: `memfd_secret` is probed on supported Linux
+  architectures but not used, and there is no global core-dump disable or `DONTFORK` implementation.
+  Added a test-only registered-allocation
+  wipe audit, AEAD/envelope corruption tests, an ignored rsync transfer harness, and an ext4-loop
+  ENOSPC/recovery rehearsal. Follow-up review also fixed the private `MlKem1024X25519` import,
+  wrapped ML-KEM shared-key/seed copies, and changed AEAD encryption to use wipe-on-drop
+  in-place buffers. A further passphrase review replaced `NFC.collect::<String>()` with a
+  pre-sized, wipe-on-drop buffer and bounded pushes, avoiding growth reallocations before the
+  guard exists; an NFC-expansion regression test covers the size boundary. At that point, the
+  Rust changes, tests, and manual lockfile feature edges had not been compiled or independently
+  validated; workflow YAML parsing and shell syntax checks passed. The allocation test does not by
+  itself audit every dependency-owned temporary; RFC-001's zeroization gate remains open. Local
+  execution was blocked because `cargo`, `rustc`, `rsync`, `mkfs.ext4`, and QEMU were absent;
+  invoking `scripts/qualify-ext4-enospc.sh` exited 127 at line 20 (`mkfs.ext4: command not
+  found`). No filesystem ENOSPC result or rsync measurement had been collected yet. The ext4
+  rehearsal cannot emulate physical power loss or controller caches, and the rsync run is limited
+  to its measured version/configuration/workload; keep L-6 and L-10 `spec` pending evidence review.
+
 - **2026-11-16** — Block 3 fault-injection and tail-write evidence: routed append data, witness,
   sync, and recovery truncation through private I/O wrappers with `cfg(test)` failpoints only.
   Tests inject a short write after every byte of a two-segment append, fail the data and final
