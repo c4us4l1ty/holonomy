@@ -103,7 +103,36 @@ Behavior rules:
 - Screen-reader: the Eye's run tree is the a11y tree source (U0 again) — announced text is
   byte-identical to painted text.
 
-## 8. What is deliberately absent in v6.0
+## 8. Framework surface: GPUI upstream, never patched
+
+The shell is GPUI, at the version the workspace pins, **unpatched**. The reference app (quiet-md)
+carries `[patch.crates-io]` entries for `gpui`, `taffy` and `xattr`, and 43 listed GPUI patches;
+none of them enter this tree. The reason is mechanical, not aesthetic:
+
+- Cargo ignores a **dependency's** `[patch.crates-io]`. Consuming quiet-md would build against stock
+  GPUI, and quiet-md's app code calls API that only the patches add (`grid_col_widths`,
+  `Window::paint_pixels`, `Window::replace_root`, `Window::set_window_min_size`,
+  `RenderImage::with_scale_factor`, `Path::transformed`). It would not compile, so it is not a
+  dependency that exists and one we declined — it is not consumable as one.
+- Reproducing those patches at our root is a `[patch.crates-io]` onto a fork inside the core
+  workspace, which Block 1 forbids by name and which is how v5 lost its UI crates.
+- Exiling the UI to a second workspace to keep the patches out is the other shape Block 1 forbids:
+  one workspace, one lockfile, every crate a member.
+
+`AUDIT.md` records this as OQ-13. What it costs, in behaviour we must earn rather than inherit:
+
+- **Line breaking is ours, not GPUI's.** The Eye lays out the page, so CJK 避头尾 rules, script-aware
+  word classification (Hangul, Hebrew, Arabic, Syriac, ...) and RTL line ordering are
+  `holonomy-eye`'s responsibility. quiet-md's patches #4, #23, #30, #31, #32 are the reference list
+  for what "correct" means — and they are the same gap OQ-11 records. They were never inheritable
+  anyway: they live in GPUI's line wrapper, which this design does not use.
+- **Rendering fidelity is whatever the platform gives.** Font-smoothing parity, synthesized oblique,
+  and the PingFang PostScript collision are quiet-md patches #1, #12, #14. Without them the page is
+  stock GPUI. Any fidelity claim in a gate is measured against stock GPUI, never against quiet-md.
+- **Anything else we need, we upstream.** A GPUI change may be sent as a PR; if it lands, the pinned
+  version moves and the change arrives with it. No local divergence, in the core tree or any other.
+
+## 9. What is deliberately absent in v6.0
 
 Comments/threads, inline images, tables, math (Block 10+ composition), sharing/people UI,
 chat, AI panels, telemetry of any kind, and any UI element that requires materializing more

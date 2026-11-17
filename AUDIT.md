@@ -50,9 +50,40 @@ Listed so they stay dead.
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
 | OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate ("layout cost on a 30 M-word doc is invariant in document length") is a claim about the caller. The chain now exists: `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, and `holonomy_eye::byte_window` joins them, contiguously — an unmeasured leaf inside the window has its bytes included, so the shaped text never has a hole. What is missing is the editor loop that calls all three and the measurement that would prove the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed 2026-11-17, no caller or measurement yet** |
-| OQ-13 | **How quiet-md enters the tree.** Block 1 forbids `[patch.crates-io]` onto forks in the core tree; quiet-md ships a patched GPUI (`vendor/PATCHES.md`). Adopting it as a dependency, a vendored subtree, or a fork of a fork are three different trees with three different failure modes, and only one of them is legal under Block 1 without an explicit exception. Decide before Block 6 opens; the choice also fixes how holonomy takes upstream GPUI fixes, and therefore how much of its own vendor surface it must maintain. | **open — decision needed before Block 6** |
+| OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 
 ## Audit trail
+
+- **2026-11-17 — D-5 — OQ-13 closed: quiet-md is source, not a dependency.** The question was
+  presented as three shapes (published dependency, vendored subtree, fork of a fork) and one of them
+  turned out not to exist.
+
+  **The dependency is impossible, not merely unattractive.** Cargo applies `[patch.crates-io]` only
+  from the workspace root, so consuming `quiet_md` builds it against stock GPUI 0.2.2. quiet-md's own
+  code calls what its patches *add*: `grid_col_widths(Vec<f32>)`, `Window::paint_pixels`,
+  `Window::replace_root`, `Window::set_window_min_size`, `RenderImage::with_scale_factor`,
+  `Path::transformed`, `WindowTextSystem::glyph_outline`, `PathPromptOptions.extensions`,
+  `ListState::estimated_scroll_metrics`. Three tables, three vendor trees and 43 patches are
+  load-bearing, so the crate as published (if it were published) would not compile for us.
+
+  **The other two shapes are what Block 1 exists to forbid.** Copying `vendor/gpui` in means a
+  `[patch.crates-io]` onto a fork inside the core workspace — the exact mechanism that held v5's UI
+  crates hostage. Moving the UI to its own workspace to keep the patch out of the core tree is the
+  other half of the same law ("one workspace, one lockfile, every crate a member"). The law decided
+  this, which is the point: the decision was available before quiet-md was ever opened, and the
+  research only confirmed it.
+
+  **What we therefore do not inherit, said out loud.** quiet-md's patches #4, #23, #30, #31, #32 are
+  CJK 避头尾 line breaking, script-aware word classes for Hangul/Hebrew/Arabic/Syriac and RTL
+  wrapping with per-line reordering — which is *the Eye's territory*, not GPUI's, because the Eye
+  lays out the page. Those five patches are now the best available reference for what OQ-11's
+  segmentation must eventually do, and #30 in particular is a worked example of the bidi line-order
+  problem. Patches #1, #12 and #14 are rendering fidelity; without them the page is stock GPUI, and
+  `docs/UI-SPEC.md` §8 forbids ever measuring a gate against quiet-md's pixels instead.
+
+  **The ledger, because MIT requires one.** `THIRD_PARTY.md` records adapted source: nothing yet,
+  and the four rules that govern the first file that ever is (provenance line in the file, licence
+  text travelling with it, same pull request, and nothing that needs a patch section to build).
 
 - **2026-11-17 — Block 5, fifth slice: the viewport chain closes.** Three pieces that had been built
   for each other but never introduced: the height index answers *which leaves*, the spine answers
