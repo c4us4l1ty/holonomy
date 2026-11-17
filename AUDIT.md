@@ -49,10 +49,32 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy** — solved by D-7 and built as D-8/D-9: a leaf names a *source*, and a source is **open** (bytes in a resident buffer) or **sealed** (bytes in the world-line), at the same address. Text being typed is a leaf from its first byte, so `byte_window` and the height index see it; a seal appends the bytes once, renames the source, and corrects one leaf's length in the current root — **no history entry**, so undo never steps through a seal; each byte is written once. `Typing::insert_at` handles mid-document typing by cutting the leaf the caret lands in (pure geometry — the halves name adjacent ranges of one segment, so nothing moves). Not yet: deletion and selection. | **closed 2026-11-17 — `typing.rs`** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
-| OQ-12 | **The window is viewport-sized, but no editor calls it yet.** `layout_styled` shapes exactly the text it is handed, so Block 5's cost gate is a claim about the caller. The chain exists — `HeightModel` finds a leaf range in O(log n) counted reads, `Spine::slab_span` turns a leaf position into a byte range in one descent, `holonomy_eye::byte_window` joins them contiguously — and D-7 removed the last structural objection by making text being typed an ordinary leaf. What is missing is the editor loop that calls all three and the measurement that proves the gate on a 30 M-word document; neither exists before Block 6. | **open — chain landed, no caller or measurement yet** |
+| OQ-12 | **The window is viewport-sized, and now measured on the size the gate names.** The chain — `HeightModel` (O(log n) counted reads), `Spine::slab_span` (one descent), `holonomy_eye::byte_window` (contiguous, holes impossible since D-7) — is swept over a **180 MB / 44,000-leaf** document, every screen. Bytes handed to layout are bounded by one screen plus two leaves, **with the identical bound at 1/1000 the length**; index reads stay ≤ 64 and grow by at most a logarithm. What is still missing is the timing half: seconds need a real shaper and a font, which is Block 6, and a fake shaper would make the number about the fake. Gate 2 therefore stays unclaimed — its *inputs* are measured, its clock is not. | **open — cost inputs measured 2026-11-17; timing needs Block 6's shaper** |
 | OQ-13 | **How quiet-md enters the tree — decided: as source, not as a dependency.** Cargo ignores a dependency's `[patch.crates-io]`, and quiet-md's app code calls API that only its 43 GPUI patches add, so it is not consumable as a dependency at all; reproducing the patches at our root is the fork-in-the-core-tree Block 1 forbids, and exiling the UI to a second workspace is the other shape it forbids. quiet-md is therefore prior art and an attributed source of MIT code (`THIRD_PARTY.md`), with GPUI pinned upstream and no patch section. The cost is named in `docs/UI-SPEC.md` §8: CJK/bidi line breaking and font fidelity are ours to earn, and quiet-md's patches #4/#23/#30/#31/#32 are the reference for the first of those — the same gap OQ-11 records. | **closed 2026-11-17 — source, not dependency** |
 
 ## Audit trail
+
+- **2026-11-17 — D-10 — the viewport, measured on thirty million words.** Gate 2 says layout cost is
+  invariant in document length. Half of that is about fonts and belongs to Block 6; the half that
+  decides it is how much work the document's *length* can force, and that is measurable now.
+
+  **What was measured, and what was deliberately not.** Index reads and bytes handed to the layout,
+  on a document of 180 MB of text as geometry — 43,945 leaves of 4 KiB, one height each — swept one
+  viewport per screen from the first byte to the last. Seconds were not measured: shaping needs a
+  real font, and a fake shaper would make a timing number that is about the fake. `tests/`
+  `viewport_cost.rs` is the sweep.
+
+  **The result.** The worst viewport asks the layout for one screen of text plus the two leaves its
+  edges land in — 1.2 MB at 300 leaves a screen — and the *same bound* holds on a document a
+  thousand times shorter, which is the invariance claim stated as a bound that does not contain the
+  document's length. Finding that window costs at most 64 counted index reads on 44,000 leaves, and
+  at most 24 more than on the thousandfold-smaller document: a logarithm, not a walk.
+
+  **Why this is not yet gate 2.** The gate is about cost, and cost has a clock. What this shows is
+  that the clock's *input* — bytes shaped per viewport — cannot grow with the document, and that the
+  index work to find it is logarithmic. The remaining measurement needs a shaper with a real font,
+  which arrives with Block 6's shell, and the gate stays unclaimed until then. OQ-12 says exactly
+  that instead of a softer version of it.
 
 - **2026-11-17 — D-9 — typing in the middle: the caret says where, the tree does the cut.** D-8 left
   the session append-only, and said so. Removing that limit turned out to be mostly a matter of
