@@ -22,8 +22,8 @@ use holonomy_seal::{
     ParamsClass,
 };
 use holonomy_text::{
-    commit_slab, Appended, CommitError, Committed, EditOutcome, History, ResidentSet, SegmentId,
-    SegmentSink, SegmentSource, Slab, SlabText, Spine,
+    commit_slab, Appended, CommitError, Committed, Draft, EditOutcome, History, ResidentSet,
+    SegmentId, SegmentSink, SegmentSource, Slab, SlabText, Spine,
 };
 
 /// A world-line path that is deleted when the test ends.
@@ -281,4 +281,56 @@ fn undo_after_a_commit_returns_to_a_root_the_world_line_still_serves() {
 
     let original = line.open_segment(0).expect("segment 0").to_vec();
     assert_eq!(original, b"first", "the sealed segment was never rewritten");
+}
+
+#[test]
+fn the_document_view_is_correct_before_the_commit_and_identical_after() {
+    let path = temp_path();
+    let (capsule, dem) = material(b"overlay", [0x61; 64]);
+    let mut line = create_line(&path, capsule, &dem);
+    line.append_segments(&[b"alpha", b"beta"]).expect("two segments");
+
+    let first = Slab::new(SegmentId::new(0), 0, 5);
+    let second = Slab::new(SegmentId::new(1), 0, 4);
+    let spine = Spine::from_slabs([first, second]);
+    let span = spine.spans_in(0, spine.len()).remove(0);
+    let mut text = resident(&line, 0, 16);
+    text.insert(5, b"!").expect("fits");
+
+    // Before the commit the spine is stale by design, and the overlay is what makes the document
+    // view correct: ten live bytes, the drafted leaf six long, everything after it three later.
+    let mut draft = Draft::with_capacity(2);
+    draft.record(span, 6).expect("records");
+    assert_eq!(draft.document_len(&spine), 10);
+    assert_eq!(spine.len(), 9, "the spine has not moved");
+    let before: Vec<(u64, u64)> = draft
+        .spans_in(&spine, 0, 10)
+        .iter()
+        .map(|live| (live.offset(), live.len()))
+        .collect();
+    assert_eq!(before, vec![(0, 6), (6, 4)]);
+    let typed = draft.locate(&spine, 5).expect("in range");
+    assert!(typed.span().is_draft());
+    assert_eq!(typed.within(), 5);
+    assert_eq!(typed.segment_offset(), None, "uncommitted bytes have no segment");
+
+    // Commit, then drop the draft. The document view must not move by a single byte.
+    let mut sink = LineSink { line: &mut line };
+    let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
+    let after = committed.spine().clone();
+    assert!(draft.forget(0));
+    assert_eq!(draft.document_len(&after), 10);
+    let now: Vec<(u64, u64)> = draft
+        .spans_in(&after, 0, 10)
+        .iter()
+        .map(|live| (live.offset(), live.len()))
+        .collect();
+    assert_eq!(now, before, "the view is the same before and after the seal");
+
+    // The same caret position now names committed geometry in the segment the commit wrote.
+    let sealed = draft.locate(&after, 5).expect("in range");
+    assert!(!sealed.span().is_draft());
+    assert_eq!(sealed.within(), 5);
+    assert_eq!(sealed.span().slab().segment(), SegmentId::new(2));
+    assert_eq!(sealed.segment_offset(), Some(5));
 }
