@@ -49,8 +49,48 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
+| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. Until the Eye is wired to the Spine's Fenwick height model (so it asks for a viewport window plus margin, and heights outside it are aggregate reads), the invariance is a design intention, not a measurement. Wiring the two also forces OQ-10's decision, because the same walk decides where a pending leaf's text enters the window. | **open — found 2026-11-17, the gate has no evidence yet** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, second and third slices: zoom as a view transform, style runs as layout
+  data.** Both slices answer the same question — *which arithmetic is allowed to change a
+  coordinate* — and both answer it by adding none.
+
+  **Zoom/DPI has no inverse.** The tempting shape is paint multiplying by the scale and hit-test
+  dividing by it: two roundings, two answers, and zoom becomes the seam Block 5 exists to close.
+  [`View`] therefore exposes one mapping, `to_device`, and `hit_test` never maps a device point back
+  into layout space — it compares the point against the device positions paint would draw, computed
+  by that same mapping. The transform is exact rational integer scaling (`logical × zoom_milli × dpi
+  / 96_000`, rounded half away from zero in `i128`). A line box maps as a whole, so one line's
+  bottom is exactly the next line's top and a caret's own `y` always selects its own line; the
+  caret's painted height is the distance between the mapped top and bottom, so the box a renderer
+  draws is the box hit-testing tested. `Layout::paint_point` and `Layout::hit_test` are now
+  `View::IDENTITY`'s answers — one implementation of the walk, not two that must agree.
+
+  **Styles are geometry, not decoration.** A heading is not the same layout drawn bigger: bigger
+  fonts have bigger advances and taller line boxes, so a renderer that applies a style the layout
+  did not shape with owns a second geometry — the v3 disease wearing a hat. `Style` (size in
+  thousandths of a logical unit, bold, italic) now travels as `StyledRun`s in `StyledText`; the
+  `Shaper` is asked every metric question *with* the style it applies to; `Placed` carries the style
+  it was shaped with; a line box is as tall as its tallest cluster and an empty line takes the
+  height of the style that reaches it. Font families are deliberately absent — they are Block 8's
+  pipeline decision and cannot be tested before that pipeline exists.
+
+  **What the tests pin.** L-8's property test now sweeps a ten-string corpus (Latin, combining
+  marks, ZWJ emoji, CJK, hard breaks, trailing newline, empty text) over six wrap widths × eight
+  zoom steps × five DPIs, and asserts the strong form — *the same byte back* — wherever device
+  positions are distinct; a zero-width-cluster shaper pins the tie rule where they are not, because
+  two carets at one device position cannot be told apart by a click and the answer must not depend
+  on rounding. Style tests pin the run boundary, a wrapping window with three mixed-size runs, and
+  empty lines inheriting the style that reaches them. `View::IDENTITY` is asserted to answer exactly
+  as the layout does, so the transform is provably the only difference between the two spaces.
+
+  **Still `spec`.** `L-8` remains `spec`: the property holds for a fake shaper, and Block 8's real
+  pipeline has not been through it. Block 5's second gate (layout cost invariant in document length)
+  has no evidence at all — `layout_styled` shapes whatever window it is handed, and nothing yet
+  constrains that window to a viewport (OQ-12) — and its third gate (BiDi and multi-script
+  cluster-honest carets) still rests on the approximate segmentation recorded in OQ-11.
 
 - **2026-11-17 — Block 5, first slice: one geometry, two consumers.** The Eye's geometry core lands
   as four modules with no dependencies, no font, and no window, because the property that matters
