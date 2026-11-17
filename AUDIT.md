@@ -49,9 +49,38 @@ Listed so they stay dead.
 | OQ-10 | A full resident slab has **no continuation policy**. `SlabText::insert` refuses with `WouldSplit { needed, capacity }` — correctly, since growing inside the keystroke path would hide an allocation — but nothing says what the editor does next. Committing the full leaf and re-faulting it with fresh slack works and is one line of wiring, at a price: every exhaustion re-seals the whole leaf, so a 64 KiB slab rewritten per few kilobytes of typing is 16× write amplification and a world-line that grows with redundant copies of the same text. The alternative is to split the leaf at the caret and start a **pending leaf** that exists in no spine yet — which the overlay cannot express, because `Draft` maps an existing leaf to a live length. Found 2026-11-17 while writing the many-commit stress test (which sidesteps it with generous slack). Decide with Block 5, where the editor's caret model makes the split point meaningful. | **open — found 2026-11-17, no fix yet** |
 | OQ-9 | Leaf fragmentation: a split that lands inside a leaf leaves the segment spread over two leaves, and `join` never coalesces adjacent fragments of the same segment. Content stays correct and the fragments share one segment's storage, but churn inflates the leaf count and with it the height and every slab-count-derived budget. **Narrowed 2026-11-17 by D-3:** the commit boundary does not create fragments — it replaces exactly the extent one leaf covers, and the commit tests assert the leaf count is unchanged — so the remaining exposure is structural inserts (`insert_slab` cutting a leaf) that are never rejoined, plus a document loaded from a log whose geometry is already fragmented. Coalescing at commit, or a pass in `from_slabs`, is still unimplemented; the cheaper of the two is coalescing same-segment neighbours when a document is built from the log. | **open — narrowed, no fix yet** |
 | OQ-11 | Cluster segmentation is a hand-written approximation of UAX #29, chosen because `holonomy-eye` must stay dependency-free (no ICU, no `uniseg`). It is conservative — it never splits a mark from its base — but it leaves some sequences UAX #29 would join as separate clusters (Hangul jamo above all), so a caret can sit where a real renderer would not allow it. Block 5's third gate (BiDi and multi-script cluster-correct carets) therefore **cannot** be claimed yet: BiDi reordering is not implemented at all, and grapheme honesty is only as good as this table. Replacing it with a real UAX-29 implementation is Block 9 work; the API surface that has to change is `cluster.rs` alone. | **open — deliberate gap, found 2026-11-17 while writing the segmentation table** |
-| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. Until the Eye is wired to the Spine's Fenwick height model (so it asks for a viewport window plus margin, and heights outside it are aggregate reads), the invariance is a design intention, not a measurement. Wiring the two also forces OQ-10's decision, because the same walk decides where a pending leaf's text enters the window. | **open — found 2026-11-17, the gate has no evidence yet** |
+| OQ-12 | **The window is not yet known to be viewport-sized.** `layout_styled` shapes exactly the text it is handed and its cost is linear in that text; Block 5's cost gate — "layout cost on a 30 M-word doc is invariant in document length" — is a claim about the *caller*, and the caller does not exist yet. The index half now does: `HeightModel` (`heights.rs`) finds a leaf range for a viewport in O(log n) counted reads. What remains is the Spine wiring that turns a leaf range into text — and that wiring must decide OQ-10 first, because a pending leaf has text but no spine entry to hold its height. | **open — index landed 2026-11-17, caller not written** |
 
 ## Audit trail
+
+- **2026-11-17 — Block 5, fourth slice: the height index, and a cost claim that is counted.**
+  Block 5's second gate says layout cost must be invariant in document length. Half of that is the
+  index that finds the viewport without reading the document; the other half is the caller that
+  supplies windowed input, and the caller does not exist yet (OQ-12).
+
+  **What landed.** `HeightModel` keeps one measured height per leaf — Block 4's slab, the unit the
+  Spine already splits and re-faults, so the Eye does not invent a second partition of the text —
+  in a Fenwick tree. `prefix`, `set`, `leaf_at` and `window` are O(log n) cell reads. A window is a
+  leaf range plus its two document coordinates, so a scrolled viewport can be described without
+  touching the index again.
+
+  **Why the cost is counted.** A wall-clock test would measure the runner; the gate is a claim about
+  the algorithm. The model counts the index cells it reads, and the tests assert numbers: a window
+  over 2^18 leaves costs fewer than 160 reads, and sixteen times as many leaves costs less than
+  twice the reads. This is the same discipline as the counting-allocator gate, applied to reads
+  instead of allocations.
+
+  **Zero is a value, not a hole.** A leaf is unmeasured until it has been laid out, and its height
+  is zero until then. `leaf_at` steps over unmeasured leaves rather than pretending they occupy
+  space, which means a window that contains them is provisional — the docs say so, and a caller that
+  trusts such a window too early will see its scroll geometry move as measurement catches up. That
+  is a real limitation, recorded rather than smoothed over.
+
+  **What this does not do.** It does not decide where a leaf's text comes from when the leaf is a
+  *pending* draft that exists in no spine (OQ-10), and it does not yet ask the Spine for anything.
+  The next slice is that wiring, and it is the slice where OQ-10's answer has to be chosen, because
+  the same walk that picks leaves must decide what a pending leaf's height means before it is
+  committed.
 
 - **2026-11-17 — Block 5, second and third slices: zoom as a view transform, style runs as layout
   data.** Both slices answer the same question — *which arithmetic is allowed to change a
