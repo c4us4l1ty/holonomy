@@ -171,7 +171,12 @@ mod tests {
         assert_eq!(window.end(), 120);
         assert_eq!(window.len(), 0);
         // An empty document has no leaves and nothing to shape.
-        let empty = byte_window(&Spine::empty(), &HeightModel::new(0), Fixed::ZERO, Fixed::ONE);
+        let empty = byte_window(
+            &Spine::empty(),
+            &HeightModel::new(0),
+            Fixed::ZERO,
+            Fixed::ONE,
+        );
         assert!(empty.is_empty());
         assert_eq!(empty.start(), 0);
     }
