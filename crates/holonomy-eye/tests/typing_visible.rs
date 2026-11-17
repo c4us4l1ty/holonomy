@@ -8,14 +8,25 @@
 use holonomy_eye::{byte_window, Fixed, HeightModel};
 use holonomy_text::{Appended, SegmentId, SegmentSink, Typing};
 
-/// A sink that seals without writing anything, so the test can type and seal freely.
-struct Null;
+/// A sink that seals without writing anything, so the test can type and seal freely. It hands
+/// out increasing ids, as a world-line does — a sink that reused one id is caught by the register.
+struct Null {
+    next: u64,
+}
+
+impl Null {
+    fn new() -> Self {
+        Self { next: 0 }
+    }
+}
 
 impl SegmentSink for Null {
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
+        let segment = SegmentId::new(self.next);
+        self.next += 1;
         Ok(Appended {
-            segment: SegmentId::new(0),
-            witness_sequence: 0,
+            segment,
+            witness_sequence: self.next,
             segment_root: [0u8; 32],
             bytes_written: plaintext.len() as u64,
         })
@@ -33,7 +44,7 @@ fn heights(spine: &holonomy_text::Spine) -> HeightModel {
 
 #[test]
 fn a_window_covers_text_that_no_segment_holds() {
-    let mut typing = Typing::new(Null, 64);
+    let mut typing = Typing::new(Null::new(), 64);
     typing
         .insert(b"the sentence the user is typing")
         .expect("typed");
@@ -50,7 +61,7 @@ fn a_window_covers_text_that_no_segment_holds() {
 #[test]
 fn sealing_does_not_move_the_text_out_of_the_window() {
     // A buffer of eight bytes, so twenty bytes of typing seal twice.
-    let mut typing = Typing::new(Null, 8);
+    let mut typing = Typing::new(Null::new(), 8);
     typing.insert(b"0123456789abcdefghij").expect("typed");
     assert_eq!(typing.sealed_bytes(), 16);
     assert_eq!(typing.pending(), b"ghij");
@@ -67,7 +78,7 @@ fn sealing_does_not_move_the_text_out_of_the_window() {
 
 #[test]
 fn a_viewport_inside_the_document_still_lands_on_whole_leaves() {
-    let mut typing = Typing::new(Null, 8);
+    let mut typing = Typing::new(Null::new(), 8);
     typing.insert(b"0123456789abcdefghij").expect("typed");
     let spine = typing.spine();
     let heights = heights(spine);

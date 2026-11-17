@@ -29,9 +29,9 @@
 //! nothing here pretends otherwise: `at` is always `spine.len()`.
 
 use crate::commit::{Appended, SegmentSink};
-use crate::draft::{Draft, DraftError};
+use crate::draft::Draft;
 use crate::slab::{SegmentId, Slab, SlabSpan};
-use crate::source::{OpenSources, SealError};
+use crate::source::OpenSources;
 use crate::spine::{Spine, SpineError};
 use crate::text::{EditOutcome, SlabText, TextError};
 
@@ -118,7 +118,10 @@ impl<S: SegmentSink> Typing<S> {
     /// If `capacity` is zero: a session that can hold nothing can never accept a keystroke, and
     /// saying so at construction is better than refusing every `insert` forever.
     pub fn new(sink: S, capacity: usize) -> Self {
-        assert!(capacity > 0, "a typing buffer needs room for at least one byte");
+        assert!(
+            capacity > 0,
+            "a typing buffer needs room for at least one byte"
+        );
         Self {
             spine: Spine::empty(),
             draft: Draft::new(),
@@ -393,7 +396,10 @@ mod tests {
         }
         typing.flush().expect("flushed");
         let written = typing.sink.written();
-        assert_eq!(written, typed, "the world-line holds the text, once, in order");
+        assert_eq!(
+            written, typed,
+            "the world-line holds the text, once, in order"
+        );
         assert_eq!(typing.sealed_bytes(), typed.len() as u64);
         assert_eq!(typing.spine().len(), typed.len() as u64);
         assert_eq!(typing.document_len(), typed.len() as u64);
