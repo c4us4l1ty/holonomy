@@ -226,9 +226,12 @@ mod tests {
         let before = spine.slab_span(0).expect("a leaf");
 
         sources.seal(provisional, SegmentId::new(7)).expect("open");
-        assert_eq!(sources.locate(provisional), Location::Sealed {
-            segment: SegmentId::new(7)
-        });
+        assert_eq!(
+            sources.locate(provisional),
+            Location::Sealed {
+                segment: SegmentId::new(7)
+            }
+        );
         assert_eq!(sources.sealed_as(provisional), Some(SegmentId::new(7)));
         assert_eq!(sources.open_count(), 0);
 
@@ -271,9 +274,13 @@ mod tests {
             }
         );
         // A provisional id that was never handed out names nothing.
-        assert_eq!(sources.locate(SegmentId::new(PROVISIONAL_BASE)), Location::Unknown);
-        sources.open();
-        assert!(sources.locate(SegmentId::new(PROVISIONAL_BASE)).is_open());
+        assert_eq!(
+            sources.locate(SegmentId::new(PROVISIONAL_BASE)),
+            Location::Unknown
+        );
+        let first = sources.open();
+        assert_eq!(first, SegmentId::new(PROVISIONAL_BASE));
+        assert!(sources.locate(first).is_open());
     }
 
     #[test]
