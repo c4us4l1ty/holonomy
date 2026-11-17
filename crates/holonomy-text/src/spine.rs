@@ -42,7 +42,10 @@ impl std::fmt::Display for SpineError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OffsetOutOfRange { offset, len } => {
-                write!(formatter, "offset {offset} is outside a {len}-byte document")
+                write!(
+                    formatter,
+                    "offset {offset} is outside a {len}-byte document"
+                )
             }
             Self::RangeOutOfRange { start, end, len } => write!(
                 formatter,
@@ -70,7 +73,9 @@ impl Spine {
     /// The empty document.
     #[must_use]
     pub fn empty() -> Self {
-        Self { root: tree::empty() }
+        Self {
+            root: tree::empty(),
+        }
     }
 
     /// Builds a spine from slabs in document order, in O(n).
@@ -298,11 +303,7 @@ mod tests {
         let mut slabs: Vec<Slab> = (0..full)
             .map(|segment| Slab::new(SegmentId::new(segment), 0, SEGMENT_BYTES as u32))
             .collect();
-        slabs.push(Slab::new(
-            SegmentId::new(full),
-            0,
-            remainder as u32,
-        ));
+        slabs.push(Slab::new(SegmentId::new(full), 0, remainder as u32));
         Spine::from_slabs(slabs)
     }
 
@@ -394,29 +395,38 @@ mod tests {
     #[test]
     fn bad_offsets_and_ranges_are_refused() {
         let spine = Spine::from_slabs(vec![slab(0, 10)]);
+        // Spine deliberately has no `PartialEq`: two spines with equal bytes are not the same
+        // document, and comparing roots would invite a structural equality that history makes
+        // meaningless. Errors are compared directly instead.
         assert_eq!(
-            spine.insert_slab(11, slab(1, 1)),
-            Err(SpineError::OffsetOutOfRange { offset: 11, len: 10 })
+            spine.insert_slab(11, slab(1, 1)).unwrap_err(),
+            SpineError::OffsetOutOfRange {
+                offset: 11,
+                len: 10
+            }
         );
         assert_eq!(
-            spine.split_at(11),
-            Err(SpineError::OffsetOutOfRange { offset: 11, len: 10 })
+            spine.split_at(11).unwrap_err(),
+            SpineError::OffsetOutOfRange {
+                offset: 11,
+                len: 10
+            }
         );
         assert_eq!(
-            spine.remove_range(4, 2),
-            Err(SpineError::RangeOutOfRange {
+            spine.remove_range(4, 2).unwrap_err(),
+            SpineError::RangeOutOfRange {
                 start: 4,
                 end: 2,
                 len: 10
-            })
+            }
         );
         assert_eq!(
-            spine.remove_range(0, 11),
-            Err(SpineError::RangeOutOfRange {
+            spine.remove_range(0, 11).unwrap_err(),
+            SpineError::RangeOutOfRange {
                 start: 0,
                 end: 11,
                 len: 10
-            })
+            }
         );
     }
 
@@ -435,7 +445,11 @@ mod tests {
     fn viewport_spans_are_clipped_and_counted_at_the_window_not_the_document() {
         let spine = Spine::from_slabs(vec![slab(0, 10), slab(1, 10), slab(2, 10)]);
         let window = spine.spans_in(8, 12);
-        assert_eq!(window.len(), 2, "only two slabs overlap an eight-byte window");
+        assert_eq!(
+            window.len(),
+            2,
+            "only two slabs overlap an eight-byte window"
+        );
         assert_eq!(window[0].offset(), 8);
         assert_eq!(window[0].len(), 2);
         assert_eq!(window[1].offset(), 10);

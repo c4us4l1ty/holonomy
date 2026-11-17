@@ -268,7 +268,11 @@ mod tests {
         let slabs = check(&root);
         assert_eq!(slabs.len(), 1_024);
         // AVL worst case is well under 24; a degenerate list would be 1,024 deep.
-        assert!(root.height() <= 24, "height {} is not logarithmic", root.height());
+        assert!(
+            root.height() <= 24,
+            "height {} is not logarithmic",
+            root.height()
+        );
         assert!(slabs
             .iter()
             .enumerate()
@@ -280,7 +284,11 @@ mod tests {
         let slabs: Vec<Slab> = (0..916).map(|index| slab(index, 10)).collect();
         let root = build_balanced(&slabs);
         assert_eq!(check(&root).len(), 916);
-        assert!(root.height() <= 11, "height {} is not logarithmic", root.height());
+        assert!(
+            root.height() <= 11,
+            "height {} is not logarithmic",
+            root.height()
+        );
     }
 
     #[test]
@@ -344,7 +352,11 @@ mod tests {
             root = join(root, leaf(slab(index, 10)));
         }
         // AVL worst case for 4,096 leaves is 18; degeneracy would be 4,096.
-        assert!(root.height() <= 24, "height {} is not logarithmic", root.height());
+        assert!(
+            root.height() <= 24,
+            "height {} is not logarithmic",
+            root.height()
+        );
         assert_eq!(check(&root).len(), 4_096);
     }
 }

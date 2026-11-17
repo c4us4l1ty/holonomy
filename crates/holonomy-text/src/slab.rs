@@ -46,7 +46,11 @@ impl Slab {
     /// Creates a slab naming `len` bytes from `start` inside `segment`.
     #[must_use]
     pub const fn new(segment: SegmentId, start: u32, len: u32) -> Self {
-        Self { segment, start, len }
+        Self {
+            segment,
+            start,
+            len,
+        }
     }
 
     /// The segment this slab reads from.

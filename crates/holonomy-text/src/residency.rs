@@ -117,10 +117,7 @@ impl<S: SegmentSource> ResidentSet<S> {
     /// Bytes of plaintext currently held. Never exceeds [`Self::budget_bytes`].
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
-        self.entries
-            .iter()
-            .map(|entry| entry.plaintext.len())
-            .sum()
+        self.entries.iter().map(|entry| entry.plaintext.len()).sum()
     }
 
     /// How many segments are currently resident.
@@ -283,7 +280,11 @@ mod tests {
         resident.fault_in(id(2)).expect("source works");
         let loads_before = resident.source().loads;
         resident.fault_in(id(1)).expect("still cached");
-        assert_eq!(resident.source().loads, loads_before, "a hit must not reload");
+        assert_eq!(
+            resident.source().loads,
+            loads_before,
+            "a hit must not reload"
+        );
         assert_eq!(resident.resident_segments(), 2);
     }
 
@@ -295,7 +296,10 @@ mod tests {
         resident.fault_in(id(2)).expect("source works");
         resident.fault_in(id(3)).expect("source works");
         assert_eq!(resident.resident_bytes(), 256);
-        assert!(!resident.contains(id(0)), "the oldest segment must be evicted");
+        assert!(
+            !resident.contains(id(0)),
+            "the oldest segment must be evicted"
+        );
 
         resident.fault_in(id(4)).expect("source works");
         assert!(!resident.contains(id(1)));
@@ -385,7 +389,8 @@ mod tests {
         assert_eq!(spine.len(), 60_000_000);
 
         let budget = 4 * 65_536;
-        let mut resident = ResidentSet::new(Counting::new(65_536), budget).expect("non-zero budget");
+        let mut resident =
+            ResidentSet::new(Counting::new(65_536), budget).expect("non-zero budget");
 
         // Scroll through the whole lifetime a window at a time; the resident bound never moves,
         // and what is resident is always a consequence of the window, not of the document.
@@ -405,14 +410,20 @@ mod tests {
             }
             offset = end;
         }
-        assert_eq!(resident.source().loads, 916, "each segment faulted exactly once");
+        assert_eq!(
+            resident.source().loads,
+            916,
+            "each segment faulted exactly once"
+        );
         assert!(resident.resident_bytes() <= budget);
 
         // The same budget over a two-slab document: the set does not know the difference.
         let small = Spine::from_slabs(vec![Slab::new(id(0), 0, 65_536)]);
         let mut small_resident =
             ResidentSet::new(Counting::new(65_536), budget).expect("non-zero budget");
-        small_resident.fault_in(small.locate(0).expect("in range").slab().segment()).expect("source works");
+        small_resident
+            .fault_in(small.locate(0).expect("in range").slab().segment())
+            .expect("source works");
         assert_eq!(small_resident.resident_bytes(), 65_536);
         assert_eq!(small_resident.budget_bytes(), resident.budget_bytes());
     }
