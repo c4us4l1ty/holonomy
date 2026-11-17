@@ -37,7 +37,10 @@ impl Drop for Temp {
 
 fn temp_path() -> Temp {
     let id = generate_container_id().expect("entropy");
-    let suffix = id.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let suffix = id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     Temp(std::env::temp_dir().join(format!("holonomy-commit-{suffix}.wavefunction")))
 }
 
@@ -48,7 +51,11 @@ fn material(passphrase: &[u8], salt: [u8; 64]) -> (Capsule, DEMKey) {
 }
 
 fn create_line<'key>(path: &Temp, capsule: Capsule, dem: &'key DEMKey) -> WorldLine<'key> {
-    let params = KdfParamsRecord { m_kib: 8_192, t: 1, p: 1 };
+    let params = KdfParamsRecord {
+        m_kib: 8_192,
+        t: 1,
+        p: 1,
+    };
     let header = LineHeader::new(params, [0x5C; 64], capsule).expect("a valid header");
     WorldLine::create(&path.0, header, dem).expect("creates the world-line")
 }
@@ -66,7 +73,10 @@ struct LineSink<'a, 'key> {
 
 impl SegmentSink for LineSink<'_, '_> {
     fn append_segment(&mut self, plaintext: &[u8]) -> Result<Appended, String> {
-        let receipt = self.line.append_segments(&[plaintext]).map_err(|e| e.to_string())?;
+        let receipt = self
+            .line
+            .append_segments(&[plaintext])
+            .map_err(|e| e.to_string())?;
         Ok(Appended {
             // The appended segment is the last one committed; sequences are dense from zero.
             segment: SegmentId::new(receipt.segment_count - 1),
@@ -84,7 +94,10 @@ struct LineSource<'a, 'key> {
 
 impl SegmentSource for LineSource<'_, '_> {
     fn load(&mut self, segment: SegmentId) -> Result<Vec<u8>, String> {
-        let bytes = self.line.open_segment(segment.get()).map_err(|e| e.to_string())?;
+        let bytes = self
+            .line
+            .open_segment(segment.get())
+            .map_err(|e| e.to_string())?;
         Ok(bytes.to_vec())
     }
 }
@@ -94,7 +107,9 @@ fn a_keystroke_becomes_a_sealed_segment_and_a_new_root() {
     let path = temp_path();
     let (capsule, dem) = material(b"commit boundary", [0x5C; 64]);
     let mut line = create_line(&path, capsule, &dem);
-    let receipt = line.append_segments(&[b"hello world"]).expect("one segment");
+    let receipt = line
+        .append_segments(&[b"hello world"])
+        .expect("one segment");
     assert_eq!(receipt.segment_count, 1);
     assert_eq!(receipt.witness_sequence, 1);
 
@@ -111,8 +126,11 @@ fn a_keystroke_becomes_a_sealed_segment_and_a_new_root() {
     // The commit: seal, append, witness, new root.
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
-    drop(sink);
-    let Committed::Sealed { spine: after, witness } = committed else {
+    let Committed::Sealed {
+        spine: after,
+        witness,
+    } = committed
+    else {
         panic!("an edited slab must seal, not vanish");
     };
     assert_eq!(witness.segment, SegmentId::new(1));
@@ -135,7 +153,10 @@ fn a_keystroke_becomes_a_sealed_segment_and_a_new_root() {
     let original = reopened.open_segment(0).expect("segment 0").to_vec();
     assert_eq!(original, b"hello world", "the old segment is untouched");
     let sealed = reopened.open_segment(1).expect("segment 1").to_vec();
-    assert_eq!(sealed, b"hello, world", "the sealed bytes are what was typed");
+    assert_eq!(
+        sealed, b"hello, world",
+        "the sealed bytes are what was typed"
+    );
     let report = reopened.verify().expect("the file authenticates");
     assert_eq!(report.segments_verified, 2);
     assert_eq!(report.plaintext_bytes_verified, 23);
@@ -146,7 +167,8 @@ fn the_resident_set_reads_the_segment_the_commit_wrote() {
     let path = temp_path();
     let (capsule, dem) = material(b"resident reads the commit", [0x5D; 64]);
     let mut line = create_line(&path, capsule, &dem);
-    line.append_segments(&[b"the quick brown fox"]).expect("one segment");
+    line.append_segments(&[b"the quick brown fox"])
+        .expect("one segment");
 
     let spine = Spine::from_slabs([Slab::new(SegmentId::new(0), 0, 19)]);
     let span = spine.spans_in(0, spine.len()).pop().expect("one span");
@@ -154,7 +176,6 @@ fn the_resident_set_reads_the_segment_the_commit_wrote() {
     text.insert(9, b"very ").expect("fits");
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
-    drop(sink);
     let after = committed.spine().clone();
 
     // A resident set pointed at the same file must fault in exactly the committed bytes for the
@@ -164,7 +185,10 @@ fn the_resident_set_reads_the_segment_the_commit_wrote() {
     let mut set = ResidentSet::new(source, 1 << 20, 64).expect("a usable budget");
     let labelled = after.locate(0).expect("not empty").slab().segment();
     assert_eq!(after.len(), 24);
-    assert_eq!(set.fault_in(labelled).expect("faults in"), b"the quick very brown fox");
+    assert_eq!(
+        set.fault_in(labelled).expect("faults in"),
+        b"the quick very brown fox"
+    );
 }
 
 #[test]
@@ -181,7 +205,6 @@ fn a_second_commit_of_the_same_span_is_refused_before_the_append() {
 
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
-    drop(sink);
     let after = committed.spine().clone();
     assert_eq!(line.segment_count(), 2);
 
@@ -191,7 +214,10 @@ fn a_second_commit_of_the_same_span_is_refused_before_the_append() {
         let mut sink = LineSink { line: &mut line };
         commit_slab(&after, span, &text, &mut sink)
     };
-    assert!(matches!(refused, Err(CommitError::StaleSpan { offset: 0, .. })));
+    assert!(matches!(
+        refused,
+        Err(CommitError::StaleSpan { offset: 0, .. })
+    ));
     assert_eq!(line.segment_count(), 2, "a refusal must not append");
 }
 
@@ -200,7 +226,8 @@ fn an_emptied_slab_leaves_the_spine_and_appends_nothing() {
     let path = temp_path();
     let (capsule, dem) = material(b"emptied slab", [0x5F; 64]);
     let mut line = create_line(&path, capsule, &dem);
-    line.append_segments(&[b"gone", b"kept"]).expect("two segments");
+    line.append_segments(&[b"gone", b"kept"])
+        .expect("two segments");
 
     let first = Slab::new(SegmentId::new(0), 0, 4);
     let second = Slab::new(SegmentId::new(1), 0, 4);
@@ -211,7 +238,6 @@ fn an_emptied_slab_leaves_the_spine_and_appends_nothing() {
 
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
-    drop(sink);
     assert!(matches!(committed, Committed::Removed { .. }));
     assert_eq!(committed.spine().len(), 4);
     assert_eq!(committed.spine().slab_count(), 1);
@@ -240,7 +266,6 @@ fn undo_after_a_commit_returns_to_a_root_the_world_line_still_serves() {
     text.insert(5, b"!").expect("fits");
     let mut sink = LineSink { line: &mut line };
     let committed = commit_slab(&spine, span, &text, &mut sink).expect("commits");
-    drop(sink);
     history.record(committed.spine().clone());
     assert_eq!(history.current().len(), 6);
 
@@ -248,7 +273,10 @@ fn undo_after_a_commit_returns_to_a_root_the_world_line_still_serves() {
     let undone = history.undo().expect("a state to undo to");
     assert_eq!(undone.len(), 5);
     assert_eq!(undone.slab_count(), 1);
-    assert_eq!(undone.locate(0).expect("in range").slab().segment(), SegmentId::new(0));
+    assert_eq!(
+        undone.locate(0).expect("in range").slab().segment(),
+        SegmentId::new(0)
+    );
     assert_eq!(history.redo().map(Spine::len), Some(6));
 
     let original = line.open_segment(0).expect("segment 0").to_vec();

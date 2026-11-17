@@ -139,7 +139,11 @@ pub enum CommitError {
 impl std::fmt::Display for CommitError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StaleSpan { offset, expected, found } => match found {
+            Self::StaleSpan {
+                offset,
+                expected,
+                found,
+            } => match found {
                 Some(slab) => write!(
                     formatter,
                     "offset {offset} holds segment {} bytes {}..{}, not segment {} bytes {}..{}",
@@ -214,7 +218,9 @@ pub fn commit_slab<S: SegmentSink>(
         });
     }
     if text.is_empty() {
-        return Ok(Committed::Removed { spine: spine.remove_range(offset, end)? });
+        return Ok(Committed::Removed {
+            spine: spine.remove_range(offset, end)?,
+        });
     }
 
     let len = u32::try_from(text.len()).map_err(|_| CommitError::TooLarge { bytes: text.len() })?;
@@ -294,7 +300,12 @@ mod tests {
             .iter()
             .map(|span| {
                 let slab = span.slab();
-                (span.offset(), slab.segment().get(), slab.start(), slab.len())
+                (
+                    span.offset(),
+                    slab.segment().get(),
+                    slab.start(),
+                    slab.len(),
+                )
             })
             .collect();
         assert_eq!(geometry, vec![(0, 10, 0, 6), (6, 1, 0, 5)]);
@@ -319,12 +330,12 @@ mod tests {
         // *new* root names a leaf that is no longer there.
         let refused = commit_slab(&after, span, &text, &mut sink);
         assert_eq!(
-            refused,
-            Err(CommitError::StaleSpan {
+            refused.unwrap_err(),
+            CommitError::StaleSpan {
                 offset: 0,
                 expected: slab(0, 5),
                 found: Some(slab(10, 6)),
-            })
+            }
         );
         assert_eq!(sink.appended.len(), 1, "a refusal must not append");
 
@@ -363,10 +374,10 @@ mod tests {
 
         let span = span_of(&spine, 0);
         assert_eq!(
-            commit_slab(&spine, span, &text, &mut sink),
-            Err(CommitError::Refused {
+            commit_slab(&spine, span, &text, &mut sink).unwrap_err(),
+            CommitError::Refused {
                 message: "no space left on device".to_owned(),
-            })
+            }
         );
         assert_eq!(spine.len(), 5);
         assert_eq!(spine.slab_count(), 1);
@@ -381,12 +392,12 @@ mod tests {
         let mut sink = Recording::new(10);
         let inside = SlabSpan::new(3, slab(0, 5));
         assert_eq!(
-            commit_slab(&spine, inside, &text, &mut sink),
-            Err(CommitError::StaleSpan {
+            commit_slab(&spine, inside, &text, &mut sink).unwrap_err(),
+            CommitError::StaleSpan {
                 offset: 3,
                 expected: slab(0, 5),
                 found: Some(slab(0, 5)),
-            })
+            }
         );
         assert!(sink.appended.is_empty(), "nothing may be appended");
         assert_eq!(spine.len(), 10, "and nothing may be removed");
@@ -400,12 +411,12 @@ mod tests {
         // Same offset, a different claimed extent: the leaf is what the spine holds, not the span.
         let overlong = SlabSpan::new(0, Slab::new(SegmentId::new(0), 0, 9));
         assert_eq!(
-            commit_slab(&spine, overlong, &text, &mut sink),
-            Err(CommitError::StaleSpan {
+            commit_slab(&spine, overlong, &text, &mut sink).unwrap_err(),
+            CommitError::StaleSpan {
                 offset: 0,
                 expected: Slab::new(SegmentId::new(0), 0, 9),
                 found: Some(slab(0, 5)),
-            })
+            }
         );
         assert!(sink.appended.is_empty());
     }

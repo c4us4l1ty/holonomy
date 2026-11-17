@@ -94,6 +94,13 @@ Listed so they stay dead.
     fragments (the tests assert the leaf count is unchanged across a commit) but it does not repair
     fragments either. OQ-9 is narrowed below, not closed.
 
+  **What the first push cost.** Two compile-level findings, both about the test, neither about the
+  boundary: `drop(sink)` on a type that implements no `Drop` (clippy's `drop_non_drop`; NLL already
+  ends the borrow at the sink's last use) and `assert_eq!` over `Result<Committed, _>`, which cannot
+  work because `Committed` holds a `Spine` and `Spine` deliberately has no `PartialEq` — two spines
+  with equal bytes are not the same spine. The refusals are compared as errors instead. A design
+  constraint became a compile error in the tests, which is where it belongs.
+
   **Dependency direction.** `holonomy-line` and `holonomy-seal` are **dev**-dependencies of
   `holonomy-text`: the shipped Spine links neither, and speaks to both through `SegmentSink` /
   `SegmentSource`. The adapters live in the test file because the application crate that will own
