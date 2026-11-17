@@ -164,6 +164,7 @@ impl<'a> StyledText<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Fixed;
     use crate::layout::layout_styled;
     use crate::test_support::Fake;
 
