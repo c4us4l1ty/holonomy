@@ -377,7 +377,8 @@ fn typing_through_many_commits_never_corrupts_the_document() {
             // Delete one character.
             let index = boundary % characters.len();
             let (start, character) = characters[index];
-            text.delete(start, start + character.len_utf8()).expect("deletes");
+            text.delete(start, start + character.len_utf8())
+                .expect("deletes");
             model.remove(start);
         } else {
             text.insert(at, ALPHABET[pick].to_string().as_bytes())
@@ -386,7 +387,11 @@ fn typing_through_many_commits_never_corrupts_the_document() {
         }
         assert_eq!(text.as_str(), model, "step {step}");
         draft.record(span, text.len() as u64).expect("records");
-        assert_eq!(draft.document_len(&spine), model.len() as u64, "step {step}");
+        assert_eq!(
+            draft.document_len(&spine),
+            model.len() as u64,
+            "step {step}"
+        );
 
         if step % 6 == 5 {
             let committed = {
@@ -396,7 +401,8 @@ fn typing_through_many_commits_never_corrupts_the_document() {
             let Committed::Sealed {
                 spine: next,
                 witness,
-            } = committed else {
+            } = committed
+            else {
                 panic!("a slab with bytes must seal");
             };
             assert_eq!(next.len(), model.len() as u64, "step {step}");
