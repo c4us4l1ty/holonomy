@@ -18,8 +18,6 @@
 //!
 //! [`Shaper`]: crate::shaper::Shaper
 
-use crate::geom::Fixed;
-
 /// The size, in thousandths of a logical unit, that [`Style::DEFAULT`] is defined at.
 const SIZE_ONE: i64 = 1000;
 
@@ -27,7 +25,7 @@ const SIZE_ONE: i64 = 1000;
 ///
 /// Sizes are thousandths of a logical unit (14000 = 14 units), because a size is a metric and
 /// metrics in this crate are integers: a float size would reintroduce, one zoom tick later, the
-/// rounding question [`Fixed`] exists to delete.
+/// rounding question [`crate::Fixed`] exists to delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Style {
     size_milli: i64,
@@ -178,14 +176,14 @@ mod tests {
             },
             StyledRun {
                 start: 5,
-                style: Style::DEFAULT.at(2000).italic(),
+                style: Style::at(2000).italic(),
             },
         ];
         let styled = StyledText::new("abcdefgh", &runs);
         assert_eq!(styled.style_at(0), Style::DEFAULT);
         assert_eq!(styled.style_at(2), Style::DEFAULT.bold());
         assert_eq!(styled.style_at(4), Style::DEFAULT.bold());
-        assert_eq!(styled.style_at(5), Style::DEFAULT.at(2000).italic());
+        assert_eq!(styled.style_at(5), Style::at(2000).italic());
         assert_eq!(styled.text(), "abcdefgh");
         assert_eq!(styled.runs().len(), 2);
         assert_eq!(StyledText::plain("x").style_at(0), Style::DEFAULT);
@@ -195,7 +193,7 @@ mod tests {
     fn a_larger_run_is_wider_and_raises_the_line() {
         let runs = [StyledRun {
             start: 3,
-            style: Style::DEFAULT.at(2000),
+            style: Style::at(2000),
         }];
         let styled = StyledText::new("abcDEF", &runs);
         let laid = layout_styled(styled, 0, Fixed::units(40), &Fake::new());
@@ -207,7 +205,7 @@ mod tests {
         assert_eq!(laid.lines()[0].height(), Fixed::units(40));
         assert_eq!(laid.height(), Fixed::units(40));
         let placed = laid.lines()[0].clusters();
-        assert_eq!(placed[3].style, Style::DEFAULT.at(2000));
+        assert_eq!(placed[3].style, Style::at(2000));
         assert_eq!(placed[3].advance, Fixed::units(2));
         assert_eq!(placed[2].style, Style::DEFAULT);
     }
@@ -217,15 +215,15 @@ mod tests {
         let runs = [
             StyledRun {
                 start: 0,
-                style: Style::DEFAULT.at(1500).bold(),
+                style: Style::at(1500).bold(),
             },
             StyledRun {
                 start: 4,
-                style: Style::DEFAULT.at(900),
+                style: Style::at(900),
             },
             StyledRun {
                 start: 9,
-                style: Style::DEFAULT.at(2400).italic(),
+                style: Style::at(2400).italic(),
             },
         ];
         let text = "one two three";
@@ -249,7 +247,7 @@ mod tests {
     fn an_empty_line_takes_the_style_that_reaches_it() {
         let runs = [StyledRun {
             start: 2,
-            style: Style::DEFAULT.at(2000),
+            style: Style::at(2000),
         }];
         let styled = StyledText::new("a\n\nb", &runs);
         let laid = layout_styled(styled, 0, Fixed::units(40), &Fake::new());
