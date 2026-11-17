@@ -266,7 +266,8 @@ mod tests {
     }
 
     fn device(view: &View, sixtyfourths: i64) -> i64 {
-        view.to_device(Fixed::from_64ths(sixtyfourths)).sixtyfourths()
+        view.to_device(Fixed::from_64ths(sixtyfourths))
+            .sixtyfourths()
     }
 
     /// The zoom tick and the DPI grid every property test sweeps.
