@@ -77,7 +77,7 @@ Listed so they stay dead.
 
   **The budget got more honest.** `ResidentSet` now accounts its bound against **allocated
   capacity**, not text length: the slack reserved for typing is memory, and a bound that ignored it
-  would be a bound in name only. `allocate`-side accounting is what a memory adversary actually
+  would be a bound in name only. Allocation-side accounting is what a memory adversary actually
   measures. Plaintext length is still reported separately.
 
   **Growth is refused, never done quietly.** `SlabText::insert` returns
