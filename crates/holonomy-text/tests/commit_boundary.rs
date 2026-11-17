@@ -342,3 +342,81 @@ fn the_document_view_is_correct_before_the_commit_and_identical_after() {
     assert_eq!(sealed.span().slab().segment(), SegmentId::new(2));
     assert_eq!(sealed.segment_offset(), Some(5));
 }
+
+/// Typing, sealing and re-faulting: the document must survive every cycle unchanged.
+///
+/// One slab holds the whole document, so each commit replaces the only leaf: the world-line grows
+/// a segment per cycle, the spine stays one leaf deep, and the text is reloaded from the segment
+/// the witness just committed — the loop an editor runs for every commit boundary.
+#[test]
+fn typing_through_many_commits_never_corrupts_the_document() {
+    const ALPHABET: [char; 5] = ['a', 'b', ' ', 'é', '中'];
+
+    let path = temp_path();
+    let (capsule, dem) = material(b"many commits", [0x62; 64]);
+    let mut line = create_line(&path, capsule, &dem);
+    line.append_segments(&[b"start"]).expect("one segment");
+
+    let mut spine = Spine::from_slabs([Slab::new(SegmentId::new(0), 0, 5)]);
+    let mut span = spine.spans_in(0, spine.len()).pop().expect("one span");
+    let mut text = resident(&line, 0, 4_096);
+    let mut model = String::from("start");
+    let mut draft = Draft::with_capacity(1);
+    let mut segment = 0u64;
+
+    for step in 0..60usize {
+        let pick = step % ALPHABET.len();
+        let characters: Vec<(usize, char)> = model.char_indices().collect();
+        let boundary = step % (characters.len() + 1);
+        let at = if boundary == characters.len() {
+            model.len()
+        } else {
+            characters[boundary].0
+        };
+        if step % 3 == 2 && !model.is_empty() {
+            // Delete one character.
+            let index = boundary % characters.len();
+            let (start, character) = characters[index];
+            text.delete(start, start + character.len_utf8()).expect("deletes");
+            model.remove(start);
+        } else {
+            text.insert(at, ALPHABET[pick].to_string().as_bytes())
+                .expect("fits");
+            model.insert(at, ALPHABET[pick]);
+        }
+        assert_eq!(text.as_str(), model, "step {step}");
+        draft.record(span, text.len() as u64).expect("records");
+        assert_eq!(draft.document_len(&spine), model.len() as u64, "step {step}");
+
+        if step % 6 == 5 {
+            let committed = {
+                let mut sink = LineSink { line: &mut line };
+                commit_slab(&spine, span, &text, &mut sink).expect("commits")
+            };
+            let Committed::Sealed {
+                spine: next,
+                witness,
+            } = committed else {
+                panic!("a slab with bytes must seal");
+            };
+            assert_eq!(next.len(), model.len() as u64, "step {step}");
+            assert!(draft.forget(span.offset()));
+            segment = witness.segment.get();
+            spine = next;
+            span = spine.spans_in(0, spine.len()).pop().expect("one span");
+            text = resident(&line, segment, 4_096);
+            assert_eq!(text.as_str(), model, "sealed and reloaded at step {step}");
+        }
+    }
+
+    // Everything the loop committed is still there, authenticated, after a fresh open.
+    let reopened = WorldLine::open(&path.0, &dem).expect("reopens");
+    let report = reopened.verify().expect("the file authenticates");
+    assert_eq!(report.segments_verified, reopened.segment_count());
+    assert!(report.segments_verified >= 10, "ten commits at least");
+    let last = reopened
+        .open_segment(segment)
+        .expect("the last committed segment")
+        .to_vec();
+    assert_eq!(last, model.as_bytes());
+}
