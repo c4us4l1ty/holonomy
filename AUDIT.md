@@ -97,9 +97,12 @@ Listed so they stay dead.
   The tree was right and the model was wrong: a cut inside a leaf produces two leaves for one
   segment and `join` never merges them back, which is the documented design (a segment's bytes may
   span several slabs) and the reason `splitting_and_rejoining_every_byte_preserves_the_sequence`
-  already compares bytes rather than leaves. The assertion is now exact instead of approximate —
-  leaves equal modelled slabs **plus one per interior cut**, with boundary cuts counted as free —
-  so a genuinely lost or invented leaf still fails. Two `clippy::unusual_byte_groupings` lints in
+  already compares bytes rather than leaves. Counting "inside the document" was still one leaf too
+  generous, and the second red run said so (28 modelled against 27 real): a cut can be strictly
+  inside the document and still fall exactly on a leaf boundary, which spends nothing. The test now
+  carries an independent set of leaf-start offsets and asserts leaves equal its size, which is exact
+  — and it was replayed against a mirror of `join`/`split` for 16,000 random operations before the
+  third push rather than trusting a fourth blind run. Two `clippy::unusual_byte_groupings` lints in
   the new seed arrays were the only other findings.
 
   **What this entry does not claim.** The hunt covered `holonomy-text` — the code written this

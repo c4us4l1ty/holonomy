@@ -381,30 +381,33 @@ mod tests {
 
     #[test]
     fn random_join_and_split_shapes_keep_every_invariant() {
+        use std::collections::BTreeSet;
+
         use crate::test_support::XorShift;
 
         for seed in [1u64, 7, 42, 0xDEAD_BEEF] {
             let mut rng = XorShift::new(seed);
             let mut root = empty();
             let mut expected: Vec<Slab> = Vec::new();
-            // A cut inside one leaf spends one leaf for good: joins never merge fragments back,
-            // because a segment's bytes may legitimately span several slabs. Boundary cuts are
-            // free (`split` returns the leaf whole on either side).
-            let mut fragments = 0u64;
+            // Where every leaf starts, tracked independently of the tree. A cut spends a leaf
+            // exactly when it lands inside one — that is, when its offset is not already here —
+            // and joins never merge fragments back (a segment's bytes may span several slabs).
+            let mut boundaries: BTreeSet<u64> = BTreeSet::new();
 
             for _ in 0..400 {
                 match rng.below(3) {
                     0 => {
                         // Append.
-                        let slab = slab(rng.below(64), 1 + rng.below(24) as u32);
-                        root = join(root, leaf(slab));
-                        expected.push(slab);
+                        let next = slab(rng.below(64), 1 + rng.below(24) as u32);
+                        boundaries.insert(root.bytes());
+                        root = join(root, leaf(next));
+                        expected.push(next);
                     }
                     1 => {
                         // Split at a random offset and rejoin: shape churn without content change.
                         let at = rng.below(root.bytes() + 1);
                         if at > 0 && at < root.bytes() {
-                            fragments += 1;
+                            boundaries.insert(at);
                         }
                         let (left, right) = split(&root, at);
                         check_invariants(&left);
@@ -417,17 +420,21 @@ mod tests {
                         let extra: Vec<Slab> = (0..count)
                             .map(|_| slab(rng.below(64), 1 + rng.below(16) as u32))
                             .collect();
-                        let block = build_balanced(&extra);
-                        root = join(root, block);
+                        let mut offset = root.bytes();
+                        for value in &extra {
+                            boundaries.insert(offset);
+                            offset += u64::from(value.len());
+                        }
+                        root = join(root, build_balanced(&extra));
                         expected.extend(extra);
                     }
                 }
                 let (bytes, slabs, _) = check_invariants(&root);
-                let expected_bytes: u64 = expected.iter().map(|s| u64::from(s.len())).sum();
+                let expected_bytes: u64 = expected.iter().map(|value| u64::from(value.len())).sum();
                 assert_eq!(bytes, expected_bytes, "seed {seed}");
                 assert_eq!(
                     u64::from(slabs),
-                    expected.len() as u64 + fragments,
+                    boundaries.len() as u64,
                     "seed {seed}: a leaf was gained or lost"
                 );
             }
