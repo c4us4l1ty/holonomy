@@ -5,20 +5,21 @@
 //! the document's length (L-2): the same set holds four 64 KiB segments whether the spine
 //! describes one page or thirty million words.
 //!
-//! Every buffer is a [`Zeroizing<Vec<u8>>`], and eviction drops it on the spot, so a segment that
-//! leaves the viewport is wiped rather than merely forgotten. That is by construction, not by
-//! measurement: proving the wipe needs the Block 9 canary and the counting allocator, and this
-//! module claims neither. What it does claim is that the *set of bytes it owns* never exceeds the
-//! budget, and tests assert exactly that.
+//! Every buffer is editable in place ([`SlabText`]) and wipes on drop, so a segment that leaves
+//! the viewport is wiped rather than merely forgotten. The budget is checked against **allocated
+//! capacity**, not against text length: slack reserved for typing is memory, and a bound that
+//! ignored it would be a bound in name only.
+//!
+//! Recency is a monotonic counter, not a reordered deque — deliberately. A `VecDeque` hit would
+//! move an entry to the back, and `push_back` may reallocate, which would put an allocator call
+//! inside the keystroke path this module exists to keep clear. Scanning for the oldest entry is
+//! O(resident) on a *miss* only, and the resident set is viewport-sized, not document-sized.
 //!
 //! The source of plaintext is a trait so the Spine does not depend on the world-line: in
-//! production it is `holonomy-line`'s [`WorldLine`] opening one sealed segment at a time.
-
-use std::collections::VecDeque;
-
-use zeroize::Zeroizing;
+//! production it is `holonomy-line`'s `WorldLine` opening one sealed segment at a time.
 
 use crate::slab::SegmentId;
+use crate::text::SlabText;
 
 /// A supplier of sealed-segment plaintext — the world-line, in production.
 pub trait SegmentSource {
@@ -43,7 +44,7 @@ pub enum ResidencyError {
     SegmentExceedsBudget {
         /// The segment that was refused.
         segment: SegmentId,
-        /// Its plaintext length.
+        /// Its allocated capacity, including slack.
         bytes: usize,
         /// The configured budget.
         budget: usize,
@@ -54,6 +55,11 @@ pub enum ResidencyError {
         segment: SegmentId,
         /// The source's message.
         message: String,
+    },
+    /// The source supplied bytes that are not valid UTF-8.
+    NotText {
+        /// The segment whose plaintext was rejected.
+        segment: SegmentId,
     },
 }
 
@@ -67,10 +73,13 @@ impl std::fmt::Display for ResidencyError {
                 budget,
             } => write!(
                 formatter,
-                "{segment} is {bytes} bytes, which exceeds the {budget}-byte resident budget"
+                "{segment} needs {bytes} bytes, which exceeds the {budget}-byte resident budget"
             ),
             Self::Source { segment, message } => {
                 write!(formatter, "cannot fault in {segment}: {message}")
+            }
+            Self::NotText { segment } => {
+                write!(formatter, "the plaintext of {segment} is not valid UTF-8")
             }
         }
     }
@@ -80,44 +89,72 @@ impl std::error::Error for ResidencyError {}
 
 struct Entry {
     segment: SegmentId,
-    plaintext: Zeroizing<Vec<u8>>,
+    text: SlabText,
+    last_used: u64,
 }
 
-/// A hard-bounded, least-recently-used set of decrypted segments.
+/// A hard-bounded, least-recently-used set of decrypted, editable segments.
 pub struct ResidentSet<S: SegmentSource> {
     source: S,
     budget_bytes: usize,
-    /// Least recently used at the front, most recent at the back.
-    entries: VecDeque<Entry>,
+    slack_bytes: usize,
+    clock: u64,
+    entries: Vec<Entry>,
 }
 
 impl<S: SegmentSource> ResidentSet<S> {
-    /// Creates a resident set with a fixed byte budget.
+    /// Creates a resident set with a fixed byte budget and `slack_bytes` of spare capacity
+    /// reserved per segment for in-place editing.
     ///
     /// # Errors
     ///
     /// [`ResidencyError::ZeroBudget`] if `budget_bytes` is zero.
-    pub fn new(source: S, budget_bytes: usize) -> Result<Self, ResidencyError> {
+    pub fn new(
+        source: S,
+        budget_bytes: usize,
+        slack_bytes: usize,
+    ) -> Result<Self, ResidencyError> {
         if budget_bytes == 0 {
             return Err(ResidencyError::ZeroBudget);
         }
         Ok(Self {
             source,
             budget_bytes,
-            entries: VecDeque::new(),
+            slack_bytes,
+            clock: 0,
+            entries: Vec::new(),
         })
     }
 
-    /// The configured budget in bytes.
+    /// The configured budget in bytes of **allocated capacity**.
     #[must_use]
     pub fn budget_bytes(&self) -> usize {
         self.budget_bytes
     }
 
-    /// Bytes of plaintext currently held. Never exceeds [`Self::budget_bytes`].
+    /// The slack reserved per segment for in-place editing.
+    #[must_use]
+    pub fn slack_bytes(&self) -> usize {
+        self.slack_bytes
+    }
+
+    /// Bytes of plaintext currently held.
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
-        self.entries.iter().map(|entry| entry.plaintext.len()).sum()
+        self.entries
+            .iter()
+            .map(|entry| entry.text.len())
+            .sum::<usize>()
+    }
+
+    /// Bytes of capacity currently allocated, including editing slack. This is what the budget
+    /// bounds, and what the process actually holds.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.text.capacity())
+            .sum::<usize>()
     }
 
     /// How many segments are currently resident.
@@ -145,60 +182,39 @@ impl<S: SegmentSource> ResidentSet<S> {
 
     /// Faults `segment` in and returns its plaintext, evicting the coldest segments as needed.
     ///
-    /// A hit refreshes recency and touches no source. A miss loads the segment, then evicts from
-    /// the front of the LRU list until the new segment fits.
+    /// A hit refreshes recency and touches no source and no allocator. A miss loads the segment,
+    /// evicts until it fits, and pushes it.
     ///
     /// # Errors
     ///
-    /// [`ResidencyError::SegmentExceedsBudget`] if the segment alone is larger than the budget
-    /// (refusing it keeps the bound true), or [`ResidencyError::Source`] if the load failed.
+    /// [`ResidencyError::SegmentExceedsBudget`] if the segment's capacity alone is larger than
+    /// the budget (refusing it keeps the bound true), [`ResidencyError::Source`] if the load
+    /// failed, or [`ResidencyError::NotText`] if the plaintext was not UTF-8.
     pub fn fault_in(&mut self, segment: SegmentId) -> Result<&[u8], ResidencyError> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.segment == segment)
-        {
-            let entry = self
-                .entries
-                .remove(index)
-                .expect("the index came from a successful position search");
-            self.entries.push_back(entry);
-            return Ok(self
-                .entries
-                .back()
-                .expect("an entry was just pushed")
-                .plaintext
-                .as_slice());
-        }
+        let index = self.ensure(segment)?;
+        Ok(self.entries[index].text.as_bytes())
+    }
 
-        let plaintext = self
-            .source
-            .load(segment)
-            .map_err(|message| ResidencyError::Source { segment, message })?;
-        if plaintext.len() > self.budget_bytes {
-            return Err(ResidencyError::SegmentExceedsBudget {
-                segment,
-                bytes: plaintext.len(),
-                budget: self.budget_bytes,
-            });
-        }
-        while self.resident_bytes() + plaintext.len() > self.budget_bytes {
-            let evicted = self
-                .entries
-                .pop_front()
-                .expect("the budget exceeds zero, so the set is not empty here");
-            drop(evicted);
-        }
-        self.entries.push_back(Entry {
-            segment,
-            plaintext: Zeroizing::new(plaintext),
-        });
-        Ok(self
-            .entries
-            .back()
-            .expect("an entry was just pushed")
-            .plaintext
-            .as_slice())
+    /// Faults `segment` in and returns its editable text.
+    ///
+    /// This is the keystroke path's entry point: on a hit it performs no allocation, so the edit
+    /// that follows runs inside a scope the counting allocator can prove quiet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fault_in`].
+    pub fn fault_in_mut(&mut self, segment: SegmentId) -> Result<&mut SlabText, ResidencyError> {
+        let index = self.ensure(segment)?;
+        Ok(&mut self.entries[index].text)
+    }
+
+    /// The resident text of `segment`, if it is resident.
+    #[must_use]
+    pub fn text(&self, segment: SegmentId) -> Option<&SlabText> {
+        self.entries
+            .iter()
+            .find(|entry| entry.segment == segment)
+            .map(|entry| &entry.text)
     }
 
     /// Evicts every resident segment, returning how many were wiped.
@@ -214,15 +230,67 @@ impl<S: SegmentSource> ResidentSet<S> {
     /// next neighborhood is faulted in.
     pub fn retain(&mut self, keep: &[SegmentId]) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|entry| keep.contains(&entry.segment));
+        self.entries
+            .retain(|entry| keep.contains(&entry.segment));
         before - self.entries.len()
+    }
+
+    /// Makes `segment` resident and returns its index. The one place loads, evictions and recency
+    /// writes happen.
+    fn ensure(&mut self, segment: SegmentId) -> Result<usize, ResidencyError> {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.segment == segment)
+        {
+            self.clock += 1;
+            self.entries[index].last_used = self.clock;
+            return Ok(index);
+        }
+
+        let plaintext = self
+            .source
+            .load(segment)
+            .map_err(|message| ResidencyError::Source { segment, message })?;
+        let text = SlabText::from_plaintext(plaintext, self.slack_bytes)
+            .map_err(|_| ResidencyError::NotText { segment })?;
+        let capacity = text.capacity();
+        if capacity > self.budget_bytes {
+            return Err(ResidencyError::SegmentExceedsBudget {
+                segment,
+                bytes: capacity,
+                budget: self.budget_bytes,
+            });
+        }
+        while self.allocated_bytes() + capacity > self.budget_bytes {
+            let index = self
+                .oldest_index()
+                .expect("a resident set over its byte budget is not empty");
+            let evicted = self.entries.remove(index);
+            drop(evicted);
+        }
+        self.clock += 1;
+        self.entries.push(Entry {
+            segment,
+            text,
+            last_used: self.clock,
+        });
+        Ok(self.entries.len() - 1)
+    }
+
+    fn oldest_index(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(index, _)| index)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slab::{SegmentId, Slab};
+    use crate::slab::Slab;
     use crate::Spine;
 
     /// A fake world-line that records load counts and never allocates more than asked.
@@ -248,7 +316,8 @@ mod tests {
                 return Err("unauthenticated segment".to_owned());
             }
             self.loads += 1;
-            let byte = u8::try_from(segment.get() % 251).expect("a remainder below 251 fits");
+            // Valid UTF-8, and distinguishable per segment: ASCII only.
+            let byte = u8::try_from(segment.get() % 26).expect("a remainder below 26 fits") + b'a';
             Ok(vec![byte; self.segment_bytes])
         }
     }
@@ -258,7 +327,7 @@ mod tests {
     }
 
     fn set(budget: usize) -> ResidentSet<Counting> {
-        ResidentSet::new(Counting::new(64), budget).expect("non-zero budget")
+        ResidentSet::new(Counting::new(64), budget, 0).expect("non-zero budget")
     }
 
     #[test]
@@ -266,7 +335,7 @@ mod tests {
         let mut resident = set(256);
         let bytes = resident.fault_in(id(1)).expect("source works");
         assert_eq!(bytes.len(), 64);
-        assert_eq!(bytes[0], 1);
+        assert_eq!(bytes[0], b'b');
         assert_eq!(resident.resident_bytes(), 64);
         assert_eq!(resident.resident_segments(), 1);
         assert!(resident.contains(id(1)));
@@ -310,7 +379,7 @@ mod tests {
         resident.fault_in(id(5)).expect("source works");
         assert!(!resident.contains(id(1)), "then the next oldest");
         assert!(resident.contains(id(5)));
-        assert!(resident.resident_bytes() <= resident.budget_bytes());
+        assert!(resident.allocated_bytes() <= resident.budget_bytes());
     }
 
     #[test]
@@ -328,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_segment_larger_than_the_budget_is_refused_rather_than_admitted() {
-        let mut resident = ResidentSet::new(Counting::new(128), 64).expect("non-zero budget");
+        let mut resident = ResidentSet::new(Counting::new(128), 64, 0).expect("non-zero budget");
         assert_eq!(
             resident.fault_in(id(0)),
             Err(ResidencyError::SegmentExceedsBudget {
@@ -341,9 +410,38 @@ mod tests {
     }
 
     #[test]
+    fn slack_counts_against_the_budget_because_slack_is_memory() {
+        let mut resident =
+            ResidentSet::new(Counting::new(64), 256, 32).expect("non-zero budget");
+        for segment in 0..3 {
+            resident.fault_in(id(segment)).expect("source works");
+        }
+        assert_eq!(resident.resident_segments(), 2);
+        assert_eq!(resident.resident_bytes(), 128, "plaintext of two segments");
+        assert!(
+            resident.allocated_bytes() > resident.resident_bytes(),
+            "slack is allocated even when unused"
+        );
+        assert!(resident.allocated_bytes() <= resident.budget_bytes());
+    }
+
+    #[test]
+    fn a_resident_slab_can_be_edited_in_place() {
+        let mut resident = ResidentSet::new(Counting::new(64), 256, 32).expect("non-zero budget");
+        resident.fault_in(id(3)).expect("source works");
+        let text = resident.fault_in_mut(id(3)).expect("resident");
+        assert_eq!(text.insert(0, b"typed ").expect("fits"), crate::EditOutcome::InPlace);
+        assert_eq!(resident.resident_bytes(), 70);
+        assert_eq!(
+            resident.text(id(3)).expect("resident").as_str(),
+            format!("typed {}", "d".repeat(64))
+        );
+    }
+
+    #[test]
     fn a_zero_budget_is_refused() {
         assert_eq!(
-            ResidentSet::new(Counting::new(64), 0).map(|_| ()),
+            ResidentSet::new(Counting::new(64), 0, 0).map(|_| ()),
             Err(ResidencyError::ZeroBudget)
         );
     }
@@ -360,6 +458,21 @@ mod tests {
             other => panic!("expected a source error, got {other:?}"),
         }
         assert_eq!(resident.resident_bytes(), 0);
+    }
+
+    #[test]
+    fn plaintext_that_is_not_utf8_is_refused() {
+        struct Binary;
+        impl SegmentSource for Binary {
+            fn load(&mut self, _segment: SegmentId) -> Result<Vec<u8>, String> {
+                Ok(vec![0xFF, 0xFE])
+            }
+        }
+        let mut resident = ResidentSet::new(Binary, 256, 0).expect("non-zero budget");
+        assert_eq!(
+            resident.fault_in(id(0)),
+            Err(ResidencyError::NotText { segment: id(0) })
+        );
     }
 
     #[test]
@@ -395,8 +508,8 @@ mod tests {
         assert_eq!(spine.len(), 60_000_000);
 
         let budget = 4 * 65_536;
-        let mut resident =
-            ResidentSet::new(Counting::new(65_536), budget).expect("non-zero budget");
+        let mut resident = ResidentSet::new(Counting::new(65_536), budget, 0)
+            .expect("non-zero budget");
 
         // Scroll through the whole lifetime a window at a time; the resident bound never moves,
         // and what is resident is always a consequence of the window, not of the document.
@@ -426,7 +539,7 @@ mod tests {
         // The same budget over a two-slab document: the set does not know the difference.
         let small = Spine::from_slabs(vec![Slab::new(id(0), 0, 65_536)]);
         let mut small_resident =
-            ResidentSet::new(Counting::new(65_536), budget).expect("non-zero budget");
+            ResidentSet::new(Counting::new(65_536), budget, 0).expect("non-zero budget");
         small_resident
             .fault_in(small.locate(0).expect("in range").slab().segment())
             .expect("source works");
